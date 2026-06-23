@@ -112,7 +112,7 @@ class AutoResearchLoopResult:
 
 
 class AutoResearchLoopEngine:
-    """Run iterative private-model patch research before validator scoring."""
+    """Run iterative private-model patch research before gateway scoring."""
 
     def __init__(
         self,
@@ -159,7 +159,7 @@ class AutoResearchLoopEngine:
                     "requested_loop_count": int(requested_loop_count),
                     "settings": _settings_doc(settings),
                     "budget_context": _safe_budget_doc(budget_context),
-                    "scoring_owner": "validator_qualification_workers",
+                    "scoring_owner": "gateway_qualification_workers",
                     "candidate_queueing": "after_loop_completion_only",
                 },
             )

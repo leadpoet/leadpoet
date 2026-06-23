@@ -477,6 +477,217 @@ async def create_auto_research_loop_event(
     return await insert_row("research_lab_auto_research_loop_events", row)
 
 
+async def create_rolling_icp_window(window: Any) -> dict[str, Any]:
+    """Persist the public hash/ref side of a Research Lab rolling ICP window."""
+    public_doc = dict(window.public_doc if hasattr(window, "public_doc") else window)
+    rolling_window_hash = str(public_doc["rolling_window_hash"])
+    existing = await select_one(
+        "research_lab_rolling_icp_windows",
+        filters=(("rolling_window_hash", rolling_window_hash),),
+    )
+    if existing:
+        return existing
+    payload = {
+        "rolling_window_hash": rolling_window_hash,
+        "required_days": int(public_doc.get("required_days", 10)),
+        "icps_per_day": int(public_doc.get("icps_per_day", 5)),
+        "selected_set_count": int(public_doc.get("selected_set_count", 0)),
+        "selected_icp_count": int(public_doc.get("selected_icp_count", 0)),
+        "window_doc": public_doc,
+    }
+    row = {
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_lab_rolling_icp_windows", row)
+
+
+async def create_scoring_dispatch_event(
+    *,
+    dispatch_type: str,
+    dispatch_status: str,
+    worker_ref: str,
+    proxy_ref_hash: str | None = None,
+    candidate_id: str | None = None,
+    run_id: str | None = None,
+    ticket_id: str | None = None,
+    rolling_window_hash: str | None = None,
+    score_bundle_id: str | None = None,
+    benchmark_bundle_id: str | None = None,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "dispatch_type": dispatch_type,
+        "dispatch_status": dispatch_status,
+        "candidate_id": candidate_id,
+        "run_id": run_id,
+        "ticket_id": ticket_id,
+        "rolling_window_hash": rolling_window_hash,
+        "score_bundle_id": score_bundle_id,
+        "benchmark_bundle_id": benchmark_bundle_id,
+        "worker_ref": worker_ref,
+        "proxy_ref_hash": proxy_ref_hash,
+        "event_doc": event_doc or {},
+    }
+    row = {
+        "dispatch_event_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_lab_scoring_dispatch_events", row)
+
+
+async def create_private_model_benchmark_bundle(
+    *,
+    benchmark_date: str,
+    private_model_artifact_hash: str,
+    private_model_manifest_hash: str,
+    rolling_window_hash: str,
+    evaluation_epoch: int,
+    aggregate_score: float,
+    scoring_worker_ref: str,
+    proxy_ref_hash: str | None,
+    signature_ref: str,
+    score_summary_doc: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = {
+        "benchmark_date": benchmark_date,
+        "private_model_artifact_hash": private_model_artifact_hash,
+        "private_model_manifest_hash": private_model_manifest_hash,
+        "rolling_window_hash": rolling_window_hash,
+        "evaluation_epoch": int(evaluation_epoch),
+        "aggregate_score": float(aggregate_score),
+        "scoring_worker_ref": scoring_worker_ref,
+        "proxy_ref_hash": proxy_ref_hash,
+        "signature_ref": signature_ref,
+        "score_summary_doc": score_summary_doc,
+    }
+    benchmark_bundle_hash = canonical_hash(payload)
+    benchmark_bundle_id = "private_benchmark:" + benchmark_bundle_hash.split(":", 1)[1]
+    existing = await select_one(
+        "research_lab_private_model_benchmark_bundles",
+        filters=(("benchmark_bundle_id", benchmark_bundle_id),),
+    )
+    if existing:
+        event = await select_one(
+            "research_lab_private_model_benchmark_events",
+            filters=(("benchmark_bundle_id", benchmark_bundle_id), ("seq", 0)),
+        )
+        if not event:
+            raise RuntimeError("existing private model benchmark bundle is missing its opening event")
+        return existing, event
+    row = {
+        "benchmark_bundle_id": benchmark_bundle_id,
+        "schema_version": "1.0",
+        **payload,
+        "benchmark_bundle_hash": benchmark_bundle_hash,
+        "anchored_hash": benchmark_bundle_hash,
+    }
+    inserted = await insert_row("research_lab_private_model_benchmark_bundles", row)
+    event = await create_private_model_benchmark_event(
+        benchmark_bundle_id=benchmark_bundle_id,
+        event_type="completed",
+        benchmark_status="completed",
+        event_doc={
+            "benchmark_bundle_hash": benchmark_bundle_hash,
+            "rolling_window_hash": rolling_window_hash,
+        },
+    )
+    return inserted, event
+
+
+async def create_private_model_benchmark_event(
+    *,
+    benchmark_bundle_id: str,
+    event_type: str,
+    benchmark_status: str,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    seq = await next_event_seq("research_lab_private_model_benchmark_events", "benchmark_bundle_id", benchmark_bundle_id)
+    payload = {
+        "benchmark_bundle_id": benchmark_bundle_id,
+        "seq": seq,
+        "event_type": event_type,
+        "benchmark_status": benchmark_status,
+        "event_doc": event_doc or {},
+    }
+    row = {
+        "event_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_lab_private_model_benchmark_events", row)
+
+
+async def create_signed_audit_bundle(
+    *,
+    epoch: int,
+    bundle_doc: dict[str, Any],
+    signature_ref: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    audit_bundle_hash = canonical_hash(bundle_doc)
+    audit_bundle_id = "research_lab_audit:" + audit_bundle_hash.split(":", 1)[1]
+    existing = await select_one(
+        "research_lab_signed_audit_bundles",
+        filters=(("audit_bundle_id", audit_bundle_id),),
+    )
+    if existing:
+        event = await select_one(
+            "research_lab_signed_audit_bundle_events",
+            filters=(("audit_bundle_id", audit_bundle_id), ("seq", 0)),
+        )
+        if not event:
+            raise RuntimeError("existing Research Lab audit bundle is missing its opening event")
+        return existing, event
+    payload = {
+        "audit_bundle_id": audit_bundle_id,
+        "epoch": int(epoch),
+        "audit_bundle_hash": audit_bundle_hash,
+        "signature_ref": signature_ref,
+        "bundle_doc": bundle_doc,
+    }
+    row = {
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": audit_bundle_hash,
+    }
+    inserted = await insert_row("research_lab_signed_audit_bundles", row)
+    event = await create_signed_audit_bundle_event(
+        audit_bundle_id=audit_bundle_id,
+        event_type="created",
+        audit_status="created",
+        event_doc={"audit_bundle_hash": audit_bundle_hash},
+    )
+    return inserted, event
+
+
+async def create_signed_audit_bundle_event(
+    *,
+    audit_bundle_id: str,
+    event_type: str,
+    audit_status: str,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    seq = await next_event_seq("research_lab_signed_audit_bundle_events", "audit_bundle_id", audit_bundle_id)
+    payload = {
+        "audit_bundle_id": audit_bundle_id,
+        "seq": seq,
+        "event_type": event_type,
+        "audit_status": audit_status,
+        "event_doc": event_doc or {},
+    }
+    row = {
+        "event_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_lab_signed_audit_bundle_events", row)
+
+
 async def create_participation_snapshot(
     *,
     island: str,

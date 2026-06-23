@@ -39,6 +39,7 @@ class ResearchLabValidatorFlags:
     fetch_enabled: bool = False
     shadow_verify_enabled: bool = False
     evaluation_verify_enabled: bool = False
+    audit_verify_enabled: bool = False
     require_shadow_verification_before_submit: bool = False
     require_evaluation_verification_before_submit: bool = False
     weight_mutation_enabled: bool = False
@@ -56,6 +57,9 @@ class ResearchLabValidatorFlags:
             ),
             evaluation_verify_enabled=_truthy(
                 data.get("RESEARCH_LAB_VALIDATOR_EVALUATION_VERIFY_ENABLED", data.get("evaluation_verify_enabled", False))
+            ),
+            audit_verify_enabled=_truthy(
+                data.get("RESEARCH_LAB_VALIDATOR_AUDIT_VERIFY_ENABLED", data.get("audit_verify_enabled", False))
             ),
             require_shadow_verification_before_submit=_truthy(
                 data.get(
@@ -125,6 +129,23 @@ def fetch_research_lab_evaluation_bundle_page(
     base = gateway_url.rstrip("/")
     request = Request(
         f"{base}/research-lab/evaluations/latest/{int(epoch)}",
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    with urlopen(request, timeout=timeout_seconds) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_research_lab_audit_bundle(
+    gateway_url: str,
+    epoch: int,
+    *,
+    timeout_seconds: int = 20,
+) -> dict[str, Any]:
+    """Fetch the latest Research Lab audit bundle for an epoch."""
+    base = gateway_url.rstrip("/")
+    request = Request(
+        f"{base}/research-lab/audit/latest/{int(epoch)}",
         headers={"Accept": "application/json"},
         method="GET",
     )
@@ -246,6 +267,65 @@ def verify_research_lab_evaluation_bundle_page(
         "verified_bundle_count": len(verified_inputs),
         "verified_weight_inputs": verified_inputs,
         "bundle_results": bundle_results,
+        "on_chain_submission_allowed": False,
+    }
+
+
+def verify_research_lab_audit_bundle(
+    bundle_or_row: Mapping[str, Any],
+    *,
+    flags: ResearchLabValidatorFlags | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    validator_flags = flags if isinstance(flags, ResearchLabValidatorFlags) else ResearchLabValidatorFlags.from_mapping(flags)
+    errors: list[str] = []
+    if not validator_flags.audit_verify_enabled:
+        errors.append("validator_audit_verify_disabled")
+    errors.extend(validator_flags.enabled_mutation_flags())
+
+    bundle = bundle_or_row.get("bundle_doc") if isinstance(bundle_or_row.get("bundle_doc"), Mapping) else bundle_or_row
+    if _contains_secret_material(bundle):
+        errors.append("audit_bundle_contains_private_or_secret_material")
+    if bundle.get("bundle_type") not in {"research_lab_signed_audit_bundle", "research_lab_audit_bundle_preview"}:
+        errors.append("unexpected_audit_bundle_type")
+    if bundle.get("on_chain_submission_allowed"):
+        errors.append("audit_bundle_must_not_allow_on_chain_submission")
+    if not bundle.get("read_only"):
+        errors.append("audit_bundle_must_be_read_only")
+
+    source_state = bundle.get("source_state")
+    source_state_hash = bundle.get("source_state_hash")
+    if not isinstance(source_state, Mapping) or not source_state_hash:
+        errors.append("audit_bundle_source_state_required")
+        source_state = {}
+    elif sha256_json(source_state) != source_state_hash:
+        errors.append("audit_bundle_source_state_hash_diverged")
+
+    score_rows = source_state.get("score_bundle_rows", []) if isinstance(source_state, Mapping) else []
+    verified_score_bundles = 0
+    if isinstance(score_rows, list):
+        for row in score_rows:
+            if not isinstance(row, Mapping):
+                errors.append("audit_score_bundle_row_must_be_object")
+                continue
+            bundle_doc = row.get("score_bundle_doc", row)
+            if not isinstance(bundle_doc, Mapping):
+                errors.append("audit_score_bundle_doc_must_be_object")
+                continue
+            verification = verify_research_evaluation_score_bundle(bundle_doc)
+            if not verification["passed"]:
+                errors.extend(f"audit_score_bundle:{error}" for error in verification["errors"])
+            else:
+                verified_score_bundles += 1
+    else:
+        errors.append("audit_score_bundle_rows_must_be_array")
+
+    return {
+        "passed": not errors,
+        "errors": errors,
+        "epoch": bundle.get("epoch"),
+        "bundle_id": bundle.get("bundle_id"),
+        "source_state_hash": source_state_hash,
+        "verified_score_bundle_count": verified_score_bundles,
         "on_chain_submission_allowed": False,
     }
 
@@ -417,6 +497,65 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
     if tampered_eval_verification["passed"] or not tampered_eval_verification["errors"]:
         raise AssertionError("tampered evaluation score bundle was not rejected")
 
+    audit_source_state = {
+        "candidate_rows": [
+            {
+                "candidate_id": "candidate:" + "8" * 64,
+                "candidate_artifact_hash": eval_bundle["candidate_artifact_hash"],
+                "candidate_patch_hash": eval_bundle["candidate_patch_hash"],
+                "private_model_manifest_hash": eval_bundle["private_model_manifest_hash"],
+                "current_candidate_status": "scored",
+                "current_score_bundle_id": "score_bundle:" + eval_bundle["score_bundle_hash"].split(":", 1)[1],
+            }
+        ],
+        "scoring_dispatch_event_rows": [
+            {
+                "dispatch_type": "candidate_scoring",
+                "dispatch_status": "scored",
+                "rolling_window_hash": eval_bundle["icp_set_hash"],
+                "score_bundle_id": "score_bundle:" + eval_bundle["score_bundle_hash"].split(":", 1)[1],
+                "worker_ref": "gateway-qualification-worker:test",
+                "proxy_ref_hash": "sha256:" + "9" * 64,
+            }
+        ],
+        "score_bundle_rows": [
+            {
+                "bundle_status": "scored",
+                "current_event_status": "scored",
+                "score_bundle_doc": eval_bundle,
+            }
+        ],
+    }
+    audit_bundle = {
+        "schema_version": "1.0",
+        "bundle_type": "research_lab_signed_audit_bundle",
+        "bundle_id": "research_lab_audit:" + "a" * 64,
+        "epoch": int(bundle["epoch"]),
+        "read_only": True,
+        "on_chain_submission_allowed": False,
+        "source_state": audit_source_state,
+        "source_state_hash": sha256_json(audit_source_state),
+        "signature_ref": "kms-signature:research-lab-audit:test",
+    }
+    audit_verification = verify_research_lab_audit_bundle(
+        audit_bundle,
+        flags={**fixture["validator_flags"], "RESEARCH_LAB_VALIDATOR_AUDIT_VERIFY_ENABLED": True},
+    )
+    if not audit_verification["passed"]:
+        raise AssertionError("audit bundle did not verify: " + "; ".join(audit_verification["errors"]))
+
+    unsafe_audit = {
+        **audit_bundle,
+        "source_state": {**audit_source_state, "private_model_manifest_doc": {"image_digest": "123.dkr.ecr.us-east-1.amazonaws.com/x@sha256:" + "1" * 64}},
+        "source_state_hash": sha256_json({**audit_source_state, "private_model_manifest_doc": {"image_digest": "123.dkr.ecr.us-east-1.amazonaws.com/x@sha256:" + "1" * 64}}),
+    }
+    unsafe_audit_verification = verify_research_lab_audit_bundle(
+        unsafe_audit,
+        flags={**fixture["validator_flags"], "RESEARCH_LAB_VALIDATOR_AUDIT_VERIFY_ENABLED": True},
+    )
+    if unsafe_audit_verification["passed"] or "audit_bundle_contains_private_or_secret_material" not in unsafe_audit_verification["errors"]:
+        raise AssertionError("audit bundle private artifact leak was not rejected")
+
     return {
         "bundle_id": bundle["bundle_id"],
         "epoch": bundle["epoch"],
@@ -424,6 +563,7 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
         "weight_sum": component["weight_sum"],
         "unsafe_errors": unsafe["errors"],
         "evaluation_bundle_count": eval_verification["verified_bundle_count"],
+        "audit_score_bundle_count": audit_verification["verified_score_bundle_count"],
     }
 
 
@@ -431,7 +571,19 @@ def _contains_secret_material(value: Any) -> bool:
     if isinstance(value, Mapping):
         for key, item in value.items():
             lowered_key = str(key).lower()
-            if any(marker in lowered_key for marker in ("api_key", "raw_secret", "raw_openrouter", "credential")):
+            if any(
+                marker in lowered_key
+                for marker in (
+                    "api_key",
+                    "raw_secret",
+                    "raw_openrouter",
+                    "credential",
+                    "private_model_manifest_doc",
+                    "candidate_patch_manifest",
+                    "image_digest",
+                    "proxy_url",
+                )
+            ):
                 return True
             if _contains_secret_material(item):
                 return True
@@ -439,7 +591,20 @@ def _contains_secret_material(value: Any) -> bool:
         return any(_contains_secret_material(item) for item in value)
     elif isinstance(value, str):
         lowered = value.lower()
-        return any(marker in lowered for marker in ("sk-or-", "raw_openrouter_key", "openrouter_api_key", "raw_secret"))
+        return any(
+            marker in lowered
+            for marker in (
+                "sk-or-",
+                "raw_openrouter_key",
+                "openrouter_api_key",
+                "raw_secret",
+                "hidden_icp",
+                "icp_plaintext",
+                ".dkr.ecr.",
+                "private_repo",
+                "judge_prompt",
+            )
+        )
     return False
 
 

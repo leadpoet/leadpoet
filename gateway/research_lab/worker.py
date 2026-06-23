@@ -502,7 +502,7 @@ class ResearchLabHostedWorker:
                     "actual_openrouter_cost_usd": round(loop_result.actual_openrouter_cost_usd, 6),
                 },
                 "reimbursement": reimbursement_decision or {"status": "not_written"},
-                "next_stage": "validator_qualification_worker_evaluation",
+                "next_stage": "gateway_qualification_worker_evaluation",
             },
         )
         await create_ticket_event(
@@ -519,7 +519,7 @@ class ResearchLabHostedWorker:
                     "elapsed_seconds": round(loop_result.elapsed_seconds, 3),
                     "stop_reason": loop_result.stop_reason,
                 },
-                "next_stage": "validator_qualification_worker_evaluation",
+                "next_stage": "gateway_qualification_worker_evaluation",
             },
         )
         return HostedWorkerOutcome(
@@ -1066,12 +1066,12 @@ def _redacted_budget_context(value: Mapping[str, Any]) -> dict[str, Any]:
 
 def _validator_evaluation_summary() -> dict[str, Any]:
     return {
-        "benchmark_id": "supabase:qualification_private_icp_sets:active",
-        "icp_set_hash": "validator_resolves_active_supabase_icp_set",
-        "split_ref": "validator_active_supabase_icp_set",
-        "item_count": "validator_resolved",
+        "benchmark_id": "research_lab:rolling_icp_window:latest_10_days",
+        "icp_set_hash": "gateway_resolves_rolling_icp_window_hash",
+        "split_ref": "gateway_private_rolling_icp_window",
+        "item_count": 50,
         "scoring_version": "qualification-company-scorer:v1",
-        "owner": "validator_qualification_workers",
+        "owner": "gateway_qualification_workers",
     }
 
 

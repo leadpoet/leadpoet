@@ -21,6 +21,8 @@ def main() -> int:
         f"epoch {summary['epoch']}, "
         f"weight_sum {summary['weight_sum']}, "
         f"hash {summary['weight_vector_hash']}, "
+        f"evaluation bundles {summary['evaluation_bundle_count']}, "
+        f"audit score bundles {summary['audit_score_bundle_count']}, "
         f"unsafe flags rejected {summary['unsafe_errors']}."
     )
     return 0

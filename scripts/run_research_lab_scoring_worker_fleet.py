@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a gateway-local fleet of hosted Research Lab workers."""
+"""Run a gateway-local fleet of Research Lab scoring workers."""
 
 from __future__ import annotations
 
@@ -13,30 +13,30 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER_SCRIPT = ROOT / "scripts" / "run_research_lab_hosted_worker.py"
+WORKER_SCRIPT = ROOT / "scripts" / "run_research_lab_scoring_worker.py"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run multiple hosted Research Lab worker processes")
+    parser = argparse.ArgumentParser(description="Run multiple Research Lab scoring worker processes")
     parser.add_argument("--workers", type=int, default=None)
-    parser.add_argument("--worker-prefix", default=os.getenv("RESEARCH_LAB_HOSTED_WORKER_PREFIX", "research-lab-worker"))
-    parser.add_argument("--log-level", default=os.getenv("RESEARCH_LAB_HOSTED_WORKER_LOG_LEVEL", "INFO"))
-    parser.add_argument("--once", action="store_true", help="Start each worker for one run_once attempt, then exit")
+    parser.add_argument("--worker-prefix", default=os.getenv("RESEARCH_LAB_SCORING_WORKER_PREFIX", "research-lab-scorer"))
+    parser.add_argument("--log-level", default=os.getenv("RESEARCH_LAB_SCORING_WORKER_LOG_LEVEL", "INFO"))
+    parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
 
-    configured_count = int(os.getenv("RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT", "0") or "0")
+    configured_count = int(os.getenv("RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT", "0") or "0")
     worker_count = max(1, args.workers or configured_count or _configured_proxy_count() or 1)
     children: dict[int, subprocess.Popen[bytes]] = {}
     stopping = False
 
     def start_worker(index: int) -> subprocess.Popen[bytes]:
         env = os.environ.copy()
-        env["RESEARCH_LAB_HOSTED_WORKER_TOTAL_WORKERS"] = str(worker_count)
-        env["RESEARCH_LAB_HOSTED_WORKER_INDEX"] = str(index)
-        env["RESEARCH_LAB_HOSTED_WORKER_ID"] = f"{args.worker_prefix}-{index + 1}"
+        env["RESEARCH_LAB_SCORING_WORKER_TOTAL_WORKERS"] = str(worker_count)
+        env["RESEARCH_LAB_SCORING_WORKER_INDEX"] = str(index)
+        env["RESEARCH_LAB_SCORING_WORKER_ID"] = f"{args.worker_prefix}-{index + 1}"
         proxy = _proxy_for_worker(index)
         if proxy:
-            env["RESEARCH_LAB_HOSTED_WORKER_PROXY"] = proxy
+            env["RESEARCH_LAB_SCORING_WORKER_PROXY"] = proxy
             env["HTTP_PROXY"] = proxy
             env["HTTPS_PROXY"] = proxy
             env["http_proxy"] = proxy
@@ -47,7 +47,7 @@ def main() -> int:
             "--log-level",
             args.log_level,
             "--worker-id",
-            env["RESEARCH_LAB_HOSTED_WORKER_ID"],
+            env["RESEARCH_LAB_SCORING_WORKER_ID"],
             "--worker-index",
             str(index),
             "--total-workers",
@@ -106,11 +106,12 @@ def main() -> int:
 def _proxy_for_worker(index: int) -> str:
     one_based = index + 1
     return (
-        os.getenv(f"RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_{one_based}")
-        or os.getenv(f"RESEARCH_LAB_WORKER_PROXY_{one_based}")
-        or os.getenv(f"RESEARCH_LAB_WORKER_HTTPS_PROXY_{one_based}")
-        or os.getenv("RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY")
-        or os.getenv("RESEARCH_LAB_WORKER_PROXY")
+        os.getenv(f"RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_{one_based}")
+        or os.getenv(f"QUALIFICATION_WEBSHARE_PROXY_{one_based}")
+        or os.getenv(f"RESEARCH_LAB_SCORING_WORKER_PROXY_{one_based}")
+        or os.getenv("RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY")
+        or os.getenv("QUALIFICATION_WEBSHARE_PROXY")
+        or os.getenv("RESEARCH_LAB_SCORING_WORKER_PROXY")
         or ""
     ).strip()
 
@@ -119,9 +120,9 @@ def _configured_proxy_count() -> int:
     proxies = set()
     for index in range(1, 501):
         proxy = (
-            os.getenv(f"RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_{index}")
-            or os.getenv(f"RESEARCH_LAB_WORKER_PROXY_{index}")
-            or os.getenv(f"RESEARCH_LAB_WORKER_HTTPS_PROXY_{index}")
+            os.getenv(f"RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_{index}")
+            or os.getenv(f"QUALIFICATION_WEBSHARE_PROXY_{index}")
+            or os.getenv(f"RESEARCH_LAB_SCORING_WORKER_PROXY_{index}")
             or ""
         ).strip()
         if proxy:

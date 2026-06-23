@@ -468,31 +468,27 @@ async def request_batch_evaluation(request: BatchEvaluationRequest):
         f"research_lab_only={research_lab_only}"
     )
     
-    # Reset stale state only for active work families. The public model
-    # competition is retired, so qualification_models must not be touched
-    # during Research Lab-only polling.
+    # Reset stale state only for active work families. Research Lab private
+    # scoring is gateway-owned; validator polling must never claim or receive
+    # candidate artifacts, private manifests, patch manifests, or hidden ICPs.
     if not research_lab_only and legacy_model_competition_enabled:
         await _reset_stale_evaluations()
-    await _reset_stale_research_lab_candidates()
 
-    # Research Lab candidates are paid work and already passed gateway
-    # generation. The retired public qualification-model competition is not
-    # returned unless explicitly enabled for rollback/testing.
-    work_items = await get_pending_research_lab_candidates_from_db(
-        limit=max_models,
-        session_id=request.session_id,
-    )
-    remaining_slots = max(0, max_models - len(work_items))
-    if remaining_slots and not research_lab_only and legacy_model_competition_enabled:
-        work_items.extend(await get_pending_models_from_db(limit=remaining_slots))
+    work_items: list[dict[str, Any]] = []
+    if research_lab_only:
+        logger.info(
+            "Research Lab private scoring is gateway-owned; validator batch "
+            "evaluation returns no Research Lab candidate work"
+        )
+    elif legacy_model_competition_enabled:
+        work_items.extend(await get_pending_models_from_db(limit=max_models))
     
     if not work_items:
         logger.debug("No pending models in queue")
         return BatchEvaluationResponse(has_work=False, models=[], queue_depth=0)
     
     # Mark public qualification models as "evaluating" in DB to prevent
-    # double-assignment. Research Lab candidates are claimed by append-only
-    # candidate-evaluation events inside get_pending_research_lab_candidates_from_db.
+    # double-assignment when the legacy rollback path is explicitly enabled.
     model_ids = [
         work["model_id"]
         for work in work_items
@@ -508,9 +504,8 @@ async def request_batch_evaluation(request: BatchEvaluationRequest):
     
     # Get remaining queue depth
     try:
-        from gateway.db.client import get_read_client, get_write_client
+        from gateway.db.client import get_read_client
         read_supabase = get_read_client()
-        private_supabase = get_write_client()
         total_public_pending = 0
         if not research_lab_only and legacy_model_competition_enabled:
             count_result = read_supabase.table("qualification_models").select(
@@ -521,13 +516,7 @@ async def request_batch_evaluation(request: BatchEvaluationRequest):
                 "status", "submitted"
             ).execute()
             total_public_pending = count_result.count if count_result.count else 0
-        research_result = private_supabase.table("research_lab_candidate_evaluation_current").select(
-            "candidate_id", count="exact"
-        ).eq(
-            "current_candidate_status", "queued"
-        ).execute()
-        total_research_pending = research_result.count if research_result.count else 0
-        queue_depth = max(0, total_public_pending + total_research_pending - len(work_items))
+        queue_depth = max(0, total_public_pending - len(work_items))
     except Exception as e:
         logger.warning(f"Could not get queue depth: {e}")
         queue_depth = 0
@@ -1372,43 +1361,18 @@ async def get_pending_research_lab_candidates_from_db(
     limit: int,
     session_id: str,
 ) -> List[Dict[str, Any]]:
+    """Deprecated compatibility shim.
+
+    Research Lab scoring is now performed by gateway-owned qualification
+    workers. The validator work API must not expose candidate artifacts,
+    private model manifests, patch manifests, or hidden ICP payloads.
     """
-    Claim queued Research Lab candidates and prepare validator work items.
-
-    The ICP plaintext is loaded from the active Supabase ICP set and included
-    only in the validator work payload, matching the existing qualification
-    model evaluation flow. Candidate lifecycle is tracked through append-only
-    Research Lab candidate-evaluation events.
-    """
-    if limit <= 0:
-        return []
-    try:
-        from gateway.db.client import get_write_client
-
-        # Research Lab candidate evaluation state is service-role-only by
-        # design.  The anon read client cannot read this private queue view.
-        supabase = get_write_client()
-        result = supabase.table("research_lab_candidate_evaluation_current").select(
-            "*"
-        ).eq(
-            "current_candidate_status", "queued"
-        ).order(
-            "current_status_at", desc=False
-        ).limit(limit).execute()
-        rows = result.data or []
-        if not rows:
-            return []
-
-        logger.info(f"📋 Found {len(rows)} Research Lab candidate(s) queued for validator scoring")
-        work_items: list[dict[str, Any]] = []
-        for row in rows:
-            work_item = await prepare_research_lab_candidate_work_item(row, session_id=session_id)
-            if work_item:
-                work_items.append(work_item)
-        return work_items
-    except Exception as e:
-        logger.error(f"Error querying Research Lab candidate queue: {e}")
-        return []
+    logger.info(
+        "Research Lab candidate polling requested by validator session %s, "
+        "but gateway-owned scoring is authoritative; returning no private work",
+        session_id[:8],
+    )
+    return []
 
 
 async def prepare_research_lab_candidate_work_item(
@@ -1416,93 +1380,15 @@ async def prepare_research_lab_candidate_work_item(
     *,
     session_id: str,
 ) -> Optional[Dict[str, Any]]:
-    """
-    Prepare a Research Lab candidate work item for a validator qualification
-    worker. This does not use qualification_models or public champion state.
-    """
-    candidate_id = str(candidate.get("candidate_id") or "")
-    if not candidate_id:
-        return None
-    try:
-        from gateway.db.client import get_write_client
-        from gateway.research_lab.store import create_candidate_evaluation_event
-
-        evaluation_id = str(uuid4())
-        # Service-role-only view; this prevents anon/RLS drift from blocking
-        # validator assignment of paid Research Lab candidates.
-        fresh_result = get_write_client().table("research_lab_candidate_evaluation_current").select(
-            "candidate_id,current_candidate_status"
-        ).eq(
-            "candidate_id", candidate_id
-        ).limit(1).execute()
-        fresh_rows = fresh_result.data or []
-        if not fresh_rows or fresh_rows[0].get("current_candidate_status") != "queued":
-            logger.info(f"Research Lab candidate {candidate_id[:20]}... was already claimed")
-            return None
-
-        await create_candidate_evaluation_event(
-            candidate_id=candidate_id,
-            run_id=str(candidate["run_id"]),
-            ticket_id=str(candidate["ticket_id"]),
-            event_type="assigned",
-            candidate_status="assigned",
-            evaluator_ref=f"qualification_session:{session_id}",
-            reason="assigned_to_validator_qualification_worker",
-            event_doc={"evaluation_id": evaluation_id},
-        )
-
-        icps, icp_set_hash = await get_icp_set(None)
-        if not icps:
-            await create_candidate_evaluation_event(
-                candidate_id=candidate_id,
-                run_id=str(candidate["run_id"]),
-                ticket_id=str(candidate["ticket_id"]),
-                event_type="queued",
-                candidate_status="queued",
-                evaluator_ref=f"qualification_session:{session_id}",
-                reason="active_supabase_icp_set_unavailable_retry",
-                event_doc={"evaluation_id": evaluation_id},
-            )
-            return None
-
-        evaluation_runs = []
-        for icp in icps:
-            run_id = str(uuid4())
-            evaluation_runs.append({
-                "evaluation_run_id": run_id,
-                "probe_id": icp.get("icp_id", str(uuid4())),
-                "probe_name": icp.get("industry", "Unknown"),
-                "icp_data": icp,
-                "stage": "research_lab_candidate",
-            })
-
-        return {
-            "work_kind": "research_lab_candidate",
-            "evaluation_id": evaluation_id,
-            "model_id": candidate_id,
-            "candidate_id": candidate_id,
-            "run_id": str(candidate["run_id"]),
-            "ticket_id": str(candidate["ticket_id"]),
-            "receipt_id": str(candidate.get("receipt_id") or ""),
-            "miner_hotkey": candidate.get("miner_hotkey", "Unknown"),
-            "model_name": f"Research Lab candidate {candidate_id[-8:]}",
-            "island": candidate.get("island", "generalist"),
-            "agent_code": "",
-            "evaluation_runs": evaluation_runs,
-            "icp_set_hash": _normalize_optional_sha256_ref(icp_set_hash),
-            "queued_at": candidate.get("current_status_at", candidate.get("created_at", datetime.now(timezone.utc).isoformat())),
-            "private_model_manifest": candidate.get("private_model_manifest_doc") or {},
-            "candidate_patch_manifest": candidate.get("candidate_patch_manifest") or {},
-            "candidate_artifact_hash": candidate.get("candidate_artifact_hash"),
-            "candidate_patch_hash": candidate.get("candidate_patch_hash"),
-            "parent_artifact_hash": candidate.get("parent_artifact_hash"),
-            "private_model_manifest_hash": candidate.get("private_model_manifest_hash"),
-            "hypothesis_doc": candidate.get("hypothesis_doc") or {},
-            "redacted_public_summary": candidate.get("redacted_public_summary") or "",
-        }
-    except Exception as e:
-        logger.error(f"Error preparing Research Lab candidate work item {candidate_id[:20]}...: {e}")
-        return None
+    """Deprecated compatibility shim for the old validator scoring path."""
+    candidate_id = str(candidate.get("candidate_id") or "unknown")
+    logger.warning(
+        "Refusing to prepare Research Lab candidate %s for validator session %s; "
+        "private scoring must run on gateway qualification workers",
+        candidate_id[:20],
+        session_id[:8],
+    )
+    return None
 
 
 async def prepare_work_item_from_model(model: Dict[str, Any]) -> Optional[Dict[str, Any]]:

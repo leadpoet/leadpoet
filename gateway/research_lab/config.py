@@ -71,6 +71,17 @@ class ResearchLabGatewayConfig:
     hosted_worker_queue_fetch_limit: int = 20
     hosted_worker_require_proxy: bool = False
     hosted_worker_proxy_url: str = ""
+    scoring_worker_enabled: bool = False
+    scoring_worker_poll_seconds: int = 15
+    scoring_worker_max_candidates: int = 1
+    scoring_worker_id: str = ""
+    scoring_worker_index: int = 0
+    scoring_worker_total_workers: int = 1
+    scoring_worker_require_proxy: bool = False
+    scoring_worker_proxy_url: str = ""
+    scoring_worker_model_timeout_seconds: int = 900
+    scoring_worker_allow_partial_icp_window: bool = False
+    private_baseline_rebenchmark_enabled: bool = False
     auto_research_min_seconds: int = 600
     auto_research_max_seconds: int = 1800
     auto_research_min_iterations: int = 2
@@ -132,6 +143,12 @@ class ResearchLabGatewayConfig:
             worker_index = 0
         if worker_index >= total_workers:
             worker_index = worker_index % total_workers
+        scoring_total_workers = max(1, _int("RESEARCH_LAB_SCORING_WORKER_TOTAL_WORKERS", 1))
+        scoring_worker_index = _int("RESEARCH_LAB_SCORING_WORKER_INDEX", 0)
+        if scoring_worker_index < 0:
+            scoring_worker_index = 0
+        if scoring_worker_index >= scoring_total_workers:
+            scoring_worker_index = scoring_worker_index % scoring_total_workers
         return cls(
             api_enabled=_truthy("RESEARCH_LAB_GATEWAY_API_ENABLED"),
             production_writes_enabled=_truthy("RESEARCH_LAB_PRODUCTION_WRITES_ENABLED"),
@@ -165,6 +182,29 @@ class ResearchLabGatewayConfig:
                 or _truthy("RESEARCH_LAB_HOSTED_WORKER_REQUIRE_PROXY")
             ),
             hosted_worker_proxy_url=os.getenv("RESEARCH_LAB_HOSTED_WORKER_PROXY", ""),
+            scoring_worker_enabled=_truthy("RESEARCH_LAB_SCORING_WORKER_ENABLED"),
+            scoring_worker_poll_seconds=max(1, _int("RESEARCH_LAB_SCORING_WORKER_POLL_SECONDS", 15)),
+            scoring_worker_max_candidates=max(1, _int("RESEARCH_LAB_SCORING_WORKER_MAX_CANDIDATES", 1)),
+            scoring_worker_id=os.getenv("RESEARCH_LAB_SCORING_WORKER_ID", ""),
+            scoring_worker_index=scoring_worker_index,
+            scoring_worker_total_workers=scoring_total_workers,
+            scoring_worker_require_proxy=(
+                _truthy("RESEARCH_LAB_REQUIRE_QUALIFICATION_PROXY")
+                or _truthy("RESEARCH_LAB_SCORING_WORKER_REQUIRE_PROXY")
+            ),
+            scoring_worker_proxy_url=os.getenv("RESEARCH_LAB_SCORING_WORKER_PROXY", ""),
+            scoring_worker_model_timeout_seconds=max(
+                30,
+                _int("RESEARCH_LAB_SCORING_WORKER_MODEL_TIMEOUT_SECONDS", 900),
+            ),
+            scoring_worker_allow_partial_icp_window=_truthy(
+                "RESEARCH_LAB_SCORING_ALLOW_PARTIAL_ICP_WINDOW",
+                "false",
+            ),
+            private_baseline_rebenchmark_enabled=_truthy(
+                "RESEARCH_LAB_PRIVATE_BASELINE_REBENCHMARK_ENABLED",
+                "false",
+            ),
             auto_research_min_seconds=max(0, _int("RESEARCH_LAB_AUTO_RESEARCH_MIN_SECONDS", 600)),
             auto_research_max_seconds=max(1, _int("RESEARCH_LAB_AUTO_RESEARCH_MAX_SECONDS", 1800)),
             auto_research_min_iterations=max(1, _int("RESEARCH_LAB_AUTO_RESEARCH_MIN_ITERATIONS", 2)),
@@ -467,7 +507,17 @@ class ResearchLabGatewayConfig:
                 "auto_research_reflection_timeout_seconds": self.auto_research_reflection_timeout_seconds,
                 "auto_research_estimated_iteration_cost_usd": self.auto_research_estimated_iteration_cost_usd,
                 "private_model_manifest_uri_configured": bool(self.private_model_manifest_uri),
-                "scoring_owner": "validator_qualification_workers",
+                "scoring_owner": "gateway_qualification_workers",
+                "scoring_worker_enabled": self.scoring_worker_enabled,
+                "scoring_worker_poll_seconds": self.scoring_worker_poll_seconds,
+                "scoring_worker_max_candidates": self.scoring_worker_max_candidates,
+                "scoring_worker_id": self.scoring_worker_id,
+                "scoring_worker_index": self.scoring_worker_index,
+                "scoring_worker_total_workers": self.scoring_worker_total_workers,
+                "scoring_worker_require_proxy": self.scoring_worker_require_proxy,
+                "scoring_worker_proxy_configured": bool(self.scoring_worker_proxy_url),
+                "scoring_worker_allow_partial_icp_window": self.scoring_worker_allow_partial_icp_window,
+                "private_baseline_rebenchmark_enabled": self.private_baseline_rebenchmark_enabled,
                 "auto_research_model_configured": bool(self.auto_research_model),
                 "approved_model_tiers": {
                     tier: {

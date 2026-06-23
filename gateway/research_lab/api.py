@@ -24,7 +24,7 @@ from gateway.qualification.utils.chain import (
 )
 from gateway.utils.bans import is_hotkey_banned
 
-from .bundles import build_shadow_report_bundle
+from .bundles import build_research_lab_audit_bundle, build_shadow_report_bundle
 from .config import ResearchLabGatewayConfig
 from .key_vault import (
     OpenRouterKeyVaultError,
@@ -588,6 +588,62 @@ async def get_research_lab_latest_evaluation_bundles(epoch: int):
     }
 
 
+@router.get("/audit/latest/{epoch}")
+async def get_research_lab_latest_audit_bundle(epoch: int):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+
+    signed_rows = await select_many(
+        "research_lab_signed_audit_bundle_current",
+        filters=(("epoch", epoch),),
+        order_by=(("created_at", True),),
+        limit=1,
+    )
+    if signed_rows:
+        return signed_rows[0]
+
+    ticket_rows = await select_many("research_loop_ticket_current", filters=(), limit=1000)
+    queue_rows = await select_many("research_loop_run_queue_current", filters=(), limit=1000)
+    receipt_rows = await select_many("research_loop_receipt_current", filters=(), limit=1000)
+    candidate_rows = await select_many("research_lab_candidate_evaluation_current", filters=(), limit=1000)
+    candidate_event_rows = await select_many("research_lab_candidate_evaluation_events", filters=(), limit=1000)
+    loop_event_rows = await select_many("research_lab_auto_research_loop_events", filters=(), limit=1000)
+    dispatch_event_rows = await select_many("research_lab_scoring_dispatch_events", filters=(), limit=1000)
+    rolling_window_rows = await select_many("research_lab_rolling_icp_windows", filters=(), limit=1000)
+    benchmark_rows = await select_many("research_lab_private_model_benchmark_current", filters=(), limit=1000)
+    score_bundle_rows = await select_many(
+        "research_evaluation_score_bundle_current",
+        filters=(("evaluation_epoch", epoch),),
+        limit=1000,
+    )
+    try:
+        preview = build_research_lab_audit_bundle(
+            epoch=epoch,
+            ticket_rows=ticket_rows,
+            queue_rows=queue_rows,
+            receipt_rows=receipt_rows,
+            candidate_rows=candidate_rows,
+            candidate_event_rows=candidate_event_rows,
+            loop_event_rows=loop_event_rows,
+            dispatch_event_rows=dispatch_event_rows,
+            rolling_window_rows=rolling_window_rows,
+            benchmark_rows=benchmark_rows,
+            score_bundle_rows=score_bundle_rows,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "schema_version": "1.0",
+        "bundle_type": "research_lab_audit_bundle_preview",
+        "epoch": int(epoch),
+        "signed": False,
+        "signature_ref": "",
+        "bundle_doc": preview,
+        "on_chain_submission_allowed": False,
+    }
+
+
 @router.get("/reports/shadow/{epoch}")
 async def get_research_lab_shadow_report(epoch: int):
     config = ResearchLabGatewayConfig.from_env()
@@ -796,7 +852,7 @@ async def _maybe_finalize_candidate_receipt(candidate: dict[str, object]) -> boo
         "run_id": str(candidate["run_id"]),
         "candidate_status_counts": status_counts,
         "score_bundle_ids": score_bundle_ids,
-        "finalization_source": "validator_research_lab_candidate_results",
+        "finalization_source": "gateway_qualification_worker_results",
     }
     has_scored_candidate = status_counts.get("scored", 0) > 0
     await create_receipt_event(
@@ -811,9 +867,9 @@ async def _maybe_finalize_candidate_receipt(candidate: dict[str, object]) -> boo
         event_type="completed" if has_scored_candidate else "cancelled",
         actor_hotkey=None,
         reason=(
-            "validator_research_lab_candidate_evaluation_completed"
+            "gateway_research_lab_candidate_evaluation_completed"
             if has_scored_candidate
-            else "validator_research_lab_candidate_evaluation_failed"
+            else "gateway_research_lab_candidate_evaluation_failed"
         ),
         event_doc=event_doc,
     )

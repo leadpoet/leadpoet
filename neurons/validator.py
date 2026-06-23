@@ -7036,76 +7036,16 @@ class Validator(BaseValidatorNeuron):
 
     async def _notify_gateway_research_lab_candidate_result(self, result: dict):
         """
-        Submit validator-owned Research Lab candidate scoring results back to
-        the gateway. This path is separate from qualification champion state.
+        Deprecated: Research Lab private scoring is gateway-owned.
+
+        Validators must not submit Research Lab candidate scoring results.
         """
-        import httpx
-
         candidate_id = result.get("candidate_id") or result.get("model_id")
-        if not candidate_id:
-            bt.logging.warning("Research Lab candidate result missing candidate_id")
-            return
-
-        gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
-        internal_key = os.environ.get("RESEARCH_LAB_INTERNAL_API_KEY", "")
-        if not internal_key:
-            bt.logging.error("RESEARCH_LAB_INTERNAL_API_KEY is required to submit Research Lab candidate results")
-            return
-
-        error = result.get("error")
-        rejection_reason = result.get("rejection_reason")
-        candidate_status = result.get("candidate_status")
-        if not candidate_status:
-            candidate_status = "failed" if error else ("rejected" if rejection_reason else "scored")
-
-        result_doc = {
-            "schema_version": "1.0",
-            "work_kind": "research_lab_candidate",
-            "qual_worker_id": result.get("qual_worker_id"),
-            "evaluation_epoch": result.get("evaluation_epoch"),
-            "avg_score": result.get("avg_score", 0.0),
-            "total_cost_usd": result.get("total_cost_usd", 0.0),
-            "total_time_seconds": result.get("total_time_seconds", 0.0),
-            "icps_evaluated": result.get("icps_evaluated", 0),
-        }
-        if error:
-            result_doc["error"] = str(error)[:500]
-        if rejection_reason:
-            result_doc["rejection_reason"] = str(rejection_reason)[:200]
-
-        payload = {
-            "candidate_id": candidate_id,
-            "candidate_status": candidate_status,
-            "evaluator_ref": f"validator:{self.wallet.hotkey.ss58_address}",
-            "reason": result.get("reason") or ("validator_research_lab_candidate_failed" if error else "validator_research_lab_candidate_scored"),
-            "score_bundle": result.get("score_bundle"),
-            "result_doc": result_doc,
-        }
-
-        max_retries = 5
-        for attempt in range(1, max_retries + 1):
-            try:
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    response = await client.post(
-                        f"{gateway_url}/research-lab/evaluations/candidate-results",
-                        json=payload,
-                        headers={"x-leadpoet-internal-key": internal_key},
-                    )
-                    response.raise_for_status()
-                    bt.logging.info(f"✅ Submitted Research Lab candidate result: candidate={candidate_id[-12:]}, status={candidate_status}")
-                    return
-            except Exception as exc:
-                bt.logging.warning(
-                    f"Research Lab candidate result submission attempt {attempt}/{max_retries} failed: "
-                    f"{type(exc).__name__}: {exc or '(empty - likely timeout)'}"
-                )
-                if attempt < max_retries:
-                    await asyncio.sleep(2 ** attempt)
-
-        bt.logging.error(
-            f"🚨 CRITICAL: Research Lab candidate result submission failed after {max_retries} attempts: "
-            f"candidate={candidate_id}, status={candidate_status}"
+        bt.logging.warning(
+            "Ignoring Research Lab candidate result on validator; "
+            f"gateway-owned scoring is authoritative (candidate={str(candidate_id)[-12:] if candidate_id else 'unknown'})"
         )
+        return
 
     async def _notify_gateway_research_lab_candidate_status(
         self,
@@ -7117,63 +7057,20 @@ class Validator(BaseValidatorNeuron):
         reason: str,
     ) -> bool:
         """
-        Submit non-terminal Research Lab candidate lifecycle status.
-
-        The gateway marks candidates `assigned` while preparing a batch. Once
-        the coordinator writes a local worker file, this callback confirms the
-        validator actually handed the candidate to a worker by marking it
-        `evaluating`. That lets the gateway quickly reset orphaned `assigned`
-        claims caused by HTTP client timeouts without resetting real work.
+        Deprecated: Research Lab candidate lifecycle is gateway-owned.
         """
-        import httpx
-
-        gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
-        internal_key = os.environ.get("RESEARCH_LAB_INTERNAL_API_KEY", "")
-        if not internal_key:
-            bt.logging.warning(
-                "RESEARCH_LAB_INTERNAL_API_KEY is required to submit Research Lab candidate status"
-            )
-            return False
-
-        payload = {
-            "candidate_id": candidate_id,
-            "candidate_status": candidate_status,
-            "evaluator_ref": f"validator:{self.wallet.hotkey.ss58_address}:qual_worker:{qual_worker_id}",
-            "reason": reason,
-            "result_doc": {
-                "schema_version": "1.0",
-                "work_kind": "research_lab_candidate",
-                "qual_worker_id": qual_worker_id,
-                "evaluation_epoch": evaluation_epoch,
-            },
-        }
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    f"{gateway_url}/research-lab/evaluations/candidate-results",
-                    json=payload,
-                    headers={"x-leadpoet-internal-key": internal_key},
-                )
-                response.raise_for_status()
-                bt.logging.info(
-                    f"✅ Submitted Research Lab candidate status: "
-                    f"candidate={candidate_id[-12:]}, status={candidate_status}"
-                )
-                return True
-        except Exception as exc:
-            bt.logging.warning(
-                f"Research Lab candidate status submission failed: "
-                f"candidate={candidate_id[-12:]}, status={candidate_status}, "
-                f"{type(exc).__name__}: {exc or '(empty - likely timeout)'}"
-            )
-            return False
+        bt.logging.warning(
+            "Ignoring Research Lab candidate status on validator; "
+            f"gateway-owned lifecycle is authoritative (candidate={str(candidate_id)[-12:]})"
+        )
+        return False
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # DEDICATED VALIDATOR EVALUATION WORKERS: Assignment at Epoch Start
+    # DEDICATED LEGACY QUALIFICATION WORKERS: Assignment at Epoch Start
     # ═══════════════════════════════════════════════════════════════════════════
-    # These methods handle assigning Research Lab candidates to the dedicated
-    # worker containers. Legacy public model competition work is retired and
-    # requires an explicit operator rollback flag.
+    # These methods now only assign legacy public model competition work when
+    # an operator enables the rollback flag. Research Lab private scoring is
+    # gateway-owned and validators verify audit bundles instead.
     # ═══════════════════════════════════════════════════════════════════════════
     
     async def _assign_qualification_to_dedicated_workers(self, current_epoch: int) -> bool:
@@ -7445,12 +7342,18 @@ class Validator(BaseValidatorNeuron):
                 if champion_data_for_date:
                     self._mark_rebenchmark_attempted_today(champion_data_for_date)
         else:
-            # All 5 workers get 1 each = 5 from queue
+            # All workers get one model each when the legacy public model
+            # competition rollback path is explicitly enabled. Research Lab
+            # private scoring is gateway-owned and must not be requested by
+            # validators.
             max_models = max(1, len(free_worker_ids) * QUALIFICATION_MODELS_PER_CONTAINER)
             if legacy_model_competition_enabled:
                 print(f"   📦 No rebenchmark - pulling max {max_models} models from queue")
             else:
-                print(f"   📦 Pulling max {max_models} Research Lab candidate(s) for validator scoring")
+                print("   🔒 Research Lab private scoring is gateway-owned")
+                print("      Validator will verify audit bundles; it will not request candidate artifacts")
+                self._qual_dedicated_last_assigned_epoch = current_epoch
+                return True
         
         # Fetch batch of NEW models from gateway (DB query - excludes rebenchmark)
         # Note: all_models may already contain a model from rebenchmark mismatch fallback
@@ -7493,11 +7396,6 @@ class Validator(BaseValidatorNeuron):
                 response.raise_for_status()
                 batch_response = response.json()
                 fetched_models = batch_response.get("models", [])
-                if not legacy_model_competition_enabled:
-                    fetched_models = [
-                        model for model in fetched_models
-                        if model.get("work_kind") == "research_lab_candidate"
-                    ]
                 all_models.extend(fetched_models)
                 
         except Exception as e:
@@ -7514,7 +7412,7 @@ class Validator(BaseValidatorNeuron):
             if legacy_model_competition_enabled:
                 print(f"   ℹ️ No models to evaluate this epoch - will retry next iteration")
             else:
-                print(f"   ℹ️ No Research Lab candidates queued for validator scoring this epoch")
+                print(f"   ℹ️ Research Lab private scoring is gateway-owned; no validator work requested")
             return True
         
         model_label = "model(s)" if legacy_model_competition_enabled else "Research Lab candidate(s)"
@@ -7597,20 +7495,6 @@ class Validator(BaseValidatorNeuron):
                     "assigned_at": time.time()
                 }, f, indent=2)
 
-            for model in assignment["models"]:
-                if model.get("work_kind") != "research_lab_candidate":
-                    continue
-                candidate_id = model.get("candidate_id") or model.get("model_id")
-                if not candidate_id:
-                    continue
-                await self._notify_gateway_research_lab_candidate_status(
-                    candidate_id=str(candidate_id),
-                    candidate_status="evaluating",
-                    evaluation_epoch=current_epoch,
-                    qual_worker_id=worker_id,
-                    reason="validator_worker_file_written",
-                )
-            
             num_models = len(assignment["models"])
             rebench_str = " (REBENCHMARK)" if assignment["is_rebenchmark_container"] else ""
             print(f"   📤 Qual Worker {worker_id}: {num_models} model(s){rebench_str}")
@@ -7832,10 +7716,9 @@ class Validator(BaseValidatorNeuron):
 
         if research_lab_results:
             print(f"\n{'='*70}")
-            print(f"🧪 PROCESSING {len(research_lab_results)} RESEARCH LAB CANDIDATE RESULT(S)")
+            print(f"🔒 IGNORING {len(research_lab_results)} RESEARCH LAB CANDIDATE RESULT(S)")
             print(f"{'='*70}")
-            for result in research_lab_results:
-                await self._notify_gateway_research_lab_candidate_result(result)
+            print("   Research Lab private scoring is gateway-owned; validator results are not submitted")
 
         legacy_model_competition_enabled = _env_flag("ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION")
         if not legacy_model_competition_enabled:
@@ -9590,157 +9473,31 @@ def run_dedicated_qualification_worker(config):
                 return data['block'], data['epoch'], data['blocks_into_epoch']
 
         async def _process_research_lab_candidate(self, model: dict, runs: list, work_epoch: int) -> dict:
-            """
-            Score a Research Lab candidate patch against the active Supabase ICP
-            set delivered by the gateway. This path does not touch public model
-            competition champion state.
+            """Reject stale Research Lab candidate work files.
+
+            Research Lab private model execution is gateway-owned. Validators
+            must not run private artifacts, candidate patches, or hidden ICPs.
             """
             candidate_id = model.get("candidate_id") or model.get("model_id", "unknown")
-            start_time = time.time()
-            try:
-                from research_lab.canonical import sha256_json
-                from research_lab.eval import (
-                    CandidatePatchManifest,
-                    DockerPrivateModelRunner,
-                    DockerPrivateModelSpec,
-                    PrivateModelArtifactManifest,
-                    SealedBenchmarkSet,
-                    evaluate_private_model_pair,
-                    sign_digest_with_kms,
-                )
-
-                artifact = PrivateModelArtifactManifest.from_mapping(model.get("private_model_manifest") or {})
-                patch = CandidatePatchManifest.from_mapping(model.get("candidate_patch_manifest") or {})
-                if not runs:
-                    raise RuntimeError("Research Lab candidate evaluation requires ICP runs")
-
-                benchmark_items = []
-                item_refs = []
-                for idx, run in enumerate(runs):
-                    icp = dict(run.get("icp_data") or {})
-                    icp_hash = sha256_json({"icp": icp})
-                    icp_ref = str(run.get("probe_id") or f"supabase_icp:{idx}:{icp_hash}")
-                    benchmark_items.append({
-                        "icp": icp,
-                        "icp_hash": icp_hash,
-                        "icp_ref": icp_ref,
-                    })
-                    item_refs.append(icp_ref)
-
-                fallback_icp_set_hash = sha256_json([
-                    {"icp_ref": item["icp_ref"], "icp_hash": item["icp_hash"]}
-                    for item in benchmark_items
-                ])
-                icp_set_hash = _normalize_research_lab_sha256_ref(
-                    model.get("icp_set_hash"),
-                    fallback=fallback_icp_set_hash,
-                    field_name="icp_set_hash",
-                )
-                benchmark = SealedBenchmarkSet(
-                    benchmark_id="supabase:qualification_private_icp_sets:active",
-                    icp_set_hash=icp_set_hash,
-                    split_ref=f"validator:qualification_private_icp_sets:{icp_set_hash}",
-                    item_refs=tuple(item_refs),
-                    scoring_version="qualification-company-scorer:v1",
-                    hidden_plaintext_available=True,
-                )
-
-                timeout_seconds = int(os.environ.get("RESEARCH_LAB_VALIDATOR_MODEL_TIMEOUT_SECONDS", "900"))
-                runner = DockerPrivateModelRunner(DockerPrivateModelSpec(
-                    image_digest=artifact.image_digest,
-                    timeout_seconds=timeout_seconds,
-                ))
-
-                cost_ledger = {
-                    "schema_version": "1.0",
-                    "candidate_id": candidate_id,
-                    "work_epoch": work_epoch,
-                    "qual_worker_id": qual_container_id,
-                    "observed_cost_usd": 0.0,
-                }
-                run_context = {
-                    "run_id": str(model["run_id"]),
-                    "ticket_id": str(model["ticket_id"]),
-                    "miner_hotkey": str(model["miner_hotkey"]),
-                    "island": str(model.get("island") or "generalist"),
-                    "evaluation_epoch": int(os.environ.get("RESEARCH_LAB_EVALUATION_EPOCH", str(work_epoch))),
-                    "evaluator_version": "leadpoet-validator-qualification-worker:research-lab:v1",
-                    "evidence_bundle_refs": [
-                        f"research_lab_candidate:{candidate_id}:supabase_icp_set:{icp_set_hash}"
-                    ],
-                    "execution_trace_ref": f"validator_qualification_worker:{candidate_id}:{work_epoch}:{qual_container_id}",
-                    "cost_ledger_ref": "cost_ledger:" + sha256_json(cost_ledger).split(":", 1)[1],
-                    "signature_ref": "",
-                }
-                policy = {
-                    "min_delta": float(os.environ.get("RESEARCH_LAB_MIN_DELTA", "0")),
-                    "min_delta_lcb": float(os.environ.get("RESEARCH_LAB_MIN_DELTA_LCB", "0")),
-                    "min_successful_icps": int(os.environ.get("RESEARCH_LAB_MIN_SUCCESSFUL_ICPS", "1")),
-                    "max_hard_failures": int(os.environ.get("RESEARCH_LAB_MAX_HARD_FAILURES", "0")),
-                    "min_candidate_score": float(os.environ.get("RESEARCH_LAB_MIN_CANDIDATE_SCORE", "0")),
-                    "observed_cost_usd": 0.0,
-                }
-
-                score_bundle = await evaluate_private_model_pair(
-                    artifact_manifest=artifact,
-                    benchmark=benchmark,
-                    patch_manifest=patch,
-                    benchmark_items=benchmark_items,
-                    base_runner=runner,
-                    candidate_runner=runner,
-                    run_context=run_context,
-                    policy=policy,
-                )
-
-                kms_key_id = os.environ.get("RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID", "")
-                if not kms_key_id:
-                    raise RuntimeError("RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID is required for Research Lab score bundles")
-                signature_ref = await asyncio.to_thread(
-                    sign_digest_with_kms,
-                    key_id=kms_key_id,
-                    digest_hash=score_bundle["score_bundle_hash"],
-                    signature_uri_prefix=os.environ.get("RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX", ""),
-                )
-                score_bundle = {**score_bundle, "signature_ref": signature_ref}
-                aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), dict) else {}
-
-                total_time = time.time() - start_time
-                print(f"      ✅ Research Lab candidate scored: {candidate_id[-12:]}")
-                print(f"         Candidate Score: {float(aggregates.get('candidate_score', 0.0) or 0.0):.2f}")
-                print(f"         Mean Delta: {float(aggregates.get('mean_delta', 0.0) or 0.0):.2f}")
-                return {
-                    "work_kind": "research_lab_candidate",
-                    "candidate_status": "scored",
-                    "candidate_id": candidate_id,
-                    "model_id": candidate_id,
-                    "model_name": model.get("model_name", f"Research Lab candidate {candidate_id[-8:]}"),
-                    "miner_hotkey": model.get("miner_hotkey", "unknown"),
-                    "avg_score": float(aggregates.get("candidate_score", 0.0) or 0.0),
-                    "total_cost_usd": float(aggregates.get("total_cost_usd", 0.0) or 0.0),
-                    "total_time_seconds": total_time,
-                    "icps_evaluated": int(aggregates.get("icp_count", len(runs)) or len(runs)),
-                    "evaluation_epoch": int(run_context["evaluation_epoch"]),
-                    "qual_worker_id": qual_container_id,
-                    "score_bundle": score_bundle,
-                }
-            except Exception as exc:
-                total_time = time.time() - start_time
-                print(f"      ❌ Research Lab candidate failed: {candidate_id[-12:]} — {exc}")
-                return {
-                    "work_kind": "research_lab_candidate",
-                    "candidate_status": "failed",
-                    "candidate_id": candidate_id,
-                    "model_id": candidate_id,
-                    "model_name": model.get("model_name", f"Research Lab candidate {candidate_id[-8:]}"),
-                    "miner_hotkey": model.get("miner_hotkey", "unknown"),
-                    "error": str(exc)[:500],
-                    "avg_score": 0.0,
-                    "total_cost_usd": 0.0,
-                    "total_time_seconds": total_time,
-                    "icps_evaluated": len(runs),
-                    "evaluation_epoch": work_epoch,
-                    "qual_worker_id": qual_container_id,
-                }
+            print(
+                f"      🔒 Ignoring stale Research Lab candidate work: {str(candidate_id)[-12:]} "
+                "(gateway-owned scoring required)"
+            )
+            return {
+                "work_kind": "research_lab_candidate",
+                "candidate_status": "ignored",
+                "candidate_id": candidate_id,
+                "model_id": candidate_id,
+                "model_name": model.get("model_name", f"Research Lab candidate {str(candidate_id)[-8:]}"),
+                "miner_hotkey": model.get("miner_hotkey", "unknown"),
+                "error": "gateway_owned_scoring_required",
+                "avg_score": 0.0,
+                "total_cost_usd": 0.0,
+                "total_time_seconds": 0.0,
+                "icps_evaluated": 0,
+                "evaluation_epoch": work_epoch,
+                "qual_worker_id": qual_container_id,
+            }
         
         async def process_qualification_models(self, current_epoch: int):
             """

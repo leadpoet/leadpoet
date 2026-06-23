@@ -1376,6 +1376,137 @@ async def reveal_leads(reveal: FulfillmentRevealRequest):
 # ---------------------------------------------------------------
 # GET /fulfillment/scoring  — validators fetch revealed leads for scoring
 # ---------------------------------------------------------------
+def _collect_scoring_requests_sync(validator_hotkey: str) -> dict:
+    """Assemble the /fulfillment/scoring payload (the blocking DB work).
+
+    Runs in a worker thread (via asyncio.to_thread) so the synchronous
+    Supabase calls never block the gateway's single event loop.  Previously
+    this ran inline in the async endpoint and froze the loop for 30s+ per
+    call, which timed out concurrent validator reveal-fetches AND miners'
+    submit/reveal requests.
+
+    Two latency optimisations vs the old inline version (output is identical):
+      * the "already scored" lookup is scoped to the CURRENT scoring
+        request_ids instead of scanning this validator's entire
+        fulfillment_scores history;
+      * revealed submissions are fetched in one chunked in_(...) query grouped
+        by request_id instead of one paged query per request (the N+1).
+    """
+    supabase = _get_supabase()
+
+    # 1. All requests currently in scoring status (paged).
+    scoring_requests: List[dict] = []
+    offset = 0
+    for _ in range(20):
+        page = supabase.table("fulfillment_requests") \
+            .select("*") \
+            .eq("status", "scoring") \
+            .range(offset, offset + 999) \
+            .execute()
+        if not page.data:
+            break
+        scoring_requests.extend(page.data)
+        if len(page.data) < 1000:
+            break
+        offset += 1000
+
+    if not scoring_requests:
+        return {"requests": []}
+    print(f"📋 /fulfillment/scoring: {len(scoring_requests)} request(s) in scoring status")
+    scoring_ids = [r["request_id"] for r in scoring_requests]
+
+    # 2. Which of THESE requests has this validator already scored?  Scoped to
+    #    the current scoring ids (was: a full fulfillment_scores history scan).
+    already_scored_requests = set()
+    if validator_hotkey:
+        for i in range(0, len(scoring_ids), 100):
+            chunk = scoring_ids[i:i + 100]
+            offset = 0
+            for _ in range(20):
+                page = supabase.table("fulfillment_scores") \
+                    .select("request_id") \
+                    .eq("validator_hotkey", validator_hotkey) \
+                    .in_("request_id", chunk) \
+                    .range(offset, offset + 999) \
+                    .execute()
+                if not page.data:
+                    break
+                already_scored_requests.update(r["request_id"] for r in page.data)
+                if len(page.data) < 1000:
+                    break
+                offset += 1000
+        if already_scored_requests:
+            print(f"   Validator {validator_hotkey[:8]}... already scored "
+                  f"{len(already_scored_requests)} of {len(scoring_ids)}")
+
+    needed_ids = [rid for rid in scoring_ids if rid not in already_scored_requests]
+    if not needed_ids:
+        return {"requests": []}
+
+    # 3. Batch-fetch all revealed submissions for the needed requests in one
+    #    chunked, paged query grouped by request_id (was: one paged query per
+    #    request — the N+1 that pushed the endpoint past 30s).
+    subs_by_req = {}
+    for i in range(0, len(needed_ids), 100):
+        chunk = needed_ids[i:i + 100]
+        offset = 0
+        for _ in range(20):
+            page = supabase.table("fulfillment_submissions") \
+                .select("*") \
+                .eq("revealed", True) \
+                .in_("request_id", chunk) \
+                .order("submission_id") \
+                .range(offset, offset + 999) \
+                .execute()
+            if not page.data:
+                break
+            for s in page.data:
+                subs_by_req.setdefault(s["request_id"], []).append(s)
+            if len(page.data) < 1000:
+                break
+            offset += 1000
+
+    # 4. Build the response — SAME shape + index-alignment invariant as before.
+    req_by_id = {r["request_id"]: r for r in scoring_requests}
+    out = []
+    for rid in needed_ids:
+        r = req_by_id[rid]
+        submissions = []
+        for s in subs_by_req.get(rid, []):
+            # SAFETY: `leads` and `lead_ids` MUST come from the same
+            # `lead_data` list so they stay index-aligned — the validator
+            # zips them onto scores, and mismatched lengths silently corrupt
+            # consensus / winner selection.  lead_data entries are
+            # {"lead_id": ..., "data": ...} so both projections are safe.
+            lead_data = s.get("lead_data") or []
+            submissions.append({
+                "submission_id": s["submission_id"],
+                "miner_hotkey": s["miner_hotkey"],
+                "leads": [entry.get("data", {}) for entry in lead_data],
+                "lead_ids": [entry.get("lead_id", "") for entry in lead_data],
+            })
+
+        print(f"   Returning {rid[:8]}... with {len(submissions)} submission(s), "
+              f"{sum(len(s['leads']) for s in submissions)} total leads")
+
+        # Merge the top-level required_attributes column into icp_details so
+        # the validator's `FulfillmentICP(**icp_details)` reconstruction sees
+        # it. required_attributes is a dedicated column (not inside icp_details
+        # JSONB), so omitting this merge meant Tier 2c never fired.
+        icp_payload = dict(r.get("icp_details", {}) or {})
+        if r.get("required_attributes"):
+            icp_payload["required_attributes"] = r["required_attributes"]
+
+        out.append({
+            "request_id": rid,
+            "icp": icp_payload,
+            "status": r["status"],
+            "submissions": submissions,
+        })
+
+    return {"requests": out}
+
+
 @fulfillment_router.get("/scoring")
 async def get_scoring_requests(
     validator_hotkey: str,
@@ -1392,106 +1523,11 @@ async def get_scoring_requests(
         request_id="",
     )
 
-    supabase = _get_supabase()
-
-    scoring_requests: List[dict] = []
-    offset = 0
-    for _ in range(20):
-        page = supabase.table("fulfillment_requests") \
-            .select("*") \
-            .eq("status", "scoring") \
-            .range(offset, offset + 999) \
-            .execute()
-        if not page.data:
-            break
-        scoring_requests.extend(page.data)
-        if len(page.data) < 1000:
-            break
-        offset += 1000
-
-    scoring_count = len(scoring_requests)
-    if scoring_count > 0:
-        print(f"📋 /fulfillment/scoring: {scoring_count} request(s) in scoring status")
-
-    already_scored_requests = set()
-    if validator_hotkey:
-        offset = 0
-        for _ in range(20):
-            page = supabase.table("fulfillment_scores") \
-                .select("request_id") \
-                .eq("validator_hotkey", validator_hotkey) \
-                .range(offset, offset + 999) \
-                .execute()
-            if not page.data:
-                break
-            already_scored_requests.update(r["request_id"] for r in page.data)
-            if len(page.data) < 1000:
-                break
-            offset += 1000
-        if already_scored_requests:
-            print(f"   Validator {validator_hotkey[:8]}... already scored: {len(already_scored_requests)} request(s)")
-
-    out = []
-    for r in scoring_requests:
-        if r["request_id"] in already_scored_requests:
-            print(f"   Skipping {r['request_id'][:8]}... (already scored by this validator)")
-            continue
-
-        subs_data: List[dict] = []
-        offset = 0
-        for _ in range(20):
-            page = supabase.table("fulfillment_submissions") \
-                .select("*") \
-                .eq("request_id", r["request_id"]) \
-                .eq("revealed", True) \
-                .range(offset, offset + 999) \
-                .execute()
-            if not page.data:
-                break
-            subs_data.extend(page.data)
-            if len(page.data) < 1000:
-                break
-            offset += 1000
-
-        submissions = []
-        for s in subs_data:
-            # SAFETY: both `leads` and `lead_ids` MUST be sourced from the
-            # same list (`lead_data`) so they stay index-aligned.  Previous
-            # code sourced `lead_ids` from `lead_hashes` (the full committed
-            # list) while `leads` came from `lead_data` (only matched entries
-            # after /reveal dropped hash-mismatched ones).  When miners had
-            # any partial-reveal hash mismatch, the two arrays had different
-            # lengths and the validator's zip(lead_ids, results) mapped the
-            # wrong lead_id onto each score — silently corrupting downstream
-            # consensus and winner selection.  `lead_data` entries are
-            # {"lead_id": ..., "data": ...} so both projections are safe.
-            lead_data = s.get("lead_data") or []
-            submissions.append({
-                "submission_id": s["submission_id"],
-                "miner_hotkey": s["miner_hotkey"],
-                "leads": [entry.get("data", {}) for entry in lead_data],
-                "lead_ids": [entry.get("lead_id", "") for entry in lead_data],
-            })
-
-        print(f"   Returning {r['request_id'][:8]}... with {len(submissions)} submission(s), "
-              f"{sum(len(s['leads']) for s in submissions)} total leads")
-
-        # Merge the top-level required_attributes column into icp_details so
-        # the validator's `FulfillmentICP(**icp_details)` reconstruction sees
-        # it. required_attributes is stored as a dedicated column (not inside
-        # icp_details JSONB), so omitting this merge meant Tier 2c never fired.
-        icp_payload = dict(r.get("icp_details", {}) or {})
-        if r.get("required_attributes"):
-            icp_payload["required_attributes"] = r["required_attributes"]
-
-        out.append({
-            "request_id": r["request_id"],
-            "icp": icp_payload,
-            "status": r["status"],
-            "submissions": submissions,
-        })
-
-    return {"requests": out}
+    # The blocking Supabase work runs OFF the event loop so it can never freeze
+    # the gateway (which would time out miner submit/reveal calls and other
+    # validators) while this single request assembles its payload.
+    import asyncio
+    return await asyncio.to_thread(_collect_scoring_requests_sync, validator_hotkey)
 
 
 # ---------------------------------------------------------------

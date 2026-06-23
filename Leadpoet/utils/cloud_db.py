@@ -2554,9 +2554,12 @@ def gateway_get_fulfillment_reveals(wallet: bt.wallet, request_id: str = None) -
     this validator has already scored (avoids redundant API costs).
 
     Retry policy:
-        5 total attempts with exponential backoff (1s, 2s, 4s, 8s between
-        attempts).  Each attempt has a 30s HTTP timeout.  Worst-case total
-        wall time on full failure: ~165s.
+        3 total attempts with exponential backoff (2s, 4s between attempts).
+        Each attempt has a 90s HTTP timeout (raised from 30s — /fulfillment/
+        scoring can legitimately take >30s while the scoring backlog drains).
+        Worst-case total wall time on full failure: 3×90 + 6 = ~276s, kept
+        under the caller's 300s per-tick guard (process_fulfillment_workflow
+        is wrapped in asyncio.wait_for(timeout=300)).
 
     A genuinely empty response (``{"requests": []}`` from the gateway) is
     NOT an error — we return it as-is.  Raises RuntimeError ONLY after all
@@ -2569,7 +2572,7 @@ def gateway_get_fulfillment_reveals(wallet: bt.wallet, request_id: str = None) -
     import uuid
     hk = wallet.hotkey.ss58_address
 
-    backoffs = [1, 2, 4, 8]  # 5 total attempts, 4 sleeps between them
+    backoffs = [2, 4]  # 3 total attempts, 2 sleeps between them
     last_err: Optional[Exception] = None
     for attempt in range(len(backoffs) + 1):
         try:
@@ -2588,7 +2591,7 @@ def gateway_get_fulfillment_reveals(wallet: bt.wallet, request_id: str = None) -
             response = requests.get(
                 f"{GATEWAY_URL}/fulfillment/scoring",
                 params=params,
-                timeout=30,
+                timeout=90,
             )
             response.raise_for_status()
             data = response.json()

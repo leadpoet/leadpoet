@@ -42,12 +42,17 @@ BLOCK_TIME_SECONDS = 12
 #               are unchanged.  Goal: stronger de-reg protection for
 #               miners with sparse wins, without inflating payouts
 #               during busy periods.
+#   2026-06-23: 0.001 → 0.004 (4× lift; per epoch 0.1% → 0.4%; total per
+#               lead 10% → 40% over the 100-epoch runway).  Same pool-cap
+#               caveat as 2026-05-22: the validator caps SUM(active
+#               reward_pct) at fulfillment_pool, so this mainly raises
+#               per-miner payouts during low-volume periods.
 # Existing reward rows stay at their original (reward_pct, reward_expires_epoch)
 # until expiry; only newly-fulfilled leads use the new rate AND new runway,
-# so the rollover is gradual.  Old rows pay at their original 0.0005/epoch
+# so the rollover is gradual.  Old rows pay at their original per-epoch
 # claim size for the remainder of their 100-epoch window (~5 days), at
-# which point all live rows are paying the new 0.001 rate.
-Z_PERCENT = float(os.getenv("FULFILLMENT_Z_PERCENT", "0.001"))
+# which point all live rows are paying the new 0.004 rate.
+Z_PERCENT = float(os.getenv("FULFILLMENT_Z_PERCENT", "0.004"))
 L_EPOCHS = int(os.getenv("FULFILLMENT_L_EPOCHS", "100"))
 FULFILLMENT_MAX_CONCURRENT_SOURCES = int(os.getenv("FULFILLMENT_MAX_CONCURRENT_SOURCES", "2"))
 FULFILLMENT_OPENROUTER_API_KEY = os.getenv("FULFILLMENT_OPENROUTER_API_KEY", "")

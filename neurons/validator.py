@@ -3373,13 +3373,13 @@ class Validator(BaseValidatorNeuron):
             # ╚══════════════════════════════════════════════════════════════════╝
             # Allocation shares (dynamic based on champion status)
             BASE_BURN_SHARE = 0.0          # 0% base burn to UID 0
-            CHAMPION_SHARE = 0.10          # 10% to qualification model champion (when active)
+            CHAMPION_SHARE = 0.0           # 0% — model competition retired 2026-06-23; its 10% folded into the fulfillment pool
             # FULFILLMENT-FLAVORED TOTAL = 90% (sourcing is zeroed, champion is 10%).
             # That 90% is split into a per-epoch fulfillment pool and a top-3
             # rolling-window leaderboard bonus.  The leaderboard is a permanent
             # feature of the fulfillment track — it is NEVER toggled off; only
             # the split ratio between per-epoch and weekly is tunable here.
-            FULFILLMENT_POOL_SHARE = 0.805 # 80.5% reserved for per-epoch fulfillment rewards
+            FULFILLMENT_POOL_SHARE = 0.905 # 90.5% per-epoch fulfillment rewards (absorbed the retired 10% champion share 2026-06-23)
             # FULFILLMENT LEADERBOARD BONUS — added 2026-04-30, restored 2026-05-15,
             # bumped to 9.5% + switched to rolling window on 2026-05-17, changed
             # from Monday-reset to rolling 140-epoch (~7 day) window on 2026-05-23.
@@ -3557,12 +3557,11 @@ class Validator(BaseValidatorNeuron):
             # portion flows to burn — it does NOT redistribute back to sourcing.
             # (ff_enabled is read once at the top of the function so the early
             #  no-sourcing-data gates above can honor it; do not re-read here.)
-            # MAX_SOURCING_SHARE is strictly 0% under the 2026-05-28 split:
-            # 10% champion (reserved even when inactive — burns instead of
-            # falling back to sourcing) + 80.5% per-epoch fulfillment + 9.5%
-            # fulfillment leaderboard = 100%.  Sourcing miners get nothing;
-            # qualification incentive is concentrated on the champion slot,
-            # fulfillment incentive on per-epoch winners and the weekly top-3.
+            # MAX_SOURCING_SHARE is strictly 0% under the 2026-06-23 split:
+            # 0% champion (model competition retired) + 90.5% per-epoch
+            # fulfillment + 9.5% fulfillment leaderboard = 100%.  Sourcing and
+            # champion buckets are both empty; all incentive is on per-epoch
+            # fulfillment winners and the weekly top-3 leaderboard.
             MAX_SOURCING_SHARE = (
                 1.0
                 - CHAMPION_SHARE

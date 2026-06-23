@@ -1339,9 +1339,11 @@ async def get_pending_research_lab_candidates_from_db(
     if limit <= 0:
         return []
     try:
-        from gateway.db.client import get_read_client
+        from gateway.db.client import get_write_client
 
-        supabase = get_read_client()
+        # Research Lab candidate evaluation state is service-role-only by
+        # design.  The anon read client cannot read this private queue view.
+        supabase = get_write_client()
         result = supabase.table("research_lab_candidate_evaluation_current").select(
             "*"
         ).eq(
@@ -1378,11 +1380,13 @@ async def prepare_research_lab_candidate_work_item(
     if not candidate_id:
         return None
     try:
-        from gateway.db.client import get_read_client
+        from gateway.db.client import get_write_client
         from gateway.research_lab.store import create_candidate_evaluation_event
 
         evaluation_id = str(uuid4())
-        fresh_result = get_read_client().table("research_lab_candidate_evaluation_current").select(
+        # Service-role-only view; this prevents anon/RLS drift from blocking
+        # validator assignment of paid Research Lab candidates.
+        fresh_result = get_write_client().table("research_lab_candidate_evaluation_current").select(
             "candidate_id,current_candidate_status"
         ).eq(
             "candidate_id", candidate_id

@@ -172,11 +172,98 @@ def coerce_component_registry(metadata: Mapping[str, Any]) -> ComponentRegistry:
     registry_payload = metadata.get("component_registry", metadata)
     if not isinstance(registry_payload, Mapping):
         raise ValueError("adapter metadata did not include component_registry")
+    if "manifest_version" not in registry_payload:
+        registry_payload = _coerce_compact_component_registry(metadata, registry_payload)
     registry = ComponentRegistry.from_mapping(registry_payload)
     errors = validate_component_registry(registry)
     if errors:
         raise ValueError("component registry failed validation: " + "; ".join(errors))
     return registry
+
+
+def _coerce_compact_component_registry(
+    metadata: Mapping[str, Any],
+    registry_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Convert private-runtime compact metadata into the Engine v1 registry shape.
+
+    Current private artifacts expose component metadata as
+    ``component_registry: {component_name: {...}}`` plus top-level version
+    fields.  Engine v1 persists an expanded registry so validator work can be
+    audited without needing to inspect the private image again.
+    """
+    manifest_version = str(
+        metadata.get("component_registry_version")
+        or metadata.get("manifest_version")
+        or "sourcing-model-components:v1"
+    )
+    champion_base = str(
+        metadata.get("adapter_version")
+        or metadata.get("champion_base")
+        or "sourcing-model-research-lab-adapter:v1"
+    )
+    eval_version = str(
+        metadata.get("scoring_adapter_version")
+        or metadata.get("eval_version")
+        or "research-lab-private-evaluator:v1"
+    )
+
+    entries: list[dict[str, Any]] = []
+    for name, raw_entry in sorted(registry_payload.items(), key=lambda item: str(item[0])):
+        if not isinstance(raw_entry, Mapping):
+            raise ValueError(f"component registry entry {name!r} must be an object")
+        entry = dict(raw_entry)
+        allowed_patch_types = [
+            str(item)
+            for item in entry.get("allowed_patch_types", [])
+            if str(item) in ENGINE_V1_ENABLED_PATCH_TYPES
+        ]
+        if not allowed_patch_types:
+            continue
+        entries.append(
+            {
+                "name": str(name),
+                "purpose": str(entry.get("purpose") or f"Private model component {name}"),
+                "input_contract": str(entry.get("input_contract") or "Private sourcing model runtime input"),
+                "output_contract": str(entry.get("output_contract") or "Private sourcing model runtime output"),
+                "ablation_leverage": float(entry.get("ablation_leverage") or 1.0),
+                "allowed_patch_types": allowed_patch_types,
+                "token_budget": int(entry.get("token_budget") or entry.get("max_instruction_chars") or 800),
+                "cost_budget_cents": int(entry.get("cost_budget_cents") or 10),
+                "prompt_required_placeholders": [
+                    str(item) for item in entry.get("prompt_required_placeholders", [])
+                ],
+                "param_bounds": dict(entry.get("param_bounds") or {}),
+                "strategy_options": [
+                    str(item) for item in entry.get("strategy_options", [])
+                ],
+                "source_evidence_refs": [
+                    str(item)
+                    for item in (
+                        entry.get("source_evidence_refs")
+                        or [f"component_registry:{manifest_version}:{name}"]
+                    )
+                ],
+                "current_patch_seq": int(entry.get("current_patch_seq") or 0),
+            }
+        )
+
+    if not entries:
+        raise ValueError("component registry did not include any Engine v1-enabled components")
+    return {
+        "manifest_version": manifest_version,
+        "champion_base": champion_base,
+        "eval_version": eval_version,
+        "entries": entries,
+        "source_receipt_refs": [
+            str(item)
+            for item in (
+                metadata.get("source_receipt_refs")
+                or [f"component_registry:{manifest_version}:runtime_metadata"]
+            )
+        ],
+        "meta_allocator_priors_enabled": bool(metadata.get("meta_allocator_priors_enabled", False)),
+    }
 
 
 def build_validated_candidate_manifest(

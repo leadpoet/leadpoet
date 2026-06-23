@@ -474,15 +474,25 @@ def verify_nitro_attestation_full(
                     result["pcr0_content_hash"] = content_hash
                     logger.info(f"[NITRO] ✅ PCR0 verified against GitHub: {pcr0_hex[:32]}...")
                 else:
-                    # PCR0 not in cache - could be new commit not yet built
-                    cache_status = get_cache_status()
-                    raise AttestationError(
-                        f"PCR0 not recognized (code not in recent GitHub commits)!\n"
-                        f"  Got:      {pcr0_hex[:48]}...\n"
-                        f"  Cached:   {cache_status['cache_size']} commits\n"
-                        f"  Status:   Build in progress: {cache_status['build_in_progress']}\n"
-                        f"  Hint:     Wait for gateway to build new commit (~5 min after push)"
-                    )
+                    # The gateway's dynamically-built PCR0 didn't match. The
+                    # enclave build is NOT byte-reproducible, so the gateway's
+                    # computed PCR0 can differ from the validator's actual
+                    # measurement — fall back to the static allowlist of
+                    # manually-approved PCR0s (pcr0_allowlist.json / fallback)
+                    # before rejecting.
+                    allowed_pcr0_list = get_allowed_validator_pcr0()
+                    if pcr0_hex in allowed_pcr0_list:
+                        result["verification_steps"].append("✓ PCR0 matches static allowlist (manual approval)")
+                        result["pcr0_verification_mode"] = "static_allowlist"
+                        logger.info(f"[NITRO] ✅ PCR0 matched static allowlist: {pcr0_hex[:32]}...")
+                    else:
+                        cache_status = get_cache_status()
+                        raise AttestationError(
+                            f"PCR0 not recognized (not in dynamic GitHub cache or static allowlist)!\n"
+                            f"  Got:       {pcr0_hex[:48]}...\n"
+                            f"  Cached:    {cache_status['cache_size']} commits\n"
+                            f"  Allowlist: {len(allowed_pcr0_list)} approved\n"
+                        )
             except ImportError:
                 # pcr0_builder not available (e.g., running outside gateway)
                 # Fall back to static allowlist

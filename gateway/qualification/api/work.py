@@ -34,6 +34,15 @@ from qualification.scoring.baseline import REFERENCE_MODEL_ID
 
 logger = logging.getLogger(__name__)
 
+_TRUTHY_ENV_VALUES = {"true", "1", "yes", "y", "on"}
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in _TRUTHY_ENV_VALUES
+
 # =============================================================================
 # Champion Selection Constants
 # =============================================================================
@@ -337,6 +346,13 @@ async def request_evaluation(request: RequestEvaluationRequest):
             status_code=404,
             detail="Session not found - please re-register"
         )
+
+    if not _env_flag("ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION"):
+        logger.info(
+            "Legacy single-model qualification work request ignored: "
+            "public model competition is retired"
+        )
+        return EvaluationWorkResponse(has_work=False)
     
     # NOTE: We no longer block if validator has existing work assigned.
     # In distributed mode, the coordinator may have batch work (for workers)
@@ -387,6 +403,10 @@ class BatchEvaluationRequest(BaseModel):
     session_id: str = Field(..., description="Validator session ID")
     max_models: int = Field(default=None, description="Max models to return (default: CONFIG.MAX_MODELS_PER_EPOCH)")
     epoch: int = Field(default=None, description="Current epoch (for logging)")
+    research_lab_only: bool = Field(
+        default=True,
+        description="Return only Research Lab candidate work. Legacy public model competition is retired by default.",
+    )
 
 
 class BatchEvaluationResponse(BaseModel):
@@ -422,24 +442,31 @@ async def request_batch_evaluation(request: BatchEvaluationRequest):
     # Determine max models to return
     max_models = request.max_models if request.max_models else CONFIG.MAX_MODELS_PER_EPOCH
     
+    legacy_model_competition_enabled = _env_flag("ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION")
+    research_lab_only = request.research_lab_only or not legacy_model_competition_enabled
+
     logger.info(
         f"📋 Batch evaluation request: session={request.session_id[:8]}..., "
-        f"max_models={max_models}, epoch={request.epoch or 'N/A'}"
+        f"max_models={max_models}, epoch={request.epoch or 'N/A'}, "
+        f"research_lab_only={research_lab_only}"
     )
     
-    # Reset any stale evaluations back to submitted before querying
-    await _reset_stale_evaluations()
+    # Reset stale state only for active work families. The public model
+    # competition is retired, so qualification_models must not be touched
+    # during Research Lab-only polling.
+    if not research_lab_only and legacy_model_competition_enabled:
+        await _reset_stale_evaluations()
     await _reset_stale_research_lab_candidates()
 
     # Research Lab candidates are paid work and already passed gateway
-    # generation. Give them the first slots, then fill remaining capacity with
-    # public qualification-model competition work.
+    # generation. The retired public qualification-model competition is not
+    # returned unless explicitly enabled for rollback/testing.
     work_items = await get_pending_research_lab_candidates_from_db(
         limit=max_models,
         session_id=request.session_id,
     )
     remaining_slots = max(0, max_models - len(work_items))
-    if remaining_slots:
+    if remaining_slots and not research_lab_only and legacy_model_competition_enabled:
         work_items.extend(await get_pending_models_from_db(limit=remaining_slots))
     
     if not work_items:
@@ -466,14 +493,16 @@ async def request_batch_evaluation(request: BatchEvaluationRequest):
     try:
         from gateway.db.client import get_read_client
         supabase = get_read_client()
-        count_result = supabase.table("qualification_models").select(
-            "id", count="exact"
-        ).is_(
-            "evaluated_at", "null"
-        ).eq(
-            "status", "submitted"
-        ).execute()
-        total_public_pending = count_result.count if count_result.count else 0
+        total_public_pending = 0
+        if not research_lab_only and legacy_model_competition_enabled:
+            count_result = supabase.table("qualification_models").select(
+                "id", count="exact"
+            ).is_(
+                "evaluated_at", "null"
+            ).eq(
+                "status", "submitted"
+            ).execute()
+            total_public_pending = count_result.count if count_result.count else 0
         research_result = supabase.table("research_lab_candidate_evaluation_current").select(
             "candidate_id", count="exact"
         ).eq(
@@ -585,6 +614,12 @@ async def request_rebenchmark(request: RebenchmarkRequest):
     
     The validator will receive the work via the normal /request-evaluation flow.
     """
+    if not _env_flag("ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION"):
+        raise HTTPException(
+            status_code=410,
+            detail="Legacy public model competition rebenchmarking is retired"
+        )
+
     logger.info(f"🔄 Rebenchmark request: model={request.model_id[:8]}...")
     
     try:

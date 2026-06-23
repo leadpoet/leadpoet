@@ -375,6 +375,16 @@ QUALIFICATION_MAX_MODELS_PER_EPOCH = QUALIFICATION_CONTAINERS_COUNT * QUALIFICAT
 QUALIFICATION_MAX_MODELS_WITH_REBENCHMARK = (QUALIFICATION_CONTAINERS_COUNT - 1) * QUALIFICATION_MODELS_PER_CONTAINER  # 4 models (1 container does rebenchmark)
 QUALIFICATION_EVAL_EPOCH_WINDOW = 3  # Models get 3 full epochs (~216 min) to complete 100-ICP evaluation before forced cutoff
 
+_TRUTHY_ENV_VALUES = {"true", "1", "yes", "y", "on"}
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in _TRUTHY_ENV_VALUES
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # DEDICATED FULFILLMENT CONTAINERS CONFIGURATION
 # ════════════════════════════════════════════════════════════════════════════
@@ -2144,26 +2154,40 @@ class Validator(BaseValidatorNeuron):
             print(f"{'='*80}")
             
             # ═══════════════════════════════════════════════════════════════════
-            # QUALIFICATION MODEL ASSIGNMENT (FIRST - before sourcing!)
+            # RESEARCH LAB CANDIDATE ASSIGNMENT
             # ═══════════════════════════════════════════════════════════════════
-            # Coordinator FIRST assigns qualification models to dedicated qual workers
-            # This happens IMMEDIATELY at epoch start, PARALLEL to sourcing
-            # Only coordinator does this - workers just read from assigned files
+            # The old public model competition is retired. Dedicated
+            # qualification workers are now used as the transport/execution
+            # layer for Research Lab candidate scoring only, unless the explicit
+            # legacy flag ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION=true is
+            # set for a rollback/test run.
             # ═══════════════════════════════════════════════════════════════════
             container_mode_check = getattr(self.config.neuron, 'mode', None)
             if container_mode_check == "coordinator" or container_mode_check is None:
-                # Check if qualification is enabled
-                qual_enabled = os.environ.get("ENABLE_QUALIFICATION_EVALUATION", "").lower() in ("true", "1", "yes")
+                # Check if validator-side Research Lab/qualification worker evaluation is enabled.
+                qual_enabled = _env_flag("ENABLE_QUALIFICATION_EVALUATION")
                 qual_proxies = detect_qualification_proxies()
                 
                 if qual_enabled and qual_proxies:
-                    print(f"\n🎯 QUALIFICATION: Assigning models to {len(qual_proxies)} dedicated workers...")
+                    legacy_model_competition_enabled = _env_flag("ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION")
+                    work_label = "legacy qualification + Research Lab" if legacy_model_competition_enabled else "Research Lab candidate"
+                    print(f"\n🎯 VALIDATOR EVALUATION: Assigning {work_label} work to {len(qual_proxies)} dedicated workers...")
                     try:
                         await self._assign_qualification_to_dedicated_workers(current_epoch)
-                        print(f"   ✅ Qualification assignment complete - sourcing begins NOW")
+                        print(f"   ✅ Validator evaluation assignment complete")
                     except Exception as qual_assign_err:
-                        print(f"   ⚠️ Qualification assignment failed: {qual_assign_err}")
-                        print(f"   Continuing with sourcing...")
+                        print(f"   ⚠️ Validator evaluation assignment failed: {qual_assign_err}")
+
+            # Legacy sourcing is retired.  Keep the old lead-validation path
+            # behind an explicit opt-in flag so validator runs do not fetch
+            # /epoch/{epoch}/leads or process sourcing leads by default.
+            if not _env_flag("ENABLE_LEGACY_SOURCING"):
+                print(f"\n🚫 Legacy sourcing disabled; skipping gateway lead fetch for epoch {current_epoch}")
+                print("   Active validator tracks: fulfillment + Research Lab candidate scoring")
+                self._last_processed_epoch = current_epoch
+                print(f"✅ Marked epoch {current_epoch} as processed (legacy sourcing skipped)\n")
+                await asyncio.sleep(10)
+                return
             
             # Fetch assigned leads from gateway
             # gateway_get_epoch_leads, gateway_submit_validation imported at module level
@@ -3528,29 +3552,32 @@ class Validator(BaseValidatorNeuron):
             effective_champion_share = 0.0
             champion_active = False
             
-            try:
-                champion_data = self._read_qualification_champion()
-                
-                if champion_data:
-                    champion_hotkey = champion_data.get("miner_hotkey")
-                    print(f"   👑 QUALIFICATION CHAMPION (from local JSON):")
-                    print(f"      Model: {champion_data.get('model_name', 'Unknown')}")
-                    print(f"      Miner: {champion_hotkey[:20] if champion_hotkey else 'Unknown'}...")
-                    print(f"      Score: {champion_data.get('score', 0):.2f}")
-                    print(f"      Since: {champion_data.get('became_champion_at', 'Unknown')}")
-                    
-                    if champion_hotkey and champion_hotkey in self.metagraph.hotkeys:
-                        champion_uid = self.metagraph.hotkeys.index(champion_hotkey)
-                        effective_champion_share = CHAMPION_SHARE
-                        champion_active = True
-                        print(f"      UID: {champion_uid}")
-                        print(f"      Emission Share: {CHAMPION_SHARE*100:.0f}%")
+            if CHAMPION_SHARE > 0 and _env_flag("ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION"):
+                try:
+                    champion_data = self._read_qualification_champion()
+
+                    if champion_data:
+                        champion_hotkey = champion_data.get("miner_hotkey")
+                        print(f"   👑 QUALIFICATION CHAMPION (from local JSON):")
+                        print(f"      Model: {champion_data.get('model_name', 'Unknown')}")
+                        print(f"      Miner: {champion_hotkey[:20] if champion_hotkey else 'Unknown'}...")
+                        print(f"      Score: {champion_data.get('score', 0):.2f}")
+                        print(f"      Since: {champion_data.get('became_champion_at', 'Unknown')}")
+
+                        if champion_hotkey and champion_hotkey in self.metagraph.hotkeys:
+                            champion_uid = self.metagraph.hotkeys.index(champion_hotkey)
+                            effective_champion_share = CHAMPION_SHARE
+                            champion_active = True
+                            print(f"      UID: {champion_uid}")
+                            print(f"      Emission Share: {CHAMPION_SHARE*100:.0f}%")
+                        else:
+                            print(f"      ⚠️  Champion not registered on subnet - share goes to sourcing miners")
                     else:
-                        print(f"      ⚠️  Champion not registered on subnet - share goes to sourcing miners")
-                else:
-                    print(f"   📭 No qualification champion yet - 100% to sourcing miners")
-            except Exception as e:
-                print(f"   ⚠️  Error reading champion: {e} - 100% to sourcing miners")
+                        print(f"   📭 No qualification champion yet - 100% to sourcing miners")
+                except Exception as e:
+                    print(f"   ⚠️  Error reading champion: {e} - 100% to sourcing miners")
+            else:
+                print("   🚫 Legacy model competition champion disabled (0% champion share)")
             
             # Fulfillment pool is ALWAYS reserved (75%). If fulfillment is disabled
             # on this validator, or no miners earned rewards this epoch, the unused
@@ -4975,9 +5002,9 @@ class Validator(BaseValidatorNeuron):
         
         Called every iteration of main loop if ENABLE_QUALIFICATION_EVALUATION=true.
         """
-        # Check if qualification is enabled
+        # Check if validator-side evaluation is enabled.
         env_value = os.environ.get("ENABLE_QUALIFICATION_EVALUATION", "")
-        if not env_value.lower() in ("true", "1", "yes"):
+        if not _env_flag("ENABLE_QUALIFICATION_EVALUATION"):
             # Only log once to avoid spam
             if not hasattr(self, '_qual_disabled_logged'):
                 bt.logging.debug(f"🎯 Qualification disabled (env={env_value!r})")
@@ -4994,13 +5021,23 @@ class Validator(BaseValidatorNeuron):
             return
         
         # ═══════════════════════════════════════════════════════════════════
-        # DEDICATED QUALIFICATION WORKERS: Skip this old flow if active
+        # DEDICATED VALIDATOR EVALUATION WORKERS
         # ═══════════════════════════════════════════════════════════════════
-        # When QUALIFICATION_WEBSHARE_PROXY_* env vars are set, dedicated
-        # qualification workers handle model evaluation PARALLEL to sourcing.
-        # This old "after sourcing" flow should be disabled.
+        # Research Lab candidate scoring uses the dedicated qualification-worker
+        # transport. The retired public model competition is blocked unless
+        # ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION=true.
         # ═══════════════════════════════════════════════════════════════════
         qual_proxies = detect_qualification_proxies()
+        legacy_model_competition_enabled = _env_flag("ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION")
+        if not qual_proxies and not legacy_model_competition_enabled:
+            if not hasattr(self, '_qual_no_worker_logged'):
+                bt.logging.warning(
+                    "Validator evaluation enabled but no QUALIFICATION_WEBSHARE_PROXY_* workers are configured. "
+                    "Legacy public model competition is retired; skipping single-process qualification fallback."
+                )
+                self._qual_no_worker_logged = True
+            return
+
         if qual_proxies:
             # Dedicated workers are active - collect results instead of running old flow
             if not hasattr(self, '_qual_dedicated_results_logged'):
@@ -7004,23 +7041,20 @@ class Validator(BaseValidatorNeuron):
         )
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # DEDICATED QUALIFICATION WORKERS: Assignment at Epoch Start
+    # DEDICATED VALIDATOR EVALUATION WORKERS: Assignment at Epoch Start
     # ═══════════════════════════════════════════════════════════════════════════
-    # These methods handle assigning models to the 5 dedicated qualification containers
-    # that run PARALLEL to sourcing (not after it)
+    # These methods handle assigning Research Lab candidates to the dedicated
+    # worker containers. Legacy public model competition work is retired and
+    # requires an explicit operator rollback flag.
     # ═══════════════════════════════════════════════════════════════════════════
     
     async def _assign_qualification_to_dedicated_workers(self, current_epoch: int):
         """
-        Assign qualification models to dedicated qualification workers at EPOCH START.
-        
-        This runs BEFORE sourcing begins (parallel, not sequential).
-        
-        Distribution logic:
-        - 5 dedicated qualification containers
-        - Each handles up to 2 models per epoch
-        - If rebenchmark needed: Worker 1 does rebenchmark, others get 2 each (8 max from queue)
-        - If no rebenchmark: All 5 workers get 2 each (10 max from queue)
+        Assign validator evaluation work to dedicated workers at epoch start.
+
+        Default production behavior is Research Lab only. The retired public
+        qualification model competition, including champion rebenchmarking, is
+        available only when ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION=true.
         
         Args:
             current_epoch: Current epoch number
@@ -7089,7 +7123,7 @@ class Validator(BaseValidatorNeuron):
             # _check_champion_rebenchmark_needed tick re-triggers dispatch.
             # Without this, the champion stays stuck at yesterday's score
             # until the next daily rotation (~24h).
-            if dropped_inflight_rebenchmark:
+            if dropped_inflight_rebenchmark and _env_flag("ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION"):
                 try:
                     champion_file = Path("validator_weights") / "qualification_champion.json"
                     if champion_file.exists():
@@ -7171,8 +7205,16 @@ class Validator(BaseValidatorNeuron):
                 print(f"   ❌ Failed to initialize qualification: {type(e).__name__}: {e or '(empty - likely timeout)'}")
                 return
         
-        # Check if rebenchmark is needed
-        rebenchmark_needed = self._check_champion_rebenchmark_needed()
+        legacy_model_competition_enabled = _env_flag("ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION")
+
+        # Public model competition is retired. Do not read champion state,
+        # request rebenchmarks, or poll qualification_models unless an operator
+        # explicitly enables the legacy rollback path.
+        rebenchmark_needed = (
+            self._check_champion_rebenchmark_needed()
+            if legacy_model_competition_enabled
+            else False
+        )
         rebenchmark_model = None
         all_models = []  # Initialize before rebenchmark section (fallback path appends here)
         
@@ -7266,7 +7308,10 @@ class Validator(BaseValidatorNeuron):
         else:
             # All 5 workers get 1 each = 5 from queue
             max_models = QUALIFICATION_MAX_MODELS_PER_EPOCH
-            print(f"   📦 No rebenchmark - pulling max {max_models} models from queue")
+            if legacy_model_competition_enabled:
+                print(f"   📦 No rebenchmark - pulling max {max_models} models from queue")
+            else:
+                print(f"   📦 Pulling max {max_models} Research Lab candidate(s) for validator scoring")
         
         # Fetch batch of NEW models from gateway (DB query - excludes rebenchmark)
         # Note: all_models may already contain a model from rebenchmark mismatch fallback
@@ -7279,7 +7324,8 @@ class Validator(BaseValidatorNeuron):
                     json={
                         "session_id": self._qualification_session_id,
                         "max_models": max_models,
-                        "epoch": current_epoch
+                        "epoch": current_epoch,
+                        "research_lab_only": not legacy_model_competition_enabled,
                     }
                 )
                 
@@ -7296,7 +7342,8 @@ class Validator(BaseValidatorNeuron):
                             json={
                                 "session_id": self._qualification_session_id,
                                 "max_models": max_models,
-                                "epoch": current_epoch
+                                "epoch": current_epoch,
+                                "research_lab_only": not legacy_model_competition_enabled,
                             }
                         )
                     except Exception as re_register_err:
@@ -7305,7 +7352,13 @@ class Validator(BaseValidatorNeuron):
                 
                 response.raise_for_status()
                 batch_response = response.json()
-                all_models.extend(batch_response.get("models", []))
+                fetched_models = batch_response.get("models", [])
+                if not legacy_model_competition_enabled:
+                    fetched_models = [
+                        model for model in fetched_models
+                        if model.get("work_kind") == "research_lab_candidate"
+                    ]
+                all_models.extend(fetched_models)
                 
         except Exception as e:
             print(f"   ❌ Failed to fetch models from gateway: {type(e).__name__}: {e or '(empty - likely timeout)'}")
@@ -7315,10 +7368,14 @@ class Validator(BaseValidatorNeuron):
             # Continue with rebenchmark if we have it
         
         if not all_models and not rebenchmark_model:
-            print(f"   ℹ️ No models to evaluate this epoch - will retry next iteration")
+            if legacy_model_competition_enabled:
+                print(f"   ℹ️ No models to evaluate this epoch - will retry next iteration")
+            else:
+                print(f"   ℹ️ No Research Lab candidates queued for validator scoring this epoch")
             return
         
-        print(f"   📥 Received {len(all_models)} new models" + (f" + 1 rebenchmark" if rebenchmark_model else ""))
+        model_label = "model(s)" if legacy_model_competition_enabled else "Research Lab candidate(s)"
+        print(f"   📥 Received {len(all_models)} new {model_label}" + (f" + 1 rebenchmark" if rebenchmark_model else ""))
         
         # ═══════════════════════════════════════════════════════════════════
         # DISTRIBUTE MODELS TO DEDICATED QUALIFICATION WORKERS (ROUND-ROBIN)
@@ -7595,7 +7652,9 @@ class Validator(BaseValidatorNeuron):
         """
         Process results from dedicated qualification workers.
         
-        Updates champion status and notifies gateway.
+        Research Lab candidate results are submitted to the Research Lab gateway
+        endpoint. Retired public model competition results update champion state
+        only when ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION=true.
         
         Args:
             results: List of model results from all qualification workers
@@ -7603,22 +7662,46 @@ class Validator(BaseValidatorNeuron):
         """
         if not results:
             return
-        
+
+        research_lab_results = [
+            result for result in results
+            if result.get("work_kind") == "research_lab_candidate"
+        ]
+        legacy_results = [
+            result for result in results
+            if result.get("work_kind") != "research_lab_candidate"
+        ]
+
+        if research_lab_results:
+            print(f"\n{'='*70}")
+            print(f"🧪 PROCESSING {len(research_lab_results)} RESEARCH LAB CANDIDATE RESULT(S)")
+            print(f"{'='*70}")
+            for result in research_lab_results:
+                await self._notify_gateway_research_lab_candidate_result(result)
+
+        legacy_model_competition_enabled = _env_flag("ENABLE_LEGACY_QUALIFICATION_MODEL_COMPETITION")
+        if not legacy_model_competition_enabled:
+            if legacy_results:
+                print(
+                    f"   ⚠️ Ignoring {len(legacy_results)} legacy qualification result(s): "
+                    "public model competition is retired"
+                )
+            return
+
+        if not legacy_results:
+            return
+
         print(f"\n{'='*70}")
-        print(f"🏆 PROCESSING {len(results)} QUALIFICATION RESULTS")
+        print(f"🏆 PROCESSING {len(legacy_results)} LEGACY QUALIFICATION RESULT(S)")
         print(f"{'='*70}")
-        
+
         # Read current champion
         champion_data = self._read_qualification_champion()
         current_champion_score = champion_data.get("score", 0.0) if champion_data else 0.0
         current_champion_id = champion_data.get("model_id") if champion_data else None
         
         # Process each result
-        for result in results:
-            if result.get("work_kind") == "research_lab_candidate":
-                await self._notify_gateway_research_lab_candidate_result(result)
-                continue
-
+        for result in legacy_results:
             model_id = result.get("model_id", "unknown")
             model_name = result.get("model_name", "Unknown")
             avg_score = result.get("avg_score", 0.0)

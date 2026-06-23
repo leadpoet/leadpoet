@@ -429,16 +429,31 @@ async def request_batch_evaluation(request: BatchEvaluationRequest):
     
     # Reset any stale evaluations back to submitted before querying
     await _reset_stale_evaluations()
-    
-    # Get pending models from database (FIFO order)
-    work_items = await get_pending_models_from_db(limit=max_models)
+    await _reset_stale_research_lab_candidates()
+
+    # Research Lab candidates are paid work and already passed gateway
+    # generation. Give them the first slots, then fill remaining capacity with
+    # public qualification-model competition work.
+    work_items = await get_pending_research_lab_candidates_from_db(
+        limit=max_models,
+        session_id=request.session_id,
+    )
+    remaining_slots = max(0, max_models - len(work_items))
+    if remaining_slots:
+        work_items.extend(await get_pending_models_from_db(limit=remaining_slots))
     
     if not work_items:
         logger.debug("No pending models in queue")
         return BatchEvaluationResponse(has_work=False, models=[], queue_depth=0)
     
-    # Mark models as "evaluating" in DB to prevent double-assignment
-    model_ids = [work["model_id"] for work in work_items]
+    # Mark public qualification models as "evaluating" in DB to prevent
+    # double-assignment. Research Lab candidates are claimed by append-only
+    # candidate-evaluation events inside get_pending_research_lab_candidates_from_db.
+    model_ids = [
+        work["model_id"]
+        for work in work_items
+        if work.get("work_kind", "qualification_model") == "qualification_model"
+    ]
     await _mark_models_evaluating(model_ids)
     
     # Track assigned work in memory
@@ -458,8 +473,14 @@ async def request_batch_evaluation(request: BatchEvaluationRequest):
         ).eq(
             "status", "submitted"
         ).execute()
-        total_pending = count_result.count if count_result.count else 0
-        queue_depth = max(0, total_pending - len(work_items))
+        total_public_pending = count_result.count if count_result.count else 0
+        research_result = supabase.table("research_lab_candidate_evaluation_current").select(
+            "candidate_id", count="exact"
+        ).eq(
+            "current_candidate_status", "queued"
+        ).execute()
+        total_research_pending = research_result.count if research_result.count else 0
+        queue_depth = max(0, total_public_pending + total_research_pending - len(work_items))
     except Exception as e:
         logger.warning(f"Could not get queue depth: {e}")
         queue_depth = 0
@@ -961,6 +982,7 @@ async def queue_model_for_evaluation(
     
     # Add to work queue (including ICP hash for verifiability)
     work_item = {
+        "work_kind": "qualification_model",
         "evaluation_id": evaluation_id,
         "model_id": model_id,
         "miner_hotkey": miner_hotkey,
@@ -1176,6 +1198,42 @@ async def _reset_stale_evaluations() -> None:
         logger.error(f"Failed to reset stale evaluations: {e}")
 
 
+async def _reset_stale_research_lab_candidates() -> None:
+    """
+    Append queued reset events for Research Lab candidate evaluations that were
+    assigned but not completed by a validator worker within the same timeout
+    window used for public qualification models.
+    """
+    try:
+        from gateway.db.client import get_write_client
+        from gateway.research_lab.store import create_candidate_evaluation_event
+
+        supabase = get_write_client()
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=CONFIG.TOTAL_EVALUATION_TIMEOUT_MINUTES)).isoformat()
+        result = supabase.table("research_lab_candidate_evaluation_current").select(
+            "candidate_id, run_id, ticket_id, current_candidate_status, current_status_at"
+        ).in_(
+            "current_candidate_status", ["assigned", "evaluating"]
+        ).lt(
+            "current_status_at", cutoff
+        ).limit(100).execute()
+        rows = result.data or []
+        for row in rows:
+            await create_candidate_evaluation_event(
+                candidate_id=str(row["candidate_id"]),
+                run_id=str(row["run_id"]),
+                ticket_id=str(row["ticket_id"]),
+                event_type="queued",
+                candidate_status="queued",
+                reason="validator_assignment_stale_reset",
+                event_doc={"previous_status": row.get("current_candidate_status")},
+            )
+        if rows:
+            logger.warning(f"♻️ Reset {len(rows)} stale Research Lab candidate evaluations back to queued")
+    except Exception as e:
+        logger.error(f"Failed to reset stale Research Lab candidate evaluations: {e}")
+
+
 async def get_pending_models_from_db(limit: int = None) -> List[Dict[str, Any]]:
     """
     Get pending models from qualification_models table in Supabase.
@@ -1228,6 +1286,140 @@ async def get_pending_models_from_db(limit: int = None) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Error querying pending models from DB: {e}")
         return []
+
+
+async def get_pending_research_lab_candidates_from_db(
+    *,
+    limit: int,
+    session_id: str,
+) -> List[Dict[str, Any]]:
+    """
+    Claim queued Research Lab candidates and prepare validator work items.
+
+    The ICP plaintext is loaded from the active Supabase ICP set and included
+    only in the validator work payload, matching the existing qualification
+    model evaluation flow. Candidate lifecycle is tracked through append-only
+    Research Lab candidate-evaluation events.
+    """
+    if limit <= 0:
+        return []
+    try:
+        from gateway.db.client import get_read_client
+
+        supabase = get_read_client()
+        result = supabase.table("research_lab_candidate_evaluation_current").select(
+            "*"
+        ).eq(
+            "current_candidate_status", "queued"
+        ).order(
+            "current_status_at", desc=False
+        ).limit(limit).execute()
+        rows = result.data or []
+        if not rows:
+            return []
+
+        logger.info(f"📋 Found {len(rows)} Research Lab candidate(s) queued for validator scoring")
+        work_items: list[dict[str, Any]] = []
+        for row in rows:
+            work_item = await prepare_research_lab_candidate_work_item(row, session_id=session_id)
+            if work_item:
+                work_items.append(work_item)
+        return work_items
+    except Exception as e:
+        logger.error(f"Error querying Research Lab candidate queue: {e}")
+        return []
+
+
+async def prepare_research_lab_candidate_work_item(
+    candidate: Dict[str, Any],
+    *,
+    session_id: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Prepare a Research Lab candidate work item for a validator qualification
+    worker. This does not use qualification_models or public champion state.
+    """
+    candidate_id = str(candidate.get("candidate_id") or "")
+    if not candidate_id:
+        return None
+    try:
+        from gateway.db.client import get_read_client
+        from gateway.research_lab.store import create_candidate_evaluation_event
+
+        evaluation_id = str(uuid4())
+        fresh_result = get_read_client().table("research_lab_candidate_evaluation_current").select(
+            "candidate_id,current_candidate_status"
+        ).eq(
+            "candidate_id", candidate_id
+        ).limit(1).execute()
+        fresh_rows = fresh_result.data or []
+        if not fresh_rows or fresh_rows[0].get("current_candidate_status") != "queued":
+            logger.info(f"Research Lab candidate {candidate_id[:20]}... was already claimed")
+            return None
+
+        await create_candidate_evaluation_event(
+            candidate_id=candidate_id,
+            run_id=str(candidate["run_id"]),
+            ticket_id=str(candidate["ticket_id"]),
+            event_type="assigned",
+            candidate_status="assigned",
+            evaluator_ref=f"qualification_session:{session_id}",
+            reason="assigned_to_validator_qualification_worker",
+            event_doc={"evaluation_id": evaluation_id},
+        )
+
+        icps, icp_set_hash = await get_icp_set(None)
+        if not icps:
+            await create_candidate_evaluation_event(
+                candidate_id=candidate_id,
+                run_id=str(candidate["run_id"]),
+                ticket_id=str(candidate["ticket_id"]),
+                event_type="queued",
+                candidate_status="queued",
+                evaluator_ref=f"qualification_session:{session_id}",
+                reason="active_supabase_icp_set_unavailable_retry",
+                event_doc={"evaluation_id": evaluation_id},
+            )
+            return None
+
+        evaluation_runs = []
+        for icp in icps:
+            run_id = str(uuid4())
+            evaluation_runs.append({
+                "evaluation_run_id": run_id,
+                "probe_id": icp.get("icp_id", str(uuid4())),
+                "probe_name": icp.get("industry", "Unknown"),
+                "icp_data": icp,
+                "stage": "research_lab_candidate",
+            })
+
+        return {
+            "work_kind": "research_lab_candidate",
+            "evaluation_id": evaluation_id,
+            "model_id": candidate_id,
+            "candidate_id": candidate_id,
+            "run_id": str(candidate["run_id"]),
+            "ticket_id": str(candidate["ticket_id"]),
+            "receipt_id": str(candidate.get("receipt_id") or ""),
+            "miner_hotkey": candidate.get("miner_hotkey", "Unknown"),
+            "model_name": f"Research Lab candidate {candidate_id[-8:]}",
+            "island": candidate.get("island", "generalist"),
+            "agent_code": "",
+            "evaluation_runs": evaluation_runs,
+            "icp_set_hash": icp_set_hash,
+            "queued_at": candidate.get("current_status_at", candidate.get("created_at", datetime.now(timezone.utc).isoformat())),
+            "private_model_manifest": candidate.get("private_model_manifest_doc") or {},
+            "candidate_patch_manifest": candidate.get("candidate_patch_manifest") or {},
+            "candidate_artifact_hash": candidate.get("candidate_artifact_hash"),
+            "candidate_patch_hash": candidate.get("candidate_patch_hash"),
+            "parent_artifact_hash": candidate.get("parent_artifact_hash"),
+            "private_model_manifest_hash": candidate.get("private_model_manifest_hash"),
+            "hypothesis_doc": candidate.get("hypothesis_doc") or {},
+            "redacted_public_summary": candidate.get("redacted_public_summary") or "",
+        }
+    except Exception as e:
+        logger.error(f"Error preparing Research Lab candidate work item {candidate_id[:20]}...: {e}")
+        return None
 
 
 async def prepare_work_item_from_model(model: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1291,6 +1483,7 @@ async def prepare_work_item_from_model(model: Dict[str, Any]) -> Optional[Dict[s
             })
         
         work_item = {
+            "work_kind": "qualification_model",
             "evaluation_id": evaluation_id,
             "model_id": model_id,
             "miner_hotkey": model.get("miner_hotkey", "Unknown"),

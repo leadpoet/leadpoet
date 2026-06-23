@@ -10,6 +10,7 @@ from typing import Any, Iterable
 from uuid import UUID, uuid4, uuid5, NAMESPACE_URL
 
 from gateway.db.client import get_write_client
+from research_lab.canonical import sha256_json
 
 
 RESEARCH_LAB_UUID_NAMESPACE = uuid5(NAMESPACE_URL, "leadpoet:research_lab:gateway")
@@ -378,6 +379,94 @@ async def create_receipt_event(
         "anchored_hash": canonical_hash(payload),
     }
     return await insert_row("research_loop_receipt_events", row)
+
+
+async def create_candidate_artifact(request: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    artifact = dict(request.private_model_manifest)
+    patch = dict(request.candidate_patch_manifest)
+    candidate_artifact_hash = str(patch["candidate_artifact_hash"])
+    candidate_id = "candidate:" + candidate_artifact_hash.split(":", 1)[1]
+    candidate_patch_hash = sha256_json(patch)
+    existing = await select_one(
+        "research_lab_candidate_artifacts",
+        filters=(("candidate_id", candidate_id),),
+    )
+    if existing:
+        event = await select_one(
+            "research_lab_candidate_evaluation_events",
+            filters=(("candidate_id", candidate_id), ("seq", 0)),
+        )
+        if not event:
+            raise RuntimeError("existing Research Lab candidate is missing its opening event")
+        return existing, event
+
+    row = {
+        "candidate_id": candidate_id,
+        "schema_version": "1.0",
+        "run_id": str(request.run_id),
+        "ticket_id": str(request.ticket_id),
+        "receipt_id": str(request.receipt_id) if request.receipt_id else None,
+        "miner_hotkey": request.miner_hotkey,
+        "island": request.island,
+        "parent_artifact_hash": str(patch["parent_artifact_hash"]),
+        "candidate_artifact_hash": candidate_artifact_hash,
+        "private_model_manifest_hash": str(artifact["manifest_hash"]),
+        "private_model_manifest_doc": artifact,
+        "candidate_patch_hash": candidate_patch_hash,
+        "candidate_patch_manifest": patch,
+        "hypothesis_doc": dict(request.hypothesis_doc or {}),
+        "redacted_public_summary": request.redacted_public_summary or "",
+        "anchored_hash": "",
+    }
+    row["anchored_hash"] = canonical_hash(row)
+    inserted = await insert_row("research_lab_candidate_artifacts", row)
+    event = await create_candidate_evaluation_event(
+        candidate_id=candidate_id,
+        run_id=str(request.run_id),
+        ticket_id=str(request.ticket_id),
+        event_type="queued",
+        candidate_status="queued",
+        reason="candidate_generated_by_gateway_worker",
+        event_doc={
+            "candidate_artifact_hash": candidate_artifact_hash,
+            "candidate_patch_hash": candidate_patch_hash,
+        },
+    )
+    return inserted, event
+
+
+async def create_candidate_evaluation_event(
+    *,
+    candidate_id: str,
+    run_id: str,
+    ticket_id: str,
+    event_type: str,
+    candidate_status: str,
+    reason: str,
+    evaluator_ref: str | None = None,
+    score_bundle_id: str | None = None,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    seq = await next_event_seq("research_lab_candidate_evaluation_events", "candidate_id", candidate_id)
+    payload = {
+        "candidate_id": candidate_id,
+        "run_id": run_id,
+        "ticket_id": ticket_id,
+        "seq": seq,
+        "event_type": event_type,
+        "candidate_status": candidate_status,
+        "evaluator_ref": evaluator_ref,
+        "reason": reason,
+        "score_bundle_id": score_bundle_id,
+        "event_doc": event_doc or {},
+    }
+    row = {
+        "event_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_lab_candidate_evaluation_events", row)
 
 
 async def create_score_bundle(request: Any) -> tuple[dict[str, Any], dict[str, Any]]:

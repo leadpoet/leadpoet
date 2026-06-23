@@ -33,6 +33,8 @@ from .key_vault import (
     preflight_openrouter_key,
 )
 from .models import (
+    ResearchLabCandidateEvaluationResultRequest,
+    ResearchLabCandidateEvaluationResultResponse,
     ResearchLabLoopStartRequest,
     ResearchLabLoopStartResponse,
     ResearchLabLoopTopUpRequest,
@@ -49,11 +51,13 @@ from .models import (
 )
 from .store import (
     canonical_hash,
+    create_candidate_evaluation_event,
     create_credit_event,
     create_loop_start_payment,
     create_openrouter_key_ref,
     create_queue_event,
     create_receipt,
+    create_receipt_event,
     create_score_bundle,
     create_ticket,
     create_ticket_event,
@@ -467,6 +471,72 @@ async def create_research_lab_score_bundle(
     )
 
 
+@router.post("/evaluations/candidate-results", response_model=ResearchLabCandidateEvaluationResultResponse)
+async def record_research_lab_candidate_result(
+    payload: ResearchLabCandidateEvaluationResultRequest,
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
+    _require_enabled(config.receipts_enabled, "Research Lab receipt writes are disabled")
+    if payload.score_bundle:
+        _require_enabled(config.evaluation_bundles_enabled, "Research Lab evaluation bundle writes are disabled")
+    _require_internal_key(config, x_leadpoet_internal_key)
+
+    candidate = await select_one(
+        "research_lab_candidate_evaluation_current",
+        filters=(("candidate_id", payload.candidate_id),),
+    )
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Research Lab candidate not found")
+
+    score_bundle_id = None
+    score_bundle_hash = None
+    if payload.score_bundle:
+        _validate_score_bundle_matches_candidate(payload.score_bundle, candidate)
+        bundle_request = ResearchLabScoreBundleCreateRequest(
+            receipt_id=candidate.get("receipt_id"),
+            bundle_status=payload.candidate_status,
+            score_bundle=payload.score_bundle,
+        )
+        try:
+            bundle, _bundle_event = await create_score_bundle(bundle_request)
+        except Exception as exc:
+            _raise_storage_error(exc)
+        score_bundle_id = str(bundle["score_bundle_id"])
+        score_bundle_hash = str(bundle["score_bundle_hash"])
+
+    try:
+        event = await create_candidate_evaluation_event(
+            candidate_id=payload.candidate_id,
+            run_id=str(candidate["run_id"]),
+            ticket_id=str(candidate["ticket_id"]),
+            event_type=payload.candidate_status,
+            candidate_status=payload.candidate_status,
+            evaluator_ref=payload.evaluator_ref,
+            reason=payload.reason or f"validator_reported_{payload.candidate_status}",
+            score_bundle_id=score_bundle_id,
+            event_doc={
+                "score_bundle_id": score_bundle_id,
+                "score_bundle_hash": score_bundle_hash,
+                "result_doc": payload.result_doc,
+            },
+        )
+    except Exception as exc:
+        _raise_storage_error(exc)
+
+    receipt_finalized = await _maybe_finalize_candidate_receipt(candidate)
+    return ResearchLabCandidateEvaluationResultResponse(
+        candidate_id=payload.candidate_id,
+        status=payload.candidate_status,
+        event_id=event["event_id"],
+        event_seq=int(event["seq"]),
+        score_bundle_id=score_bundle_id,
+        receipt_finalized=receipt_finalized,
+    )
+
+
 @router.get("/tickets/{ticket_id}")
 async def get_research_lab_ticket(ticket_id: str):
     config = ResearchLabGatewayConfig.from_env()
@@ -668,6 +738,86 @@ def _validate_compute_budget(config: ResearchLabGatewayConfig, value: float, fie
     upper = max(lower, float(config.max_compute_budget_usd))
     if float(value) < lower or float(value) > upper:
         raise HTTPException(status_code=400, detail=f"{field_name} must be between {lower:.2f} and {upper:.2f}")
+
+
+def _validate_score_bundle_matches_candidate(bundle: dict[str, object], candidate: dict[str, object]) -> None:
+    expected = {
+        "run_id": str(candidate["run_id"]),
+        "ticket_id": str(candidate["ticket_id"]),
+        "miner_hotkey": str(candidate["miner_hotkey"]),
+        "island": str(candidate["island"]),
+        "parent_artifact_hash": str(candidate["parent_artifact_hash"]),
+        "candidate_artifact_hash": str(candidate["candidate_artifact_hash"]),
+        "private_model_manifest_hash": str(candidate["private_model_manifest_hash"]),
+        "candidate_patch_hash": str(candidate["candidate_patch_hash"]),
+    }
+    for key, expected_value in expected.items():
+        actual_value = str(bundle.get(key) or "")
+        if actual_value != expected_value:
+            raise HTTPException(
+                status_code=400,
+                detail=f"score bundle {key} does not match Research Lab candidate",
+            )
+
+
+async def _maybe_finalize_candidate_receipt(candidate: dict[str, object]) -> bool:
+    receipt_id = candidate.get("receipt_id")
+    if not receipt_id:
+        return False
+
+    candidates = await select_many(
+        "research_lab_candidate_evaluation_current",
+        filters=(("run_id", str(candidate["run_id"])),),
+        limit=1000,
+    )
+    if not candidates:
+        return False
+
+    terminal_statuses = {"scored", "failed", "rejected", "tombstoned"}
+    status_counts: dict[str, int] = {}
+    score_bundle_ids: list[str] = []
+    for row in candidates:
+        status = str(row.get("current_candidate_status") or "")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if status not in terminal_statuses:
+            return False
+        score_bundle_id = row.get("current_score_bundle_id")
+        if score_bundle_id:
+            score_bundle_ids.append(str(score_bundle_id))
+
+    receipt = await select_one(
+        "research_loop_receipt_current",
+        filters=(("receipt_id", str(receipt_id)),),
+    )
+    if not receipt or receipt.get("current_receipt_status") != "queued":
+        return False
+
+    event_doc = {
+        "run_id": str(candidate["run_id"]),
+        "candidate_status_counts": status_counts,
+        "score_bundle_ids": score_bundle_ids,
+        "finalization_source": "validator_research_lab_candidate_results",
+    }
+    has_scored_candidate = status_counts.get("scored", 0) > 0
+    await create_receipt_event(
+        receipt_id=str(receipt_id),
+        ticket_id=str(candidate["ticket_id"]),
+        event_type="completed" if has_scored_candidate else "failed",
+        receipt_status="completed" if has_scored_candidate else "failed",
+        event_doc=event_doc,
+    )
+    await create_ticket_event(
+        ticket_id=str(candidate["ticket_id"]),
+        event_type="completed" if has_scored_candidate else "cancelled",
+        actor_hotkey=None,
+        reason=(
+            "validator_research_lab_candidate_evaluation_completed"
+            if has_scored_candidate
+            else "validator_research_lab_candidate_evaluation_failed"
+        ),
+        event_doc=event_doc,
+    )
+    return True
 
 
 def _raise_storage_error(exc: Exception) -> None:

@@ -265,7 +265,7 @@ class ResearchLabGatewayConfig:
                 "require_proxy": self.hosted_worker_require_proxy,
                 "worker_proxy_configured": bool(self.hosted_worker_proxy_url),
                 "private_model_manifest_uri_configured": bool(self.private_model_manifest_uri),
-                "private_benchmark_path_configured": bool(self.private_benchmark_path),
+                "scoring_owner": "validator_qualification_workers",
                 "auto_research_model_configured": bool(self.auto_research_model),
                 "approved_model_tiers": {
                     tier: {

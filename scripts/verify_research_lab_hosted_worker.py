@@ -112,14 +112,17 @@ def main() -> int:
         production_writes_enabled=True,
         hosted_runs_enabled=True,
         receipts_enabled=True,
-        evaluation_bundles_enabled=True,
-        private_benchmark_path="/sealed/benchmark.json",
+        private_model_manifest_uri="s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json",
         auto_research_model="test/model",
         hosted_worker_index=2,
         hosted_worker_total_workers=4,
         hosted_worker_queue_fetch_limit=64,
     )
     preferred_worker = ResearchLabHostedWorker(preferred_cfg, worker_ref="test-worker-3")
+    try:
+        preferred_worker._require_enabled()
+    except HostedResearchLabWorkerError as exc:
+        errors.append(f"worker config should not require private benchmark path: {exc}")
     selected = preferred_worker._select_preferred_queued_row(rows)
     if not selected or _row_partition(selected, 4) != 2:
         errors.append("worker did not prefer its assigned queue partition")
@@ -142,7 +145,7 @@ def main() -> int:
         return 1
     print(
         "Research Lab hosted worker contracts verified: candidate parser, Engine v1 validation, "
-        "validator scored-bundle filtering, worker partitioning, claim-race detection."
+        "validator scored-bundle filtering, worker partitioning, claim-race detection, no gateway benchmark path."
     )
     return 0
 

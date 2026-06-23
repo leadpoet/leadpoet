@@ -163,6 +163,23 @@ class ResearchLabReceiptCreateRequest(BaseModel):
         return self
 
 
+class ResearchLabCandidateArtifactCreateRequest(BaseModel):
+    run_id: UUID
+    ticket_id: UUID
+    receipt_id: Optional[UUID] = None
+    miner_hotkey: str = Field(min_length=16)
+    island: str = Field(min_length=1, max_length=80)
+    private_model_manifest: dict[str, Any]
+    candidate_patch_manifest: dict[str, Any]
+    hypothesis_doc: dict[str, Any] = Field(default_factory=dict)
+    redacted_public_summary: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def no_secret_material(self) -> "ResearchLabCandidateArtifactCreateRequest":
+        reject_secret_material(self.model_dump())
+        return self
+
+
 class ResearchLabScoreBundleCreateRequest(BaseModel):
     bundle_status: str = Field(default="scored", pattern="^(scored|failed|rejected|tombstoned)$")
     receipt_id: Optional[UUID] = None
@@ -185,6 +202,34 @@ class ResearchLabScoreBundleCreateRequest(BaseModel):
         reward_path = bundle.get("reward_path") or {}
         if reward_path.get("eligible_for_crown") or reward_path.get("eligible_for_improvement_grant"):
             raise ValueError("score bundle cannot directly create crown or improvement-grant eligibility")
+        return self
+
+
+class ResearchLabCandidateEvaluationResultRequest(BaseModel):
+    candidate_id: str = Field(pattern=r"^candidate:[0-9a-f]{64}$")
+    candidate_status: str = Field(pattern="^(scored|failed|rejected)$")
+    evaluator_ref: Optional[str] = Field(default=None, max_length=256)
+    reason: Optional[str] = Field(default=None, max_length=500)
+    score_bundle: Optional[dict[str, Any]] = None
+    result_doc: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def valid_result_shape(self) -> "ResearchLabCandidateEvaluationResultRequest":
+        reject_secret_material(self.model_dump())
+        if self.candidate_status == "scored" and not self.score_bundle:
+            raise ValueError("scored Research Lab candidate requires score_bundle")
+        if self.score_bundle:
+            bundle = self.score_bundle
+            if bundle.get("bundle_type") != "research_lab_evaluation_score_bundle":
+                raise ValueError("score_bundle must be a Research Lab evaluation score bundle")
+            if bundle.get("schema_version") != "1.0":
+                raise ValueError("unsupported score bundle schema version")
+            if not bundle.get("signature_ref"):
+                raise ValueError("score bundle signature_ref is required")
+            if bundle.get("score_bundle_hash") != bundle.get("anchored_hash"):
+                raise ValueError("score_bundle_hash must match anchored_hash")
+            if bundle.get("score_bundle_hash") != _score_bundle_hash(bundle):
+                raise ValueError("score bundle hash mismatch")
         return self
 
 
@@ -229,6 +274,24 @@ class ResearchLabReceiptResponse(BaseModel):
     receipt_id: str
     receipt_hash: str
     status: str
+
+
+class ResearchLabCandidateArtifactResponse(BaseModel):
+    candidate_id: str
+    candidate_artifact_hash: str
+    candidate_patch_hash: str
+    status: str
+    event_id: str
+    event_seq: int
+
+
+class ResearchLabCandidateEvaluationResultResponse(BaseModel):
+    candidate_id: str
+    status: str
+    event_id: str
+    event_seq: int
+    score_bundle_id: Optional[str] = None
+    receipt_finalized: bool = False
 
 
 class ResearchLabScoreBundleResponse(BaseModel):

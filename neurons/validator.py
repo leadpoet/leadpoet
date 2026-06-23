@@ -6931,6 +6931,79 @@ class Validator(BaseValidatorNeuron):
             f"{'='*70}\n"
         )
 
+    async def _notify_gateway_research_lab_candidate_result(self, result: dict):
+        """
+        Submit validator-owned Research Lab candidate scoring results back to
+        the gateway. This path is separate from qualification champion state.
+        """
+        import httpx
+
+        candidate_id = result.get("candidate_id") or result.get("model_id")
+        if not candidate_id:
+            bt.logging.warning("Research Lab candidate result missing candidate_id")
+            return
+
+        gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
+        internal_key = os.environ.get("RESEARCH_LAB_INTERNAL_API_KEY", "")
+        if not internal_key:
+            bt.logging.error("RESEARCH_LAB_INTERNAL_API_KEY is required to submit Research Lab candidate results")
+            return
+
+        error = result.get("error")
+        rejection_reason = result.get("rejection_reason")
+        candidate_status = result.get("candidate_status")
+        if not candidate_status:
+            candidate_status = "failed" if error else ("rejected" if rejection_reason else "scored")
+
+        result_doc = {
+            "schema_version": "1.0",
+            "work_kind": "research_lab_candidate",
+            "qual_worker_id": result.get("qual_worker_id"),
+            "evaluation_epoch": result.get("evaluation_epoch"),
+            "avg_score": result.get("avg_score", 0.0),
+            "total_cost_usd": result.get("total_cost_usd", 0.0),
+            "total_time_seconds": result.get("total_time_seconds", 0.0),
+            "icps_evaluated": result.get("icps_evaluated", 0),
+        }
+        if error:
+            result_doc["error"] = str(error)[:500]
+        if rejection_reason:
+            result_doc["rejection_reason"] = str(rejection_reason)[:200]
+
+        payload = {
+            "candidate_id": candidate_id,
+            "candidate_status": candidate_status,
+            "evaluator_ref": f"validator:{self.wallet.hotkey.ss58_address}",
+            "reason": result.get("reason") or ("validator_research_lab_candidate_failed" if error else "validator_research_lab_candidate_scored"),
+            "score_bundle": result.get("score_bundle"),
+            "result_doc": result_doc,
+        }
+
+        max_retries = 5
+        for attempt in range(1, max_retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    response = await client.post(
+                        f"{gateway_url}/research-lab/evaluations/candidate-results",
+                        json=payload,
+                        headers={"x-leadpoet-internal-key": internal_key},
+                    )
+                    response.raise_for_status()
+                    bt.logging.info(f"✅ Submitted Research Lab candidate result: candidate={candidate_id[-12:]}, status={candidate_status}")
+                    return
+            except Exception as exc:
+                bt.logging.warning(
+                    f"Research Lab candidate result submission attempt {attempt}/{max_retries} failed: "
+                    f"{type(exc).__name__}: {exc or '(empty - likely timeout)'}"
+                )
+                if attempt < max_retries:
+                    await asyncio.sleep(2 ** attempt)
+
+        bt.logging.error(
+            f"🚨 CRITICAL: Research Lab candidate result submission failed after {max_retries} attempts: "
+            f"candidate={candidate_id}, status={candidate_status}"
+        )
+
     # ═══════════════════════════════════════════════════════════════════════════
     # DEDICATED QUALIFICATION WORKERS: Assignment at Epoch Start
     # ═══════════════════════════════════════════════════════════════════════════
@@ -7543,6 +7616,10 @@ class Validator(BaseValidatorNeuron):
         
         # Process each result
         for result in results:
+            if result.get("work_kind") == "research_lab_candidate":
+                await self._notify_gateway_research_lab_candidate_result(result)
+                continue
+
             model_id = result.get("model_id", "unknown")
             model_name = result.get("model_name", "Unknown")
             avg_score = result.get("avg_score", 0.0)
@@ -9271,6 +9348,154 @@ def run_dedicated_qualification_worker(config):
             with open(block_file, 'r') as f:
                 data = json.load(f)
                 return data['block'], data['epoch'], data['blocks_into_epoch']
+
+        async def _process_research_lab_candidate(self, model: dict, runs: list, work_epoch: int) -> dict:
+            """
+            Score a Research Lab candidate patch against the active Supabase ICP
+            set delivered by the gateway. This path does not touch public model
+            competition champion state.
+            """
+            candidate_id = model.get("candidate_id") or model.get("model_id", "unknown")
+            start_time = time.time()
+            try:
+                from research_lab.canonical import sha256_json
+                from research_lab.eval import (
+                    CandidatePatchManifest,
+                    DockerPrivateModelRunner,
+                    DockerPrivateModelSpec,
+                    PrivateModelArtifactManifest,
+                    SealedBenchmarkSet,
+                    evaluate_private_model_pair,
+                    sign_digest_with_kms,
+                )
+
+                artifact = PrivateModelArtifactManifest.from_mapping(model.get("private_model_manifest") or {})
+                patch = CandidatePatchManifest.from_mapping(model.get("candidate_patch_manifest") or {})
+                if not runs:
+                    raise RuntimeError("Research Lab candidate evaluation requires ICP runs")
+
+                benchmark_items = []
+                item_refs = []
+                for idx, run in enumerate(runs):
+                    icp = dict(run.get("icp_data") or {})
+                    icp_hash = sha256_json({"icp": icp})
+                    icp_ref = str(run.get("probe_id") or f"supabase_icp:{idx}:{icp_hash}")
+                    benchmark_items.append({
+                        "icp": icp,
+                        "icp_hash": icp_hash,
+                        "icp_ref": icp_ref,
+                    })
+                    item_refs.append(icp_ref)
+
+                icp_set_hash = str(model.get("icp_set_hash") or sha256_json([
+                    {"icp_ref": item["icp_ref"], "icp_hash": item["icp_hash"]}
+                    for item in benchmark_items
+                ]))
+                benchmark = SealedBenchmarkSet(
+                    benchmark_id="supabase:qualification_private_icp_sets:active",
+                    icp_set_hash=icp_set_hash,
+                    split_ref=f"validator:qualification_private_icp_sets:{icp_set_hash}",
+                    item_refs=tuple(item_refs),
+                    scoring_version="qualification-company-scorer:v1",
+                    hidden_plaintext_available=True,
+                )
+
+                timeout_seconds = int(os.environ.get("RESEARCH_LAB_VALIDATOR_MODEL_TIMEOUT_SECONDS", "900"))
+                runner = DockerPrivateModelRunner(DockerPrivateModelSpec(
+                    image_digest=artifact.image_digest,
+                    timeout_seconds=timeout_seconds,
+                ))
+
+                cost_ledger = {
+                    "schema_version": "1.0",
+                    "candidate_id": candidate_id,
+                    "work_epoch": work_epoch,
+                    "qual_worker_id": qual_container_id,
+                    "observed_cost_usd": 0.0,
+                }
+                run_context = {
+                    "run_id": str(model["run_id"]),
+                    "ticket_id": str(model["ticket_id"]),
+                    "miner_hotkey": str(model["miner_hotkey"]),
+                    "island": str(model.get("island") or "generalist"),
+                    "evaluation_epoch": int(os.environ.get("RESEARCH_LAB_EVALUATION_EPOCH", str(work_epoch))),
+                    "evaluator_version": "leadpoet-validator-qualification-worker:research-lab:v1",
+                    "evidence_bundle_refs": [
+                        f"research_lab_candidate:{candidate_id}:supabase_icp_set:{icp_set_hash}"
+                    ],
+                    "execution_trace_ref": f"validator_qualification_worker:{candidate_id}:{work_epoch}:{qual_container_id}",
+                    "cost_ledger_ref": "cost_ledger:" + sha256_json(cost_ledger).split(":", 1)[1],
+                    "signature_ref": "",
+                }
+                policy = {
+                    "min_delta": float(os.environ.get("RESEARCH_LAB_MIN_DELTA", "0")),
+                    "min_delta_lcb": float(os.environ.get("RESEARCH_LAB_MIN_DELTA_LCB", "0")),
+                    "min_successful_icps": int(os.environ.get("RESEARCH_LAB_MIN_SUCCESSFUL_ICPS", "1")),
+                    "max_hard_failures": int(os.environ.get("RESEARCH_LAB_MAX_HARD_FAILURES", "0")),
+                    "min_candidate_score": float(os.environ.get("RESEARCH_LAB_MIN_CANDIDATE_SCORE", "0")),
+                    "observed_cost_usd": 0.0,
+                }
+
+                score_bundle = await evaluate_private_model_pair(
+                    artifact_manifest=artifact,
+                    benchmark=benchmark,
+                    patch_manifest=patch,
+                    benchmark_items=benchmark_items,
+                    base_runner=runner,
+                    candidate_runner=runner,
+                    run_context=run_context,
+                    policy=policy,
+                )
+
+                kms_key_id = os.environ.get("RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID", "")
+                if not kms_key_id:
+                    raise RuntimeError("RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID is required for Research Lab score bundles")
+                signature_ref = await asyncio.to_thread(
+                    sign_digest_with_kms,
+                    key_id=kms_key_id,
+                    digest_hash=score_bundle["score_bundle_hash"],
+                    signature_uri_prefix=os.environ.get("RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX", ""),
+                )
+                score_bundle = {**score_bundle, "signature_ref": signature_ref}
+                aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), dict) else {}
+
+                total_time = time.time() - start_time
+                print(f"      ✅ Research Lab candidate scored: {candidate_id[-12:]}")
+                print(f"         Candidate Score: {float(aggregates.get('candidate_score', 0.0) or 0.0):.2f}")
+                print(f"         Mean Delta: {float(aggregates.get('mean_delta', 0.0) or 0.0):.2f}")
+                return {
+                    "work_kind": "research_lab_candidate",
+                    "candidate_status": "scored",
+                    "candidate_id": candidate_id,
+                    "model_id": candidate_id,
+                    "model_name": model.get("model_name", f"Research Lab candidate {candidate_id[-8:]}"),
+                    "miner_hotkey": model.get("miner_hotkey", "unknown"),
+                    "avg_score": float(aggregates.get("candidate_score", 0.0) or 0.0),
+                    "total_cost_usd": float(aggregates.get("total_cost_usd", 0.0) or 0.0),
+                    "total_time_seconds": total_time,
+                    "icps_evaluated": int(aggregates.get("icp_count", len(runs)) or len(runs)),
+                    "evaluation_epoch": int(run_context["evaluation_epoch"]),
+                    "qual_worker_id": qual_container_id,
+                    "score_bundle": score_bundle,
+                }
+            except Exception as exc:
+                total_time = time.time() - start_time
+                print(f"      ❌ Research Lab candidate failed: {candidate_id[-12:]} — {exc}")
+                return {
+                    "work_kind": "research_lab_candidate",
+                    "candidate_status": "failed",
+                    "candidate_id": candidate_id,
+                    "model_id": candidate_id,
+                    "model_name": model.get("model_name", f"Research Lab candidate {candidate_id[-8:]}"),
+                    "miner_hotkey": model.get("miner_hotkey", "unknown"),
+                    "error": str(exc)[:500],
+                    "avg_score": 0.0,
+                    "total_cost_usd": 0.0,
+                    "total_time_seconds": total_time,
+                    "icps_evaluated": len(runs),
+                    "evaluation_epoch": work_epoch,
+                    "qual_worker_id": qual_container_id,
+                }
         
         async def process_qualification_models(self, current_epoch: int):
             """
@@ -9359,6 +9584,12 @@ def run_dedicated_qualification_worker(config):
                     print(f"      Miner: {miner_hotkey[:16]}...")
                     print(f"      ICPs: {len(runs)}")
                     print(f"      Rebenchmark: {is_rebenchmark}")
+
+                    if model.get("work_kind") == "research_lab_candidate":
+                        model_results.append(
+                            await self._process_research_lab_candidate(model, runs, work_epoch)
+                        )
+                        continue
                     
                     # Decode model code
                     model_code = base64.b64decode(model_code_b64) if model_code_b64 else b""

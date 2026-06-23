@@ -16,6 +16,7 @@ from gateway.research_lab.api import router
 from gateway.research_lab.bundles import build_shadow_report_bundle, sha256_json
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.models import (
+    ResearchLabCandidateEvaluationResultRequest,
     ResearchLabLoopStartRequest,
     ResearchLabLoopTopUpRequest,
     ResearchLabOpenRouterKeyRegisterRequest,
@@ -52,6 +53,7 @@ def main() -> int:
         "/research-lab/tickets/{ticket_id}",
         "/research-lab/receipts/{receipt_id}",
         "/research-lab/evaluations/score-bundles",
+        "/research-lab/evaluations/candidate-results",
         "/research-lab/evaluations/score-bundles/{score_bundle_id}",
         "/research-lab/evaluations/latest/{epoch}",
         "/research-lab/reports/shadow/{epoch}",
@@ -249,6 +251,19 @@ def main() -> int:
         errors.append("score-bundle request accepted missing signature_ref")
     except ValueError:
         pass
+
+    candidate_result = ResearchLabCandidateEvaluationResultRequest(
+        candidate_id="candidate:" + "8" * 64,
+        candidate_status="scored",
+        evaluator_ref="validator:test",
+        score_bundle=score_bundle,
+        result_doc={"summary": "validator completed paired scoring"},
+    )
+    reparsed_candidate_result = ResearchLabCandidateEvaluationResultRequest.model_validate(
+        candidate_result.model_dump(mode="json")
+    )
+    if reparsed_candidate_result != candidate_result:
+        errors.append("candidate evaluation result request failed json round-trip")
 
     if errors:
         for error in errors:

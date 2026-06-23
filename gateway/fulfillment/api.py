@@ -1698,7 +1698,23 @@ async def get_active_rewards(current_epoch: int):
 
     Used by the validator during weight calculation to determine the
     fulfillment emission carve-out from the sourcing allocation.
+
+    The DB pagination runs in a worker thread (asyncio.to_thread) so the
+    synchronous Supabase calls never block the gateway event loop. The
+    validator's client times out at 45s/attempt and treats an exhausted
+    fetch as "no active rewards" — which zeroes the fulfillment emission
+    share and burns it. Run inline, this query queued behind the lifecycle
+    tick and exceeded 50s under PostgREST latency, so the validator was
+    dropping ALL fulfillment rewards some epochs. Offloading keeps it well
+    under the 45s budget even during slow spells.
     """
+    import asyncio
+    return await asyncio.to_thread(_collect_active_rewards_sync, current_epoch)
+
+
+def _collect_active_rewards_sync(current_epoch: int) -> dict:
+    """Synchronous body of GET /fulfillment/rewards/active — runs in a worker
+    thread so it never blocks the event loop.  See the endpoint docstring."""
     supabase = _get_supabase()
 
     all_rows: List[dict] = []

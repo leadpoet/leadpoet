@@ -33,6 +33,36 @@ EPOCH_DURATION_SECONDS = 360 * 12
 _async_subtensor = None
 
 
+STAKE_THRESHOLD = 500000  # 500K TAO for mainnet stake-based classification
+
+
+def _classify_hotkey_role(active: bool, validator_permit: bool, stake: float) -> Tuple[str, str]:
+    """
+    Classify registered hotkeys without weakening mainnet validator checks.
+
+    Testnet has unstable/low validator permit semantics, so active=True is
+    enough there. Mainnet keeps the existing requirement that validator
+    classification must include validator_permit=True.
+    """
+    from gateway.config import BITTENSOR_NETWORK
+
+    is_testnet = BITTENSOR_NETWORK == "test"
+    if is_testnet:
+        if active:
+            return "validator", "testnet, active=True"
+        return "miner", f"testnet, active={active}, permit={validator_permit}, stake={stake:.0f}"
+
+    is_validator = (
+        (active and validator_permit) or
+        (stake > STAKE_THRESHOLD and validator_permit)
+    )
+    if is_validator:
+        if active and validator_permit:
+            return "validator", "active=True, permit=True"
+        return "validator", f"stake={stake:.0f} τ > {STAKE_THRESHOLD}, permit=True"
+    return "miner", f"active={active}, permit={validator_permit}, stake={stake:.0f}"
+
+
 def inject_async_subtensor(async_subtensor):
     """
     Inject async subtensor instance at gateway startup.
@@ -338,35 +368,11 @@ async def is_registered_hotkey_async(hotkey: str) -> Tuple[bool, Optional[str]]:
         print(f"   Active: {active}")
         print(f"   Validator Permit: {validator_permit}")
         
-        # Validator classification logic:
-        # On TESTNET: validator_permit=True is sufficient (low stake is common)
-        # On MAINNET: require active=True OR high stake (500K+ TAO)
-        from gateway.config import BITTENSOR_NETWORK
-        is_testnet = BITTENSOR_NETWORK == "test"
-        
-        STAKE_THRESHOLD = 500000  # 500K TAO for mainnet stake-based classification
-        
-        # Validators are identified by:
-        # 1. validator_permit=True AND active=True (normal path), OR
-        # 2. validator_permit=True AND stake > threshold (mainnet high-stake), OR
-        # 3. validator_permit=True on testnet (testnet has low stake)
-        is_validator = (
-            (active and validator_permit) or
-            (stake > STAKE_THRESHOLD and validator_permit) or
-            (is_testnet and validator_permit)
-        )
-        
-        if is_validator:
-            role = "validator"
-            if active and validator_permit:
-                print(f"   ✅ Role: VALIDATOR (active=True, permit=True)")
-            elif is_testnet and validator_permit:
-                print(f"   ✅ Role: VALIDATOR (testnet, permit=True, active={active})")
-            else:
-                print(f"   ✅ Role: VALIDATOR (stake={stake:.0f} τ > {STAKE_THRESHOLD}, permit=True)")
+        role, reason = _classify_hotkey_role(active, validator_permit, float(stake))
+        if role == "validator":
+            print(f"   ✅ Role: VALIDATOR ({reason})")
         else:
-            role = "miner"
-            print(f"   ✅ Role: MINER (active={active}, permit={validator_permit}, stake={stake:.0f})")
+            print(f"   ✅ Role: MINER ({reason})")
         
         return True, role
     
@@ -416,35 +422,11 @@ def is_registered_hotkey(hotkey: str) -> Tuple[bool, Optional[str]]:
         print(f"   Active: {active}")
         print(f"   Validator Permit: {validator_permit}")
         
-        # Validator classification logic:
-        # On TESTNET: validator_permit=True is sufficient (low stake is common)
-        # On MAINNET: require active=True OR high stake (500K+ TAO)
-        from gateway.config import BITTENSOR_NETWORK
-        is_testnet = BITTENSOR_NETWORK == "test"
-        
-        STAKE_THRESHOLD = 500000  # 500K TAO for mainnet stake-based classification
-        
-        # Validators are identified by:
-        # 1. validator_permit=True AND active=True (normal path), OR
-        # 2. validator_permit=True AND stake > threshold (mainnet high-stake), OR
-        # 3. validator_permit=True on testnet (testnet has low stake)
-        is_validator = (
-            (active and validator_permit) or
-            (stake > STAKE_THRESHOLD and validator_permit) or
-            (is_testnet and validator_permit)
-        )
-        
-        if is_validator:
-            role = "validator"
-            if active and validator_permit:
-                print(f"   ✅ Role: VALIDATOR (active=True, permit=True)")
-            elif is_testnet and validator_permit:
-                print(f"   ✅ Role: VALIDATOR (testnet, permit=True, active={active})")
-            else:
-                print(f"   ✅ Role: VALIDATOR (stake={stake:.0f} τ > {STAKE_THRESHOLD}, permit=True)")
+        role, reason = _classify_hotkey_role(active, validator_permit, float(stake))
+        if role == "validator":
+            print(f"   ✅ Role: VALIDATOR ({reason})")
         else:
-            role = "miner"
-            print(f"   ✅ Role: MINER (active={active}, permit={validator_permit}, stake={stake:.0f})")
+            print(f"   ✅ Role: MINER ({reason})")
         
         return True, role
     
@@ -797,4 +779,3 @@ def get_validator_weights(validator_hotkey: str) -> tuple[float, float]:
     except Exception as e:
         print(f"❌ Error fetching validator weights: {e}")
         return (0.0, 0.0)
-

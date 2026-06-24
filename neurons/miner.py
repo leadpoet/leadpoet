@@ -2350,7 +2350,7 @@ def _register_research_lab_openrouter_key(wallet, status: dict) -> tuple[str, st
                 "key_label": "research-lab-miner-key",
             },
         )
-        result = _post_research_lab_json("/research-lab/openrouter-keys", payload, timeout=45)
+        result = _post_research_lab_json("/research-lab/openrouter-keys", payload, timeout=120)
         if "error" in result:
             print(f"❌ OpenRouter key verification failed: HTTP {result.get('status_code')}")
             print(f"   {result['error']}")

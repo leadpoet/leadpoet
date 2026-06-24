@@ -31,11 +31,21 @@ SECRET_KEY_MARKERS = (
     "raw_secret",
     "raw_openrouter",
     "credential",
-    "token",
     "private_model_manifest_doc",
     "candidate_patch_manifest",
     "image_digest",
     "proxy_url",
+)
+SECRET_TOKEN_KEY_MARKERS = (
+    "access_token",
+    "api_token",
+    "auth_token",
+    "bearer_token",
+    "refresh_token",
+    "session_token",
+    "token_key",
+    "token_secret",
+    "token_value",
 )
 
 
@@ -219,7 +229,7 @@ def contains_secret_material(value: Any) -> bool:
     if isinstance(value, Mapping):
         for key, item in value.items():
             lowered_key = str(key).lower()
-            if any(marker in lowered_key for marker in SECRET_KEY_MARKERS):
+            if _looks_like_secret_key(lowered_key):
                 return True
             if contains_secret_material(item):
                 return True
@@ -229,6 +239,12 @@ def contains_secret_material(value: Any) -> bool:
         lowered = value.lower()
         return any(marker in lowered for marker in SECRET_MARKERS)
     return False
+
+
+def _looks_like_secret_key(lowered_key: str) -> bool:
+    if any(marker in lowered_key for marker in SECRET_KEY_MARKERS):
+        return True
+    return any(marker in lowered_key for marker in SECRET_TOKEN_KEY_MARKERS)
 
 
 def _stable_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:

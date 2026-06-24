@@ -2461,6 +2461,7 @@ def _execute_research_lab_payment(
     netuid: int,
     usd_amount: float,
     payment_label: str,
+    confirm_transfer: bool = True,
 ) -> tuple[str, int] | None:
     """Submit a TAO payment and return the on-chain proof for gateway verification."""
     dest_coldkey = get_leadpoet_coldkey(netuid)
@@ -2481,10 +2482,11 @@ def _execute_research_lab_payment(
     print(f"   TAO required: {tao_required:.6f}")
     print(f"   TAO to send with 1% buffer: {tao_with_buffer:.6f}")
 
-    confirm = input("   Proceed with TAO transfer? [Y/n]: ").strip().lower()
-    if confirm in ("n", "no"):
-        print("Payment cancelled.")
-        return None
+    if confirm_transfer:
+        confirm = input("   Proceed with TAO transfer? [Y/n]: ").strip().lower()
+        if confirm in ("n", "no"):
+            print("Payment cancelled.")
+            return None
 
     print("\nConnecting to chain...")
     subtensor = None
@@ -2677,7 +2679,9 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
         print("The ticket is open, but this miner process will not submit a paid loop-start request.")
         return
 
-    start_now = input("❓ Continue to payment and queue this run now? [Y/n]: ").strip().lower()
+    start_now = input(
+        f"❓ Pay the TAO loop-start fee of ${loop_fee:.2f} USD-equivalent and queue this run now? [Y/n]: "
+    ).strip().lower()
     if start_now in ("n", "no"):
         return
 
@@ -2687,6 +2691,7 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
         netuid=netuid,
         usd_amount=loop_fee,
         payment_label="Loop-start fee",
+        confirm_transfer=False,
     )
     if payment_result is None:
         return

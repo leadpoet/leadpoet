@@ -38,6 +38,15 @@ def _proxy_ref(proxy_url: str) -> str:
     return "sha256:" + hashlib.sha256(proxy_url.encode("utf-8")).hexdigest()[:16]
 
 
+def _configure_logging(level: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, str(level).upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    for logger_name in ("httpx", "httpcore", "hpack", "botocore", "boto3", "urllib3"):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
 def _proxy_for_worker(prefixes: tuple[str, ...], index: int) -> str:
     one_based = index + 1
     for prefix in prefixes:
@@ -132,10 +141,7 @@ def main() -> int:
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    _configure_logging(args.log_level)
 
     if args.kind == "hosted":
         worker_id = _configure_hosted_worker(

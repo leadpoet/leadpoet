@@ -48,6 +48,24 @@ from research_lab.eval.evaluator import QualificationStyleCompanyScorer
 logger = logging.getLogger(__name__)
 
 
+def _idle_log_seconds() -> float:
+    try:
+        return max(10.0, float(os.getenv("RESEARCH_LAB_WORKER_IDLE_LOG_SECONDS", "60")))
+    except ValueError:
+        return 60.0
+
+
+def _error_backoff_seconds() -> float:
+    try:
+        return max(5.0, float(os.getenv("RESEARCH_LAB_WORKER_ERROR_BACKOFF_SECONDS", "60")))
+    except ValueError:
+        return 60.0
+
+
+def _short_error(exc: BaseException) -> str:
+    return f"{exc.__class__.__name__}: {str(exc)[:300]}"
+
+
 class ResearchLabGatewayScoringWorker:
     """Scores Research Lab candidates inside the gateway trust boundary."""
 
@@ -58,9 +76,40 @@ class ResearchLabGatewayScoringWorker:
         self.proxy_ref_hash = canonical_hash({"proxy_ref": self.proxy_url}) if self.proxy_url else None
 
     async def run_forever(self) -> None:
+        last_idle_log = 0.0
+        last_error_log = 0.0
+        idle_log_seconds = _idle_log_seconds()
+        error_backoff_seconds = _error_backoff_seconds()
         while True:
-            outcome = await self.run_once()
-            logger.info("Research Lab scoring worker outcome: %s", outcome)
+            try:
+                outcome = await self.run_once()
+            except Exception as exc:
+                now = time.monotonic()
+                if now - last_error_log >= idle_log_seconds:
+                    logger.error(
+                        "Research Lab scoring worker pass failed: worker_ref=%s error=%s",
+                        self.worker_ref,
+                        _short_error(exc),
+                    )
+                    last_error_log = now
+                await asyncio.sleep(max(self.config.scoring_worker_poll_seconds, error_backoff_seconds))
+                continue
+            if outcome.get("processed") or outcome.get("status") != "idle":
+                logger.info(
+                    "Research Lab scoring worker pass: status=%s candidates=%s baseline_status=%s",
+                    outcome.get("status"),
+                    len(outcome.get("candidate_ids") or []),
+                    (outcome.get("baseline") or {}).get("status")
+                    if isinstance(outcome.get("baseline"), Mapping)
+                    else None,
+                )
+            elif time.monotonic() - last_idle_log >= idle_log_seconds:
+                logger.info(
+                    "Research Lab scoring worker idle: worker_ref=%s poll_seconds=%s",
+                    self.worker_ref,
+                    self.config.scoring_worker_poll_seconds,
+                )
+                last_idle_log = time.monotonic()
             await asyncio.sleep(max(1, self.config.scoring_worker_poll_seconds))
 
     async def run_once(self) -> dict[str, Any]:

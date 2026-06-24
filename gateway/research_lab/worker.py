@@ -55,6 +55,13 @@ from research_lab.eval import (
 logger = logging.getLogger(__name__)
 
 
+def _idle_log_seconds() -> float:
+    try:
+        return max(10.0, float(os.getenv("RESEARCH_LAB_WORKER_IDLE_LOG_SECONDS", "60")))
+    except ValueError:
+        return 60.0
+
+
 class HostedResearchLabWorkerError(RuntimeError):
     """Raised when a hosted Research Lab run cannot complete safely."""
 
@@ -176,9 +183,26 @@ class ResearchLabHostedWorker:
 
     async def run_forever(self) -> None:
         processed = 0
+        last_idle_log = 0.0
+        idle_log_seconds = _idle_log_seconds()
         while True:
             outcome = await self.run_once()
-            logger.info("Research Lab hosted worker outcome: %s", outcome.to_dict())
+            if outcome.processed or outcome.status != "idle":
+                logger.info(
+                    "Research Lab hosted worker pass: status=%s run_id=%s receipt_id=%s candidates=%s error=%s",
+                    outcome.status,
+                    outcome.run_id,
+                    outcome.receipt_id,
+                    len(outcome.candidate_ids),
+                    outcome.error,
+                )
+            elif time.monotonic() - last_idle_log >= idle_log_seconds:
+                logger.info(
+                    "Research Lab hosted worker idle: worker_ref=%s poll_seconds=%s",
+                    self.worker_ref,
+                    self.config.hosted_worker_poll_seconds,
+                )
+                last_idle_log = time.monotonic()
             if outcome.processed:
                 processed += 1
             if self.config.hosted_worker_max_runs and processed >= self.config.hosted_worker_max_runs:

@@ -653,6 +653,17 @@ class ResearchLabGatewayScoringWorker:
                 "audit_bundle_hash": str(bundle["audit_bundle_hash"]),
             },
         )
+        logger.info(
+            format_worker_block(
+                "RESEARCH LAB AUDIT BUNDLE WRITTEN",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Epoch", epoch),
+                    ("Audit bundle", compact_ref(bundle["audit_bundle_id"])),
+                    ("Audit hash", compact_ref(bundle["audit_bundle_hash"])),
+                ),
+            )
+        )
 
     async def _maybe_finalize_candidate_receipt(self, candidate: Mapping[str, Any]) -> bool:
         receipt_id = candidate.get("receipt_id")
@@ -706,6 +717,20 @@ class ResearchLabGatewayScoringWorker:
                 else "gateway_research_lab_candidate_evaluation_failed"
             ),
             event_doc=event_doc,
+        )
+        logger.info(
+            format_worker_block(
+                "RESEARCH LAB RECEIPT FINALIZED",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Receipt", compact_ref(receipt_id)),
+                    ("Run", compact_ref(candidate["run_id"])),
+                    ("Status", "completed" if has_scored_candidate else "failed"),
+                    ("Candidates scored", status_counts.get("scored", 0)),
+                    ("Candidates failed", status_counts.get("failed", 0)),
+                    ("Score bundles", len(score_bundle_ids)),
+                ),
+            )
         )
         return True
 

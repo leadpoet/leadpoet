@@ -18,7 +18,11 @@ from research_lab.engine_v1 import (
     validate_patch,
 )
 from research_lab.eval.artifacts import PrivateModelArtifactManifest
-from research_lab.eval.patches import CandidatePatchManifest, validate_candidate_patch_manifest
+from research_lab.eval.patches import (
+    CandidatePatchManifest,
+    runtime_compatible_strategy_options,
+    validate_candidate_patch_manifest,
+)
 
 
 FORBIDDEN_TERMS = (
@@ -174,11 +178,27 @@ def coerce_component_registry(metadata: Mapping[str, Any]) -> ComponentRegistry:
         raise ValueError("adapter metadata did not include component_registry")
     if "manifest_version" not in registry_payload:
         registry_payload = _coerce_compact_component_registry(metadata, registry_payload)
+    else:
+        registry_payload = _filter_runtime_compatible_registry(registry_payload)
     registry = ComponentRegistry.from_mapping(registry_payload)
     errors = validate_component_registry(registry)
     if errors:
         raise ValueError("component registry failed validation: " + "; ".join(errors))
     return registry
+
+
+def _filter_runtime_compatible_registry(registry_payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop component patch options that the current private runtime cannot execute."""
+    payload = dict(registry_payload)
+    entries: list[dict[str, Any]] = []
+    for raw_entry in registry_payload.get("entries", []):
+        if not isinstance(raw_entry, Mapping):
+            continue
+        entry = _filter_runtime_compatible_entry(raw_entry)
+        if entry is not None:
+            entries.append(entry)
+    payload["entries"] = entries
+    return payload
 
 
 def _coerce_compact_component_registry(
@@ -220,7 +240,7 @@ def _coerce_compact_component_registry(
         ]
         if not allowed_patch_types:
             continue
-        entries.append(
+        coerced_entry = _filter_runtime_compatible_entry(
             {
                 "name": str(name),
                 "purpose": str(entry.get("purpose") or f"Private model component {name}"),
@@ -247,6 +267,8 @@ def _coerce_compact_component_registry(
                 "current_patch_seq": int(entry.get("current_patch_seq") or 0),
             }
         )
+        if coerced_entry is not None:
+            entries.append(coerced_entry)
 
     if not entries:
         raise ValueError("component registry did not include any Engine v1-enabled components")
@@ -264,6 +286,23 @@ def _coerce_compact_component_registry(
         ],
         "meta_allocator_priors_enabled": bool(metadata.get("meta_allocator_priors_enabled", False)),
     }
+
+
+def _filter_runtime_compatible_entry(entry: Mapping[str, Any]) -> dict[str, Any] | None:
+    name = str(entry.get("name") or "")
+    allowed_patch_types = [str(item) for item in entry.get("allowed_patch_types", [])]
+    strategy_options = runtime_compatible_strategy_options(
+        name,
+        [str(item) for item in entry.get("strategy_options", [])],
+    )
+    if "STRATEGY_SWAP" in allowed_patch_types and len(strategy_options) < 2:
+        allowed_patch_types = [item for item in allowed_patch_types if item != "STRATEGY_SWAP"]
+    if not allowed_patch_types:
+        return None
+    updated = dict(entry)
+    updated["allowed_patch_types"] = allowed_patch_types
+    updated["strategy_options"] = list(strategy_options)
+    return updated
 
 
 def build_validated_candidate_manifest(

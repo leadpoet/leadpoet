@@ -11,6 +11,12 @@ from research_lab.engine_v1 import ENGINE_V1_ENABLED_PATCH_TYPES
 
 FORBIDDEN_PATCH_TYPES = {"CODE_EDIT", "SOURCE_ADD"}
 SECRET_MARKERS = ("sk-or-", "raw_secret", "openrouter_api_key", "raw_openrouter_key")
+RUNTIME_COMPATIBLE_STRATEGY_OPTIONS: dict[str, tuple[str, ...]] = {
+    # The current private model adapter rejects non-reference source_router
+    # strategies at runtime. Keep the gateway validator stricter than the
+    # image-reported registry so bad candidates fail before Docker scoring.
+    "source_router": ("reference_routing",),
+}
 
 
 @dataclass(frozen=True)
@@ -71,7 +77,29 @@ def validate_candidate_patch_manifest(
         errors.append("candidate_artifact_hash_must_differ_from_parent")
     if manifest.validation_result not in {"passed", "failed", "pending"}:
         errors.append("unknown_validation_result")
+    if manifest.patch_type == "STRATEGY_SWAP":
+        strategy = str(
+            (manifest.patch_doc or {}).get("strategy_name")
+            or (manifest.patch_doc or {}).get("strategy_option")
+            or ""
+        )
+        compatible_options = RUNTIME_COMPATIBLE_STRATEGY_OPTIONS.get(manifest.target_component_id)
+        if compatible_options is not None and strategy not in set(compatible_options):
+            errors.append(
+                f"runtime_incompatible_strategy:{manifest.target_component_id}:{strategy or 'missing'}"
+            )
     return errors
+
+
+def runtime_compatible_strategy_options(
+    component_id: str,
+    strategy_options: Sequence[str],
+) -> tuple[str, ...]:
+    compatible_options = RUNTIME_COMPATIBLE_STRATEGY_OPTIONS.get(str(component_id))
+    if compatible_options is None:
+        return tuple(str(item) for item in strategy_options)
+    allowed = set(compatible_options)
+    return tuple(str(item) for item in strategy_options if str(item) in allowed)
 
 
 def _contains_secret_material(value: Any) -> bool:

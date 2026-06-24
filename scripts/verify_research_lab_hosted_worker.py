@@ -57,12 +57,18 @@ def main() -> int:
                 sequence=idx,
                 miner_brief_ref="brief_sanitized:sha256:abc123",
             )
+            if draft.target_component_id == "source_router":
+                errors.append("runtime-incompatible source_router strategy candidate passed validation")
             if manifest.validation_result != "passed":
                 errors.append("candidate patch manifest did not pass validation")
             if hypothesis.component != patch.component:
                 errors.append("hypothesis and patch component diverged")
         except Exception as exc:
+            if draft.target_component_id == "source_router":
+                continue
             errors.append(f"valid candidate failed hosted-worker validation: {exc}")
+    if "source_router" in registry.by_name():
+        errors.append("runtime-incompatible source_router strategy component was exposed to auto-research")
 
     try:
         parse_auto_research_response('{"candidates":[{"hypothesis":{},"patch":{"patch_type":"CODE_EDIT","patch_doc":{}}}]}')

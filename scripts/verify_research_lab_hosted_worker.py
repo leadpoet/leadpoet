@@ -171,6 +171,13 @@ async def _verify_auto_research_loop_engine(artifact: PrivateModelArtifactManife
                 provider_usage={"provider": "openrouter", "response_id": f"reflection-{len(calls)}", "cost_microusd": 100000},
                 cost_microusd=100000,
             )
+        draft_call_count = sum(1 for call in calls if int(call["max_tokens"]) > 700)
+        if draft_call_count == 2:
+            return OpenRouterCallResult(
+                content='{"candidates":[{"hypothesis":{"failure_mode":"bad draft"},"patch":{"patch_type":"PROMPT_EDIT","patch_doc":"not-an-object"}}]}',
+                provider_usage={"provider": "openrouter", "response_id": f"draft-{len(calls)}", "cost_microusd": 400000},
+                cost_microusd=400000,
+            )
         return OpenRouterCallResult(
             content=_candidate_response(),
             provider_usage={"provider": "openrouter", "response_id": f"draft-{len(calls)}", "cost_microusd": 400000},
@@ -223,6 +230,8 @@ async def _verify_auto_research_loop_engine(artifact: PrivateModelArtifactManife
         errors.append("auto-research loop engine did not aggregate actual OpenRouter spend")
     if len(result.provider_usage) != 4:
         errors.append("auto-research loop engine did not retain provider usage for all model calls")
+    if "patch_validation_failed" not in event_types:
+        errors.append("auto-research loop engine did not record malformed draft failures")
     for expected in ("loop_started", "hypothesis_drafted", "patch_drafted", "reflection_recorded", "candidate_selected", "loop_completed"):
         if expected not in event_types:
             errors.append(f"auto-research loop engine missing event: {expected}")

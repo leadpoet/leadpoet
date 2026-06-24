@@ -59,7 +59,8 @@ class ResearchLabGatewayScoringWorker:
 
     async def run_forever(self) -> None:
         while True:
-            await self.run_once()
+            outcome = await self.run_once()
+            logger.info("Research Lab scoring worker outcome: %s", outcome)
             await asyncio.sleep(max(1, self.config.scoring_worker_poll_seconds))
 
     async def run_once(self) -> dict[str, Any]:

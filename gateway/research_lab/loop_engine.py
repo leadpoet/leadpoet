@@ -217,10 +217,42 @@ class AutoResearchLoopEngine:
             actual_cost_microusd += max(0, int(draft_result.cost_microusd))
             if draft_result.provider_usage:
                 provider_usage.append({**draft_result.provider_usage, "loop_iteration": iteration, "call_stage": "draft"})
-            from research_lab.auto_research_prompt import parse_auto_research_response
-
-            drafts = parse_auto_research_response(raw, max_candidates=settings.max_candidates)
             attempt_summaries: list[dict[str, Any]] = []
+            try:
+                from research_lab.auto_research_prompt import parse_auto_research_response
+
+                drafts = parse_auto_research_response(raw, max_candidates=settings.max_candidates)
+            except Exception as exc:
+                draft_parse_node_id = f"node:draft-parse-failed:{iteration}"
+                await self.event_sink(
+                    AutoResearchLoopEvent(
+                        event_type="patch_validation_failed",
+                        loop_status="running",
+                        elapsed_seconds=time.monotonic() - start,
+                        node_id=draft_parse_node_id,
+                        provider_usage=([provider_usage[-1]] if provider_usage else []),
+                        cost_ledger=_running_cost_ledger(
+                            openrouter_calls,
+                            estimated_cost,
+                            actual_cost_microusd,
+                            "draft_parse_failed",
+                        ),
+                        event_doc={
+                            "iteration": iteration,
+                            "validation_result": "failed",
+                            "error": str(exc)[:500],
+                            "raw_response_hash": sha256_json({"raw_response": raw}),
+                        },
+                    )
+                )
+                attempt_summaries.append(
+                    {
+                        "node_id": draft_parse_node_id,
+                        "status": "dropped",
+                        "error": str(exc)[:240],
+                    }
+                )
+                drafts = []
             for draft_index, draft in enumerate(drafts):
                 node_id = _node_id(run_id, iteration, draft_index, draft)
                 running_ledger = _running_cost_ledger(

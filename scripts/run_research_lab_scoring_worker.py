@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -17,6 +18,28 @@ if str(ROOT) not in sys.path:
 
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
 from gateway.research_lab.scoring_worker import ResearchLabGatewayScoringWorker  # noqa: E402
+
+
+def _proxy_ref(proxy_url: str) -> str:
+    if not proxy_url:
+        return "none"
+    return "sha256:" + hashlib.sha256(proxy_url.encode("utf-8")).hexdigest()[:16]
+
+
+def _print_startup_banner(config: ResearchLabGatewayConfig, *, worker_id: str, once: bool) -> None:
+    print("\n" + "=" * 70, flush=True)
+    print("Research Lab Gateway Qualification Scoring Worker", flush=True)
+    print("=" * 70, flush=True)
+    print(f"Worker ID       : {worker_id or config.scoring_worker_id or 'auto'}", flush=True)
+    print(f"Worker index    : {config.scoring_worker_index + 1}/{config.scoring_worker_total_workers}", flush=True)
+    print(f"Poll seconds    : {config.scoring_worker_poll_seconds}", flush=True)
+    print(f"Run mode        : {'once' if once else 'continuous'}", flush=True)
+    print(f"Proxy required  : {config.scoring_worker_require_proxy}", flush=True)
+    print(f"Proxy ref       : {_proxy_ref(config.scoring_worker_proxy_url)}", flush=True)
+    print(f"Baseline daily  : {config.private_baseline_rebenchmark_enabled}", flush=True)
+    print(f"Candidate batch : {config.scoring_worker_max_candidates}", flush=True)
+    print(f"Model timeout   : {config.scoring_worker_model_timeout_seconds}s", flush=True)
+    print("=" * 70 + "\n", flush=True)
 
 
 def main() -> int:
@@ -39,7 +62,9 @@ def main() -> int:
         level=getattr(logging, str(args.log_level).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    worker = ResearchLabGatewayScoringWorker(ResearchLabGatewayConfig.from_env(), worker_ref=args.worker_id or None)
+    config = ResearchLabGatewayConfig.from_env()
+    _print_startup_banner(config, worker_id=args.worker_id, once=args.once)
+    worker = ResearchLabGatewayScoringWorker(config, worker_ref=args.worker_id or None)
     if args.once:
         outcome = asyncio.run(worker.run_once())
         print(outcome)

@@ -291,6 +291,14 @@ async def lifespan(app: FastAPI):
             print("⚠️  DISABLE_BACKGROUND_TASKS=true - Skipping background tasks")
             print("   This is for LOCAL TESTING ONLY!")
 
+            # Keep the immutable audit path alive during local/testnet Research
+            # Lab testing. This does not re-enable legacy epoch, checkpoint, ICP,
+            # qualification, or fulfillment loops; it only drains the TEE buffer
+            # into the existing batched Arweave checkpoint flow.
+            hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
+            print("✅ Hourly Arweave batch task started (EXCEPTION: runs even with DISABLE_BACKGROUND_TASKS)")
+            print("   → Only drains signed TEE buffer events to Arweave checkpoints")
+
             # ICP rotation task ALWAYS runs (even with DISABLE_BACKGROUND_TASKS)
             # TESTNET GUARD: Skip on testnet to prevent writing to production DB
             if BITTENSOR_NETWORK == "test":

@@ -57,11 +57,40 @@ RUN find /usr/lib64/python3.7 -type f -exec touch -t 197001010000.00 {} + 2>/dev
 # Set working directory
 WORKDIR /app
 
+RUN mkdir -p \
+    /app/gateway/db \
+    /app/gateway/qualification \
+    /app/gateway/tasks \
+    /app/qualification \
+    /app/scripts
+
 # Copy enclave-specific files (runs INSIDE the enclave)
 COPY validator_tee/enclave/ /app/validator_tee/enclave/
 
 # Copy leadpoet_canonical module (for canonical weight hashing)
 COPY leadpoet_canonical/ /app/leadpoet_canonical/
+
+# Copy Research Lab verifier and gateway-owned scoring source inputs.
+# These files are included so PCR0 changes whenever Research Lab scoring,
+# promotion, audit-bundle, verifier, or ICP-window logic changes.
+COPY leadpoet_verifier/ /app/leadpoet_verifier/
+COPY research_lab/ /app/research_lab/
+COPY gateway/__init__.py /app/gateway/__init__.py
+COPY gateway/research_lab/ /app/gateway/research_lab/
+COPY gateway/qualification/__init__.py /app/gateway/qualification/__init__.py
+COPY gateway/qualification/models.py /app/gateway/qualification/models.py
+COPY gateway/qualification/config.py /app/gateway/qualification/config.py
+COPY gateway/qualification/utils/ /app/gateway/qualification/utils/
+COPY gateway/db/__init__.py /app/gateway/db/__init__.py
+COPY gateway/db/client.py /app/gateway/db/client.py
+COPY gateway/tasks/__init__.py /app/gateway/tasks/__init__.py
+COPY gateway/tasks/icp_generator.py /app/gateway/tasks/icp_generator.py
+COPY qualification/__init__.py /app/qualification/__init__.py
+COPY qualification/scoring/ /app/qualification/scoring/
+COPY scripts/run_research_lab_hosted_worker.py /app/scripts/run_research_lab_hosted_worker.py
+COPY scripts/run_research_lab_hosted_worker_fleet.py /app/scripts/run_research_lab_hosted_worker_fleet.py
+COPY scripts/run_research_lab_scoring_worker.py /app/scripts/run_research_lab_scoring_worker.py
+COPY scripts/run_research_lab_scoring_worker_fleet.py /app/scripts/run_research_lab_scoring_worker_fleet.py
 
 # =============================================================================
 # CRITICAL: Include validation logic for PCR0 verification

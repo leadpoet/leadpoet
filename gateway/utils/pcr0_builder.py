@@ -22,6 +22,12 @@ MONITORED FILES (changes trigger rebuild):
 - validator_tee/Dockerfile.enclave
 - validator_tee/enclave/*
 - leadpoet_canonical/*
+- leadpoet_verifier/*
+- research_lab/*
+- gateway/research_lab/*
+- gateway qualification/db/task helpers used by Research Lab
+- qualification/scoring/*
+- Research Lab worker entrypoint scripts
 - neurons/validator.py
 - validator_models/automated_checks.py
 """
@@ -77,12 +83,32 @@ MONITORED_FILES: Set[str] = {
     "validator_tee/enclave/tee_service.py",
     "neurons/validator.py",
     "validator_models/automated_checks.py",
+    "gateway/__init__.py",
+    "gateway/qualification/__init__.py",
+    "gateway/qualification/models.py",
+    "gateway/qualification/config.py",
+    "gateway/db/__init__.py",
+    "gateway/db/client.py",
+    "gateway/tasks/__init__.py",
+    "gateway/tasks/icp_generator.py",
+    "qualification/__init__.py",
+    "scripts/run_research_lab_hosted_worker.py",
+    "scripts/run_research_lab_hosted_worker_fleet.py",
+    "scripts/run_research_lab_scoring_worker.py",
+    "scripts/run_research_lab_scoring_worker_fleet.py",
 }
 
 # Directories where any file change triggers rebuild
 MONITORED_DIRS: Set[str] = {
     "leadpoet_canonical/",
+    "leadpoet_verifier/",
+    "research_lab/",
+    "gateway/research_lab/",
+    "gateway/qualification/utils/",
+    "qualification/scoring/",
 }
+
+MONITORED_DIR_SUFFIXES: Set[str] = {".py", ".json", ".txt"}
 
 # Working directory for builds
 BUILD_DIR = os.environ.get("PCR0_BUILD_DIR", "/tmp/pcr0_builder")
@@ -169,6 +195,9 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
     OPTIMIZATION: Only fetches the files needed for PCR0 verification:
     - validator_tee/ (Dockerfile and enclave code)
     - leadpoet_canonical/ (canonical modules)
+    - leadpoet_verifier/ (open verifier and golden vectors)
+    - research_lab/ and gateway/research_lab/ (Research Lab execution/audit logic)
+    - qualification scoring modules used by Research Lab scoring
     - neurons/validator.py
     - validator_models/automated_checks.py
     
@@ -184,8 +213,26 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
         "/.dockerignore",  # Critical for reproducible builds
         "/validator_tee/",  # Includes both Dockerfile.base and Dockerfile.enclave
         "/leadpoet_canonical/",
+        "/leadpoet_verifier/",
+        "/research_lab/",
+        "/gateway/__init__.py",
+        "/gateway/research_lab/",
+        "/gateway/qualification/__init__.py",
+        "/gateway/qualification/models.py",
+        "/gateway/qualification/config.py",
+        "/gateway/qualification/utils/",
+        "/gateway/db/__init__.py",
+        "/gateway/db/client.py",
+        "/gateway/tasks/__init__.py",
+        "/gateway/tasks/icp_generator.py",
+        "/qualification/__init__.py",
+        "/qualification/scoring/",
         "/neurons/validator.py",
         "/validator_models/automated_checks.py",
+        "/scripts/run_research_lab_hosted_worker.py",
+        "/scripts/run_research_lab_hosted_worker_fleet.py",
+        "/scripts/run_research_lab_scoring_worker.py",
+        "/scripts/run_research_lab_scoring_worker_fleet.py",
     ]
     
     if os.path.exists(os.path.join(repo_dir, ".git")):
@@ -632,21 +679,43 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
             "validator_tee/enclave/requirements.txt",
             "neurons/validator.py",
             "validator_models/automated_checks.py",
+            "gateway/__init__.py",
+            "gateway/qualification/__init__.py",
+            "gateway/qualification/models.py",
+            "gateway/qualification/config.py",
+            "gateway/db/__init__.py",
+            "gateway/db/client.py",
+            "gateway/tasks/__init__.py",
+            "gateway/tasks/icp_generator.py",
+            "qualification/__init__.py",
+            "scripts/run_research_lab_hosted_worker.py",
+            "scripts/run_research_lab_hosted_worker_fleet.py",
+            "scripts/run_research_lab_scoring_worker.py",
+            "scripts/run_research_lab_scoring_worker_fleet.py",
         ]
         for pf in permission_files:
             full_path = os.path.join(repo_dir, pf)
             if os.path.exists(full_path):
                 os.chmod(full_path, 0o644)
         
-        # Also normalize Python files in directories
-        for subdir in ["validator_tee/enclave", "leadpoet_canonical"]:
+        # Also normalize monitored files in directories
+        for subdir in [
+            "validator_tee/enclave",
+            "leadpoet_canonical",
+            "leadpoet_verifier",
+            "research_lab",
+            "gateway/research_lab",
+            "gateway/qualification/utils",
+            "qualification/scoring",
+        ]:
             subdir_path = os.path.join(repo_dir, subdir)
             if os.path.isdir(subdir_path):
-                for fname in os.listdir(subdir_path):
-                    if fname.endswith(".py") or fname.endswith(".txt"):
-                        fpath = os.path.join(subdir_path, fname)
-                        if os.path.isfile(fpath):
-                            os.chmod(fpath, 0o644)
+                for root, _dirs, files in os.walk(subdir_path):
+                    for fname in files:
+                        if any(fname.endswith(suffix) for suffix in MONITORED_DIR_SUFFIXES):
+                            fpath = os.path.join(root, fname)
+                            if os.path.isfile(fpath):
+                                os.chmod(fpath, 0o644)
         
         # Step 1: Build Docker image with --no-cache
         # The base image is cached, so only our code layers rebuild
@@ -758,7 +827,7 @@ def compute_files_content_hash(repo_dir: str) -> Optional[str]:
         if os.path.isdir(full_dir):
             for root, dirs, files in os.walk(full_dir):
                 for filename in sorted(files):
-                    if filename.endswith('.py'):  # Only Python files
+                    if any(filename.endswith(suffix) for suffix in MONITORED_DIR_SUFFIXES):
                         filepath = os.path.join(root, filename)
                         rel_path = os.path.relpath(filepath, repo_dir)
                         try:
@@ -1185,4 +1254,3 @@ def verify_pcr0(pcr0: str) -> Dict:
         "cache_size": len(_pcr0_cache),
         "cached_pcr0s": [e["pcr0"][:32] + "..." for e in _pcr0_cache.values()],
     }
-

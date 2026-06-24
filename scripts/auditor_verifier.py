@@ -163,33 +163,30 @@ class AuditorVerifier:
     async def _verify_gateway_attestation(self, results: Dict) -> bool:
         """Fetch and verify gateway attestation."""
         try:
-            # Try /attest endpoint first (returns hex-encoded attestation)
-            # Fall back to /attestation/document if /attest doesn't exist
+            # Try /attest endpoint first (returns hex-encoded attestation).
+            # Fall back to /attestation/document if /attest doesn't exist.
             async with aiohttp.ClientSession() as session:
-                # Try /attest first
                 async with session.get(
                     f"{self.gateway_url}/attest",
-                    timeout=aiohttp.ClientTimeout(total=30)
+                    timeout=aiohttp.ClientTimeout(total=30),
                 ) as response:
                     if response.status == 200:
-                    data = await response.json()
-                        # /attest returns: attestation_document (hex), enclave_public_key, code_hash, pcr0
+                        data = await response.json()
                         self.gateway_pubkey = data.get("enclave_public_key")
                         self.gateway_code_hash = data.get("code_hash")
-                        attestation_doc = data.get("attestation_document")  # hex-encoded
+                        attestation_doc = data.get("attestation_document")
                     elif response.status == 404:
-                        # Fall back to /attestation/document
                         async with session.get(
                             f"{self.gateway_url}/attestation/document",
-                            timeout=aiohttp.ClientTimeout(total=30)
+                            timeout=aiohttp.ClientTimeout(total=30),
                         ) as fallback_response:
                             if fallback_response.status != 200:
                                 print(f"   ❌ Failed to fetch attestation: {fallback_response.status}")
                                 return False
                             data = await fallback_response.json()
-            self.gateway_pubkey = data.get("enclave_pubkey")
-            self.gateway_code_hash = data.get("code_hash")
-                            attestation_doc = data.get("attestation_document")  # may be b64
+                            self.gateway_pubkey = data.get("enclave_pubkey")
+                            self.gateway_code_hash = data.get("code_hash")
+                            attestation_doc = data.get("attestation_document")
                     else:
                         print(f"   ❌ Failed to fetch attestation: {response.status}")
                         return False
@@ -383,10 +380,10 @@ class AuditorVerifier:
                 if success:
                     pcr0 = result.get("pcr0", "N/A")
                     print(f"      PCR0 (unverified): {pcr0[:32]}..." if pcr0 and len(pcr0) > 32 else f"      PCR0: {pcr0}")
-            print(f"   ⚠️  SIGNATURE-ONLY MODE: Cannot verify enclave authenticity")
-            print(f"   ⚠️  Trust model is WEAKER - pubkey may not be from pinned code")
-            # self.trust_level remains "signature_only"
-            return True
+                    print(f"   ⚠️  SIGNATURE-ONLY MODE: Cannot verify enclave authenticity")
+                    print(f"   ⚠️  Trust model is WEAKER - pubkey may not be from pinned code")
+                    # self.trust_level remains "signature_only"
+                    return True
                 else:
                     error = result.get("error", "Unknown error")
                     print(f"   ❌ Attestation parsing failed: {error}")
@@ -1083,4 +1080,3 @@ ENVIRONMENT VARIABLES:
 
 if __name__ == "__main__":
     main()
-

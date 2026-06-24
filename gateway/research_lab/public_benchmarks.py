@@ -12,7 +12,7 @@ from gateway.research_lab.bundles import contains_secret_material, sha256_json
 ZERO_LEAD_SCORE_THRESHOLD = 1e-9
 DEFAULT_PUBLIC_ICPS_PER_DAY = 3
 DEFAULT_PUBLIC_WEAK_PER_DAY = 2
-SPLIT_POLICY = "daily_score_rank_public_2_weak_1_strong:v1"
+SPLIT_POLICY = "global_score_rank_public_weak_majority:v1"
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 PUBLIC_ICP_FORBIDDEN_KEY_MARKERS = (
     "api_key",
@@ -252,70 +252,41 @@ def _build_scored_visibility_rows(
             }
         )
 
-    grouped: dict[tuple[int, int], list[dict[str, Any]]] = {}
-    for row in rows:
-        grouped.setdefault((int(row["day_index"]), int(row["set_id"])), []).append(row)
+    selected_day_count = len(
+        {
+            (int(row["day_index"]), int(row["set_id"]))
+            for row in rows
+        }
+    )
+    public_count = public_icps_per_day * selected_day_count
+    public_weak_count = public_weak_per_day * selected_day_count
+    public_strong_count = public_count - public_weak_count
+    if public_count <= 0 or public_count >= len(rows):
+        raise ValueError("public split must expose at least one ICP and leave private holdout ICPs")
 
-    seen_public_features: dict[str, set[str]] = {
-        "intent": set(),
-        "industry": set(),
-        "sub_industry": set(),
-        "product_service": set(),
-        "geography": set(),
-        "company_size": set(),
+    ranked = sorted(rows, key=lambda row: (float(row["score"]), _split_tiebreaker(row)))
+    weak_count = len(ranked) // 2
+    weak_pool = ranked[:weak_count]
+    strong_pool = ranked[weak_count:]
+    if public_weak_count > len(weak_pool):
+        raise ValueError("public split requested more weak ICPs than the global weak pool contains")
+    if public_strong_count > len(strong_pool):
+        raise ValueError("public split requested more strong ICPs than the global strong pool contains")
+
+    public_weak_rows = weak_pool[:public_weak_count]
+    public_strong_rows = list(reversed(strong_pool))[:public_strong_count]
+    public_refs = {
+        str(row["icp_ref"])
+        for row in [*public_weak_rows, *public_strong_rows]
     }
-    public_refs: set[str] = set()
-    weak_refs: set[str] = set()
-    strong_refs: set[str] = set()
-
-    for group_key in sorted(grouped):
-        group = grouped[group_key]
-        if public_icps_per_day >= len(group):
-            raise ValueError("public_icps_per_day must leave private holdout ICPs in every day")
-        ranked = sorted(group, key=lambda row: (float(row["score"]), _split_tiebreaker(row)))
-        weak_count = len(ranked) // 2
-        weak_pool = ranked[:weak_count]
-        strong_pool = ranked[weak_count:]
-        public_weak_count = min(public_weak_per_day, public_icps_per_day, len(weak_pool))
-        public_strong_count = public_icps_per_day - public_weak_count
-        if public_strong_count > len(strong_pool):
-            raise ValueError("public split requested more strong ICPs than the daily strong pool contains")
-
-        weak_refs.update(str(row["icp_ref"]) for row in weak_pool)
-        strong_refs.update(str(row["icp_ref"]) for row in strong_pool)
-        for row in _select_diverse_public_rows(weak_pool, public_weak_count, seen_public_features):
-            public_refs.add(str(row["icp_ref"]))
-        for row in _select_diverse_public_rows(strong_pool, public_strong_count, seen_public_features):
-            public_refs.add(str(row["icp_ref"]))
+    weak_refs = {str(row["icp_ref"]) for row in weak_pool}
+    strong_refs = {str(row["icp_ref"]) for row in strong_pool}
 
     for row in rows:
         ref = str(row["icp_ref"])
         row["visibility"] = "public" if ref in public_refs else "private"
         row["strength_label"] = "weak" if ref in weak_refs else "strong"
     return sorted(rows, key=lambda row: int(row["item_rank"]))
-
-
-def _select_diverse_public_rows(
-    pool: Sequence[dict[str, Any]],
-    count: int,
-    seen_public_features: dict[str, set[str]],
-) -> list[dict[str, Any]]:
-    selected: list[dict[str, Any]] = []
-    remaining = list(pool)
-    while remaining and len(selected) < count:
-        best = min(
-            remaining,
-            key=lambda row: (
-                -_public_novelty_score(_split_features(row), seen_public_features),
-                _split_tiebreaker(row),
-            ),
-        )
-        selected.append(best)
-        remaining.remove(best)
-        for key, value in _split_features(best).items():
-            if value:
-                seen_public_features[key].add(value)
-    return selected
 
 
 def _visibility_split_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -390,36 +361,6 @@ def _set_id_from_item(item: Mapping[str, Any]) -> int:
     return 0
 
 
-def _split_features(row: Mapping[str, Any]) -> dict[str, str]:
-    item = row.get("item") if isinstance(row.get("item"), Mapping) else {}
-    icp = item.get("icp") if isinstance(item.get("icp"), Mapping) else {}
-    return {
-        "intent": str(item.get("intent_signal_signature") or _intent_signature(icp)),
-        "industry": _bucket_text(icp.get("industry")),
-        "sub_industry": _bucket_text(icp.get("sub_industry")),
-        "product_service": _bucket_text(icp.get("product_service")),
-        "geography": _bucket_text(icp.get("geography") or icp.get("country") or icp.get("target_geography")),
-        "company_size": _company_size_bucket(icp),
-    }
-
-
-def _public_novelty_score(features: Mapping[str, str], seen_features: Mapping[str, set[str]]) -> int:
-    weights = {
-        "intent": 100,
-        "industry": 60,
-        "sub_industry": 40,
-        "product_service": 25,
-        "geography": 15,
-        "company_size": 10,
-    }
-    score = 0
-    for key, weight in weights.items():
-        value = features.get(key) or ""
-        if value and value not in seen_features.get(key, set()):
-            score += weight
-    return score
-
-
 def _split_tiebreaker(row: Mapping[str, Any]) -> str:
     return sha256_json(
         {
@@ -429,20 +370,6 @@ def _split_tiebreaker(row: Mapping[str, Any]) -> str:
             "score": round(float(row.get("score") or 0.0), 6),
         }
     )
-
-
-def _intent_signature(icp: Mapping[str, Any]) -> str:
-    signals = icp.get("intent_signals") or []
-    if isinstance(signals, str):
-        signals = [signals]
-    normalized = sorted(
-        {
-            " ".join(str(signal).strip().lower().split())
-            for signal in signals
-            if str(signal).strip()
-        }
-    )
-    return "|".join(normalized) if normalized else "unknown"
 
 
 def _failure_category(reason: str) -> str:

@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway.research_lab.bundles import contains_secret_material
+from gateway.research_lab.bundles import sha256_json
 from gateway.research_lab.public_benchmarks import (
     build_benchmark_visibility_split,
     build_public_benchmark_report,
@@ -24,10 +25,12 @@ from gateway.research_lab.public_benchmarks import (
 def main() -> int:
     errors: list[str] = []
     deterministic_errors = _verify_controlled_split()
+    skewed_errors = _verify_skewed_global_split()
     fuzz_errors = _verify_fuzzed_splits(seed=71060, runs=200)
     secret_errors = _verify_secret_rejection()
     migration_errors = _verify_migration_policy()
     errors.extend(deterministic_errors)
+    errors.extend(skewed_errors)
     errors.extend(fuzz_errors)
     errors.extend(secret_errors)
     errors.extend(migration_errors)
@@ -35,7 +38,7 @@ def main() -> int:
         for error in errors:
             print(f"ERROR: {error}")
         return 1
-    print("Research Lab public benchmark split verified: controlled 30/30 split and 200 fuzzed splits passed.")
+    print("Research Lab public benchmark split verified: global 20 weakest + 10 strongest public split passed.")
     return 0
 
 
@@ -86,6 +89,26 @@ def _verify_controlled_split() -> list[str]:
             errors.append(f"public report leaked forbidden marker: {forbidden}")
     if contains_secret_material(report):
         errors.append("public report failed secret material guard")
+    return errors
+
+
+def _verify_skewed_global_split() -> list[str]:
+    items, summaries = _skewed_fixture()
+    split = build_benchmark_visibility_split(
+        rolling_window_hash="sha256:" + "7" * 64,
+        benchmark_items=items,
+        per_icp_summaries=summaries,
+        public_icps_per_day=3,
+        public_weak_per_day=2,
+    )
+    errors = _assert_split(split)
+    public_by_day: dict[int, int] = {}
+    for item in split.get("items", []):
+        if item.get("visibility") == "public":
+            day = int(item.get("day_index") or 0)
+            public_by_day[day] = public_by_day.get(day, 0) + 1
+    if set(public_by_day.values()) == {3}:
+        errors.append("skewed split must not force exactly 3 public ICPs from every day")
     return errors
 
 
@@ -187,16 +210,49 @@ def _assert_split(split: dict[str, object]) -> list[str]:
         errors.append(f"public split must be 20 weak / 10 strong, got {split.get('public_strength_counts')}")
     if split.get("private_strength_counts") != {"strong": 20, "weak": 10}:
         errors.append(f"private split must be 10 weak / 20 strong, got {split.get('private_strength_counts')}")
-    per_day: dict[int, dict[str, int]] = {}
-    for item in items:
-        day = int(item.get("day_index") or 0)
-        visibility = str(item.get("visibility") or "")
-        per_day.setdefault(day, {"public": 0, "private": 0})
-        per_day[day][visibility] += 1
-    for day, counts in per_day.items():
-        if counts != {"public": 3, "private": 3}:
-            errors.append(f"day {day} must split 3 public / 3 private, got {counts}")
+    ranked = sorted(
+        items,
+        key=lambda item: (
+            float(item.get("score") or 0.0),
+            _test_split_tiebreaker(split, item),
+        ),
+    )
+    weak_pool = ranked[: len(ranked) // 2]
+    strong_pool = ranked[len(ranked) // 2 :]
+    expected_public_weak_refs = {
+        str(item.get("icp_ref"))
+        for item in weak_pool[:20]
+    }
+    expected_public_strong_refs = {
+        str(item.get("icp_ref"))
+        for item in list(reversed(strong_pool))[:10]
+    }
+    actual_public_weak_refs = {
+        str(item.get("icp_ref"))
+        for item in public
+        if item.get("strength_label") == "weak"
+    }
+    actual_public_strong_refs = {
+        str(item.get("icp_ref"))
+        for item in public
+        if item.get("strength_label") == "strong"
+    }
+    if actual_public_weak_refs != expected_public_weak_refs:
+        errors.append("public weak ICPs must be the global 20 lowest-scoring ICPs")
+    if actual_public_strong_refs != expected_public_strong_refs:
+        errors.append("public strong ICPs must be the global 10 highest-scoring ICPs")
     return errors
+
+
+def _test_split_tiebreaker(split: dict[str, object], item: dict[str, object]) -> str:
+    return sha256_json(
+        {
+            "rolling_window_hash": split.get("rolling_window_hash"),
+            "icp_ref": item.get("icp_ref"),
+            "icp_hash": item.get("icp_hash"),
+            "score": round(float(item.get("score") or 0.0), 6),
+        }
+    )
 
 
 def _fixture(*, seed: int, tie_scores: bool = False) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
@@ -261,6 +317,51 @@ def _fixture(*, seed: int, tie_scores: bool = False) -> tuple[list[dict[str, obj
                             "icp_fit": min(score / 2, 50.0),
                             "intent_signal_final": min(score / 2, 50.0),
                             "failure_reason": None if score > 0 else "Intent fabrication detected",
+                        }
+                    ],
+                )
+            )
+    return items, summaries
+
+
+def _skewed_fixture() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    items: list[dict[str, object]] = []
+    summaries: list[dict[str, object]] = []
+    for day in range(1, 11):
+        for rank in range(1, 7):
+            score = float(day * 10 + rank)
+            industry = f"Industry {day}"
+            signal = f"signal {rank}"
+            icp_id = f"skewed_{day}_{rank}"
+            item = {
+                "icp_ref": f"qualification_private_icp_sets:{200 + day}:{icp_id}",
+                "icp_hash": "sha256:" + f"{day * 100 + rank:064x}"[-64:],
+                "set_id": 200 + day,
+                "day_index": day,
+                "day_rank": rank,
+                "intent_signal_signature": signal,
+                "icp": {
+                    "icp_id": icp_id,
+                    "industry": industry,
+                    "sub_industry": f"{industry} sub {rank}",
+                    "country": "United States",
+                    "employee_count": "51-200",
+                    "product_service": f"{industry} platform",
+                    "intent_signals": [signal],
+                },
+            }
+            items.append(item)
+            summaries.append(
+                sanitize_benchmark_item_summary(
+                    item=item,
+                    score=score,
+                    company_count=rank,
+                    score_breakdowns=[
+                        {
+                            "final_score": score,
+                            "icp_fit": min(score / 2, 50.0),
+                            "intent_signal_final": min(score / 2, 50.0),
+                            "failure_reason": None,
                         }
                     ],
                 )

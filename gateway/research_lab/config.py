@@ -496,7 +496,7 @@ class ResearchLabGatewayConfig:
             )
         if self.public_benchmark_public_icps_per_day >= self.lab_champion_icps_per_day:
             raise ValueError(
-                "RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_ICPS_PER_DAY must leave at least one private holdout ICP per day"
+                "RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_ICPS_PER_DAY must leave private holdout ICPs"
             )
 
     def public_status(self) -> dict[str, object]:

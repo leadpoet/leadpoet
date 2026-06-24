@@ -118,6 +118,7 @@ def _print_hosted_banner(config: ResearchLabGatewayConfig, *, worker_id: str) ->
 
 
 def _print_scoring_banner(config: ResearchLabGatewayConfig, *, worker_id: str) -> None:
+    baseline_owner = config.scoring_worker_index == 0
     print("\n" + "=" * 80, flush=True)
     print("Research Lab Qualification Scoring Worker", flush=True)
     print("=" * 80, flush=True)
@@ -127,6 +128,7 @@ def _print_scoring_banner(config: ResearchLabGatewayConfig, *, worker_id: str) -
     print(f"Proxy required  : {config.scoring_worker_require_proxy}", flush=True)
     print(f"Proxy ref       : {_proxy_ref(config.scoring_worker_proxy_url)}", flush=True)
     print(f"Baseline daily  : {config.private_baseline_rebenchmark_enabled}", flush=True)
+    print(f"Baseline owner  : {baseline_owner}", flush=True)
     print(f"Candidate batch : {config.scoring_worker_max_candidates}", flush=True)
     print(f"Model timeout   : {config.scoring_worker_model_timeout_seconds}s", flush=True)
     print("=" * 80 + "\n", flush=True)

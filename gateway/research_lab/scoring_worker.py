@@ -74,6 +74,7 @@ class ResearchLabGatewayScoringWorker:
         self.worker_ref = worker_ref or config.scoring_worker_id or "research-lab-scoring-worker"
         self.proxy_url = config.scoring_worker_proxy_url or os.getenv("RESEARCH_LAB_SCORING_WORKER_PROXY", "")
         self.proxy_ref_hash = canonical_hash({"proxy_ref": self.proxy_url}) if self.proxy_url else None
+        self._baseline_skip_logged = False
 
     async def run_forever(self) -> None:
         last_idle_log = 0.0
@@ -121,8 +122,18 @@ class ResearchLabGatewayScoringWorker:
             return {"processed": False, "status": "scoring_worker_proxy_required"}
 
         baseline_result = None
-        if self.config.private_baseline_rebenchmark_enabled:
+        if self.config.private_baseline_rebenchmark_enabled and self._is_private_baseline_owner():
             baseline_result = await self._maybe_run_private_baseline()
+        elif self.config.private_baseline_rebenchmark_enabled and not self._baseline_skip_logged:
+            logger.info(
+                "Research Lab private baseline rebenchmark skipped on non-owner worker: "
+                "worker_ref=%s worker_index=%s/%s owner_worker_index=1 proxy_ref_hash=%s",
+                self.worker_ref,
+                self.config.scoring_worker_index + 1,
+                self.config.scoring_worker_total_workers,
+                self.proxy_ref_hash,
+            )
+            self._baseline_skip_logged = True
 
         processed: list[str] = []
         for _ in range(max(1, self.config.scoring_worker_max_candidates)):
@@ -374,6 +385,19 @@ class ResearchLabGatewayScoringWorker:
             return {"status": "already_benchmarked", "benchmark_date": today}
 
         start = time.time()
+        logger.info(
+            "Research Lab private baseline rebenchmark allocated: "
+            "worker_ref=%s worker_index=%s/%s proxy_ref_hash=%s benchmark_date=%s "
+            "eval_days=%s icps_per_day=%s expected_icps=%s",
+            self.worker_ref,
+            self.config.scoring_worker_index + 1,
+            self.config.scoring_worker_total_workers,
+            self.proxy_ref_hash,
+            today,
+            self.config.lab_champion_eval_days,
+            self.config.lab_champion_icps_per_day,
+            self.config.lab_champion_eval_days * self.config.lab_champion_icps_per_day,
+        )
         window = await fetch_rolling_icp_window(
             days=self.config.lab_champion_eval_days,
             icps_per_day=self.config.lab_champion_icps_per_day,
@@ -382,6 +406,19 @@ class ResearchLabGatewayScoringWorker:
         await create_rolling_icp_window(window)
         active = await load_active_private_model(self.config, register_bootstrap=True)
         artifact = active.artifact
+        logger.info(
+            "Research Lab private baseline rebenchmark started: "
+            "worker_ref=%s worker_index=%s/%s proxy_ref_hash=%s rolling_window_hash=%s "
+            "selected_sets=%s selected_icps=%s private_model_artifact_hash=%s",
+            self.worker_ref,
+            self.config.scoring_worker_index + 1,
+            self.config.scoring_worker_total_workers,
+            self.proxy_ref_hash,
+            window.window_hash,
+            list(window.set_ids),
+            len(window.item_refs),
+            artifact.model_artifact_hash,
+        )
         runner = DockerPrivateModelRunner(
             DockerPrivateModelSpec(
                 image_digest=artifact.image_digest,
@@ -455,6 +492,19 @@ class ResearchLabGatewayScoringWorker:
             report_doc=public_report_doc,
         )
         await self._write_audit_bundle(int(self.config.evaluation_epoch or 0))
+        logger.info(
+            "Research Lab private baseline rebenchmark completed: "
+            "worker_ref=%s worker_index=%s/%s benchmark_bundle_id=%s public_report_id=%s "
+            "rolling_window_hash=%s aggregate_score=%.4f elapsed_seconds=%.3f",
+            self.worker_ref,
+            self.config.scoring_worker_index + 1,
+            self.config.scoring_worker_total_workers,
+            bundle["benchmark_bundle_id"],
+            public_report["report_id"],
+            window.window_hash,
+            aggregate_score,
+            time.time() - start,
+        )
         return {
             "status": "completed",
             "benchmark_date": today,
@@ -462,6 +512,9 @@ class ResearchLabGatewayScoringWorker:
             "public_report_id": str(public_report["report_id"]),
             "rolling_window_hash": window.window_hash,
         }
+
+    def _is_private_baseline_owner(self) -> bool:
+        return self.config.scoring_worker_index == 0
 
     async def _write_audit_bundle(self, epoch: int) -> None:
         ticket_rows = await select_many("research_loop_ticket_current", filters=(), limit=1000)

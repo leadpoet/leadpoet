@@ -17,6 +17,18 @@ except ImportError:
     # dotenv not installed - environment variables must be set directly
     pass
 
+if os.getenv("AWS_PROFILE") and os.getenv("LEADPOET_AWS_PROFILE_OVERRIDES_ENV_KEYS", "true").lower() == "true":
+    # Local/testnet operators often use a named AWS profile while .env still
+    # contains older static keys. Boto3 gives env keys precedence over profiles,
+    # so clear static AWS creds when an explicit profile is selected.
+    for _aws_env_key in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+    ):
+        os.environ.pop(_aws_env_key, None)
+
 # ============================================================
 # Gateway Build Info (for reproducible builds)
 # ============================================================
@@ -43,13 +55,14 @@ if not SUPABASE_SERVICE_ROLE_KEY:
 # ============================================================
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_PROFILE = os.getenv("AWS_PROFILE")
 AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET", "leadpoet-leads-primary")
 AWS_S3_REGION = os.getenv("AWS_S3_REGION", "us-east-2")
 
-if not AWS_ACCESS_KEY_ID:
+if not AWS_ACCESS_KEY_ID and not AWS_PROFILE:
     import warnings
     warnings.warn("AWS_ACCESS_KEY_ID environment variable not set - S3 storage will fail")
-if not AWS_SECRET_ACCESS_KEY:
+if not AWS_SECRET_ACCESS_KEY and not AWS_PROFILE:
     import warnings
     warnings.warn("AWS_SECRET_ACCESS_KEY environment variable not set - S3 storage will fail")
 
@@ -130,9 +143,9 @@ def validate_config():
         errors.append("SUPABASE_SERVICE_ROLE_KEY is not set")
     
     # Check AWS S3
-    if not AWS_ACCESS_KEY_ID:
+    if not AWS_ACCESS_KEY_ID and not AWS_PROFILE:
         errors.append("AWS_ACCESS_KEY_ID is not set")
-    if not AWS_SECRET_ACCESS_KEY:
+    if not AWS_SECRET_ACCESS_KEY and not AWS_PROFILE:
         errors.append("AWS_SECRET_ACCESS_KEY is not set")
     
     if errors:
@@ -169,4 +182,3 @@ try:
 except ValueError as e:
     print(f"⚠️  Configuration warning: {e}")
     print("⚠️  Some features may not work correctly.")
-

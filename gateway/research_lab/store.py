@@ -1000,6 +1000,124 @@ async def create_signed_audit_bundle_event(
     return await insert_row("research_lab_signed_audit_bundle_events", row)
 
 
+async def create_arweave_epoch_audit_anchor(
+    *,
+    epoch: int,
+    netuid: int,
+    audit_kind: str,
+    audit_bundle_id: str | None,
+    audit_bundle_hash: str | None,
+    allocation_hash: str | None,
+    weights_hash: str | None,
+    payload_hash: str,
+    transparency_event_hash: str | None,
+    tee_sequence: int | None,
+    event_doc: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    identity_payload = {
+        "epoch": int(epoch),
+        "netuid": int(netuid),
+        "audit_kind": audit_kind,
+        "payload_hash": payload_hash,
+    }
+    anchor_hash = canonical_hash(identity_payload)
+    anchor_id = "research_lab_arweave_anchor:" + anchor_hash.split(":", 1)[1]
+    existing = await select_one(
+        "research_lab_arweave_epoch_audit_anchors",
+        filters=(("anchor_id", anchor_id),),
+    )
+    payload = {
+        "epoch": int(epoch),
+        "netuid": int(netuid),
+        "audit_kind": audit_kind,
+        "audit_bundle_id": audit_bundle_id,
+        "audit_bundle_hash": audit_bundle_hash,
+        "allocation_hash": allocation_hash,
+        "weights_hash": weights_hash,
+        "payload_hash": payload_hash,
+        "transparency_event_hash": transparency_event_hash,
+        "tee_sequence": tee_sequence,
+    }
+    if existing:
+        event = await select_one(
+            "research_lab_arweave_epoch_audit_anchor_events",
+            filters=(("anchor_id", anchor_id), ("event_type", "buffered")),
+        )
+        if event:
+            return existing, event
+        event = await create_arweave_epoch_audit_anchor_event(
+            anchor_id=anchor_id,
+            event_type="buffered",
+            anchor_status="buffered",
+            event_doc=event_doc or {},
+        )
+        return existing, event
+
+    row = {
+        "anchor_id": anchor_id,
+        "schema_version": "1.0",
+        **payload,
+        "anchor_hash": anchor_hash,
+        "anchored_hash": anchor_hash,
+    }
+    inserted = await insert_row("research_lab_arweave_epoch_audit_anchors", row)
+    await create_arweave_epoch_audit_anchor_event(
+        anchor_id=anchor_id,
+        event_type="created",
+        anchor_status="created",
+        event_doc={
+            "payload_hash": payload_hash,
+            "audit_kind": audit_kind,
+        },
+    )
+    event = await create_arweave_epoch_audit_anchor_event(
+        anchor_id=anchor_id,
+        event_type="buffered",
+        anchor_status="buffered",
+        event_doc=event_doc or {},
+    )
+    return inserted, event
+
+
+async def create_arweave_epoch_audit_anchor_event(
+    *,
+    anchor_id: str,
+    event_type: str,
+    anchor_status: str,
+    transparency_event_hash: str | None = None,
+    tee_sequence: int | None = None,
+    checkpoint_number: int | None = None,
+    checkpoint_merkle_root: str | None = None,
+    arweave_tx_id: str | None = None,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    seq = await next_event_seq("research_lab_arweave_epoch_audit_anchor_events", "anchor_id", anchor_id)
+    doc = event_doc or {}
+    payload = {
+        "anchor_id": anchor_id,
+        "seq": seq,
+        "event_type": event_type,
+        "anchor_status": anchor_status,
+        "transparency_event_hash": transparency_event_hash or doc.get("transparency_event_hash") or doc.get("event_hash"),
+        "tee_sequence": tee_sequence if tee_sequence is not None else doc.get("tee_sequence"),
+        "checkpoint_number": (
+            checkpoint_number
+            if checkpoint_number is not None
+            else doc.get("checkpoint_number")
+        ),
+        "checkpoint_merkle_root": checkpoint_merkle_root or doc.get("checkpoint_merkle_root"),
+        "arweave_tx_id": arweave_tx_id or doc.get("arweave_tx_id"),
+        "event_doc": doc,
+    }
+    row = {
+        "event_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_lab_arweave_epoch_audit_anchor_events", row)
+
+
 async def create_participation_snapshot(
     *,
     island: str,

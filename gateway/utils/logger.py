@@ -63,6 +63,7 @@ import asyncio
 import json
 import logging
 import hashlib
+import os
 import uuid
 from datetime import datetime
 from typing import Dict, Any, Optional
@@ -75,10 +76,35 @@ try:
 except ImportError:
     from tee.enclave_signer import sign_event, is_keypair_initialized
 
-from config import BUILD_ID
+try:
+    from gateway.config import BUILD_ID
+except ImportError:
+    from config import BUILD_ID
 
 # Python logging
 logger = logging.getLogger(__name__)
+
+_DEFAULT_TEE_REQUIRED_EVENT_TYPES = {"RESEARCH_LAB_EPOCH_AUDIT"}
+
+
+def _tee_required_event_types() -> set[str]:
+    configured = {
+        item.strip()
+        for item in os.getenv("TEE_BUFFER_REQUIRED_EVENT_TYPES", "").split(",")
+        if item.strip()
+    }
+    return _DEFAULT_TEE_REQUIRED_EVENT_TYPES | configured
+
+
+def _requires_tee_buffer(event_type: str, payload: Dict[str, Any]) -> bool:
+    if event_type == "RESEARCH_LAB_EPOCH_AUDIT" and payload.get("audit_kind") == "shadow":
+        return os.getenv("RESEARCH_LAB_ARWEAVE_AUDIT_SHADOW_FAIL_CLOSED", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    return event_type in _tee_required_event_types()
 
 # Supabase client accessor (lazily initialized)
 def _get_supabase():
@@ -296,14 +322,13 @@ async def _log_event_signed_format(event_type: str, payload: Dict[str, Any]) -> 
     # ============================================================
     
     supabase = await _get_supabase_async()
+    payload_hash = compute_payload_hash(payload)
     if supabase:
         try:
             email_hash = payload.get("email_hash") if isinstance(payload, dict) else None
             linkedin_combo_hash = payload.get("linkedin_combo_hash") if isinstance(payload, dict) else None
             actor_hotkey = payload.get("actor_hotkey") or payload.get("validator_hotkey") or payload.get("miner_hotkey")
-            
-            payload_hash = compute_payload_hash(payload)
-            
+
             supabase_entry = {
                 "event_type": event_type,
                 "nonce": str(uuid.uuid4()),
@@ -340,8 +365,89 @@ async def _log_event_signed_format(event_type: str, payload: Dict[str, Any]) -> 
     else:
         logger.warning(f"⚠️ Supabase not configured - signed event not stored: {event_type}")
     
+    # ============================================================
+    # Step 3: Append exact signed event to TEE buffer for Arweave
+    # ============================================================
+    try:
+        tee_result = await _append_signed_event_to_tee_buffer(
+            event_type=event_type,
+            log_entry=log_entry,
+            payload_hash=payload_hash,
+        )
+        log_entry["tee_sequence"] = tee_result.get("sequence")
+        log_entry["tee_buffer_size"] = tee_result.get("buffer_size")
+        log_entry["tee_buffered"] = True
+        if supabase and log_entry.get("event_hash"):
+            await _patch_tee_buffer_metadata(
+                event_hash=log_entry["event_hash"],
+                tee_sequence=tee_result.get("sequence"),
+                tee_buffer_size=tee_result.get("buffer_size"),
+            )
+        logger.info(
+            "✅ Event buffered for Arweave: %s (tee_seq=%s)",
+            event_type,
+            tee_result.get("sequence"),
+        )
+    except Exception as e:
+        log_entry["tee_buffered"] = False
+        log_entry["tee_buffer_error"] = str(e)[:300]
+        logger.error("❌ Failed to buffer signed event for Arweave: %s - %s", event_type, e)
+        await _fallback_log_to_file(log_entry, error=f"TEE buffer append failed: {e}")
+        if _requires_tee_buffer(event_type, payload):
+            raise RuntimeError(
+                f"Failed to buffer required signed event in TEE: {event_type}. "
+                f"Event hash: {event_hash}."
+            ) from e
+
     # Return the full log_entry
     return log_entry
+
+
+async def _append_signed_event_to_tee_buffer(
+    *,
+    event_type: str,
+    log_entry: Dict[str, Any],
+    payload_hash: str,
+) -> Dict[str, Any]:
+    try:
+        from gateway.utils.tee_client import tee_client
+    except ImportError:
+        from utils.tee_client import tee_client
+
+    event = {
+        "event_type": event_type,
+        "event_hash": log_entry.get("event_hash"),
+        "payload_hash": payload_hash,
+        "signed_log_entry": log_entry,
+    }
+    return await tee_client.append_event(event)
+
+
+async def _patch_tee_buffer_metadata(
+    *,
+    event_hash: str,
+    tee_sequence: Any,
+    tee_buffer_size: Any,
+) -> None:
+    supabase = await _get_supabase_async()
+    if not supabase:
+        return
+    patch = {
+        "tee_sequence": tee_sequence,
+        "tee_buffer_size": tee_buffer_size,
+    }
+    patch = {key: value for key, value in patch.items() if value is not None}
+    if not patch:
+        return
+    try:
+        await (
+            supabase.table("transparency_log")
+            .update(patch)
+            .eq("event_hash", event_hash)
+            .execute()
+        )
+    except Exception as exc:
+        logger.warning("Failed to patch TEE buffer metadata for %s: %s", event_hash[:16], exc)
 
 
 async def _fallback_log_to_file(event: dict, error: str = ""):

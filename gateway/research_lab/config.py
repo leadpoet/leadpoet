@@ -144,6 +144,8 @@ class ResearchLabGatewayConfig:
     miner_openrouter_key_ref_env_map_json: str = ""
     openrouter_key_kms_key_id: str = ""
     evaluation_epoch: int = 0
+    arweave_audit_enabled: bool = False
+    arweave_audit_shadow_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "ResearchLabGatewayConfig":
@@ -341,6 +343,8 @@ class ResearchLabGatewayConfig:
             miner_openrouter_key_ref_env_map_json=os.getenv("RESEARCH_LAB_OPENROUTER_KEY_REF_ENV_MAP_JSON", ""),
             openrouter_key_kms_key_id=os.getenv("RESEARCH_LAB_OPENROUTER_KEY_KMS_KEY_ID", ""),
             evaluation_epoch=_int("RESEARCH_LAB_EVALUATION_EPOCH", 0),
+            arweave_audit_enabled=_truthy("RESEARCH_LAB_ARWEAVE_AUDIT_ENABLED"),
+            arweave_audit_shadow_enabled=_truthy("RESEARCH_LAB_ARWEAVE_AUDIT_SHADOW_ENABLED"),
         )
 
     def approved_auto_research_models(self) -> dict[str, dict[str, Any]]:
@@ -514,6 +518,11 @@ class ResearchLabGatewayConfig:
                 "champion_icps_per_day": self.lab_champion_icps_per_day,
                 "improvement_threshold_points": self.improvement_threshold_points,
                 "improvement_min_delta_lcb": self.improvement_min_delta_lcb,
+            },
+            "arweave_audit": {
+                "enabled": self.arweave_audit_enabled,
+                "shadow_enabled": self.arweave_audit_shadow_enabled,
+                "event_type": "RESEARCH_LAB_EPOCH_AUDIT",
             },
             "hosted_worker": {
                 "enabled": self.hosted_worker_enabled,

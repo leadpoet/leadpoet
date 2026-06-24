@@ -27,6 +27,7 @@ from gateway.utils.tee_client import tee_client
 from gateway.utils.arweave_client import upload_checkpoint, get_wallet_balance
 from gateway.utils.logger import log_event
 from gateway.config import BUILD_ID
+from gateway.research_lab.arweave_audit import record_research_lab_checkpointed_events
 
 
 # Configuration
@@ -258,6 +259,16 @@ async def hourly_batch_task():
                 print(f"   Note: Empty checkpoint (maintains continuous audit trail)")
             else:
                 print(f"   Events: {header['event_count']}")
+                try:
+                    recorded_lab_events = await record_research_lab_checkpointed_events(
+                        events=events,
+                        header=header,
+                        arweave_tx_id=tx_id,
+                    )
+                    if recorded_lab_events:
+                        print(f"   Research Lab audit anchors checkpointed: {recorded_lab_events}")
+                except Exception as e:
+                    print(f"⚠️  Failed to record Research Lab Arweave audit checkpoint links: {e}")
             print(f"   Note: Full confirmation takes 2-20 minutes to propagate")
             print(f"   Content URL: https://arweave.net/{tx_id}")
             print(f"   ViewBlock: https://viewblock.io/arweave/tx/{tx_id}")
@@ -421,4 +432,3 @@ async def start_hourly_batch_task():
             import traceback
             traceback.print_exc()
             await asyncio.sleep(restart_delay)
-

@@ -256,7 +256,11 @@ def print_event_details(event: Dict[str, Any], index: int):
     print(f"Timestamp: {event.get('ts', 'N/A')}")
     print(f"Actor: {event.get('actor_hotkey', 'N/A')[:40]}...")
     
+    signed_log_entry = event.get("signed_log_entry") if isinstance(event.get("signed_log_entry"), dict) else {}
+    signed_event = signed_log_entry.get("signed_event") if isinstance(signed_log_entry.get("signed_event"), dict) else {}
     payload = event.get('payload', {})
+    if not payload and isinstance(signed_event.get("payload"), dict):
+        payload = signed_event["payload"]
     
     if event['event_type'] == 'LEAD_SUBMITTED':
         print(f"📋 Lead ID: {payload.get('lead_id', 'N/A')}")
@@ -294,6 +298,26 @@ def print_event_details(event: Dict[str, Any], index: int):
         print(f"🚫 Miner: {payload.get('miner_hotkey', 'N/A')[:40]}...")
         print(f"   Reason: {payload.get('reason', 'N/A')}")
         print(f"   Limit Type: {payload.get('limit_type', 'N/A')}")
+
+    elif event['event_type'] == 'RESEARCH_LAB_EPOCH_AUDIT':
+        print(f"🧪 Research Lab Epoch Audit")
+        print(f"   Epoch: {payload.get('epoch', 'N/A')}")
+        print(f"   NetUID: {payload.get('netuid', 'N/A')}")
+        print(f"   Audit Kind: {payload.get('audit_kind', 'N/A')}")
+        print(f"   Payload Hash: {payload.get('payload_hash', 'N/A')}")
+        audit_bundle = payload.get("audit_bundle") if isinstance(payload.get("audit_bundle"), dict) else {}
+        allocation = payload.get("lab_allocation") if isinstance(payload.get("lab_allocation"), dict) else {}
+        weights = payload.get("weights") if isinstance(payload.get("weights"), dict) else {}
+        observability = payload.get("observability") if isinstance(payload.get("observability"), dict) else {}
+        print(f"   Audit Bundle: {audit_bundle.get('audit_bundle_id', 'N/A')}")
+        print(f"   Audit Hash: {audit_bundle.get('audit_bundle_hash', 'N/A')}")
+        print(f"   Allocation Hash: {allocation.get('allocation_hash', 'N/A')}")
+        print(f"   Weights Hash: {weights.get('weights_hash', 'N/A')}")
+        print(f"   Score Bundles: {observability.get('score_bundle_count', 'N/A')}")
+        print(f"   Champion Rewards: {observability.get('champion_reward_count', 'N/A')}")
+        print(f"   Reimbursements: {observability.get('reimbursement_award_count', 'N/A')}")
+        if signed_log_entry:
+            print(f"   Transparency Event Hash: {signed_log_entry.get('event_hash', 'N/A')}")
 
 
 def main():

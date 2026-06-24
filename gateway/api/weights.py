@@ -40,6 +40,8 @@ from leadpoet_canonical.chain import normalize_chain_weights
 from leadpoet_canonical.binding import verify_binding_message
 from leadpoet_canonical.timestamps import canonical_timestamp
 from leadpoet_canonical.constants import EPOCH_LENGTH, WEIGHT_SUBMISSION_BLOCK
+from gateway.research_lab.arweave_audit import publish_research_lab_epoch_audit
+from gateway.research_lab.config import ResearchLabGatewayConfig
 
 logger = logging.getLogger(__name__)
 
@@ -564,6 +566,29 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
             raise
         
         print(f"   ✅ Bundle stored successfully")
+    research_lab_config = ResearchLabGatewayConfig.from_env()
+    if BITTENSOR_NETWORK == "test":
+        if research_lab_config.arweave_audit_shadow_enabled:
+            try:
+                await publish_research_lab_epoch_audit(
+                    epoch=submission.epoch_id,
+                    netuid=submission.netuid,
+                    audit_kind="shadow",
+                    weight_bundle=bundle_data,
+                    config=research_lab_config,
+                )
+                print("   ✅ Research Lab shadow Arweave audit buffered")
+            except Exception as e:
+                logger.warning("[RESEARCH_LAB_ARWEAVE] Shadow audit publish failed: %s", e)
+    elif research_lab_config.arweave_audit_enabled:
+        await publish_research_lab_epoch_audit(
+            epoch=submission.epoch_id,
+            netuid=submission.netuid,
+            audit_kind="active",
+            weight_bundle=bundle_data,
+            config=research_lab_config,
+        )
+        print("   ✅ Research Lab active Arweave audit buffered")
     print(f"   📝 Event hash: {weight_submission_event_hash}")
     print(f"{'='*60}\n")
     
@@ -786,4 +811,3 @@ async def get_transparency_events_range(
         "count": len(events),
         "has_more": has_more,
     }
-

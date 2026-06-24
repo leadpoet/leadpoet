@@ -24,6 +24,7 @@ from gateway.qualification.utils.chain import (
 )
 from gateway.utils.bans import is_hotkey_banned
 
+from .arweave_audit import latest_arweave_anchor
 from .bundles import build_research_lab_audit_bundle, build_shadow_report_bundle
 from .config import ResearchLabGatewayConfig
 from .key_vault import (
@@ -655,7 +656,9 @@ async def get_research_lab_latest_audit_bundle(epoch: int):
         limit=1,
     )
     if signed_rows:
-        return signed_rows[0]
+        row = dict(signed_rows[0])
+        row["arweave_anchor"] = await _safe_latest_arweave_anchor(epoch)
+        return row
 
     ticket_rows = await select_many("research_loop_ticket_current", filters=(), limit=1000)
     queue_rows = await select_many("research_loop_run_queue_current", filters=(), limit=1000)
@@ -702,7 +705,36 @@ async def get_research_lab_latest_audit_bundle(epoch: int):
         "signed": False,
         "signature_ref": "",
         "bundle_doc": preview,
+        "arweave_anchor": await _safe_latest_arweave_anchor(epoch),
         "on_chain_submission_allowed": False,
+    }
+
+
+@router.get("/audit/arweave/latest/{epoch}")
+async def get_research_lab_latest_arweave_anchor(epoch: int):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    row = await _safe_latest_arweave_anchor(epoch)
+    if not row:
+        raise HTTPException(status_code=404, detail="Research Lab Arweave audit anchor not found")
+    return {
+        "schema_version": "1.0",
+        "bundle_type": "research_lab_arweave_audit_anchor_latest",
+        "epoch": int(epoch),
+        "anchor": row,
+        "verification": {
+            "download_checkpoint_url": (
+                f"https://arweave.net/{row.get('current_arweave_tx_id')}"
+                if row.get("current_arweave_tx_id")
+                else None
+            ),
+            "expected_event_type": "RESEARCH_LAB_EPOCH_AUDIT",
+            "expected_event_hash": row.get("transparency_event_hash")
+            or row.get("current_transparency_event_hash"),
+            "expected_tee_sequence": row.get("tee_sequence") or row.get("current_tee_sequence"),
+            "expected_checkpoint_merkle_root": row.get("current_checkpoint_merkle_root"),
+        },
     }
 
 
@@ -783,6 +815,14 @@ async def _get_ticket_for_miner(ticket_id: str, miner_hotkey: str) -> dict[str, 
 def _require_enabled(enabled: bool, detail: str) -> None:
     if not enabled:
         raise HTTPException(status_code=403, detail=detail)
+
+
+async def _safe_latest_arweave_anchor(epoch: int) -> dict[str, object] | None:
+    try:
+        return await latest_arweave_anchor(epoch=epoch, netuid=BITTENSOR_NETUID)
+    except Exception as exc:
+        logger.warning("research_lab_arweave_anchor_unavailable: %s", str(exc)[:200])
+        return None
 
 
 def _require_internal_key(config: ResearchLabGatewayConfig, provided: Optional[str]) -> None:

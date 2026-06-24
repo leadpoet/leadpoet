@@ -212,6 +212,7 @@ async def lifespan(app: FastAPI):
     rate_limiter_task = None
     icp_task = None
     fulfillment_task_handle = None
+    research_lab_worker_supervisor = None
 
     # Now use async_subtensor in a try/finally to ensure cleanup
     try:
@@ -339,6 +340,17 @@ async def lifespan(app: FastAPI):
         from gateway.utils.pcr0_builder import start_pcr0_builder
         start_pcr0_builder()
         print("✅ PCR0 builder started (trustless validator verification)")
+
+        # Start gateway-owned Research Lab worker fleets. This mirrors the
+        # validator dynamic worker model: one auto-research/scoring worker per
+        # configured gateway proxy, supervised by the gateway process.
+        if _RESEARCH_LAB_ROUTER_AVAILABLE:
+            from gateway.research_lab.worker_autostart import ResearchLabWorkerSupervisor
+
+            research_lab_worker_supervisor = ResearchLabWorkerSupervisor()
+            research_lab_worker_supervisor.start()
+        else:
+            print("⚠️  Research Lab router unavailable - worker fleets not started")
         
         print("")
         print("🎯 ARCHITECTURE SUMMARY:")
@@ -362,6 +374,12 @@ async def lifespan(app: FastAPI):
         
         # Cancel all background tasks
         print("   🛑 Cancelling background tasks...")
+        if research_lab_worker_supervisor is not None:
+            try:
+                research_lab_worker_supervisor.stop()
+            except Exception as e:
+                print(f"   ⚠️  Error stopping Research Lab worker fleets: {e}")
+
         tasks = [
             epoch_monitor_task,
             reveal_task,

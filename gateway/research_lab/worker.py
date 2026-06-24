@@ -1217,7 +1217,7 @@ def _validator_evaluation_summary() -> dict[str, Any]:
         "benchmark_id": "research_lab:rolling_icp_window:latest_10_days",
         "icp_set_hash": "gateway_resolves_rolling_icp_window_hash",
         "split_ref": "gateway_private_rolling_icp_window",
-        "item_count": 50,
+        "item_count": 60,
         "scoring_version": "qualification-company-scorer:v1",
         "owner": "gateway_qualification_workers",
     }

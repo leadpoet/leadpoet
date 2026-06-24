@@ -1,7 +1,7 @@
 """Research Lab rolling ICP window selection.
 
 The gateway owns hidden ICP plaintext. This module builds a deterministic
-10-day / 50-ICP scoring window while exposing only public refs and hashes.
+10-day / 60-ICP scoring window while exposing only public refs and hashes.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def select_rolling_icp_window_from_sets(
     rows: Sequence[Mapping[str, Any]],
     *,
     days: int = 10,
-    icps_per_day: int = 5,
+    icps_per_day: int = 6,
     allow_partial: bool = False,
 ) -> ResearchLabRollingIcpWindow:
     if days <= 0 or icps_per_day <= 0:
@@ -68,6 +68,7 @@ def select_rolling_icp_window_from_sets(
                 f"set_{row['set_id']}_requires_{icps_per_day}_selectable_icps_found_{len(selected_icps)}"
             )
         public_items: list[dict[str, Any]] = []
+        day_index = len(public_sets) + 1
         for rank, icp in enumerate(selected_icps, start=1):
             icp_id = str(icp.get("icp_id") or f"icp_{row['set_id']}_{rank:03d}")
             icp_hash = sha256_json({"icp": icp})
@@ -75,6 +76,7 @@ def select_rolling_icp_window_from_sets(
             signal_signature = intent_signal_signature(icp)
             public_item = {
                 "rank": rank,
+                "day_index": day_index,
                 "icp_ref": icp_ref,
                 "icp_id": icp_id,
                 "icp_hash": icp_hash,
@@ -89,6 +91,8 @@ def select_rolling_icp_window_from_sets(
                     "icp_hash": icp_hash,
                     "icp_ref": icp_ref,
                     "set_id": int(row["set_id"]),
+                    "day_index": day_index,
+                    "day_rank": rank,
                     "intent_signal_signature": signal_signature,
                 }
             )
@@ -107,7 +111,7 @@ def select_rolling_icp_window_from_sets(
         "icps_per_day": int(icps_per_day),
         "selected_set_count": len(public_sets),
         "selected_icp_count": len(benchmark_items),
-        "selection_policy": "unique_intent_signal_signature_then_stable_hash:v1",
+        "selection_policy": "diverse_intent_industry_stable_hash:v2",
         "sets": public_sets,
     }
     window_hash = sha256_json(public_doc_without_hash)
@@ -128,7 +132,7 @@ def select_rolling_icp_window_from_sets(
 async def fetch_rolling_icp_window(
     *,
     days: int = 10,
-    icps_per_day: int = 5,
+    icps_per_day: int = 6,
     allow_partial: bool = False,
 ) -> ResearchLabRollingIcpWindow:
     """Fetch private ICP sets through the gateway service-role client."""
@@ -189,35 +193,86 @@ def _normalize_set_row(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _select_icps_for_day(icps: Sequence[Mapping[str, Any]], *, icps_per_day: int) -> list[dict[str, Any]]:
-    ranked = sorted(
-        (dict(icp) for icp in icps),
-        key=lambda icp: (
-            intent_signal_signature(icp),
-            sha256_json(
-                {
-                    "icp_id": icp.get("icp_id"),
-                    "industry": icp.get("industry"),
-                    "sub_industry": icp.get("sub_industry"),
-                    "intent_signals": icp.get("intent_signals"),
-                    "prompt": icp.get("prompt"),
-                }
-            ),
-        ),
-    )
+    ranked = _dedupe_and_rank_icps(icps)
     selected: list[dict[str, Any]] = []
-    seen_signatures: set[str] = set()
-    for icp in ranked:
-        signature = intent_signal_signature(icp)
-        if signature in seen_signatures:
-            continue
-        selected.append(icp)
-        seen_signatures.add(signature)
-        if len(selected) >= icps_per_day:
-            return selected
-    for icp in ranked:
-        if len(selected) >= icps_per_day:
-            break
-        if any(str(existing.get("icp_id")) == str(icp.get("icp_id")) for existing in selected):
-            continue
-        selected.append(icp)
+    seen_features: dict[str, set[str]] = {
+        "intent": set(),
+        "industry": set(),
+        "sub_industry": set(),
+        "product_service": set(),
+        "geography": set(),
+        "company_size": set(),
+    }
+    remaining = list(ranked)
+    while remaining and len(selected) < icps_per_day:
+        best = min(
+            remaining,
+            key=lambda icp: (
+                -_novelty_score(_icp_features(icp), seen_features),
+                _stable_icp_hash(icp),
+            ),
+        )
+        selected.append(best)
+        remaining.remove(best)
+        for key, value in _icp_features(best).items():
+            if value:
+                seen_features[key].add(value)
     return selected
+
+
+def _dedupe_and_rank_icps(icps: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(icps):
+        icp = dict(item)
+        identity = str(icp.get("icp_id") or _stable_icp_hash(icp) or index)
+        current = deduped.get(identity)
+        if current is None or _stable_icp_hash(icp) < _stable_icp_hash(current):
+            deduped[identity] = icp
+    return sorted(deduped.values(), key=_stable_icp_hash)
+
+
+def _icp_features(icp: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "intent": intent_signal_signature(icp),
+        "industry": _normalize_feature(icp.get("industry")),
+        "sub_industry": _normalize_feature(icp.get("sub_industry")),
+        "product_service": _normalize_feature(icp.get("product_service")),
+        "geography": _normalize_feature(icp.get("geography") or icp.get("country") or icp.get("target_geography")),
+        "company_size": _normalize_feature(icp.get("employee_count") or icp.get("company_size")),
+    }
+
+
+def _novelty_score(features: Mapping[str, str], seen_features: Mapping[str, set[str]]) -> int:
+    weights = {
+        "intent": 100,
+        "industry": 60,
+        "sub_industry": 40,
+        "product_service": 25,
+        "geography": 15,
+        "company_size": 10,
+    }
+    score = 0
+    for key, weight in weights.items():
+        value = features.get(key) or ""
+        if value and value not in seen_features.get(key, set()):
+            score += weight
+    return score
+
+
+def _stable_icp_hash(icp: Mapping[str, Any]) -> str:
+    return sha256_json(
+        {
+            "icp_id": icp.get("icp_id"),
+            "industry": icp.get("industry"),
+            "sub_industry": icp.get("sub_industry"),
+            "product_service": icp.get("product_service"),
+            "geography": icp.get("geography") or icp.get("country") or icp.get("target_geography"),
+            "employee_count": icp.get("employee_count") or icp.get("company_size"),
+            "intent_signals": icp.get("intent_signals"),
+            "prompt": icp.get("prompt"),
+        }
+    )
+
+
+def _normalize_feature(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())

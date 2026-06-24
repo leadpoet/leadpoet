@@ -23,7 +23,6 @@ def main() -> int:
     encoded = json.dumps(report, sort_keys=True).lower()
     for forbidden in (
         "sk-or-",
-        "intent_signals",
         "https://",
         "http://",
         "image_digest",
@@ -34,13 +33,30 @@ def main() -> int:
     ):
         if forbidden in encoded:
             errors.append(f"public benchmark report leaked forbidden marker: {forbidden}")
+    if "intent_signals" not in encoded:
+        errors.append("public benchmark report must expose exact intent_signals for public ICPs")
+    if report["schema_version"] != "1.1":
+        errors.append(f"public benchmark report schema was not 1.1: {report['schema_version']}")
+    if report["item_count"] != 6:
+        errors.append(f"public benchmark report expected 6 total ICPs, got {report['item_count']}")
+    if report["public_icp_count"] != 3:
+        errors.append(f"public benchmark report expected 3 public ICPs, got {report['public_icp_count']}")
+    if report["private_holdout_icp_count"] != 3:
+        errors.append(
+            f"public benchmark report expected 3 private holdout ICPs, got {report['private_holdout_icp_count']}"
+        )
+    split = report["visibility_split"]
+    if split["public_strength_counts"] != {"strong": 1, "weak": 2}:
+        errors.append(f"public split did not expose 2 weak / 1 strong ICPs: {split['public_strength_counts']}")
+    if split["private_strength_counts"] != {"strong": 2, "weak": 1}:
+        errors.append(f"private split did not reserve 1 weak / 2 strong ICPs: {split['private_strength_counts']}")
     if report["zero_lead_icp_count"] != 1:
         errors.append("zero-lead ICP count did not match expected value")
     if report["failure_category_counts"].get("hallucinated_or_generic_intent") != 1:
         errors.append("hallucinated/generic intent failure was not counted")
 
     daily_counts = _daily_counts_from_score_bundle(_score_bundle())
-    if daily_counts != {str(day): 5 for day in range(100, 110)}:
+    if daily_counts != {str(day): 6 for day in range(100, 110)}:
         errors.append(f"daily ICP counts did not parse from score bundle refs: {daily_counts}")
 
     obligation = build_champion_reward_obligation(
@@ -55,7 +71,7 @@ def main() -> int:
             "start_epoch": 1001,
             "improvement_points": 1.25,
             "threshold_points": 1.0,
-            "daily_icp_counts": {str(day): 5 for day in range(100, 110)},
+            "daily_icp_counts": {str(day): 6 for day in range(100, 110)},
         },
         {
             "champion_threshold_points": 1.0,
@@ -63,7 +79,7 @@ def main() -> int:
             "champion_extra_alpha_percent_per_point": 0.1,
             "champion_max_alpha_percent": 5.0,
             "champion_eval_days": 10,
-            "champion_icps_per_day": 5,
+            "champion_icps_per_day": 6,
             "reward_epochs": 20,
         },
     )
@@ -84,61 +100,66 @@ def main() -> int:
 
 
 def _public_report() -> dict[str, object]:
-    summaries = [
-        sanitize_benchmark_item_summary(
-            item={
-                "icp_ref": "qualification_private_icp_sets:100:icp_a",
-                "icp_hash": "sha256:" + "1" * 64,
-                "icp": {
-                    "industry": "Healthcare",
-                    "sub_industry": "Revenue Cycle",
-                    "country": "United States",
-                    "employee_count": "51-200",
-                    "intent_signals": ["hiring revenue operations leaders"],
-                },
-            },
-            score=72.0,
-            company_count=4,
-            score_breakdowns=[
-                {"final_score": 72.0, "icp_fit": 32.0, "intent_signal_final": 40.0, "failure_reason": None}
-            ],
-        ),
-        sanitize_benchmark_item_summary(
-            item={
-                "icp_ref": "qualification_private_icp_sets:100:icp_b",
-                "icp_hash": "sha256:" + "2" * 64,
-                "icp": {
-                    "industry": "Manufacturing",
-                    "sub_industry": "Industrial automation",
-                    "country": "United States",
-                    "employee_count": "201-1000",
-                    "intent_signals": ["expansion into new facilities"],
-                },
-            },
-            score=0.0,
-            company_count=0,
-            score_breakdowns=[
-                {
-                    "final_score": 0.0,
-                    "icp_fit": 0.0,
-                    "intent_signal_final": 0.0,
-                    "failure_reason": "Intent fabrication detected (generic claim)",
-                }
-            ],
-        ),
+    benchmark_items = []
+    summaries = []
+    rows = [
+        ("icp_a", "Healthcare", "Revenue Cycle", "hiring revenue operations leaders", 0.0, 0),
+        ("icp_b", "Manufacturing", "Industrial Automation", "expansion into new facilities", 22.0, 3),
+        ("icp_c", "Financial Services", "Risk", "new compliance audit program", 35.0, 2),
+        ("icp_d", "Software", "Developer Tools", "migration to cloud data warehouse", 72.0, 4),
+        ("icp_e", "Logistics", "Cold Chain", "opening new fulfillment centers", 83.0, 4),
+        ("icp_f", "Cybersecurity", "IAM", "security platform implementation", 91.0, 5),
     ]
+    for rank, (icp_id, industry, sub_industry, signal, score, company_count) in enumerate(rows, start=1):
+        item = {
+            "icp_ref": f"qualification_private_icp_sets:100:{icp_id}",
+            "icp_hash": "sha256:" + f"{rank:064x}"[-64:],
+            "set_id": 100,
+            "day_index": 1,
+            "day_rank": rank,
+            "intent_signal_signature": signal,
+            "icp": {
+                "icp_id": icp_id,
+                "prompt": f"Find companies for {industry}; see https://example.com/private",
+                "industry": industry,
+                "sub_industry": sub_industry,
+                "country": "United States",
+                "employee_count": "51-200",
+                "product_service": f"{industry} platform",
+                "intent_signals": [signal],
+            },
+        }
+        benchmark_items.append(item)
+        summaries.append(
+            sanitize_benchmark_item_summary(
+                item=item,
+                score=score,
+                company_count=company_count,
+                score_breakdowns=[
+                    {
+                        "final_score": score,
+                        "icp_fit": min(score / 2, 50.0),
+                        "intent_signal_final": min(score / 2, 50.0),
+                        "failure_reason": "Intent fabrication detected (generic claim)" if score == 0.0 else None,
+                    }
+                ],
+            )
+        )
     return build_public_benchmark_report(
         benchmark_date="2026-06-23",
         rolling_window_hash="sha256:" + "3" * 64,
         aggregate_score=36.0,
         per_icp_summaries=summaries,
+        benchmark_items=benchmark_items,
+        public_icps_per_day=3,
+        public_weak_per_day=2,
     )
 
 
 def _score_bundle() -> dict[str, object]:
     per_icp_results = []
     for set_id in range(100, 110):
-        for idx in range(5):
+        for idx in range(6):
             per_icp_results.append(
                 {
                     "icp_ref": f"qualification_private_icp_sets:{set_id}:icp_{idx}",

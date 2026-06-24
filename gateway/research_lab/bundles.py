@@ -514,7 +514,6 @@ _AUDIT_PUBLIC_BENCHMARK_FIELDS = {
     "private_model_manifest_hash",
     "rolling_window_hash",
     "aggregate_score",
-    "report_doc",
     "report_hash",
     "anchored_hash",
     "current_event_seq",

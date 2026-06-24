@@ -78,12 +78,12 @@ async def main_async() -> int:
         one_day_window = select_rolling_icp_window_from_sets(
             [row],
             days=1,
-            icps_per_day=5,
+            icps_per_day=6,
             allow_partial=False,
         )
         print(
             f"set_id={set_id} icps={len(icps)} hash=sha256:{icp_set_hash} "
-            f"selected_5_hash={one_day_window.window_hash}"
+            f"selected_6_hash={one_day_window.window_hash}"
         )
         if args.write:
             active_from = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
@@ -104,7 +104,7 @@ async def main_async() -> int:
     window = select_rolling_icp_window_from_sets(
         generated_rows,
         days=min(args.days, 10),
-        icps_per_day=5,
+        icps_per_day=6,
         allow_partial=False,
     )
     print(

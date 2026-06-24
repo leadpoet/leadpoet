@@ -126,7 +126,7 @@ def _run_lab_allocator_simulations() -> None:
         "champion_placeholder_alpha_percent": 0.0001,
         "champion_threshold_points": 2.0,
         "champion_eval_days": 10,
-        "champion_icps_per_day": 5,
+        "champion_icps_per_day": 6,
         "lab_score_per_alpha_percent": 1,
     }
 
@@ -191,11 +191,11 @@ def _run_lab_allocator_simulations() -> None:
         "island": "generalist",
         "evaluation_epoch": 100,
         "improvement_points": 4.0,
-        "daily_icp_counts": {f"2026-06-{day:02d}": 5 for day in range(1, 11)},
+        "daily_icp_counts": {f"2026-06-{day:02d}": 6 for day in range(1, 11)},
     }
     obligation = build_champion_reward_obligation(good_candidate, policy)
     _assert_close(obligation["desired_alpha_percent"], 2.2, "champion reward should be 2% + 0.1% per point over threshold")
-    bad_candidate = {**good_candidate, "candidate_id": "candidate:bad", "daily_icp_counts": {"2026-06-01": 5}}
+    bad_candidate = {**good_candidate, "candidate_id": "candidate:bad", "daily_icp_counts": {"2026-06-01": 6}}
     blocked = build_champion_reward_obligation(bad_candidate, policy)
     if blocked["status"] != "blocked":
         raise AssertionError("missing daily ICP window should block champion obligation")

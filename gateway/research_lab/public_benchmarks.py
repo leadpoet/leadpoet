@@ -3,12 +3,33 @@
 from __future__ import annotations
 
 from collections import Counter
+import re
 from typing import Any, Mapping, Sequence
 
 from gateway.research_lab.bundles import contains_secret_material, sha256_json
 
 
 ZERO_LEAD_SCORE_THRESHOLD = 1e-9
+DEFAULT_PUBLIC_ICPS_PER_DAY = 3
+DEFAULT_PUBLIC_WEAK_PER_DAY = 2
+SPLIT_POLICY = "daily_score_rank_public_2_weak_1_strong:v1"
+URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+PUBLIC_ICP_FORBIDDEN_KEY_MARKERS = (
+    "api_key",
+    "raw_secret",
+    "raw_openrouter",
+    "service_role",
+    "private_repo",
+    "judge_prompt",
+    "hidden_icp",
+    "icp_plaintext",
+    "image_digest",
+    "private_model_manifest",
+    "candidate_patch_manifest",
+    "proxy_url",
+    "credential",
+    "secret",
+)
 
 
 def build_public_benchmark_report(
@@ -17,15 +38,32 @@ def build_public_benchmark_report(
     rolling_window_hash: str,
     aggregate_score: float,
     per_icp_summaries: Sequence[Mapping[str, Any]],
+    benchmark_items: Sequence[Mapping[str, Any]] = (),
+    public_icps_per_day: int = DEFAULT_PUBLIC_ICPS_PER_DAY,
+    public_weak_per_day: int = DEFAULT_PUBLIC_WEAK_PER_DAY,
 ) -> dict[str, Any]:
     """Build a sanitized report from private daily benchmark summaries.
 
-    The output intentionally excludes exact ICP text, exact intent signals,
-    URLs, company names, private model outputs, private image refs, and private
-    repo details.
+    The output intentionally reveals full miner-facing ICP details for the
+    configured public split only. The private holdout ICP bodies, URLs, company
+    names, private model outputs, private image refs, and private repo details
+    stay withheld.
     """
 
+    split = (
+        _build_scored_visibility_rows(
+            rolling_window_hash=rolling_window_hash,
+            benchmark_items=benchmark_items,
+            per_icp_summaries=per_icp_summaries,
+            public_icps_per_day=public_icps_per_day,
+            public_weak_per_day=public_weak_per_day,
+        )
+        if benchmark_items
+        else []
+    )
+    split_by_ref = {str(row["icp_ref"]): row for row in split}
     bucket_rows: list[dict[str, Any]] = []
+    public_icps: list[dict[str, Any]] = []
     error_counts: Counter[str] = Counter()
     score_bands: Counter[str] = Counter()
     zero_lead_count = 0
@@ -46,9 +84,14 @@ def build_public_benchmark_report(
             low_intent_count += 1
         if float(diagnostics.get("avg_icp_fit") or 0.0) < 15.0:
             low_icp_fit_count += 1
+        icp_ref = str(summary.get("icp_ref") or "")
+        split_row = split_by_ref.get(icp_ref)
         bucket_rows.append(
             {
                 "item_rank": index,
+                "icp_ref": icp_ref,
+                "visibility": str(split_row.get("visibility")) if split_row else "summary_only",
+                "strength_label": str(split_row.get("strength_label")) if split_row else "unknown",
                 "industry_bucket": _bucket_text(summary.get("industry")),
                 "sub_industry_bucket": _bucket_text(summary.get("sub_industry")),
                 "geography_bucket": _bucket_text(summary.get("geography_bucket") or summary.get("country")),
@@ -59,24 +102,38 @@ def build_public_benchmark_report(
                 "failure_categories": sorted(failures),
             }
         )
+        if split_row and split_row.get("visibility") == "public":
+            public_icps.append(_public_icp_entry(split_row))
+
+    split_summary = _visibility_split_summary(split) if split else {
+        "split_policy": "summary_only",
+        "rolling_window_hash": str(rolling_window_hash),
+        "public_count": 0,
+        "private_count": 0,
+    }
 
     report = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "report_type": "research_lab_public_daily_benchmark",
         "benchmark_date": str(benchmark_date),
         "rolling_window_hash": str(rolling_window_hash),
         "aggregate_score_band": _score_band(float(aggregate_score)),
         "aggregate_score": round(float(aggregate_score), 6),
         "item_count": len(bucket_rows),
+        "public_icp_count": len(public_icps),
+        "private_holdout_icp_count": int(split_summary.get("private_count") or 0),
         "zero_lead_icp_count": zero_lead_count,
         "low_intent_fit_icp_count": low_intent_count,
         "low_icp_fit_count": low_icp_fit_count,
         "score_band_counts": dict(sorted(score_bands.items())),
         "failure_category_counts": dict(sorted(error_counts.items())),
+        "visibility_split": split_summary,
+        "public_icps": public_icps,
         "icp_buckets": bucket_rows,
         "redaction_policy": {
-            "exact_icp_text": "withheld",
-            "exact_signal_text": "withheld",
+            "exact_icp_text": "public_for_public_split_only",
+            "exact_signal_text": "public_for_public_split_only",
+            "private_holdout_icp_text": "withheld",
             "urls": "withheld",
             "company_names": "withheld",
             "private_model_outputs": "withheld",
@@ -87,6 +144,38 @@ def build_public_benchmark_report(
         raise ValueError("public benchmark report contains forbidden private or secret material")
     report["report_public_hash"] = sha256_json(report)
     return report
+
+
+def build_benchmark_visibility_split(
+    *,
+    rolling_window_hash: str,
+    benchmark_items: Sequence[Mapping[str, Any]],
+    per_icp_summaries: Sequence[Mapping[str, Any]],
+    public_icps_per_day: int = DEFAULT_PUBLIC_ICPS_PER_DAY,
+    public_weak_per_day: int = DEFAULT_PUBLIC_WEAK_PER_DAY,
+) -> dict[str, Any]:
+    rows = _build_scored_visibility_rows(
+        rolling_window_hash=rolling_window_hash,
+        benchmark_items=benchmark_items,
+        per_icp_summaries=per_icp_summaries,
+        public_icps_per_day=public_icps_per_day,
+        public_weak_per_day=public_weak_per_day,
+    )
+    summary = _visibility_split_summary(rows)
+    summary["items"] = [
+        {
+            "icp_ref": str(row["icp_ref"]),
+            "icp_hash": str(row["icp_hash"]),
+            "set_id": int(row["set_id"]),
+            "day_index": int(row["day_index"]),
+            "day_rank": int(row["day_rank"]),
+            "score": round(float(row["score"]), 6),
+            "visibility": str(row["visibility"]),
+            "strength_label": str(row["strength_label"]),
+        }
+        for row in rows
+    ]
+    return summary
 
 
 def sanitize_benchmark_item_summary(
@@ -122,6 +211,238 @@ def sanitize_benchmark_item_summary(
             "avg_intent_signal_final": _average(intent_values),
         },
     }
+
+
+def _build_scored_visibility_rows(
+    *,
+    rolling_window_hash: str,
+    benchmark_items: Sequence[Mapping[str, Any]],
+    per_icp_summaries: Sequence[Mapping[str, Any]],
+    public_icps_per_day: int,
+    public_weak_per_day: int,
+) -> list[dict[str, Any]]:
+    if len(benchmark_items) != len(per_icp_summaries):
+        raise ValueError("benchmark_items and per_icp_summaries must have the same length")
+    if public_icps_per_day <= 0:
+        raise ValueError("public_icps_per_day must be positive")
+    if public_weak_per_day < 0 or public_weak_per_day > public_icps_per_day:
+        raise ValueError("public_weak_per_day must be between 0 and public_icps_per_day")
+
+    rows: list[dict[str, Any]] = []
+    for index, (item, summary) in enumerate(zip(benchmark_items, per_icp_summaries), start=1):
+        item_ref = str(item.get("icp_ref") or "")
+        summary_ref = str(summary.get("icp_ref") or item_ref)
+        if item_ref and summary_ref and item_ref != summary_ref:
+            raise ValueError(f"benchmark item/ref mismatch at rank {index}: {item_ref} != {summary_ref}")
+        icp_ref = item_ref or summary_ref
+        if not icp_ref:
+            raise ValueError(f"benchmark item at rank {index} is missing icp_ref")
+        rows.append(
+            {
+                "item_rank": index,
+                "item": dict(item),
+                "summary": dict(summary),
+                "icp_ref": icp_ref,
+                "icp_hash": str(item.get("icp_hash") or summary.get("icp_hash") or ""),
+                "set_id": _set_id_from_item(item),
+                "day_index": int(item.get("day_index") or 0),
+                "day_rank": int(item.get("day_rank") or index),
+                "score": float(summary.get("score") or 0.0),
+                "rolling_window_hash": str(rolling_window_hash),
+            }
+        )
+
+    grouped: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault((int(row["day_index"]), int(row["set_id"])), []).append(row)
+
+    seen_public_features: dict[str, set[str]] = {
+        "intent": set(),
+        "industry": set(),
+        "sub_industry": set(),
+        "product_service": set(),
+        "geography": set(),
+        "company_size": set(),
+    }
+    public_refs: set[str] = set()
+    weak_refs: set[str] = set()
+    strong_refs: set[str] = set()
+
+    for group_key in sorted(grouped):
+        group = grouped[group_key]
+        if public_icps_per_day >= len(group):
+            raise ValueError("public_icps_per_day must leave private holdout ICPs in every day")
+        ranked = sorted(group, key=lambda row: (float(row["score"]), _split_tiebreaker(row)))
+        weak_count = len(ranked) // 2
+        weak_pool = ranked[:weak_count]
+        strong_pool = ranked[weak_count:]
+        public_weak_count = min(public_weak_per_day, public_icps_per_day, len(weak_pool))
+        public_strong_count = public_icps_per_day - public_weak_count
+        if public_strong_count > len(strong_pool):
+            raise ValueError("public split requested more strong ICPs than the daily strong pool contains")
+
+        weak_refs.update(str(row["icp_ref"]) for row in weak_pool)
+        strong_refs.update(str(row["icp_ref"]) for row in strong_pool)
+        for row in _select_diverse_public_rows(weak_pool, public_weak_count, seen_public_features):
+            public_refs.add(str(row["icp_ref"]))
+        for row in _select_diverse_public_rows(strong_pool, public_strong_count, seen_public_features):
+            public_refs.add(str(row["icp_ref"]))
+
+    for row in rows:
+        ref = str(row["icp_ref"])
+        row["visibility"] = "public" if ref in public_refs else "private"
+        row["strength_label"] = "weak" if ref in weak_refs else "strong"
+    return sorted(rows, key=lambda row: int(row["item_rank"]))
+
+
+def _select_diverse_public_rows(
+    pool: Sequence[dict[str, Any]],
+    count: int,
+    seen_public_features: dict[str, set[str]],
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    remaining = list(pool)
+    while remaining and len(selected) < count:
+        best = min(
+            remaining,
+            key=lambda row: (
+                -_public_novelty_score(_split_features(row), seen_public_features),
+                _split_tiebreaker(row),
+            ),
+        )
+        selected.append(best)
+        remaining.remove(best)
+        for key, value in _split_features(best).items():
+            if value:
+                seen_public_features[key].add(value)
+    return selected
+
+
+def _visibility_split_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    public_rows = [row for row in rows if row.get("visibility") == "public"]
+    private_rows = [row for row in rows if row.get("visibility") == "private"]
+    public_strength = Counter(str(row.get("strength_label")) for row in public_rows)
+    private_strength = Counter(str(row.get("strength_label")) for row in private_rows)
+    return {
+        "schema_version": "1.0",
+        "split_policy": SPLIT_POLICY,
+        "rolling_window_hash": str(rows[0].get("rolling_window_hash") if rows else ""),
+        "public_count": len(public_rows),
+        "private_count": len(private_rows),
+        "public_strength_counts": dict(sorted(public_strength.items())),
+        "private_strength_counts": dict(sorted(private_strength.items())),
+    }
+
+
+def _public_icp_entry(row: Mapping[str, Any]) -> dict[str, Any]:
+    item = row.get("item") if isinstance(row.get("item"), Mapping) else {}
+    summary = row.get("summary") if isinstance(row.get("summary"), Mapping) else {}
+    diagnostics = summary.get("diagnostics") if isinstance(summary.get("diagnostics"), Mapping) else {}
+    return {
+        "item_rank": int(row.get("item_rank") or 0),
+        "icp_ref": str(row.get("icp_ref") or ""),
+        "icp_hash": str(row.get("icp_hash") or ""),
+        "set_id": int(row.get("set_id") or 0),
+        "day_index": int(row.get("day_index") or 0),
+        "day_rank": int(row.get("day_rank") or 0),
+        "score": round(float(row.get("score") or 0.0), 6),
+        "company_count": int(summary.get("company_count") or 0),
+        "strength_label": str(row.get("strength_label") or "unknown"),
+        "icp": _public_icp_doc(item.get("icp") if isinstance(item.get("icp"), Mapping) else {}),
+        "diagnostics": {
+            "failure_categories": list(diagnostics.get("failure_categories") or []),
+            "avg_icp_fit": float(diagnostics.get("avg_icp_fit") or 0.0),
+            "avg_intent_signal_final": float(diagnostics.get("avg_intent_signal_final") or 0.0),
+        },
+    }
+
+
+def _public_icp_doc(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _public_icp_doc(item)
+            for key, item in value.items()
+            if _public_icp_key_allowed(str(key))
+        }
+    if isinstance(value, list):
+        return [_public_icp_doc(item) for item in value]
+    if isinstance(value, str):
+        return URL_RE.sub("[withheld_url]", value)
+    return value
+
+
+def _public_icp_key_allowed(key: str) -> bool:
+    lowered = key.lower()
+    return not any(marker in lowered for marker in PUBLIC_ICP_FORBIDDEN_KEY_MARKERS)
+
+
+def _set_id_from_item(item: Mapping[str, Any]) -> int:
+    try:
+        return int(item.get("set_id") or 0)
+    except (TypeError, ValueError):
+        pass
+    parts = str(item.get("icp_ref") or "").split(":")
+    if len(parts) >= 2:
+        try:
+            return int(parts[1])
+        except ValueError:
+            return 0
+    return 0
+
+
+def _split_features(row: Mapping[str, Any]) -> dict[str, str]:
+    item = row.get("item") if isinstance(row.get("item"), Mapping) else {}
+    icp = item.get("icp") if isinstance(item.get("icp"), Mapping) else {}
+    return {
+        "intent": str(item.get("intent_signal_signature") or _intent_signature(icp)),
+        "industry": _bucket_text(icp.get("industry")),
+        "sub_industry": _bucket_text(icp.get("sub_industry")),
+        "product_service": _bucket_text(icp.get("product_service")),
+        "geography": _bucket_text(icp.get("geography") or icp.get("country") or icp.get("target_geography")),
+        "company_size": _company_size_bucket(icp),
+    }
+
+
+def _public_novelty_score(features: Mapping[str, str], seen_features: Mapping[str, set[str]]) -> int:
+    weights = {
+        "intent": 100,
+        "industry": 60,
+        "sub_industry": 40,
+        "product_service": 25,
+        "geography": 15,
+        "company_size": 10,
+    }
+    score = 0
+    for key, weight in weights.items():
+        value = features.get(key) or ""
+        if value and value not in seen_features.get(key, set()):
+            score += weight
+    return score
+
+
+def _split_tiebreaker(row: Mapping[str, Any]) -> str:
+    return sha256_json(
+        {
+            "rolling_window_hash": row.get("rolling_window_hash"),
+            "icp_ref": row.get("icp_ref"),
+            "icp_hash": row.get("icp_hash"),
+            "score": round(float(row.get("score") or 0.0), 6),
+        }
+    )
+
+
+def _intent_signature(icp: Mapping[str, Any]) -> str:
+    signals = icp.get("intent_signals") or []
+    if isinstance(signals, str):
+        signals = [signals]
+    normalized = sorted(
+        {
+            " ".join(str(signal).strip().lower().split())
+            for signal in signals
+            if str(signal).strip()
+        }
+    )
+    return "|".join(normalized) if normalized else "unknown"
 
 
 def _failure_category(reason: str) -> str:

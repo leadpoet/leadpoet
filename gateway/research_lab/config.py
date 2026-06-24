@@ -118,7 +118,9 @@ class ResearchLabGatewayConfig:
     lab_champion_queue_trigger_ratio: float = 0.50
     lab_champion_threshold_points: float = 2.0
     lab_champion_eval_days: int = 10
-    lab_champion_icps_per_day: int = 5
+    lab_champion_icps_per_day: int = 6
+    public_benchmark_public_icps_per_day: int = 3
+    public_benchmark_public_weak_per_day: int = 2
     improvement_threshold_points: float = 1.0
     improvement_min_delta_lcb: float = 0.0
     private_model_manifest_uri: str = (
@@ -310,7 +312,15 @@ class ResearchLabGatewayConfig:
             ),
             lab_champion_threshold_points=max(0.0, _float("RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS", 2.0)),
             lab_champion_eval_days=max(1, _int("RESEARCH_LAB_CHAMPION_EVAL_DAYS", 10)),
-            lab_champion_icps_per_day=max(1, _int("RESEARCH_LAB_CHAMPION_ICPS_PER_DAY", 5)),
+            lab_champion_icps_per_day=max(1, _int("RESEARCH_LAB_CHAMPION_ICPS_PER_DAY", 6)),
+            public_benchmark_public_icps_per_day=max(
+                1,
+                _int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_ICPS_PER_DAY", 3),
+            ),
+            public_benchmark_public_weak_per_day=max(
+                0,
+                _int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_PER_DAY", 2),
+            ),
             improvement_threshold_points=max(
                 0.0,
                 _float("RESEARCH_LAB_IMPROVEMENT_THRESHOLD_POINTS", 1.0),
@@ -469,7 +479,25 @@ class ResearchLabGatewayConfig:
             "champion_threshold_points": self.lab_champion_threshold_points,
             "champion_eval_days": self.lab_champion_eval_days,
             "champion_icps_per_day": self.lab_champion_icps_per_day,
+            "public_benchmark_public_icps_per_day": self.public_benchmark_public_icps_per_day,
+            "public_benchmark_public_weak_per_day": self.public_benchmark_public_weak_per_day,
         }
+
+    def validate_public_benchmark_split(self) -> None:
+        if self.public_benchmark_public_icps_per_day > self.lab_champion_icps_per_day:
+            raise ValueError(
+                "RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_ICPS_PER_DAY must be <= "
+                "RESEARCH_LAB_CHAMPION_ICPS_PER_DAY"
+            )
+        if self.public_benchmark_public_weak_per_day > self.public_benchmark_public_icps_per_day:
+            raise ValueError(
+                "RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_PER_DAY must be <= "
+                "RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_ICPS_PER_DAY"
+            )
+        if self.public_benchmark_public_icps_per_day >= self.lab_champion_icps_per_day:
+            raise ValueError(
+                "RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_ICPS_PER_DAY must leave at least one private holdout ICP per day"
+            )
 
     def public_status(self) -> dict[str, object]:
         return {
@@ -516,6 +544,8 @@ class ResearchLabGatewayConfig:
                 "champion_threshold_points": self.lab_champion_threshold_points,
                 "champion_eval_days": self.lab_champion_eval_days,
                 "champion_icps_per_day": self.lab_champion_icps_per_day,
+                "public_benchmark_public_icps_per_day": self.public_benchmark_public_icps_per_day,
+                "public_benchmark_public_weak_per_day": self.public_benchmark_public_weak_per_day,
                 "improvement_threshold_points": self.improvement_threshold_points,
                 "improvement_min_delta_lcb": self.improvement_min_delta_lcb,
             },

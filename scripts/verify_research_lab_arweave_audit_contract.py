@@ -169,7 +169,7 @@ def _score_bundle() -> dict[str, Any]:
         "bundle_status": "scored",
         "score_bundle_hash": "sha256:" + "6" * 64,
         "anchored_hash": "sha256:" + "6" * 64,
-        "score_bundle_doc": {"aggregates": {"mean_delta": 1.25, "icp_count": 50}},
+        "score_bundle_doc": {"aggregates": {"mean_delta": 1.25, "icp_count": 60}},
     }
 
 
@@ -178,7 +178,7 @@ def _benchmark() -> dict[str, Any]:
 
 
 def _window() -> dict[str, Any]:
-    return {"rolling_window_hash": "sha256:" + "8" * 64, "selected_icp_count": 50}
+    return {"rolling_window_hash": "sha256:" + "8" * 64, "selected_icp_count": 60}
 
 
 def _model_version() -> dict[str, Any]:

@@ -18,7 +18,11 @@ from gateway.research_lab.icp_window import (
 from gateway.research_lab.logging_utils import compact_ref, format_worker_block
 from gateway.research_lab.models import ResearchLabScoreBundleCreateRequest
 from gateway.research_lab.promotion import ResearchLabPromotionController, load_active_private_model
-from gateway.research_lab.public_benchmarks import build_public_benchmark_report, sanitize_benchmark_item_summary
+from gateway.research_lab.public_benchmarks import (
+    build_benchmark_visibility_split,
+    build_public_benchmark_report,
+    sanitize_benchmark_item_summary,
+)
 from gateway.research_lab.store import (
     canonical_hash,
     create_candidate_evaluation_event,
@@ -71,6 +75,7 @@ class ResearchLabGatewayScoringWorker:
     """Scores Research Lab candidates inside the gateway trust boundary."""
 
     def __init__(self, config: ResearchLabGatewayConfig, *, worker_ref: str | None = None):
+        config.validate_public_benchmark_split()
         self.config = config
         self.worker_ref = worker_ref or config.scoring_worker_id or "research-lab-scoring-worker"
         self.proxy_url = config.scoring_worker_proxy_url or os.getenv("RESEARCH_LAB_SCORING_WORKER_PROXY", "")
@@ -519,10 +524,18 @@ class ResearchLabGatewayScoringWorker:
                 )
             )
         aggregate_score = _average([summary["score"] for summary in per_icp_summaries])
+        visibility_split = build_benchmark_visibility_split(
+            rolling_window_hash=window.window_hash,
+            benchmark_items=window.benchmark_items,
+            per_icp_summaries=per_icp_summaries,
+            public_icps_per_day=self.config.public_benchmark_public_icps_per_day,
+            public_weak_per_day=self.config.public_benchmark_public_weak_per_day,
+        )
         score_summary_doc = {
             "schema_version": "1.0",
             "rolling_window_hash": window.window_hash,
             "per_icp_summaries": per_icp_summaries,
+            "visibility_split": visibility_split,
             "aggregate_score": aggregate_score,
             "elapsed_seconds": round(time.time() - start, 3),
         }
@@ -552,13 +565,22 @@ class ResearchLabGatewayScoringWorker:
             proxy_ref_hash=self.proxy_ref_hash,
             rolling_window_hash=window.window_hash,
             benchmark_bundle_id=str(bundle["benchmark_bundle_id"]),
-            event_doc={"benchmark_date": today, "elapsed_seconds": round(time.time() - start, 3)},
+            event_doc={
+                "benchmark_date": today,
+                "elapsed_seconds": round(time.time() - start, 3),
+                "selected_icp_count": len(window.item_refs),
+                "public_icp_count": int(visibility_split.get("public_count") or 0),
+                "private_holdout_icp_count": int(visibility_split.get("private_count") or 0),
+            },
         )
         public_report_doc = build_public_benchmark_report(
             benchmark_date=today,
             rolling_window_hash=window.window_hash,
             aggregate_score=aggregate_score,
             per_icp_summaries=per_icp_summaries,
+            benchmark_items=window.benchmark_items,
+            public_icps_per_day=self.config.public_benchmark_public_icps_per_day,
+            public_weak_per_day=self.config.public_benchmark_public_weak_per_day,
         )
         public_report, _report_event = await create_public_benchmark_report(
             benchmark_date=today,
@@ -579,6 +601,11 @@ class ResearchLabGatewayScoringWorker:
                     ("Benchmark bundle", compact_ref(bundle["benchmark_bundle_id"])),
                     ("Public report", compact_ref(public_report["report_id"])),
                     ("Rolling window", compact_ref(window.window_hash)),
+                    ("Selected ICPs", len(window.item_refs)),
+                    ("Public ICPs", visibility_split.get("public_count")),
+                    ("Private holdout ICPs", visibility_split.get("private_count")),
+                    ("Public strength", visibility_split.get("public_strength_counts")),
+                    ("Private strength", visibility_split.get("private_strength_counts")),
                     ("Aggregate score", f"{aggregate_score:.4f}"),
                     ("Elapsed", f"{time.time() - start:.1f}s"),
                 ),

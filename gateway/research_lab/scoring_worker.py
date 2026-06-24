@@ -16,11 +16,14 @@ from gateway.research_lab.icp_window import (
     fetch_rolling_icp_window,
 )
 from gateway.research_lab.models import ResearchLabScoreBundleCreateRequest
+from gateway.research_lab.promotion import ResearchLabPromotionController, load_active_private_model
+from gateway.research_lab.public_benchmarks import build_public_benchmark_report, sanitize_benchmark_item_summary
 from gateway.research_lab.store import (
     canonical_hash,
     create_candidate_evaluation_event,
     create_private_model_benchmark_bundle,
     create_private_model_benchmark_event,
+    create_public_benchmark_report,
     create_receipt_event,
     create_rolling_icp_window,
     create_score_bundle,
@@ -30,14 +33,13 @@ from gateway.research_lab.store import (
     select_many,
     select_one,
 )
+from research_lab.auto_research_prompt import coerce_component_registry
 from research_lab.eval import (
     DockerPrivateModelRunner,
     DockerPrivateModelSpec,
     PrivateModelArtifactManifest,
     SealedBenchmarkSet,
-    build_score_bundle_from_scored_icps,
     evaluate_private_model_pair,
-    load_private_artifact_manifest,
     sign_digest_with_kms,
 )
 from research_lab.eval.evaluator import QualificationStyleCompanyScorer
@@ -230,6 +232,17 @@ class ResearchLabGatewayScoringWorker:
                 score_bundle_id=str(bundle["score_bundle_id"]),
                 event_doc={"elapsed_seconds": round(time.time() - start, 3)},
             )
+            promotion_result = await self._maybe_promote_scored_candidate(
+                candidate=candidate,
+                score_bundle_row=bundle,
+                score_bundle=score_bundle,
+            )
+            if promotion_result.get("status") not in {"disabled", ""}:
+                logger.info(
+                    "Research Lab candidate promotion result: candidate_id=%s status=%s",
+                    candidate_id,
+                    promotion_result.get("status"),
+                )
             await self._maybe_finalize_candidate_receipt(candidate)
             await self._write_audit_bundle(int(run_context["evaluation_epoch"]))
             logger.info("Research Lab candidate scored by gateway worker: %s", candidate_id)
@@ -266,6 +279,39 @@ class ResearchLabGatewayScoringWorker:
                 logger.exception("Research Lab audit bundle write failed after candidate failure")
             logger.exception("Research Lab candidate scoring failed: %s", candidate_id)
 
+    async def _maybe_promote_scored_candidate(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_row: Mapping[str, Any],
+        score_bundle: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not self.config.auto_promotion_enabled:
+            return {"status": "disabled"}
+        active_registry = None
+        try:
+            active = await load_active_private_model(self.config, register_bootstrap=True)
+            if str(candidate.get("parent_artifact_hash") or "") != active.artifact.model_artifact_hash:
+                active_runner = DockerPrivateModelRunner(
+                    DockerPrivateModelSpec(
+                        image_digest=active.artifact.image_digest,
+                        timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
+                        extra_env=self._private_scoring_env(),
+                    )
+                )
+                active_registry = coerce_component_registry(active_runner.metadata())
+        except Exception as exc:
+            logger.warning("Research Lab active model registry unavailable for promotion: %s", str(exc)[:200])
+        return await ResearchLabPromotionController(
+            self.config,
+            worker_ref=self.worker_ref,
+        ).process_scored_candidate(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            score_bundle=score_bundle,
+            active_component_registry=active_registry,
+        )
+
     async def _maybe_run_private_baseline(self) -> dict[str, Any] | None:
         today = datetime.now(timezone.utc).date().isoformat()
         existing = await select_many(
@@ -284,8 +330,8 @@ class ResearchLabGatewayScoringWorker:
             allow_partial=self.config.scoring_worker_allow_partial_icp_window,
         )
         await create_rolling_icp_window(window)
-        manifest_doc = load_private_artifact_manifest(self.config.private_model_manifest_uri)
-        artifact = PrivateModelArtifactManifest.from_mapping(manifest_doc)
+        active = await load_active_private_model(self.config, register_bootstrap=True)
+        artifact = active.artifact
         runner = DockerPrivateModelRunner(
             DockerPrivateModelSpec(
                 image_digest=artifact.image_digest,
@@ -297,14 +343,15 @@ class ResearchLabGatewayScoringWorker:
         per_icp_summaries: list[dict[str, Any]] = []
         for item in window.benchmark_items:
             outputs = await asyncio.to_thread(runner, item["icp"], {"mode": "private_baseline"})
-            scores = await scorer(outputs, item["icp"], True)
+            score_breakdowns = await scorer.score_with_breakdowns(outputs, item["icp"], True)
+            scores = [float(row.get("final_score", 0.0) or 0.0) for row in score_breakdowns]
             per_icp_summaries.append(
-                {
-                    "icp_ref": item["icp_ref"],
-                    "icp_hash": item["icp_hash"],
-                    "score": _average(scores),
-                    "company_count": len(scores),
-                }
+                sanitize_benchmark_item_summary(
+                    item=item,
+                    score=_average(scores),
+                    company_count=len(scores),
+                    score_breakdowns=score_breakdowns,
+                )
             )
         aggregate_score = _average([summary["score"] for summary in per_icp_summaries])
         score_summary_doc = {
@@ -342,11 +389,27 @@ class ResearchLabGatewayScoringWorker:
             benchmark_bundle_id=str(bundle["benchmark_bundle_id"]),
             event_doc={"benchmark_date": today, "elapsed_seconds": round(time.time() - start, 3)},
         )
+        public_report_doc = build_public_benchmark_report(
+            benchmark_date=today,
+            rolling_window_hash=window.window_hash,
+            aggregate_score=aggregate_score,
+            per_icp_summaries=per_icp_summaries,
+        )
+        public_report, _report_event = await create_public_benchmark_report(
+            benchmark_date=today,
+            benchmark_bundle_id=str(bundle["benchmark_bundle_id"]),
+            private_model_artifact_hash=artifact.model_artifact_hash,
+            private_model_manifest_hash=artifact.manifest_hash,
+            rolling_window_hash=window.window_hash,
+            aggregate_score=aggregate_score,
+            report_doc=public_report_doc,
+        )
         await self._write_audit_bundle(int(self.config.evaluation_epoch or 0))
         return {
             "status": "completed",
             "benchmark_date": today,
             "benchmark_bundle_id": str(bundle["benchmark_bundle_id"]),
+            "public_report_id": str(public_report["report_id"]),
             "rolling_window_hash": window.window_hash,
         }
 
@@ -360,6 +423,10 @@ class ResearchLabGatewayScoringWorker:
         dispatch_event_rows = await select_many("research_lab_scoring_dispatch_events", filters=(), limit=1000)
         rolling_window_rows = await select_many("research_lab_rolling_icp_windows", filters=(), limit=1000)
         benchmark_rows = await select_many("research_lab_private_model_benchmark_current", filters=(), limit=1000)
+        private_model_version_rows = await select_many("research_lab_private_model_version_current", filters=(), limit=1000)
+        promotion_event_rows = await select_many("research_lab_candidate_promotion_events", filters=(), limit=1000)
+        private_repo_commit_event_rows = await select_many("research_lab_private_repo_commit_events", filters=(), limit=1000)
+        public_benchmark_report_rows = await select_many("research_lab_public_benchmark_report_current", filters=(), limit=1000)
         score_bundle_rows = await select_many(
             "research_evaluation_score_bundle_current",
             filters=(("evaluation_epoch", epoch),),
@@ -376,6 +443,10 @@ class ResearchLabGatewayScoringWorker:
             dispatch_event_rows=dispatch_event_rows,
             rolling_window_rows=rolling_window_rows,
             benchmark_rows=benchmark_rows,
+            private_model_version_rows=private_model_version_rows,
+            promotion_event_rows=promotion_event_rows,
+            private_repo_commit_event_rows=private_repo_commit_event_rows,
+            public_benchmark_report_rows=public_benchmark_report_rows,
             score_bundle_rows=score_bundle_rows,
         )
         audit_hash = canonical_hash(bundle_doc)
@@ -477,8 +548,18 @@ class ResearchLabGatewayScoringWorker:
 
     def _evaluation_policy(self) -> dict[str, Any]:
         return {
-            "min_delta": float(os.environ.get("RESEARCH_LAB_MIN_DELTA", "0")),
-            "min_delta_lcb": float(os.environ.get("RESEARCH_LAB_MIN_DELTA_LCB", "0")),
+            "min_delta": float(
+                os.environ.get(
+                    "RESEARCH_LAB_MIN_DELTA",
+                    str(self.config.improvement_threshold_points),
+                )
+            ),
+            "min_delta_lcb": float(
+                os.environ.get(
+                    "RESEARCH_LAB_MIN_DELTA_LCB",
+                    str(self.config.improvement_min_delta_lcb),
+                )
+            ),
             "min_successful_icps": int(
                 os.environ.get(
                     "RESEARCH_LAB_MIN_SUCCESSFUL_ICPS",

@@ -24,6 +24,7 @@ from gateway.research_lab.loop_engine import (
     OpenRouterCallResult,
 )
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabReceiptCreateRequest
+from gateway.research_lab.promotion import latest_public_benchmark_summary, load_active_private_model
 from gateway.research_lab.store import (
     canonical_hash,
     create_auto_research_loop_event,
@@ -44,13 +45,10 @@ from research_lab.reimbursements import (
     compute_participation_score,
     compute_reimbursement_award,
 )
-from research_lab.auto_research_prompt import coerce_component_registry
+from research_lab.auto_research_prompt import build_validated_candidate_manifest, coerce_component_registry
 from research_lab.eval import (
     DockerPrivateModelRunner,
     DockerPrivateModelSpec,
-    PrivateModelArtifactManifest,
-    load_private_artifact_manifest,
-    validate_private_model_artifact_manifest,
 )
 
 
@@ -345,7 +343,8 @@ class ResearchLabHostedWorker:
         )
         max_candidates = self._max_candidates_for_run(budget_context, model_doc)
 
-        artifact = self._load_private_artifact()
+        active_start = await load_active_private_model(self.config, register_bootstrap=True)
+        artifact = active_start.artifact
         runner = DockerPrivateModelRunner(
             DockerPrivateModelSpec(
                 image_digest=artifact.image_digest,
@@ -356,6 +355,7 @@ class ResearchLabHostedWorker:
         with _temporary_env(provider_env):
             metadata = runner.metadata()
             registry = coerce_component_registry(metadata)
+            benchmark_public_summary = await latest_public_benchmark_summary()
             logger.info(
                 "Research Lab auto-research loop started: run_id=%s ticket_id=%s min_seconds=%s max_seconds=%s max_iterations=%s",
                 context.run_id,
@@ -421,7 +421,7 @@ class ResearchLabHostedWorker:
                 ticket=context.ticket,
                 artifact=artifact,
                 component_registry=registry,
-                benchmark_public_summary=_validator_evaluation_summary(),
+                benchmark_public_summary=benchmark_public_summary,
                 model_id=model_id,
                 budget_context=budget_context,
                 requested_loop_count=int(context.ticket.get("requested_loop_count") or 1),
@@ -429,6 +429,69 @@ class ResearchLabHostedWorker:
             )
             if not loop_result.selected_candidates:
                 raise HostedResearchLabWorkerError("auto-research loop completed without valid candidate finalists")
+
+            active_finish = await load_active_private_model(self.config, register_bootstrap=True)
+            final_artifact = artifact
+            finalists: list[dict[str, Any]] = [
+                {
+                    "selected": candidate,
+                    "patch_manifest": candidate.patch_manifest,
+                    "hypothesis": candidate.hypothesis,
+                    "patch": candidate.patch,
+                    "iteration": candidate.iteration,
+                    "node_id": candidate.node_id,
+                }
+                for candidate in loop_result.selected_candidates
+            ]
+            if active_finish.artifact.model_artifact_hash != artifact.model_artifact_hash:
+                final_artifact = active_finish.artifact
+                latest_runner = DockerPrivateModelRunner(
+                    DockerPrivateModelSpec(
+                        image_digest=final_artifact.image_digest,
+                        extra_env=provider_env,
+                        timeout_seconds=900,
+                    )
+                )
+                latest_registry = coerce_component_registry(latest_runner.metadata())
+                rebuilt: list[dict[str, Any]] = []
+                for index, candidate in enumerate(loop_result.selected_candidates):
+                    try:
+                        patch_manifest, hypothesis, patch = build_validated_candidate_manifest(
+                            draft=candidate.draft,
+                            artifact_manifest=final_artifact,
+                            component_registry=latest_registry,
+                            run_id=context.run_id,
+                            sequence=(candidate.iteration * 1000) + index,
+                            miner_brief_ref=str(context.ticket.get("brief_sanitized_ref") or ""),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Research Lab finalist dropped during active-parent refresh: run_id=%s node=%s error=%s",
+                            context.run_id,
+                            candidate.node_id,
+                            str(exc)[:200],
+                        )
+                        continue
+                    rebuilt.append(
+                        {
+                            "selected": candidate,
+                            "patch_manifest": patch_manifest,
+                            "hypothesis": hypothesis,
+                            "patch": patch,
+                            "iteration": candidate.iteration,
+                            "node_id": candidate.node_id,
+                        }
+                    )
+                if not rebuilt:
+                    raise HostedResearchLabWorkerError("active model changed and no finalist rebased cleanly")
+                finalists = rebuilt
+                logger.info(
+                    "Research Lab finalists rebased to latest active artifact: run_id=%s old_parent=%s new_parent=%s count=%s",
+                    context.run_id,
+                    artifact.model_artifact_hash,
+                    final_artifact.model_artifact_hash,
+                    len(finalists),
+                )
 
         reimbursement_decision = await self._maybe_create_reimbursement_decision(
             context=context,
@@ -451,17 +514,17 @@ class ResearchLabHostedWorker:
 
         candidate_ids: list[str] = []
         candidate_summaries: list[dict[str, Any]] = []
-        for index, candidate in enumerate(loop_result.selected_candidates):
-            patch_manifest = candidate.patch_manifest
-            hypothesis = candidate.hypothesis
-            patch = candidate.patch
+        for index, finalist in enumerate(finalists):
+            patch_manifest = finalist["patch_manifest"]
+            hypothesis = finalist["hypothesis"]
+            patch = finalist["patch"]
             request = ResearchLabCandidateArtifactCreateRequest(
                 run_id=context.run_id,
                 ticket_id=context.ticket_id,
                 receipt_id=context.receipt_id,
                 miner_hotkey=str(context.ticket["miner_hotkey"]),
                 island=str(context.ticket["island"]),
-                private_model_manifest=artifact.to_dict(),
+                private_model_manifest=final_artifact.to_dict(),
                 candidate_patch_manifest=patch_manifest.to_dict(),
                 hypothesis_doc=hypothesis.to_dict(),
                 redacted_public_summary=patch_manifest.redacted_summary,
@@ -471,13 +534,14 @@ class ResearchLabHostedWorker:
             candidate_summaries.append(
                 {
                     "candidate_index": index,
-                    "loop_iteration": candidate.iteration,
-                    "loop_node_id": candidate.node_id,
+                    "loop_iteration": finalist["iteration"],
+                    "loop_node_id": finalist["node_id"],
                     "candidate_id": str(candidate_row["candidate_id"]),
                     "candidate_artifact_hash": patch_manifest.candidate_artifact_hash,
                     "candidate_patch_hash": patch_manifest.manifest_hash(),
                     "hypothesis": hypothesis.to_dict(),
                     "patch": patch.to_dict(),
+                    "parent_artifact_hash": final_artifact.model_artifact_hash,
                 }
             )
 
@@ -830,14 +894,6 @@ class ResearchLabHostedWorker:
             {"provider": "exa", "key_source": "leadpoet_server_side"},
             {"provider": "scrapingdog", "key_source": "leadpoet_server_side"},
         ]
-
-    def _load_private_artifact(self) -> PrivateModelArtifactManifest:
-        payload = load_private_artifact_manifest(self.config.private_model_manifest_uri)
-        artifact = PrivateModelArtifactManifest.from_mapping(payload)
-        errors = validate_private_model_artifact_manifest(artifact)
-        if errors:
-            raise HostedResearchLabWorkerError("private artifact manifest failed validation: " + "; ".join(errors))
-        return artifact
 
     async def _call_openrouter(
         self,

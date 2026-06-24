@@ -102,8 +102,8 @@ def verify_candidate_sql(sql: str) -> list[str]:
     lowered = sql.lower()
     if "begin;" not in lowered or "commit;" not in lowered:
         errors.append("candidate migration must be wrapped in BEGIN/COMMIT")
-    if "validator" not in lowered or "candidate" not in lowered:
-        errors.append("candidate migration must document validator candidate evaluation ownership")
+    if "gateway" not in lowered or "candidate" not in lowered:
+        errors.append("candidate migration must document gateway candidate evaluation ownership")
     if re.search(r"\b(?:CREATE|ALTER|DROP)\s+TABLE\b[^;]*\bfulfillment_", sql, re.IGNORECASE):
         errors.append("candidate migration must not modify fulfillment tables")
     if FORBIDDEN_GRANT_RE.search(sql):

@@ -57,6 +57,8 @@ class ResearchLabGatewayConfig:
     reimbursements_enabled: bool = False
     weight_mutation_enabled: bool = False
     fulfillment_mutation_enabled: bool = False
+    auto_promotion_enabled: bool = False
+    auto_commit_enabled: bool = False
     miner_openrouter_key_required: bool = True
     loop_start_fee_usd: float = DEFAULT_LOOP_START_FEE_USD
     internal_api_key: str = ""
@@ -117,9 +119,17 @@ class ResearchLabGatewayConfig:
     lab_champion_threshold_points: float = 2.0
     lab_champion_eval_days: int = 10
     lab_champion_icps_per_day: int = 5
+    improvement_threshold_points: float = 1.0
+    improvement_min_delta_lcb: float = 0.0
     private_model_manifest_uri: str = (
         "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json"
     )
+    private_repo_url: str = ""
+    private_repo_branch: str = "main"
+    private_patch_applier_cmd: str = ""
+    private_test_cmd: str = ""
+    private_build_cmd: str = ""
+    private_artifact_manifest_output: str = ""
     private_benchmark_path: str = ""
     score_bundle_kms_key_id: str = "alias/leadpoet-research-lab-artifact-signing"
     score_bundle_signature_uri_prefix: str = ""
@@ -165,6 +175,8 @@ class ResearchLabGatewayConfig:
             reimbursements_enabled=_truthy("RESEARCH_LAB_REIMBURSEMENTS_ENABLED"),
             weight_mutation_enabled=_truthy("RESEARCH_LAB_WEIGHT_MUTATION_ENABLED"),
             fulfillment_mutation_enabled=_truthy("RESEARCH_LAB_FULFILLMENT_MUTATION_ENABLED"),
+            auto_promotion_enabled=_truthy("RESEARCH_LAB_AUTO_PROMOTION_ENABLED"),
+            auto_commit_enabled=_truthy("RESEARCH_LAB_AUTO_COMMIT_ENABLED"),
             miner_openrouter_key_required=_truthy("RESEARCH_LAB_MINER_OPENROUTER_KEY_REQUIRED", "true"),
             loop_start_fee_usd=_float("RESEARCH_LAB_LOOP_START_FEE_USD", DEFAULT_LOOP_START_FEE_USD),
             internal_api_key=os.getenv("RESEARCH_LAB_INTERNAL_API_KEY", ""),
@@ -297,10 +309,21 @@ class ResearchLabGatewayConfig:
             lab_champion_threshold_points=max(0.0, _float("RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS", 2.0)),
             lab_champion_eval_days=max(1, _int("RESEARCH_LAB_CHAMPION_EVAL_DAYS", 10)),
             lab_champion_icps_per_day=max(1, _int("RESEARCH_LAB_CHAMPION_ICPS_PER_DAY", 5)),
+            improvement_threshold_points=max(
+                0.0,
+                _float("RESEARCH_LAB_IMPROVEMENT_THRESHOLD_POINTS", 1.0),
+            ),
+            improvement_min_delta_lcb=_float("RESEARCH_LAB_IMPROVEMENT_MIN_DELTA_LCB", 0.0),
             private_model_manifest_uri=os.getenv(
                 "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI",
                 "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json",
             ),
+            private_repo_url=os.getenv("RESEARCH_LAB_PRIVATE_REPO_URL", ""),
+            private_repo_branch=os.getenv("RESEARCH_LAB_PRIVATE_REPO_BRANCH", "main") or "main",
+            private_patch_applier_cmd=os.getenv("RESEARCH_LAB_PRIVATE_PATCH_APPLIER_CMD", ""),
+            private_test_cmd=os.getenv("RESEARCH_LAB_PRIVATE_TEST_CMD", ""),
+            private_build_cmd=os.getenv("RESEARCH_LAB_PRIVATE_BUILD_CMD", ""),
+            private_artifact_manifest_output=os.getenv("RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT", ""),
             private_benchmark_path=os.getenv("RESEARCH_LAB_PRIVATE_BENCHMARK_PATH", ""),
             score_bundle_kms_key_id=os.getenv(
                 "RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID",
@@ -399,6 +422,8 @@ class ResearchLabGatewayConfig:
             "RESEARCH_LAB_REIMBURSEMENTS_ENABLED": self.reimbursements_enabled,
             "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": self.weight_mutation_enabled,
             "RESEARCH_LAB_FULFILLMENT_MUTATION_ENABLED": self.fulfillment_mutation_enabled,
+            "RESEARCH_LAB_AUTO_PROMOTION_ENABLED": self.auto_promotion_enabled,
+            "RESEARCH_LAB_AUTO_COMMIT_ENABLED": self.auto_commit_enabled,
         }
 
     def reimbursement_policy_doc(self, *, enabled: bool | None = None) -> dict[str, object]:
@@ -487,6 +512,8 @@ class ResearchLabGatewayConfig:
                 "champion_threshold_points": self.lab_champion_threshold_points,
                 "champion_eval_days": self.lab_champion_eval_days,
                 "champion_icps_per_day": self.lab_champion_icps_per_day,
+                "improvement_threshold_points": self.improvement_threshold_points,
+                "improvement_min_delta_lcb": self.improvement_min_delta_lcb,
             },
             "hosted_worker": {
                 "enabled": self.hosted_worker_enabled,
@@ -518,6 +545,13 @@ class ResearchLabGatewayConfig:
                 "scoring_worker_proxy_configured": bool(self.scoring_worker_proxy_url),
                 "scoring_worker_allow_partial_icp_window": self.scoring_worker_allow_partial_icp_window,
                 "private_baseline_rebenchmark_enabled": self.private_baseline_rebenchmark_enabled,
+                "auto_promotion_enabled": self.auto_promotion_enabled,
+                "auto_commit_enabled": self.auto_commit_enabled,
+                "private_repo_configured": bool(self.private_repo_url),
+                "private_patch_applier_configured": bool(self.private_patch_applier_cmd),
+                "private_test_cmd_configured": bool(self.private_test_cmd),
+                "private_build_cmd_configured": bool(self.private_build_cmd),
+                "private_artifact_manifest_output_configured": bool(self.private_artifact_manifest_output),
                 "auto_research_model_configured": bool(self.auto_research_model),
                 "approved_model_tiers": {
                     tier: {

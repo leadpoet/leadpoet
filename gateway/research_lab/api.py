@@ -74,10 +74,30 @@ router = APIRouter(prefix="/research-lab", tags=["research-lab"])
 @router.get("/status")
 async def research_lab_status() -> dict[str, object]:
     config = ResearchLabGatewayConfig.from_env()
+    latest_public_benchmark = None
+    if config.api_enabled and config.reports_enabled:
+        try:
+            rows = await select_many(
+                "research_lab_public_benchmark_report_current",
+                filters=(("current_report_status", "published"),),
+                order_by=(("benchmark_date", True), ("created_at", True)),
+                limit=1,
+            )
+            if rows:
+                latest_public_benchmark = {
+                    "benchmark_date": rows[0].get("benchmark_date"),
+                    "report_id": rows[0].get("report_id"),
+                    "aggregate_score": rows[0].get("aggregate_score"),
+                    "report_doc": rows[0].get("report_doc"),
+                }
+        except Exception as exc:
+            logger.warning("research_lab_public_benchmark_status_unavailable: %s", str(exc)[:200])
+            latest_public_benchmark = {"status": "unavailable"}
     return {
         "service": "leadpoet-research-lab-gateway",
         "status": "configured" if config.api_enabled else "disabled",
         **config.public_status(),
+        "latest_public_benchmark": latest_public_benchmark,
     }
 
 
@@ -588,6 +608,40 @@ async def get_research_lab_latest_evaluation_bundles(epoch: int):
     }
 
 
+@router.get("/benchmarks/public/latest")
+async def get_latest_public_benchmark_report():
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    rows = await select_many(
+        "research_lab_public_benchmark_report_current",
+        filters=(("current_report_status", "published"),),
+        order_by=(("benchmark_date", True), ("created_at", True)),
+        limit=1,
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Research Lab public benchmark report not found")
+    return rows[0]
+
+
+@router.get("/benchmarks/public/{benchmark_date}")
+async def get_public_benchmark_report_by_date(benchmark_date: str):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", benchmark_date):
+        raise HTTPException(status_code=400, detail="benchmark_date must be YYYY-MM-DD")
+    rows = await select_many(
+        "research_lab_public_benchmark_report_current",
+        filters=(("benchmark_date", benchmark_date), ("current_report_status", "published")),
+        order_by=(("created_at", True),),
+        limit=1,
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Research Lab public benchmark report not found")
+    return rows[0]
+
+
 @router.get("/audit/latest/{epoch}")
 async def get_research_lab_latest_audit_bundle(epoch: int):
     config = ResearchLabGatewayConfig.from_env()
@@ -612,6 +666,10 @@ async def get_research_lab_latest_audit_bundle(epoch: int):
     dispatch_event_rows = await select_many("research_lab_scoring_dispatch_events", filters=(), limit=1000)
     rolling_window_rows = await select_many("research_lab_rolling_icp_windows", filters=(), limit=1000)
     benchmark_rows = await select_many("research_lab_private_model_benchmark_current", filters=(), limit=1000)
+    private_model_version_rows = await select_many("research_lab_private_model_version_current", filters=(), limit=1000)
+    promotion_event_rows = await select_many("research_lab_candidate_promotion_events", filters=(), limit=1000)
+    private_repo_commit_event_rows = await select_many("research_lab_private_repo_commit_events", filters=(), limit=1000)
+    public_benchmark_report_rows = await select_many("research_lab_public_benchmark_report_current", filters=(), limit=1000)
     score_bundle_rows = await select_many(
         "research_evaluation_score_bundle_current",
         filters=(("evaluation_epoch", epoch),),
@@ -629,6 +687,10 @@ async def get_research_lab_latest_audit_bundle(epoch: int):
             dispatch_event_rows=dispatch_event_rows,
             rolling_window_rows=rolling_window_rows,
             benchmark_rows=benchmark_rows,
+            private_model_version_rows=private_model_version_rows,
+            promotion_event_rows=promotion_event_rows,
+            private_repo_commit_event_rows=private_repo_commit_event_rows,
+            public_benchmark_report_rows=public_benchmark_report_rows,
             score_bundle_rows=score_bundle_rows,
         )
     except ValueError as exc:

@@ -148,6 +148,15 @@ class QualificationStyleCompanyScorer:
         icp: Mapping[str, Any],
         is_reference_model: bool,
     ) -> list[float]:
+        breakdowns = await self.score_with_breakdowns(companies, icp, is_reference_model)
+        return [float(item.get("final_score", 0.0) or 0.0) for item in breakdowns]
+
+    async def score_with_breakdowns(
+        self,
+        companies: Sequence[Mapping[str, Any]],
+        icp: Mapping[str, Any],
+        is_reference_model: bool,
+    ) -> list[dict[str, Any]]:
         models = import_module("gateway.qualification.models")
         scorer_module = import_module("qualification.scoring.lead_scorer")
         CompanyOutput = getattr(models, "CompanyOutput")
@@ -156,7 +165,7 @@ class QualificationStyleCompanyScorer:
 
         icp_obj = ICPPrompt(**dict(icp))
         seen_companies: set[str] = set()
-        scores: list[float] = []
+        breakdowns: list[dict[str, Any]] = []
         for company in companies:
             company_obj = CompanyOutput(**_normalize_company_output(company))
             result = await score_company(
@@ -167,8 +176,12 @@ class QualificationStyleCompanyScorer:
                 seen_companies=seen_companies,
                 is_reference_model=is_reference_model,
             )
-            scores.append(float(getattr(result, "final_score", 0.0) or 0.0))
-        return scores
+            if hasattr(result, "model_dump"):
+                item = result.model_dump(mode="json")
+            else:
+                item = dict(result)
+            breakdowns.append(item)
+        return breakdowns
 
 
 async def _maybe_await(value: Any) -> Any:

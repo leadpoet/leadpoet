@@ -622,6 +622,318 @@ async def create_private_model_benchmark_event(
     return await insert_row("research_lab_private_model_benchmark_events", row)
 
 
+async def create_private_model_version(
+    *,
+    artifact_manifest: dict[str, Any],
+    manifest_uri: str | None = None,
+    source_candidate_id: str | None = None,
+    source_score_bundle_id: str | None = None,
+    source_benchmark_bundle_id: str | None = None,
+    redacted_version_doc: dict[str, Any] | None = None,
+    version_status: str = "active",
+    reason: str = "private_model_version_registered",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = {
+        "model_artifact_hash": str(artifact_manifest["model_artifact_hash"]),
+        "private_model_manifest_hash": str(artifact_manifest["manifest_hash"]),
+        "private_model_manifest_uri": str(manifest_uri or artifact_manifest["manifest_uri"]),
+        "git_commit_sha": str(artifact_manifest["git_commit_sha"]),
+        "config_hash": str(artifact_manifest["config_hash"]),
+        "component_registry_version": str(artifact_manifest["component_registry_version"]),
+        "scoring_adapter_version": str(artifact_manifest["scoring_adapter_version"]),
+        "source_candidate_id": source_candidate_id,
+        "source_score_bundle_id": source_score_bundle_id,
+        "source_benchmark_bundle_id": source_benchmark_bundle_id,
+        "signature_ref": str(artifact_manifest["signature_ref"]),
+        "build_id": artifact_manifest.get("build_id"),
+        "redacted_version_doc": redacted_version_doc or {},
+    }
+    version_hash = canonical_hash(payload)
+    version_id = "private_model_version:" + version_hash
+    existing = await select_one(
+        "research_lab_private_model_versions",
+        filters=(("private_model_version_id", version_id),),
+    )
+    if existing:
+        event = await create_private_model_version_event(
+            private_model_version_id=version_id,
+            event_type=version_status,
+            version_status=version_status,
+            reason=reason,
+            event_doc={"version_hash": version_hash},
+        )
+        return existing, event
+    row = {
+        "private_model_version_id": version_id,
+        "schema_version": "1.0",
+        **payload,
+        "version_hash": version_hash,
+        "anchored_hash": version_hash,
+    }
+    inserted = await insert_row("research_lab_private_model_versions", row)
+    event = await create_private_model_version_event(
+        private_model_version_id=version_id,
+        event_type=version_status,
+        version_status=version_status,
+        reason=reason,
+        event_doc={"version_hash": version_hash},
+    )
+    return inserted, event
+
+
+async def create_private_model_version_event(
+    *,
+    private_model_version_id: str,
+    event_type: str,
+    version_status: str,
+    reason: str | None = None,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    seq = await next_event_seq(
+        "research_lab_private_model_version_events",
+        "private_model_version_id",
+        private_model_version_id,
+    )
+    payload = {
+        "private_model_version_id": private_model_version_id,
+        "seq": seq,
+        "event_type": event_type,
+        "version_status": version_status,
+        "reason": reason,
+        "event_doc": event_doc or {},
+    }
+    row = {
+        "event_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_lab_private_model_version_events", row)
+
+
+async def create_candidate_promotion_event(
+    *,
+    candidate_id: str,
+    event_type: str,
+    promotion_status: str,
+    derived_candidate_id: str | None = None,
+    source_score_bundle_id: str | None = None,
+    derived_score_bundle_id: str | None = None,
+    private_model_version_id: str | None = None,
+    active_parent_artifact_hash: str | None = None,
+    candidate_parent_artifact_hash: str | None = None,
+    rolling_window_hash: str | None = None,
+    improvement_points: float = 0.0,
+    threshold_points: float = 1.0,
+    worker_ref: str | None = None,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "candidate_id": candidate_id,
+        "derived_candidate_id": derived_candidate_id,
+        "source_score_bundle_id": source_score_bundle_id,
+        "derived_score_bundle_id": derived_score_bundle_id,
+        "private_model_version_id": private_model_version_id,
+        "event_type": event_type,
+        "promotion_status": promotion_status,
+        "active_parent_artifact_hash": active_parent_artifact_hash,
+        "candidate_parent_artifact_hash": candidate_parent_artifact_hash,
+        "rolling_window_hash": rolling_window_hash,
+        "improvement_points": float(improvement_points),
+        "threshold_points": float(threshold_points),
+        "worker_ref": worker_ref,
+        "event_doc": event_doc or {},
+    }
+    row = {
+        "promotion_event_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_lab_candidate_promotion_events", row)
+
+
+async def create_private_repo_commit_event(
+    *,
+    commit_status: str,
+    branch_name: str,
+    candidate_id: str | None = None,
+    score_bundle_id: str | None = None,
+    private_model_version_id: str | None = None,
+    git_commit_sha: str | None = None,
+    private_repo_ref_hash: str | None = None,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "candidate_id": candidate_id,
+        "score_bundle_id": score_bundle_id,
+        "private_model_version_id": private_model_version_id,
+        "commit_status": commit_status,
+        "git_commit_sha": git_commit_sha,
+        "branch_name": branch_name,
+        "private_repo_ref_hash": private_repo_ref_hash,
+        "event_doc": event_doc or {},
+    }
+    row = {
+        "commit_event_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_lab_private_repo_commit_events", row)
+
+
+async def create_public_benchmark_report(
+    *,
+    benchmark_date: str,
+    benchmark_bundle_id: str,
+    private_model_artifact_hash: str,
+    private_model_manifest_hash: str,
+    rolling_window_hash: str,
+    aggregate_score: float,
+    report_doc: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = {
+        "benchmark_date": benchmark_date,
+        "benchmark_bundle_id": benchmark_bundle_id,
+        "private_model_artifact_hash": private_model_artifact_hash,
+        "private_model_manifest_hash": private_model_manifest_hash,
+        "rolling_window_hash": rolling_window_hash,
+        "aggregate_score": float(aggregate_score),
+        "report_doc": report_doc,
+    }
+    report_hash = canonical_hash(payload)
+    report_id = "public_benchmark:" + report_hash
+    existing = await select_one(
+        "research_lab_public_benchmark_reports",
+        filters=(("report_id", report_id),),
+    )
+    if existing:
+        event = await select_one(
+            "research_lab_public_benchmark_report_events",
+            filters=(("report_id", report_id), ("seq", 0)),
+        )
+        if not event:
+            raise RuntimeError("existing Research Lab public benchmark report is missing its opening event")
+        return existing, event
+    row = {
+        "report_id": report_id,
+        "schema_version": "1.0",
+        **payload,
+        "report_hash": report_hash,
+        "anchored_hash": report_hash,
+    }
+    inserted = await insert_row("research_lab_public_benchmark_reports", row)
+    event = await create_public_benchmark_report_event(
+        report_id=report_id,
+        event_type="published",
+        report_status="published",
+        event_doc={"report_hash": report_hash, "benchmark_bundle_id": benchmark_bundle_id},
+    )
+    return inserted, event
+
+
+async def create_public_benchmark_report_event(
+    *,
+    report_id: str,
+    event_type: str,
+    report_status: str,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    seq = await next_event_seq("research_lab_public_benchmark_report_events", "report_id", report_id)
+    payload = {
+        "report_id": report_id,
+        "seq": seq,
+        "event_type": event_type,
+        "report_status": report_status,
+        "event_doc": event_doc or {},
+    }
+    row = {
+        "event_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_lab_public_benchmark_report_events", row)
+
+
+async def create_champion_reward_obligation(
+    *,
+    obligation: dict[str, Any],
+    ticket_id: str | None = None,
+    obligation_doc: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    existing = await select_one(
+        "research_lab_champion_reward_obligations",
+        filters=(("champion_reward_id", obligation["champion_reward_id"]),),
+    )
+    if existing:
+        event = await select_one(
+            "research_lab_champion_reward_events",
+            filters=(("champion_reward_id", obligation["champion_reward_id"]), ("seq", 0)),
+        )
+        if not event:
+            raise RuntimeError("existing champion reward obligation is missing its opening event")
+        return existing, event
+    row = {
+        "champion_reward_id": obligation["champion_reward_id"],
+        "schema_version": "1.0",
+        "score_bundle_id": obligation.get("score_bundle_id") or None,
+        "candidate_id": obligation.get("candidate_id") or None,
+        "run_id": obligation["run_id"],
+        "ticket_id": ticket_id,
+        "miner_hotkey": obligation["miner_hotkey"],
+        "miner_uid": int(obligation["uid"]),
+        "island": obligation["island"],
+        "policy_id": str((obligation_doc or {}).get("policy_id") or "research-lab-promotion-v1"),
+        "evaluation_epoch": int(obligation["evaluation_epoch"]),
+        "start_epoch": int(obligation["start_epoch"]),
+        "epoch_count": int(obligation["epoch_count"]),
+        "improvement_points": float(obligation["improvement_points"]),
+        "threshold_points": float(obligation["threshold_points"]),
+        "desired_alpha_percent": float(obligation["desired_alpha_percent"]),
+        "source_score_bundle_hash": (obligation_doc or {}).get("source_score_bundle_hash"),
+        "input_hash": obligation["input_hash"],
+        "anchored_hash": obligation["anchored_hash"],
+        "obligation_doc": obligation_doc or {},
+    }
+    inserted = await insert_row("research_lab_champion_reward_obligations", row)
+    event = await create_champion_reward_event(
+        champion_reward_id=obligation["champion_reward_id"],
+        event_type="active",
+        reward_status="active",
+        reason="created_from_gateway_promotion_event",
+        event_doc={"candidate_id": obligation.get("candidate_id"), "score_bundle_id": obligation.get("score_bundle_id")},
+    )
+    return inserted, event
+
+
+async def create_champion_reward_event(
+    *,
+    champion_reward_id: str,
+    event_type: str,
+    reward_status: str,
+    reason: str | None = None,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    seq = await next_event_seq("research_lab_champion_reward_events", "champion_reward_id", champion_reward_id)
+    payload = {
+        "champion_reward_id": champion_reward_id,
+        "seq": seq,
+        "event_type": event_type,
+        "reward_status": reward_status,
+        "reason": reason,
+        "event_doc": event_doc or {},
+    }
+    row = {
+        "event_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_lab_champion_reward_events", row)
+
+
 async def create_signed_audit_bundle(
     *,
     epoch: int,

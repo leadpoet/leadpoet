@@ -15,6 +15,7 @@ from gateway.research_lab.icp_window import (
     RollingIcpWindowUnavailable,
     fetch_rolling_icp_window,
 )
+from gateway.research_lab.logging_utils import compact_ref, format_worker_block
 from gateway.research_lab.models import ResearchLabScoreBundleCreateRequest
 from gateway.research_lab.promotion import ResearchLabPromotionController, load_active_private_model
 from gateway.research_lab.public_benchmarks import build_public_benchmark_report, sanitize_benchmark_item_summary
@@ -75,6 +76,7 @@ class ResearchLabGatewayScoringWorker:
         self.proxy_url = config.scoring_worker_proxy_url or os.getenv("RESEARCH_LAB_SCORING_WORKER_PROXY", "")
         self.proxy_ref_hash = canonical_hash({"proxy_ref": self.proxy_url}) if self.proxy_url else None
         self._baseline_skip_logged = False
+        self._baseline_already_logged_date: str | None = None
 
     async def run_forever(self) -> None:
         last_idle_log = 0.0
@@ -88,21 +90,33 @@ class ResearchLabGatewayScoringWorker:
                 now = time.monotonic()
                 if now - last_error_log >= idle_log_seconds:
                     logger.error(
-                        "Research Lab scoring worker pass failed: worker_ref=%s error=%s",
-                        self.worker_ref,
-                        _short_error(exc),
+                        format_worker_block(
+                            "RESEARCH LAB SCORING WORKER PASS FAILED",
+                            (
+                                ("Worker", self.worker_ref),
+                                ("Error", _short_error(exc)),
+                            ),
+                        )
                     )
                     last_error_log = now
                 await asyncio.sleep(max(self.config.scoring_worker_poll_seconds, error_backoff_seconds))
                 continue
             if outcome.get("processed") or outcome.get("status") != "idle":
                 logger.info(
-                    "Research Lab scoring worker pass: status=%s candidates=%s baseline_status=%s",
-                    outcome.get("status"),
-                    len(outcome.get("candidate_ids") or []),
-                    (outcome.get("baseline") or {}).get("status")
-                    if isinstance(outcome.get("baseline"), Mapping)
-                    else None,
+                    format_worker_block(
+                        "RESEARCH LAB SCORING WORKER PASS",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("Status", outcome.get("status")),
+                            ("Candidates", len(outcome.get("candidate_ids") or [])),
+                            (
+                                "Baseline status",
+                                (outcome.get("baseline") or {}).get("status")
+                                if isinstance(outcome.get("baseline"), Mapping)
+                                else None,
+                            ),
+                        ),
+                    )
                 )
             elif time.monotonic() - last_idle_log >= idle_log_seconds:
                 logger.info(
@@ -126,12 +140,15 @@ class ResearchLabGatewayScoringWorker:
             baseline_result = await self._maybe_run_private_baseline()
         elif self.config.private_baseline_rebenchmark_enabled and not self._baseline_skip_logged:
             logger.info(
-                "Research Lab private baseline rebenchmark skipped on non-owner worker: "
-                "worker_ref=%s worker_index=%s/%s owner_worker_index=1 proxy_ref_hash=%s",
-                self.worker_ref,
-                self.config.scoring_worker_index + 1,
-                self.config.scoring_worker_total_workers,
-                self.proxy_ref_hash,
+                format_worker_block(
+                    "RESEARCH LAB PRIVATE BASELINE SKIPPED",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Worker index", f"{self.config.scoring_worker_index + 1}/{self.config.scoring_worker_total_workers}"),
+                        ("Owner worker index", 1),
+                        ("Proxy ref", self.proxy_ref_hash),
+                    ),
+                )
             )
             self._baseline_skip_logged = True
 
@@ -143,9 +160,13 @@ class ResearchLabGatewayScoringWorker:
             await self._score_candidate(candidate)
             processed.append(str(candidate["candidate_id"]))
 
+        baseline_completed = (
+            isinstance(baseline_result, Mapping)
+            and str(baseline_result.get("status") or "") == "completed"
+        )
         return {
-            "processed": bool(processed or baseline_result),
-            "status": "processed" if processed else "idle",
+            "processed": bool(processed or baseline_completed),
+            "status": "processed" if processed else ("baseline_completed" if baseline_completed else "idle"),
             "candidate_ids": processed,
             "baseline": baseline_result,
         }
@@ -190,6 +211,18 @@ class ResearchLabGatewayScoringWorker:
                 "proxy_ref_hash": self.proxy_ref_hash,
             },
         )
+        logger.info(
+            format_worker_block(
+                "RESEARCH LAB CANDIDATE ALLOCATED",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Candidate", compact_ref(candidate_id)),
+                    ("Run", compact_ref(candidate.get("run_id"))),
+                    ("Ticket", compact_ref(candidate.get("ticket_id"))),
+                    ("Proxy ref", self.proxy_ref_hash),
+                ),
+            )
+        )
         return candidate
 
     async def _score_candidate(self, candidate: Mapping[str, Any]) -> None:
@@ -203,6 +236,19 @@ class ResearchLabGatewayScoringWorker:
             candidate_id=candidate_id,
             run_id=str(candidate["run_id"]),
             ticket_id=str(candidate["ticket_id"]),
+        )
+        logger.info(
+            format_worker_block(
+                "RESEARCH LAB CANDIDATE SCORING STARTED",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Candidate", compact_ref(candidate_id)),
+                    ("Run", compact_ref(candidate.get("run_id"))),
+                    ("Ticket", compact_ref(candidate.get("ticket_id"))),
+                    ("Model timeout", f"{self.config.scoring_worker_model_timeout_seconds}s"),
+                    ("Proxy ref", self.proxy_ref_hash),
+                ),
+            )
         )
         try:
             await create_candidate_evaluation_event(
@@ -298,15 +344,22 @@ class ResearchLabGatewayScoringWorker:
                 score_bundle_row=bundle,
                 score_bundle=score_bundle,
             )
-            if promotion_result.get("status") not in {"disabled", ""}:
-                logger.info(
-                    "Research Lab candidate promotion result: candidate_id=%s status=%s",
-                    candidate_id,
-                    promotion_result.get("status"),
-                )
             await self._maybe_finalize_candidate_receipt(candidate)
             await self._write_audit_bundle(int(run_context["evaluation_epoch"]))
-            logger.info("Research Lab candidate scored by gateway worker: %s", candidate_id)
+            logger.info(
+                format_worker_block(
+                    "RESEARCH LAB CANDIDATE SCORED",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Candidate", compact_ref(candidate_id)),
+                        ("Run", compact_ref(candidate.get("run_id"))),
+                        ("Score bundle", compact_ref(bundle["score_bundle_id"])),
+                        ("Rolling window", compact_ref(window.window_hash)),
+                        ("Promotion", promotion_result.get("status")),
+                        ("Elapsed", f"{time.time() - start:.1f}s"),
+                    ),
+                )
+            )
         except Exception as exc:
             await create_candidate_evaluation_event(
                 candidate_id=candidate_id,
@@ -338,7 +391,18 @@ class ResearchLabGatewayScoringWorker:
                 await self._write_audit_bundle(int(self.config.evaluation_epoch or 0))
             except Exception:
                 logger.exception("Research Lab audit bundle write failed after candidate failure")
-            logger.exception("Research Lab candidate scoring failed: %s", candidate_id)
+            logger.exception(
+                format_worker_block(
+                    "RESEARCH LAB CANDIDATE SCORING FAILED",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Candidate", compact_ref(candidate_id)),
+                        ("Run", compact_ref(candidate.get("run_id"))),
+                        ("Error", str(exc)[:300]),
+                        ("Elapsed", f"{time.time() - start:.1f}s"),
+                    ),
+                )
+            )
 
     async def _maybe_promote_scored_candidate(
         self,
@@ -382,21 +446,34 @@ class ResearchLabGatewayScoringWorker:
             limit=1,
         )
         if existing:
+            if self._baseline_already_logged_date != today:
+                logger.info(
+                    format_worker_block(
+                        "RESEARCH LAB PRIVATE BASELINE ALREADY BENCHMARKED",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("Benchmark date", today),
+                            ("Worker index", f"{self.config.scoring_worker_index + 1}/{self.config.scoring_worker_total_workers}"),
+                        ),
+                    )
+                )
+                self._baseline_already_logged_date = today
             return {"status": "already_benchmarked", "benchmark_date": today}
 
         start = time.time()
         logger.info(
-            "Research Lab private baseline rebenchmark allocated: "
-            "worker_ref=%s worker_index=%s/%s proxy_ref_hash=%s benchmark_date=%s "
-            "eval_days=%s icps_per_day=%s expected_icps=%s",
-            self.worker_ref,
-            self.config.scoring_worker_index + 1,
-            self.config.scoring_worker_total_workers,
-            self.proxy_ref_hash,
-            today,
-            self.config.lab_champion_eval_days,
-            self.config.lab_champion_icps_per_day,
-            self.config.lab_champion_eval_days * self.config.lab_champion_icps_per_day,
+            format_worker_block(
+                "RESEARCH LAB PRIVATE BASELINE ALLOCATED",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Worker index", f"{self.config.scoring_worker_index + 1}/{self.config.scoring_worker_total_workers}"),
+                    ("Proxy ref", self.proxy_ref_hash),
+                    ("Benchmark date", today),
+                    ("Eval days", self.config.lab_champion_eval_days),
+                    ("ICPs per day", self.config.lab_champion_icps_per_day),
+                    ("Expected ICPs", self.config.lab_champion_eval_days * self.config.lab_champion_icps_per_day),
+                ),
+            )
         )
         window = await fetch_rolling_icp_window(
             days=self.config.lab_champion_eval_days,
@@ -407,17 +484,18 @@ class ResearchLabGatewayScoringWorker:
         active = await load_active_private_model(self.config, register_bootstrap=True)
         artifact = active.artifact
         logger.info(
-            "Research Lab private baseline rebenchmark started: "
-            "worker_ref=%s worker_index=%s/%s proxy_ref_hash=%s rolling_window_hash=%s "
-            "selected_sets=%s selected_icps=%s private_model_artifact_hash=%s",
-            self.worker_ref,
-            self.config.scoring_worker_index + 1,
-            self.config.scoring_worker_total_workers,
-            self.proxy_ref_hash,
-            window.window_hash,
-            list(window.set_ids),
-            len(window.item_refs),
-            artifact.model_artifact_hash,
+            format_worker_block(
+                "RESEARCH LAB PRIVATE BASELINE STARTED",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Worker index", f"{self.config.scoring_worker_index + 1}/{self.config.scoring_worker_total_workers}"),
+                    ("Proxy ref", self.proxy_ref_hash),
+                    ("Rolling window", compact_ref(window.window_hash)),
+                    ("Selected sets", len(window.set_ids)),
+                    ("Selected ICPs", len(window.item_refs)),
+                    ("Private model", compact_ref(artifact.model_artifact_hash)),
+                ),
+            )
         )
         runner = DockerPrivateModelRunner(
             DockerPrivateModelSpec(
@@ -493,17 +571,18 @@ class ResearchLabGatewayScoringWorker:
         )
         await self._write_audit_bundle(int(self.config.evaluation_epoch or 0))
         logger.info(
-            "Research Lab private baseline rebenchmark completed: "
-            "worker_ref=%s worker_index=%s/%s benchmark_bundle_id=%s public_report_id=%s "
-            "rolling_window_hash=%s aggregate_score=%.4f elapsed_seconds=%.3f",
-            self.worker_ref,
-            self.config.scoring_worker_index + 1,
-            self.config.scoring_worker_total_workers,
-            bundle["benchmark_bundle_id"],
-            public_report["report_id"],
-            window.window_hash,
-            aggregate_score,
-            time.time() - start,
+            format_worker_block(
+                "RESEARCH LAB PRIVATE BASELINE COMPLETED",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Worker index", f"{self.config.scoring_worker_index + 1}/{self.config.scoring_worker_total_workers}"),
+                    ("Benchmark bundle", compact_ref(bundle["benchmark_bundle_id"])),
+                    ("Public report", compact_ref(public_report["report_id"])),
+                    ("Rolling window", compact_ref(window.window_hash)),
+                    ("Aggregate score", f"{aggregate_score:.4f}"),
+                    ("Elapsed", f"{time.time() - start:.1f}s"),
+                ),
+            )
         )
         return {
             "status": "completed",

@@ -16,6 +16,7 @@ if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
+from gateway.research_lab.logging_utils import format_worker_block  # noqa: E402
 from gateway.research_lab.scoring_worker import ResearchLabGatewayScoringWorker  # noqa: E402
 from gateway.research_lab.worker import ResearchLabHostedWorker  # noqa: E402
 
@@ -102,36 +103,46 @@ def _configure_scoring_worker(index: int, total_workers: int, worker_prefix: str
 
 
 def _print_hosted_banner(config: ResearchLabGatewayConfig, *, worker_id: str) -> None:
-    print("\n" + "=" * 80, flush=True)
-    print("Research Lab Auto-Research Worker", flush=True)
-    print("=" * 80, flush=True)
-    print(f"Worker ID       : {worker_id}", flush=True)
-    print(f"Worker index    : {config.hosted_worker_index + 1}/{config.hosted_worker_total_workers}", flush=True)
-    print(f"Poll seconds    : {config.hosted_worker_poll_seconds}", flush=True)
-    print(f"Dry run         : {config.hosted_worker_dry_run}", flush=True)
-    print(f"Proxy required  : {config.hosted_worker_require_proxy}", flush=True)
-    print(f"Proxy ref       : {_proxy_ref(config.hosted_worker_proxy_url)}", flush=True)
-    print(f"Runtime target  : {config.auto_research_min_seconds}s-{config.auto_research_max_seconds}s", flush=True)
-    print(f"Iterations      : {config.auto_research_min_iterations}-{config.auto_research_max_iterations}", flush=True)
-    print(f"Candidate limit : {config.hosted_worker_max_candidates}", flush=True)
-    print("=" * 80 + "\n", flush=True)
+    print(
+        format_worker_block(
+            "RESEARCH LAB AUTO-RESEARCH WORKER",
+            (
+                ("Worker ID", worker_id),
+                ("Worker index", f"{config.hosted_worker_index + 1}/{config.hosted_worker_total_workers}"),
+                ("Poll seconds", config.hosted_worker_poll_seconds),
+                ("Dry run", config.hosted_worker_dry_run),
+                ("Proxy required", config.hosted_worker_require_proxy),
+                ("Proxy ref", _proxy_ref(config.hosted_worker_proxy_url)),
+                ("Runtime target", f"{config.auto_research_min_seconds}s-{config.auto_research_max_seconds}s"),
+                ("Iterations", f"{config.auto_research_min_iterations}-{config.auto_research_max_iterations}"),
+                ("Candidate limit", config.hosted_worker_max_candidates),
+            ),
+        )
+        + "\n",
+        flush=True,
+    )
 
 
 def _print_scoring_banner(config: ResearchLabGatewayConfig, *, worker_id: str) -> None:
     baseline_owner = config.scoring_worker_index == 0
-    print("\n" + "=" * 80, flush=True)
-    print("Research Lab Qualification Scoring Worker", flush=True)
-    print("=" * 80, flush=True)
-    print(f"Worker ID       : {worker_id}", flush=True)
-    print(f"Worker index    : {config.scoring_worker_index + 1}/{config.scoring_worker_total_workers}", flush=True)
-    print(f"Poll seconds    : {config.scoring_worker_poll_seconds}", flush=True)
-    print(f"Proxy required  : {config.scoring_worker_require_proxy}", flush=True)
-    print(f"Proxy ref       : {_proxy_ref(config.scoring_worker_proxy_url)}", flush=True)
-    print(f"Baseline daily  : {config.private_baseline_rebenchmark_enabled}", flush=True)
-    print(f"Baseline owner  : {baseline_owner}", flush=True)
-    print(f"Candidate batch : {config.scoring_worker_max_candidates}", flush=True)
-    print(f"Model timeout   : {config.scoring_worker_model_timeout_seconds}s", flush=True)
-    print("=" * 80 + "\n", flush=True)
+    print(
+        format_worker_block(
+            "RESEARCH LAB QUALIFICATION SCORING WORKER",
+            (
+                ("Worker ID", worker_id),
+                ("Worker index", f"{config.scoring_worker_index + 1}/{config.scoring_worker_total_workers}"),
+                ("Poll seconds", config.scoring_worker_poll_seconds),
+                ("Proxy required", config.scoring_worker_require_proxy),
+                ("Proxy ref", _proxy_ref(config.scoring_worker_proxy_url)),
+                ("Baseline daily", config.private_baseline_rebenchmark_enabled),
+                ("Baseline owner", baseline_owner),
+                ("Candidate batch", config.scoring_worker_max_candidates),
+                ("Model timeout", f"{config.scoring_worker_model_timeout_seconds}s"),
+            ),
+        )
+        + "\n",
+        flush=True,
+    )
 
 
 def main() -> int:

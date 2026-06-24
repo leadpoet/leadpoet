@@ -17,6 +17,7 @@ from urllib.error import HTTPError, URLError
 
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.key_vault import OpenRouterKeyVaultError, decrypt_openrouter_key
+from gateway.research_lab.logging_utils import compact_ref, format_worker_block, format_worker_line
 from gateway.research_lab.loop_engine import (
     AutoResearchLoopEngine,
     AutoResearchLoopEvent,
@@ -189,12 +190,17 @@ class ResearchLabHostedWorker:
             outcome = await self.run_once()
             if outcome.processed or outcome.status != "idle":
                 logger.info(
-                    "Research Lab hosted worker pass: status=%s run_id=%s receipt_id=%s candidates=%s error=%s",
-                    outcome.status,
-                    outcome.run_id,
-                    outcome.receipt_id,
-                    len(outcome.candidate_ids),
-                    outcome.error,
+                    format_worker_block(
+                        "RESEARCH LAB AUTO-RESEARCH PASS",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("Status", outcome.status),
+                            ("Run", compact_ref(outcome.run_id)),
+                            ("Receipt", compact_ref(outcome.receipt_id)),
+                            ("Candidates", len(outcome.candidate_ids)),
+                            ("Error", outcome.error),
+                        ),
+                    )
                 )
             elif time.monotonic() - last_idle_log >= idle_log_seconds:
                 logger.info(
@@ -228,10 +234,15 @@ class ResearchLabHostedWorker:
             self._require_worker_proxy_for_execution()
         except HostedResearchLabWorkerError as exc:
             logger.error(
-                "Research Lab worker proxy is required before claiming run: run_id=%s ticket_id=%s worker_ref=%s",
-                run_id,
-                ticket_id,
-                self.worker_ref,
+                format_worker_block(
+                    "RESEARCH LAB AUTO-RESEARCH BLOCKED",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Run", compact_ref(run_id)),
+                        ("Ticket", compact_ref(ticket_id)),
+                        ("Reason", "worker_proxy_required"),
+                    ),
+                )
             )
             return HostedWorkerOutcome(
                 processed=False,
@@ -246,10 +257,15 @@ class ResearchLabHostedWorker:
             return await self._process_run(context)
         except HostedResearchLabClaimLost as exc:
             logger.info(
-                "Research Lab queued run was claimed elsewhere: run_id=%s ticket_id=%s worker_ref=%s",
-                run_id,
-                ticket_id,
-                self.worker_ref,
+                format_worker_block(
+                    "RESEARCH LAB AUTO-RESEARCH CLAIM LOST",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Run", compact_ref(run_id)),
+                        ("Ticket", compact_ref(ticket_id)),
+                        ("Reason", str(exc)[:300]),
+                    ),
+                )
             )
             return HostedWorkerOutcome(
                 processed=False,
@@ -260,7 +276,17 @@ class ResearchLabHostedWorker:
                 error=str(exc)[:500],
             )
         except Exception as exc:
-            logger.exception("Research Lab hosted run failed: run_id=%s ticket_id=%s", run_id, ticket_id)
+            logger.exception(
+                format_worker_block(
+                    "RESEARCH LAB AUTO-RESEARCH FAILED",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Run", compact_ref(run_id)),
+                        ("Ticket", compact_ref(ticket_id)),
+                        ("Error", str(exc)[:300]),
+                    ),
+                )
+            )
             return await self._mark_failed(context, str(exc))
 
     def _require_enabled(self) -> None:
@@ -381,12 +407,19 @@ class ResearchLabHostedWorker:
             registry = coerce_component_registry(metadata)
             benchmark_public_summary = await latest_public_benchmark_summary()
             logger.info(
-                "Research Lab auto-research loop started: run_id=%s ticket_id=%s min_seconds=%s max_seconds=%s max_iterations=%s",
-                context.run_id,
-                context.ticket_id,
-                self.config.auto_research_min_seconds,
-                self.config.auto_research_max_seconds,
-                self.config.auto_research_max_iterations,
+                format_worker_block(
+                    "RESEARCH LAB AUTO-RESEARCH STARTED",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Run", compact_ref(context.run_id)),
+                        ("Ticket", compact_ref(context.ticket_id)),
+                        ("Model", model_id),
+                        ("Min runtime", f"{self.config.auto_research_min_seconds}s"),
+                        ("Max runtime", f"{self.config.auto_research_max_seconds}s"),
+                        ("Max iterations", self.config.auto_research_max_iterations),
+                        ("Max candidates", max_candidates),
+                    ),
+                )
             )
 
             async def _record_loop_event(event: AutoResearchLoopEvent) -> None:
@@ -405,13 +438,29 @@ class ResearchLabHostedWorker:
                     cost_ledger=event.cost_ledger,
                     event_doc=event.event_doc,
                 )
-                if event.event_type in {"patch_validation_passed", "patch_validation_failed", "candidate_selected", "loop_completed", "loop_failed"}:
+                if event.event_type in {"candidate_selected", "loop_completed", "loop_failed"}:
                     logger.info(
-                        "Research Lab auto-research event: run_id=%s event=%s elapsed=%.1fs node=%s",
-                        context.run_id,
-                        event.event_type,
-                        event.elapsed_seconds,
-                        event.node_id,
+                        format_worker_block(
+                            f"RESEARCH LAB AUTO-RESEARCH {event.event_type.replace('_', ' ').upper()}",
+                            (
+                                ("Worker", self.worker_ref),
+                                ("Run", compact_ref(context.run_id)),
+                                ("Event", event.event_type),
+                                ("Elapsed", f"{event.elapsed_seconds:.1f}s"),
+                                ("Node", compact_ref(event.node_id)),
+                            ),
+                        )
+                    )
+                elif event.event_type in {"patch_validation_passed", "patch_validation_failed"}:
+                    logger.info(
+                        format_worker_line(
+                            "Research Lab auto-research event",
+                            worker=self.worker_ref,
+                            run=compact_ref(context.run_id),
+                            event=event.event_type,
+                            elapsed=f"{event.elapsed_seconds:.1f}s",
+                            node=compact_ref(event.node_id),
+                        )
                     )
 
             async def _call_loop_model(
@@ -610,6 +659,21 @@ class ResearchLabHostedWorker:
                 "next_stage": "gateway_qualification_worker_evaluation",
             },
         )
+        logger.info(
+            format_worker_block(
+                "RESEARCH LAB AUTO-RESEARCH QUEUED CANDIDATES",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Run", compact_ref(context.run_id)),
+                    ("Receipt", compact_ref(context.receipt_id)),
+                    ("Candidates", len(candidate_ids)),
+                    ("Iterations", loop_result.iterations_completed),
+                    ("Elapsed", f"{loop_result.elapsed_seconds:.1f}s"),
+                    ("Stop reason", loop_result.stop_reason),
+                    ("Next stage", "gateway_qualification_worker_evaluation"),
+                ),
+            )
+        )
         return HostedWorkerOutcome(
             processed=True,
             dry_run=False,
@@ -690,12 +754,16 @@ class ResearchLabHostedWorker:
         )
         schedule_row = await create_reimbursement_schedule(schedule=schedule, schedule_doc=schedule_doc)
         logger.info(
-            "Research Lab reimbursement decision: run_id=%s status=%s target_usd=%.6f actual_openrouter_usd=%.6f shadow_only=%s",
-            context.run_id,
-            award["status"],
-            float(award["target_reimbursement_usd"]),
-            float(loop_result.actual_openrouter_cost_usd),
-            shadow_only,
+            format_worker_block(
+                "RESEARCH LAB REIMBURSEMENT DECISION",
+                (
+                    ("Run", compact_ref(context.run_id)),
+                    ("Status", award["status"]),
+                    ("Target USD", f"{float(award['target_reimbursement_usd']):.6f}"),
+                    ("OpenRouter USD", f"{float(loop_result.actual_openrouter_cost_usd):.6f}"),
+                    ("Shadow only", shadow_only),
+                ),
+            )
         )
         return {
             "status": award["status"],

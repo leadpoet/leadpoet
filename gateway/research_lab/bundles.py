@@ -121,7 +121,7 @@ def build_shadow_report_bundle(
             "required_checks": [
                 "shadow_flags_enabled",
                 "live_mutation_flags_false",
-                "no_raw_secret_material",
+                "secret_payload_absent",
                 "source_state_hash_matches",
                 "weight_vector_hash_matches",
                 "open_verifier_golden_vectors_pass",
@@ -169,7 +169,7 @@ def build_research_lab_audit_bundle(
         "private_baseline_benchmark_rows": _stable_rows(_redact_rows(benchmark_rows, _AUDIT_BENCHMARK_FIELDS)),
         "private_model_version_rows": _stable_rows(_redact_rows(private_model_version_rows, _AUDIT_PRIVATE_MODEL_VERSION_FIELDS)),
         "candidate_promotion_event_rows": _stable_rows(_redact_rows(promotion_event_rows, _AUDIT_PROMOTION_EVENT_FIELDS)),
-        "private_repo_commit_event_rows": _stable_rows(_redact_rows(private_repo_commit_event_rows, _AUDIT_PRIVATE_REPO_COMMIT_FIELDS)),
+        "repo_commit_event_rows": _stable_rows(_redact_rows(private_repo_commit_event_rows, _AUDIT_PRIVATE_REPO_COMMIT_FIELDS)),
         "public_benchmark_report_rows": _stable_rows(_redact_rows(public_benchmark_report_rows, _AUDIT_PUBLIC_BENCHMARK_FIELDS)),
         "score_bundle_rows": _stable_rows(_redact_rows(score_bundle_rows, _AUDIT_SCORE_BUNDLE_FIELDS)),
     }
@@ -201,17 +201,17 @@ def build_research_lab_audit_bundle(
             "private_baseline_benchmark_count": len(benchmark_rows),
             "private_model_version_count": len(private_model_version_rows),
             "candidate_promotion_event_count": len(promotion_event_rows),
-            "private_repo_commit_event_count": len(private_repo_commit_event_rows),
+            "repo_commit_event_count": len(private_repo_commit_event_rows),
             "public_benchmark_report_count": len(public_benchmark_report_rows),
             "score_bundle_count": len(score_bundle_rows),
         },
         "verifier_contract": {
             "required_checks": [
-                "no_raw_secret_material",
-                "no_private_model_manifest_doc",
-                "no_candidate_patch_manifest",
-                "no_private_image_ref",
-                "no_hidden_icp_plaintext",
+                "secret_payload_absent",
+                "private_manifest_payload_absent",
+                "candidate_patch_payload_absent",
+                "private_image_reference_absent",
+                "sealed_icp_payload_absent",
                 "source_state_hash_matches",
                 "score_bundle_hashes_match",
                 "score_bundle_aggregates_recompute",
@@ -255,9 +255,19 @@ def _stable_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
 def _redact_rows(rows: Sequence[Mapping[str, Any]], allowed_fields: set[str]) -> list[dict[str, Any]]:
     redacted: list[dict[str, Any]] = []
     for row in rows:
-        item = {key: _redact_value(value) for key, value in dict(row).items() if key in allowed_fields}
+        item = {
+            _audit_output_key(key): _redact_value(value)
+            for key, value in dict(row).items()
+            if key in allowed_fields
+        }
         redacted.append(item)
     return redacted
+
+
+def _audit_output_key(key: str) -> str:
+    if key == "private_repo_ref_hash":
+        return "repo_ref_hash"
+    return key
 
 
 def _redact_value(value: Any) -> Any:

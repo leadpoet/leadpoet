@@ -1150,9 +1150,11 @@ async def create_participation_snapshot(
     )
     if existing:
         return existing
+    snapshot_ref = "research_island_participation_snapshot:" + input_hash.split(":", 1)[1]
     row = {
         "participation_snapshot_id": str(uuid4()),
         "schema_version": "1.0",
+        "snapshot_ref": snapshot_ref,
         **payload,
         "input_hash": input_hash,
     }

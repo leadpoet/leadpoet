@@ -444,27 +444,6 @@ class ResearchLabGatewayScoringWorker:
 
     async def _maybe_run_private_baseline(self) -> dict[str, Any] | None:
         today = datetime.now(timezone.utc).date().isoformat()
-        existing = await select_many(
-            "research_lab_private_model_benchmark_bundles",
-            columns="benchmark_bundle_id",
-            filters=(("benchmark_date", today),),
-            limit=1,
-        )
-        if existing:
-            if self._baseline_already_logged_date != today:
-                logger.info(
-                    format_worker_block(
-                        "RESEARCH LAB PRIVATE BASELINE ALREADY BENCHMARKED",
-                        (
-                            ("Worker", self.worker_ref),
-                            ("Benchmark date", today),
-                            ("Worker index", f"{self.config.scoring_worker_index + 1}/{self.config.scoring_worker_total_workers}"),
-                        ),
-                    )
-                )
-                self._baseline_already_logged_date = today
-            return {"status": "already_benchmarked", "benchmark_date": today}
-
         start = time.time()
         logger.info(
             format_worker_block(
@@ -485,6 +464,33 @@ class ResearchLabGatewayScoringWorker:
             icps_per_day=self.config.lab_champion_icps_per_day,
             allow_partial=self.config.scoring_worker_allow_partial_icp_window,
         )
+        existing = await select_many(
+            "research_lab_private_model_benchmark_bundles",
+            columns="benchmark_bundle_id",
+            filters=(("benchmark_date", today), ("rolling_window_hash", window.window_hash)),
+            limit=1,
+        )
+        if existing:
+            already_key = f"{today}:{window.window_hash}"
+            if self._baseline_already_logged_date != already_key:
+                logger.info(
+                    format_worker_block(
+                        "RESEARCH LAB PRIVATE BASELINE ALREADY BENCHMARKED",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("Benchmark date", today),
+                            ("Rolling window", compact_ref(window.window_hash)),
+                            ("Selected ICPs", len(window.item_refs)),
+                            ("Worker index", f"{self.config.scoring_worker_index + 1}/{self.config.scoring_worker_total_workers}"),
+                        ),
+                    )
+                )
+                self._baseline_already_logged_date = already_key
+            return {
+                "status": "already_benchmarked",
+                "benchmark_date": today,
+                "rolling_window_hash": window.window_hash,
+            }
         await create_rolling_icp_window(window)
         active = await load_active_private_model(self.config, register_bootstrap=True)
         artifact = active.artifact

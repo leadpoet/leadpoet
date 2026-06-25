@@ -26,7 +26,7 @@ from gateway.utils.bans import is_hotkey_banned
 
 from .allocations import build_research_lab_allocation_bundle
 from .arweave_audit import latest_arweave_anchor
-from .bundles import build_research_lab_audit_bundle, build_shadow_report_bundle
+from .bundles import build_research_lab_audit_bundle, build_shadow_report_bundle, contains_secret_material
 from .config import ResearchLabGatewayConfig
 from .key_vault import (
     OpenRouterKeyVaultError,
@@ -1103,14 +1103,18 @@ async def _topup_continuation_context(*, ticket_id: str, run_id: str) -> dict[st
     )
     candidate_summaries = []
     for row in candidate_rows[:5]:
-        candidate_summaries.append(
-            {
-                "candidate_id": str(row.get("candidate_id") or ""),
-                "status": str(row.get("current_candidate_status") or ""),
-                "score_bundle_id": str(row.get("current_score_bundle_id") or ""),
-                "redacted_public_summary": str(row.get("redacted_public_summary") or "")[:500],
-            }
-        )
+        score_bundle_id = str(row.get("current_score_bundle_id") or "")
+        score_summary = await _candidate_score_summary(score_bundle_id)
+        candidate_doc = {
+            "candidate_id": str(row.get("candidate_id") or ""),
+            "status": str(row.get("current_candidate_status") or ""),
+            "score_bundle_id": score_bundle_id,
+            "redacted_public_summary": _safe_public_context_text(row.get("redacted_public_summary"), max_length=500),
+        }
+        if score_summary:
+            candidate_doc["score_summary"] = score_summary
+        candidate_summaries.append(candidate_doc)
+    reflections = _topup_reflection_summaries(event_rows)
     return {
         "schema_version": "1.0",
         "prior_run_id": run_id,
@@ -1118,7 +1122,78 @@ async def _topup_continuation_context(*, ticket_id: str, run_id: str) -> dict[st
         "prior_event_count": len(event_rows),
         "prior_candidate_count": len(candidate_rows),
         "prior_candidates": candidate_summaries,
+        "prior_reflections": reflections,
     }
+
+
+async def _candidate_score_summary(score_bundle_id: str) -> dict[str, Any] | None:
+    if not score_bundle_id:
+        return None
+    row = await select_one(
+        "research_evaluation_score_bundle_current",
+        filters=(("score_bundle_id", score_bundle_id),),
+    )
+    if not row:
+        return None
+    bundle = row.get("score_bundle_doc") if isinstance(row.get("score_bundle_doc"), Mapping) else {}
+    aggregates = bundle.get("aggregates") if isinstance(bundle.get("aggregates"), Mapping) else {}
+    summary = {
+        "base_score": _float_or_none(aggregates.get("base_score")),
+        "candidate_score": _float_or_none(aggregates.get("candidate_score")),
+        "mean_delta": _float_or_none(aggregates.get("mean_delta")),
+        "delta_lcb": _float_or_none(aggregates.get("delta_lcb")),
+        "icp_count": _int_or_none(aggregates.get("icp_count")),
+        "successful_icp_count": _int_or_none(aggregates.get("successful_icp_count")),
+        "failure_count": _int_or_none(aggregates.get("failure_count")),
+    }
+    compact = {key: value for key, value in summary.items() if value is not None}
+    return compact or None
+
+
+def _topup_reflection_summaries(event_rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    reflections: list[dict[str, str]] = []
+    for row in event_rows:
+        if str(row.get("event_type") or "") != "reflection_recorded":
+            continue
+        event_doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
+        reflection = event_doc.get("reflection") if isinstance(event_doc.get("reflection"), Mapping) else {}
+        if not reflection:
+            continue
+        item = {
+            "worked": _safe_public_context_text(reflection.get("worked"), max_length=300),
+            "failed": _safe_public_context_text(reflection.get("failed"), max_length=300),
+            "why": _safe_public_context_text(reflection.get("why"), max_length=300),
+            "next_question": _safe_public_context_text(reflection.get("next_question"), max_length=300),
+            "decision": _safe_public_context_text(reflection.get("decision"), max_length=40),
+        }
+        clean = {key: value for key, value in item.items() if value}
+        if clean and not contains_secret_material(clean):
+            reflections.append(clean)
+        if len(reflections) >= 5:
+            break
+    return reflections
+
+
+def _safe_public_context_text(value: object, *, max_length: int) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s+", " ", text)[:max_length]
+    return "" if contains_secret_material(text) else text
+
+
+def _float_or_none(value: object) -> float | None:
+    try:
+        return round(float(value), 6)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _validate_score_bundle_matches_candidate(bundle: dict[str, object], candidate: dict[str, object]) -> None:

@@ -47,6 +47,7 @@ class AutoResearchCandidateDraft:
     target_component_id: str
     patch_doc: dict[str, Any]
     redacted_summary: str
+    focus_alignment: str = ""
     predicted_delta: float = 1.0
     falsifier: str = "proxy_score"
 
@@ -57,6 +58,7 @@ class AutoResearchCandidateDraft:
                 "mechanism": self.mechanism,
                 "expected_improvement": self.expected_improvement,
                 "risk": self.risk,
+                "focus_alignment": self.focus_alignment,
                 "predicted_delta": self.predicted_delta,
                 "falsifier": self.falsifier,
             },
@@ -104,7 +106,10 @@ def build_default_auto_research_messages(
         "- Return at most max_candidates candidates.\n"
         "- Respect budget_context: use fewer, more precise candidates when the compute budget is small.\n"
         "- For top_up payment_kind, focus on pushing the prior promising direction over starting broad new exploration.\n"
-        "- Treat ticket.brief_public_summary as an optional miner research direction, not as a client-specific ICP.\n"
+        "- If ticket.brief_public_summary is present, treat it as the miner's research focus. Each candidate must either "
+        "directly address that focus or explain why a broader adjacent fix is safer for the sealed benchmark.\n"
+        "- Include hypothesis.focus_alignment for every candidate. Keep it short and public-safe.\n"
+        "- Do not treat ticket.brief_public_summary as a client-specific ICP.\n"
         "- Do not overfit to one supplied market segment; propose changes that should generalize across sealed benchmark items.\n"
         "- Allowed patch types: PROMPT_EDIT, PARAM_EDIT, STRATEGY_SWAP.\n"
         "- Never use CODE_EDIT or SOURCE_ADD.\n"
@@ -117,7 +122,7 @@ def build_default_auto_research_messages(
         "- Prefer narrower, testable changes over broad vague changes.\n\n"
         "Expected output shape:\n"
         "{\"candidates\":[{\"hypothesis\":{\"failure_mode\":\"...\",\"mechanism\":\"...\","
-        "\"expected_improvement\":\"...\",\"risk\":\"...\",\"predicted_delta\":1.0,"
+        "\"expected_improvement\":\"...\",\"risk\":\"...\",\"focus_alignment\":\"...\",\"predicted_delta\":1.0,"
         "\"falsifier\":\"proxy_score\"},\"patch\":{\"patch_type\":\"PROMPT_EDIT\","
         "\"target_component_id\":\"...\",\"patch_doc\":{},\"redacted_summary\":\"...\"}}]}\n\n"
         "Context JSON:\n"
@@ -160,6 +165,7 @@ def parse_auto_research_response(raw_text: str, *, max_candidates: int = 3) -> l
                 mechanism=str(hypothesis.get("mechanism") or "")[:900],
                 expected_improvement=str(hypothesis.get("expected_improvement") or "")[:900],
                 risk=str(hypothesis.get("risk") or "")[:600],
+                focus_alignment=str(hypothesis.get("focus_alignment") or "")[:500],
                 predicted_delta=float(hypothesis.get("predicted_delta") or 1.0),
                 falsifier=falsifier,
                 patch_type=patch_type,

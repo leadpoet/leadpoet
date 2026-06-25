@@ -728,15 +728,50 @@ class ResearchLabGatewayScoringWorker:
             for item_index, item in enumerate(window.benchmark_items, start=1):
                 item_start = time.time()
                 label = str(item.get("icp_ref") or item.get("icp_hash") or "unknown_icp")
-                outputs = ensure_private_model_outputs(
-                    await asyncio.to_thread(runner, item["icp"], {"mode": "private_baseline"}),
-                    context_label=f"private baseline for {label}",
-                    require_non_empty=False,
+                logger.info(
+                    format_worker_block(
+                        "RESEARCH LAB PRIVATE BASELINE ICP STARTED",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("ICP", f"{item_index}/{total_icps}"),
+                            ("ICP ref", compact_ref(label)),
+                            ("ICP hash", compact_ref(item.get("icp_hash"))),
+                            ("Set", item.get("set_id")),
+                            ("Day", item.get("day_index")),
+                            ("Day rank", item.get("day_rank")),
+                        ),
+                    )
                 )
+                runtime_error = ""
+                try:
+                    outputs = ensure_private_model_outputs(
+                        await asyncio.to_thread(runner, item["icp"], {"mode": "private_baseline"}),
+                        context_label=f"private baseline for {label}",
+                        require_non_empty=False,
+                    )
+                except PrivateModelRuntimeError as exc:
+                    outputs = []
+                    runtime_error = _short_error(exc)
+                    logger.warning(
+                        format_worker_block(
+                            "RESEARCH LAB PRIVATE BASELINE ICP RUNTIME ERROR",
+                            (
+                                ("Worker", self.worker_ref),
+                                ("ICP", f"{item_index}/{total_icps}"),
+                                ("ICP ref", compact_ref(label)),
+                                ("ICP hash", compact_ref(item.get("icp_hash"))),
+                                ("Error", runtime_error),
+                            ),
+                        )
+                    )
                 item_elapsed = time.time() - item_start
                 if outputs:
                     nonempty_output_count += 1
-                score_breakdowns = await scorer.score_with_breakdowns(outputs, item["icp"], True)
+                score_breakdowns = (
+                    await scorer.score_with_breakdowns(outputs, item["icp"], True)
+                    if outputs
+                    else []
+                )
                 scores = [float(row.get("final_score", 0.0) or 0.0) for row in score_breakdowns]
                 icp_score = _average(scores)
                 logger.info(
@@ -753,6 +788,7 @@ class ResearchLabGatewayScoringWorker:
                             ("Score", f"{icp_score:.4f}"),
                             ("Companies", len(scores)),
                             ("Non-empty output", bool(outputs)),
+                            ("Runtime error", runtime_error or "-"),
                             ("ICP runtime", f"{item_elapsed:.1f}s"),
                             ("Elapsed", f"{time.time() - start:.1f}s"),
                         ),
@@ -769,14 +805,20 @@ class ResearchLabGatewayScoringWorker:
                         "The private model is not executing the full provider-backed sourcing path; "
                         "check Docker env passthrough, provider keys, proxy connectivity, and ICP canonicalization."
                     )
-                per_icp_summaries.append(
-                    sanitize_benchmark_item_summary(
-                        item=item,
-                        score=icp_score,
-                        company_count=len(scores),
-                        score_breakdowns=score_breakdowns,
-                    )
+                item_summary = sanitize_benchmark_item_summary(
+                    item=item,
+                    score=icp_score,
+                    company_count=len(scores),
+                    score_breakdowns=score_breakdowns,
                 )
+                if runtime_error:
+                    diagnostics = dict(item_summary.get("diagnostics") or {})
+                    categories = set(diagnostics.get("failure_categories") or [])
+                    categories.add("runtime_provider_error")
+                    diagnostics["failure_categories"] = sorted(categories)
+                    diagnostics["runtime_error"] = runtime_error
+                    item_summary["diagnostics"] = diagnostics
+                per_icp_summaries.append(item_summary)
             if nonempty_output_count <= 0:
                 raise PrivateModelRuntimeError(
                     f"private baseline returned zero companies across all {len(window.benchmark_items)} ICPs"

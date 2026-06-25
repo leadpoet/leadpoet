@@ -73,6 +73,23 @@ def _error_backoff_seconds() -> float:
         return 60.0
 
 
+def _status_age_seconds(raw_status_at: object) -> float | None:
+    if not raw_status_at:
+        return None
+    try:
+        status_at = datetime.fromisoformat(str(raw_status_at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if status_at.tzinfo is None:
+        status_at = status_at.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - status_at.astimezone(timezone.utc)).total_seconds()
+
+
+def _status_is_stale(raw_status_at: object, stale_after_seconds: int) -> bool:
+    age_seconds = _status_age_seconds(raw_status_at)
+    return age_seconds is not None and age_seconds > max(60, int(stale_after_seconds or 7200))
+
+
 class HostedResearchLabWorkerError(RuntimeError):
     """Raised when a hosted Research Lab run cannot complete safely."""
 
@@ -245,6 +262,8 @@ class ResearchLabHostedWorker:
 
     async def run_once(self) -> HostedWorkerOutcome:
         self._require_enabled()
+        if not self.config.hosted_worker_dry_run:
+            await self._recover_stale_started_runs()
         queued = await self._next_queued_run()
         if not queued:
             return HostedWorkerOutcome(processed=False, dry_run=self.config.hosted_worker_dry_run)
@@ -362,6 +381,58 @@ class ResearchLabHostedWorker:
         # Avoid starvation if this worker's preferred shard is temporarily empty.
         # Claim conflicts are handled as no-ops, not failures.
         return rows[0]
+
+    async def _recover_stale_started_runs(self) -> int:
+        stale_after_seconds = max(60, int(self.config.active_loop_stale_after_seconds or 7200))
+        rows = await select_many(
+            "research_loop_run_queue_current",
+            columns=(
+                "run_id,ticket_id,current_queue_status,current_status_at,"
+                "current_event_hash,queue_priority,worker_ref"
+            ),
+            filters=(("current_queue_status", "started"),),
+            order_by=(("current_status_at", True),),
+            limit=50,
+        )
+        recovered = 0
+        for row in rows:
+            if not _status_is_stale(row.get("current_status_at"), stale_after_seconds):
+                continue
+            run_id = str(row.get("run_id") or "")
+            ticket_id = str(row.get("ticket_id") or "")
+            if not run_id or not ticket_id:
+                continue
+            try:
+                await create_queue_event(
+                    run_id=run_id,
+                    ticket_id=ticket_id,
+                    event_type="queued",
+                    queue_priority=int(row.get("queue_priority") or 0),
+                    worker_ref=self.worker_ref,
+                    reason="stale_started_requeued",
+                    event_doc={
+                        "recovering_worker_ref": self.worker_ref,
+                        "previous_worker_ref": row.get("worker_ref"),
+                        "previous_event_hash": row.get("current_event_hash"),
+                        "previous_status_at": row.get("current_status_at"),
+                        "stale_after_seconds": stale_after_seconds,
+                    },
+                )
+                recovered += 1
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_stale_hosted_run_requeue_failed run_id=%s error=%s",
+                    compact_ref(run_id),
+                    str(exc)[:240],
+                )
+        if recovered:
+            logger.info(
+                "research_lab_stale_hosted_runs_requeued worker_ref=%s count=%s stale_after_seconds=%s",
+                self.worker_ref,
+                recovered,
+                stale_after_seconds,
+            )
+        return recovered
 
     async def _load_run_context(self, queue_row: Mapping[str, Any]) -> HostedRunContext:
         ticket = await select_one(
@@ -893,7 +964,7 @@ class ResearchLabHostedWorker:
         if not current or current.get("current_queue_status") != "queued":
             raise HostedResearchLabClaimLost("queued Research Lab run is no longer queued")
         try:
-            await create_queue_event(
+            started_event = await create_queue_event(
                 run_id=context.run_id,
                 ticket_id=context.ticket_id,
                 event_type="started",
@@ -906,6 +977,18 @@ class ResearchLabHostedWorker:
             if _is_claim_race_error(exc):
                 raise HostedResearchLabClaimLost("queued Research Lab run was claimed by another worker") from exc
             raise
+        current_after = await select_one(
+            "research_loop_run_queue_current",
+            columns="run_id,current_queue_status,worker_ref,current_event_hash,current_event_seq",
+            filters=(("run_id", context.run_id),),
+        )
+        if (
+            not current_after
+            or current_after.get("current_queue_status") != "started"
+            or current_after.get("worker_ref") != self.worker_ref
+            or current_after.get("current_event_hash") != started_event.get("anchored_hash")
+        ):
+            raise HostedResearchLabClaimLost("queued Research Lab run claim was superseded before execution")
         await create_ticket_event(
             ticket_id=context.ticket_id,
             event_type="running",

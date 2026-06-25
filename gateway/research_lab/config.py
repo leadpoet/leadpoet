@@ -119,7 +119,7 @@ class ResearchLabGatewayConfig:
     hosted_worker_poll_seconds: int = 15
     hosted_worker_max_runs: int = 0
     hosted_worker_max_candidates: int = 3
-    hosted_worker_dry_run: bool = True
+    hosted_worker_dry_run: bool = False
     hosted_worker_id: str = ""
     hosted_worker_index: int = 0
     hosted_worker_total_workers: int = 1
@@ -248,7 +248,7 @@ class ResearchLabGatewayConfig:
             hosted_worker_poll_seconds=_int("RESEARCH_LAB_HOSTED_WORKER_POLL_SECONDS", 15),
             hosted_worker_max_runs=_int("RESEARCH_LAB_HOSTED_WORKER_MAX_RUNS", 0),
             hosted_worker_max_candidates=max(1, _int("RESEARCH_LAB_HOSTED_WORKER_MAX_CANDIDATES", 3)),
-            hosted_worker_dry_run=_truthy("RESEARCH_LAB_HOSTED_WORKER_DRY_RUN", "true"),
+            hosted_worker_dry_run=_truthy("RESEARCH_LAB_HOSTED_WORKER_DRY_RUN", "false"),
             hosted_worker_id=os.getenv("RESEARCH_LAB_HOSTED_WORKER_ID", ""),
             hosted_worker_index=worker_index,
             hosted_worker_total_workers=total_workers,

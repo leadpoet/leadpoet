@@ -147,6 +147,7 @@ class AutoResearchLoopEngine:
         estimated_cost = 0.0
         actual_cost_microusd = 0
         provider_usage: list[dict[str, Any]] = []
+        budget_limit_microusd = _budget_limit_microusd(budget_context)
 
         await self.event_sink(
             AutoResearchLoopEvent(
@@ -178,6 +179,13 @@ class AutoResearchLoopEngine:
                 and len(selected) >= settings.max_candidates
             ):
                 stop_reason = "candidate_limit_reached_after_minimum_runtime"
+                break
+            if _would_exceed_budget(
+                actual_cost_microusd,
+                _estimated_call_microusd(settings.estimated_iteration_cost_usd),
+                budget_limit_microusd,
+            ):
+                stop_reason = "compute_budget_exhausted_before_next_draft"
                 break
 
             iteration += 1
@@ -396,6 +404,21 @@ class AutoResearchLoopEngine:
                         }
                     )
 
+            reflection_estimate_microusd = _estimated_call_microusd(
+                max(0.01, settings.estimated_iteration_cost_usd * 0.25)
+            )
+            if _would_exceed_budget(actual_cost_microusd, reflection_estimate_microusd, budget_limit_microusd):
+                reflections.append(
+                    {
+                        "worked": "draft call completed",
+                        "failed": "reflection skipped",
+                        "why": "compute budget would be exceeded by next estimated call",
+                        "next_question": "stop or continue with additional budget",
+                        "decision": "stop",
+                    }
+                )
+                stop_reason = "compute_budget_exhausted_before_reflection"
+                break
             reflection, reflection_usage = await self._reflect(
                 run_id=run_id,
                 iteration=iteration,
@@ -647,6 +670,26 @@ def _safe_budget_doc(value: Mapping[str, Any]) -> dict[str, Any]:
         "topup_reason",
     }
     return {key: value[key] for key in allowed if key in value}
+
+
+def _budget_limit_microusd(budget_context: Mapping[str, Any]) -> int:
+    try:
+        budget_usd = float(budget_context.get("requested_compute_budget_usd") or 0.0)
+    except (TypeError, ValueError):
+        budget_usd = 0.0
+    return max(0, int(round(budget_usd * 1_000_000)))
+
+
+def _estimated_call_microusd(estimated_cost_usd: float) -> int:
+    try:
+        estimate = float(estimated_cost_usd)
+    except (TypeError, ValueError):
+        estimate = 0.0
+    return max(1, int(round(max(0.0, estimate) * 1_000_000)))
+
+
+def _would_exceed_budget(actual_cost_microusd: int, estimated_next_call_microusd: int, budget_limit_microusd: int) -> bool:
+    return budget_limit_microusd > 0 and max(0, actual_cost_microusd) + max(0, estimated_next_call_microusd) > budget_limit_microusd
 
 
 def _coerce_call_result(value: str | OpenRouterCallResult) -> OpenRouterCallResult:

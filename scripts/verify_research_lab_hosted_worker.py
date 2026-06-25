@@ -318,6 +318,67 @@ async def _verify_auto_research_loop_engine(artifact: PrivateModelArtifactManife
     if "candidate_selected" in event_types and "reflection_recorded" in event_types:
         if event_types.index("candidate_selected") < event_types.index("reflection_recorded"):
             errors.append("auto-research loop selected candidates before recording any reflection")
+
+    budget_guard_events: list[AutoResearchLoopEvent] = []
+    budget_guard_calls: list[dict[str, object]] = []
+
+    async def _budget_guard_call(messages, timeout_seconds: int, max_tokens: int) -> OpenRouterCallResult:
+        budget_guard_calls.append({"timeout_seconds": timeout_seconds, "max_tokens": max_tokens, "message_count": len(messages)})
+        if max_tokens <= 700:
+            return OpenRouterCallResult(
+                content='{"worked":"reflection should not run","failed":"budget guard failed","why":"unexpected reflection","next_question":"stop","decision":"stop"}',
+                provider_usage={"provider": "openrouter", "response_id": "unexpected-reflection", "cost_microusd": 100000},
+                cost_microusd=100000,
+            )
+        return OpenRouterCallResult(
+            content=_candidate_response(),
+            provider_usage={"provider": "openrouter", "response_id": "budget-draft", "cost_microusd": 1000000},
+            cost_microusd=1000000,
+        )
+
+    async def _budget_guard_event_sink(event: AutoResearchLoopEvent) -> None:
+        budget_guard_events.append(event)
+
+    budget_guard_result = await AutoResearchLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=5,
+            min_iterations=1,
+            max_iterations=2,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.5,
+            max_candidates=1,
+        ),
+        call_openrouter=_budget_guard_call,
+        event_sink=_budget_guard_event_sink,
+    ).run(
+        run_id="33333333-3333-4333-8333-333333333333",
+        ticket={
+            "ticket_id": "44444444-4444-4444-8444-444444444444",
+            "miner_hotkey": "5FminerHotkey222",
+            "island": "generalist",
+            "brief_sanitized_ref": "brief_sanitized:sha256:def456",
+            "ticket_doc": {"brief_public_summary": "benchmark-wide improvement"},
+            "requested_loop_count": 2,
+        },
+        artifact=artifact,
+        component_registry=registry,
+        benchmark_public_summary={"item_count": "validator_resolved"},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 1.1, "research_model_tier": "default"},
+        requested_loop_count=2,
+        miner_brief_ref="brief_sanitized:sha256:def456",
+    )
+    budget_guard_event_types = [event.event_type for event in budget_guard_events]
+    if len(budget_guard_calls) != 1:
+        errors.append("auto-research hard budget guard did not stop before reflection")
+    if budget_guard_result.stop_reason != "compute_budget_exhausted_before_reflection":
+        errors.append("auto-research hard budget guard did not report reflection budget exhaustion")
+    if budget_guard_result.actual_openrouter_cost_microusd != 1000000:
+        errors.append("auto-research hard budget guard did not preserve actual draft spend only")
+    if "reflection_recorded" in budget_guard_event_types:
+        errors.append("auto-research hard budget guard still recorded a reflection")
     return errors
 
 

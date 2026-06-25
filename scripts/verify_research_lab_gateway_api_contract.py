@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from inspect import signature
 from pathlib import Path
 import sys
@@ -15,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from fastapi import HTTPException
 
+import gateway.research_lab.api as research_lab_api
 from gateway.research_lab.api import (
     _OPENROUTER_KEY_REGISTRATION_ATTEMPTS,
     _enforce_openrouter_key_registration_rate_limit,
@@ -163,6 +165,7 @@ def main() -> int:
     ref = openrouter_key_ref(miner_hotkey=ticket.miner_hotkey, key_hash="a" * 64)
     if not ref.startswith("encrypted_ref:openrouter:") or len(ref.rsplit(":", 1)[-1]) != 32:
         errors.append("OpenRouter key ref shape is invalid")
+    errors.extend(asyncio.run(_verify_openrouter_key_ref_validation(ticket.miner_hotkey, ref)))
     try:
         _OPENROUTER_KEY_REGISTRATION_ATTEMPTS.clear()
         _enforce_openrouter_key_registration_rate_limit(ticket.miner_hotkey)
@@ -377,6 +380,60 @@ def main() -> int:
         return 1
     print("Research Lab gateway API contract verified: routes mounted, flags default false, models round-trip, raw key rejected.")
     return 0
+
+
+async def _verify_openrouter_key_ref_validation(miner_hotkey: str, key_ref: str) -> list[str]:
+    errors: list[str] = []
+    original_select_one = research_lab_api.select_one
+    expected_row = {
+        "key_ref": key_ref,
+        "miner_hotkey": miner_hotkey,
+        "preflight_status": "passed",
+    }
+
+    async def fake_select_one(table: str, **kwargs):
+        if table != "research_lab_openrouter_key_refs":
+            raise AssertionError(f"unexpected select_one table: {table}")
+        filters = dict(kwargs.get("filters") or ())
+        if filters.get("key_ref") == key_ref and filters.get("miner_hotkey") == miner_hotkey:
+            return dict(expected_row)
+        return None
+
+    research_lab_api.select_one = fake_select_one
+    try:
+        config = ResearchLabGatewayConfig(miner_openrouter_key_required=True)
+        try:
+            await research_lab_api._validate_miner_openrouter_key_ref(
+                config,
+                miner_hotkey=miner_hotkey,
+                key_ref=key_ref,
+                key_handling="encrypted_ref",
+            )
+        except HTTPException as exc:
+            errors.append(f"valid encrypted OpenRouter key ref was rejected: {exc.detail}")
+        try:
+            await research_lab_api._validate_miner_openrouter_key_ref(
+                config,
+                miner_hotkey="5FotherHotkey11111111111111111111111111111",
+                key_ref=key_ref,
+                key_handling="encrypted_ref",
+            )
+            errors.append("encrypted OpenRouter key ref ownership mismatch was accepted")
+        except HTTPException:
+            pass
+        try:
+            await research_lab_api._validate_miner_openrouter_key_ref(
+                config,
+                miner_hotkey=miner_hotkey,
+                key_ref="ephemeral_ref:client-claimed",
+                key_handling="encrypted_ref",
+            )
+            errors.append("encrypted OpenRouter key handling accepted a non-encrypted ref")
+        except HTTPException:
+            pass
+    finally:
+        research_lab_api.select_one = original_select_one
+    return errors
 
 
 if __name__ == "__main__":

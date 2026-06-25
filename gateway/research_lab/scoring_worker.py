@@ -83,6 +83,23 @@ def _short_error(exc: BaseException) -> str:
     return f"{exc.__class__.__name__}: {str(exc)[:300]}"
 
 
+def _status_age_seconds(raw_status_at: object) -> float | None:
+    if not raw_status_at:
+        return None
+    try:
+        status_at = datetime.fromisoformat(str(raw_status_at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if status_at.tzinfo is None:
+        status_at = status_at.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - status_at.astimezone(timezone.utc)).total_seconds()
+
+
+def _status_is_stale(raw_status_at: object, stale_after_seconds: int) -> bool:
+    age_seconds = _status_age_seconds(raw_status_at)
+    return age_seconds is not None and age_seconds > max(60, int(stale_after_seconds))
+
+
 class ResearchLabGatewayScoringWorker:
     """Scores Research Lab candidates inside the gateway trust boundary."""
 
@@ -153,6 +170,8 @@ class ResearchLabGatewayScoringWorker:
         if self.config.scoring_worker_require_proxy and not self.proxy_url:
             return {"processed": False, "status": "scoring_worker_proxy_required"}
 
+        await self._recover_stale_candidate_claims()
+
         baseline_result = None
         if self.config.private_baseline_rebenchmark_enabled and self._is_private_baseline_owner():
             baseline_result = await self._maybe_run_private_baseline()
@@ -216,7 +235,7 @@ class ResearchLabGatewayScoringWorker:
         )
         if not fresh or fresh.get("current_candidate_status") != "queued":
             return None
-        await create_candidate_evaluation_event(
+        assigned_event = await create_candidate_evaluation_event(
             candidate_id=candidate_id,
             run_id=str(candidate["run_id"]),
             ticket_id=str(candidate["ticket_id"]),
@@ -229,6 +248,23 @@ class ResearchLabGatewayScoringWorker:
                 "proxy_ref_hash": self.proxy_ref_hash,
             },
         )
+        assigned_current = await select_one(
+            "research_lab_candidate_evaluation_current",
+            columns="candidate_id,current_candidate_status,current_evaluator_ref,current_event_hash",
+            filters=(("candidate_id", candidate_id),),
+        )
+        if (
+            not assigned_current
+            or assigned_current.get("current_candidate_status") != "assigned"
+            or assigned_current.get("current_evaluator_ref") != self.worker_ref
+            or assigned_current.get("current_event_hash") != assigned_event.get("anchored_hash")
+        ):
+            logger.info(
+                "research_lab_candidate_claim_lost candidate_id=%s worker_ref=%s",
+                compact_ref(candidate_id),
+                self.worker_ref,
+            )
+            return None
         await safe_project_public_loop_activity(
             str(candidate["ticket_id"]),
             source_ref=f"candidate_assigned:{candidate_id}",
@@ -248,6 +284,65 @@ class ResearchLabGatewayScoringWorker:
             )
         )
         return candidate
+
+    async def _recover_stale_candidate_claims(self) -> int:
+        stale_after_seconds = max(120, int(self.config.scoring_worker_model_timeout_seconds or 900) + 60)
+        rows: list[dict[str, Any]] = []
+        for status in ("assigned", "evaluating"):
+            rows.extend(
+                await select_many(
+                    "research_lab_candidate_evaluation_current",
+                    columns=(
+                        "candidate_id,run_id,ticket_id,current_candidate_status,current_status_at,"
+                        "current_evaluator_ref,current_event_hash"
+                    ),
+                    filters=(("current_candidate_status", status),),
+                    order_by=(("current_status_at", True),),
+                    limit=50,
+                )
+            )
+        recovered = 0
+        for row in rows:
+            if not _status_is_stale(row.get("current_status_at"), stale_after_seconds):
+                continue
+            candidate_id = str(row.get("candidate_id") or "")
+            run_id = str(row.get("run_id") or "")
+            ticket_id = str(row.get("ticket_id") or "")
+            if not candidate_id or not run_id or not ticket_id:
+                continue
+            try:
+                await create_candidate_evaluation_event(
+                    candidate_id=candidate_id,
+                    run_id=run_id,
+                    ticket_id=ticket_id,
+                    event_type="queued",
+                    candidate_status="queued",
+                    evaluator_ref=self.worker_ref,
+                    reason="stale_gateway_scoring_requeued",
+                    event_doc={
+                        "recovering_worker_ref": self.worker_ref,
+                        "previous_evaluator_ref": row.get("current_evaluator_ref"),
+                        "previous_candidate_status": row.get("current_candidate_status"),
+                        "previous_event_hash": row.get("current_event_hash"),
+                        "previous_status_at": row.get("current_status_at"),
+                        "stale_after_seconds": stale_after_seconds,
+                    },
+                )
+                recovered += 1
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_stale_candidate_requeue_failed candidate_id=%s error=%s",
+                    compact_ref(candidate_id),
+                    str(exc)[:240],
+                )
+        if recovered:
+            logger.info(
+                "research_lab_stale_candidates_requeued worker_ref=%s count=%s stale_after_seconds=%s",
+                self.worker_ref,
+                recovered,
+                stale_after_seconds,
+            )
+        return recovered
 
     async def _score_candidate(self, candidate: Mapping[str, Any]) -> None:
         candidate_id = str(candidate["candidate_id"])

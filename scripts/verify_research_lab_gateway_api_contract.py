@@ -14,7 +14,13 @@ if str(ROOT) not in sys.path:
 
 from fastapi import HTTPException
 
-from gateway.research_lab.api import _effective_budget_doc, _validate_allowed_research_island, router
+from gateway.research_lab.api import (
+    _OPENROUTER_KEY_REGISTRATION_ATTEMPTS,
+    _effective_budget_doc,
+    _enforce_openrouter_key_registration_rate_limit,
+    _validate_allowed_research_island,
+    router,
+)
 from gateway.research_lab.bundles import build_shadow_report_bundle, sha256_json
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.models import (
@@ -135,6 +141,13 @@ def main() -> int:
     ref = openrouter_key_ref(miner_hotkey=ticket.miner_hotkey, key_hash="a" * 64)
     if not ref.startswith("encrypted_ref:openrouter:") or len(ref.rsplit(":", 1)[-1]) != 32:
         errors.append("OpenRouter key ref shape is invalid")
+    try:
+        _OPENROUTER_KEY_REGISTRATION_ATTEMPTS.clear()
+        _enforce_openrouter_key_registration_rate_limit(ticket.miner_hotkey)
+    except NameError:
+        errors.append("OpenRouter key registration rate limiter helper is missing")
+    except HTTPException:
+        errors.append("first OpenRouter key registration attempt was rate limited")
 
     loop_start = ResearchLabLoopStartRequest(
         miner_hotkey=ticket.miner_hotkey,

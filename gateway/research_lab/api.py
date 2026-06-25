@@ -10,6 +10,7 @@ import asyncio
 import logging
 import re
 import secrets
+import time
 from typing import Any, Mapping, Optional
 from uuid import uuid4
 
@@ -76,6 +77,9 @@ from .store import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/research-lab", tags=["research-lab"])
+_OPENROUTER_KEY_REGISTRATION_ATTEMPTS: dict[str, list[float]] = {}
+_OPENROUTER_KEY_REGISTER_MIN_SECONDS = 60.0
+_OPENROUTER_KEY_REGISTER_MAX_PER_HOUR = 6
 
 
 @router.get("/status")
@@ -190,6 +194,7 @@ async def register_research_lab_openrouter_key(payload: ResearchLabOpenRouterKey
     if not config.openrouter_key_kms_key_id:
         raise HTTPException(status_code=503, detail="Research Lab OpenRouter key vault KMS key is not configured")
     await _verify_signed_miner(payload)
+    _enforce_openrouter_key_registration_rate_limit(payload.miner_hotkey)
 
     try:
         preflight_doc = await asyncio.to_thread(preflight_openrouter_key, payload.openrouter_api_key)
@@ -976,6 +981,22 @@ def _require_internal_key(config: ResearchLabGatewayConfig, provided: Optional[s
         raise HTTPException(status_code=403, detail="Research Lab internal API key is not configured")
     if not provided or not secrets.compare_digest(provided, config.internal_api_key):
         raise HTTPException(status_code=401, detail="invalid Research Lab internal API key")
+
+
+def _enforce_openrouter_key_registration_rate_limit(miner_hotkey: str) -> None:
+    now = time.monotonic()
+    key = str(miner_hotkey or "").strip()
+    attempts = [
+        ts
+        for ts in _OPENROUTER_KEY_REGISTRATION_ATTEMPTS.get(key, [])
+        if now - ts < 3600.0
+    ]
+    if attempts and now - attempts[-1] < _OPENROUTER_KEY_REGISTER_MIN_SECONDS:
+        raise HTTPException(status_code=429, detail="OpenRouter key registration rate limit exceeded")
+    if len(attempts) >= _OPENROUTER_KEY_REGISTER_MAX_PER_HOUR:
+        raise HTTPException(status_code=429, detail="OpenRouter key registration hourly limit exceeded")
+    attempts.append(now)
+    _OPENROUTER_KEY_REGISTRATION_ATTEMPTS[key] = attempts
 
 
 def _validate_requested_model_and_budget(

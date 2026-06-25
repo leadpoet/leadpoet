@@ -37,6 +37,15 @@ FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "validator_integra
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
 
 
+def _request_headers(*, include_internal_key: bool = False) -> dict[str, str]:
+    headers = {"Accept": "application/json"}
+    if include_internal_key:
+        internal_key = os.getenv("RESEARCH_LAB_INTERNAL_API_KEY", "").strip()
+        if internal_key:
+            headers["x-leadpoet-internal-key"] = internal_key
+    return headers
+
+
 def _argv_value(name: str) -> str:
     try:
         index = sys.argv.index(name)
@@ -163,7 +172,7 @@ def fetch_research_lab_shadow_bundle(gateway_url: str, epoch: int, *, timeout_se
     base = gateway_url.rstrip("/")
     request = Request(
         f"{base}/research-lab/reports/shadow/{int(epoch)}",
-        headers={"Accept": "application/json"},
+        headers=_request_headers(),
         method="GET",
     )
     with urlopen(request, timeout=timeout_seconds) as response:
@@ -180,7 +189,7 @@ def fetch_research_lab_evaluation_bundle_page(
     base = gateway_url.rstrip("/")
     request = Request(
         f"{base}/research-lab/evaluations/latest/{int(epoch)}",
-        headers={"Accept": "application/json"},
+        headers=_request_headers(include_internal_key=True),
         method="GET",
     )
     with urlopen(request, timeout=timeout_seconds) as response:
@@ -197,7 +206,7 @@ def fetch_research_lab_audit_bundle(
     base = gateway_url.rstrip("/")
     request = Request(
         f"{base}/research-lab/audit/latest/{int(epoch)}",
-        headers={"Accept": "application/json"},
+        headers=_request_headers(),
         method="GET",
     )
     with urlopen(request, timeout=timeout_seconds) as response:
@@ -214,7 +223,7 @@ def fetch_research_lab_allocation_bundle(
     base = gateway_url.rstrip("/")
     request = Request(
         f"{base}/research-lab/allocations/live/{int(epoch)}",
-        headers={"Accept": "application/json"},
+        headers=_request_headers(),
         method="GET",
     )
     with urlopen(request, timeout=timeout_seconds) as response:

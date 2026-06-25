@@ -1,8 +1,8 @@
 """Production Research Lab gateway flags.
 
-Live workflow flags default on only for the production subnet
-(`BITTENSOR_NETWORK=finney`, `BITTENSOR_NETUID=71`). Other environments stay
-closed unless explicitly enabled.
+Most live workflow flags default on only for the production subnet
+(`BITTENSOR_NETWORK=finney`, `BITTENSOR_NETUID=71`). Reimbursements and weight
+mutation remain explicit opt-ins because they directly affect incentives.
 """
 
 from __future__ import annotations
@@ -235,8 +235,8 @@ class ResearchLabGatewayConfig:
             shadow_weights_enabled=_truthy("RESEARCH_LAB_SHADOW_WEIGHTS_ENABLED", prod_on),
             shadow_reimbursements_enabled=_truthy("RESEARCH_LAB_SHADOW_REIMBURSEMENTS_ENABLED"),
             crowning_enabled=_truthy("RESEARCH_LAB_CROWNING_ENABLED"),
-            reimbursements_enabled=_truthy("RESEARCH_LAB_REIMBURSEMENTS_ENABLED", prod_on),
-            weight_mutation_enabled=_truthy("RESEARCH_LAB_WEIGHT_MUTATION_ENABLED", prod_on),
+            reimbursements_enabled=_truthy("RESEARCH_LAB_REIMBURSEMENTS_ENABLED"),
+            weight_mutation_enabled=_truthy("RESEARCH_LAB_WEIGHT_MUTATION_ENABLED"),
             fulfillment_mutation_enabled=_truthy("RESEARCH_LAB_FULFILLMENT_MUTATION_ENABLED"),
             auto_promotion_enabled=_truthy("RESEARCH_LAB_AUTO_PROMOTION_ENABLED"),
             auto_commit_enabled=_truthy("RESEARCH_LAB_AUTO_COMMIT_ENABLED"),

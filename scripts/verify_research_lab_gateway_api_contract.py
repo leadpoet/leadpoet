@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from inspect import signature
+import os
 from pathlib import Path
 import sys
 import time
@@ -40,6 +41,27 @@ from gateway.research_lab.key_vault import openrouter_key_ref, validate_openrout
 from leadpoet_verifier.research_evaluation import build_research_evaluation_score_bundle
 
 
+def _config_from_env(
+    *,
+    set_values: dict[str, str],
+    unset_values: set[str],
+) -> ResearchLabGatewayConfig:
+    touched = set(set_values) | set(unset_values)
+    original = {key: os.environ.get(key) for key in touched}
+    try:
+        for key in unset_values:
+            os.environ.pop(key, None)
+        for key, value in set_values.items():
+            os.environ[key] = value
+        return ResearchLabGatewayConfig.from_env()
+    finally:
+        for key, value in original.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def main() -> int:
     now = int(time.time())
     defaults = ResearchLabGatewayConfig.from_env()
@@ -56,6 +78,17 @@ def main() -> int:
         errors.append("Research Lab top-ups must default disabled")
     if defaults.public_status().get("allowed_research_areas") != ["generalist"]:
         errors.append("Research Lab launch must default to generalist-only research area")
+    prod_defaults = _config_from_env(
+        set_values={"BITTENSOR_NETWORK": "finney", "BITTENSOR_NETUID": "71"},
+        unset_values={
+            "RESEARCH_LAB_REIMBURSEMENTS_ENABLED",
+            "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED",
+        },
+    )
+    if prod_defaults.reimbursements_enabled:
+        errors.append("Research Lab reimbursements must be explicit opt-in even on production subnet")
+    if prod_defaults.weight_mutation_enabled:
+        errors.append("Research Lab weight mutation must be explicit opt-in even on production subnet")
     payment_text = (ROOT / "gateway" / "qualification" / "api" / "payment.py").read_text(encoding="utf-8")
     helper_text = (ROOT / "gateway" / "qualification" / "utils" / "helpers.py").read_text(encoding="utf-8")
     for marker in ("fallback TAO", "taostats.io/api/price", "return 500.0", "return 400.0"):

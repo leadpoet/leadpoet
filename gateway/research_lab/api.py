@@ -355,6 +355,8 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
                 "payment_ref": payment_ref,
                 "payment_kind": "loop_start_credit" if consumed_credit else "loop_start",
                 "loop_start_credit_id": payload.credit_id,
+                "miner_openrouter_key_ref": payload.miner_openrouter_key_ref,
+                "miner_openrouter_key_handling": payload.miner_openrouter_key_handling,
                 "requested_loop_count": payload.requested_loop_count,
                 **budget_doc,
             },
@@ -529,7 +531,10 @@ async def top_up_research_lab_paid_loop(payload: ResearchLabLoopTopUpRequest):
             reason="loop_topup_queued",
             event_doc={
                 "payment_id": payment["payment_id"],
+                "payment_ref": payment_ref,
                 "payment_kind": "top_up",
+                "miner_openrouter_key_ref": payload.miner_openrouter_key_ref,
+                "miner_openrouter_key_handling": payload.miner_openrouter_key_handling,
                 **budget_doc,
             },
         )
@@ -1176,7 +1181,13 @@ async def _consume_loop_start_credit(
 
 def _is_credit_claim_race_error(exc: BaseException) -> bool:
     message = str(exc).lower()
-    return "duplicate" in message and "research_loop_start_credit_events_credit_seq_key" in message
+    return (
+        "research_lab_credit_consume_conflict" in message
+        or "research_loop_start_credit_events_credit_seq_key" in message
+        or "duplicate key" in message
+        or "unique constraint" in message
+        or "23505" in message
+    )
 
 
 def _validate_requested_model_and_budget(

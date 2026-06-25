@@ -1251,13 +1251,13 @@ class ResearchLabHostedWorker:
 
 
 def _miner_openrouter_key_ref(context: HostedRunContext) -> str:
-    direct = str(context.ticket.get("miner_openrouter_key_ref") or "")
-    if direct:
-        return direct
-    for event in context.ticket_events:
+    for event in (*context.queue_events, *context.ticket_events):
         event_doc = event.get("event_doc")
         if isinstance(event_doc, Mapping) and event_doc.get("miner_openrouter_key_ref"):
             return str(event_doc["miner_openrouter_key_ref"])
+    direct = str(context.ticket.get("miner_openrouter_key_ref") or "")
+    if direct:
+        return direct
     raise HostedResearchLabWorkerError("Research Lab run is missing miner OpenRouter key ref")
 
 
@@ -1404,7 +1404,8 @@ def _row_partition(row: Mapping[str, Any], total_workers: int) -> int:
 def _is_claim_race_error(exc: BaseException) -> bool:
     message = str(exc).lower()
     return (
-        "research_loop_run_queue_events_run_seq_key" in message
+        "research_lab_run_claim_conflict" in message
+        or "research_loop_run_queue_events_run_seq_key" in message
         or "duplicate key" in message
         or "unique constraint" in message
         or "23505" in message

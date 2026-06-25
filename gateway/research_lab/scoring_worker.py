@@ -235,19 +235,29 @@ class ResearchLabGatewayScoringWorker:
         )
         if not fresh or fresh.get("current_candidate_status") != "queued":
             return None
-        assigned_event = await create_candidate_evaluation_event(
-            candidate_id=candidate_id,
-            run_id=str(candidate["run_id"]),
-            ticket_id=str(candidate["ticket_id"]),
-            event_type="assigned",
-            candidate_status="assigned",
-            evaluator_ref=self.worker_ref,
-            reason="assigned_to_gateway_qualification_worker",
-            event_doc={
-                "worker_ref": self.worker_ref,
-                "proxy_ref_hash": self.proxy_ref_hash,
-            },
-        )
+        try:
+            assigned_event = await create_candidate_evaluation_event(
+                candidate_id=candidate_id,
+                run_id=str(candidate["run_id"]),
+                ticket_id=str(candidate["ticket_id"]),
+                event_type="assigned",
+                candidate_status="assigned",
+                evaluator_ref=self.worker_ref,
+                reason="assigned_to_gateway_qualification_worker",
+                event_doc={
+                    "worker_ref": self.worker_ref,
+                    "proxy_ref_hash": self.proxy_ref_hash,
+                },
+            )
+        except Exception as exc:
+            if _is_candidate_claim_race_error(exc):
+                logger.info(
+                    "research_lab_candidate_claim_race candidate_id=%s worker_ref=%s",
+                    compact_ref(candidate_id),
+                    self.worker_ref,
+                )
+                return None
+            raise
         assigned_current = await select_one(
             "research_lab_candidate_evaluation_current",
             columns="candidate_id,current_candidate_status,current_evaluator_ref,current_event_hash",
@@ -1342,3 +1352,14 @@ def _benchmark_summary_has_companies(item: Any) -> bool:
         return int(item.get("company_count") or 0) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _is_candidate_claim_race_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return (
+        "research_lab_candidate_claim_conflict" in message
+        or "research_lab_candidate_eval_events_candidate_seq_key" in message
+        or "duplicate key" in message
+        or "unique constraint" in message
+        or "23505" in message
+    )

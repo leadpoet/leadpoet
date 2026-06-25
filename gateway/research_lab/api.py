@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import secrets
 import time
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 from uuid import uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
@@ -81,6 +82,12 @@ router = APIRouter(prefix="/research-lab", tags=["research-lab"])
 _OPENROUTER_KEY_REGISTRATION_ATTEMPTS: dict[str, list[float]] = {}
 _OPENROUTER_KEY_REGISTER_MIN_SECONDS = 60.0
 _OPENROUTER_KEY_REGISTER_MAX_PER_HOUR = 6
+ACTIVE_AUTORESEARCH_QUEUE_STATUSES = {"queued", "started"}
+AUTORESEARCH_PROXY_PREFIXES = (
+    "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY",
+    "RESEARCH_LAB_WORKER_PROXY",
+    "RESEARCH_LAB_WORKER_HTTPS_PROXY",
+)
 
 
 @router.get("/status")
@@ -119,6 +126,7 @@ async def create_research_lab_ticket(payload: ResearchLabTicketCreateRequest, re
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
     _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
     await _verify_signed_miner(payload)
+    await _enforce_autoresearch_loop_capacity(config, payload.miner_hotkey)
     island = _validate_allowed_research_island(config, payload.island)
     _require_default_research_model_tier(config, payload.research_model_tier)
     budget_doc = _effective_budget_doc(
@@ -253,6 +261,7 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
         raise HTTPException(status_code=400, detail="miner OpenRouter key preflight must pass before queueing")
     await _verify_signed_miner(payload)
     ticket = await _get_ticket_for_miner(str(payload.ticket_id), payload.miner_hotkey)
+    await _enforce_autoresearch_loop_capacity(config, payload.miner_hotkey)
     _validate_allowed_research_island(config, str(ticket.get("island") or ""))
     _require_default_research_model_tier(config, payload.research_model_tier)
     budget_doc = _effective_budget_doc(
@@ -1199,6 +1208,89 @@ def _ticket_loop_start_fee_usd(ticket: Mapping[str, Any], config: ResearchLabGat
     if fee < 0:
         return float(config.loop_start_fee_usd)
     return fee
+
+
+async def _enforce_autoresearch_loop_capacity(config: ResearchLabGatewayConfig, miner_hotkey: str) -> None:
+    active_rows = await _active_autoresearch_queue_rows()
+    capacity = _autoresearch_loop_capacity(config)
+    if capacity <= 0:
+        raise HTTPException(
+            status_code=409,
+            detail="too many autoresearch loops right now, try again later",
+        )
+    if not active_rows:
+        return
+    ticket_map = await _ticket_rows_by_id(active_rows)
+    normalized_hotkey = str(miner_hotkey or "").strip()
+    for row in active_rows:
+        ticket = ticket_map.get(str(row.get("ticket_id") or ""))
+        if ticket and str(ticket.get("miner_hotkey") or "").strip() == normalized_hotkey:
+            raise HTTPException(
+                status_code=409,
+                detail="autoresearch loop for this hotkey already running",
+            )
+
+    if len(active_rows) >= capacity:
+        raise HTTPException(
+            status_code=409,
+            detail="too many autoresearch loops right now, try again later",
+        )
+
+
+async def _active_autoresearch_queue_rows() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for status in sorted(ACTIVE_AUTORESEARCH_QUEUE_STATUSES):
+        rows.extend(
+            await select_all(
+                "research_loop_run_queue_current",
+                columns="run_id,ticket_id,current_queue_status,current_status_at",
+                filters=(("current_queue_status", status),),
+                order_by=(("current_status_at", True),),
+                batch_size=1000,
+                max_rows=10000,
+            )
+        )
+    return rows
+
+
+async def _ticket_rows_by_id(queue_rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    ticket_ids = {str(row.get("ticket_id") or "") for row in queue_rows if row.get("ticket_id")}
+    if not ticket_ids:
+        return {}
+    ticket_rows: dict[str, dict[str, Any]] = {}
+    for ticket_id in sorted(ticket_ids):
+        row = await select_one(
+            "research_loop_ticket_current",
+            columns="ticket_id,miner_hotkey",
+            filters=(("ticket_id", ticket_id),),
+        )
+        if row:
+            ticket_rows[ticket_id] = row
+    return ticket_rows
+
+
+def _autoresearch_loop_capacity(config: ResearchLabGatewayConfig) -> int:
+    proxy_count = _configured_autoresearch_proxy_count()
+    total_workers = max(0, int(config.hosted_worker_total_workers or 0))
+    if config.hosted_worker_require_proxy and not proxy_count and not config.hosted_worker_proxy_url:
+        return 0
+    if proxy_count and total_workers:
+        return max(1, min(proxy_count, total_workers))
+    if proxy_count:
+        return max(1, proxy_count)
+    if total_workers:
+        return max(1, total_workers)
+    if config.hosted_worker_proxy_url:
+        return 1
+    return 0
+
+
+def _configured_autoresearch_proxy_count() -> int:
+    count = 0
+    for index in range(1, 501):
+        if any(os.getenv(f"{prefix}_{index}", "").strip() for prefix in AUTORESEARCH_PROXY_PREFIXES):
+            count += 1
+    return count
 
 
 async def _topup_continuation_context(*, ticket_id: str, run_id: str) -> dict[str, Any]:

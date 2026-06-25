@@ -28,14 +28,21 @@ from research_lab.eval.evaluator import QualificationStyleCompanyScorer  # noqa:
 
 DEFAULT_ICPS: tuple[dict[str, Any], ...] = (
     {
-        "icp_id": "live-fintech-funding",
-        "industry": "Financial Services",
-        "sub_industry": "Fintech",
+        "icp_id": "live-software-funding",
+        "industry": "Software Development",
+        "sub_industry": "AI-powered Accounts Receivable Automation",
         "geography": "United States",
-        "employee_count": "201-500",
-        "required_attribute": "The company is privately held and sells financial software",
-        "product_service": "financial software",
-        "intent_signal": "The company recently raised a funding round",
+        "employee_count": "11-50 employees",
+        "company_stage": "Any",
+        "required_attribute": (
+            "The company sells AI-powered accounts receivable, finance operations, billing, "
+            "or revenue automation software"
+        ),
+        "product_service": "AI-powered accounts receivable automation software",
+        "intent_signal": (
+            "The company recently raised a named seed, Series A, Series B, or growth funding "
+            "round to expand its finance automation software business"
+        ),
         "intent_category": "FUNDING",
         "intent_max_age_days": 365,
     },
@@ -46,7 +53,7 @@ DEFAULT_ICPS: tuple[dict[str, Any], ...] = (
         "target_geography": "United States",
         "company_size": "200-500",
         "product_service": "managed cloud infrastructure services",
-        "intent_signals": ["Launched or announced a new product"],
+        "intent_signals": ["Announced a new managed cloud infrastructure, Kubernetes, security, or AI infrastructure product for enterprise customers"],
         "intent_max_age_days": 365,
     },
     {
@@ -56,7 +63,7 @@ DEFAULT_ICPS: tuple[dict[str, Any], ...] = (
         "geography": "United States",
         "employee_count": "50-200",
         "product_service": "biotech therapeutics",
-        "intent_signal": "Achieved regulatory clearance or certification",
+        "intent_signal": "Announced FDA clearance, FDA approval, CE mark certification, or another named regulatory milestone for a therapeutic or diagnostic product",
         "intent_category": "REGULATORY_CLEARANCE",
         "intent_max_age_days": 365,
     },
@@ -110,31 +117,31 @@ async def _run(image: str, max_icps: int, timeout_seconds: int) -> int:
             )
             score_breakdowns = await scorer.score_with_breakdowns(outputs, icp, True)
         except Exception as exc:
-            rows.append(
-                {
-                    "index": index,
-                    "icp_id": icp["icp_id"],
-                    "status": "failed",
-                    "error_type": exc.__class__.__name__,
-                    "error": str(exc)[:500],
-                    "runtime_seconds": round(time.time() - started, 3),
-                }
-            )
+            row = {
+                "index": index,
+                "icp_id": icp["icp_id"],
+                "status": "failed",
+                "error_type": exc.__class__.__name__,
+                "error": str(exc)[:500],
+                "runtime_seconds": round(time.time() - started, 3),
+            }
+            rows.append(row)
+            print(json.dumps({"progress": row}, sort_keys=True), file=sys.stderr, flush=True)
             continue
         scores = [float(row.get("final_score", 0.0) or 0.0) for row in score_breakdowns]
         score = sum(scores) / len(scores) if scores else 0.0
         if outputs and score > 0:
             positive_icps += 1
-        rows.append(
-            {
-                "index": index,
-                "icp_id": icp["icp_id"],
-                "status": "completed",
-                "companies": len(outputs),
-                "score": round(score, 4),
-                "runtime_seconds": round(time.time() - started, 3),
-            }
-        )
+        row = {
+            "index": index,
+            "icp_id": icp["icp_id"],
+            "status": "completed",
+            "companies": len(outputs),
+            "score": round(score, 4),
+            "runtime_seconds": round(time.time() - started, 3),
+        }
+        rows.append(row)
+        print(json.dumps({"progress": row}, sort_keys=True), file=sys.stderr, flush=True)
     print(json.dumps({"positive_icps": positive_icps, "results": rows}, indent=2, sort_keys=True))
     return 0 if positive_icps > 0 else 1
 

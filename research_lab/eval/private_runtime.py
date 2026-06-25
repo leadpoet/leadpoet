@@ -208,9 +208,13 @@ class SubprocessPrivateModelRunner:
             raise PrivateModelRuntimeError(f"private model adapter failed with code {completed.returncode}: {stderr}")
 
         try:
-            decoded = json.loads(completed.stdout)
+            decoded = _loads_adapter_stdout(completed.stdout)
         except json.JSONDecodeError as exc:
-            raise PrivateModelRuntimeError("private model adapter returned invalid JSON") from exc
+            stdout = _sanitize_text(completed.stdout)[-800:]
+            stderr = _sanitize_text(completed.stderr)[-800:]
+            raise PrivateModelRuntimeError(
+                f"private model adapter returned invalid JSON: stdout={stdout!r} stderr={stderr!r}"
+            ) from exc
         _raise_on_empty_provider_error(decoded, completed.stderr, context_label="private model")
         return ensure_private_model_outputs(
             decoded,
@@ -358,9 +362,13 @@ class DockerPrivateModelRunner:
             stderr = _sanitize_text(completed.stderr)[-1200:]
             raise PrivateModelRuntimeError(f"docker private model adapter failed with code {completed.returncode}: {stderr}")
         try:
-            decoded = json.loads(completed.stdout)
+            decoded = _loads_adapter_stdout(completed.stdout)
         except json.JSONDecodeError as exc:
-            raise PrivateModelRuntimeError("docker private model adapter returned invalid JSON") from exc
+            stdout = _sanitize_text(completed.stdout)[-800:]
+            stderr = _sanitize_text(completed.stderr)[-800:]
+            raise PrivateModelRuntimeError(
+                f"docker private model adapter returned invalid JSON: stdout={stdout!r} stderr={stderr!r}"
+            ) from exc
         _raise_on_empty_provider_error(decoded, completed.stderr, context_label="docker private model")
         return decoded
 
@@ -533,6 +541,23 @@ def _raise_on_empty_provider_error(decoded: Any, stderr: str, *, context_label: 
         f"{context_label} provider-backed sourcing failed before returning companies: "
         f"{sanitized[-1200:]}"
     )
+
+
+def _loads_adapter_stdout(stdout: str) -> Any:
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError:
+        pass
+
+    for line in reversed(stdout.splitlines()):
+        candidate = line.strip()
+        if not candidate or candidate[0] not in "[{":
+            continue
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    raise json.JSONDecodeError("adapter stdout did not contain a JSON payload", stdout, 0)
 
 
 def _first_text(*values: Any, default: str = "") -> str:
@@ -772,6 +797,7 @@ def _research_lab_patch_strict_qualify(adapter_module):
 
 
 _ADAPTER_BOOTSTRAP = _PROVIDER_DIAGNOSTICS_BOOTSTRAP + r"""
+import contextlib
 import importlib
 import json
 import sys
@@ -782,8 +808,9 @@ payload = json.load(sys.stdin)
 module = importlib.import_module(module_name)
 _research_lab_patch_strict_qualify(module)
 fn = getattr(module, callable_name)
-result = fn(payload["icp"], payload.get("context") or {})
-print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+with contextlib.redirect_stdout(sys.stderr):
+    result = fn(payload["icp"], payload.get("context") or {})
+sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")))
 """
 
 
@@ -802,6 +829,7 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 
 
 _DOCKER_ADAPTER_BOOTSTRAP = _PROVIDER_DIAGNOSTICS_BOOTSTRAP + r"""
+import contextlib
 import importlib
 import json
 import sys
@@ -811,8 +839,9 @@ payload = json.load(sys.stdin)
 module = importlib.import_module(module_name)
 _research_lab_patch_strict_qualify(module)
 fn = getattr(module, callable_name)
-result = fn(payload["icp"], payload.get("context") or {})
-print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+with contextlib.redirect_stdout(sys.stderr):
+    result = fn(payload["icp"], payload.get("context") or {})
+sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")))
 """
 
 

@@ -39,6 +39,7 @@ def main() -> int:
         adapter.write_text(
             """
 def run_icp(icp, context):
+    print("diagnostic line that must not corrupt adapter JSON")
     required = ("required_attribute", "intent_signal", "intent_category", "employee_count", "geography")
     if not all(icp.get(key) for key in required):
         return []
@@ -158,7 +159,7 @@ def run_icp(icp, context):
 
         class _Completed:
             returncode = 0
-            stdout = '[{"raw_secret":"should-fail"}]'
+            stdout = 'debug line before JSON\n[{"raw_secret":"should-fail"}]'
             stderr = ""
 
         def _fake_run(*_args, **_kwargs):

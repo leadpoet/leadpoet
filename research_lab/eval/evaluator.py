@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from importlib import import_module
+import os
 from typing import Any, Awaitable, Callable, Mapping, Sequence, Union
 
 from leadpoet_verifier.research_evaluation import build_research_evaluation_score_bundle
@@ -11,7 +12,7 @@ from leadpoet_verifier.research_evaluation import build_research_evaluation_scor
 from .artifacts import PrivateModelArtifactManifest, validate_private_model_artifact_manifest
 from .benchmark import SealedBenchmarkSet, validate_sealed_benchmark_set
 from .patches import CandidatePatchManifest, validate_candidate_patch_manifest
-from .private_runtime import ensure_private_model_outputs
+from .private_runtime import canonicalize_private_model_icp, ensure_private_model_outputs
 
 
 ModelRunner = Callable[
@@ -178,11 +179,12 @@ class QualificationStyleCompanyScorer:
     ) -> list[dict[str, Any]]:
         models = import_module("gateway.qualification.models")
         scorer_module = import_module("qualification.scoring.lead_scorer")
+        _ensure_qualification_provider_env()
         CompanyOutput = getattr(models, "CompanyOutput")
         ICPPrompt = getattr(models, "ICPPrompt")
         score_company = getattr(scorer_module, "score_company")
 
-        icp_obj = ICPPrompt(**dict(icp))
+        icp_obj = ICPPrompt(**canonicalize_private_model_icp(icp))
         seen_companies: set[str] = set()
         breakdowns: list[dict[str, Any]] = []
         for company in companies:
@@ -201,6 +203,19 @@ class QualificationStyleCompanyScorer:
                 item = dict(result)
             breakdowns.append(item)
         return breakdowns
+
+
+def _ensure_qualification_provider_env() -> None:
+    openrouter_key = os.getenv("QUALIFICATION_OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+    if openrouter_key:
+        os.environ.setdefault("QUALIFICATION_OPENROUTER_API_KEY", openrouter_key)
+        for module_name in (
+            "gateway.qualification.utils.helpers",
+            "qualification.scoring.verification_helpers",
+        ):
+            module = import_module(module_name)
+            if not getattr(module, "OPENROUTER_API_KEY", ""):
+                setattr(module, "OPENROUTER_API_KEY", openrouter_key)
 
 
 async def _maybe_await(value: Any) -> Any:

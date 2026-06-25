@@ -48,6 +48,85 @@ class PrivateModelRuntimeError(RuntimeError):
     """Raised when the private model artifact cannot be executed safely."""
 
 
+def canonicalize_private_model_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
+    """Adapt Research Lab ICPs to the private sourcing-model contract.
+
+    The private sourcing model is intentionally kept outside this public repo,
+    but its stable adapter expects a canonical ICP shape with
+    ``required_attribute``, ``intent_signal``, ``intent_category``,
+    ``geography``, and ``employee_count``. Research Lab benchmark rows already
+    contain the same information, but may use public qualification-era names
+    such as ``product_service``, ``intent_signals``, ``target_geography``, or
+    ``company_size``. Normalize only at the execution boundary so benchmark
+    hashes and persisted private ICP rows remain unchanged.
+    """
+    if not isinstance(icp, Mapping):
+        raise PrivateModelRuntimeError("private model ICP payload must be an object")
+    normalized = dict(icp)
+
+    industry = _first_text(normalized.get("industry"), normalized.get("market"))
+    sub_industry = _first_text(normalized.get("sub_industry"), normalized.get("subindustry"))
+    product_service = _first_text(
+        normalized.get("product_service"),
+        normalized.get("required_attribute"),
+        normalized.get("solution"),
+        normalized.get("offering"),
+    )
+    geography = _first_text(
+        normalized.get("geography"),
+        normalized.get("country"),
+        normalized.get("target_geography"),
+        normalized.get("hq_country"),
+        default="United States",
+    )
+    employee_count = _first_text(
+        normalized.get("employee_count"),
+        normalized.get("company_size"),
+        normalized.get("company_size_bucket"),
+        normalized.get("employee_range"),
+        default="50-200",
+    )
+    intent_signal = _intent_signal_text(normalized)
+    required_attribute = _required_attribute(
+        normalized.get("required_attribute"),
+        industry=industry,
+        sub_industry=sub_industry,
+        product_service=product_service,
+    )
+
+    normalized["industry"] = industry
+    normalized["sub_industry"] = sub_industry
+    normalized["geography"] = geography
+    normalized["country"] = _first_text(normalized.get("country"), geography)
+    normalized["employee_count"] = employee_count
+    normalized["product_service"] = product_service or required_attribute
+    normalized["required_attribute"] = required_attribute
+    normalized["intent_signal"] = intent_signal
+    normalized["intent_signal_text"] = _first_text(normalized.get("intent_signal_text"), intent_signal)
+    normalized["intent_signals"] = _intent_signals_list(normalized.get("intent_signals"), intent_signal)
+    normalized["intent_category"] = _intent_category(normalized.get("intent_category"), intent_signal)
+    normalized["intent_max_age_days"] = _positive_int(normalized.get("intent_max_age_days"), default=365)
+    normalized["company_stage"] = _first_text(normalized.get("company_stage"), default="Any")
+    normalized["prompt"] = _first_text(normalized.get("prompt"), _prompt_from_icp(normalized))
+    normalized["target_roles"] = normalized.get("target_roles") if isinstance(normalized.get("target_roles"), list) else []
+    normalized["target_seniority"] = _first_text(normalized.get("target_seniority"))
+    if not _first_text(normalized.get("icp_id")):
+        normalized["icp_id"] = sha256_json(
+            {
+                "industry": industry,
+                "sub_industry": sub_industry,
+                "geography": geography,
+                "employee_count": employee_count,
+                "product_service": normalized["product_service"],
+                "intent_signal": intent_signal,
+            }
+        )[:18]
+
+    if not normalized["industry"] or not normalized["intent_signal"]:
+        raise PrivateModelRuntimeError("private model ICP is missing industry or intent signal after canonicalization")
+    return normalized
+
+
 def ensure_private_model_outputs(
     outputs: Any,
     *,
@@ -99,7 +178,7 @@ class SubprocessPrivateModelRunner:
             raise PrivateModelRuntimeError(f"private model source path does not exist: {self.spec.source_path}")
 
     def __call__(self, icp: Mapping[str, Any], context: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
-        payload = {"icp": dict(icp), "context": _redacted_context(context)}
+        payload = {"icp": canonicalize_private_model_icp(icp), "context": _redacted_context(context)}
         env = _build_subprocess_env(self.spec)
         command = [
             self.spec.python_executable,
@@ -204,7 +283,7 @@ class DockerPrivateModelRunner:
             self._pull_image()
 
     def __call__(self, icp: Mapping[str, Any], context: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
-        payload = {"icp": dict(icp), "context": _redacted_context(context)}
+        payload = {"icp": canonicalize_private_model_icp(icp), "context": _redacted_context(context)}
         decoded = self._run_json(
             bootstrap=_DOCKER_ADAPTER_BOOTSTRAP,
             argv=(self.spec.module_name, self.spec.callable_name),
@@ -437,6 +516,129 @@ def _redacted_context(context: Mapping[str, Any]) -> dict[str, Any]:
     if _contains_secret_material(context):
         raise PrivateModelRuntimeError("run context contains raw secret material")
     return dict(context)
+
+
+def _first_text(*values: Any, default: str = "") -> str:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            nested = _first_text(*value)
+            if nested:
+                return nested
+            continue
+        if isinstance(value, Mapping):
+            nested = _first_text(
+                value.get("description"),
+                value.get("signal"),
+                value.get("text"),
+                value.get("label"),
+                value.get("name"),
+                value.get("value"),
+            )
+            if nested:
+                return nested
+            continue
+        text = " ".join(str(value).strip().split())
+        if text:
+            return text
+    return default
+
+
+def _intent_signal_text(icp: Mapping[str, Any]) -> str:
+    return _first_text(
+        icp.get("intent_signal_text"),
+        icp.get("intent_signal"),
+        icp.get("intent"),
+        icp.get("buying_intent"),
+        icp.get("intent_signals"),
+    )
+
+
+def _intent_signals_list(value: Any, fallback: str) -> list[str]:
+    if isinstance(value, str):
+        signals = [_first_text(value)]
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        signals = [_first_text(item) for item in value]
+    else:
+        signals = []
+    signals = [signal for signal in signals if signal]
+    if not signals and fallback:
+        signals = [fallback]
+    return signals
+
+
+def _required_attribute(
+    value: Any,
+    *,
+    industry: str,
+    sub_industry: str,
+    product_service: str,
+) -> str:
+    existing = _first_text(value)
+    if existing:
+        return existing
+    if product_service:
+        return f"The company offers or provides {product_service}"
+    if sub_industry:
+        return f"The company operates in {sub_industry}"
+    if industry:
+        return f"The company operates in {industry}"
+    return "The company matches the target customer profile"
+
+
+def _intent_category(value: Any, signal: str) -> str:
+    explicit = _first_text(value).strip().upper().replace(" ", "_").replace("-", "_")
+    if explicit:
+        return explicit
+    text = signal.lower()
+    if any(word in text for word in ("hiring", "job", "role", "career", "recruit")):
+        return "HIRING"
+    if any(word in text for word in ("tech stack", "installed", "uses ", "using ", "software", "tool")):
+        return "TECHSTACK"
+    if any(word in text for word in ("linkedin", "posted", "social", "tweet", "x.com")):
+        return "SOCIAL_POSTING"
+    if any(word in text for word in ("funding", "raised", "series ", "seed round", "financing")):
+        return "FUNDING"
+    if any(word in text for word in ("acquired", "acquisition", "merger", "bought")):
+        return "ACQUISITION"
+    if any(word in text for word in ("partner", "partnership", "integration")):
+        return "PARTNERSHIP"
+    if any(word in text for word in ("launch", "launched", "announced", "released", "new product")):
+        return "PRODUCT_LAUNCH"
+    if any(word in text for word in ("executive", "ceo", "cfo", "cto", "appointed", "joined")):
+        return "LEADERSHIP_CHANGE"
+    if any(word in text for word in ("expanded", "expansion", "new market", "opened")):
+        return "MARKET_EXPANSION"
+    if any(word in text for word in ("regulatory", "clearance", "certification", "approved")):
+        return "REGULATORY_CLEARANCE"
+    if any(word in text for word in ("factory", "facility", "store", "warehouse", "office opening")):
+        return "FACILITY_OPENING"
+    return "SALES_GROWTH"
+
+
+def _positive_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _prompt_from_icp(icp: Mapping[str, Any]) -> str:
+    return " ".join(
+        part
+        for part in (
+            f"{icp.get('industry', '')} companies",
+            f"in {icp.get('geography', '')}" if icp.get("geography") else "",
+            f"with {icp.get('employee_count', '')} employees" if icp.get("employee_count") else "",
+            f"that {str(icp.get('required_attribute', '')).removeprefix('The company ').strip()}"
+            if icp.get("required_attribute")
+            else "",
+            f"showing intent: {icp.get('intent_signal', '')}" if icp.get("intent_signal") else "",
+        )
+        if part
+    )
 
 
 def _excluded_source_path(rel: str) -> bool:

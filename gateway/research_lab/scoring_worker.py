@@ -61,6 +61,8 @@ from research_lab.eval.evaluator import QualificationStyleCompanyScorer
 
 
 logger = logging.getLogger(__name__)
+PRIVATE_BASELINE_FAST_EMPTY_ABORT_AFTER = 6
+PRIVATE_BASELINE_FAST_EMPTY_ABORT_SECONDS = 90.0
 
 
 def _idle_log_seconds() -> float:
@@ -724,12 +726,14 @@ class ResearchLabGatewayScoringWorker:
             )
             total_icps = len(window.benchmark_items)
             for item_index, item in enumerate(window.benchmark_items, start=1):
+                item_start = time.time()
                 label = str(item.get("icp_ref") or item.get("icp_hash") or "unknown_icp")
                 outputs = ensure_private_model_outputs(
                     await asyncio.to_thread(runner, item["icp"], {"mode": "private_baseline"}),
                     context_label=f"private baseline for {label}",
                     require_non_empty=False,
                 )
+                item_elapsed = time.time() - item_start
                 if outputs:
                     nonempty_output_count += 1
                 score_breakdowns = await scorer.score_with_breakdowns(outputs, item["icp"], True)
@@ -749,10 +753,22 @@ class ResearchLabGatewayScoringWorker:
                             ("Score", f"{icp_score:.4f}"),
                             ("Companies", len(scores)),
                             ("Non-empty output", bool(outputs)),
+                            ("ICP runtime", f"{item_elapsed:.1f}s"),
                             ("Elapsed", f"{time.time() - start:.1f}s"),
                         ),
                     )
                 )
+                if (
+                    item_index >= PRIVATE_BASELINE_FAST_EMPTY_ABORT_AFTER
+                    and nonempty_output_count <= 0
+                    and time.time() - start < PRIVATE_BASELINE_FAST_EMPTY_ABORT_SECONDS
+                ):
+                    raise PrivateModelRuntimeError(
+                        "private baseline fast-empty guard tripped: "
+                        f"first {item_index} ICPs returned zero companies in {time.time() - start:.1f}s. "
+                        "The private model is not executing the full provider-backed sourcing path; "
+                        "check Docker env passthrough, provider keys, proxy connectivity, and ICP canonicalization."
+                    )
                 per_icp_summaries.append(
                     sanitize_benchmark_item_summary(
                         item=item,

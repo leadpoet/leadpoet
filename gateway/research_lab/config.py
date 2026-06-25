@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import json
 import logging
 import os
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 
 TRUTHY = {"1", "true", "yes", "on"}
@@ -38,6 +38,16 @@ def _int(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except ValueError:
         return default
+
+
+def _optional_int(name: str) -> Optional[int]:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def _normalized_csv(name: str, default: str) -> tuple[str, ...]:
@@ -143,6 +153,8 @@ class ResearchLabGatewayConfig:
     lab_champion_icps_per_day: int = 6
     public_benchmark_public_icps_per_day: int = 3
     public_benchmark_public_weak_per_day: int = 2
+    public_benchmark_public_total_icps: Optional[int] = None
+    public_benchmark_public_weak_total: Optional[int] = None
     improvement_threshold_points: float = 1.0
     improvement_min_delta_lcb: float = 0.0
     private_model_manifest_uri: str = (
@@ -350,6 +362,16 @@ class ResearchLabGatewayConfig:
                 0,
                 _int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_PER_DAY", 2),
             ),
+            public_benchmark_public_total_icps=(
+                max(1, value)
+                if (value := _optional_int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_TOTAL_ICPS")) is not None
+                else None
+            ),
+            public_benchmark_public_weak_total=(
+                max(0, value)
+                if (value := _optional_int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_TOTAL")) is not None
+                else None
+            ),
             improvement_threshold_points=max(
                 0.0,
                 _float("RESEARCH_LAB_IMPROVEMENT_THRESHOLD_POINTS", 1.0),
@@ -511,9 +533,24 @@ class ResearchLabGatewayConfig:
             "champion_icps_per_day": self.lab_champion_icps_per_day,
             "public_benchmark_public_icps_per_day": self.public_benchmark_public_icps_per_day,
             "public_benchmark_public_weak_per_day": self.public_benchmark_public_weak_per_day,
+            "public_benchmark_public_total_icps": self.public_benchmark_public_total_icps,
+            "public_benchmark_public_weak_total": self.public_benchmark_public_weak_total,
         }
 
     def validate_public_benchmark_split(self) -> None:
+        total_icps = self.lab_champion_eval_days * self.lab_champion_icps_per_day
+        if self.public_benchmark_public_total_icps is not None:
+            if self.public_benchmark_public_total_icps >= total_icps:
+                raise ValueError("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_TOTAL_ICPS must leave private holdout ICPs")
+            weak_total = self.public_benchmark_public_weak_total
+            if weak_total is None:
+                weak_total = self.public_benchmark_public_total_icps // 2
+            if weak_total > self.public_benchmark_public_total_icps:
+                raise ValueError(
+                    "RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_TOTAL must be <= "
+                    "RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_TOTAL_ICPS"
+                )
+            return
         if self.public_benchmark_public_icps_per_day > self.lab_champion_icps_per_day:
             raise ValueError(
                 "RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_ICPS_PER_DAY must be <= "
@@ -579,6 +616,8 @@ class ResearchLabGatewayConfig:
                 "champion_icps_per_day": self.lab_champion_icps_per_day,
                 "public_benchmark_public_icps_per_day": self.public_benchmark_public_icps_per_day,
                 "public_benchmark_public_weak_per_day": self.public_benchmark_public_weak_per_day,
+                "public_benchmark_public_total_icps": self.public_benchmark_public_total_icps,
+                "public_benchmark_public_weak_total": self.public_benchmark_public_weak_total,
                 "improvement_threshold_points": self.improvement_threshold_points,
                 "improvement_min_delta_lcb": self.improvement_min_delta_lcb,
             },

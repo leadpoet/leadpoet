@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from gateway.research_lab.bundles import contains_secret_material, sha256_json
 
@@ -12,7 +12,7 @@ from gateway.research_lab.bundles import contains_secret_material, sha256_json
 ZERO_LEAD_SCORE_THRESHOLD = 1e-9
 DEFAULT_PUBLIC_ICPS_PER_DAY = 3
 DEFAULT_PUBLIC_WEAK_PER_DAY = 2
-SPLIT_POLICY = "global_score_rank_public_weak_majority:v1"
+SPLIT_POLICY = "global_score_rank_public_split:v2"
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 PUBLIC_ICP_FORBIDDEN_KEY_MARKERS = (
     "api_key",
@@ -41,6 +41,8 @@ def build_public_benchmark_report(
     benchmark_items: Sequence[Mapping[str, Any]] = (),
     public_icps_per_day: int = DEFAULT_PUBLIC_ICPS_PER_DAY,
     public_weak_per_day: int = DEFAULT_PUBLIC_WEAK_PER_DAY,
+    public_total_icps: Optional[int] = None,
+    public_weak_total: Optional[int] = None,
 ) -> dict[str, Any]:
     """Build a sanitized report from private daily benchmark summaries.
 
@@ -57,6 +59,8 @@ def build_public_benchmark_report(
             per_icp_summaries=per_icp_summaries,
             public_icps_per_day=public_icps_per_day,
             public_weak_per_day=public_weak_per_day,
+            public_total_icps=public_total_icps,
+            public_weak_total=public_weak_total,
         )
         if benchmark_items
         else []
@@ -153,6 +157,8 @@ def build_benchmark_visibility_split(
     per_icp_summaries: Sequence[Mapping[str, Any]],
     public_icps_per_day: int = DEFAULT_PUBLIC_ICPS_PER_DAY,
     public_weak_per_day: int = DEFAULT_PUBLIC_WEAK_PER_DAY,
+    public_total_icps: Optional[int] = None,
+    public_weak_total: Optional[int] = None,
 ) -> dict[str, Any]:
     rows = _build_scored_visibility_rows(
         rolling_window_hash=rolling_window_hash,
@@ -160,6 +166,8 @@ def build_benchmark_visibility_split(
         per_icp_summaries=per_icp_summaries,
         public_icps_per_day=public_icps_per_day,
         public_weak_per_day=public_weak_per_day,
+        public_total_icps=public_total_icps,
+        public_weak_total=public_weak_total,
     )
     summary = _visibility_split_summary(rows)
     summary["items"] = [
@@ -220,6 +228,8 @@ def _build_scored_visibility_rows(
     per_icp_summaries: Sequence[Mapping[str, Any]],
     public_icps_per_day: int,
     public_weak_per_day: int,
+    public_total_icps: Optional[int] = None,
+    public_weak_total: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     if len(benchmark_items) != len(per_icp_summaries):
         raise ValueError("benchmark_items and per_icp_summaries must have the same length")
@@ -258,11 +268,17 @@ def _build_scored_visibility_rows(
             for row in rows
         }
     )
-    public_count = public_icps_per_day * selected_day_count
-    public_weak_count = public_weak_per_day * selected_day_count
+    public_count = int(public_total_icps) if public_total_icps is not None else public_icps_per_day * selected_day_count
+    public_weak_count = (
+        int(public_weak_total)
+        if public_weak_total is not None
+        else public_weak_per_day * selected_day_count
+    )
     public_strong_count = public_count - public_weak_count
     if public_count <= 0 or public_count >= len(rows):
         raise ValueError("public split must expose at least one ICP and leave private holdout ICPs")
+    if public_weak_count < 0 or public_weak_count > public_count:
+        raise ValueError("public weak count must be between 0 and public count")
 
     ranked = sorted(rows, key=lambda row: (float(row["score"]), _split_tiebreaker(row)))
     weak_count = len(ranked) // 2

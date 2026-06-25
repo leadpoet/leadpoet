@@ -26,11 +26,13 @@ def main() -> int:
     errors: list[str] = []
     deterministic_errors = _verify_controlled_split()
     skewed_errors = _verify_skewed_global_split()
+    launch_config_errors = _verify_20_icp_total_split()
     fuzz_errors = _verify_fuzzed_splits(seed=71060, runs=200)
     secret_errors = _verify_secret_rejection()
     migration_errors = _verify_migration_policy()
     errors.extend(deterministic_errors)
     errors.extend(skewed_errors)
+    errors.extend(launch_config_errors)
     errors.extend(fuzz_errors)
     errors.extend(secret_errors)
     errors.extend(migration_errors)
@@ -38,7 +40,7 @@ def main() -> int:
         for error in errors:
             print(f"ERROR: {error}")
         return 1
-    print("Research Lab public benchmark split verified: global 20 weakest + 10 strongest public split passed.")
+    print("Research Lab public benchmark split verified: global ranked public/private splits passed.")
     return 0
 
 
@@ -109,6 +111,64 @@ def _verify_skewed_global_split() -> list[str]:
             public_by_day[day] = public_by_day.get(day, 0) + 1
     if set(public_by_day.values()) == {3}:
         errors.append("skewed split must not force exactly 3 public ICPs from every day")
+    return errors
+
+
+def _verify_20_icp_total_split() -> list[str]:
+    items, summaries = _fixture_20()
+    split = build_benchmark_visibility_split(
+        rolling_window_hash="sha256:" + "6" * 64,
+        benchmark_items=items,
+        per_icp_summaries=summaries,
+        public_icps_per_day=1,
+        public_weak_per_day=1,
+        public_total_icps=10,
+        public_weak_total=5,
+    )
+    report = build_public_benchmark_report(
+        benchmark_date="2026-06-25",
+        rolling_window_hash="sha256:" + "6" * 64,
+        aggregate_score=42.0,
+        benchmark_items=items,
+        per_icp_summaries=summaries,
+        public_icps_per_day=1,
+        public_weak_per_day=1,
+        public_total_icps=10,
+        public_weak_total=5,
+    )
+    errors: list[str] = []
+    split_items = split.get("items") if isinstance(split.get("items"), list) else []
+    public = [item for item in split_items if item.get("visibility") == "public"]
+    private = [item for item in split_items if item.get("visibility") == "private"]
+    if len(split_items) != 20:
+        errors.append(f"20-ICP launch split must contain 20 items, got {len(split_items)}")
+    if len(public) != 10:
+        errors.append(f"20-ICP launch split must expose 10 public ICPs, got {len(public)}")
+    if len(private) != 10:
+        errors.append(f"20-ICP launch split must reserve 10 private ICPs, got {len(private)}")
+    if split.get("public_strength_counts") != {"strong": 5, "weak": 5}:
+        errors.append(f"20-ICP launch public split must be 5 weak / 5 strong, got {split.get('public_strength_counts')}")
+    ranked = sorted(
+        split_items,
+        key=lambda item: (
+            float(item.get("score") or 0.0),
+            _test_split_tiebreaker(split, item),
+        ),
+    )
+    weak_pool = ranked[:10]
+    strong_pool = ranked[10:]
+    expected_public_refs = {
+        str(item.get("icp_ref"))
+        for item in [*weak_pool[:5], *list(reversed(strong_pool))[:5]]
+    }
+    actual_public_refs = {str(item.get("icp_ref")) for item in public}
+    if actual_public_refs != expected_public_refs:
+        errors.append("20-ICP launch split must pick the global 5 weakest and global 5 strongest ICPs")
+    if report.get("public_icp_count") != 10 or report.get("private_holdout_icp_count") != 10:
+        errors.append(
+            "20-ICP launch report must expose 10 public ICPs and withhold 10 private ICPs, "
+            f"got public={report.get('public_icp_count')} private={report.get('private_holdout_icp_count')}"
+        )
     return errors
 
 
@@ -317,6 +377,51 @@ def _fixture(*, seed: int, tie_scores: bool = False) -> tuple[list[dict[str, obj
                             "icp_fit": min(score / 2, 50.0),
                             "intent_signal_final": min(score / 2, 50.0),
                             "failure_reason": None if score > 0 else "Intent fabrication detected",
+                        }
+                    ],
+                )
+            )
+    return items, summaries
+
+
+def _fixture_20() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    items: list[dict[str, object]] = []
+    summaries: list[dict[str, object]] = []
+    scores = [3, 97, 17, 83, 29, 71, 41, 59, 7, 93, 13, 89, 23, 79, 37, 67, 47, 53, 31, 61]
+    for day in range(1, 11):
+        for rank in range(1, 3):
+            index = (day - 1) * 2 + (rank - 1)
+            score = float(scores[index])
+            icp_id = f"launch_{day}_{rank}"
+            item = {
+                "icp_ref": f"qualification_private_icp_sets:{300 + day}:{icp_id}",
+                "icp_hash": "sha256:" + f"{day * 100 + rank:064x}"[-64:],
+                "set_id": 300 + day,
+                "day_index": day,
+                "day_rank": rank,
+                "intent_signal_signature": f"launch signal {day}-{rank}",
+                "icp": {
+                    "icp_id": icp_id,
+                    "industry": f"Industry {day}",
+                    "sub_industry": f"Sub {rank}",
+                    "country": "United States",
+                    "employee_count": "51-200",
+                    "product_service": "Launch benchmark",
+                    "intent_signals": [f"launch signal {day}-{rank}"],
+                },
+            }
+            items.append(item)
+            summaries.append(
+                sanitize_benchmark_item_summary(
+                    item=item,
+                    score=score,
+                    company_count=max(1, int(score // 20)),
+                    score_breakdowns=[
+                        {
+                            "final_score": score,
+                            "icp_fit": min(score / 2, 50.0),
+                            "intent_signal_final": min(score / 2, 50.0),
+                            "failure_reason": None,
                         }
                     ],
                 )

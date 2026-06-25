@@ -822,6 +822,8 @@ class ResearchLabGatewayScoringWorker:
             per_icp_summaries=per_icp_summaries,
             public_icps_per_day=self.config.public_benchmark_public_icps_per_day,
             public_weak_per_day=self.config.public_benchmark_public_weak_per_day,
+            public_total_icps=self.config.public_benchmark_public_total_icps,
+            public_weak_total=self.config.public_benchmark_public_weak_total,
         )
         score_summary_doc = {
             "schema_version": "1.0",
@@ -877,6 +879,8 @@ class ResearchLabGatewayScoringWorker:
             benchmark_items=window.benchmark_items,
             public_icps_per_day=self.config.public_benchmark_public_icps_per_day,
             public_weak_per_day=self.config.public_benchmark_public_weak_per_day,
+            public_total_icps=self.config.public_benchmark_public_total_icps,
+            public_weak_total=self.config.public_benchmark_public_weak_total,
         )
         public_report, _report_event = await create_public_benchmark_report(
             benchmark_date=today,

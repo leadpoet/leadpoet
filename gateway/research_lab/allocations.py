@@ -34,7 +34,8 @@ async def build_research_lab_allocation_bundle(
         reimbursement_obligations,
         champion_obligations,
     )
-    snapshot_status = "active" if config.weight_mutation_enabled else "shadow"
+    live_allocation_enabled = bool(config.reimbursements_enabled or config.weight_mutation_enabled)
+    snapshot_status = "active" if live_allocation_enabled else "shadow"
     if persist_snapshot and config.production_writes_enabled:
         await create_research_lab_emission_allocation_snapshot(
             epoch=int(epoch),
@@ -66,10 +67,10 @@ async def build_research_lab_allocation_bundle(
         "epoch": int(epoch),
         "netuid": int(netuid),
         "generated_at": _utc_now_iso(),
-        "shadow_only": not config.weight_mutation_enabled,
-        "read_only": not config.weight_mutation_enabled,
-        "submission_allowed": bool(config.weight_mutation_enabled),
-        "on_chain_submission_allowed": bool(config.weight_mutation_enabled),
+        "shadow_only": not live_allocation_enabled,
+        "read_only": not live_allocation_enabled,
+        "submission_allowed": live_allocation_enabled,
+        "on_chain_submission_allowed": live_allocation_enabled,
         "source_state_hash": source_state_hash,
         "source_state": source_state,
         "allocation_hash": allocation["allocation_hash"],

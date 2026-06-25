@@ -43,6 +43,7 @@ class ResearchLabValidatorFlags:
     audit_verify_enabled: bool = False
     require_shadow_verification_before_submit: bool = False
     require_evaluation_verification_before_submit: bool = False
+    reimbursements_enabled: bool = False
     weight_mutation_enabled: bool = False
     production_writes_enabled: bool = False
     submit_on_chain_enabled: bool = False
@@ -74,6 +75,9 @@ class ResearchLabValidatorFlags:
                     data.get("require_evaluation_verification_before_submit", False),
                 )
             ),
+            reimbursements_enabled=_truthy(
+                data.get("RESEARCH_LAB_REIMBURSEMENTS_ENABLED", data.get("reimbursements_enabled", False))
+            ),
             weight_mutation_enabled=_truthy(
                 data.get("RESEARCH_LAB_WEIGHT_MUTATION_ENABLED", data.get("weight_mutation_enabled", False))
             ),
@@ -102,6 +106,9 @@ class ResearchLabValidatorFlags:
             }.items()
             if enabled
         ]
+
+    def live_allocation_enabled(self) -> bool:
+        return self.reimbursements_enabled or self.weight_mutation_enabled or self.submit_on_chain_enabled
 
 
 def fetch_research_lab_shadow_bundle(gateway_url: str, epoch: int, *, timeout_seconds: int = 20) -> dict[str, Any]:
@@ -236,7 +243,7 @@ def verify_research_lab_allocation_bundle(
     errors: list[str] = []
     if not validator_flags.fetch_enabled:
         errors.append("validator_fetch_disabled")
-    if not (validator_flags.weight_mutation_enabled or validator_flags.submit_on_chain_enabled):
+    if not validator_flags.live_allocation_enabled():
         errors.append("validator_live_research_lab_weight_flags_disabled")
     if _contains_secret_material(bundle):
         errors.append("allocation_bundle_contains_raw_secret_material")
@@ -672,7 +679,7 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
     allocation_flags = {
         **fixture["validator_flags"],
         "RESEARCH_LAB_VALIDATOR_FETCH_ENABLED": True,
-        "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": True,
+        "RESEARCH_LAB_REIMBURSEMENTS_ENABLED": True,
     }
     allocation_verification = verify_research_lab_allocation_bundle(
         allocation_bundle,

@@ -922,7 +922,7 @@ async def get_research_lab_live_allocation(epoch: int):
             config=config,
             epoch=int(epoch),
             netuid=BITTENSOR_NETUID,
-            persist_snapshot=bool(config.weight_mutation_enabled),
+            persist_snapshot=bool(config.reimbursements_enabled or config.weight_mutation_enabled),
         )
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

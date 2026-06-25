@@ -3402,7 +3402,7 @@ class Validator(BaseValidatorNeuron):
             print(f"   ✅ Research Lab shadow bundle verified: {verification.get('weight_vector_hash')}")
             allocation_component = None
             allocation_verification = None
-            if flags.weight_mutation_enabled or flags.submit_on_chain_enabled:
+            if flags.live_allocation_enabled():
                 print(f"   Fetching Research Lab live allocation for epoch {current_epoch}")
                 allocation_bundle = await asyncio.to_thread(fetch_research_lab_allocation_bundle, gateway_url, current_epoch)
                 allocation_verification = verify_research_lab_allocation_bundle(allocation_bundle, flags=flags)
@@ -3561,7 +3561,13 @@ class Validator(BaseValidatorNeuron):
             # submit weights rather than misrouting emissions.
             BURN_TARGET_UID = int(os.environ.get("BURN_TARGET_UID", "0"))
             EXPECTED_BURN_TARGET_HOTKEY = os.environ.get("EXPECTED_BURN_TARGET_HOTKEY")
-            if not EXPECTED_BURN_TARGET_HOTKEY and os.environ.get("BITTENSOR_NETWORK", "finney") != "test":
+            subtensor_config = getattr(self.config, "subtensor", None)
+            configured_network = str(
+                os.environ.get("BITTENSOR_NETWORK")
+                or getattr(subtensor_config, "network", "")
+                or "finney"
+            ).strip().lower()
+            if not EXPECTED_BURN_TARGET_HOTKEY and configured_network != "test":
                 EXPECTED_BURN_TARGET_HOTKEY = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
 
             # Read ff_enabled EARLY (used by the no-sourcing-data gates below)

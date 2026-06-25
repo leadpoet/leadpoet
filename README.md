@@ -108,8 +108,6 @@ Current flow:
 6. Validators verify signed receipts and evaluation bundles.
 7. Rewards are assigned through the Research Lab allocation policy.
 
-For the first production launch, all Research Lab runs are **generalist**. Specialized areas and top-ups are intentionally disabled for now.
-
 ### Fulfillment
 
 Fulfillment miners compete on real client requests. A client publishes an ICP, miners submit enriched leads, and validators score each lead for fit, accuracy, and intent evidence.

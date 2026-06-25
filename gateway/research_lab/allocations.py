@@ -48,6 +48,7 @@ async def build_research_lab_allocation_bundle(
         "epoch": int(epoch),
         "netuid": int(netuid),
         "policy_id": str(policy["policy_id"]),
+        "policy": policy,
         "reimbursement_obligation_count": len(reimbursement_obligations),
         "champion_obligation_count": len(champion_obligations),
         "reimbursement_obligations": reimbursement_obligations,
@@ -92,6 +93,8 @@ async def build_research_lab_allocation_bundle(
                 "secret_payload_absent",
                 "source_state_hash_matches",
                 "allocation_hash_matches",
+                "allocation_recomputes_from_source_state",
+                "validator_policy_lab_cap_ceiling",
                 "gateway_allows_live_research_lab_weights",
                 "validator_flags_allow_live_research_lab_weights",
             ],
@@ -104,11 +107,11 @@ async def build_research_lab_allocation_bundle(
 async def _active_reimbursement_obligations(epoch: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     award_rows = await select_all(
         "research_reimbursement_award_current",
-        filters=(),
+        filters=(("current_award_status", "awarded"),),
     )
     schedule_rows = await select_all(
         "research_reimbursement_schedules",
-        filters=(),
+        filters=(("schedule_status", "scheduled"),),
     )
     awards_by_id = {
         str(row.get("award_id")): row
@@ -155,10 +158,14 @@ async def _active_reimbursement_obligations(epoch: int) -> tuple[list[dict[str, 
 
 
 async def _active_champion_obligations(epoch: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    champion_rows = await select_all(
-        "research_lab_champion_reward_current",
-        filters=(),
-    )
+    champion_rows: list[dict[str, Any]] = []
+    for status in sorted(ACTIVE_CHAMPION_STATUSES):
+        champion_rows.extend(
+            await select_all(
+                "research_lab_champion_reward_current",
+                filters=(("current_reward_status", status),),
+            )
+        )
     hotkey_uids = await resolve_hotkey_uids(str(row.get("miner_hotkey") or "") for row in champion_rows)
     obligations: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []

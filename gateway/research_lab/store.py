@@ -143,6 +143,47 @@ async def payment_ref_exists(block_hash: str, extrinsic_index: int) -> bool:
     return row is not None
 
 
+async def _existing_or_recovered_event(
+    event_table: str,
+    key_field: str,
+    key_value: Any,
+    create_opening_event: Any,
+) -> dict[str, Any]:
+    """Return an idempotency event, recreating seq=0 if a prior insert crashed."""
+    event = await select_one(
+        event_table,
+        filters=((key_field, key_value), ("seq", 0)),
+    )
+    if event:
+        return event
+    existing_events = await select_many(
+        event_table,
+        filters=((key_field, key_value),),
+        order_by=(("seq", False),),
+        limit=1,
+    )
+    if existing_events:
+        return existing_events[0]
+    try:
+        return await create_opening_event()
+    except Exception:
+        event = await select_one(
+            event_table,
+            filters=((key_field, key_value), ("seq", 0)),
+        )
+        if event:
+            return event
+        existing_events = await select_many(
+            event_table,
+            filters=((key_field, key_value),),
+            order_by=(("seq", False),),
+            limit=1,
+        )
+        if existing_events:
+            return existing_events[0]
+        raise
+
+
 async def create_openrouter_key_ref(
     *,
     key_ref: str,
@@ -175,12 +216,18 @@ async def create_ticket(request: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     ticket_id = deterministic_uuid("ticket", request.miner_hotkey, request.idempotency_key)
     existing_ticket = await select_one("research_loop_tickets", filters=(("ticket_id", ticket_id),))
     if existing_ticket:
-        existing_event = await select_one(
+        existing_event = await _existing_or_recovered_event(
             "research_loop_ticket_events",
-            filters=(("ticket_id", ticket_id), ("seq", 0)),
+            "ticket_id",
+            ticket_id,
+            lambda: create_ticket_event(
+                ticket_id=ticket_id,
+                event_type="opened",
+                actor_hotkey=request.miner_hotkey,
+                reason="ticket_created",
+                event_doc={"ticket_hash": existing_ticket.get("ticket_hash")},
+            ),
         )
-        if not existing_event:
-            raise RuntimeError("existing Research Lab ticket is missing its opening event")
         return existing_ticket, existing_event
 
     ticket_payload = {
@@ -432,12 +479,23 @@ async def create_candidate_artifact(request: Any) -> tuple[dict[str, Any], dict[
         filters=(("candidate_id", candidate_id),),
     )
     if existing:
-        event = await select_one(
+        event = await _existing_or_recovered_event(
             "research_lab_candidate_evaluation_events",
-            filters=(("candidate_id", candidate_id), ("seq", 0)),
+            "candidate_id",
+            candidate_id,
+            lambda: create_candidate_evaluation_event(
+                candidate_id=candidate_id,
+                run_id=str(request.run_id),
+                ticket_id=str(request.ticket_id),
+                event_type="queued",
+                candidate_status="queued",
+                reason="candidate_generated_by_gateway_worker",
+                event_doc={
+                    "candidate_artifact_hash": candidate_artifact_hash,
+                    "candidate_patch_hash": candidate_patch_hash,
+                },
+            ),
         )
-        if not event:
-            raise RuntimeError("existing Research Lab candidate is missing its opening event")
         return existing, event
 
     row = {
@@ -616,12 +674,20 @@ async def create_private_model_benchmark_bundle(
         filters=(("benchmark_bundle_id", benchmark_bundle_id),),
     )
     if existing:
-        event = await select_one(
+        event = await _existing_or_recovered_event(
             "research_lab_private_model_benchmark_events",
-            filters=(("benchmark_bundle_id", benchmark_bundle_id), ("seq", 0)),
+            "benchmark_bundle_id",
+            benchmark_bundle_id,
+            lambda: create_private_model_benchmark_event(
+                benchmark_bundle_id=benchmark_bundle_id,
+                event_type="completed",
+                benchmark_status="completed",
+                event_doc={
+                    "benchmark_bundle_hash": benchmark_bundle_hash,
+                    "rolling_window_hash": rolling_window_hash,
+                },
+            ),
         )
-        if not event:
-            raise RuntimeError("existing private model benchmark bundle is missing its opening event")
         return existing, event
     row = {
         "benchmark_bundle_id": benchmark_bundle_id,
@@ -948,12 +1014,17 @@ async def create_public_benchmark_report(
         filters=(("report_id", report_id),),
     )
     if existing:
-        event = await select_one(
+        event = await _existing_or_recovered_event(
             "research_lab_public_benchmark_report_events",
-            filters=(("report_id", report_id), ("seq", 0)),
+            "report_id",
+            report_id,
+            lambda: create_public_benchmark_report_event(
+                report_id=report_id,
+                event_type="published",
+                report_status="published",
+                event_doc={"report_hash": report_hash, "benchmark_bundle_id": benchmark_bundle_id},
+            ),
         )
-        if not event:
-            raise RuntimeError("existing Research Lab public benchmark report is missing its opening event")
         return existing, event
     row = {
         "report_id": report_id,
@@ -1007,12 +1078,21 @@ async def create_champion_reward_obligation(
         filters=(("champion_reward_id", obligation["champion_reward_id"]),),
     )
     if existing:
-        event = await select_one(
+        event = await _existing_or_recovered_event(
             "research_lab_champion_reward_events",
-            filters=(("champion_reward_id", obligation["champion_reward_id"]), ("seq", 0)),
+            "champion_reward_id",
+            obligation["champion_reward_id"],
+            lambda: create_champion_reward_event(
+                champion_reward_id=obligation["champion_reward_id"],
+                event_type="active",
+                reward_status="active",
+                reason="created_from_gateway_promotion_event",
+                event_doc={
+                    "candidate_id": obligation.get("candidate_id"),
+                    "score_bundle_id": obligation.get("score_bundle_id"),
+                },
+            ),
         )
-        if not event:
-            raise RuntimeError("existing champion reward obligation is missing its opening event")
         return existing, event
     row = {
         "champion_reward_id": obligation["champion_reward_id"],
@@ -1121,12 +1201,17 @@ async def create_signed_audit_bundle(
         filters=(("audit_bundle_id", audit_bundle_id),),
     )
     if existing:
-        event = await select_one(
+        event = await _existing_or_recovered_event(
             "research_lab_signed_audit_bundle_events",
-            filters=(("audit_bundle_id", audit_bundle_id), ("seq", 0)),
+            "audit_bundle_id",
+            audit_bundle_id,
+            lambda: create_signed_audit_bundle_event(
+                audit_bundle_id=audit_bundle_id,
+                event_type="created",
+                audit_status="created",
+                event_doc={"audit_bundle_hash": audit_bundle_hash},
+            ),
         )
-        if not event:
-            raise RuntimeError("existing Research Lab audit bundle is missing its opening event")
         return existing, event
     payload = {
         "audit_bundle_id": audit_bundle_id,
@@ -1345,12 +1430,20 @@ async def create_reimbursement_award(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     existing = await select_one("research_reimbursement_awards", filters=(("award_id", award["award_id"]),))
     if existing:
-        event = await select_one(
+        event = await _existing_or_recovered_event(
             "research_reimbursement_award_events",
-            filters=(("award_id", award["award_id"]), ("seq", 0)),
+            "award_id",
+            award["award_id"],
+            lambda: create_reimbursement_award_event(
+                award_id=str(award["award_id"]),
+                event_type=str(award["status"]),
+                award_status=str(award["status"]),
+                event_doc={
+                    "award_id": str(award["award_id"]),
+                    "target_reimbursement_microusd": int(award["target_reimbursement_microusd"]),
+                },
+            ),
         )
-        if not event:
-            raise RuntimeError("existing Research Lab reimbursement award is missing its opening event")
         return existing, event
     row = {
         "award_id": str(award["award_id"]),
@@ -1474,12 +1567,18 @@ async def create_score_bundle(request: Any) -> tuple[dict[str, Any], dict[str, A
         filters=(("score_bundle_id", score_bundle_id),),
     )
     if existing:
-        event = await select_one(
+        event = await _existing_or_recovered_event(
             "research_evaluation_score_bundle_events",
-            filters=(("score_bundle_id", score_bundle_id), ("seq", 0)),
+            "score_bundle_id",
+            score_bundle_id,
+            lambda: create_score_bundle_event(
+                score_bundle_id=score_bundle_id,
+                event_type=request.bundle_status,
+                event_status=request.bundle_status,
+                reason="score_bundle_created",
+                event_doc={"score_bundle_hash": score_bundle_hash},
+            ),
         )
-        if not event:
-            raise RuntimeError("existing Research Lab score bundle is missing its opening event")
         return existing, event
 
     row = {

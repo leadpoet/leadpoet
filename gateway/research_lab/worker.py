@@ -941,7 +941,10 @@ class ResearchLabHostedWorker:
         return snapshot_doc, snapshot_row
 
     async def _reimbursement_cap_usage(self, context: HostedRunContext, *, run_day: str) -> dict[str, float]:
-        rows = await select_all("research_reimbursement_award_current", filters=())
+        rows = await select_all(
+            "research_reimbursement_award_current",
+            filters=(("current_award_status", "awarded"),),
+        )
         miner_hotkey = str(context.ticket["miner_hotkey"])
         island = str(context.ticket["island"] or self.config.reimbursement_default_island)
         eligible_rows = [

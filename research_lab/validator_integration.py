@@ -17,7 +17,7 @@ from typing import Any, Mapping
 from urllib.request import Request, urlopen
 
 from leadpoet_verifier.golden_vectors import run_golden_vectors
-from leadpoet_verifier.economics import allocate_research_lab_epoch
+from leadpoet_verifier.economics import DEFAULT_RESEARCH_LAB_EMISSION_PERCENT, allocate_research_lab_epoch
 from leadpoet_verifier.research_evaluation import (
     build_research_evaluation_score_bundle,
     score_bundle_to_weight_input,
@@ -35,6 +35,7 @@ from .production_shadow import (
 
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "validator_integration_fixtures.json"
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
+PERCENT_EPSILON = 0.000001
 
 
 def _request_headers(*, include_internal_key: bool = False) -> dict[str, str]:
@@ -44,6 +45,16 @@ def _request_headers(*, include_internal_key: bool = False) -> dict[str, str]:
         if internal_key:
             headers["x-leadpoet-internal-key"] = internal_key
     return headers
+
+
+def _validator_lab_cap_ceiling_percent() -> float:
+    raw = os.getenv("RESEARCH_LAB_EMISSION_PERCENT", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return float(DEFAULT_RESEARCH_LAB_EMISSION_PERCENT)
+    return float(DEFAULT_RESEARCH_LAB_EMISSION_PERCENT)
 
 
 def _argv_value(name: str) -> str:
@@ -308,8 +319,21 @@ def verify_research_lab_allocation_bundle(
     source_state_hash = bundle.get("source_state_hash")
     if not isinstance(source_state, Mapping) or not source_state_hash:
         errors.append("allocation_source_state_required")
+        source_state = {}
     elif sha256_json(source_state) != source_state_hash:
         errors.append("allocation_source_state_hash_diverged")
+    else:
+        try:
+            if int(source_state.get("epoch")) != int(bundle.get("epoch")):
+                errors.append("allocation_source_state_epoch_diverged")
+        except (TypeError, ValueError):
+            errors.append("allocation_source_state_epoch_invalid")
+        if source_state.get("netuid") is not None and bundle.get("netuid") is not None:
+            try:
+                if int(source_state.get("netuid")) != int(bundle.get("netuid")):
+                    errors.append("allocation_source_state_netuid_diverged")
+            except (TypeError, ValueError):
+                errors.append("allocation_source_state_netuid_invalid")
 
     allocation_doc = bundle.get("allocation_doc")
     allocation_hash = bundle.get("allocation_hash")
@@ -324,6 +348,7 @@ def verify_research_lab_allocation_bundle(
             errors.append("allocation_doc_hash_field_diverged")
 
     lab_cap = float(allocation_doc.get("lab_cap_percent") or 0.0) if allocation_doc else 0.0
+    validator_lab_cap_ceiling = _validator_lab_cap_ceiling_percent()
     paid = sum(
         float(allocation_doc.get(field) or 0.0)
         for field in (
@@ -335,8 +360,51 @@ def verify_research_lab_allocation_bundle(
     )
     if lab_cap < 0 or lab_cap > 100:
         errors.append("invalid_lab_cap_percent")
-    if paid > lab_cap + 0.000001:
+    if lab_cap > validator_lab_cap_ceiling + PERCENT_EPSILON:
+        errors.append("allocation_lab_cap_exceeds_validator_policy")
+    if paid > lab_cap + PERCENT_EPSILON:
         errors.append("allocation_exceeds_lab_cap")
+
+    recomputed_allocation_hash: str | None = None
+    policy = source_state.get("policy") if isinstance(source_state, Mapping) else None
+    reimbursements = source_state.get("reimbursement_obligations") if isinstance(source_state, Mapping) else None
+    champions = source_state.get("champion_obligations") if isinstance(source_state, Mapping) else None
+    if not isinstance(policy, Mapping):
+        errors.append("allocation_policy_required")
+    if not isinstance(reimbursements, list):
+        errors.append("allocation_reimbursement_obligations_must_be_array")
+        reimbursements = []
+    if not isinstance(champions, list):
+        errors.append("allocation_champion_obligations_must_be_array")
+        champions = []
+    if isinstance(policy, Mapping):
+        try:
+            policy_lab_cap = float(policy.get("research_lab_emission_percent") or 0.0)
+        except (TypeError, ValueError):
+            errors.append("allocation_policy_lab_cap_invalid")
+            policy_lab_cap = 0.0
+        if policy_lab_cap > validator_lab_cap_ceiling + PERCENT_EPSILON:
+            errors.append("allocation_policy_cap_exceeds_validator_policy")
+        if abs(policy_lab_cap - lab_cap) > PERCENT_EPSILON:
+            errors.append("allocation_policy_cap_diverged_from_doc")
+        if isinstance(source_state, Mapping) and source_state.get("policy_id") is not None:
+            if str(policy.get("policy_id") or "") != str(source_state.get("policy_id") or ""):
+                errors.append("allocation_policy_id_diverged")
+        try:
+            allocation_epoch = int(source_state.get("epoch", bundle.get("epoch")))
+            recomputed = allocate_research_lab_epoch(
+                allocation_epoch,
+                policy,
+                reimbursements,
+                champions,
+            )
+            recomputed_allocation_hash = str(recomputed.get("allocation_hash") or "")
+            if allocation_hash and recomputed_allocation_hash != str(allocation_hash):
+                errors.append("allocation_recompute_hash_diverged")
+            if allocation_doc and dict(recomputed) != dict(allocation_doc):
+                errors.append("allocation_recompute_doc_diverged")
+        except Exception as exc:
+            errors.append(f"allocation_recompute_failed:{str(exc)[:120]}")
 
     return {
         "passed": not errors,
@@ -345,6 +413,8 @@ def verify_research_lab_allocation_bundle(
         "bundle_id": bundle.get("bundle_id"),
         "source_state_hash": source_state_hash,
         "allocation_hash": allocation_hash,
+        "recomputed_allocation_hash": recomputed_allocation_hash,
+        "validator_lab_cap_ceiling_percent": validator_lab_cap_ceiling,
         "allocation_doc": dict(allocation_doc or {}),
         "on_chain_submission_allowed": not errors,
     }
@@ -662,6 +732,7 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
         raise AssertionError("tampered evaluation score bundle was not rejected")
 
     allocation_policy = {
+        "policy_id": "research_lab_reimbursement_and_champion_rewards:v1",
         "research_lab_emission_percent": 10.0,
         "reward_epochs": 20,
         "usd_per_0_1_percent_epoch": 0.162,
@@ -712,6 +783,7 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
         "epoch": int(bundle["epoch"]),
         "netuid": 401,
         "policy_id": "research_lab_reimbursement_and_champion_rewards:v1",
+        "policy": allocation_policy,
         "reimbursement_obligations": reimbursement_obligations,
         "champion_obligations": champion_obligations,
     }
@@ -760,6 +832,47 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
     )
     if tampered_allocation_verification["passed"] or "allocation_hash_diverged" not in tampered_allocation_verification["errors"]:
         raise AssertionError("tampered live allocation bundle was not rejected")
+
+    rehashed_bad_allocation_doc = {
+        **allocation_doc,
+        "reimbursement_alpha_percent": 9.99,
+    }
+    rehashed_bad_payload = {k: v for k, v in rehashed_bad_allocation_doc.items() if k != "allocation_hash"}
+    rehashed_bad_allocation_hash = sha256_json(rehashed_bad_payload)
+    rehashed_bad_allocation_doc["allocation_hash"] = rehashed_bad_allocation_hash
+    rehashed_bad_allocation = {
+        **allocation_bundle,
+        "allocation_doc": rehashed_bad_allocation_doc,
+        "allocation_hash": rehashed_bad_allocation_hash,
+    }
+    rehashed_bad_verification = verify_research_lab_allocation_bundle(
+        rehashed_bad_allocation,
+        flags=allocation_flags,
+    )
+    if rehashed_bad_verification["passed"] or "allocation_recompute_hash_diverged" not in rehashed_bad_verification["errors"]:
+        raise AssertionError("rehashed live allocation tamper was not rejected")
+
+    oversized_policy = {**allocation_policy, "research_lab_emission_percent": 100.0}
+    oversized_allocation_doc = allocate_research_lab_epoch(
+        int(bundle["epoch"]),
+        oversized_policy,
+        reimbursement_obligations,
+        champion_obligations,
+    )
+    oversized_source_state = {**allocation_source_state, "policy": oversized_policy}
+    oversized_allocation = {
+        **allocation_bundle,
+        "source_state": oversized_source_state,
+        "source_state_hash": sha256_json(oversized_source_state),
+        "allocation_doc": oversized_allocation_doc,
+        "allocation_hash": oversized_allocation_doc["allocation_hash"],
+    }
+    oversized_verification = verify_research_lab_allocation_bundle(
+        oversized_allocation,
+        flags=allocation_flags,
+    )
+    if oversized_verification["passed"] or "allocation_lab_cap_exceeds_validator_policy" not in oversized_verification["errors"]:
+        raise AssertionError("oversized Research Lab allocation cap was not rejected")
 
     audit_source_state = {
         "candidate_rows": [

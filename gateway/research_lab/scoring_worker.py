@@ -566,7 +566,8 @@ class ResearchLabGatewayScoringWorker:
                     "selected_icp_count": len(window.item_refs),
                 },
             )
-            for item in window.benchmark_items:
+            total_icps = len(window.benchmark_items)
+            for item_index, item in enumerate(window.benchmark_items, start=1):
                 label = str(item.get("icp_ref") or item.get("icp_hash") or "unknown_icp")
                 outputs = ensure_private_model_outputs(
                     await asyncio.to_thread(runner, item["icp"], {"mode": "private_baseline"}),
@@ -577,10 +578,29 @@ class ResearchLabGatewayScoringWorker:
                     nonempty_output_count += 1
                 score_breakdowns = await scorer.score_with_breakdowns(outputs, item["icp"], True)
                 scores = [float(row.get("final_score", 0.0) or 0.0) for row in score_breakdowns]
+                icp_score = _average(scores)
+                logger.info(
+                    format_worker_block(
+                        "RESEARCH LAB PRIVATE BASELINE ICP SCORED",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("ICP", f"{item_index}/{total_icps}"),
+                            ("ICP ref", compact_ref(label)),
+                            ("ICP hash", compact_ref(item.get("icp_hash"))),
+                            ("Set", item.get("set_id")),
+                            ("Day", item.get("day_index")),
+                            ("Day rank", item.get("day_rank")),
+                            ("Score", f"{icp_score:.4f}"),
+                            ("Companies", len(scores)),
+                            ("Non-empty output", bool(outputs)),
+                            ("Elapsed", f"{time.time() - start:.1f}s"),
+                        ),
+                    )
+                )
                 per_icp_summaries.append(
                     sanitize_benchmark_item_summary(
                         item=item,
-                        score=_average(scores),
+                        score=icp_score,
                         company_count=len(scores),
                         score_breakdowns=score_breakdowns,
                     )

@@ -40,7 +40,7 @@ class SignedResearchLabRequest(BaseModel):
         return self
 
     def signed_payload(self) -> dict[str, Any]:
-        return self.model_dump(exclude={"signature"}, mode="json")
+        return self.model_dump(exclude={"signature"}, exclude_unset=True, mode="json")
 
 
 class ResearchLabTicketCreateRequest(SignedResearchLabRequest):

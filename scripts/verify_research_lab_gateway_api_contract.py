@@ -183,6 +183,9 @@ def main() -> int:
     reparsed_loop_start = ResearchLabLoopStartRequest.model_validate(loop_start.model_dump(mode="json"))
     if reparsed_loop_start != loop_start:
         errors.append("loop-start request failed json round-trip")
+    loop_signed_payload = loop_start.signed_payload()
+    if "credit_id" in loop_signed_payload:
+        errors.append("loop-start signed payload included omitted credit_id default")
     credit_loop_start = ResearchLabLoopStartRequest(
         miner_hotkey=ticket.miner_hotkey,
         signature=ticket.signature,

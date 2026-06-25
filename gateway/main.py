@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 import sys
 import os
 import asyncio
+import time
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -257,7 +258,21 @@ async def lifespan(app: FastAPI):
         app.state.async_subtensor = async_subtensor
         print("✅ Async subtensor stored in app.state")
         print("")
-        
+
+        # Child worker processes do not share the in-process injected
+        # AsyncSubtensor. Provide a bounded, fresh epoch hint before spawning
+        # Research Lab workers so baseline scoring cannot hang on direct chain
+        # fallback during local/testnet startup.
+        try:
+            current_block = int(await asyncio.wait_for(epoch_utils._get_current_block_async(), timeout=20))
+            current_epoch = current_block // epoch_utils.EPOCH_DURATION_BLOCKS
+            os.environ["RESEARCH_LAB_GATEWAY_EPOCH_HINT"] = str(current_epoch)
+            os.environ["RESEARCH_LAB_GATEWAY_BLOCK_HINT"] = str(current_block)
+            os.environ["RESEARCH_LAB_GATEWAY_EPOCH_HINT_TS"] = str(int(time.time()))
+            print(f"✅ Research Lab worker epoch hint set: epoch={current_epoch}, block={current_block}")
+        except Exception as e:
+            print(f"⚠️  Could not set Research Lab worker epoch hint: {e}")
+
         # ════════════════════════════════════════════════════════════════
         # BACKGROUND TASKS: Start all services
         # ════════════════════════════════════════════════════════════════

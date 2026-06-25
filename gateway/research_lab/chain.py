@@ -11,6 +11,13 @@ from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 _EPOCH_CACHE: tuple[int, int | None, str, float] | None = None
+_EPOCH_HINT_ENV = "RESEARCH_LAB_GATEWAY_EPOCH_HINT"
+_EPOCH_BLOCK_HINT_ENV = "RESEARCH_LAB_GATEWAY_BLOCK_HINT"
+_EPOCH_HINT_TS_ENV = "RESEARCH_LAB_GATEWAY_EPOCH_HINT_TS"
+_EPOCH_HINT_MAX_AGE_SECONDS_ENV = "RESEARCH_LAB_GATEWAY_EPOCH_HINT_MAX_AGE_SECONDS"
+_DIRECT_EPOCH_TIMEOUT_SECONDS_ENV = "RESEARCH_LAB_DIRECT_EPOCH_TIMEOUT_SECONDS"
+_DEFAULT_EPOCH_HINT_MAX_AGE_SECONDS = 2 * 60 * 60
+_DEFAULT_DIRECT_EPOCH_TIMEOUT_SECONDS = 20.0
 
 
 async def resolve_research_lab_evaluation_epoch(configured_epoch: int | str | None = None) -> tuple[int, int | None, str]:
@@ -32,18 +39,88 @@ async def resolve_research_lab_evaluation_epoch(configured_epoch: int | str | No
     try:
         from gateway.utils.epoch import get_current_epoch_id_async
 
-        epoch = int(await get_current_epoch_id_async())
+        timeout_seconds = _direct_epoch_timeout_seconds()
+        epoch = int(await asyncio.wait_for(get_current_epoch_id_async(), timeout=timeout_seconds))
         block = None
         source = "gateway_epoch_utils"
     except Exception as exc:
-        logger.warning("research_lab_epoch_gateway_utils_failed_fallback_direct: %s", str(exc)[:200])
-        epoch, block, network = await asyncio.to_thread(_fetch_current_chain_epoch_direct)
-        source = f"direct_subtensor:{network}"
+        logger.warning("research_lab_epoch_gateway_utils_failed_fallback_hint: %s", str(exc)[:200])
+        hint = _read_gateway_epoch_hint(require_fresh=True)
+        if hint is not None:
+            epoch, block, source = hint
+        else:
+            try:
+                epoch, block, network = await asyncio.wait_for(
+                    asyncio.to_thread(_fetch_current_chain_epoch_direct),
+                    timeout=_direct_epoch_timeout_seconds(),
+                )
+                source = f"direct_subtensor:{network}"
+            except Exception as direct_exc:
+                stale_hint = _read_gateway_epoch_hint(require_fresh=False)
+                if stale_hint is not None:
+                    logger.warning(
+                        "research_lab_epoch_direct_failed_using_stale_gateway_hint: %s",
+                        str(direct_exc)[:200],
+                    )
+                    epoch, block, source = stale_hint
+                    source = f"{source}:stale_fallback"
+                else:
+                    raise RuntimeError(
+                        "Research Lab evaluation epoch could not be resolved from gateway utils, "
+                        "gateway epoch hint, or direct subtensor"
+                    ) from direct_exc
 
     if epoch <= 0:
         raise RuntimeError("Research Lab evaluation epoch resolved to 0")
     _EPOCH_CACHE = (epoch, block, source, now)
     return epoch, block, source
+
+
+def _read_gateway_epoch_hint(*, require_fresh: bool) -> tuple[int, int | None, str] | None:
+    try:
+        epoch = int(str(os.getenv(_EPOCH_HINT_ENV, "0")).strip() or "0")
+    except (TypeError, ValueError):
+        return None
+    if epoch <= 0:
+        return None
+    block = _optional_int_env(_EPOCH_BLOCK_HINT_ENV)
+    hinted_at = _optional_float_env(_EPOCH_HINT_TS_ENV)
+    if require_fresh:
+        if hinted_at is None:
+            return None
+        if time.time() - hinted_at > _epoch_hint_max_age_seconds():
+            return None
+    return epoch, block, "gateway_epoch_hint"
+
+
+def _epoch_hint_max_age_seconds() -> float:
+    try:
+        return max(0.0, float(os.getenv(_EPOCH_HINT_MAX_AGE_SECONDS_ENV, _DEFAULT_EPOCH_HINT_MAX_AGE_SECONDS)))
+    except (TypeError, ValueError):
+        return float(_DEFAULT_EPOCH_HINT_MAX_AGE_SECONDS)
+
+
+def _direct_epoch_timeout_seconds() -> float:
+    try:
+        return max(1.0, float(os.getenv(_DIRECT_EPOCH_TIMEOUT_SECONDS_ENV, _DEFAULT_DIRECT_EPOCH_TIMEOUT_SECONDS)))
+    except (TypeError, ValueError):
+        return float(_DEFAULT_DIRECT_EPOCH_TIMEOUT_SECONDS)
+
+
+def _optional_int_env(name: str) -> int | None:
+    try:
+        value = str(os.getenv(name, "")).strip()
+        return int(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float_env(name: str) -> float | None:
+    try:
+        value = str(os.getenv(name, "")).strip()
+        return float(value) if value else None
+    except (TypeError, ValueError):
+        return None
 
 
 async def resolve_hotkey_uids(hotkeys: Iterable[str]) -> dict[str, int]:

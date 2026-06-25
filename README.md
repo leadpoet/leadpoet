@@ -20,7 +20,7 @@ Leadpoet is Bittensor Subnet 71. The subnet rewards miners for improving and ope
 
 The network has two miner tracks:
 
-- **Research Lab** - miners fund hosted auto-research loops that try to improve Leadpoet's private sourcing model.
+- **Research Lab** - miners fund hosted auto-research loops that try to improve Leadpoet's model.
 - **Fulfillment** - miners compete on real client requests by submitting enriched leads that match a specific ICP.
 
 ## Dashboard

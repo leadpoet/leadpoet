@@ -18,7 +18,7 @@
 
 Leadpoet is Bittensor Subnet 71. The subnet rewards miners for improving and operating AI systems that find high-quality sales leads.
 
-The network currently has two production tracks:
+The network has two miner tracks:
 
 - **Research Lab** - miners fund hosted auto-research loops that try to improve Leadpoet's private sourcing model.
 - **Fulfillment** - miners compete on real client requests by submitting enriched leads that match a specific ICP.
@@ -89,14 +89,14 @@ The miner will ask which mode to run:
 
 Research Lab lets miners contribute compute toward improving Leadpoet's private sourcing model.
 
-Current flow:
+How it works:
 
 1. The miner provides an OpenRouter key.
-2. The miner enters an optional research focus.
+2. The miner enters a research direction.
 3. The miner pays the loop-start fee in TAO.
 4. The gateway runs the hosted auto-research loop.
 5. Candidate improvements are scored.
-6. Rewards are assigned to miners.
+6. Validators verify the receipts and scoring bundles used for rewards.
 
 ### Fulfillment
 
@@ -178,17 +178,20 @@ See [`env.example`](env.example) for a fuller configuration template.
 
 ## Rewards
 
-The active production split is designed around both Research Lab and Fulfillment:
+Rewards are designed around both Research Lab and Fulfillment:
 
-- Research Lab has its own allocation for compute reimbursement and successful model improvements.
+- Research Lab miners can earn reimbursement-style emissions for verified compute they provide.
+- Research Lab miners that produce benchmarked model improvements can earn larger improvement rewards.
 - Fulfillment rewards winning leads from client requests.
 - The weekly leaderboard rewards top fulfillment performance.
 
-Exact weights are computed by the validator from signed gateway bundles and current subnet policy.
+Exact weights are computed by validators from signed gateway bundles, verified compute records, benchmark results, and current subnet policy. Research Lab reward calculations are based on the emitted receipts and audit logs, so the reimbursement and improvement allocations can be independently checked against those artifacts.
 
 ## Transparency
 
-Leadpoet uses signed gateway artifacts and validator-side verification for Research Lab and Fulfillment outputs.
+Leadpoet uses a gateway TEE, signed gateway artifacts, validator-side verification, and Arweave checkpoints for Research Lab and Fulfillment outputs.
+
+Research Lab is designed to be externally auditable without exposing private model code, hidden ICPs, provider secrets, or candidate patch internals. The gateway emits signed receipts, scoring bundles, allocation records, and compact audit anchors. Validators verify those artifacts before using them for weights, and Arweave checkpoints provide a durable record of the hashes and status transitions used in the reward calculation.
 
 Useful tools:
 

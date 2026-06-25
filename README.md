@@ -95,7 +95,7 @@ Current flow:
 2. The miner enters an optional general research focus.
 3. The miner pays the loop-start fee in TAO.
 4. The gateway runs the hosted auto-research loop.
-5. Candidate improvements are scored by gateway qualification workers.
+5. Candidate improvements are scored.
 6. Validators verify signed receipts and evaluation bundles.
 7. Rewards are assigned through the Research Lab allocation policy.
 

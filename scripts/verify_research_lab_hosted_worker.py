@@ -20,6 +20,8 @@ from gateway.research_lab.loop_engine import (  # noqa: E402
     AutoResearchLoopSettings,
     OpenRouterCallResult,
 )
+from gateway.research_lab.store import canonical_hash, scoring_dispatch_event_anchor_payload  # noqa: E402
+from gateway.research_lab.scoring_worker import _private_benchmark_row_is_valid  # noqa: E402
 from gateway.research_lab.worker import (  # noqa: E402
     HostedResearchLabWorkerError,
     ResearchLabHostedWorker,
@@ -96,6 +98,40 @@ def main() -> int:
             errors.append(f"valid candidate failed hosted-worker validation: {exc}")
     if "source_router" in registry.by_name():
         errors.append("runtime-incompatible source_router strategy component was exposed to auto-research")
+
+    dispatch_payload = {
+        "dispatch_type": "private_baseline_rebenchmark",
+        "dispatch_status": "failed",
+        "candidate_id": None,
+        "run_id": None,
+        "ticket_id": None,
+        "rolling_window_hash": "sha256:" + "d" * 64,
+        "score_bundle_id": None,
+        "benchmark_bundle_id": None,
+        "worker_ref": "research-lab-scorer-1",
+        "proxy_ref_hash": "sha256:" + "e" * 64,
+        "event_doc": {"error": "same failure"},
+    }
+    first_hash = canonical_hash(scoring_dispatch_event_anchor_payload(dispatch_payload, "11111111-1111-4111-8111-111111111111"))
+    second_hash = canonical_hash(scoring_dispatch_event_anchor_payload(dispatch_payload, "22222222-2222-4222-8222-222222222222"))
+    if first_hash == second_hash:
+        errors.append("scoring dispatch event anchored_hash still collides for repeated events")
+    if _private_benchmark_row_is_valid(
+        {
+            "current_benchmark_status": "completed",
+            "benchmark_quality": "passed",
+            "score_summary_doc": {"per_icp_summaries": [{"company_count": 0}, {"company_count": 0}]},
+        }
+    ):
+        errors.append("all-empty private baseline benchmark row was treated as valid")
+    if not _private_benchmark_row_is_valid(
+        {
+            "current_benchmark_status": "completed",
+            "benchmark_quality": "passed",
+            "score_summary_doc": {"per_icp_summaries": [{"company_count": 0}, {"company_count": 1}]},
+        }
+    ):
+        errors.append("nonempty private baseline benchmark row was treated as invalid")
 
     try:
         parse_auto_research_response('{"candidates":[{"hypothesis":{},"patch":{"patch_type":"CODE_EDIT","patch_doc":{}}}]}')

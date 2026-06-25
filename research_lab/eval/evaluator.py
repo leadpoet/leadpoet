@@ -69,7 +69,7 @@ async def evaluate_private_model_pair(
         base_outputs = ensure_private_model_outputs(
             await _maybe_await(base_runner(icp, run_context)),
             context_label=f"reference model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
-            require_non_empty=True,
+            require_non_empty=False,
         )
         candidate_outputs = ensure_private_model_outputs(
             await _maybe_await(candidate_runner(icp, {**dict(run_context), "patch": patch.to_dict()})),
@@ -78,10 +78,15 @@ async def evaluate_private_model_pair(
         )
         base_scores = await _maybe_await(scorer(base_outputs, icp, True))
         candidate_scores = await _maybe_await(scorer(candidate_outputs, icp, False))
-        if not base_scores:
-            raise RealEvaluatorRequired(
-                f"reference model produced no scoreable companies for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}"
-            )
+        failure_reasons: list[str] = []
+        if not base_outputs:
+            failure_reasons.append("reference_model_zero_companies")
+        elif not base_scores:
+            failure_reasons.append("reference_model_zero_scoreable_companies")
+        if not candidate_outputs:
+            failure_reasons.append("candidate_model_zero_companies")
+        elif not candidate_scores:
+            failure_reasons.append("candidate_model_zero_scoreable_companies")
         per_icp_results.append(
             {
                 "icp_ref": str(item.get("icp_ref") or item.get("icp_hash") or ""),
@@ -90,6 +95,7 @@ async def evaluate_private_model_pair(
                 "hard_failure": False,
                 "base_company_scores": base_scores,
                 "candidate_company_scores": candidate_scores,
+                "failure_reason": ";".join(failure_reasons),
             }
         )
 

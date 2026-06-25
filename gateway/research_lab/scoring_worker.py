@@ -552,6 +552,7 @@ class ResearchLabGatewayScoringWorker:
         )
         scorer = QualificationStyleCompanyScorer()
         per_icp_summaries: list[dict[str, Any]] = []
+        nonempty_output_count = 0
         try:
             await create_scoring_dispatch_event(
                 dispatch_type="private_baseline_rebenchmark",
@@ -570,11 +571,11 @@ class ResearchLabGatewayScoringWorker:
                 outputs = ensure_private_model_outputs(
                     await asyncio.to_thread(runner, item["icp"], {"mode": "private_baseline"}),
                     context_label=f"private baseline for {label}",
-                    require_non_empty=True,
+                    require_non_empty=False,
                 )
+                if outputs:
+                    nonempty_output_count += 1
                 score_breakdowns = await scorer.score_with_breakdowns(outputs, item["icp"], True)
-                if not score_breakdowns:
-                    raise PrivateModelRuntimeError(f"private baseline produced no scoreable companies for {label}")
                 scores = [float(row.get("final_score", 0.0) or 0.0) for row in score_breakdowns]
                 per_icp_summaries.append(
                     sanitize_benchmark_item_summary(
@@ -583,6 +584,10 @@ class ResearchLabGatewayScoringWorker:
                         company_count=len(scores),
                         score_breakdowns=score_breakdowns,
                     )
+                )
+            if nonempty_output_count <= 0:
+                raise PrivateModelRuntimeError(
+                    f"private baseline returned zero companies across all {len(window.benchmark_items)} ICPs"
                 )
         except Exception as exc:
             await create_scoring_dispatch_event(
@@ -983,18 +988,24 @@ def _private_benchmark_row_is_valid(row: Mapping[str, Any]) -> bool:
     status = str(row.get("current_benchmark_status") or row.get("benchmark_status") or "")
     if status and status != "completed":
         return False
-    if str(row.get("benchmark_quality") or "") == "passed":
-        return True
-    try:
-        if int(row.get("evaluation_epoch") or 0) <= 0:
-            return False
-    except (TypeError, ValueError):
-        return False
     doc = row.get("score_summary_doc") if isinstance(row.get("score_summary_doc"), Mapping) else {}
     summaries = doc.get("per_icp_summaries") if isinstance(doc, Mapping) else None
     if not isinstance(summaries, list) or not summaries:
         return False
-    return all(
-        isinstance(item, Mapping) and int(item.get("company_count") or 0) > 0
-        for item in summaries
-    )
+    if not any(_benchmark_summary_has_companies(item) for item in summaries):
+        return False
+    if str(row.get("benchmark_quality") or "") == "passed":
+        return True
+    try:
+        return int(row.get("evaluation_epoch") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _benchmark_summary_has_companies(item: Any) -> bool:
+    if not isinstance(item, Mapping):
+        return False
+    try:
+        return int(item.get("company_count") or 0) > 0
+    except (TypeError, ValueError):
+        return False

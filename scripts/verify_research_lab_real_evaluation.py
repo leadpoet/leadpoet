@@ -92,6 +92,33 @@ def main() -> int:
             errors.append("missing private runners did not fail closed")
         except RealEvaluatorRequired:
             pass
+
+        zero_base_policy = {**_policy(), "min_successful_icps": 2, "min_delta": 0.0, "min_delta_lcb": 0.0}
+        zero_base_bundle = asyncio.run(
+            evaluate_private_model_pair(
+                artifact_manifest=artifact,
+                benchmark=benchmark,
+                patch_manifest=patch,
+                benchmark_items=[
+                    {"icp_ref": "icp:a", "icp_hash": "sha256:" + "a" * 64, "icp": {"industry": "Software"}},
+                    {"icp_ref": "icp:b", "icp_hash": "sha256:" + "b" * 64, "icp": {"industry": "Healthcare"}},
+                ],
+                base_runner=_empty_base_runner,
+                candidate_runner=_single_candidate_runner,
+                company_scorer=_fixture_company_scorer,
+                run_context=run_context,
+                policy=zero_base_policy,
+            )
+        )
+        zero_base_verification = verify_research_evaluation_score_bundle(zero_base_bundle, policy=zero_base_policy)
+        if not zero_base_verification["passed"]:
+            errors.append("empty base-output score bundle failed verification: " + "; ".join(zero_base_verification["errors"]))
+        if zero_base_bundle["aggregates"]["base_score"] != 0.0:
+            errors.append("empty base-output score bundle did not score reference model as zero")
+        if zero_base_bundle["aggregates"]["candidate_score"] <= 0.0:
+            errors.append("empty base-output score bundle did not score candidate outputs")
+        if "reference_model_zero_companies" not in zero_base_bundle["aggregates"]["per_icp_results"][0]["failure_reason"]:
+            errors.append("empty base-output score bundle did not record sanitized failure reason")
     except Exception as exc:
         errors.append(f"unexpected verifier exception: {exc}")
 
@@ -181,6 +208,22 @@ def _policy() -> dict[str, object]:
         "min_candidate_score": 15.0,
         "observed_cost_usd": 1.25,
     }
+
+
+async def _empty_base_runner(_icp: dict[str, object], _context: dict[str, object]) -> list[dict[str, object]]:
+    return []
+
+
+async def _single_candidate_runner(_icp: dict[str, object], _context: dict[str, object]) -> list[dict[str, object]]:
+    return [{"company_name": "Example Co"}]
+
+
+async def _fixture_company_scorer(
+    companies: list[dict[str, object]],
+    _icp: dict[str, object],
+    _is_reference_model: bool,
+) -> list[float]:
+    return [75.0 for _company in companies]
 
 
 if __name__ == "__main__":

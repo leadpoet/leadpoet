@@ -21,6 +21,10 @@ def canonical_hash(payload: Any) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def scoring_dispatch_event_anchor_payload(payload: dict[str, Any], dispatch_event_id: str) -> dict[str, Any]:
+    return {**payload, "dispatch_event_id": str(dispatch_event_id)}
+
+
 def deterministic_uuid(*parts: Any) -> str:
     return str(uuid5(RESEARCH_LAB_UUID_NAMESPACE, canonical_hash(parts)))
 
@@ -566,11 +570,12 @@ async def create_scoring_dispatch_event(
         "proxy_ref_hash": proxy_ref_hash,
         "event_doc": event_doc or {},
     }
+    dispatch_event_id = str(uuid4())
     row = {
-        "dispatch_event_id": str(uuid4()),
+        "dispatch_event_id": dispatch_event_id,
         "schema_version": "1.0",
         **payload,
-        "anchored_hash": canonical_hash(payload),
+        "anchored_hash": canonical_hash(scoring_dispatch_event_anchor_payload(payload, dispatch_event_id)),
     }
     return await insert_row("research_lab_scoring_dispatch_events", row)
 

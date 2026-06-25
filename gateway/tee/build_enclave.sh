@@ -16,6 +16,13 @@ echo ""
 echo "📦 Step 1: Building Docker image..."
 echo "   Build context: ~/gateway/ (gateway root)"
 echo "   Dockerfile: ~/tee/Dockerfile.enclave"
+echo "   Attested runtime: ~/gateway/_attested_runtime"
+
+# Stage top-level runtime packages into the gateway build context so both PCR0
+# and the gateway TEE code_hash cover the code actually imported at runtime.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bash "$SCRIPT_DIR/stage_attested_runtime.sh"
+
 # Force fresh build (no cache) to ensure latest code is included
 # Build from ~/gateway/ so .dockerignore works properly
 # On EC2: ~/tee/ and ~/gateway/ are sibling directories

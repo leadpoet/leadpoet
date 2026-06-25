@@ -46,6 +46,13 @@ print("🐛 DEBUG: Importing merkle module...", flush=True)
 from merkle import compute_merkle_tree, generate_inclusion_proof
 print("🐛 DEBUG: Merkle module imports OK", flush=True)
 
+print("🐛 DEBUG: Importing code hash module...", flush=True)
+try:
+    from gateway.tee.code_hash import compute_gateway_code_hash
+except Exception:
+    from code_hash import compute_gateway_code_hash
+print("🐛 DEBUG: Code hash module imports OK", flush=True)
+
 
 # ============================================================================
 # VSOCK CONFIGURATION (AWS Nitro Enclaves)
@@ -528,119 +535,12 @@ def build_checkpoint() -> Dict[str, Any]:
 # ============================================================================
 
 def compute_code_hash() -> str:
-    """
-    Compute SHA256 hash of ALL critical gateway code.
-    
-    This creates a deterministic hash of all API endpoints, consensus logic,
-    and core gateway functionality, proving the EXACT code running for
-    miner/validator interactions.
-    
-    🔐 CRITICAL FOR TRUSTLESSNESS:
-    This hash covers ALL code that could be manipulated to:
-    - Drop miner submissions (submit.py)
-    - Fake consensus results (epoch_lifecycle.py, consensus.py)
-    - Censor events (logger.py)
-    - Allow unauthorized access (signature.py, registry.py)
-    - Manipulate validation (validate.py, reveal.py)
-    
-    Files included (automatically discovered):
-    - gateway/main.py - FastAPI server, presign endpoint
-    - gateway/config.py - Constants (epoch length, etc.)
-    - gateway/api/*.py - All API endpoints (submit, validate, reveal, epoch, etc.)
-    - gateway/tasks/*.py - Epoch lifecycle, hourly batching
-    - gateway/utils/*.py - Consensus, logging, signatures, registry, TEE client
-    - gateway/models/*.py - Event structure definitions
-    - gateway/tee/*.py - TEE service, Merkle tree, NSM interface
-    
-    Files excluded:
-    - gateway/secrets/ - Credentials (should never be in repo)
-    - gateway/logs/ - Runtime logs
-    - __pycache__, *.pyc - Python bytecode
-    
-    💡 TO ADD NEW FILES TO VERIFICATION:
-    Simply add new .py files to any of the included directories above.
-    They will be automatically picked up and hashed.
-    
-    Returns:
-        SHA256 hash (hex string, 64 chars)
-    """
+    """Compute SHA256 hash of all attested gateway runtime code."""
     try:
         from pathlib import Path
-        
-        # Get gateway root directory (parent of tee/)
         gateway_root = Path(__file__).parent.parent
-        
         print(f"[TEE] 🔐 Computing code hash from gateway directory: {gateway_root}", flush=True)
-        
-        # Collect all .py files to hash
-        files_to_hash = []
-        
-        # ============================================================
-        # CRITICAL FILES - Automatically include entire directories
-        # ============================================================
-        # 💡 TO ADD MORE FILES: Just add the directory or file path here
-        
-        include_dirs = [
-            gateway_root / "api",        # API endpoints (submit, validate, reveal, epoch, manifest, attest)
-            gateway_root / "tasks",      # Epoch lifecycle, hourly batching
-            gateway_root / "utils",      # Consensus, logger, signatures, registry, TEE client
-            gateway_root / "models",     # Pydantic event models
-            gateway_root / "tee",        # TEE service, Merkle tree, NSM library
-        ]
-        
-        # Also include root-level critical files
-        files_to_hash.append(gateway_root / "main.py")
-        files_to_hash.append(gateway_root / "config.py")
-        
-        # Collect all .py files from include_dirs
-        for dir_path in include_dirs:
-            if dir_path.exists():
-                for py_file in sorted(dir_path.glob("**/*.py")):
-                    # Skip __pycache__ and other build artifacts
-                    if "__pycache__" in str(py_file) or py_file.name.endswith(".pyc"):
-                        continue
-                    
-                    # Skip test files (not in GitHub repo)
-                    if py_file.name.startswith("test_"):
-                        continue
-                    
-                    # Skip utility scripts (not critical for trustlessness)
-                    if py_file.name in ["provision_pcrs.py", "verify_code_hash.py"]:
-                        continue
-                    
-                    files_to_hash.append(py_file)
-            else:
-                print(f"[TEE] ⚠️  Directory not found (skipping): {dir_path}", flush=True)
-        
-        # Sort for determinism (must be identical on GitHub and EC2)
-        files_to_hash = sorted(set(files_to_hash))
-        
-        print(f"[TEE] 📝 Hashing {len(files_to_hash)} files...", flush=True)
-        
-        # Hash all files deterministically
-        hasher = hashlib.sha256()
-        for file_path in files_to_hash:
-            if file_path.exists():
-                # Include filename in hash for structure integrity
-                # This ensures file renames or moves are detected
-                hasher.update(str(file_path.name).encode('utf-8'))
-                
-                # Include file content
-                hasher.update(file_path.read_bytes())
-                
-                # Debug: Print first few files
-                if len(files_to_hash) <= 20 or files_to_hash.index(file_path) < 3:
-                    print(f"[TEE]    ✓ {file_path.relative_to(gateway_root)}", flush=True)
-            else:
-                print(f"[TEE] ⚠️  File not found (skipping): {file_path}", flush=True)
-        
-        code_hash = hasher.hexdigest()
-        
-        print(f"[TEE] ✅ Code hash computed from {len(files_to_hash)} files", flush=True)
-        print(f"[TEE]    Hash: {code_hash[:32]}...{code_hash[-32:]}", flush=True)
-        
-        return code_hash
-        
+        return compute_gateway_code_hash(gateway_root, log_prefix="[TEE]")
     except Exception as e:
         print(f"[TEE] ⚠️  Failed to compute code hash: {e}", flush=True)
         import traceback
@@ -1302,4 +1202,3 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
-

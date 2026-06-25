@@ -18,6 +18,16 @@ WORKDIR /app
 # Build context must be gateway root, not tee/ subdirectory
 COPY . /app/gateway/
 
+# These packages are imported by Research Lab as top-level modules at runtime.
+# They must be staged into the gateway build context before enclave build so
+# PCR0 and code_hash bind to the same runtime code the host process imports.
+RUN test -d /app/gateway/_attested_runtime/research_lab \
+    && test -d /app/gateway/_attested_runtime/leadpoet_verifier \
+    && test -d /app/gateway/_attested_runtime/schemas \
+    && test -d /app/gateway/_attested_runtime/leadpoet_canonical \
+    && test -d /app/gateway/_attested_runtime/qualification \
+    && test -d /app/gateway/_attested_runtime/validator_models
+
 # Create keys directory
 RUN mkdir -p /app/gateway/keys
 

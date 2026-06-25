@@ -136,6 +136,7 @@ test-*.json
 
 # Gateway secrets (Arweave keyfile, Ed25519 keypair, etc.)
 gateway/secrets/
+gateway/_attested_runtime/
 *.pem
 *.jwk
 *_keyfile.json

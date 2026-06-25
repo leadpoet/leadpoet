@@ -24,9 +24,9 @@ This class should be instantiated once at gateway startup in main.py.
 import os
 from typing import Optional, Dict, Any
 
-import hashlib
 from pathlib import Path
 
+from gateway.tee.code_hash import compute_gateway_code_hash
 from gateway.tee.enclave_signer import (
     initialize_enclave_keypair,
     generate_attestation_document,
@@ -40,78 +40,11 @@ from gateway.tee.enclave_signer import (
 
 
 def compute_code_hash() -> str:
-    """
-    Compute SHA256 hash of ALL critical gateway code.
-    
-    This creates a deterministic hash of all API endpoints, consensus logic,
-    and core gateway functionality, proving the EXACT code running.
-    
-    Files included (automatically discovered):
-    - gateway/main.py - FastAPI server
-    - gateway/config.py - Constants
-    - gateway/api/*.py - All API endpoints
-    - gateway/tasks/*.py - Epoch lifecycle, hourly batching
-    - gateway/utils/*.py - Consensus, logging, signatures, registry
-    - gateway/models/*.py - Event structure definitions
-    - gateway/tee/*.py - TEE service, enclave signer
-    
-    Files excluded:
-    - gateway/secrets/ - Credentials
-    - __pycache__, *.pyc - Python bytecode
-    
-    Returns:
-        SHA256 hash (hex string, 64 chars)
-    """
+    """Compute SHA256 hash of all attested gateway runtime code."""
     try:
-        # Get gateway root directory
         gateway_root = Path(__file__).parent.parent
-        
         print(f"[GatewayTEE] 📋 Computing code hash from: {gateway_root}", flush=True)
-        
-        # Collect all .py files to hash
-        files_to_hash = []
-        
-        # Include directories
-        include_dirs = [
-            gateway_root / "api",
-            gateway_root / "tasks",
-            gateway_root / "utils",
-            gateway_root / "models",
-            gateway_root / "tee",
-            gateway_root / "middleware",
-        ]
-        
-        # Root-level critical files
-        files_to_hash.append(gateway_root / "main.py")
-        files_to_hash.append(gateway_root / "config.py")
-        
-        # Collect all .py files from include_dirs
-        for dir_path in include_dirs:
-            if dir_path.exists():
-                for py_file in sorted(dir_path.glob("**/*.py")):
-                    if "__pycache__" in str(py_file):
-                        continue
-                    if py_file.name.endswith(".pyc"):
-                        continue
-                    if py_file.name.startswith("test_"):
-                        continue
-                    files_to_hash.append(py_file)
-        
-        # Sort for determinism
-        files_to_hash = sorted(set(files_to_hash))
-        
-        # Hash all files deterministically
-        hasher = hashlib.sha256()
-        for file_path in files_to_hash:
-            if file_path.exists():
-                hasher.update(str(file_path.name).encode('utf-8'))
-                hasher.update(file_path.read_bytes())
-        
-        code_hash = hasher.hexdigest()
-        print(f"[GatewayTEE]    Hash: {code_hash[:32]}...{code_hash[-32:]}", flush=True)
-        
-        return code_hash
-        
+        return compute_gateway_code_hash(gateway_root, log_prefix="[GatewayTEE]")
     except Exception as e:
         print(f"[GatewayTEE] ⚠️  Failed to compute code hash: {e}", flush=True)
         return "0" * 64
@@ -436,4 +369,3 @@ if __name__ == "__main__":
     
     print("\n" + "=" * 50)
     print("All tests completed!")
-

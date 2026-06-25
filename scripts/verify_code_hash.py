@@ -5,7 +5,7 @@ Verify gateway code hash matches GitHub commit.
 This script verifies that the gateway enclave is running the exact code from a
 specific GitHub commit by:
 1. Cloning the repo at the specified commit
-2. Computing SHA256 hash of tee_service.py
+2. Computing the same attested gateway code hash as the enclave
 3. Comparing to the code_hash from the gateway's attestation
 
 Usage:
@@ -17,17 +17,17 @@ Requirements:
     - git
     - Python with requests, cbor2, cryptography
 
-Note: This verifies the application code hash, which proves the exact Python code running.
-      It does NOT verify PCR0 (Docker image hash) since that requires AWS Nitro CLI on Linux.
+Note: This verifies the application code hash bound into attestation user_data.
+      PCR0 remains the root of trust for the Docker image measurement.
 """
 
 import sys
 import json
-import hashlib
 import subprocess
 import tempfile
 import shutil
 import argparse
+import importlib.util
 from pathlib import Path
 from typing import Optional
 import requests
@@ -135,54 +135,21 @@ def compute_code_hash(repo_dir: Path) -> Optional[str]:
         return None
     
     try:
-        # Collect all .py files to hash (EXACT same logic as TEE)
-        files_to_hash = []
-        
-        # Same directories as TEE
-        include_dirs = [
-            gateway_root / "api",        # API endpoints
-            gateway_root / "tasks",      # Epoch lifecycle, hourly batching
-            gateway_root / "utils",      # Consensus, logger, signatures, registry
-            gateway_root / "models",     # Pydantic models
-            gateway_root / "tee",        # TEE service
-        ]
-        
-        # Root-level files
-        files_to_hash.append(gateway_root / "main.py")
-        files_to_hash.append(gateway_root / "config.py")
-        
-        # Collect all .py files from directories
-        for dir_path in include_dirs:
-            if dir_path.exists():
-                for py_file in sorted(dir_path.glob("**/*.py")):
-                    if "__pycache__" not in str(py_file) and not py_file.name.endswith(".pyc"):
-                        files_to_hash.append(py_file)
-        
-        # Sort for determinism (must match TEE exactly)
-        files_to_hash = sorted(set(files_to_hash))
-        
-        print(f"   📝 Hashing {len(files_to_hash)} files...")
-        
-        # Hash all files (EXACT same algorithm as TEE)
-        hasher = hashlib.sha256()
-        for file_path in files_to_hash:
-            if file_path.exists():
-                # Include filename (same as TEE)
-                hasher.update(str(file_path.name).encode('utf-8'))
-                
-                # Include file content
-                hasher.update(file_path.read_bytes())
-                
-                # Show first few files for debugging
-                if len(files_to_hash) <= 20 or files_to_hash.index(file_path) < 3:
-                    print(f"      ✓ {file_path.relative_to(gateway_root)}")
-        
-        code_hash = hasher.hexdigest()
-        
-        print(f"   ✅ Code hash computed from {len(files_to_hash)} files")
-        print(f"      {code_hash[:32]}...{code_hash[-32:]}")
-        return code_hash
-    
+        code_hash_module = gateway_root / "tee" / "code_hash.py"
+        if not code_hash_module.exists():
+            print(f"   ❌ Hash helper not found: {code_hash_module}")
+            return None
+        spec = importlib.util.spec_from_file_location("_leadpoet_gateway_code_hash", code_hash_module)
+        if spec is None or spec.loader is None:
+            print(f"   ❌ Failed to load hash helper: {code_hash_module}")
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.compute_gateway_code_hash(
+            gateway_root,
+            runtime_fallback_root=repo_dir,
+            log_prefix="   ",
+        )
     except Exception as e:
         print(f"   ❌ Failed to compute hash: {e}")
         import traceback

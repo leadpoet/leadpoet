@@ -2678,23 +2678,8 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
     tier_max_budget = max(min_budget, _research_lab_tier_budget_cap(research_model_tier, approved_tiers, max_budget))
     requested_compute_budget_usd = min(default_budget, tier_max_budget)
     max_compute_budget_usd = requested_compute_budget_usd
-    advanced = input("❓ Adjust advanced settings? [y/N]: ").strip().lower()
-    if advanced in ("y", "yes"):
-        print(f"   Research area: {_research_lab_research_area_label(island)}")
-        requested_loop_count = _research_lab_prompt_int("   Requested loop count", default=1, minimum=1, maximum=100)
-        research_model_tier = _research_lab_prompt_model_tier(default_tier, approved_tiers)
-        tier_max_budget = max(min_budget, _research_lab_tier_budget_cap(research_model_tier, approved_tiers, max_budget))
-        requested_compute_budget_usd = _research_lab_prompt_budget(
-            "   Compute budget USD",
-            default=min(default_budget, tier_max_budget),
-            minimum=min_budget,
-            maximum=tier_max_budget,
-        )
-        max_compute_budget_usd = requested_compute_budget_usd
     print(
-        f"   Using: research area={_research_lab_research_area_label(island)}, "
-        f"budget=${requested_compute_budget_usd:.2f}, "
-        f"model_tier={research_model_tier}, loops={requested_loop_count}"
+        f"   Using default Research Lab settings: budget=${requested_compute_budget_usd:.2f}"
         + (f", expected_runtime={runtime_label}" if runtime_label else "")
     )
 

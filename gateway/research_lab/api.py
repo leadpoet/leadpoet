@@ -70,6 +70,7 @@ from .store import (
     create_ticket,
     create_ticket_event,
     payment_ref_exists,
+    select_all,
     select_many,
     select_one,
 )
@@ -261,52 +262,64 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
     )
     loop_start_fee_usd = _ticket_loop_start_fee_usd(ticket, config)
 
-    payment_ref = f"{payload.payment_block_hash}:{payload.payment_extrinsic_index}"
-    if await payment_ref_exists(payload.payment_block_hash, payload.payment_extrinsic_index):
-        raise HTTPException(status_code=409, detail="Research Lab loop-start payment has already been used")
-
-    payment_valid, payment_error = await verify_payment(
-        block_hash=payload.payment_block_hash,
-        extrinsic_index=payload.payment_extrinsic_index,
-        miner_hotkey=payload.miner_hotkey,
-        required_usd=loop_start_fee_usd,
-    )
-    if not payment_valid:
-        raise HTTPException(status_code=402, detail=f"loop-start payment verification failed: {payment_error}")
-
-    payment_info = await get_payment_info(payload.payment_block_hash, payload.payment_extrinsic_index)
-    if not payment_info:
-        raise HTTPException(status_code=402, detail="loop-start payment details were unavailable after verification")
-
     run_id = str(uuid4())
-    payment = await create_loop_start_payment(
-        ticket_id=str(payload.ticket_id),
-        payment_ref=payment_ref,
-        block_hash=payload.payment_block_hash,
-        extrinsic_index=payload.payment_extrinsic_index,
-        network=BITTENSOR_NETWORK,
-        netuid=BITTENSOR_NETUID,
-        miner_hotkey=payload.miner_hotkey,
-        payment_info=payment_info,
-        required_usd=loop_start_fee_usd,
-        payment_kind="loop_start",
-        run_id=run_id,
-        compute_budget_usd=budget_doc["requested_compute_budget_usd"],
-        extra_verification_doc={
-            "research_model_tier": budget_doc["research_model_tier"],
-            "max_compute_budget_usd": budget_doc["max_compute_budget_usd"],
-        },
-    )
+    consumed_credit: dict[str, Any] | None = None
+    if payload.credit_id:
+        payment = await _consume_loop_start_credit(
+            payload=payload,
+            run_id=run_id,
+        )
+        consumed_credit = payment.pop("_credit")
+        payment_ref = str(payment["payment_ref"])
+    else:
+        assert payload.payment_block_hash is not None
+        assert payload.payment_extrinsic_index is not None
+        payment_ref = f"{payload.payment_block_hash}:{payload.payment_extrinsic_index}"
+        if await payment_ref_exists(payload.payment_block_hash, payload.payment_extrinsic_index):
+            raise HTTPException(status_code=409, detail="Research Lab loop-start payment has already been used")
+
+        payment_valid, payment_error = await verify_payment(
+            block_hash=payload.payment_block_hash,
+            extrinsic_index=payload.payment_extrinsic_index,
+            miner_hotkey=payload.miner_hotkey,
+            required_usd=loop_start_fee_usd,
+        )
+        if not payment_valid:
+            raise HTTPException(status_code=402, detail=f"loop-start payment verification failed: {payment_error}")
+
+        payment_info = await get_payment_info(payload.payment_block_hash, payload.payment_extrinsic_index)
+        if not payment_info:
+            raise HTTPException(status_code=402, detail="loop-start payment details were unavailable after verification")
+
+        payment = await create_loop_start_payment(
+            ticket_id=str(payload.ticket_id),
+            payment_ref=payment_ref,
+            block_hash=payload.payment_block_hash,
+            extrinsic_index=payload.payment_extrinsic_index,
+            network=BITTENSOR_NETWORK,
+            netuid=BITTENSOR_NETUID,
+            miner_hotkey=payload.miner_hotkey,
+            payment_info=payment_info,
+            required_usd=loop_start_fee_usd,
+            payment_kind="loop_start",
+            run_id=run_id,
+            compute_budget_usd=budget_doc["requested_compute_budget_usd"],
+            extra_verification_doc={
+                "research_model_tier": budget_doc["research_model_tier"],
+                "max_compute_budget_usd": budget_doc["max_compute_budget_usd"],
+            },
+        )
 
     try:
         await create_ticket_event(
             ticket_id=str(payload.ticket_id),
             event_type="funded",
             actor_hotkey=payload.miner_hotkey,
-            reason="loop_start_payment_verified",
+            reason="loop_start_credit_consumed" if consumed_credit else "loop_start_payment_verified",
             event_doc={
                 "payment_id": payment["payment_id"],
                 "payment_ref": payment_ref,
+                "loop_start_credit_id": payload.credit_id,
                 "miner_openrouter_key_ref": payload.miner_openrouter_key_ref,
                 "miner_openrouter_key_handling": payload.miner_openrouter_key_handling,
                 **budget_doc,
@@ -320,7 +333,9 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
             reason="paid_loop_queued",
             event_doc={
                 "payment_id": payment["payment_id"],
-                "payment_kind": "loop_start",
+                "payment_ref": payment_ref,
+                "payment_kind": "loop_start_credit" if consumed_credit else "loop_start",
+                "loop_start_credit_id": payload.credit_id,
                 "requested_loop_count": payload.requested_loop_count,
                 **budget_doc,
             },
@@ -330,7 +345,13 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
             event_type="queued",
             actor_hotkey=payload.miner_hotkey,
             reason="paid_loop_queued",
-            event_doc={"payment_id": payment["payment_id"], "run_id": run_id, **budget_doc},
+            event_doc={
+                "payment_id": payment["payment_id"],
+                "payment_ref": payment_ref,
+                "loop_start_credit_id": payload.credit_id,
+                "run_id": run_id,
+                **budget_doc,
+            },
         )
     except Exception as exc:
         credit_id = "loop_start_credit:" + canonical_hash(
@@ -344,8 +365,11 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
             miner_hotkey=payload.miner_hotkey,
             event_type="granted",
             credit_status="available",
-            reason="queue_failed_before_work_started",
-            event_doc={"error": str(exc)[:200]},
+            reason="queue_failed_after_credit_consumed" if consumed_credit else "queue_failed_before_work_started",
+            event_doc={
+                "error": str(exc)[:200],
+                "replaces_credit_id": payload.credit_id,
+            },
         )
         logger.exception("Research Lab queue failed after payment; retry credit preserved")
         return ResearchLabLoopStartResponse(
@@ -371,6 +395,7 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
         payment_id=payment["payment_id"],
         payment_ref=payment_ref,
         queued=True,
+        credit_id=payload.credit_id,
         status="queued",
     )
 
@@ -615,9 +640,13 @@ async def record_research_lab_candidate_result(
 
 
 @router.get("/tickets/{ticket_id}")
-async def get_research_lab_ticket(ticket_id: str):
+async def get_research_lab_ticket(
+    ticket_id: str,
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
     config = ResearchLabGatewayConfig.from_env()
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_internal_key(config, x_leadpoet_internal_key)
     row = await select_one("research_loop_ticket_current", filters=(("ticket_id", ticket_id),))
     if not row:
         raise HTTPException(status_code=404, detail="Research Lab ticket not found")
@@ -625,9 +654,13 @@ async def get_research_lab_ticket(ticket_id: str):
 
 
 @router.get("/receipts/{receipt_id}")
-async def get_research_lab_receipt(receipt_id: str):
+async def get_research_lab_receipt(
+    receipt_id: str,
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
     config = ResearchLabGatewayConfig.from_env()
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_internal_key(config, x_leadpoet_internal_key)
     row = await select_one("research_loop_receipt_current", filters=(("receipt_id", receipt_id),))
     if not row:
         raise HTTPException(status_code=404, detail="Research Lab receipt not found")
@@ -635,10 +668,14 @@ async def get_research_lab_receipt(receipt_id: str):
 
 
 @router.get("/evaluations/score-bundles/{score_bundle_id}")
-async def get_research_lab_score_bundle(score_bundle_id: str):
+async def get_research_lab_score_bundle(
+    score_bundle_id: str,
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
     config = ResearchLabGatewayConfig.from_env()
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
     _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    _require_internal_key(config, x_leadpoet_internal_key)
     row = await select_one("research_evaluation_score_bundle_current", filters=(("score_bundle_id", score_bundle_id),))
     if not row:
         raise HTTPException(status_code=404, detail="Research Lab evaluation score bundle not found")
@@ -722,14 +759,17 @@ async def get_research_lab_public_topic_groups(
 
 
 @router.get("/evaluations/latest/{epoch}")
-async def get_research_lab_latest_evaluation_bundles(epoch: int):
+async def get_research_lab_latest_evaluation_bundles(
+    epoch: int,
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
     config = ResearchLabGatewayConfig.from_env()
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
     _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
-    rows = await select_many(
+    _require_internal_key(config, x_leadpoet_internal_key)
+    rows = await select_all(
         "research_evaluation_score_bundle_current",
         filters=(("evaluation_epoch", epoch), ("bundle_status", "scored"), ("current_event_status", "scored")),
-        limit=1000,
     )
     return {
         "schema_version": "1.0",
@@ -997,6 +1037,54 @@ def _enforce_openrouter_key_registration_rate_limit(miner_hotkey: str) -> None:
         raise HTTPException(status_code=429, detail="OpenRouter key registration hourly limit exceeded")
     attempts.append(now)
     _OPENROUTER_KEY_REGISTRATION_ATTEMPTS[key] = attempts
+
+
+async def _consume_loop_start_credit(
+    *,
+    payload: ResearchLabLoopStartRequest,
+    run_id: str,
+) -> dict[str, Any]:
+    credit = await select_one(
+        "research_loop_start_credit_current",
+        filters=(
+            ("credit_id", str(payload.credit_id)),
+            ("ticket_id", str(payload.ticket_id)),
+            ("miner_hotkey", payload.miner_hotkey),
+        ),
+    )
+    if not credit:
+        raise HTTPException(status_code=404, detail="Research Lab loop-start credit not found")
+    if str(credit.get("current_credit_status") or "") != "available":
+        raise HTTPException(status_code=409, detail="Research Lab loop-start credit is not available")
+    if not credit.get("payment_id"):
+        raise HTTPException(status_code=409, detail="Research Lab loop-start credit is missing its payment reference")
+    try:
+        await create_credit_event(
+            credit_id=str(credit["credit_id"]),
+            ticket_id=str(credit["ticket_id"]),
+            payment_id=str(credit["payment_id"]) if credit.get("payment_id") else None,
+            payment_ref=str(credit["payment_ref"]),
+            miner_hotkey=str(credit["miner_hotkey"]),
+            event_type="consumed",
+            credit_status="consumed",
+            reason="loop_start_credit_consumed_before_queueing",
+            consumed_by_loop_id=run_id,
+            event_doc={"run_id": run_id},
+        )
+    except Exception as exc:
+        if _is_credit_claim_race_error(exc):
+            raise HTTPException(status_code=409, detail="Research Lab loop-start credit was already consumed") from exc
+        _raise_storage_error(exc)
+    return {
+        "payment_id": str(credit.get("payment_id") or ""),
+        "payment_ref": str(credit["payment_ref"]),
+        "_credit": credit,
+    }
+
+
+def _is_credit_claim_race_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "duplicate" in message and "research_loop_start_credit_events_credit_seq_key" in message
 
 
 def _validate_requested_model_and_budget(

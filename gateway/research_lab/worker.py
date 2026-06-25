@@ -39,6 +39,7 @@ from gateway.research_lab.store import (
     create_reimbursement_award,
     create_reimbursement_schedule,
     create_ticket_event,
+    select_all,
     select_many,
     select_one,
 )
@@ -61,6 +62,13 @@ logger = logging.getLogger(__name__)
 def _idle_log_seconds() -> float:
     try:
         return max(10.0, float(os.getenv("RESEARCH_LAB_WORKER_IDLE_LOG_SECONDS", "60")))
+    except ValueError:
+        return 60.0
+
+
+def _error_backoff_seconds() -> float:
+    try:
+        return max(5.0, float(os.getenv("RESEARCH_LAB_WORKER_ERROR_BACKOFF_SECONDS", "60")))
     except ValueError:
         return 60.0
 
@@ -187,9 +195,27 @@ class ResearchLabHostedWorker:
     async def run_forever(self) -> None:
         processed = 0
         last_idle_log = 0.0
+        last_error_log = 0.0
         idle_log_seconds = _idle_log_seconds()
+        error_backoff_seconds = _error_backoff_seconds()
         while True:
-            outcome = await self.run_once()
+            try:
+                outcome = await self.run_once()
+            except Exception as exc:
+                now = time.monotonic()
+                if now - last_error_log >= idle_log_seconds:
+                    logger.error(
+                        format_worker_block(
+                            "RESEARCH LAB AUTO-RESEARCH POLL FAILED",
+                            (
+                                ("Worker", self.worker_ref),
+                                ("Error", f"{exc.__class__.__name__}: {str(exc)[:300]}"),
+                            ),
+                        )
+                    )
+                    last_error_log = now
+                await asyncio.sleep(max(self.config.hosted_worker_poll_seconds, error_backoff_seconds))
+                continue
             if outcome.processed or outcome.status != "idle":
                 logger.info(
                     format_worker_block(
@@ -428,9 +454,9 @@ class ResearchLabHostedWorker:
                 await create_auto_research_loop_event(
                     run_id=context.run_id,
                     ticket_id=context.ticket_id,
-                    receipt_id=context.receipt_id,
-                    event_type=event.event_type,
-                    loop_status=event.loop_status,
+            receipt_id=context.receipt_id,
+            event_type=event.event_type,
+            loop_status=event.loop_status,
                     worker_ref=self.worker_ref,
                     node_id=event.node_id,
                     elapsed_seconds=event.elapsed_seconds,
@@ -794,11 +820,10 @@ class ResearchLabHostedWorker:
         island = str(context.ticket.get("island") or self.config.reimbursement_default_island)
         lookback_end = datetime.now(timezone.utc)
         lookback_start = lookback_end - timedelta(days=7)
-        ticket_rows = await select_many(
+        ticket_rows = await select_all(
             "research_loop_ticket_current",
             filters=(("island", island),),
             order_by=(("created_at", True),),
-            limit=1000,
         )
         ticket_rows = [
             row
@@ -806,7 +831,7 @@ class ResearchLabHostedWorker:
             if _row_dt(row.get("created_at") or row.get("current_status_at")) >= lookback_start
         ]
         ticket_ids = {str(row.get("ticket_id")) for row in ticket_rows}
-        queue_rows = await select_many("research_loop_run_queue_current", filters=(), limit=1000)
+        queue_rows = await select_all("research_loop_run_queue_current", filters=())
         funded_queue_rows = [
             row
             for row in queue_rows
@@ -845,7 +870,7 @@ class ResearchLabHostedWorker:
         return snapshot_doc, snapshot_row
 
     async def _reimbursement_cap_usage(self, context: HostedRunContext, *, run_day: str) -> dict[str, float]:
-        rows = await select_many("research_reimbursement_award_current", filters=(), limit=1000)
+        rows = await select_all("research_reimbursement_award_current", filters=())
         miner_hotkey = str(context.ticket["miner_hotkey"])
         island = str(context.ticket["island"] or self.config.reimbursement_default_island)
         eligible_rows = [
@@ -952,6 +977,7 @@ class ResearchLabHostedWorker:
             island=str(context.ticket["island"]),
             receipt_status="queued",
             loop_count=int(context.ticket.get("requested_loop_count") or 1),
+            loop_start_credit_id=_loop_start_credit_id_from_queue_events(context.queue_events),
             miner_openrouter_key_ref=_miner_openrouter_key_ref(context),
             provider_usage=self._provider_usage(context),
             cost_ledger={
@@ -980,6 +1006,7 @@ class ResearchLabHostedWorker:
             island=str(context.ticket["island"]),
             receipt_status="failed",
             loop_count=int(context.ticket.get("requested_loop_count") or 1),
+            loop_start_credit_id=_loop_start_credit_id_from_queue_events(context.queue_events),
             miner_openrouter_key_ref=_miner_openrouter_key_ref(context),
             provider_usage=self._provider_usage(context),
             cost_ledger={
@@ -1029,6 +1056,10 @@ class ResearchLabHostedWorker:
             "temperature": 0.2,
             "max_tokens": int(max_tokens),
             "response_format": {"type": "json_object"},
+            "provider": {
+                "data_collection": "deny",
+                "zdr": True,
+            },
         }
 
         def _call() -> OpenRouterCallResult:
@@ -1212,6 +1243,14 @@ def _payment_id_from_queue_events(events: Sequence[Mapping[str, Any]]) -> str:
         if isinstance(event_doc, Mapping) and event_doc.get("payment_id"):
             return str(event_doc["payment_id"])
     return ""
+
+
+def _loop_start_credit_id_from_queue_events(events: Sequence[Mapping[str, Any]]) -> str | None:
+    for event in events:
+        event_doc = event.get("event_doc")
+        if isinstance(event_doc, Mapping) and event_doc.get("loop_start_credit_id"):
+            return str(event_doc["loop_start_credit_id"])
+    return None
 
 
 def _latest_event_doc(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

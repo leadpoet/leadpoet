@@ -379,6 +379,21 @@ ALL_PROVIDERS: Dict[str, str] = {**PAID_PROVIDERS, **FREE_PROVIDERS}
 
 PROXY_TIMEOUT_SECONDS = 90.0
 
+
+def _with_openrouter_privacy_provider_policy(body_json: Any) -> Any:
+    if not isinstance(body_json, dict):
+        return body_json
+    provider = body_json.get("provider")
+    if not isinstance(provider, dict):
+        provider = {}
+    body_json["provider"] = {
+        **provider,
+        "data_collection": "deny",
+        "zdr": True,
+    }
+    return body_json
+
+
 # =============================================================================
 # GitHub API Endpoint Allowlist (Security)
 # =============================================================================
@@ -571,7 +586,15 @@ class LocalProxyHandler(BaseHTTPRequestHandler):
                     try:
                         body_json = json.loads(body)
                         request_model = body_json.get("model")
-                    except:
+                        if provider == "openrouter" and endpoint == "chat/completions":
+                            body_json = _with_openrouter_privacy_provider_policy(body_json)
+                            body = json.dumps(body_json, separators=(",", ":")).encode("utf-8")
+                    except Exception as e:
+                        if provider == "openrouter" and endpoint == "chat/completions":
+                            logger.warning(
+                                "LocalProxy: could not apply OpenRouter provider privacy policy: %s",
+                                str(e)[:120],
+                            )
                         pass
             
             # Build headers with auth

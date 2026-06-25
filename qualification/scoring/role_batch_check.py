@@ -309,6 +309,10 @@ async def _judge_chunk(
             {"role": "system", "content": _SYS_MESSAGE},
             {"role": "user",   "content": prompt},
         ],
+        "provider": {
+            "data_collection": "deny",
+            "zdr": True,
+        },
     }
     last_err = "retries_exhausted"
     for attempt in range(NUM_RETRIES):

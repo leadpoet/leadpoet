@@ -1074,6 +1074,10 @@ async def _call_openrouter(
                 "schema": _SCHEMA,
             },
         },
+        "provider": {
+            "data_collection": "deny",
+            "zdr": True,
+        },
     }
     for attempt in range(3):
         try:

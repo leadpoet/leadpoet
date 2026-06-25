@@ -579,6 +579,10 @@ async def llm_classify_evidence_type(text: str) -> Optional[str]:
                         ],
                         "max_tokens": 32,
                         "temperature": 0,
+                        "provider": {
+                            "data_collection": "deny",
+                            "zdr": True,
+                        },
                     },
                 ) as resp:
                     latency_ms = int((_time.monotonic() - t0) * 1000)
@@ -1102,6 +1106,10 @@ async def _call_openrouter(
         "response_format": {
             "type": "json_schema",
             "json_schema": {"name": "verdict", "strict": False, "schema": _RESPONSE_SCHEMA},
+        },
+        "provider": {
+            "data_collection": "deny",
+            "zdr": True,
         },
     }
     last_err = "retries_exhausted"

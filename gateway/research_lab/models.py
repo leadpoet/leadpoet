@@ -94,8 +94,9 @@ class ResearchLabOpenRouterKeyRegisterRequest(SignedResearchLabRequest):
 
 class ResearchLabLoopStartRequest(SignedResearchLabRequest):
     ticket_id: UUID
-    payment_block_hash: str = Field(min_length=8, max_length=160)
-    payment_extrinsic_index: int = Field(ge=0)
+    payment_block_hash: Optional[str] = Field(default=None, min_length=8, max_length=160)
+    payment_extrinsic_index: Optional[int] = Field(default=None, ge=0)
+    credit_id: Optional[str] = Field(default=None, min_length=8, max_length=256)
     miner_openrouter_key_ref: str = Field(min_length=8, max_length=256)
     miner_openrouter_key_handling: str = Field(pattern="^(encrypted_ref|ephemeral_ref)$")
     miner_openrouter_preflight_status: str = Field(pattern="^(passed|failed|not_run)$")
@@ -104,14 +105,24 @@ class ResearchLabLoopStartRequest(SignedResearchLabRequest):
     requested_compute_budget_usd: Optional[float] = Field(default=None, ge=0)
     max_compute_budget_usd: Optional[float] = Field(default=None, ge=0)
 
-    @field_validator("miner_openrouter_key_ref", "payment_block_hash")
+    @field_validator("miner_openrouter_key_ref", "payment_block_hash", "credit_id")
     @classmethod
-    def no_raw_loop_start_secret(cls, value: str) -> str:
-        reject_secret_material(value)
+    def no_raw_loop_start_secret(cls, value: Optional[str]) -> Optional[str]:
+        if value:
+            reject_secret_material(value)
         return value
 
     @model_validator(mode="after")
     def valid_budget_bounds(self) -> "ResearchLabLoopStartRequest":
+        using_credit = bool(self.credit_id)
+        has_block = bool(self.payment_block_hash)
+        has_extrinsic = self.payment_extrinsic_index is not None
+        if using_credit and (has_block or has_extrinsic):
+            raise ValueError("credit_id cannot be combined with payment block/extrinsic fields")
+        if not using_credit and not (has_block and has_extrinsic):
+            raise ValueError("loop start requires either credit_id or both payment_block_hash and payment_extrinsic_index")
+        if has_block != has_extrinsic:
+            raise ValueError("payment_block_hash and payment_extrinsic_index must be provided together")
         if (
             self.requested_compute_budget_usd is not None
             and self.max_compute_budget_usd is not None

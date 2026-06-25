@@ -3630,6 +3630,10 @@ async def openrouter_chat(
                     "messages": messages,
                     "temperature": 0.3,
                     "max_tokens": max_tokens,
+                    "provider": {
+                        "data_collection": "deny",
+                        "zdr": True,
+                    },
                 }
                 if response_format is not None:
                     payload["response_format"] = response_format

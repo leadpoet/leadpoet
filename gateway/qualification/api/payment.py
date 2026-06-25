@@ -219,7 +219,11 @@ async def verify_payment(
         logger.warning(f"Invalid transfer amount: {amount_rao}")
         return False, "Invalid transfer amount"
     
-    tao_price_usd = await get_tao_price_usd()
+    try:
+        tao_price_usd = await get_tao_price_usd()
+    except Exception as e:
+        logger.error(f"Could not fetch TAO price from CoinGecko: {e}")
+        return False, "Could not fetch current TAO price from CoinGecko; please retry shortly"
     amount_tao = amount_rao / 1e9  # Convert rao to TAO (1 TAO = 1e9 rao)
     amount_usd = amount_tao * tao_price_usd
     
@@ -570,14 +574,7 @@ async def get_tao_price_usd() -> float:
     except Exception as e:
         logger.warning(f"Failed to fetch TAO price from CoinGecko: {e}")
     
-    # Fallback to cached price if available
-    if cache['price']:
-        logger.info(f"Using cached TAO price: ${cache['price']:.2f}")
-        return cache['price']
-    
-    # Last resort fallback
-    logger.warning("Using fallback TAO price of $500")
-    return 500.0
+    raise RuntimeError("CoinGecko TAO price unavailable")
 
 
 # =============================================================================
@@ -641,7 +638,11 @@ async def get_payment_info(block_hash: str, extrinsic_index: int) -> Optional[Di
     extrinsic = extrinsics[extrinsic_index]
     
     amount_rao = get_extrinsic_amount(extrinsic)
-    tao_price = await get_tao_price_usd()
+    try:
+        tao_price = await get_tao_price_usd()
+    except Exception as e:
+        logger.error(f"Could not fetch TAO price for payment info from CoinGecko: {e}")
+        return None
     amount_tao = rao_to_tao(amount_rao) if amount_rao else 0.0
     amount_usd = amount_tao * tao_price if amount_tao else 0.0
     

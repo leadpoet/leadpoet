@@ -119,6 +119,10 @@ async def openrouter_chat(
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
+                "provider": {
+                    "data_collection": "deny",
+                    "zdr": True,
+                },
             },
             timeout=OPENROUTER_TIMEOUT
         )
@@ -774,41 +778,23 @@ async def get_current_bittensor_epoch() -> int:
 
 async def get_tao_price_usd() -> float:
     """
-    Get current TAO price in USD from a price oracle.
+    Get current TAO price in USD from CoinGecko.
     
     Returns:
         TAO price in USD
     """
-    try:
-        # Try CoinGecko API
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                "https://api.coingecko.com/api/v3/simple/price",
-                params={"ids": "bittensor", "vs_currencies": "usd"},
-                timeout=10.0
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("bittensor", {}).get("usd", 0.0)
-    except Exception as e:
-        logger.warning(f"Failed to get TAO price from CoinGecko: {e}")
-    
-    try:
-        # Fallback to taostats
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                "https://taostats.io/api/price",
-                timeout=10.0
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return float(data.get("price", 0.0))
-    except Exception as e:
-        logger.warning(f"Failed to get TAO price from taostats: {e}")
-    
-    # Default fallback price
-    logger.warning("Using fallback TAO price: $400")
-    return 400.0
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "bittensor", "vs_currencies": "usd"},
+            timeout=10.0
+        )
+        response.raise_for_status()
+        data = response.json()
+    price = data.get("bittensor", {}).get("usd", 0.0)
+    if not price:
+        raise RuntimeError("CoinGecko returned no TAO price")
+    return float(price)
 
 
 async def is_hotkey_registered(hotkey: str, netuid: int = SUBNET_NETUID) -> bool:

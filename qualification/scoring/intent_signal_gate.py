@@ -623,6 +623,10 @@ async def judge_intent_signal(company: str,
         "response_format": {"type": "json_object"},
         "temperature": 0,
         "max_tokens": 1200,
+        "provider": {
+            "data_collection": "deny",
+            "zdr": True,
+        },
     }
 
     judge_output: Optional[Dict[str, Any]] = None

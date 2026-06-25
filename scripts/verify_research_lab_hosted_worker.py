@@ -158,6 +158,17 @@ def main() -> int:
         errors.append("auto-research prompt did not guard against client-specific overfitting")
     if "HTTPS_PROXY" not in DEFAULT_ENV_PASSTHROUGH or "HTTP_PROXY" not in DEFAULT_ENV_PASSTHROUGH:
         errors.append("private Docker runner does not pass through proxy env vars")
+    worker_text = (ROOT / "gateway" / "research_lab" / "worker.py").read_text(encoding="utf-8")
+    scoring_worker_text = (ROOT / "gateway" / "research_lab" / "scoring_worker.py").read_text(encoding="utf-8")
+    local_proxy_text = (ROOT / "qualification" / "validator" / "local_proxy.py").read_text(encoding="utf-8")
+    if '"data_collection": "deny"' not in worker_text or '"zdr": True' not in worker_text:
+        errors.append("hosted worker OpenRouter calls must enforce data_collection=deny and ZDR")
+    if '"data_collection": "deny"' not in local_proxy_text or '"zdr": True' not in local_proxy_text:
+        errors.append("local proxy must inject OpenRouter data_collection=deny and ZDR")
+    if "_maybe_rebase_stale_candidate_before_scoring" not in scoring_worker_text:
+        errors.append("scoring worker must rebase stale-parent candidates before evaluation")
+    if "private_model_manifest_hash\", artifact.manifest_hash" not in scoring_worker_text:
+        errors.append("private baseline lookup must filter by active private model manifest hash")
 
     eval_bundle = _score_bundle()
     page = {

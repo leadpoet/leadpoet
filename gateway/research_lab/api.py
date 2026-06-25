@@ -310,24 +310,29 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
         if not payment_info:
             raise HTTPException(status_code=402, detail="loop-start payment details were unavailable after verification")
 
-        payment = await create_loop_start_payment(
-            ticket_id=str(payload.ticket_id),
-            payment_ref=payment_ref,
-            block_hash=payload.payment_block_hash,
-            extrinsic_index=payload.payment_extrinsic_index,
-            network=BITTENSOR_NETWORK,
-            netuid=BITTENSOR_NETUID,
-            miner_hotkey=payload.miner_hotkey,
-            payment_info=payment_info,
-            required_usd=loop_start_fee_usd,
-            payment_kind="loop_start",
-            run_id=run_id,
-            compute_budget_usd=budget_doc["requested_compute_budget_usd"],
-            extra_verification_doc={
-                "research_model_tier": budget_doc["research_model_tier"],
-                "max_compute_budget_usd": budget_doc["max_compute_budget_usd"],
-            },
-        )
+        try:
+            payment = await create_loop_start_payment(
+                ticket_id=str(payload.ticket_id),
+                payment_ref=payment_ref,
+                block_hash=payload.payment_block_hash,
+                extrinsic_index=payload.payment_extrinsic_index,
+                network=BITTENSOR_NETWORK,
+                netuid=BITTENSOR_NETUID,
+                miner_hotkey=payload.miner_hotkey,
+                payment_info=payment_info,
+                required_usd=loop_start_fee_usd,
+                payment_kind="loop_start",
+                run_id=run_id,
+                compute_budget_usd=budget_doc["requested_compute_budget_usd"],
+                extra_verification_doc={
+                    "research_model_tier": budget_doc["research_model_tier"],
+                    "max_compute_budget_usd": budget_doc["max_compute_budget_usd"],
+                },
+            )
+        except Exception as exc:
+            if _is_duplicate_payment_error(exc):
+                raise HTTPException(status_code=409, detail="Research Lab loop-start payment has already been used") from exc
+            _raise_storage_error(exc)
 
     try:
         await create_ticket_event(
@@ -494,21 +499,26 @@ async def top_up_research_lab_paid_loop(payload: ResearchLabLoopTopUpRequest):
         raise HTTPException(status_code=402, detail="top-up payment details were unavailable after verification")
 
     run_id = str(uuid4())
-    payment = await create_loop_start_payment(
-        ticket_id=str(payload.ticket_id),
-        payment_ref=payment_ref,
-        block_hash=payload.payment_block_hash,
-        extrinsic_index=payload.payment_extrinsic_index,
-        network=BITTENSOR_NETWORK,
-        netuid=BITTENSOR_NETUID,
-        miner_hotkey=payload.miner_hotkey,
-        payment_info=payment_info,
-        required_usd=float(payload.additional_compute_budget_usd),
-        payment_kind="top_up",
-        run_id=run_id,
-        compute_budget_usd=float(payload.additional_compute_budget_usd),
-        extra_verification_doc=budget_doc,
-    )
+    try:
+        payment = await create_loop_start_payment(
+            ticket_id=str(payload.ticket_id),
+            payment_ref=payment_ref,
+            block_hash=payload.payment_block_hash,
+            extrinsic_index=payload.payment_extrinsic_index,
+            network=BITTENSOR_NETWORK,
+            netuid=BITTENSOR_NETUID,
+            miner_hotkey=payload.miner_hotkey,
+            payment_info=payment_info,
+            required_usd=float(payload.additional_compute_budget_usd),
+            payment_kind="top_up",
+            run_id=run_id,
+            compute_budget_usd=float(payload.additional_compute_budget_usd),
+            extra_verification_doc=budget_doc,
+        )
+    except Exception as exc:
+        if _is_duplicate_payment_error(exc):
+            raise HTTPException(status_code=409, detail="Research Lab top-up payment has already been used") from exc
+        _raise_storage_error(exc)
 
     try:
         await create_ticket_event(
@@ -1192,6 +1202,19 @@ def _is_credit_claim_race_error(exc: BaseException) -> bool:
     )
 
 
+def _is_duplicate_payment_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    if "research_loop_start_payments" not in message:
+        return False
+    return (
+        "duplicate key" in message
+        or "unique constraint" in message
+        or "23505" in message
+        or "payment_ref" in message
+        or "block_extrinsic" in message
+    )
+
+
 def _validate_requested_model_and_budget(
     config: ResearchLabGatewayConfig,
     *,
@@ -1684,6 +1707,8 @@ def _raise_storage_error(exc: Exception) -> None:
         raise HTTPException(status_code=409, detail="autoresearch loop for this hotkey already running") from exc
     if "research_lab_queue_capacity_conflict" in message_lower:
         raise HTTPException(status_code=409, detail="too many autoresearch loops right now, try again later") from exc
+    if _is_duplicate_payment_error(exc):
+        raise HTTPException(status_code=409, detail="Research Lab payment has already been used") from exc
     raise HTTPException(status_code=500, detail="Research Lab storage operation failed") from exc
 
 

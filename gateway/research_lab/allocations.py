@@ -8,7 +8,7 @@ from typing import Any, Mapping
 from gateway.research_lab.bundles import contains_secret_material, sha256_json
 from gateway.research_lab.chain import resolve_hotkey_uids
 from gateway.research_lab.config import ResearchLabGatewayConfig
-from gateway.research_lab.store import create_research_lab_emission_allocation_snapshot, select_all
+from gateway.research_lab.store import create_research_lab_emission_allocation_snapshot, select_all, select_one
 from leadpoet_verifier.economics import allocate_research_lab_epoch
 
 
@@ -26,7 +26,7 @@ async def build_research_lab_allocation_bundle(
 ) -> dict[str, Any]:
     """Build a sanitized Research Lab allocation bundle for one epoch."""
     policy = config.reimbursement_policy_doc(enabled=True)
-    reimbursement_obligations, reimbursement_skipped = await _active_reimbursement_obligations(int(epoch))
+    reimbursement_obligations, reimbursement_skipped = await _active_reimbursement_obligations(int(epoch), policy=policy)
     champion_obligations, champion_skipped = await _active_champion_obligations(int(epoch))
     allocation = allocate_research_lab_epoch(
         int(epoch),
@@ -104,32 +104,54 @@ async def build_research_lab_allocation_bundle(
     return {**bundle_without_id, "bundle_id": bundle_id}
 
 
-async def _active_reimbursement_obligations(epoch: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    award_rows = await select_all(
-        "research_reimbursement_award_current",
-        filters=(("current_award_status", "awarded"),),
-    )
+async def _active_reimbursement_obligations(
+    epoch: int,
+    *,
+    policy: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    try:
+        epoch_span = max(1, int(policy.get("reimbursement_epochs") or 20))
+    except (TypeError, ValueError):
+        epoch_span = 20
+    schedule_start_floor = max(0, int(epoch) - epoch_span)
     schedule_rows = await select_all(
         "research_reimbursement_schedules",
-        filters=(("schedule_status", "scheduled"),),
+        filters=(
+            ("schedule_status", "scheduled"),
+            ("start_epoch", "lte", int(epoch)),
+            ("start_epoch", "gte", schedule_start_floor),
+        ),
+        order_by=(("start_epoch", True),),
     )
-    awards_by_id = {
-        str(row.get("award_id")): row
-        for row in award_rows
-        if str(row.get("current_award_status") or row.get("award_status") or "") in ACTIVE_REIMBURSEMENT_STATUSES
-    }
+    active_schedule_rows = [
+        row
+        for row in schedule_rows
+        if str(row.get("schedule_status") or "") in ACTIVE_SCHEDULE_STATUSES and _epoch_active(row, epoch)
+    ]
+    awards_by_id: dict[str, dict[str, Any]] = {}
+    for schedule in active_schedule_rows:
+        award_id = str(schedule.get("award_id") or "")
+        if not award_id or award_id in awards_by_id:
+            continue
+        award = await select_one(
+            "research_reimbursement_award_current",
+            filters=(
+                ("award_id", award_id),
+                ("current_award_status", "awarded"),
+            ),
+        )
+        if award and str(award.get("current_award_status") or award.get("award_status") or "") in ACTIVE_REIMBURSEMENT_STATUSES:
+            awards_by_id[award_id] = award
     hotkeys = [str(row.get("miner_hotkey") or "") for row in awards_by_id.values()]
     hotkey_uids = await resolve_hotkey_uids(hotkeys)
     obligations: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
-    for schedule in schedule_rows:
+    for schedule in active_schedule_rows:
         status = str(schedule.get("schedule_status") or "")
         if status not in ACTIVE_SCHEDULE_STATUSES:
             continue
         award = awards_by_id.get(str(schedule.get("award_id") or ""))
         if not award:
-            continue
-        if not _epoch_active(schedule, epoch):
             continue
         miner_hotkey = str(award.get("miner_hotkey") or "")
         uid = hotkey_uids.get(miner_hotkey)

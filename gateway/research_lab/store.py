@@ -33,6 +33,35 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _apply_filters(query: Any, filters: Iterable[tuple[Any, ...]]) -> Any:
+    for raw_filter in filters:
+        if len(raw_filter) == 2:
+            field, value = raw_filter
+            query = query.eq(field, str(value) if isinstance(value, UUID) else value)
+            continue
+        if len(raw_filter) != 3:
+            raise ValueError(f"invalid PostgREST filter spec: {raw_filter!r}")
+        field, operator, value = raw_filter
+        value = str(value) if isinstance(value, UUID) else value
+        if operator == "eq":
+            query = query.eq(field, value)
+        elif operator == "neq":
+            query = query.neq(field, value)
+        elif operator == "lt":
+            query = query.lt(field, value)
+        elif operator == "lte":
+            query = query.lte(field, value)
+        elif operator == "gt":
+            query = query.gt(field, value)
+        elif operator == "gte":
+            query = query.gte(field, value)
+        elif operator == "in":
+            query = query.in_(field, value)
+        else:
+            raise ValueError(f"unsupported PostgREST filter operator: {operator}")
+    return query
+
+
 async def insert_row(table: str, row: dict[str, Any]) -> dict[str, Any]:
     def _call() -> Any:
         return get_write_client().table(table).insert(row).execute()
@@ -52,8 +81,7 @@ async def select_one(
 ) -> dict[str, Any] | None:
     def _call() -> Any:
         query = get_write_client().table(table).select(columns)
-        for field, value in filters:
-            query = query.eq(field, str(value) if isinstance(value, UUID) else value)
+        query = _apply_filters(query, filters)
         return query.limit(1).execute()
 
     response = await asyncio.to_thread(_call)
@@ -71,8 +99,7 @@ async def select_many(
 ) -> list[dict[str, Any]]:
     def _call() -> Any:
         query = get_write_client().table(table).select(columns)
-        for field, value in filters:
-            query = query.eq(field, str(value) if isinstance(value, UUID) else value)
+        query = _apply_filters(query, filters)
         for field, desc in order_by:
             query = query.order(field, desc=desc)
         return query.limit(limit).execute()
@@ -102,8 +129,7 @@ async def select_all(
 
         def _call() -> Any:
             query = get_write_client().table(table).select(columns)
-            for field, value in filters:
-                query = query.eq(field, str(value) if isinstance(value, UUID) else value)
+            query = _apply_filters(query, filters)
             for field, desc in order_by:
                 query = query.order(field, desc=desc)
             return query.range(offset, end).execute()

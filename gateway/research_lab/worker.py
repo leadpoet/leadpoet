@@ -902,7 +902,18 @@ class ResearchLabHostedWorker:
             if _row_dt(row.get("created_at") or row.get("current_status_at")) >= lookback_start
         ]
         ticket_ids = {str(row.get("ticket_id")) for row in ticket_rows}
-        queue_rows = await select_all("research_loop_run_queue_current", filters=())
+        queue_rows: list[dict[str, Any]] = []
+        for ticket_id in ticket_ids:
+            if not ticket_id:
+                continue
+            queue_rows.extend(
+                await select_all(
+                    "research_loop_run_queue_current",
+                    filters=(("ticket_id", ticket_id),),
+                    order_by=(("current_status_at", True),),
+                    max_rows=100,
+                )
+            )
         funded_queue_rows = [
             row
             for row in queue_rows
@@ -943,7 +954,10 @@ class ResearchLabHostedWorker:
     async def _reimbursement_cap_usage(self, context: HostedRunContext, *, run_day: str) -> dict[str, float]:
         rows = await select_all(
             "research_reimbursement_award_current",
-            filters=(("current_award_status", "awarded"),),
+            filters=(
+                ("current_award_status", "awarded"),
+                ("run_day", run_day),
+            ),
         )
         miner_hotkey = str(context.ticket["miner_hotkey"])
         island = str(context.ticket["island"] or self.config.reimbursement_default_island)

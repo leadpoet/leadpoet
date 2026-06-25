@@ -42,6 +42,7 @@ import random
 import grpc
 from pathlib import Path
 import hashlib
+from urllib.parse import urlparse
 
 from gateway.research_lab.config import DEFAULT_LOOP_START_FEE_USD as RESEARCH_LAB_DEFAULT_LOOP_START_FEE_USD
 
@@ -2319,7 +2320,26 @@ def _research_lab_signed_payload(wallet, payload: dict) -> dict:
     return {**payload, "signature": signature}
 
 
+def _research_lab_insecure_gateway_allowed(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "https":
+        return True
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    return os.getenv("RESEARCH_LAB_ALLOW_INSECURE_GATEWAY", "").strip().lower() in {"1", "true", "yes"}
+
+
 def _post_research_lab_json(path: str, payload: dict, *, timeout: int = 60) -> dict:
+    if path.startswith("/research-lab/") and not _research_lab_insecure_gateway_allowed(QUALIFICATION_GATEWAY_URL):
+        return {
+            "error": (
+                "Refusing to send Research Lab signed payload over insecure gateway URL. "
+                "Set GATEWAY_URL to an https:// gateway, or set "
+                "RESEARCH_LAB_ALLOW_INSECURE_GATEWAY=true for local/dev testing only."
+            ),
+            "status_code": 0,
+        }
     response = requests.post(f"{QUALIFICATION_GATEWAY_URL.rstrip('/')}{path}", json=payload, timeout=timeout)
     if response.status_code >= 400:
         try:
@@ -2332,6 +2352,10 @@ def _post_research_lab_json(path: str, payload: dict, *, timeout: int = 60) -> d
 
 def _register_research_lab_openrouter_key(wallet, status: dict) -> tuple[str, str] | None:
     if status.get("openrouter_key_registration_enabled"):
+        if not _research_lab_insecure_gateway_allowed(QUALIFICATION_GATEWAY_URL):
+            print("❌ Refusing to send raw OpenRouter API key over an insecure gateway URL.")
+            print("   Set GATEWAY_URL to an https:// gateway, or set RESEARCH_LAB_ALLOW_INSECURE_GATEWAY=true for local/dev testing only.")
+            return None
         raw_key = getpass.getpass("   OpenRouter API key (hidden; encrypted by gateway): ").strip()
         if not raw_key:
             print("❌ OpenRouter API key is required for paid auto-research loops.")
@@ -2345,7 +2369,11 @@ def _register_research_lab_openrouter_key(wallet, status: dict) -> tuple[str, st
             {
                 "miner_hotkey": wallet.hotkey.ss58_address,
                 "timestamp": int(time.time()),
-                "idempotency_key": f"research-openrouter-key:{wallet.hotkey.ss58_address}:{int(time.time())}",
+                "idempotency_key": (
+                    "research-openrouter-key:"
+                    f"{wallet.hotkey.ss58_address}:"
+                    f"{hashlib.sha256(raw_key.encode('utf-8')).hexdigest()[:24]}"
+                ),
                 "openrouter_api_key": raw_key,
                 "key_label": "research-lab-miner-key",
             },
@@ -2583,6 +2611,7 @@ def _execute_research_lab_payment(
 def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
     """Run the miner-facing Research Lab auto-research entrypoint."""
     gateway_url = QUALIFICATION_GATEWAY_URL.rstrip("/")
+    flow_id = hashlib.sha256(os.urandom(32)).hexdigest()[:24]
     print("\n" + "="*80)
     print(" LEADPOET AUTO-RESEARCH LOOPS")
     print("="*80)
@@ -2694,7 +2723,7 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
         {
             "miner_hotkey": wallet.hotkey.ss58_address,
             "timestamp": int(time.time()),
-            "idempotency_key": f"research-ticket:{wallet.hotkey.ss58_address}:{int(time.time())}",
+            "idempotency_key": f"research-ticket:{wallet.hotkey.ss58_address}:{flow_id}",
             "island": island,
             "brief_sanitized_ref": brief_sanitized_ref,
             "brief_public_summary": brief_public_summary,
@@ -2749,7 +2778,7 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
         {
             "miner_hotkey": wallet.hotkey.ss58_address,
             "timestamp": int(time.time()),
-            "idempotency_key": f"research-loop-start:{ticket_id}:{int(time.time())}",
+            "idempotency_key": f"research-loop-start:{ticket_id}:{payment_block_hash}:{payment_extrinsic_index}",
             "ticket_id": ticket_id,
             "payment_block_hash": payment_block_hash,
             "payment_extrinsic_index": payment_extrinsic_index,
@@ -2834,7 +2863,7 @@ def _run_research_lab_topup_flow(
         {
             "miner_hotkey": wallet.hotkey.ss58_address,
             "timestamp": int(time.time()),
-            "idempotency_key": f"research-loop-topup:{ticket_id}:{int(time.time())}",
+            "idempotency_key": f"research-loop-topup:{ticket_id}:{payment_block_hash}:{payment_extrinsic_index}",
             "ticket_id": ticket_id,
             "continue_from_run_id": continue_from_run_id,
             "payment_block_hash": payment_block_hash,

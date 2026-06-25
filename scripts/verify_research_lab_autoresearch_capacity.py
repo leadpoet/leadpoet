@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import sys
@@ -83,6 +84,7 @@ async def main() -> int:
                 errors.append(f"{name}: expected 409/{expected_detail!r}, got {exc.status_code}/{exc.detail!r}")
 
     try:
+        now = datetime.now(timezone.utc)
         await run_case(
             "empty queue passes",
             queue_rows=[],
@@ -93,7 +95,14 @@ async def main() -> int:
         )
         await run_case(
             "same hotkey blocked",
-            queue_rows=[{"run_id": "run-1", "ticket_id": "ticket-1", "current_queue_status": "started"}],
+            queue_rows=[
+                {
+                    "run_id": "run-1",
+                    "ticket_id": "ticket-1",
+                    "current_queue_status": "started",
+                    "current_status_at": now.isoformat(),
+                }
+            ],
             ticket_rows=[{"ticket_id": "ticket-1", "miner_hotkey": "hotkey-active"}],
             miner_hotkey="hotkey-active",
             config=_config(),
@@ -102,7 +111,12 @@ async def main() -> int:
         await run_case(
             "proxy capacity blocked",
             queue_rows=[
-                {"run_id": f"run-{index}", "ticket_id": f"ticket-{index}", "current_queue_status": "queued"}
+                {
+                    "run_id": f"run-{index}",
+                    "ticket_id": f"ticket-{index}",
+                    "current_queue_status": "queued",
+                    "current_status_at": now.isoformat(),
+                }
                 for index in range(5)
             ],
             ticket_rows=[
@@ -116,7 +130,12 @@ async def main() -> int:
         await run_case(
             "below capacity passes",
             queue_rows=[
-                {"run_id": f"run-{index}", "ticket_id": f"ticket-{index}", "current_queue_status": "queued"}
+                {
+                    "run_id": f"run-{index}",
+                    "ticket_id": f"ticket-{index}",
+                    "current_queue_status": "queued",
+                    "current_status_at": now.isoformat(),
+                }
                 for index in range(4)
             ],
             ticket_rows=[
@@ -135,6 +154,21 @@ async def main() -> int:
             config=_config(require_proxy=True),
             expected_detail="too many autoresearch loops right now, try again later",
             proxy_count=0,
+        )
+        await run_case(
+            "stale same hotkey does not block",
+            queue_rows=[
+                {
+                    "run_id": "run-stale",
+                    "ticket_id": "ticket-stale",
+                    "current_queue_status": "started",
+                    "current_status_at": (now - timedelta(hours=3)).isoformat(),
+                }
+            ],
+            ticket_rows=[{"ticket_id": "ticket-stale", "miner_hotkey": "hotkey-active"}],
+            miner_hotkey="hotkey-active",
+            config=_config(),
+            expected_detail=None,
         )
     finally:
         research_lab_api.select_all = original_select_all

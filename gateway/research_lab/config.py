@@ -94,6 +94,7 @@ class ResearchLabGatewayConfig:
     hosted_worker_queue_fetch_limit: int = 20
     hosted_worker_require_proxy: bool = False
     hosted_worker_proxy_url: str = ""
+    active_loop_stale_after_seconds: int = 7200
     scoring_worker_enabled: bool = False
     scoring_worker_poll_seconds: int = 15
     scoring_worker_max_candidates: int = 1
@@ -222,6 +223,10 @@ class ResearchLabGatewayConfig:
                 or _truthy("RESEARCH_LAB_HOSTED_WORKER_REQUIRE_PROXY")
             ),
             hosted_worker_proxy_url=os.getenv("RESEARCH_LAB_HOSTED_WORKER_PROXY", ""),
+            active_loop_stale_after_seconds=max(
+                60,
+                _int("RESEARCH_LAB_ACTIVE_LOOP_STALE_AFTER_SECONDS", 7200),
+            ),
             scoring_worker_enabled=_truthy("RESEARCH_LAB_SCORING_WORKER_ENABLED"),
             scoring_worker_poll_seconds=max(1, _int("RESEARCH_LAB_SCORING_WORKER_POLL_SECONDS", 15)),
             scoring_worker_max_candidates=max(1, _int("RESEARCH_LAB_SCORING_WORKER_MAX_CANDIDATES", 1)),

@@ -7,6 +7,7 @@ require explicit Research Lab flags and write only Research Lab tables/events.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
 import os
 import re
@@ -1211,7 +1212,11 @@ def _ticket_loop_start_fee_usd(ticket: Mapping[str, Any], config: ResearchLabGat
 
 
 async def _enforce_autoresearch_loop_capacity(config: ResearchLabGatewayConfig, miner_hotkey: str) -> None:
-    active_rows = await _active_autoresearch_queue_rows()
+    active_rows = [
+        row
+        for row in await _active_autoresearch_queue_rows()
+        if _autoresearch_active_row_is_fresh(row, config)
+    ]
     capacity = _autoresearch_loop_capacity(config)
     if capacity <= 0:
         raise HTTPException(
@@ -1291,6 +1296,30 @@ def _configured_autoresearch_proxy_count() -> int:
         if any(os.getenv(f"{prefix}_{index}", "").strip() for prefix in AUTORESEARCH_PROXY_PREFIXES):
             count += 1
     return count
+
+
+def _autoresearch_active_row_is_fresh(row: Mapping[str, Any], config: ResearchLabGatewayConfig) -> bool:
+    stale_after_seconds = max(60, int(config.active_loop_stale_after_seconds or 7200))
+    raw_status_at = row.get("current_status_at")
+    if not raw_status_at:
+        return True
+    try:
+        status_at = datetime.fromisoformat(str(raw_status_at).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if status_at.tzinfo is None:
+        status_at = status_at.replace(tzinfo=timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - status_at.astimezone(timezone.utc)).total_seconds()
+    if age_seconds <= stale_after_seconds:
+        return True
+    logger.info(
+        "research_lab_autoresearch_capacity_ignored_stale_active_run run_id=%s status=%s age_seconds=%.0f stale_after_seconds=%s",
+        row.get("run_id"),
+        row.get("current_queue_status"),
+        age_seconds,
+        stale_after_seconds,
+    )
+    return False
 
 
 async def _topup_continuation_context(*, ticket_id: str, run_id: str) -> dict[str, Any]:

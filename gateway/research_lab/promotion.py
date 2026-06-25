@@ -65,14 +65,42 @@ async def load_active_private_model(
         logger.warning("research_lab_active_model_lineage_unavailable: %s", str(exc)[:200])
         rows = []
 
-    if rows:
-        row = rows[0]
-        artifact = _load_valid_artifact(str(row["private_model_manifest_uri"]))
-        if artifact.model_artifact_hash != str(row["model_artifact_hash"]):
-            raise RuntimeError("active private model artifact hash does not match lineage row")
-        if artifact.manifest_hash != str(row["private_model_manifest_hash"]):
-            raise RuntimeError("active private model manifest hash does not match lineage row")
-        return ActivePrivateModel(artifact=artifact, version_row=row)
+    stale_active_rows: list[tuple[dict[str, Any], str, dict[str, str]]] = []
+    for row in rows:
+        try:
+            artifact = _load_valid_artifact(str(row["private_model_manifest_uri"]))
+        except Exception as exc:
+            stale_active_rows.append((row, "manifest_load_failed", {"error": _safe_text(str(exc))}))
+            logger.warning(
+                "research_lab_active_model_lineage_row_load_failed: version=%s error=%s",
+                _short_ref(row.get("private_model_version_id")),
+                _safe_text(str(exc))[:200],
+            )
+            continue
+
+        row_artifact_hash = str(row["model_artifact_hash"])
+        row_manifest_hash = str(row["private_model_manifest_hash"])
+        if artifact.model_artifact_hash == row_artifact_hash and artifact.manifest_hash == row_manifest_hash:
+            return ActivePrivateModel(artifact=artifact, version_row=row)
+
+        stale_active_rows.append(
+            (
+                row,
+                "mutable_manifest_hash_mismatch",
+                {
+                    "row_model_artifact_hash": row_artifact_hash,
+                    "loaded_model_artifact_hash": artifact.model_artifact_hash,
+                    "row_private_model_manifest_hash": row_manifest_hash,
+                    "loaded_private_model_manifest_hash": artifact.manifest_hash,
+                },
+            )
+        )
+        logger.warning(
+            "research_lab_active_model_lineage_stale: version=%s row_artifact=%s loaded_artifact=%s",
+            _short_ref(row.get("private_model_version_id")),
+            _short_ref(row_artifact_hash),
+            _short_ref(artifact.model_artifact_hash),
+        )
 
     artifact = _load_valid_artifact(config.private_model_manifest_uri)
     version_row = None
@@ -92,6 +120,30 @@ async def load_active_private_model(
                 version_status="active",
                 reason="bootstrap_private_model_manifest_uri",
             )
+            for stale_row, stale_reason, stale_doc in stale_active_rows:
+                stale_version_id = str(stale_row.get("private_model_version_id") or "")
+                if not stale_version_id or stale_version_id == str(version_row.get("private_model_version_id") or ""):
+                    continue
+                try:
+                    await create_private_model_version_event(
+                        private_model_version_id=stale_version_id,
+                        event_type="superseded",
+                        version_status="superseded",
+                        reason="superseded_by_current_private_model_manifest",
+                        event_doc={
+                            "reason": stale_reason,
+                            "replacement_private_model_version_id": str(version_row["private_model_version_id"]),
+                            "replacement_model_artifact_hash": artifact.model_artifact_hash,
+                            "replacement_private_model_manifest_hash": artifact.manifest_hash,
+                            **stale_doc,
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "research_lab_stale_active_model_supersede_failed: version=%s error=%s",
+                        _short_ref(stale_version_id),
+                        _safe_text(str(exc))[:200],
+                    )
         except Exception as exc:
             logger.warning("research_lab_active_model_bootstrap_write_failed: %s", str(exc)[:200])
     return ActivePrivateModel(artifact=artifact, version_row=version_row)
@@ -636,3 +688,10 @@ def _safe_text(value: str) -> str:
     for marker in ("sk-or-", "service_role", "openrouter_api_key"):
         text = text.replace(marker, "[redacted]")
     return text[:500]
+
+
+def _short_ref(value: Any) -> str:
+    text = str(value or "")
+    if len(text) <= 24:
+        return text
+    return f"{text[:14]}...{text[-6:]}"

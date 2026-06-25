@@ -2454,6 +2454,55 @@ def _research_lab_prompt_int(label: str, *, default: int, minimum: int, maximum:
         return parsed
 
 
+RESEARCH_LAB_RESEARCH_AREA_CHOICES: tuple[tuple[str, str, str], ...] = (
+    ("1", "generalist", "Broad improvements across all lead types"),
+    ("2", "healthcare", "Healthcare and life sciences leads"),
+    ("3", "fintech", "Finance and fintech leads"),
+    ("4", "industrial", "Industrial and manufacturing leads"),
+    ("5", "crypto_infra", "Crypto and blockchain infrastructure leads"),
+    ("6", "real_estate", "Real estate and property leads"),
+)
+
+
+def _research_lab_prompt_research_area(default: str = "generalist") -> str:
+    labels_by_value = {
+        value: label for _number, value, label in RESEARCH_LAB_RESEARCH_AREA_CHOICES
+    }
+    values_by_number = {
+        number: value for number, value, _label in RESEARCH_LAB_RESEARCH_AREA_CHOICES
+    }
+    values_by_name = {
+        value.replace("_", "-"): value for _number, value, _label in RESEARCH_LAB_RESEARCH_AREA_CHOICES
+    }
+    values_by_name.update(
+        {value: value for _number, value, _label in RESEARCH_LAB_RESEARCH_AREA_CHOICES}
+    )
+
+    print("   Choose where this run should focus:")
+    for number, value, label in RESEARCH_LAB_RESEARCH_AREA_CHOICES:
+        default_marker = " (default)" if value == default else ""
+        print(f"     {number}. {label}{default_marker}")
+    while True:
+        choice = input(
+            f"   Research area [{labels_by_value.get(default, default)}]: "
+        ).strip().lower()
+        if not choice:
+            return default
+        if choice in values_by_number:
+            return values_by_number[choice]
+        normalized_choice = choice.replace(" ", "_")
+        if normalized_choice in values_by_name:
+            return values_by_name[normalized_choice]
+        print("   Choose a number from the list, or press Enter for the default.")
+
+
+def _research_lab_research_area_label(value: str) -> str:
+    for _number, area_value, label in RESEARCH_LAB_RESEARCH_AREA_CHOICES:
+        if area_value == value:
+            return label
+    return value.replace("_", " ")
+
+
 def _execute_research_lab_payment(
     *,
     wallet,
@@ -2620,7 +2669,7 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
     max_compute_budget_usd = default_budget
     advanced = input("❓ Adjust advanced settings? [y/N]: ").strip().lower()
     if advanced in ("y", "yes"):
-        island = input("   Island [generalist]: ").strip() or "generalist"
+        island = _research_lab_prompt_research_area()
         requested_loop_count = _research_lab_prompt_int("   Requested loop count", default=1, minimum=1, maximum=100)
         research_model_tier = _research_lab_prompt_model_tier(default_tier, approved_tiers)
         requested_compute_budget_usd = _research_lab_prompt_budget(
@@ -2631,7 +2680,8 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
         )
         max_compute_budget_usd = requested_compute_budget_usd
     print(
-        f"   Using: island={island}, budget=${requested_compute_budget_usd:.2f}, "
+        f"   Using: research area={_research_lab_research_area_label(island)}, "
+        f"budget=${requested_compute_budget_usd:.2f}, "
         f"model_tier={research_model_tier}, loops={requested_loop_count}"
         + (f", expected_runtime={runtime_label}" if runtime_label else "")
     )

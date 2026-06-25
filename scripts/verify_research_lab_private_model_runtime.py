@@ -180,6 +180,31 @@ def run_icp(icp, context):
         finally:
             private_runtime_module.subprocess.run = original_run
 
+        class _ProviderErrorCompleted:
+            returncode = 0
+            stdout = "[]"
+            stderr = "research_lab_private_runtime_provider_error HTTPError: HTTP Error 401: Unauthorized"
+
+        def _fake_provider_error_run(*_args, **_kwargs):
+            return _ProviderErrorCompleted()
+
+        private_runtime_module.subprocess.run = _fake_provider_error_run
+        try:
+            try:
+                DockerPrivateModelRunner(
+                    DockerPrivateModelSpec(
+                        image_digest="123456789012.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:" + "8" * 64,
+                        pull_before_run=False,
+                        timeout_seconds=30,
+                    )
+                )(research_lab_icp, {})
+                errors.append("docker private model runner accepted empty output with provider error")
+            except PrivateModelRuntimeError as exc:
+                if "provider-backed sourcing failed" not in str(exc):
+                    errors.append("provider error did not produce a clear runtime failure")
+        finally:
+            private_runtime_module.subprocess.run = original_run
+
         secret_adapter = root / "secret_adapter.py"
         secret_adapter.write_text(
             "def run_icp(icp, context):\n    return [{'raw_secret': 'sk-or-should-fail'}]\n",

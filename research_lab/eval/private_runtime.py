@@ -12,6 +12,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any, Mapping, Sequence
@@ -28,6 +29,7 @@ SECRET_MARKERS = (
     "raw_secret",
     "service_role",
 )
+PROVIDER_ERROR_MARKER = "research_lab_private_runtime_provider_error"
 DEFAULT_ENV_PASSTHROUGH = (
     "EXA_API_KEY",
     "SCRAPINGDOG_API_KEY",
@@ -209,6 +211,7 @@ class SubprocessPrivateModelRunner:
             decoded = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
             raise PrivateModelRuntimeError("private model adapter returned invalid JSON") from exc
+        _raise_on_empty_provider_error(decoded, completed.stderr, context_label="private model")
         return ensure_private_model_outputs(
             decoded,
             context_label="private model",
@@ -355,9 +358,11 @@ class DockerPrivateModelRunner:
             stderr = _sanitize_text(completed.stderr)[-1200:]
             raise PrivateModelRuntimeError(f"docker private model adapter failed with code {completed.returncode}: {stderr}")
         try:
-            return json.loads(completed.stdout)
+            decoded = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
             raise PrivateModelRuntimeError("docker private model adapter returned invalid JSON") from exc
+        _raise_on_empty_provider_error(decoded, completed.stderr, context_label="docker private model")
+        return decoded
 
 
 def load_private_artifact_manifest(uri: str) -> dict[str, Any]:
@@ -518,6 +523,18 @@ def _redacted_context(context: Mapping[str, Any]) -> dict[str, Any]:
     return dict(context)
 
 
+def _raise_on_empty_provider_error(decoded: Any, stderr: str, *, context_label: str) -> None:
+    if decoded != []:
+        return
+    sanitized = _sanitize_text(stderr)
+    if PROVIDER_ERROR_MARKER not in sanitized:
+        return
+    raise PrivateModelRuntimeError(
+        f"{context_label} provider-backed sourcing failed before returning companies: "
+        f"{sanitized[-1200:]}"
+    )
+
+
 def _first_text(*values: Any, default: str = "") -> str:
     for value in values:
         if value is None:
@@ -665,8 +682,21 @@ def _contains_secret_material(value: Any) -> bool:
 
 def _sanitize_text(text: str) -> str:
     sanitized = text or ""
+    for env_name in (
+        "EXA_API_KEY",
+        "SCRAPINGDOG_API_KEY",
+        "QUALIFICATION_SCRAPINGDOG_API_KEY",
+        "OPENROUTER_API_KEY",
+        "QUALIFICATION_OPENROUTER_API_KEY",
+        "OPENROUTER_KEY",
+    ):
+        value = os.environ.get(env_name)
+        if value:
+            sanitized = sanitized.replace(value, "[REDACTED]")
     for marker in SECRET_MARKERS:
         sanitized = sanitized.replace(marker, "[REDACTED]")
+    sanitized = re.sub(r"(?i)(api_key=)[^&\s]+", r"\1[REDACTED]", sanitized)
+    sanitized = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s]+", r"\1[REDACTED]", sanitized)
     return sanitized
 
 
@@ -680,7 +710,68 @@ def _parse_s3_uri(uri: str) -> tuple[str, str]:
     return bucket, key
 
 
-_ADAPTER_BOOTSTRAP = r"""
+_PROVIDER_DIAGNOSTICS_BOOTSTRAP = r"""
+import os
+import re
+import sys
+import urllib.request
+
+_research_lab_original_urlopen = urllib.request.urlopen
+
+def _research_lab_sanitize(text):
+    text = str(text or "")
+    for env_name in (
+        "EXA_API_KEY",
+        "SCRAPINGDOG_API_KEY",
+        "QUALIFICATION_SCRAPINGDOG_API_KEY",
+        "OPENROUTER_API_KEY",
+        "QUALIFICATION_OPENROUTER_API_KEY",
+        "OPENROUTER_KEY",
+    ):
+        value = os.environ.get(env_name)
+        if value:
+            text = text.replace(value, "[REDACTED]")
+    text = re.sub(r"(?i)(api_key=)[^&\s]+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s]+", r"\1[REDACTED]", text)
+    return text
+
+def _research_lab_urlopen(req, *args, **kwargs):
+    try:
+        return _research_lab_original_urlopen(req, *args, **kwargs)
+    except Exception as exc:
+        target = getattr(req, "full_url", req if isinstance(req, str) else "")
+        message = _research_lab_sanitize(f"{type(exc).__name__}: {exc}; url={target}")
+        sys.stderr.write("research_lab_private_runtime_provider_error " + message[-900:] + "\n")
+        raise
+
+urllib.request.urlopen = _research_lab_urlopen
+
+def _research_lab_patch_strict_qualify(adapter_module):
+    try:
+        import asyncio
+        import sourcing_model
+        import sourcing_model.core as core
+    except Exception:
+        return
+
+    def _strict_qualify(icp):
+        if not isinstance(icp, dict) or not (icp.get("industry") or icp.get("intent_signal_text") or icp.get("intent_signal")):
+            return []
+        if not (core._exa_key() and core._sd_key() and core._or_key()):
+            raise RuntimeError("Missing API keys for private sourcing model")
+        return asyncio.run(core._qualify_async(icp))
+
+    try:
+        sourcing_model.qualify = _strict_qualify
+        if hasattr(adapter_module, "qualify"):
+            adapter_module.qualify = _strict_qualify
+    except Exception as exc:
+        message = _research_lab_sanitize(f"{type(exc).__name__}: {exc}")
+        sys.stderr.write("research_lab_private_runtime_diagnostic_warning strict_qualify_patch_failed " + message[-500:] + "\n")
+"""
+
+
+_ADAPTER_BOOTSTRAP = _PROVIDER_DIAGNOSTICS_BOOTSTRAP + r"""
 import importlib
 import json
 import sys
@@ -689,6 +780,7 @@ source_path, module_name, callable_name = sys.argv[1:4]
 sys.path.insert(0, source_path)
 payload = json.load(sys.stdin)
 module = importlib.import_module(module_name)
+_research_lab_patch_strict_qualify(module)
 fn = getattr(module, callable_name)
 result = fn(payload["icp"], payload.get("context") or {})
 print(json.dumps(result, sort_keys=True, separators=(",", ":")))
@@ -709,7 +801,7 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 """
 
 
-_DOCKER_ADAPTER_BOOTSTRAP = r"""
+_DOCKER_ADAPTER_BOOTSTRAP = _PROVIDER_DIAGNOSTICS_BOOTSTRAP + r"""
 import importlib
 import json
 import sys
@@ -717,6 +809,7 @@ import sys
 module_name, callable_name = sys.argv[1:3]
 payload = json.load(sys.stdin)
 module = importlib.import_module(module_name)
+_research_lab_patch_strict_qualify(module)
 fn = getattr(module, callable_name)
 result = fn(payload["icp"], payload.get("context") or {})
 print(json.dumps(result, sort_keys=True, separators=(",", ":")))

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import os
 from pathlib import Path
+import sys
 from typing import Any, Mapping
 from urllib.request import Request, urlopen
 
@@ -35,6 +37,41 @@ FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "validator_integra
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
 
 
+def _argv_value(name: str) -> str:
+    try:
+        index = sys.argv.index(name)
+    except ValueError:
+        return ""
+    if index + 1 >= len(sys.argv):
+        return ""
+    return str(sys.argv[index + 1] or "")
+
+
+def _is_production_subnet(data: Mapping[str, Any] | None = None) -> bool:
+    data = data or {}
+    network = str(
+        data.get("BITTENSOR_NETWORK")
+        or data.get("SUBTENSOR_NETWORK")
+        or os.getenv("BITTENSOR_NETWORK")
+        or os.getenv("SUBTENSOR_NETWORK")
+        or _argv_value("--subtensor_network")
+        or ""
+    ).strip().lower()
+    netuid = str(
+        data.get("BITTENSOR_NETUID")
+        or data.get("NETUID")
+        or os.getenv("BITTENSOR_NETUID")
+        or os.getenv("NETUID")
+        or _argv_value("--netuid")
+        or ""
+    ).strip()
+    return network == "finney" and netuid == "71"
+
+
+def _default_for_prod(data: Mapping[str, Any] | None = None) -> bool:
+    return _is_production_subnet(data)
+
+
 @dataclass(frozen=True)
 class ResearchLabValidatorFlags:
     fetch_enabled: bool = False
@@ -52,13 +89,19 @@ class ResearchLabValidatorFlags:
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any] | None = None) -> "ResearchLabValidatorFlags":
         data = data or {}
+        prod_default = _default_for_prod(data)
         return cls(
-            fetch_enabled=_truthy(data.get("RESEARCH_LAB_VALIDATOR_FETCH_ENABLED", data.get("fetch_enabled", False))),
+            fetch_enabled=_truthy(
+                data.get("RESEARCH_LAB_VALIDATOR_FETCH_ENABLED", data.get("fetch_enabled", prod_default))
+            ),
             shadow_verify_enabled=_truthy(
-                data.get("RESEARCH_LAB_VALIDATOR_SHADOW_VERIFY_ENABLED", data.get("shadow_verify_enabled", False))
+                data.get("RESEARCH_LAB_VALIDATOR_SHADOW_VERIFY_ENABLED", data.get("shadow_verify_enabled", prod_default))
             ),
             evaluation_verify_enabled=_truthy(
-                data.get("RESEARCH_LAB_VALIDATOR_EVALUATION_VERIFY_ENABLED", data.get("evaluation_verify_enabled", False))
+                data.get(
+                    "RESEARCH_LAB_VALIDATOR_EVALUATION_VERIFY_ENABLED",
+                    data.get("evaluation_verify_enabled", prod_default),
+                )
             ),
             audit_verify_enabled=_truthy(
                 data.get("RESEARCH_LAB_VALIDATOR_AUDIT_VERIFY_ENABLED", data.get("audit_verify_enabled", False))
@@ -66,26 +109,26 @@ class ResearchLabValidatorFlags:
             require_shadow_verification_before_submit=_truthy(
                 data.get(
                     "RESEARCH_LAB_REQUIRE_SHADOW_VERIFICATION_BEFORE_SUBMIT",
-                    data.get("require_shadow_verification_before_submit", False),
+                    data.get("require_shadow_verification_before_submit", prod_default),
                 )
             ),
             require_evaluation_verification_before_submit=_truthy(
                 data.get(
                     "RESEARCH_LAB_REQUIRE_EVALUATION_VERIFICATION_BEFORE_SUBMIT",
-                    data.get("require_evaluation_verification_before_submit", False),
+                    data.get("require_evaluation_verification_before_submit", prod_default),
                 )
             ),
             reimbursements_enabled=_truthy(
-                data.get("RESEARCH_LAB_REIMBURSEMENTS_ENABLED", data.get("reimbursements_enabled", False))
+                data.get("RESEARCH_LAB_REIMBURSEMENTS_ENABLED", data.get("reimbursements_enabled", prod_default))
             ),
             weight_mutation_enabled=_truthy(
-                data.get("RESEARCH_LAB_WEIGHT_MUTATION_ENABLED", data.get("weight_mutation_enabled", False))
+                data.get("RESEARCH_LAB_WEIGHT_MUTATION_ENABLED", data.get("weight_mutation_enabled", prod_default))
             ),
             production_writes_enabled=_truthy(
-                data.get("RESEARCH_LAB_PRODUCTION_WRITES_ENABLED", data.get("production_writes_enabled", False))
+                data.get("RESEARCH_LAB_PRODUCTION_WRITES_ENABLED", data.get("production_writes_enabled", prod_default))
             ),
             submit_on_chain_enabled=_truthy(
-                data.get("RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED", data.get("submit_on_chain_enabled", False))
+                data.get("RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED", data.get("submit_on_chain_enabled", prod_default))
             ),
             fulfillment_mutation_enabled=_truthy(
                 data.get("RESEARCH_LAB_FULFILLMENT_MUTATION_ENABLED", data.get("fulfillment_mutation_enabled", False))

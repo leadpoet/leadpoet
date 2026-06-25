@@ -397,6 +397,32 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return value.strip().lower() in _TRUTHY_ENV_VALUES
 
 
+def _argv_value(name: str) -> str:
+    try:
+        index = sys.argv.index(name)
+    except ValueError:
+        return ""
+    if index + 1 >= len(sys.argv):
+        return ""
+    return str(sys.argv[index + 1] or "")
+
+
+def _research_lab_production_subnet_default() -> bool:
+    network = (
+        os.environ.get("BITTENSOR_NETWORK")
+        or os.environ.get("SUBTENSOR_NETWORK")
+        or _argv_value("--subtensor_network")
+        or ""
+    ).strip().lower()
+    netuid = (
+        os.environ.get("BITTENSOR_NETUID")
+        or os.environ.get("NETUID")
+        or _argv_value("--netuid")
+        or ""
+    ).strip()
+    return network == "finney" and netuid == "71"
+
+
 def _research_lab_allocation_has_live_payments(allocation_doc: Any) -> bool:
     if not isinstance(allocation_doc, dict):
         return False
@@ -3363,12 +3389,10 @@ class Validator(BaseValidatorNeuron):
                 write_research_lab_validator_artifact,
             )
         except Exception as exc:
-            mutation_enabled = os.environ.get("RESEARCH_LAB_WEIGHT_MUTATION_ENABLED", "").lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
+            mutation_enabled = _env_flag(
+                "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED",
+                _research_lab_production_subnet_default(),
+            )
             if mutation_enabled:
                 print(f"   ❌ Research Lab verifier import failed while mutation is enabled: {exc}")
                 return {"abort_chain_submission": True, "reason": "research_lab_verifier_import_failed"}
@@ -10761,6 +10785,9 @@ def main():
     parser.add_argument("--total-containers", type=int, help="Total number of containers running (for dynamic lead distribution)")
     parser.add_argument("--mode", type=str, choices=["coordinator", "worker", "qualification_worker", "fulfillment_worker"], help="Container mode")
     args = parser.parse_args()
+
+    os.environ.setdefault("BITTENSOR_NETWORK", str(args.subtensor_network))
+    os.environ.setdefault("BITTENSOR_NETUID", str(args.netuid))
 
     if args.logging_trace:
         bt.logging.set_trace(True)

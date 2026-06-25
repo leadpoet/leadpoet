@@ -1,8 +1,8 @@
 """Production Research Lab gateway flags.
 
-All live workflow flags default false. Enabling the API only exposes the
-Research Lab namespace; paid loops, probes, writes, receipts, and weights each
-require their own explicit gate.
+Live workflow flags default on only for the production subnet
+(`BITTENSOR_NETWORK=finney`, `BITTENSOR_NETUID=71`). Other environments stay
+closed unless explicitly enabled.
 """
 
 from __future__ import annotations
@@ -20,6 +20,28 @@ logger = logging.getLogger(__name__)
 # Single code-level default for the Research Lab loop-start fee. Operators can
 # still override it at runtime with RESEARCH_LAB_LOOP_START_FEE_USD.
 DEFAULT_LOOP_START_FEE_USD = 0.2
+
+
+def _is_production_subnet() -> bool:
+    network = (
+        os.getenv("BITTENSOR_NETWORK")
+        or os.getenv("SUBTENSOR_NETWORK")
+        or ""
+    ).strip().lower()
+    netuid = (
+        os.getenv("BITTENSOR_NETUID")
+        or os.getenv("NETUID")
+        or ""
+    ).strip()
+    return network == "finney" and netuid == "71"
+
+
+def _prod_default(default_for_prod: bool, default_for_non_prod: bool = False) -> str:
+    return (
+        "true"
+        if (_is_production_subnet() and default_for_prod) or (not _is_production_subnet() and default_for_non_prod)
+        else "false"
+    )
 
 
 def _truthy(name: str, default: str = "false") -> bool:
@@ -185,6 +207,7 @@ class ResearchLabGatewayConfig:
 
     @classmethod
     def from_env(cls) -> "ResearchLabGatewayConfig":
+        prod_on = _prod_default(True)
         total_workers = max(1, _int("RESEARCH_LAB_HOSTED_WORKER_TOTAL_WORKERS", 1))
         worker_index = _int("RESEARCH_LAB_HOSTED_WORKER_INDEX", 0)
         if worker_index < 0:
@@ -198,22 +221,22 @@ class ResearchLabGatewayConfig:
         if scoring_worker_index >= scoring_total_workers:
             scoring_worker_index = scoring_worker_index % scoring_total_workers
         return cls(
-            api_enabled=_truthy("RESEARCH_LAB_GATEWAY_API_ENABLED"),
-            production_writes_enabled=_truthy("RESEARCH_LAB_PRODUCTION_WRITES_ENABLED"),
-            paid_loops_enabled=_truthy("RESEARCH_LAB_PAID_LOOPS_ENABLED"),
+            api_enabled=_truthy("RESEARCH_LAB_GATEWAY_API_ENABLED", prod_on),
+            production_writes_enabled=_truthy("RESEARCH_LAB_PRODUCTION_WRITES_ENABLED", prod_on),
+            paid_loops_enabled=_truthy("RESEARCH_LAB_PAID_LOOPS_ENABLED", prod_on),
             loop_topups_enabled=_truthy("RESEARCH_LAB_LOOP_TOPUPS_ENABLED", "false"),
-            probes_enabled=_truthy("RESEARCH_LAB_PROBES_ENABLED"),
-            hosted_runs_enabled=_truthy("RESEARCH_LAB_HOSTED_RUNS_ENABLED"),
-            receipts_enabled=_truthy("RESEARCH_LAB_RECEIPTS_ENABLED"),
-            evaluation_bundles_enabled=_truthy("RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED"),
-            reports_enabled=_truthy("RESEARCH_LAB_REPORTS_ENABLED"),
-            public_activity_enabled=_truthy("RESEARCH_LAB_PUBLIC_ACTIVITY_ENABLED"),
-            shadow_bundles_enabled=_truthy("RESEARCH_LAB_SHADOW_BUNDLES_ENABLED"),
-            shadow_weights_enabled=_truthy("RESEARCH_LAB_SHADOW_WEIGHTS_ENABLED"),
+            probes_enabled=_truthy("RESEARCH_LAB_PROBES_ENABLED", prod_on),
+            hosted_runs_enabled=_truthy("RESEARCH_LAB_HOSTED_RUNS_ENABLED", prod_on),
+            receipts_enabled=_truthy("RESEARCH_LAB_RECEIPTS_ENABLED", prod_on),
+            evaluation_bundles_enabled=_truthy("RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED", prod_on),
+            reports_enabled=_truthy("RESEARCH_LAB_REPORTS_ENABLED", prod_on),
+            public_activity_enabled=_truthy("RESEARCH_LAB_PUBLIC_ACTIVITY_ENABLED", prod_on),
+            shadow_bundles_enabled=_truthy("RESEARCH_LAB_SHADOW_BUNDLES_ENABLED", prod_on),
+            shadow_weights_enabled=_truthy("RESEARCH_LAB_SHADOW_WEIGHTS_ENABLED", prod_on),
             shadow_reimbursements_enabled=_truthy("RESEARCH_LAB_SHADOW_REIMBURSEMENTS_ENABLED"),
             crowning_enabled=_truthy("RESEARCH_LAB_CROWNING_ENABLED"),
-            reimbursements_enabled=_truthy("RESEARCH_LAB_REIMBURSEMENTS_ENABLED"),
-            weight_mutation_enabled=_truthy("RESEARCH_LAB_WEIGHT_MUTATION_ENABLED"),
+            reimbursements_enabled=_truthy("RESEARCH_LAB_REIMBURSEMENTS_ENABLED", prod_on),
+            weight_mutation_enabled=_truthy("RESEARCH_LAB_WEIGHT_MUTATION_ENABLED", prod_on),
             fulfillment_mutation_enabled=_truthy("RESEARCH_LAB_FULFILLMENT_MUTATION_ENABLED"),
             auto_promotion_enabled=_truthy("RESEARCH_LAB_AUTO_PROMOTION_ENABLED"),
             auto_commit_enabled=_truthy("RESEARCH_LAB_AUTO_COMMIT_ENABLED"),
@@ -260,7 +283,7 @@ class ResearchLabGatewayConfig:
             ),
             private_baseline_rebenchmark_enabled=_truthy(
                 "RESEARCH_LAB_PRIVATE_BASELINE_REBENCHMARK_ENABLED",
-                "false",
+                prod_on,
             ),
             auto_research_min_seconds=max(0, _int("RESEARCH_LAB_AUTO_RESEARCH_MIN_SECONDS", 600)),
             auto_research_max_seconds=max(1, _int("RESEARCH_LAB_AUTO_RESEARCH_MAX_SECONDS", 1800)),
@@ -353,7 +376,7 @@ class ResearchLabGatewayConfig:
             ),
             lab_champion_threshold_points=max(0.0, _float("RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS", 2.0)),
             lab_champion_eval_days=max(1, _int("RESEARCH_LAB_CHAMPION_EVAL_DAYS", 10)),
-            lab_champion_icps_per_day=max(1, _int("RESEARCH_LAB_CHAMPION_ICPS_PER_DAY", 6)),
+            lab_champion_icps_per_day=max(1, _int("RESEARCH_LAB_CHAMPION_ICPS_PER_DAY", 2)),
             public_benchmark_public_icps_per_day=max(
                 1,
                 _int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_ICPS_PER_DAY", 3),
@@ -365,12 +388,12 @@ class ResearchLabGatewayConfig:
             public_benchmark_public_total_icps=(
                 max(1, value)
                 if (value := _optional_int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_TOTAL_ICPS")) is not None
-                else None
+                else 10
             ),
             public_benchmark_public_weak_total=(
                 max(0, value)
                 if (value := _optional_int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_TOTAL")) is not None
-                else None
+                else 7
             ),
             improvement_threshold_points=max(
                 0.0,

@@ -23,15 +23,6 @@ The network currently has two production tracks:
 - **Research Lab** - miners fund hosted auto-research loops that try to improve Leadpoet's private sourcing model.
 - **Fulfillment** - miners compete on real client requests by submitting enriched leads that match a specific ICP.
 
-## The Lab
-
-Research Lab production launch starts deliberately narrow:
-
-- Run auto-research loops.
-- Private model rebenchmarking against a sealed 60-ICP benchmark.
-- Public dashboard view of the current model score, public ICP results, and recent research activity.
-- Specialized research areas, loop top-ups, direct patch uploads will be available soon.
-
 ## Dashboard
 
 Use the public dashboard to track:

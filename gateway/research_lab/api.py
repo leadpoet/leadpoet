@@ -358,6 +358,7 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
                 "miner_openrouter_key_ref": payload.miner_openrouter_key_ref,
                 "miner_openrouter_key_handling": payload.miner_openrouter_key_handling,
                 "requested_loop_count": payload.requested_loop_count,
+                **_queue_capacity_doc(config),
                 **budget_doc,
             },
         )
@@ -535,6 +536,7 @@ async def top_up_research_lab_paid_loop(payload: ResearchLabLoopTopUpRequest):
                 "payment_kind": "top_up",
                 "miner_openrouter_key_ref": payload.miner_openrouter_key_ref,
                 "miner_openrouter_key_handling": payload.miner_openrouter_key_handling,
+                **_queue_capacity_doc(config),
                 **budget_doc,
             },
         )
@@ -1427,6 +1429,14 @@ def _autoresearch_loop_capacity(config: ResearchLabGatewayConfig) -> int:
     return 0
 
 
+def _queue_capacity_doc(config: ResearchLabGatewayConfig) -> dict[str, int | str]:
+    return {
+        "autoresearch_capacity_policy": "proxy_worker_capacity:v1",
+        "autoresearch_capacity": int(_autoresearch_loop_capacity(config)),
+        "active_loop_stale_after_seconds": max(60, int(config.active_loop_stale_after_seconds or 7200)),
+    }
+
+
 def _configured_autoresearch_proxy_count() -> int:
     count = 0
     for index in range(1, 501):
@@ -1655,6 +1665,7 @@ async def _maybe_finalize_candidate_receipt(candidate: dict[str, object]) -> boo
 
 def _raise_storage_error(exc: Exception) -> None:
     message = _redact_storage_error_text(str(exc))
+    message_lower = message.lower()
     json_detail = getattr(exc, "json", None)
     if callable(json_detail):
         try:
@@ -1667,8 +1678,12 @@ def _raise_storage_error(exc: Exception) -> None:
         message,
         _redact_storage_error_text(str(json_detail)) if json_detail else None,
     )
-    if "does not exist" in message or "relation" in message:
+    if "does not exist" in message_lower or "relation" in message_lower:
         raise HTTPException(status_code=503, detail="Research Lab SQL migrations are not applied") from exc
+    if "research_lab_queue_hotkey_conflict" in message_lower:
+        raise HTTPException(status_code=409, detail="autoresearch loop for this hotkey already running") from exc
+    if "research_lab_queue_capacity_conflict" in message_lower:
+        raise HTTPException(status_code=409, detail="too many autoresearch loops right now, try again later") from exc
     raise HTTPException(status_code=500, detail="Research Lab storage operation failed") from exc
 
 

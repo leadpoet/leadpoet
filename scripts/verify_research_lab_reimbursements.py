@@ -124,6 +124,7 @@ def _run_lab_allocator_simulations() -> None:
         "champion_extra_alpha_percent_per_point": 0.1,
         "champion_max_alpha_percent": 5.0,
         "champion_placeholder_alpha_percent": 0.0001,
+        "champion_queue_trigger_ratio": 0.50,
         "champion_threshold_points": 2.0,
         "champion_eval_days": 10,
         "champion_icps_per_day": 6,
@@ -150,18 +151,29 @@ def _run_lab_allocator_simulations() -> None:
     three_reimbursements = [_reimbursement_obligation(uid, spend_usd=10) for uid in range(1, 4)]
     allocation = allocate_research_lab_epoch(100, policy, three_reimbursements, two_champions)
     _assert_cap(allocation, 10.0)
+    _assert_close(allocation["unallocated_percent"], 0.0, "active winners should receive all non-reimbursed lab capacity")
     if len(allocation["champion_allocations"]) != 2:
         raise AssertionError("two active champions should both fit with three $10 reimbursements")
     if allocation["reimbursement_alpha_percent"] <= 0:
         raise AssertionError("reimbursements should be paid before champion remainder")
     if allocation["champion_alpha_percent"] <= allocation["reimbursement_alpha_percent"]:
         raise AssertionError("remaining lab capacity should go to champions")
+    _assert_close(
+        allocation["reimbursement_alpha_percent"] + allocation["champion_alpha_percent"],
+        10.0,
+        "reimbursements plus winners should exhaust lab cap",
+    )
 
     crowded_reimbursements = [_reimbursement_obligation(uid, spend_usd=500) for uid in range(1, 31)]
     allocation = allocate_research_lab_epoch(100, policy, crowded_reimbursements, two_champions)
     _assert_cap(allocation, 10.0)
+    _assert_close(allocation["unallocated_percent"], 0.0, "crowded reimbursements should not leave lab capacity unassigned")
     if allocation["reimbursement_alpha_percent"] >= 8.0:
         raise AssertionError("crowded reimbursements should scale down to reserve champion capacity")
+    if not allocation["queued_champion_allocations"]:
+        raise AssertionError("queue trigger should queue additional champions when reimbursements crowd champion capacity")
+    if min(item["paid_alpha_percent"] for item in allocation["queued_champion_allocations"]) <= 0:
+        raise AssertionError("queued champions should receive a positive placeholder")
 
     quiet_and_generalist = [
         _reimbursement_obligation(1, spend_usd=500, island="generalist", island_weight=1.0),
@@ -178,6 +190,7 @@ def _run_lab_allocator_simulations() -> None:
     ]
     allocation = allocate_research_lab_epoch(100, policy, [], overflow_champions)
     _assert_cap(allocation, 10.0)
+    _assert_close(allocation["unallocated_percent"], 0.0, "champion-only overflow should not leave lab capacity unassigned")
     if not allocation["queued_champion_allocations"]:
         raise AssertionError("champion overflow should queue later champions")
     if min(item["paid_alpha_percent"] for item in allocation["queued_champion_allocations"]) < 0:

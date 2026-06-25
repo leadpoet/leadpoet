@@ -380,6 +380,7 @@ def allocate_research_lab_epoch(
             champions,
             remaining_for_champions,
             policy,
+            reimbursement_paid=reimbursement_paid,
         )
 
     champion_paid = sum((_decimal(item["paid_alpha_percent"]) for item in champion_allocations), Decimal("0"))
@@ -1033,35 +1034,71 @@ def _allocate_champions(
     champions: Sequence[Mapping[str, Any]],
     pool: Decimal,
     policy: Mapping[str, Any],
+    *,
+    reimbursement_paid: Decimal = Decimal("0"),
 ) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
     placeholder = _decimal(
         policy.get("champion_placeholder_alpha_percent", DEFAULT_RESEARCH_LAB_CHAMPION_PLACEHOLDER_ALPHA_PERCENT)
     )
-    paid = [Decimal("0") for _ in champions]
-    remaining = max(Decimal("0"), pool)
+    queue_trigger_ratio = _decimal(policy.get("champion_queue_trigger_ratio", Decimal("0.50")))
+    if queue_trigger_ratio < 0:
+        raise ValueError("champion_queue_trigger_ratio must be non-negative")
 
-    for index in range(len(champions)):
-        if remaining <= 0:
-            break
-        amount = min(placeholder, remaining, _decimal(champions[index]["desired_alpha_percent"]))
-        paid[index] += amount
-        remaining -= amount
+    total_pool = max(Decimal("0"), pool)
+    active_indices: list[int] = []
+    queued_indices: list[int] = []
 
     for index, champion in enumerate(champions):
-        if remaining <= 0:
-            break
         desired = _decimal(champion["desired_alpha_percent"])
-        needed = max(Decimal("0"), desired - paid[index])
-        if needed <= remaining:
-            paid[index] += needed
-            remaining -= needed
+        should_queue_for_reimbursement = (
+            bool(active_indices)
+            and queue_trigger_ratio > 0
+            and reimbursement_paid >= desired * queue_trigger_ratio
+        )
+        if should_queue_for_reimbursement:
+            queued_indices.append(index)
+            continue
+
+        remaining_undecided = len(champions) - index - 1
+        active_desired = sum(_decimal(champions[idx]["desired_alpha_percent"]) for idx in active_indices)
+        required_if_active = active_desired + desired
+        required_if_active += placeholder * Decimal(len(queued_indices) + remaining_undecided)
+        if required_if_active <= total_pool:
+            active_indices.append(index)
+        else:
+            queued_indices.append(index)
+
+    paid = [Decimal("0") for _ in champions]
+    for index in active_indices:
+        paid[index] = _decimal(champions[index]["desired_alpha_percent"])
+    for index in queued_indices:
+        paid[index] = min(placeholder, _decimal(champions[index]["desired_alpha_percent"]))
+
+    spent = sum(paid, Decimal("0"))
+    remaining = max(Decimal("0"), total_pool - spent)
+    if remaining > 0 and active_indices:
+        weights = [
+            max(Decimal("0"), _decimal(champions[index].get("improvement_points", 0)))
+            for index in active_indices
+        ]
+        weight_sum = sum(weights, Decimal("0"))
+        if weight_sum <= 0:
+            weights = [_decimal(champions[index]["desired_alpha_percent"]) for index in active_indices]
+            weight_sum = sum(weights, Decimal("0"))
+        if weight_sum <= 0:
+            weights = [Decimal("1") for _ in active_indices]
+            weight_sum = Decimal(len(active_indices))
+        for index, weight in zip(active_indices, weights):
+            paid[index] += remaining * weight / weight_sum
+    elif remaining > 0 and paid:
+        paid[0] += remaining
 
     active: list[Dict[str, Any]] = []
     queued: list[Dict[str, Any]] = []
     for champion, amount in zip(champions, paid):
         allocation = _champion_allocation(champion, amount)
         if amount >= _decimal(champion["desired_alpha_percent"]):
-            active.append({**allocation, "reason": "full_champion_reward"})
+            active.append({**allocation, "reason": "active_champion_reward"})
         elif amount > 0:
             queued.append({**allocation, "reason": "queued_with_placeholder"})
         else:

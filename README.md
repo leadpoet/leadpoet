@@ -92,7 +92,7 @@ Research Lab lets miners contribute compute toward improving Leadpoet's private 
 Current flow:
 
 1. The miner provides an OpenRouter key.
-2. The miner enters an optional general research focus.
+2. The miner enters an optional research focus.
 3. The miner pays the loop-start fee in TAO.
 4. The gateway runs the hosted auto-research loop.
 5. Candidate improvements are scored.

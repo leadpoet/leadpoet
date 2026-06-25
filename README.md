@@ -11,7 +11,6 @@
   <a href="https://x.com/subnet71"><img alt="Subnet X" src="https://img.shields.io/badge/X-@subnet71-000000?style=flat-square"></a>
   <a href="https://x.com/LeadpoetAI"><img alt="Leadpoet X" src="https://img.shields.io/badge/X-@LeadpoetAI-000000?style=flat-square"></a>
   <a href="https://www.linkedin.com/company/leadpoet/"><img alt="LinkedIn" src="https://img.shields.io/badge/LinkedIn-Leadpoet-0A66C2?style=flat-square"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-2563eb?style=flat-square"></a>
 </p>
 
 ---

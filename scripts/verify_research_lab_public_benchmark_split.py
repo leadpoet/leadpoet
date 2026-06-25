@@ -123,7 +123,7 @@ def _verify_20_icp_total_split() -> list[str]:
         public_icps_per_day=1,
         public_weak_per_day=1,
         public_total_icps=10,
-        public_weak_total=5,
+        public_weak_total=7,
     )
     report = build_public_benchmark_report(
         benchmark_date="2026-06-25",
@@ -134,7 +134,7 @@ def _verify_20_icp_total_split() -> list[str]:
         public_icps_per_day=1,
         public_weak_per_day=1,
         public_total_icps=10,
-        public_weak_total=5,
+        public_weak_total=7,
     )
     errors: list[str] = []
     split_items = split.get("items") if isinstance(split.get("items"), list) else []
@@ -146,8 +146,10 @@ def _verify_20_icp_total_split() -> list[str]:
         errors.append(f"20-ICP launch split must expose 10 public ICPs, got {len(public)}")
     if len(private) != 10:
         errors.append(f"20-ICP launch split must reserve 10 private ICPs, got {len(private)}")
-    if split.get("public_strength_counts") != {"strong": 5, "weak": 5}:
-        errors.append(f"20-ICP launch public split must be 5 weak / 5 strong, got {split.get('public_strength_counts')}")
+    if split.get("public_strength_counts") != {"strong": 3, "weak": 7}:
+        errors.append(f"20-ICP launch public split must be 7 weak / 3 strong, got {split.get('public_strength_counts')}")
+    if split.get("private_strength_counts") != {"strong": 7, "weak": 3}:
+        errors.append(f"20-ICP launch private split must be 3 weak / 7 strong, got {split.get('private_strength_counts')}")
     ranked = sorted(
         split_items,
         key=lambda item: (
@@ -159,11 +161,11 @@ def _verify_20_icp_total_split() -> list[str]:
     strong_pool = ranked[10:]
     expected_public_refs = {
         str(item.get("icp_ref"))
-        for item in [*weak_pool[:5], *list(reversed(strong_pool))[:5]]
+        for item in [*weak_pool[:7], *list(reversed(strong_pool))[:3]]
     }
     actual_public_refs = {str(item.get("icp_ref")) for item in public}
     if actual_public_refs != expected_public_refs:
-        errors.append("20-ICP launch split must pick the global 5 weakest and global 5 strongest ICPs")
+        errors.append("20-ICP launch split must pick the global 7 weakest and global 3 strongest ICPs")
     if report.get("public_icp_count") != 10 or report.get("private_holdout_icp_count") != 10:
         errors.append(
             "20-ICP launch report must expose 10 public ICPs and withhold 10 private ICPs, "

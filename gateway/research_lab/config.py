@@ -50,6 +50,7 @@ class ResearchLabGatewayConfig:
     receipts_enabled: bool = False
     evaluation_bundles_enabled: bool = False
     reports_enabled: bool = False
+    public_activity_enabled: bool = False
     shadow_bundles_enabled: bool = False
     shadow_weights_enabled: bool = False
     shadow_reimbursements_enabled: bool = False
@@ -172,6 +173,7 @@ class ResearchLabGatewayConfig:
             receipts_enabled=_truthy("RESEARCH_LAB_RECEIPTS_ENABLED"),
             evaluation_bundles_enabled=_truthy("RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED"),
             reports_enabled=_truthy("RESEARCH_LAB_REPORTS_ENABLED"),
+            public_activity_enabled=_truthy("RESEARCH_LAB_PUBLIC_ACTIVITY_ENABLED"),
             shadow_bundles_enabled=_truthy("RESEARCH_LAB_SHADOW_BUNDLES_ENABLED"),
             shadow_weights_enabled=_truthy("RESEARCH_LAB_SHADOW_WEIGHTS_ENABLED"),
             shadow_reimbursements_enabled=_truthy("RESEARCH_LAB_SHADOW_REIMBURSEMENTS_ENABLED"),
@@ -509,6 +511,7 @@ class ResearchLabGatewayConfig:
             "receipts_enabled": self.receipts_enabled,
             "evaluation_bundles_enabled": self.evaluation_bundles_enabled,
             "reports_enabled": self.reports_enabled,
+            "public_activity_enabled": self.public_activity_enabled,
             "shadow_flags": {
                 "RESEARCH_LAB_SHADOW_BUNDLES_ENABLED": self.shadow_bundles_enabled,
                 "RESEARCH_LAB_SHADOW_WEIGHTS_ENABLED": self.shadow_weights_enabled,

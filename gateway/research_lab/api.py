@@ -13,7 +13,7 @@ import secrets
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 from gateway.qualification.api.payment import get_payment_info, verify_payment
 from gateway.qualification.utils.chain import (
@@ -49,6 +49,11 @@ from .models import (
     ResearchLabScoreBundleResponse,
     ResearchLabTicketCreateRequest,
     ResearchLabTicketResponse,
+)
+from .public_activity import (
+    fetch_public_loop_detail,
+    fetch_public_loop_rows,
+    safe_project_public_loop_activity,
 )
 from .store import (
     canonical_hash,
@@ -120,6 +125,12 @@ async def create_research_lab_ticket(payload: ResearchLabTicketCreateRequest, re
     except Exception as exc:
         _raise_storage_error(exc)
 
+    await safe_project_public_loop_activity(
+        str(ticket["ticket_id"]),
+        source_ref=f"ticket_event:{event['event_id']}",
+        reason="ticket_created",
+        config=config,
+    )
     logger.info("Research Lab ticket opened: ticket_id=%s hotkey=%s", ticket["ticket_id"], payload.miner_hotkey[:16])
     return ResearchLabTicketResponse(
         ticket_id=ticket["ticket_id"],
@@ -329,6 +340,12 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
             status="credit_preserved_after_queue_failure",
         )
 
+    await safe_project_public_loop_activity(
+        str(payload.ticket_id),
+        source_ref=f"loop_start_queue:{run_id}",
+        reason="paid_loop_queued",
+        config=config,
+    )
     return ResearchLabLoopStartResponse(
         ticket_id=str(payload.ticket_id),
         run_id=run_id,
@@ -433,6 +450,12 @@ async def top_up_research_lab_paid_loop(payload: ResearchLabLoopTopUpRequest):
     except Exception as exc:
         _raise_storage_error(exc)
 
+    await safe_project_public_loop_activity(
+        str(payload.ticket_id),
+        source_ref=f"loop_topup_queue:{run_id}",
+        reason="loop_topup_queued",
+        config=config,
+    )
     return ResearchLabLoopTopUpResponse(
         ticket_id=str(payload.ticket_id),
         run_id=run_id,
@@ -548,6 +571,12 @@ async def record_research_lab_candidate_result(
         _raise_storage_error(exc)
 
     receipt_finalized = await _maybe_finalize_candidate_receipt(candidate)
+    await safe_project_public_loop_activity(
+        str(candidate["ticket_id"]),
+        source_ref=f"candidate_result:{event['event_id']}",
+        reason=f"candidate_{payload.candidate_status}",
+        config=config,
+    )
     return ResearchLabCandidateEvaluationResultResponse(
         candidate_id=payload.candidate_id,
         status=payload.candidate_status,
@@ -587,6 +616,82 @@ async def get_research_lab_score_bundle(score_bundle_id: str):
     if not row:
         raise HTTPException(status_code=404, detail="Research Lab evaluation score bundle not found")
     return row
+
+
+@router.get("/public/loops")
+async def get_research_lab_public_loops(
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    status: Optional[str] = Query(default=None, max_length=80),
+    topic: Optional[str] = Query(default=None, max_length=80),
+    research_area: Optional[str] = Query(default=None, max_length=80),
+    since_days: int = Query(default=14, ge=0, le=90),
+):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    _require_enabled(config.public_activity_enabled, "Research Lab public activity is disabled")
+    try:
+        items, groups = await fetch_public_loop_rows(
+            limit=limit,
+            offset=offset,
+            status=status,
+            topic=topic,
+            research_area=research_area,
+            since_days=since_days,
+        )
+    except Exception as exc:
+        _raise_storage_error(exc)
+    return {
+        "schema_version": "1.0",
+        "items": items,
+        "topic_groups": groups,
+        "pagination": {
+            "limit": limit,
+            "offset": offset,
+            "returned": len(items),
+        },
+        "filters": {
+            "status": status,
+            "topic": topic,
+            "research_area": research_area,
+            "since_days": since_days,
+        },
+    }
+
+
+@router.get("/public/loops/{ticket_id}")
+async def get_research_lab_public_loop_detail(ticket_id: str):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    _require_enabled(config.public_activity_enabled, "Research Lab public activity is disabled")
+    try:
+        detail = await fetch_public_loop_detail(ticket_id)
+    except Exception as exc:
+        _raise_storage_error(exc)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Research Lab public activity card not found")
+    return {"schema_version": "1.0", **detail}
+
+
+@router.get("/public/topic-groups")
+async def get_research_lab_public_topic_groups(
+    since_days: int = Query(default=14, ge=0, le=90),
+):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    _require_enabled(config.public_activity_enabled, "Research Lab public activity is disabled")
+    try:
+        _items, groups = await fetch_public_loop_rows(limit=1, offset=0, since_days=since_days)
+    except Exception as exc:
+        _raise_storage_error(exc)
+    return {
+        "schema_version": "1.0",
+        "topic_groups": groups,
+        "since_days": since_days,
+    }
 
 
 @router.get("/evaluations/latest/{epoch}")

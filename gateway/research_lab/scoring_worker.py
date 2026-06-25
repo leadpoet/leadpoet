@@ -18,6 +18,7 @@ from gateway.research_lab.icp_window import (
 from gateway.research_lab.logging_utils import compact_ref, format_worker_block
 from gateway.research_lab.models import ResearchLabScoreBundleCreateRequest
 from gateway.research_lab.promotion import ResearchLabPromotionController, load_active_private_model
+from gateway.research_lab.public_activity import safe_project_public_loop_activity
 from gateway.research_lab.public_benchmarks import (
     build_benchmark_visibility_split,
     build_public_benchmark_report,
@@ -241,6 +242,12 @@ class ResearchLabGatewayScoringWorker:
                 "proxy_ref_hash": self.proxy_ref_hash,
             },
         )
+        await safe_project_public_loop_activity(
+            str(candidate["ticket_id"]),
+            source_ref=f"candidate_assigned:{candidate_id}",
+            reason="assigned_to_gateway_qualification_worker",
+            config=self.config,
+        )
         logger.info(
             format_worker_block(
                 "RESEARCH LAB CANDIDATE ALLOCATED",
@@ -381,6 +388,12 @@ class ResearchLabGatewayScoringWorker:
                 score_bundle=score_bundle,
             )
             await self._maybe_finalize_candidate_receipt(candidate)
+            await safe_project_public_loop_activity(
+                str(candidate["ticket_id"]),
+                source_ref=f"candidate_scored:{candidate_id}:{bundle['score_bundle_id']}",
+                reason="gateway_qualification_worker_scored_candidate",
+                config=self.config,
+            )
             await self._write_audit_bundle(int(run_context["evaluation_epoch"]))
             logger.info(
                 format_worker_block(
@@ -423,6 +436,12 @@ class ResearchLabGatewayScoringWorker:
                 event_doc={"error": str(exc)[:500]},
             )
             await self._maybe_finalize_candidate_receipt(candidate)
+            await safe_project_public_loop_activity(
+                str(candidate["ticket_id"]),
+                source_ref=f"candidate_failed:{candidate_id}",
+                reason="gateway_qualification_worker_failed",
+                config=self.config,
+            )
             try:
                 await self._write_audit_bundle(await self._resolve_evaluation_epoch())
             except Exception:

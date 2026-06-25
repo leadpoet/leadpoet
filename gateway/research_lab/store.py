@@ -753,6 +753,96 @@ async def create_candidate_promotion_event(
     return await insert_row("research_lab_candidate_promotion_events", row)
 
 
+def public_loop_card_id(ticket_id: str) -> str:
+    return f"public_loop_card:{ticket_id}"
+
+
+def public_loop_card_event_ref(*parts: Any) -> str:
+    return "public_loop_card_event:" + canonical_hash(parts).split(":", 1)[1]
+
+
+async def create_public_loop_card(
+    *,
+    ticket_id: str,
+    miner_hotkey: str,
+    research_area: str,
+    research_focus_summary: str,
+    topic_tags: list[str],
+    topic_signature_hash: str,
+    card_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    card_id = public_loop_card_id(ticket_id)
+    existing = await select_one("research_lab_public_loop_cards", filters=(("card_id", card_id),))
+    if existing:
+        return existing
+    payload = {
+        "card_id": card_id,
+        "schema_version": "1.0",
+        "ticket_id": ticket_id,
+        "miner_hotkey": miner_hotkey,
+        "research_area": research_area,
+        "research_focus_summary": research_focus_summary,
+        "topic_tags": topic_tags,
+        "topic_signature_hash": topic_signature_hash,
+        "card_doc": card_doc or {},
+    }
+    payload["card_hash"] = canonical_hash(payload)
+    payload["anchored_hash"] = payload["card_hash"]
+    return await insert_row("research_lab_public_loop_cards", payload)
+
+
+async def create_public_loop_card_event(
+    *,
+    event_ref: str,
+    card_id: str,
+    ticket_id: str,
+    event_type: str,
+    outcome_label: str,
+    outcome_band: str,
+    topic_tags: list[str],
+    topic_signature_hash: str,
+    run_id: str | None = None,
+    receipt_id: str | None = None,
+    candidate_count: int = 0,
+    scored_candidate_count: int = 0,
+    best_candidate_public_summary: str = "",
+    last_activity_at: str | None = None,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    existing = await select_one(
+        "research_lab_public_loop_card_events",
+        filters=(("event_ref", event_ref),),
+    )
+    if existing:
+        return existing
+    seq = await next_event_seq("research_lab_public_loop_card_events", "card_id", card_id)
+    payload = {
+        "event_ref": event_ref,
+        "card_id": card_id,
+        "ticket_id": ticket_id,
+        "run_id": run_id,
+        "receipt_id": receipt_id,
+        "seq": seq,
+        "event_type": event_type,
+        "outcome_label": outcome_label,
+        "outcome_band": outcome_band,
+        "topic_tags": topic_tags,
+        "topic_signature_hash": topic_signature_hash,
+        "candidate_count": int(candidate_count),
+        "scored_candidate_count": int(scored_candidate_count),
+        "best_candidate_public_summary": best_candidate_public_summary,
+        "last_activity_at": last_activity_at or now_iso(),
+        "event_doc": event_doc or {},
+    }
+    row = {
+        "event_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_lab_public_loop_card_events", row)
+
+
 async def create_private_repo_commit_event(
     *,
     commit_status: str,

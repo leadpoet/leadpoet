@@ -26,6 +26,7 @@ from gateway.research_lab.loop_engine import (
 )
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabReceiptCreateRequest
 from gateway.research_lab.promotion import latest_public_benchmark_summary, load_active_private_model
+from gateway.research_lab.public_activity import safe_project_public_loop_activity
 from gateway.research_lab.store import (
     canonical_hash,
     create_auto_research_loop_event,
@@ -659,6 +660,12 @@ class ResearchLabHostedWorker:
                 "next_stage": "gateway_qualification_worker_evaluation",
             },
         )
+        await safe_project_public_loop_activity(
+            context.ticket_id,
+            source_ref=f"hosted_worker_completed:{context.run_id}",
+            reason="candidate_generation_completed_evaluation_queued",
+            config=self.config,
+        )
         logger.info(
             format_worker_block(
                 "RESEARCH LAB AUTO-RESEARCH QUEUED CANDIDATES",
@@ -877,6 +884,12 @@ class ResearchLabHostedWorker:
             reason="hosted_worker_started",
             event_doc={"run_id": context.run_id, "worker_ref": self.worker_ref},
         )
+        await safe_project_public_loop_activity(
+            context.ticket_id,
+            source_ref=f"hosted_worker_started:{context.run_id}",
+            reason="hosted_worker_started",
+            config=self.config,
+        )
 
     async def _mark_failed(self, context: HostedRunContext, error: str) -> HostedWorkerOutcome:
         event_doc = {"run_id": context.run_id, "worker_ref": self.worker_ref, "error": error[:500]}
@@ -907,6 +920,12 @@ class ResearchLabHostedWorker:
             actor_hotkey=None,
             reason="hosted_research_lab_run_failed",
             event_doc={**event_doc, "receipt_id": receipt_id},
+        )
+        await safe_project_public_loop_activity(
+            context.ticket_id,
+            source_ref=f"hosted_worker_failed:{context.run_id}",
+            reason="hosted_research_lab_run_failed",
+            config=self.config,
         )
         return HostedWorkerOutcome(
             processed=True,

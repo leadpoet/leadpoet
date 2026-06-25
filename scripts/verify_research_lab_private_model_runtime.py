@@ -181,6 +181,31 @@ def run_icp(icp, context):
         finally:
             private_runtime_module.subprocess.run = original_run
 
+        captured_commands: list[list[str]] = []
+
+        class _CommandCompleted:
+            returncode = 0
+            stdout = "[]"
+            stderr = ""
+
+        def _fake_command_run(command, *_args, **_kwargs):
+            captured_commands.append(list(command))
+            return _CommandCompleted()
+
+        private_runtime_module.subprocess.run = _fake_command_run
+        try:
+            DockerPrivateModelRunner(
+                DockerPrivateModelSpec(
+                    image_digest="123456789012.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:" + "7" * 64,
+                    pull_before_run=False,
+                    timeout_seconds=30,
+                )
+            )(research_lab_icp, {})
+        finally:
+            private_runtime_module.subprocess.run = original_run
+        if not captured_commands or "--platform" not in captured_commands[0] or "linux/amd64" not in captured_commands[0]:
+            errors.append("docker private model runner did not pin linux/amd64 platform")
+
         class _ProviderErrorCompleted:
             returncode = 0
             stdout = "[]"

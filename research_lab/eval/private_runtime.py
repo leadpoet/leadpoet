@@ -30,6 +30,7 @@ SECRET_MARKERS = (
     "service_role",
 )
 PROVIDER_ERROR_MARKER = "research_lab_private_runtime_provider_error"
+DEFAULT_DOCKER_PLATFORM = "linux/amd64"
 DEFAULT_ENV_PASSTHROUGH = (
     "EXA_API_KEY",
     "SCRAPINGDOG_API_KEY",
@@ -48,6 +49,10 @@ DEFAULT_ENV_PASSTHROUGH = (
 
 class PrivateModelRuntimeError(RuntimeError):
     """Raised when the private model artifact cannot be executed safely."""
+
+
+def _default_docker_platform() -> str:
+    return os.getenv("RESEARCH_LAB_PRIVATE_MODEL_DOCKER_PLATFORM", DEFAULT_DOCKER_PLATFORM).strip() or DEFAULT_DOCKER_PLATFORM
 
 
 def canonicalize_private_model_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
@@ -261,6 +266,7 @@ class DockerPrivateModelSpec:
     callable_name: str = "run_icp"
     timeout_seconds: int = 900
     docker_executable: str = "docker"
+    platform: str = field(default_factory=_default_docker_platform)
     env_passthrough: tuple[str, ...] = DEFAULT_ENV_PASSTHROUGH
     extra_env: Mapping[str, str] = field(default_factory=dict)
     pull_before_run: bool = True
@@ -273,6 +279,7 @@ class DockerPrivateModelSpec:
             callable_name=str(data.get("callable_name") or "run_icp"),
             timeout_seconds=int(data.get("timeout_seconds") or 900),
             docker_executable=str(data.get("docker_executable") or "docker"),
+            platform=str(data.get("platform") or os.getenv("RESEARCH_LAB_PRIVATE_MODEL_DOCKER_PLATFORM") or DEFAULT_DOCKER_PLATFORM),
             env_passthrough=tuple(str(item) for item in data.get("env_passthrough", DEFAULT_ENV_PASSTHROUGH)),
             extra_env={str(k): str(v) for k, v in dict(data.get("extra_env") or {}).items()},
             pull_before_run=bool(data.get("pull_before_run", True)),
@@ -316,7 +323,7 @@ class DockerPrivateModelRunner:
 
     def _pull_image(self) -> None:
         completed = subprocess.run(
-            [self.spec.docker_executable, "pull", self.spec.image_digest],
+            [self.spec.docker_executable, "pull", *_docker_platform_args(self.spec), self.spec.image_digest],
             text=True,
             capture_output=True,
             timeout=self.spec.timeout_seconds,
@@ -339,6 +346,7 @@ class DockerPrivateModelRunner:
             "run",
             "--rm",
             "-i",
+            *_docker_platform_args(self.spec),
             *_docker_env_args(self.spec),
             self.spec.image_digest,
             "python",
@@ -525,6 +533,11 @@ def _docker_env_args(spec: DockerPrivateModelSpec) -> list[str]:
     return args
 
 
+def _docker_platform_args(spec: DockerPrivateModelSpec) -> list[str]:
+    platform = str(spec.platform or "").strip()
+    return ["--platform", platform] if platform else []
+
+
 def _redacted_context(context: Mapping[str, Any]) -> dict[str, Any]:
     if _contains_secret_material(context):
         raise PrivateModelRuntimeError("run context contains raw secret material")
@@ -534,13 +547,21 @@ def _redacted_context(context: Mapping[str, Any]) -> dict[str, Any]:
 def _raise_on_empty_provider_error(decoded: Any, stderr: str, *, context_label: str) -> None:
     if decoded != []:
         return
-    sanitized = _sanitize_text(stderr)
-    if PROVIDER_ERROR_MARKER not in sanitized:
+    provider_error = _provider_error_text(stderr)
+    if not provider_error:
         return
     raise PrivateModelRuntimeError(
         f"{context_label} provider-backed sourcing failed before returning companies: "
-        f"{sanitized[-1200:]}"
+        f"{provider_error}"
     )
+
+
+def _provider_error_text(stderr: str) -> str:
+    sanitized = _sanitize_text(stderr)
+    lines = [line.strip() for line in sanitized.splitlines() if PROVIDER_ERROR_MARKER in line]
+    if not lines:
+        return ""
+    return "\n".join(lines)[-1200:]
 
 
 def _loads_adapter_stdout(stdout: str) -> Any:
@@ -739,6 +760,7 @@ _PROVIDER_DIAGNOSTICS_BOOTSTRAP = r"""
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 
 _research_lab_original_urlopen = urllib.request.urlopen
@@ -760,12 +782,32 @@ def _research_lab_sanitize(text):
     text = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s]+", r"\1[REDACTED]", text)
     return text
 
+def _research_lab_http_error_details(exc):
+    parts = [f"{type(exc).__name__}: {exc}"]
+    status = getattr(exc, "code", None) or getattr(exc, "status", None)
+    reason = getattr(exc, "reason", None)
+    if status is not None:
+        parts.append(f"status={status}")
+    if reason:
+        parts.append(f"reason={reason}")
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            body = exc.read(1200)
+            if isinstance(body, bytes):
+                body = body.decode("utf-8", "replace")
+            body = _research_lab_sanitize(str(body)).replace("\n", " ")[:900]
+            if body:
+                parts.append(f"body={body}")
+        except Exception as body_exc:
+            parts.append(f"body_unavailable={type(body_exc).__name__}")
+    return "; ".join(parts)
+
 def _research_lab_urlopen(req, *args, **kwargs):
     try:
         return _research_lab_original_urlopen(req, *args, **kwargs)
     except Exception as exc:
         target = getattr(req, "full_url", req if isinstance(req, str) else "")
-        message = _research_lab_sanitize(f"{type(exc).__name__}: {exc}; url={target}")
+        message = _research_lab_sanitize(f"{_research_lab_http_error_details(exc)}; url={target}")
         sys.stderr.write("research_lab_private_runtime_provider_error " + message[-900:] + "\n")
         raise
 

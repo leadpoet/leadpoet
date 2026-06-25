@@ -120,6 +120,7 @@ async def create_research_lab_ticket(payload: ResearchLabTicketCreateRequest, re
     _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
     await _verify_signed_miner(payload)
     island = _validate_allowed_research_island(config, payload.island)
+    _require_default_research_model_tier(config, payload.research_model_tier)
     budget_doc = _effective_budget_doc(
         config,
         ticket={"ticket_doc": {}},
@@ -253,6 +254,7 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
     await _verify_signed_miner(payload)
     ticket = await _get_ticket_for_miner(str(payload.ticket_id), payload.miner_hotkey)
     _validate_allowed_research_island(config, str(ticket.get("island") or ""))
+    _require_default_research_model_tier(config, payload.research_model_tier)
     budget_doc = _effective_budget_doc(
         config,
         ticket=ticket,
@@ -419,6 +421,7 @@ async def top_up_research_lab_paid_loop(payload: ResearchLabLoopTopUpRequest):
         ticket_id=str(payload.ticket_id),
         run_id=str(payload.continue_from_run_id),
     )
+    _require_default_research_model_tier(config, payload.research_model_tier)
 
     budget_doc = _effective_budget_doc(
         config,
@@ -1101,6 +1104,13 @@ def _validate_requested_model_and_budget(
         requested_compute_budget_usd=requested_compute_budget_usd,
         max_compute_budget_usd=max_compute_budget_usd,
     )
+
+
+def _require_default_research_model_tier(config: ResearchLabGatewayConfig, research_model_tier: str | None) -> None:
+    default_tier = str(config.default_auto_research_model_tier or "default")
+    requested_tier = str(research_model_tier or default_tier)
+    if requested_tier != default_tier:
+        raise HTTPException(status_code=400, detail="miner model tier selection is disabled for launch")
 
 
 def _effective_budget_doc(

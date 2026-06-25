@@ -19,6 +19,7 @@ from gateway.research_lab.api import (
     _OPENROUTER_KEY_REGISTRATION_ATTEMPTS,
     _enforce_openrouter_key_registration_rate_limit,
     _effective_budget_doc,
+    _require_default_research_model_tier,
     _validate_allowed_research_island,
     router,
 )
@@ -81,6 +82,11 @@ def main() -> int:
     )
     if budget_doc.get("max_compute_budget_usd") != 5.0:
         errors.append("tier max_compute_budget_usd was not enforced over miner-supplied max")
+    try:
+        _require_default_research_model_tier(tier_limited_config, "custom")
+        errors.append("non-default research model tier was accepted for launch")
+    except HTTPException:
+        pass
     try:
         _effective_budget_doc(
             tier_limited_config,

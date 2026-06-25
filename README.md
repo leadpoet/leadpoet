@@ -96,7 +96,14 @@ How it works:
 3. The miner pays the loop-start fee in TAO.
 4. The gateway runs the hosted auto-research loop.
 5. Candidate improvements are scored.
-6. Miners are provided with their respective rewards.
+6. Validators verify the receipts, scoring bundles, and allocation records used for weights.
+
+Research Lab rewards have two parts:
+
+- Compute reimbursement for verified OpenRouter spend from accepted research loops.
+- Additional improvement rewards when a candidate improvement beats the current private-model benchmark.
+
+The reward records tie miner hotkeys to the run, candidate, verified spend, benchmark result, and validator weight input. Miner rewards are not based on self-reported claims.
 
 ### Fulfillment
 
@@ -185,13 +192,15 @@ Rewards are designed around both Research Lab and Fulfillment:
 - Fulfillment rewards winning leads from client requests.
 - The weekly leaderboard rewards top fulfillment performance.
 
-Exact weights are computed by validators from signed gateway bundles, verified compute records, benchmark results, and current subnet policy. Research Lab reward calculations are based on the emitted receipts and audit logs, so the reimbursement and improvement allocations can be independently checked against those artifacts.
+Exact weights are computed by validators from signed gateway bundles, verified compute records, benchmark results, allocation records, and current subnet policy. Research Lab reward calculations can be independently checked from the emitted receipts, signed audit logs, and Arweave-anchored checkpoints.
 
 ## Transparency
 
 Leadpoet uses a gateway TEE, signed gateway artifacts, validator-side verification, and Arweave checkpoints for Research Lab and Fulfillment outputs.
 
-Research Lab is designed to be externally auditable without exposing private model code, hidden ICPs, provider secrets, or candidate patch internals. The gateway emits signed receipts, scoring bundles, allocation records, and compact audit anchors. Validators verify those artifacts before using them for weights, and Arweave checkpoints provide a durable record of the hashes and status transitions used in the reward calculation.
+Research Lab is designed to be externally auditable without exposing private model code, hidden ICPs, provider secrets, or candidate patch internals. The gateway emits signed receipts, scoring bundles, allocation records, and compact audit anchors from inside the TEE. Validators verify those artifacts before using them for weights.
+
+Arweave checkpoints anchor the hashes and status transitions used in the reward calculation. An external auditor can match the Arweave checkpoint data to the signed gateway artifacts, recompute the reward inputs, and verify that validator weights follow the published policy.
 
 Useful tools:
 

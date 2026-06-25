@@ -96,7 +96,7 @@ How it works:
 3. The miner pays the loop-start fee in TAO.
 4. The gateway runs the hosted auto-research loop.
 5. Candidate improvements are scored.
-6. Validators verify the receipts and scoring bundles used for rewards.
+6. Miners are provided with their respective rewards.
 
 ### Fulfillment
 

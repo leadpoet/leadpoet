@@ -368,10 +368,12 @@ def allocate_research_lab_epoch(
     if reimbursements:
         if not champions and bool(policy.get("reimbursement_allow_overpay_without_champions", True)):
             reimbursement_allocations = _allocate_reimbursements_no_champions(reimbursements, lab_cap)
+            _cap_allocation_sections_to_pool((reimbursement_allocations,), lab_cap)
         else:
             champion_reserve = _minimum_champion_reserve(champions, lab_cap, policy)
             reimbursement_pool = max(Decimal("0"), lab_cap - champion_reserve)
             reimbursement_allocations = _allocate_reimbursements_with_champions(reimbursements, reimbursement_pool)
+            _cap_allocation_sections_to_pool((reimbursement_allocations,), reimbursement_pool)
         reimbursement_paid = sum(_decimal(item["paid_alpha_percent"]) for item in reimbursement_allocations)
 
     remaining_for_champions = max(Decimal("0"), lab_cap - reimbursement_paid)
@@ -383,6 +385,11 @@ def allocate_research_lab_epoch(
             reimbursement_paid=reimbursement_paid,
         )
 
+    _cap_allocation_sections_to_pool(
+        (reimbursement_allocations, champion_allocations, queued_champion_allocations),
+        lab_cap,
+    )
+    reimbursement_paid = sum((_decimal(item["paid_alpha_percent"]) for item in reimbursement_allocations), Decimal("0"))
     champion_paid = sum((_decimal(item["paid_alpha_percent"]) for item in champion_allocations), Decimal("0"))
     queued_paid = sum((_decimal(item["paid_alpha_percent"]) for item in queued_champion_allocations), Decimal("0"))
     total_paid = reimbursement_paid + champion_paid + queued_paid
@@ -1028,6 +1035,37 @@ def _allocate_reimbursements_with_champions(
         )
         for item, amount in zip(reimbursements, paid)
     ]
+
+
+def _cap_allocation_sections_to_pool(
+    sections: Sequence[list[Dict[str, Any]]],
+    pool: Decimal,
+) -> None:
+    cap = max(Decimal("0"), pool).quantize(RATE_QUANT, rounding=ROUND_HALF_UP)
+    paid_total = sum(
+        (_decimal(row.get("paid_alpha_percent", 0)) for rows in sections for row in rows),
+        Decimal("0"),
+    )
+    overflow = paid_total - cap
+    if overflow <= 0:
+        return
+
+    for rows in reversed(sections):
+        for row in reversed(rows):
+            paid = _decimal(row.get("paid_alpha_percent", 0))
+            if paid <= 0:
+                continue
+            reduction = min(paid, overflow)
+            new_paid = (paid - reduction).quantize(RATE_QUANT, rounding=ROUND_HALF_UP)
+            row["paid_alpha_percent"] = _rate_float(new_paid)
+            intended = _decimal(row.get("intended_alpha_percent", 0))
+            if "deferred_alpha_percent" in row:
+                row["deferred_alpha_percent"] = _rate_float(max(Decimal("0"), intended - new_paid))
+            if "overpaid_alpha_percent" in row:
+                row["overpaid_alpha_percent"] = _rate_float(max(Decimal("0"), new_paid - intended))
+            overflow -= reduction
+            if overflow <= 0:
+                return
 
 
 def _allocate_champions(

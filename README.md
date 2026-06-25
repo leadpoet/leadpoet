@@ -124,7 +124,7 @@ reimbursement_reward = min(remaining_verified_spend, reimbursement_capacity * mi
 winner_reward = remaining_lab_allocation * winner_improvement_credit / total_winner_improvement_credit
 ```
 
-The reward records tie miner hotkeys to the run, candidate, verified spend, benchmark result, and validator weight input. Miner rewards are not based on self-reported claims.
+The reward records tie miner hotkeys to the run, candidate, verified spend, benchmark result, and validator weight input. More information can be found through investigating the relevant code in the neurons/validator.py.
 
 ### Fulfillment
 

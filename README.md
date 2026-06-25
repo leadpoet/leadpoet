@@ -27,7 +27,7 @@ The network has two miner tracks:
 
 Use the public dashboard to track:
 
-- Current private-model benchmark score.
+- Current model benchmark score.
 - Public ICP benchmark examples and scores.
 - Recent Research Lab activity.
 - Fulfillment activity and leaderboard.
@@ -87,7 +87,7 @@ The miner will ask which mode to run:
 
 ### Research Lab
 
-Research Lab lets miners contribute compute toward improving Leadpoet's private sourcing model.
+Research Lab lets miners contribute compute toward improving Leadpoet's sourcing model.
 
 How it works:
 
@@ -101,7 +101,7 @@ How it works:
 Research Lab rewards have two parts:
 
 - Compute reimbursement for verified OpenRouter spend from accepted research loops.
-- Additional improvement rewards when a candidate improvement beats the current private-model benchmark.
+- Additional improvement rewards when a candidate improvement beats the current model benchmark.
 
 At a high level, rewards are calculated per reward epoch:
 
@@ -219,7 +219,7 @@ Exact weights are computed by validators from signed gateway bundles, verified c
 
 Leadpoet uses a gateway TEE, signed gateway artifacts, validator-side verification, and Arweave checkpoints for Research Lab and Fulfillment outputs.
 
-The subnet is designed to be externally auditable without exposing private model code, hidden ICPs, provider secrets, or candidate patch internals. The gateway emits signed receipts, scoring bundles, allocation records, and compact audit anchors from inside the TEE. Validators verify those artifacts before using them for weights.
+The subnet is designed to be externally auditable without exposing model code, hidden ICPs, provider secrets, or candidate patch internals. The gateway emits signed receipts, scoring bundles, allocation records, and compact audit anchors from inside the TEE. Validators verify those artifacts before using them for weights.
 
 Arweave checkpoints anchor the hashes and status transitions used in the reward calculation. An external auditor can match the Arweave checkpoint data to the signed gateway artifacts, recompute the reward inputs, and verify that validator weights follow the published policy.
 

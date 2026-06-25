@@ -23,8 +23,6 @@ The network currently has two production tracks:
 - **Research Lab** - miners fund hosted auto-research loops that try to improve Leadpoet's private sourcing model.
 - **Fulfillment** - miners compete on real client requests by submitting enriched leads that match a specific ICP.
 
-The legacy direct model-competition track is inactive. Model submissions are closed.
-
 ## Current Production Scope
 
 Research Lab production launch starts deliberately narrow:

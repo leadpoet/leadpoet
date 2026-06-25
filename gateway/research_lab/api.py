@@ -10,7 +10,7 @@ import asyncio
 import logging
 import re
 import secrets
-from typing import Optional
+from typing import Any, Mapping, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
@@ -114,15 +114,26 @@ async def create_research_lab_ticket(payload: ResearchLabTicketCreateRequest, re
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
     _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
     await _verify_signed_miner(payload)
-    _validate_requested_model_and_budget(
+    island = _validate_allowed_research_island(config, payload.island)
+    budget_doc = _effective_budget_doc(
         config,
+        ticket={"ticket_doc": {}},
         research_model_tier=payload.research_model_tier,
         requested_compute_budget_usd=payload.requested_compute_budget_usd,
         max_compute_budget_usd=payload.max_compute_budget_usd,
     )
+    payload_to_store = payload.model_copy(
+        update={
+            "island": island,
+            "loop_start_fee_required_usd": float(config.loop_start_fee_usd),
+            "research_model_tier": str(budget_doc["research_model_tier"]),
+            "requested_compute_budget_usd": float(budget_doc["requested_compute_budget_usd"]),
+            "max_compute_budget_usd": float(budget_doc["max_compute_budget_usd"]),
+        }
+    )
 
     try:
-        ticket, event = await create_ticket(payload)
+        ticket, event = await create_ticket(payload_to_store)
     except Exception as exc:
         _raise_storage_error(exc)
 
@@ -235,6 +246,7 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
         raise HTTPException(status_code=400, detail="miner OpenRouter key preflight must pass before queueing")
     await _verify_signed_miner(payload)
     ticket = await _get_ticket_for_miner(str(payload.ticket_id), payload.miner_hotkey)
+    _validate_allowed_research_island(config, str(ticket.get("island") or ""))
     budget_doc = _effective_budget_doc(
         config,
         ticket=ticket,
@@ -242,6 +254,7 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
         requested_compute_budget_usd=payload.requested_compute_budget_usd,
         max_compute_budget_usd=payload.max_compute_budget_usd,
     )
+    loop_start_fee_usd = _ticket_loop_start_fee_usd(ticket, config)
 
     payment_ref = f"{payload.payment_block_hash}:{payload.payment_extrinsic_index}"
     if await payment_ref_exists(payload.payment_block_hash, payload.payment_extrinsic_index):
@@ -251,7 +264,7 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
         block_hash=payload.payment_block_hash,
         extrinsic_index=payload.payment_extrinsic_index,
         miner_hotkey=payload.miner_hotkey,
-        required_usd=config.loop_start_fee_usd,
+        required_usd=loop_start_fee_usd,
     )
     if not payment_valid:
         raise HTTPException(status_code=402, detail=f"loop-start payment verification failed: {payment_error}")
@@ -270,7 +283,7 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
         netuid=BITTENSOR_NETUID,
         miner_hotkey=payload.miner_hotkey,
         payment_info=payment_info,
-        required_usd=config.loop_start_fee_usd,
+        required_usd=loop_start_fee_usd,
         payment_kind="loop_start",
         run_id=run_id,
         compute_budget_usd=budget_doc["requested_compute_budget_usd"],
@@ -364,22 +377,30 @@ async def top_up_research_lab_paid_loop(payload: ResearchLabLoopTopUpRequest):
     _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
     _require_enabled(config.paid_loops_enabled, "Research Lab paid loops are disabled")
     _require_enabled(config.hosted_runs_enabled, "Research Lab hosted runs are disabled")
+    _require_enabled(config.loop_topups_enabled, "Research Lab loop top-ups are disabled for launch")
     if config.miner_openrouter_key_required and payload.miner_openrouter_preflight_status != "passed":
         raise HTTPException(status_code=400, detail="miner OpenRouter key preflight must pass before queueing")
     await _verify_signed_miner(payload)
     ticket = await _get_ticket_for_miner(str(payload.ticket_id), payload.miner_hotkey)
+    _validate_allowed_research_island(config, str(ticket.get("island") or ""))
+    if not payload.continue_from_run_id:
+        raise HTTPException(status_code=400, detail="continue_from_run_id is required for Research Lab top-ups")
+    continuation_context = await _topup_continuation_context(
+        ticket_id=str(payload.ticket_id),
+        run_id=str(payload.continue_from_run_id),
+    )
 
     budget_doc = _effective_budget_doc(
         config,
         ticket=ticket,
         research_model_tier=payload.research_model_tier,
         requested_compute_budget_usd=payload.additional_compute_budget_usd,
-        max_compute_budget_usd=None,
+        max_compute_budget_usd=payload.additional_compute_budget_usd,
     )
     budget_doc["additional_compute_budget_usd"] = float(payload.additional_compute_budget_usd)
     budget_doc["topup_reason"] = payload.topup_reason
-    if payload.continue_from_run_id:
-        budget_doc["continue_from_run_id"] = str(payload.continue_from_run_id)
+    budget_doc["continue_from_run_id"] = str(payload.continue_from_run_id)
+    budget_doc["continuation_context"] = continuation_context
 
     payment_ref = f"{payload.payment_block_hash}:{payload.payment_extrinsic_index}"
     if await payment_ref_exists(payload.payment_block_hash, payload.payment_extrinsic_index):
@@ -964,20 +985,13 @@ def _validate_requested_model_and_budget(
     requested_compute_budget_usd: float | None,
     max_compute_budget_usd: float | None,
 ) -> None:
-    try:
-        config.resolve_auto_research_model(research_model_tier)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if requested_compute_budget_usd is not None:
-        _validate_compute_budget(config, requested_compute_budget_usd, "requested_compute_budget_usd")
-    if max_compute_budget_usd is not None:
-        _validate_compute_budget(config, max_compute_budget_usd, "max_compute_budget_usd")
-    if (
-        requested_compute_budget_usd is not None
-        and max_compute_budget_usd is not None
-        and float(requested_compute_budget_usd) > float(max_compute_budget_usd)
-    ):
-        raise HTTPException(status_code=400, detail="requested_compute_budget_usd cannot exceed max_compute_budget_usd")
+    _effective_budget_doc(
+        config,
+        ticket={"ticket_doc": {}},
+        research_model_tier=research_model_tier,
+        requested_compute_budget_usd=requested_compute_budget_usd,
+        max_compute_budget_usd=max_compute_budget_usd,
+    )
 
 
 def _effective_budget_doc(
@@ -994,26 +1008,46 @@ def _effective_budget_doc(
         resolved_tier, _model, tier_doc = config.resolve_auto_research_model(effective_tier)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    tier_cap = _tier_compute_budget_cap(config, tier_doc)
     requested_budget = (
         requested_compute_budget_usd
         if requested_compute_budget_usd is not None
         else ticket_doc.get("requested_compute_budget_usd", config.default_compute_budget_usd)
     )
-    max_budget = (
+    _validate_compute_budget(config, float(requested_budget), "requested_compute_budget_usd")
+    requested_budget = float(requested_budget)
+    if requested_budget > tier_cap:
+        raise HTTPException(
+            status_code=400,
+            detail=f"requested_compute_budget_usd cannot exceed tier cap {tier_cap:.2f}",
+        )
+    user_max_budget = (
         max_compute_budget_usd
         if max_compute_budget_usd is not None
-        else ticket_doc.get("max_compute_budget_usd", tier_doc.get("max_compute_budget_usd", config.max_compute_budget_usd))
+        else ticket_doc.get("max_compute_budget_usd")
     )
-    _validate_compute_budget(config, float(requested_budget), "requested_compute_budget_usd")
-    _validate_compute_budget(config, float(max_budget), "max_compute_budget_usd")
-    if float(requested_budget) > float(max_budget):
+    effective_max_budget = tier_cap
+    if user_max_budget is not None:
+        _validate_compute_budget(config, float(user_max_budget), "max_compute_budget_usd")
+        effective_max_budget = min(effective_max_budget, float(user_max_budget))
+    if requested_budget > effective_max_budget:
         raise HTTPException(status_code=400, detail="requested_compute_budget_usd cannot exceed max_compute_budget_usd")
     return {
         "research_model_tier": resolved_tier,
-        "requested_compute_budget_usd": float(requested_budget),
-        "max_compute_budget_usd": float(max_budget),
+        "requested_compute_budget_usd": requested_budget,
+        "max_compute_budget_usd": float(effective_max_budget),
         "budget_policy_version": "research-lab-budget:v1",
     }
+
+
+def _tier_compute_budget_cap(config: ResearchLabGatewayConfig, tier_doc: Mapping[str, Any]) -> float:
+    lower = max(0.0, float(config.min_compute_budget_usd))
+    global_cap = max(lower, float(config.max_compute_budget_usd))
+    try:
+        tier_cap = float(tier_doc.get("max_compute_budget_usd", global_cap))
+    except (TypeError, ValueError):
+        tier_cap = global_cap
+    return min(global_cap, max(lower, tier_cap))
 
 
 def _validate_compute_budget(config: ResearchLabGatewayConfig, value: float, field_name: str) -> None:
@@ -1021,6 +1055,70 @@ def _validate_compute_budget(config: ResearchLabGatewayConfig, value: float, fie
     upper = max(lower, float(config.max_compute_budget_usd))
     if float(value) < lower or float(value) > upper:
         raise HTTPException(status_code=400, detail=f"{field_name} must be between {lower:.2f} and {upper:.2f}")
+
+
+def _normalize_research_island(value: object) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _validate_allowed_research_island(config: ResearchLabGatewayConfig, value: object) -> str:
+    island = _normalize_research_island(value)
+    allowed = {_normalize_research_island(item) for item in config.allowed_research_islands}
+    if island not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail="Research Lab launch currently accepts only generalist research loops",
+        )
+    return island
+
+
+def _ticket_loop_start_fee_usd(ticket: Mapping[str, Any], config: ResearchLabGatewayConfig) -> float:
+    try:
+        fee = float(ticket.get("loop_start_fee_required_usd"))
+    except (TypeError, ValueError):
+        fee = float(config.loop_start_fee_usd)
+    if fee < 0:
+        return float(config.loop_start_fee_usd)
+    return fee
+
+
+async def _topup_continuation_context(*, ticket_id: str, run_id: str) -> dict[str, Any]:
+    run = await select_one(
+        "research_loop_run_queue_current",
+        filters=(("run_id", run_id), ("ticket_id", ticket_id)),
+    )
+    if not run:
+        raise HTTPException(status_code=404, detail="continue_from_run_id was not found for this ticket")
+    candidate_rows = await select_many(
+        "research_lab_candidate_evaluation_current",
+        filters=(("run_id", run_id), ("ticket_id", ticket_id)),
+        order_by=(("created_at", True),),
+        limit=10,
+    )
+    event_rows = await select_many(
+        "research_lab_auto_research_loop_events",
+        filters=(("run_id", run_id), ("ticket_id", ticket_id)),
+        order_by=(("seq", True),),
+        limit=30,
+    )
+    candidate_summaries = []
+    for row in candidate_rows[:5]:
+        candidate_summaries.append(
+            {
+                "candidate_id": str(row.get("candidate_id") or ""),
+                "status": str(row.get("current_candidate_status") or ""),
+                "score_bundle_id": str(row.get("current_score_bundle_id") or ""),
+                "redacted_public_summary": str(row.get("redacted_public_summary") or "")[:500],
+            }
+        )
+    return {
+        "schema_version": "1.0",
+        "prior_run_id": run_id,
+        "prior_queue_status": str(run.get("current_queue_status") or ""),
+        "prior_event_count": len(event_rows),
+        "prior_candidate_count": len(candidate_rows),
+        "prior_candidates": candidate_summaries,
+    }
 
 
 def _validate_score_bundle_matches_candidate(bundle: dict[str, object], candidate: dict[str, object]) -> None:

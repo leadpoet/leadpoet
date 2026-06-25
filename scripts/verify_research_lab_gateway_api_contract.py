@@ -12,7 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from gateway.research_lab.api import router
+from fastapi import HTTPException
+
+from gateway.research_lab.api import _effective_budget_doc, _validate_allowed_research_island, router
 from gateway.research_lab.bundles import build_shadow_report_bundle, sha256_json
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.models import (
@@ -40,6 +42,44 @@ def main() -> int:
         errors.append("live mutation flags must default false")
     if defaults.evaluation_bundles_enabled:
         errors.append("evaluation bundle writes must default disabled")
+    if defaults.loop_topups_enabled:
+        errors.append("Research Lab top-ups must default disabled")
+    if defaults.public_status().get("allowed_research_areas") != ["generalist"]:
+        errors.append("Research Lab launch must default to generalist-only research area")
+    try:
+        _validate_allowed_research_island(defaults, "healthcare")
+        errors.append("non-generalist research area was accepted by default")
+    except HTTPException:
+        pass
+    tier_limited_config = ResearchLabGatewayConfig(
+        auto_research_model="openrouter/test-model",
+        default_compute_budget_usd=3.0,
+        min_compute_budget_usd=1.0,
+        max_compute_budget_usd=100.0,
+        approved_auto_research_models_json=(
+            '{"default":{"model":"openrouter/test-model","max_compute_budget_usd":5.0}}'
+        ),
+    )
+    budget_doc = _effective_budget_doc(
+        tier_limited_config,
+        ticket={"ticket_doc": {}},
+        research_model_tier="default",
+        requested_compute_budget_usd=4.0,
+        max_compute_budget_usd=99.0,
+    )
+    if budget_doc.get("max_compute_budget_usd") != 5.0:
+        errors.append("tier max_compute_budget_usd was not enforced over miner-supplied max")
+    try:
+        _effective_budget_doc(
+            tier_limited_config,
+            ticket={"ticket_doc": {}},
+            research_model_tier="default",
+            requested_compute_budget_usd=6.0,
+            max_compute_budget_usd=99.0,
+        )
+        errors.append("requested compute budget above tier cap was accepted")
+    except HTTPException:
+        pass
 
     paths = {route.path for route in router.routes}
     for required in {

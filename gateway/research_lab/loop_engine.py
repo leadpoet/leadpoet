@@ -492,9 +492,10 @@ class AutoResearchLoopEngine:
     def _settings_for_budget(self, requested_loop_count: int, budget_context: Mapping[str, Any]) -> AutoResearchLoopSettings:
         settings = self.settings
         budget = float(budget_context.get("requested_compute_budget_usd") or 0.0)
-        budget_iterations = max(1, int(budget // settings.estimated_iteration_cost_usd)) if budget > 0 else settings.max_iterations
-        requested_iterations = max(settings.min_iterations, int(requested_loop_count or 1))
-        max_iterations = min(settings.max_iterations, max(requested_iterations, budget_iterations))
+        estimated_iteration_cost = max(0.01, float(settings.estimated_iteration_cost_usd))
+        budget_iterations = max(1, int(budget // estimated_iteration_cost)) if budget > 0 else settings.max_iterations
+        requested_iterations = max(1, int(requested_loop_count or 1))
+        max_iterations = max(1, min(settings.max_iterations, requested_iterations, budget_iterations))
         return AutoResearchLoopSettings(
             min_seconds=settings.min_seconds,
             max_seconds=settings.max_seconds,
@@ -642,6 +643,7 @@ def _safe_budget_doc(value: Mapping[str, Any]) -> dict[str, Any]:
         "budget_policy_version",
         "additional_compute_budget_usd",
         "continue_from_run_id",
+        "continuation_context",
         "topup_reason",
     }
     return {key: value[key] for key in allowed if key in value}

@@ -2456,11 +2456,6 @@ def _research_lab_prompt_int(label: str, *, default: int, minimum: int, maximum:
 
 RESEARCH_LAB_RESEARCH_AREA_CHOICES: tuple[tuple[str, str, str], ...] = (
     ("1", "generalist", "Broad improvements across all lead types"),
-    ("2", "healthcare", "Healthcare and life sciences leads"),
-    ("3", "fintech", "Finance and fintech leads"),
-    ("4", "industrial", "Industrial and manufacturing leads"),
-    ("5", "crypto_infra", "Crypto and blockchain infrastructure leads"),
-    ("6", "real_estate", "Real estate and property leads"),
 )
 
 
@@ -2501,6 +2496,19 @@ def _research_lab_research_area_label(value: str) -> str:
         if area_value == value:
             return label
     return value.replace("_", " ")
+
+
+def _research_lab_tier_budget_cap(
+    tier: str,
+    approved_tiers: dict,
+    fallback_max_budget: float,
+) -> float:
+    tier_doc = approved_tiers.get(tier) if isinstance(approved_tiers, dict) else {}
+    try:
+        tier_cap = float(tier_doc.get("max_compute_budget_usd")) if isinstance(tier_doc, dict) else fallback_max_budget
+    except (TypeError, ValueError):
+        tier_cap = fallback_max_budget
+    return max(0.0, min(float(fallback_max_budget), tier_cap))
 
 
 def _execute_research_lab_payment(
@@ -2609,6 +2617,7 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
     max_runtime_seconds = int(worker_status.get("auto_research_max_seconds") or 0)
     runtime_label = _research_lab_runtime_label(min_runtime_seconds, max_runtime_seconds)
     reimbursement_status = status.get("reimbursement") if isinstance(status.get("reimbursement"), dict) else {}
+    topups_enabled = bool(status.get("loop_topups_enabled"))
 
     print("Research Lab status:")
     ready = bool(status.get("api_enabled") and status.get("paid_loops_enabled") and status.get("hosted_runs_enabled"))
@@ -2629,23 +2638,24 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
         print("Auto-research APIs are not enabled on this gateway yet.")
         return
 
-    print("")
-    run_choice = input("❓ Start new loop or top up an existing promising loop? [new/topup] ").strip().lower() or "new"
-    if run_choice in ("topup", "top-up", "t"):
-        _run_research_lab_topup_flow(
-            wallet=wallet,
-            config=config,
-            netuid=netuid,
-            status=status,
-            default_tier=default_tier,
-            default_budget=default_budget,
-            min_budget=min_budget,
-            max_budget=max_budget,
-        )
-        return
-    if run_choice not in ("new", "n", "start"):
-        print("❌ Choose either 'new' or 'topup'.")
-        return
+    if topups_enabled:
+        print("")
+        run_choice = input("❓ Start new loop or top up an existing promising loop? [new/topup] ").strip().lower() or "new"
+        if run_choice in ("topup", "top-up", "t"):
+            _run_research_lab_topup_flow(
+                wallet=wallet,
+                config=config,
+                netuid=netuid,
+                status=status,
+                default_tier=default_tier,
+                default_budget=default_budget,
+                min_budget=min_budget,
+                max_budget=max_budget,
+            )
+            return
+        if run_choice not in ("new", "n", "start"):
+            print("❌ Choose either 'new' or 'topup'.")
+            return
 
     print("")
     print("Research focus (optional).")
@@ -2665,18 +2675,20 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
     island = "generalist"
     requested_loop_count = 1
     research_model_tier = _research_lab_default_model_tier(default_tier, approved_tiers)
-    requested_compute_budget_usd = default_budget
-    max_compute_budget_usd = default_budget
+    tier_max_budget = max(min_budget, _research_lab_tier_budget_cap(research_model_tier, approved_tiers, max_budget))
+    requested_compute_budget_usd = min(default_budget, tier_max_budget)
+    max_compute_budget_usd = requested_compute_budget_usd
     advanced = input("❓ Adjust advanced settings? [y/N]: ").strip().lower()
     if advanced in ("y", "yes"):
-        island = _research_lab_prompt_research_area()
+        print(f"   Research area: {_research_lab_research_area_label(island)}")
         requested_loop_count = _research_lab_prompt_int("   Requested loop count", default=1, minimum=1, maximum=100)
         research_model_tier = _research_lab_prompt_model_tier(default_tier, approved_tiers)
+        tier_max_budget = max(min_budget, _research_lab_tier_budget_cap(research_model_tier, approved_tiers, max_budget))
         requested_compute_budget_usd = _research_lab_prompt_budget(
             "   Compute budget USD",
-            default=default_budget,
+            default=min(default_budget, tier_max_budget),
             minimum=min_budget,
-            maximum=max_budget,
+            maximum=tier_max_budget,
         )
         max_compute_budget_usd = requested_compute_budget_usd
     print(
@@ -2790,20 +2802,26 @@ def _run_research_lab_topup_flow(
 ) -> None:
     import time
 
+    if not status.get("loop_topups_enabled"):
+        print("Top-ups are temporarily disabled for launch.")
+        return
     ticket_id = input("   Existing ticket ID: ").strip()
-    continue_from_run_id = input("   Continue from run ID (optional): ").strip()
+    continue_from_run_id = input("   Continue from run ID: ").strip()
     research_model_tier = _research_lab_default_model_tier(default_tier, {})
+    worker_status = status.get("hosted_worker") if isinstance(status.get("hosted_worker"), dict) else {}
+    approved_tiers = worker_status.get("approved_model_tiers") if isinstance(worker_status.get("approved_model_tiers"), dict) else {}
+    tier_max_budget = max(min_budget, _research_lab_tier_budget_cap(research_model_tier, approved_tiers, max_budget))
     additional_compute_budget_usd = _research_lab_prompt_budget(
         "   Additional compute budget USD",
-        default=default_budget,
+        default=min(default_budget, tier_max_budget),
         minimum=min_budget,
-        maximum=max_budget,
+        maximum=tier_max_budget,
     )
     advanced = input("❓ Adjust advanced top-up settings? [y/N]: ").strip().lower()
     if advanced in ("y", "yes"):
-        worker_status = status.get("hosted_worker") if isinstance(status.get("hosted_worker"), dict) else {}
-        approved_tiers = worker_status.get("approved_model_tiers") if isinstance(worker_status.get("approved_model_tiers"), dict) else {}
         research_model_tier = _research_lab_prompt_model_tier(default_tier, approved_tiers)
+        tier_max_budget = max(min_budget, _research_lab_tier_budget_cap(research_model_tier, approved_tiers, max_budget))
+        additional_compute_budget_usd = min(additional_compute_budget_usd, tier_max_budget)
     key_result = _register_research_lab_openrouter_key(wallet, status)
     if key_result is None:
         return
@@ -2811,6 +2829,9 @@ def _run_research_lab_topup_flow(
 
     if not ticket_id:
         print("❌ Ticket ID is required.")
+        return
+    if not continue_from_run_id:
+        print("❌ Continue from run ID is required for top-ups.")
         return
     payment_result = _execute_research_lab_payment(
         wallet=wallet,
@@ -2830,7 +2851,7 @@ def _run_research_lab_topup_flow(
             "timestamp": int(time.time()),
             "idempotency_key": f"research-loop-topup:{ticket_id}:{int(time.time())}",
             "ticket_id": ticket_id,
-            "continue_from_run_id": continue_from_run_id or None,
+            "continue_from_run_id": continue_from_run_id,
             "payment_block_hash": payment_block_hash,
             "payment_extrinsic_index": payment_extrinsic_index,
             "additional_compute_budget_usd": additional_compute_budget_usd,

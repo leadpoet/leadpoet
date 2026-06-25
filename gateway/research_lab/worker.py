@@ -1120,6 +1120,8 @@ class ResearchLabHostedWorker:
             context_doc["additional_compute_budget_usd"] = self.config.clamp_compute_budget_usd(additional_budget)
         if queue_doc.get("continue_from_run_id"):
             context_doc["continue_from_run_id"] = str(queue_doc["continue_from_run_id"])
+        if isinstance(queue_doc.get("continuation_context"), Mapping):
+            context_doc["continuation_context"] = dict(queue_doc["continuation_context"])
         if queue_doc.get("topup_reason"):
             context_doc["topup_reason"] = str(queue_doc["topup_reason"])
         return context_doc
@@ -1230,6 +1232,7 @@ def _redacted_budget_context(value: Mapping[str, Any]) -> dict[str, Any]:
         "budget_policy_version",
         "additional_compute_budget_usd",
         "continue_from_run_id",
+        "continuation_context",
         "topup_reason",
     }
     return {key: value[key] for key in allowed if key in value}

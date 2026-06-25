@@ -41,6 +41,33 @@ from research_lab.validator_integration import verify_research_lab_evaluation_bu
 
 def main() -> int:
     errors: list[str] = []
+    async def _noop_call(*_args, **_kwargs):
+        return OpenRouterCallResult(content='{"candidates":[]}')
+
+    async def _noop_event(_event: AutoResearchLoopEvent):
+        return None
+
+    budget_engine = AutoResearchLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=60,
+            min_iterations=2,
+            max_iterations=12,
+            draft_timeout_seconds=30,
+            reflection_timeout_seconds=30,
+            estimated_iteration_cost_usd=0.5,
+            max_candidates=3,
+        ),
+        call_openrouter=_noop_call,
+        event_sink=_noop_event,
+    )
+    budget_settings = budget_engine._settings_for_budget(
+        12,
+        {"requested_compute_budget_usd": 1.0},
+    )
+    if budget_settings.max_iterations != 2:
+        errors.append("auto-research budget did not cap requested loop iterations")
+
     artifact = _artifact()
     registry = coerce_component_registry(_metadata())
     raw_response = _candidate_response()

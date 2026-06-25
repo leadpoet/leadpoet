@@ -40,11 +40,30 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _normalized_csv(name: str, default: str) -> tuple[str, ...]:
+    raw = os.getenv(name, default).strip()
+    if raw.startswith("["):
+        try:
+            decoded = json.loads(raw)
+            items = decoded if isinstance(decoded, list) else []
+        except json.JSONDecodeError:
+            items = []
+    else:
+        items = raw.split(",")
+    normalized: list[str] = []
+    for item in items:
+        value = str(item or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if value and value not in normalized:
+            normalized.append(value)
+    return tuple(normalized or ("generalist",))
+
+
 @dataclass(frozen=True)
 class ResearchLabGatewayConfig:
     api_enabled: bool = False
     production_writes_enabled: bool = False
     paid_loops_enabled: bool = False
+    loop_topups_enabled: bool = False
     probes_enabled: bool = False
     hosted_runs_enabled: bool = False
     receipts_enabled: bool = False
@@ -62,6 +81,7 @@ class ResearchLabGatewayConfig:
     auto_commit_enabled: bool = False
     miner_openrouter_key_required: bool = True
     loop_start_fee_usd: float = DEFAULT_LOOP_START_FEE_USD
+    allowed_research_islands: tuple[str, ...] = ("generalist",)
     internal_api_key: str = ""
     hosted_worker_enabled: bool = False
     hosted_worker_poll_seconds: int = 15
@@ -168,6 +188,7 @@ class ResearchLabGatewayConfig:
             api_enabled=_truthy("RESEARCH_LAB_GATEWAY_API_ENABLED"),
             production_writes_enabled=_truthy("RESEARCH_LAB_PRODUCTION_WRITES_ENABLED"),
             paid_loops_enabled=_truthy("RESEARCH_LAB_PAID_LOOPS_ENABLED"),
+            loop_topups_enabled=_truthy("RESEARCH_LAB_LOOP_TOPUPS_ENABLED", "false"),
             probes_enabled=_truthy("RESEARCH_LAB_PROBES_ENABLED"),
             hosted_runs_enabled=_truthy("RESEARCH_LAB_HOSTED_RUNS_ENABLED"),
             receipts_enabled=_truthy("RESEARCH_LAB_RECEIPTS_ENABLED"),
@@ -185,6 +206,7 @@ class ResearchLabGatewayConfig:
             auto_commit_enabled=_truthy("RESEARCH_LAB_AUTO_COMMIT_ENABLED"),
             miner_openrouter_key_required=_truthy("RESEARCH_LAB_MINER_OPENROUTER_KEY_REQUIRED", "true"),
             loop_start_fee_usd=_float("RESEARCH_LAB_LOOP_START_FEE_USD", DEFAULT_LOOP_START_FEE_USD),
+            allowed_research_islands=_normalized_csv("RESEARCH_LAB_ALLOWED_ISLANDS", "generalist"),
             internal_api_key=os.getenv("RESEARCH_LAB_INTERNAL_API_KEY", ""),
             hosted_worker_enabled=_truthy("RESEARCH_LAB_HOSTED_WORKER_ENABLED"),
             hosted_worker_poll_seconds=_int("RESEARCH_LAB_HOSTED_WORKER_POLL_SECONDS", 15),
@@ -432,6 +454,7 @@ class ResearchLabGatewayConfig:
     def live_mutation_flags(self) -> dict[str, bool]:
         return {
             "RESEARCH_LAB_PAID_LOOPS_ENABLED": self.paid_loops_enabled,
+            "RESEARCH_LAB_LOOP_TOPUPS_ENABLED": self.loop_topups_enabled,
             "RESEARCH_LAB_HOSTED_RUNS_ENABLED": self.hosted_runs_enabled,
             "RESEARCH_LAB_PROBES_ENABLED": self.probes_enabled,
             "RESEARCH_LAB_CROWNING_ENABLED": self.crowning_enabled,
@@ -506,6 +529,7 @@ class ResearchLabGatewayConfig:
             "api_enabled": self.api_enabled,
             "production_writes_enabled": self.production_writes_enabled,
             "paid_loops_enabled": self.paid_loops_enabled,
+            "loop_topups_enabled": self.loop_topups_enabled,
             "probes_enabled": self.probes_enabled,
             "hosted_runs_enabled": self.hosted_runs_enabled,
             "receipts_enabled": self.receipts_enabled,
@@ -519,6 +543,7 @@ class ResearchLabGatewayConfig:
             },
             "live_mutation_flags": self.live_mutation_flags(),
             "loop_start_fee_usd": self.loop_start_fee_usd,
+            "allowed_research_areas": list(self.allowed_research_islands),
             "miner_openrouter_key_required": self.miner_openrouter_key_required,
             "openrouter_key_registration_enabled": bool(self.openrouter_key_kms_key_id),
             "reimbursement": {

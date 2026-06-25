@@ -211,12 +211,6 @@ For more detail, see [`scripts/VERIFICATION_GUIDE.md`](scripts/VERIFICATION_GUID
 
 ## Support
 
-- Discord: [discord.gg/tMcmbPKvz](https://discord.gg/tMcmbPKvz)
-- Dashboard: [subnet71.com](https://subnet71.com)
-- Website: [leadpoet.com](https://leadpoet.com)
-- Subnet X: [@subnet71](https://x.com/subnet71)
-- Leadpoet X: [@LeadpoetAI](https://x.com/LeadpoetAI)
-- LinkedIn: [Leadpoet](https://www.linkedin.com/company/leadpoet/)
 - Email: hello@leadpoet.com
 
 ## License

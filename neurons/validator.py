@@ -472,7 +472,10 @@ def _research_lab_uid_weights_from_allocation(
         0.0,
         min(float(reserved_share), float(allocation_doc.get("lab_cap_percent") or 0.0) / 100.0),
     )
-    unallocated_share = max(0.0, float(allocation_doc.get("unallocated_percent") or 0.0) / 100.0)
+    unallocated_share = min(
+        lab_cap_share,
+        max(0.0, float(allocation_doc.get("unallocated_percent") or 0.0) / 100.0),
+    )
     uid_weights: dict[int, float] = {}
     paid_share = 0.0
     deregistered_share = 0.0
@@ -500,6 +503,13 @@ def _research_lab_uid_weights_from_allocation(
                 deregistered_share += pct
                 continue
             uid_weights[uid] = uid_weights.get(uid, 0.0) + pct
+
+    payable_cap = max(0.0, lab_cap_share - unallocated_share)
+    if paid_share > payable_cap and paid_share > 0:
+        scale = payable_cap / paid_share
+        uid_weights = {uid: weight * scale for uid, weight in uid_weights.items()}
+        deregistered_share *= scale
+        paid_share = payable_cap
 
     reported_total = paid_share + unallocated_share
     rounding_gap = max(0.0, lab_cap_share - reported_total)

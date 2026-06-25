@@ -4206,9 +4206,19 @@ class Validator(BaseValidatorNeuron):
                 ):
                     return False
             
-            # Use final_uids and final_weights
+            # Use final_uids and final_weights.
+            # Clamp tiny floating-point dust so Bittensor never sees negative
+            # weights such as -2.7755575615628914e-17 on the burn UID.
             uids = final_uids
-            normalized_weights = final_weights
+            normalized_weights = [max(0.0, float(weight)) for weight in final_weights]
+            normalized_total = sum(normalized_weights)
+            if normalized_total <= 0:
+                print("   ❌ ERROR: Sanitized weights sum to 0; refusing chain submission")
+                return False
+            normalized_weights = [weight / normalized_total for weight in normalized_weights]
+            if any(weight < 0 for weight in normalized_weights):
+                print(f"   ❌ ERROR: Negative weight remained after sanitization: {normalized_weights}")
+                return False
             
             # ═══════════════════════════════════════════════════════════════════
             # TEE GATEWAY SUBMISSION (Phase 2.3)

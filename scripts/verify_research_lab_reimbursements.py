@@ -46,7 +46,7 @@ def _run_simulations() -> None:
         "enabled": True,
         "min_rebate_rate": 0.25,
         "base_rebate_rate": 0.5,
-        "max_rebate_rate": 0.8,
+        "max_rebate_rate": 1.0,
         "high_participation_target": 10,
         "reimbursement_epochs": 30,
         "max_usd_per_run": 100,
@@ -68,7 +68,7 @@ def _run_simulations() -> None:
         ("five_generalist_material", _run("run-5", "generalist", 5, 4), generalist, 2_500_000),
         ("ten_generalist_low_actual", _run("run-2", "generalist", 10, 2), generalist, 1_000_000),
         ("ten_generalist_zero_actual", _run("run-0", "generalist", 10, 0), generalist, 0),
-        ("ten_specialized_quiet", _run("run-special", "evidence-routing", 10, 8), quiet_specialized, 8_000_000),
+        ("ten_specialized_quiet", _run("run-special", "evidence-routing", 10, 8), quiet_specialized, 10_000_000),
         ("ten_generalist_crowded", _run("run-crowded", "generalist", 10, 8), crowded, 2_500_000),
     ]
     schedules = []

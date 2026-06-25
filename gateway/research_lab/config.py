@@ -148,7 +148,7 @@ class ResearchLabGatewayConfig:
     reimbursement_policy_id: str = "alpha-reimbursement-production-v1"
     reimbursement_min_rebate_rate: float = 0.25
     reimbursement_base_rebate_rate: float = 0.50
-    reimbursement_max_rebate_rate: float = 0.80
+    reimbursement_max_rebate_rate: float = 1.0
     reimbursement_high_participation_target: float = 10.0
     reimbursement_epochs: int = 20
     reimbursement_max_usd_per_run: float = 100.0
@@ -307,7 +307,7 @@ class ResearchLabGatewayConfig:
             ),
             reimbursement_min_rebate_rate=max(0.0, _float("RESEARCH_LAB_REIMBURSEMENT_MIN_REBATE_RATE", 0.25)),
             reimbursement_base_rebate_rate=max(0.0, _float("RESEARCH_LAB_REIMBURSEMENT_BASE_REBATE_RATE", 0.50)),
-            reimbursement_max_rebate_rate=max(0.0, _float("RESEARCH_LAB_REIMBURSEMENT_MAX_REBATE_RATE", 0.80)),
+            reimbursement_max_rebate_rate=max(0.0, _float("RESEARCH_LAB_REIMBURSEMENT_MAX_REBATE_RATE", 1.0)),
             reimbursement_high_participation_target=max(
                 0.01,
                 _float("RESEARCH_LAB_REIMBURSEMENT_HIGH_PARTICIPATION_TARGET", 10.0),

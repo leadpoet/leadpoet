@@ -71,6 +71,30 @@ def _short_error(exc: BaseException) -> str:
     return f"{exc.__class__.__name__}: {str(exc)[:300]}"
 
 
+def _fetch_current_chain_epoch_direct() -> tuple[int, int, str]:
+    """Resolve the current Bittensor epoch for worker subprocesses.
+
+    Research Lab scoring workers run as child processes, so they do not share
+    the AsyncSubtensor injected into gateway.utils.epoch by gateway/main.py.
+    """
+    import bittensor as bt
+
+    network = os.getenv("BITTENSOR_NETWORK", "finney")
+    proxy_keys = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+    saved_proxy_env = {key: os.environ.pop(key) for key in proxy_keys if key in os.environ}
+    try:
+        subtensor = bt.subtensor(network=network)
+        try:
+            block = int(subtensor.block)
+        finally:
+            close = getattr(subtensor, "close", None)
+            if callable(close):
+                close()
+    finally:
+        os.environ.update(saved_proxy_env)
+    return block // 360, block, network
+
+
 class ResearchLabGatewayScoringWorker:
     """Scores Research Lab candidates inside the gateway trust boundary."""
 
@@ -82,6 +106,7 @@ class ResearchLabGatewayScoringWorker:
         self.proxy_ref_hash = canonical_hash({"proxy_ref": self.proxy_url}) if self.proxy_url else None
         self._baseline_skip_logged = False
         self._baseline_already_logged_date: str | None = None
+        self._resolved_epoch_cache: tuple[int, float] | None = None
 
     async def run_forever(self) -> None:
         last_idle_log = 0.0
@@ -233,29 +258,31 @@ class ResearchLabGatewayScoringWorker:
     async def _score_candidate(self, candidate: Mapping[str, Any]) -> None:
         candidate_id = str(candidate["candidate_id"])
         start = time.time()
-        await create_scoring_dispatch_event(
-            dispatch_type="candidate_scoring",
-            dispatch_status="assigned",
-            worker_ref=self.worker_ref,
-            proxy_ref_hash=self.proxy_ref_hash,
-            candidate_id=candidate_id,
-            run_id=str(candidate["run_id"]),
-            ticket_id=str(candidate["ticket_id"]),
-        )
-        logger.info(
-            format_worker_block(
-                "RESEARCH LAB CANDIDATE SCORING STARTED",
-                (
-                    ("Worker", self.worker_ref),
-                    ("Candidate", compact_ref(candidate_id)),
-                    ("Run", compact_ref(candidate.get("run_id"))),
-                    ("Ticket", compact_ref(candidate.get("ticket_id"))),
-                    ("Model timeout", f"{self.config.scoring_worker_model_timeout_seconds}s"),
-                    ("Proxy ref", self.proxy_ref_hash),
-                ),
-            )
-        )
         try:
+            evaluation_epoch = await self._resolve_evaluation_epoch()
+            await create_scoring_dispatch_event(
+                dispatch_type="candidate_scoring",
+                dispatch_status="assigned",
+                worker_ref=self.worker_ref,
+                proxy_ref_hash=self.proxy_ref_hash,
+                candidate_id=candidate_id,
+                run_id=str(candidate["run_id"]),
+                ticket_id=str(candidate["ticket_id"]),
+            )
+            logger.info(
+                format_worker_block(
+                    "RESEARCH LAB CANDIDATE SCORING STARTED",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Candidate", compact_ref(candidate_id)),
+                        ("Run", compact_ref(candidate.get("run_id"))),
+                        ("Ticket", compact_ref(candidate.get("ticket_id"))),
+                        ("Evaluation epoch", evaluation_epoch),
+                        ("Model timeout", f"{self.config.scoring_worker_model_timeout_seconds}s"),
+                        ("Proxy ref", self.proxy_ref_hash),
+                    ),
+                )
+            )
             await create_candidate_evaluation_event(
                 candidate_id=candidate_id,
                 run_id=str(candidate["run_id"]),
@@ -290,7 +317,11 @@ class ResearchLabGatewayScoringWorker:
                     extra_env=self._private_scoring_env(),
                 )
             )
-            run_context = self._candidate_run_context(candidate, window_hash=window.window_hash)
+            run_context = self._candidate_run_context(
+                candidate,
+                window_hash=window.window_hash,
+                evaluation_epoch=evaluation_epoch,
+            )
             score_bundle = await evaluate_private_model_pair(
                 artifact_manifest=artifact,
                 benchmark=benchmark,
@@ -393,7 +424,7 @@ class ResearchLabGatewayScoringWorker:
             )
             await self._maybe_finalize_candidate_receipt(candidate)
             try:
-                await self._write_audit_bundle(int(self.config.evaluation_epoch or 0))
+                await self._write_audit_bundle(await self._resolve_evaluation_epoch())
             except Exception:
                 logger.exception("Research Lab audit bundle write failed after candidate failure")
             logger.exception(
@@ -445,6 +476,7 @@ class ResearchLabGatewayScoringWorker:
     async def _maybe_run_private_baseline(self) -> dict[str, Any] | None:
         today = datetime.now(timezone.utc).date().isoformat()
         start = time.time()
+        evaluation_epoch = await self._resolve_evaluation_epoch()
         logger.info(
             format_worker_block(
                 "RESEARCH LAB PRIVATE BASELINE ALLOCATED",
@@ -453,6 +485,7 @@ class ResearchLabGatewayScoringWorker:
                     ("Worker index", f"{self.config.scoring_worker_index + 1}/{self.config.scoring_worker_total_workers}"),
                     ("Proxy ref", self.proxy_ref_hash),
                     ("Benchmark date", today),
+                    ("Evaluation epoch", evaluation_epoch),
                     ("Eval days", self.config.lab_champion_eval_days),
                     ("ICPs per day", self.config.lab_champion_icps_per_day),
                     ("Expected ICPs", self.config.lab_champion_eval_days * self.config.lab_champion_icps_per_day),
@@ -502,6 +535,7 @@ class ResearchLabGatewayScoringWorker:
                     ("Worker index", f"{self.config.scoring_worker_index + 1}/{self.config.scoring_worker_total_workers}"),
                     ("Proxy ref", self.proxy_ref_hash),
                     ("Rolling window", compact_ref(window.window_hash)),
+                    ("Evaluation epoch", evaluation_epoch),
                     ("Selected sets", len(window.set_ids)),
                     ("Selected ICPs", len(window.item_refs)),
                     ("Private model", compact_ref(artifact.model_artifact_hash)),
@@ -557,7 +591,7 @@ class ResearchLabGatewayScoringWorker:
             private_model_artifact_hash=artifact.model_artifact_hash,
             private_model_manifest_hash=artifact.manifest_hash,
             rolling_window_hash=window.window_hash,
-            evaluation_epoch=int(self.config.evaluation_epoch or 0),
+            evaluation_epoch=evaluation_epoch,
             aggregate_score=aggregate_score,
             scoring_worker_ref=self.worker_ref,
             proxy_ref_hash=self.proxy_ref_hash,
@@ -597,7 +631,7 @@ class ResearchLabGatewayScoringWorker:
             aggregate_score=aggregate_score,
             report_doc=public_report_doc,
         )
-        await self._write_audit_bundle(int(self.config.evaluation_epoch or 0))
+        await self._write_audit_bundle(evaluation_epoch)
         logger.info(
             format_worker_block(
                 "RESEARCH LAB PRIVATE BASELINE COMPLETED",
@@ -607,6 +641,7 @@ class ResearchLabGatewayScoringWorker:
                     ("Benchmark bundle", compact_ref(bundle["benchmark_bundle_id"])),
                     ("Public report", compact_ref(public_report["report_id"])),
                     ("Rolling window", compact_ref(window.window_hash)),
+                    ("Evaluation epoch", evaluation_epoch),
                     ("Selected ICPs", len(window.item_refs)),
                     ("Public ICPs", visibility_split.get("public_count")),
                     ("Private holdout ICPs", visibility_split.get("private_count")),
@@ -627,6 +662,42 @@ class ResearchLabGatewayScoringWorker:
 
     def _is_private_baseline_owner(self) -> bool:
         return self.config.scoring_worker_index == 0
+
+    async def _resolve_evaluation_epoch(self) -> int:
+        configured_epoch = int(self.config.evaluation_epoch or 0)
+        if configured_epoch > 0:
+            return configured_epoch
+
+        now = time.monotonic()
+        if self._resolved_epoch_cache is not None:
+            cached_epoch, cached_at = self._resolved_epoch_cache
+            if now - cached_at <= 60.0:
+                return cached_epoch
+
+        try:
+            from gateway.utils.epoch import get_current_epoch_id_async
+
+            epoch = int(await get_current_epoch_id_async())
+            source = "gateway_epoch_utils"
+            block = None
+            network = os.getenv("BITTENSOR_NETWORK", "finney")
+        except Exception:
+            epoch, block, network = await asyncio.to_thread(_fetch_current_chain_epoch_direct)
+            source = "direct_subtensor"
+
+        if epoch <= 0:
+            raise RuntimeError(
+                "Research Lab evaluation epoch resolved to 0; refusing to write epoch-0 score/audit bundles"
+            )
+        self._resolved_epoch_cache = (epoch, now)
+        logger.info(
+            "Research Lab scoring worker resolved evaluation epoch: epoch=%s block=%s network=%s source=%s",
+            epoch,
+            block,
+            network,
+            source,
+        )
+        return epoch
 
     async def _write_audit_bundle(self, epoch: int) -> None:
         ticket_rows = await select_many("research_loop_ticket_current", filters=(), limit=1000)
@@ -767,13 +838,19 @@ class ResearchLabGatewayScoringWorker:
         )
         return True
 
-    def _candidate_run_context(self, candidate: Mapping[str, Any], *, window_hash: str) -> dict[str, Any]:
+    def _candidate_run_context(
+        self,
+        candidate: Mapping[str, Any],
+        *,
+        window_hash: str,
+        evaluation_epoch: int,
+    ) -> dict[str, Any]:
         return {
             "run_id": str(candidate["run_id"]),
             "ticket_id": str(candidate["ticket_id"]),
             "miner_hotkey": str(candidate["miner_hotkey"]),
             "island": str(candidate.get("island") or "generalist"),
-            "evaluation_epoch": int(self.config.evaluation_epoch or 0),
+            "evaluation_epoch": int(evaluation_epoch),
             "evaluator_version": "leadpoet-gateway-qualification-worker:research-lab:v1",
             "evidence_bundle_refs": [f"research_lab_rolling_icp_window:{window_hash}"],
             "execution_trace_ref": f"gateway_qualification_worker:{self.worker_ref}:{candidate['candidate_id']}",

@@ -24,6 +24,7 @@ from .private_runtime import (
     SubprocessPrivateModelRunner,
     build_local_private_artifact_manifest,
     compute_private_source_tree_hash,
+    ensure_private_model_outputs,
     load_private_artifact_manifest,
     sign_digest_with_kms,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "build_local_private_artifact_manifest",
     "build_score_bundle_from_scored_icps",
     "compute_private_source_tree_hash",
+    "ensure_private_model_outputs",
     "evaluate_private_model_pair",
     "load_private_artifact_manifest",
     "sign_digest_with_kms",

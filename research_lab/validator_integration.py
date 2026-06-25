@@ -15,6 +15,7 @@ from typing import Any, Mapping
 from urllib.request import Request, urlopen
 
 from leadpoet_verifier.golden_vectors import run_golden_vectors
+from leadpoet_verifier.economics import allocate_research_lab_epoch
 from leadpoet_verifier.research_evaluation import (
     build_research_evaluation_score_bundle,
     score_bundle_to_weight_input,
@@ -153,6 +154,23 @@ def fetch_research_lab_audit_bundle(
         return json.loads(response.read().decode("utf-8"))
 
 
+def fetch_research_lab_allocation_bundle(
+    gateway_url: str,
+    epoch: int,
+    *,
+    timeout_seconds: int = 20,
+) -> dict[str, Any]:
+    """Fetch the live Research Lab allocation bundle for an epoch."""
+    base = gateway_url.rstrip("/")
+    request = Request(
+        f"{base}/research-lab/allocations/live/{int(epoch)}",
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    with urlopen(request, timeout=timeout_seconds) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def verify_research_lab_shadow_bundle(
     bundle: Mapping[str, Any],
     *,
@@ -206,6 +224,70 @@ def verify_research_lab_shadow_bundle(
         "weight_vector_hash": sha256_json(weight_vector) if weight_vector else None,
         "verifier_divergence": divergence,
         "on_chain_submission_allowed": False,
+    }
+
+
+def verify_research_lab_allocation_bundle(
+    bundle: Mapping[str, Any],
+    *,
+    flags: ResearchLabValidatorFlags | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    validator_flags = flags if isinstance(flags, ResearchLabValidatorFlags) else ResearchLabValidatorFlags.from_mapping(flags)
+    errors: list[str] = []
+    if not validator_flags.fetch_enabled:
+        errors.append("validator_fetch_disabled")
+    if not (validator_flags.weight_mutation_enabled or validator_flags.submit_on_chain_enabled):
+        errors.append("validator_live_research_lab_weight_flags_disabled")
+    if _contains_secret_material(bundle):
+        errors.append("allocation_bundle_contains_raw_secret_material")
+    if bundle.get("bundle_type") != "research_lab_live_allocation_bundle":
+        errors.append("unexpected_allocation_bundle_type")
+    if not bundle.get("submission_allowed") or not bundle.get("on_chain_submission_allowed"):
+        errors.append("gateway_live_research_lab_weight_submission_disabled")
+
+    source_state = bundle.get("source_state")
+    source_state_hash = bundle.get("source_state_hash")
+    if not isinstance(source_state, Mapping) or not source_state_hash:
+        errors.append("allocation_source_state_required")
+    elif sha256_json(source_state) != source_state_hash:
+        errors.append("allocation_source_state_hash_diverged")
+
+    allocation_doc = bundle.get("allocation_doc")
+    allocation_hash = bundle.get("allocation_hash")
+    if not isinstance(allocation_doc, Mapping) or not allocation_hash:
+        errors.append("allocation_doc_and_hash_required")
+        allocation_doc = {}
+    else:
+        expected_payload = {k: v for k, v in dict(allocation_doc).items() if k != "allocation_hash"}
+        if sha256_json(expected_payload) != allocation_hash:
+            errors.append("allocation_hash_diverged")
+        if allocation_doc.get("allocation_hash") != allocation_hash:
+            errors.append("allocation_doc_hash_field_diverged")
+
+    lab_cap = float(allocation_doc.get("lab_cap_percent") or 0.0) if allocation_doc else 0.0
+    paid = sum(
+        float(allocation_doc.get(field) or 0.0)
+        for field in (
+            "reimbursement_alpha_percent",
+            "champion_alpha_percent",
+            "queued_champion_alpha_percent",
+            "unallocated_percent",
+        )
+    )
+    if lab_cap < 0 or lab_cap > 100:
+        errors.append("invalid_lab_cap_percent")
+    if paid > lab_cap + 0.000001:
+        errors.append("allocation_exceeds_lab_cap")
+
+    return {
+        "passed": not errors,
+        "errors": errors,
+        "epoch": bundle.get("epoch"),
+        "bundle_id": bundle.get("bundle_id"),
+        "source_state_hash": source_state_hash,
+        "allocation_hash": allocation_hash,
+        "allocation_doc": dict(allocation_doc or {}),
+        "on_chain_submission_allowed": not errors,
     }
 
 
@@ -353,6 +435,29 @@ def build_research_lab_weight_component(
     }
 
 
+def build_research_lab_allocation_component(
+    bundle: Mapping[str, Any],
+    *,
+    flags: ResearchLabValidatorFlags | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    verification = verify_research_lab_allocation_bundle(bundle, flags=flags)
+    if not verification["passed"]:
+        raise ValueError("; ".join(verification["errors"]))
+    allocation_doc = dict(verification["allocation_doc"])
+    return {
+        "epoch": int(bundle["epoch"]),
+        "shadow_only": False,
+        "read_only": False,
+        "submission_allowed": True,
+        "on_chain_submission_allowed": True,
+        "bundle_id": bundle.get("bundle_id"),
+        "source_state_hash": bundle.get("source_state_hash"),
+        "allocation_hash": verification["allocation_hash"],
+        "allocation_doc": allocation_doc,
+        "observability": dict(bundle.get("observability") or {}),
+    }
+
+
 def build_on_chain_weight_payload(_component: Mapping[str, Any]) -> dict[str, Any]:
     raise RuntimeError("Research Lab shadow verification cannot build on-chain weight payloads")
 
@@ -497,6 +602,106 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
     if tampered_eval_verification["passed"] or not tampered_eval_verification["errors"]:
         raise AssertionError("tampered evaluation score bundle was not rejected")
 
+    allocation_policy = {
+        "research_lab_emission_percent": 10.0,
+        "reward_epochs": 20,
+        "usd_per_0_1_percent_epoch": 0.162,
+        "champion_threshold_points": 2.0,
+        "champion_min_alpha_percent": 2.0,
+        "champion_extra_alpha_percent_per_point": 0.1,
+        "champion_max_alpha_percent": 5.0,
+    }
+    reimbursement_obligations = [
+        {
+            "uid": 3,
+            "miner_hotkey": "5FreimbMiner1111111111111111111111111111111",
+            "source_id": "reimbursement_schedule:test",
+            "schedule_id": "reimbursement_schedule:test",
+            "award_id": "reimbursement_award:test",
+            "run_id": "33333333-3333-4333-8333-333333333333",
+            "island": "generalist",
+            "status": "active",
+            "start_epoch": int(bundle["epoch"]),
+            "epoch_count": 20,
+            "target_reimbursement_microusd": 3_240_000,
+        }
+    ]
+    champion_obligations = [
+        {
+            "uid": 4,
+            "miner_hotkey": "5FchampMiner1111111111111111111111111111111",
+            "source_id": "champion_reward:test",
+            "champion_reward_id": "champion_reward:test",
+            "candidate_id": "candidate:" + "9" * 64,
+            "score_bundle_id": "score_bundle:" + eval_bundle["score_bundle_hash"].split(":", 1)[1],
+            "run_id": "44444444-4444-4444-8444-444444444444",
+            "island": "generalist",
+            "status": "active",
+            "start_epoch": int(bundle["epoch"]),
+            "epoch_count": 20,
+            "improvement_points": 3.0,
+            "desired_alpha_percent": 2.1,
+        }
+    ]
+    allocation_doc = allocate_research_lab_epoch(
+        int(bundle["epoch"]),
+        allocation_policy,
+        reimbursement_obligations,
+        champion_obligations,
+    )
+    allocation_source_state = {
+        "epoch": int(bundle["epoch"]),
+        "netuid": 401,
+        "policy_id": "research_lab_reimbursement_and_champion_rewards:v1",
+        "reimbursement_obligations": reimbursement_obligations,
+        "champion_obligations": champion_obligations,
+    }
+    allocation_bundle = {
+        "schema_version": "1.0",
+        "bundle_type": "research_lab_live_allocation_bundle",
+        "bundle_id": "research_lab_allocation_bundle:" + allocation_doc["allocation_hash"].split(":", 1)[1],
+        "epoch": int(bundle["epoch"]),
+        "netuid": 401,
+        "submission_allowed": True,
+        "on_chain_submission_allowed": True,
+        "source_state": allocation_source_state,
+        "source_state_hash": sha256_json(allocation_source_state),
+        "allocation_doc": allocation_doc,
+        "allocation_hash": allocation_doc["allocation_hash"],
+    }
+    allocation_flags = {
+        **fixture["validator_flags"],
+        "RESEARCH_LAB_VALIDATOR_FETCH_ENABLED": True,
+        "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED": True,
+    }
+    allocation_verification = verify_research_lab_allocation_bundle(
+        allocation_bundle,
+        flags=allocation_flags,
+    )
+    if not allocation_verification["passed"]:
+        raise AssertionError("live allocation bundle did not verify: " + "; ".join(allocation_verification["errors"]))
+    allocation_component = build_research_lab_allocation_component(allocation_bundle, flags=allocation_flags)
+    if not allocation_component["on_chain_submission_allowed"]:
+        raise AssertionError("live allocation component did not allow on-chain submission")
+    if float(allocation_component["allocation_doc"].get("reimbursement_alpha_percent") or 0.0) <= 0:
+        raise AssertionError("live allocation did not include reimbursement alpha")
+    if float(allocation_component["allocation_doc"].get("champion_alpha_percent") or 0.0) <= 0:
+        raise AssertionError("live allocation did not include champion alpha")
+
+    tampered_allocation = {
+        **allocation_bundle,
+        "allocation_doc": {
+            **allocation_doc,
+            "reimbursement_alpha_percent": 9.99,
+        },
+    }
+    tampered_allocation_verification = verify_research_lab_allocation_bundle(
+        tampered_allocation,
+        flags=allocation_flags,
+    )
+    if tampered_allocation_verification["passed"] or "allocation_hash_diverged" not in tampered_allocation_verification["errors"]:
+        raise AssertionError("tampered live allocation bundle was not rejected")
+
     audit_source_state = {
         "candidate_rows": [
             {
@@ -564,6 +769,9 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
         "unsafe_errors": unsafe["errors"],
         "evaluation_bundle_count": eval_verification["verified_bundle_count"],
         "audit_score_bundle_count": audit_verification["verified_score_bundle_count"],
+        "allocation_hash": allocation_component["allocation_hash"],
+        "allocation_reimbursement_alpha_percent": allocation_component["allocation_doc"]["reimbursement_alpha_percent"],
+        "allocation_champion_alpha_percent": allocation_component["allocation_doc"]["champion_alpha_percent"],
     }
 
 

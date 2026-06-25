@@ -11,6 +11,7 @@ from leadpoet_verifier.research_evaluation import build_research_evaluation_scor
 from .artifacts import PrivateModelArtifactManifest, validate_private_model_artifact_manifest
 from .benchmark import SealedBenchmarkSet, validate_sealed_benchmark_set
 from .patches import CandidatePatchManifest, validate_candidate_patch_manifest
+from .private_runtime import ensure_private_model_outputs
 
 
 ModelRunner = Callable[
@@ -65,10 +66,22 @@ async def evaluate_private_model_pair(
         icp = item.get("icp")
         if not isinstance(icp, Mapping):
             raise RealEvaluatorRequired("benchmark item is missing private ICP payload")
-        base_outputs = await _maybe_await(base_runner(icp, run_context))
-        candidate_outputs = await _maybe_await(candidate_runner(icp, {**dict(run_context), "patch": patch.to_dict()}))
+        base_outputs = ensure_private_model_outputs(
+            await _maybe_await(base_runner(icp, run_context)),
+            context_label=f"reference model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
+            require_non_empty=True,
+        )
+        candidate_outputs = ensure_private_model_outputs(
+            await _maybe_await(candidate_runner(icp, {**dict(run_context), "patch": patch.to_dict()})),
+            context_label=f"candidate model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
+            require_non_empty=False,
+        )
         base_scores = await _maybe_await(scorer(base_outputs, icp, True))
         candidate_scores = await _maybe_await(scorer(candidate_outputs, icp, False))
+        if not base_scores:
+            raise RealEvaluatorRequired(
+                f"reference model produced no scoreable companies for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}"
+            )
         per_icp_results.append(
             {
                 "icp_ref": str(item.get("icp_ref") or item.get("icp_hash") or ""),

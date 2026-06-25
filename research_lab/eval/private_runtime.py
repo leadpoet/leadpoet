@@ -48,6 +48,25 @@ class PrivateModelRuntimeError(RuntimeError):
     """Raised when the private model artifact cannot be executed safely."""
 
 
+def ensure_private_model_outputs(
+    outputs: Any,
+    *,
+    context_label: str,
+    require_non_empty: bool,
+) -> list[Mapping[str, Any]]:
+    """Validate the adapter's JSON-list contract at the evaluation boundary."""
+    if not isinstance(outputs, Sequence) or isinstance(outputs, (str, bytes, bytearray)):
+        raise PrivateModelRuntimeError(f"{context_label} adapter must return a JSON array")
+    normalized = list(outputs)
+    if require_non_empty and not normalized:
+        raise PrivateModelRuntimeError(f"{context_label} adapter returned zero companies")
+    if not all(isinstance(item, Mapping) for item in normalized):
+        raise PrivateModelRuntimeError(f"{context_label} adapter returned a non-object company row")
+    if _contains_secret_material(normalized):
+        raise PrivateModelRuntimeError(f"{context_label} adapter returned raw secret material")
+    return normalized
+
+
 @dataclass(frozen=True)
 class PrivateModelAdapterSpec:
     source_path: Path
@@ -111,11 +130,11 @@ class SubprocessPrivateModelRunner:
             decoded = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
             raise PrivateModelRuntimeError("private model adapter returned invalid JSON") from exc
-        if not isinstance(decoded, list):
-            raise PrivateModelRuntimeError("private model adapter must return a JSON array")
-        if _contains_secret_material(decoded):
-            raise PrivateModelRuntimeError("private model adapter returned raw secret material")
-        return decoded
+        return ensure_private_model_outputs(
+            decoded,
+            context_label="private model",
+            require_non_empty=False,
+        )
 
     def metadata(self) -> Mapping[str, Any]:
         env = _build_subprocess_env(self.spec)
@@ -191,11 +210,11 @@ class DockerPrivateModelRunner:
             argv=(self.spec.module_name, self.spec.callable_name),
             stdin_payload=payload,
         )
-        if not isinstance(decoded, list):
-            raise PrivateModelRuntimeError("private model adapter must return a JSON array")
-        if _contains_secret_material(decoded):
-            raise PrivateModelRuntimeError("private model adapter returned raw secret material")
-        return decoded
+        return ensure_private_model_outputs(
+            decoded,
+            context_label="private model",
+            require_non_empty=False,
+        )
 
     def metadata(self) -> Mapping[str, Any]:
         decoded = self._run_json(

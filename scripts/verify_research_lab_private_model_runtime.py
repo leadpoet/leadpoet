@@ -24,6 +24,7 @@ from research_lab.eval.private_runtime import (  # noqa: E402
     SubprocessPrivateModelRunner,
     build_local_private_artifact_manifest,
     compute_private_source_tree_hash,
+    ensure_private_model_outputs,
     load_private_artifact_manifest,
 )
 import research_lab.eval.private_runtime as private_runtime_module  # noqa: E402
@@ -79,6 +80,22 @@ def run_icp(icp, context):
             errors.append("private output intent source did not normalize")
         if normalized["intent_signals"][0]["matched_icp_signal"] != 0:
             errors.append("private output intent signal did not default matched ICP signal")
+
+        try:
+            ensure_private_model_outputs([], context_label="baseline-test", require_non_empty=True)
+            errors.append("empty private baseline output was accepted")
+        except PrivateModelRuntimeError:
+            pass
+        try:
+            empty_candidate = ensure_private_model_outputs(
+                [],
+                context_label="candidate-test",
+                require_non_empty=False,
+            )
+            if empty_candidate != []:
+                errors.append("empty candidate output did not round-trip as empty list")
+        except PrivateModelRuntimeError:
+            errors.append("empty candidate output was rejected")
 
         tree_hash_a = compute_private_source_tree_hash(root)
         (root / "__pycache__").mkdir()

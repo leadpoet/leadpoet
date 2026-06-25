@@ -56,6 +56,7 @@ def main() -> int:
         "/research-lab/evaluations/candidate-results",
         "/research-lab/evaluations/score-bundles/{score_bundle_id}",
         "/research-lab/evaluations/latest/{epoch}",
+        "/research-lab/allocations/live/{epoch}",
         "/research-lab/reports/shadow/{epoch}",
     }:
         if required not in paths:

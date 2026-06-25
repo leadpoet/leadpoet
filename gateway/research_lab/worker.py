@@ -15,6 +15,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
+from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.key_vault import OpenRouterKeyVaultError, decrypt_openrouter_key
 from gateway.research_lab.logging_utils import compact_ref, format_worker_block, format_worker_line
@@ -729,9 +730,10 @@ class ResearchLabHostedWorker:
         }
         award_obj = compute_reimbursement_award(run_cost, snapshot_doc, policy, ReimbursementCapUsage.from_mapping(cap_usage))
         award = award_obj.to_dict()
+        evaluation_epoch, _block, _source = await resolve_research_lab_evaluation_epoch(self.config.evaluation_epoch)
         schedule = build_reimbursement_schedule(
             award,
-            start_epoch=max(0, int(self.config.evaluation_epoch or 0) + (1 if self.config.evaluation_epoch else 0)),
+            start_epoch=max(0, int(evaluation_epoch) + 1),
         ).to_dict()
         shadow_only = not self.config.reimbursements_enabled
         award_doc = {
@@ -744,6 +746,7 @@ class ResearchLabHostedWorker:
             "shadow_only": shadow_only,
             "submission_allowed": self.config.reimbursements_enabled,
             "source": "hosted_auto_research_loop_completion",
+            "evaluation_epoch": int(evaluation_epoch),
         }
         schedule_doc = {
             "schema_version": "1.0",
@@ -751,6 +754,7 @@ class ResearchLabHostedWorker:
             "shadow_only": shadow_only,
             "submission_allowed": self.config.reimbursements_enabled,
             "source": "hosted_auto_research_loop_completion",
+            "evaluation_epoch": int(evaluation_epoch),
         }
         award_row, _award_event = await create_reimbursement_award(
             award=award,

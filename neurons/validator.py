@@ -397,6 +397,97 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return value.strip().lower() in _TRUTHY_ENV_VALUES
 
 
+def _research_lab_allocation_has_live_payments(allocation_doc: Any) -> bool:
+    if not isinstance(allocation_doc, dict):
+        return False
+    for section in (
+        "reimbursement_allocations",
+        "champion_allocations",
+        "queued_champion_allocations",
+    ):
+        rows = allocation_doc.get(section) or []
+        if any(float(row.get("paid_alpha_percent") or 0.0) > 0 for row in rows if isinstance(row, dict)):
+            return True
+    return False
+
+
+def _research_lab_uid_weights_from_allocation(
+    allocation_doc: Any,
+    *,
+    metagraph: Any,
+    reserved_share: float,
+) -> tuple[dict[int, float], float, dict[str, float]]:
+    if not isinstance(allocation_doc, dict) or not allocation_doc:
+        return {}, float(reserved_share), {
+            "paid": 0.0,
+            "burn": float(reserved_share),
+            "unallocated": float(reserved_share),
+            "deregistered": 0.0,
+        }
+
+    lab_cap_share = max(
+        0.0,
+        min(float(reserved_share), float(allocation_doc.get("lab_cap_percent") or 0.0) / 100.0),
+    )
+    unallocated_share = max(0.0, float(allocation_doc.get("unallocated_percent") or 0.0) / 100.0)
+    uid_weights: dict[int, float] = {}
+    paid_share = 0.0
+    deregistered_share = 0.0
+
+    for section in (
+        "reimbursement_allocations",
+        "champion_allocations",
+        "queued_champion_allocations",
+    ):
+        for row in allocation_doc.get(section) or []:
+            if not isinstance(row, dict):
+                continue
+            pct = max(0.0, float(row.get("paid_alpha_percent") or 0.0) / 100.0)
+            if pct <= 0:
+                continue
+            paid_share += pct
+            try:
+                uid = int(row.get("uid"))
+                expected_hotkey = str(row.get("miner_hotkey") or "")
+                actual_hotkey = metagraph.hotkeys[uid]
+            except Exception:
+                deregistered_share += pct
+                continue
+            if expected_hotkey and actual_hotkey != expected_hotkey:
+                deregistered_share += pct
+                continue
+            uid_weights[uid] = uid_weights.get(uid, 0.0) + pct
+
+    reported_total = paid_share + unallocated_share
+    rounding_gap = max(0.0, lab_cap_share - reported_total)
+    reserved_gap = max(0.0, float(reserved_share) - lab_cap_share)
+    burn_share = unallocated_share + deregistered_share + rounding_gap + reserved_gap
+    return uid_weights, burn_share, {
+        "paid": paid_share,
+        "burn": burn_share,
+        "unallocated": unallocated_share + rounding_gap + reserved_gap,
+        "deregistered": deregistered_share,
+    }
+
+
+def _verify_burn_target_owner(metagraph: Any, uid: int, expected_hotkey: str | None) -> bool:
+    try:
+        actual_hotkey = metagraph.hotkeys[int(uid)]
+    except Exception as exc:
+        print(f"   ❌ Error verifying burn target UID ownership: {exc}")
+        return False
+    if not expected_hotkey:
+        print(f"   ⚠️ EXPECTED_BURN_TARGET_HOTKEY unset; using current UID {uid} owner on this network")
+        return True
+    if actual_hotkey != expected_hotkey:
+        print(f"   ❌ CRITICAL ERROR: BURN_TARGET_UID={uid} ownership changed!")
+        print(f"      Expected: {expected_hotkey[:20]}...")
+        print(f"      Actual:   {actual_hotkey[:20]}...")
+        print(f"      Burn would go to WRONG address - aborting weight submission")
+        return False
+    return True
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # DEDICATED FULFILLMENT CONTAINERS CONFIGURATION
 # ════════════════════════════════════════════════════════════════════════════
@@ -3244,9 +3335,12 @@ class Validator(BaseValidatorNeuron):
         try:
             from research_lab.validator_integration import (
                 ResearchLabValidatorFlags,
+                build_research_lab_allocation_component,
                 fetch_research_lab_evaluation_bundle_page,
                 build_research_lab_weight_component,
+                fetch_research_lab_allocation_bundle,
                 fetch_research_lab_shadow_bundle,
+                verify_research_lab_allocation_bundle,
                 verify_research_lab_evaluation_bundle_page,
                 verify_research_lab_shadow_bundle,
                 write_research_lab_validator_artifact,
@@ -3273,10 +3367,17 @@ class Validator(BaseValidatorNeuron):
 
         try:
             bundle = await asyncio.to_thread(fetch_research_lab_shadow_bundle, gateway_url, current_epoch)
-            verification = verify_research_lab_shadow_bundle(bundle, flags=flags)
+            shadow_verify_flags = {
+                **flags.to_dict(),
+                "weight_mutation_enabled": False,
+                "production_writes_enabled": False,
+                "submit_on_chain_enabled": False,
+                "fulfillment_mutation_enabled": False,
+            }
+            verification = verify_research_lab_shadow_bundle(bundle, flags=shadow_verify_flags)
             component = None
             if verification.get("passed"):
-                component = build_research_lab_weight_component(bundle, flags=flags)
+                component = build_research_lab_weight_component(bundle, flags=shadow_verify_flags)
 
             artifact_path = write_research_lab_validator_artifact(
                 output_dir=Path("validator_weights"),
@@ -3299,15 +3400,43 @@ class Validator(BaseValidatorNeuron):
                 return {"abort_chain_submission": False, "verified": False, "errors": verification.get("errors", [])}
 
             print(f"   ✅ Research Lab shadow bundle verified: {verification.get('weight_vector_hash')}")
+            allocation_component = None
+            allocation_verification = None
             if flags.weight_mutation_enabled or flags.submit_on_chain_enabled:
-                print("   ❌ Research Lab bundle is shadow-only; live Research Lab on-chain weights are not authorized")
-                return {"abort_chain_submission": True, "reason": "research_lab_shadow_only_not_submittable"}
+                print(f"   Fetching Research Lab live allocation for epoch {current_epoch}")
+                allocation_bundle = await asyncio.to_thread(fetch_research_lab_allocation_bundle, gateway_url, current_epoch)
+                allocation_verification = verify_research_lab_allocation_bundle(allocation_bundle, flags=flags)
+                allocation_component = (
+                    build_research_lab_allocation_component(allocation_bundle, flags=flags)
+                    if allocation_verification.get("passed")
+                    else None
+                )
+                allocation_artifact_path = write_research_lab_validator_artifact(
+                    output_dir=Path("validator_weights"),
+                    epoch=current_epoch,
+                    bundle=allocation_bundle,
+                    verification=allocation_verification,
+                    component=allocation_component,
+                    artifact_kind="allocation",
+                )
+                print(f"   Research Lab allocation artifact written: {allocation_artifact_path}")
+                if not allocation_verification.get("passed"):
+                    print(f"   ❌ Research Lab live allocation verification failed: {allocation_verification.get('errors')}")
+                    return {"abort_chain_submission": True, "reason": "research_lab_allocation_verification_failed"}
+                allocation_doc = allocation_component.get("allocation_doc", {})
+                print(
+                    "   ✅ Research Lab live allocation verified: "
+                    f"{allocation_component.get('allocation_hash')} "
+                    f"(reimbursements={float(allocation_doc.get('reimbursement_alpha_percent') or 0):.4f}%, "
+                    f"champions={float(allocation_doc.get('champion_alpha_percent') or 0):.4f}%, "
+                    f"queued={float(allocation_doc.get('queued_champion_alpha_percent') or 0):.4f}%)"
+                )
 
             evaluation_verification = None
             if flags.evaluation_verify_enabled:
                 print(f"   Fetching Research Lab evaluation bundles for epoch {current_epoch}")
                 evaluation_page = await asyncio.to_thread(fetch_research_lab_evaluation_bundle_page, gateway_url, current_epoch)
-                evaluation_verification = verify_research_lab_evaluation_bundle_page(evaluation_page, flags=flags)
+                evaluation_verification = verify_research_lab_evaluation_bundle_page(evaluation_page, flags=shadow_verify_flags)
                 eval_artifact_path = write_research_lab_validator_artifact(
                     output_dir=Path("validator_weights"),
                     epoch=current_epoch,
@@ -3336,6 +3465,8 @@ class Validator(BaseValidatorNeuron):
                 "abort_chain_submission": False,
                 "verified": True,
                 "component": component,
+                "allocation_component": allocation_component,
+                "allocation_verification": allocation_verification,
                 "weight_vector_hash": verification.get("weight_vector_hash"),
                 "evaluation_verification": evaluation_verification,
             }
@@ -3385,6 +3516,19 @@ class Validator(BaseValidatorNeuron):
             if research_lab_guard.get("abort_chain_submission"):
                 print(f"   ❌ Research Lab pre-submission guard blocked weights: {research_lab_guard.get('reason')}")
                 return False
+            research_lab_allocation_component = (
+                research_lab_guard.get("allocation_component")
+                if isinstance(research_lab_guard, dict)
+                else None
+            )
+            research_lab_allocation_doc = (
+                research_lab_allocation_component.get("allocation_doc", {})
+                if isinstance(research_lab_allocation_component, dict)
+                else {}
+            )
+            research_lab_has_live_allocations = _research_lab_allocation_has_live_payments(
+                research_lab_allocation_doc
+            )
             
             # ═══════════════════════════════════════════════════════════════════
             # Load current epoch data (may be empty if gateway was down)
@@ -3416,10 +3560,9 @@ class Validator(BaseValidatorNeuron):
             # configured hotkey, so a misconfigured env var refuses to
             # submit weights rather than misrouting emissions.
             BURN_TARGET_UID = int(os.environ.get("BURN_TARGET_UID", "0"))
-            EXPECTED_BURN_TARGET_HOTKEY = os.environ.get(
-                "EXPECTED_BURN_TARGET_HOTKEY",
-                "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
-            )
+            EXPECTED_BURN_TARGET_HOTKEY = os.environ.get("EXPECTED_BURN_TARGET_HOTKEY")
+            if not EXPECTED_BURN_TARGET_HOTKEY and os.environ.get("BITTENSOR_NETWORK", "finney") != "test":
+                EXPECTED_BURN_TARGET_HOTKEY = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9"
 
             # Read ff_enabled EARLY (used by the no-sourcing-data gates below)
             # so the validator doesn't 100%-burn when sourcing is zeroed out but
@@ -3466,12 +3609,13 @@ class Validator(BaseValidatorNeuron):
             # Allocation shares (dynamic based on champion status)
             BASE_BURN_SHARE = 0.0          # 0% base burn to UID 0
             CHAMPION_SHARE = 0.0           # 0% — model competition retired 2026-06-23; its 10% folded into the fulfillment pool
-            # FULFILLMENT-FLAVORED TOTAL = 90% (sourcing is zeroed, champion is 10%).
+            # FULFILLMENT-FLAVORED TOTAL = 90% (sourcing/champion are zeroed; Research Lab has its own 10%).
             # That 90% is split into a per-epoch fulfillment pool and a top-3
             # rolling-window leaderboard bonus.  The leaderboard is a permanent
             # feature of the fulfillment track — it is NEVER toggled off; only
             # the split ratio between per-epoch and weekly is tunable here.
-            FULFILLMENT_POOL_SHARE = 0.905 # 90.5% per-epoch fulfillment rewards (absorbed the retired 10% champion share 2026-06-23)
+            RESEARCH_LAB_SHARE = 0.10      # 10% Research Lab reimbursements + promoted private-model improvements
+            FULFILLMENT_POOL_SHARE = 0.805 # 80.5% per-epoch fulfillment rewards
             # FULFILLMENT LEADERBOARD BONUS — added 2026-04-30, restored 2026-05-15,
             # bumped to 9.5% + switched to rolling window on 2026-05-17, changed
             # from Monday-reset to rolling 140-epoch (~7 day) window on 2026-05-23.
@@ -3547,18 +3691,16 @@ class Validator(BaseValidatorNeuron):
             # sourcing data, otherwise fulfillment miners get nothing despite
             # successfully scoring requests this epoch (the 90% fulfillment pool
             # would silently burn).
-            if not miner_scores and not rolling_scores and not ff_enabled:
+            if not miner_scores and not rolling_scores and not ff_enabled and not research_lab_has_live_allocations:
                 print(f"   ⚠️  No current epoch OR rolling epoch data for epoch {current_epoch}")
                 print(f"   🔥 Submitting 100% burn weights (sourcing-only validator, no data)...")
                 
                 try:
-                    # Verify the configured burn-target UID is owned by the
-                    # expected hotkey before sending all-burn weights.
-                    actual_burn_hotkey = self.metagraph.hotkeys[BURN_TARGET_UID]
-                    if actual_burn_hotkey != EXPECTED_BURN_TARGET_HOTKEY:
-                        print(f"   ❌ CRITICAL ERROR: BURN_TARGET_UID={BURN_TARGET_UID} ownership changed!")
-                        print(f"      Expected: {EXPECTED_BURN_TARGET_HOTKEY[:20]}...")
-                        print(f"      Actual:   {actual_burn_hotkey[:20]}...")
+                    if not _verify_burn_target_owner(
+                        self.metagraph,
+                        BURN_TARGET_UID,
+                        EXPECTED_BURN_TARGET_HOTKEY,
+                    ):
                         return False
                     
                     result = self.subtensor.set_weights(
@@ -3599,18 +3741,6 @@ class Validator(BaseValidatorNeuron):
             # the expected hotkey (safety check — refuses to misroute
             # emissions if BURN_TARGET_UID / EXPECTED_BURN_TARGET_HOTKEY
             # are misconfigured or the on-chain UID owner has changed).
-            try:
-                actual_burn_hotkey = self.metagraph.hotkeys[BURN_TARGET_UID]
-                if actual_burn_hotkey != EXPECTED_BURN_TARGET_HOTKEY:
-                    print(f"   ❌ CRITICAL ERROR: BURN_TARGET_UID={BURN_TARGET_UID} ownership changed!")
-                    print(f"      Expected: {EXPECTED_BURN_TARGET_HOTKEY[:20]}...")
-                    print(f"      Actual:   {actual_burn_hotkey[:20]}...")
-                    print(f"      Burn would go to WRONG address - aborting weight submission")
-                    return False
-            except Exception as e:
-                print(f"   ❌ Error verifying UID 0 ownership: {e}")
-                return False
-            
             # ═══════════════════════════════════════════════════════════════════
             # QUALIFICATION CHAMPION: Read from local JSON
             # Determines dynamic split: champion active → 90/10, none → 100/0
@@ -3652,13 +3782,13 @@ class Validator(BaseValidatorNeuron):
             # portion flows to burn — it does NOT redistribute back to sourcing.
             # (ff_enabled is read once at the top of the function so the early
             #  no-sourcing-data gates above can honor it; do not re-read here.)
-            # MAX_SOURCING_SHARE is strictly 0% under the 2026-06-23 split:
-            # 0% champion (model competition retired) + 90.5% per-epoch
-            # fulfillment + 9.5% fulfillment leaderboard = 100%.  Sourcing and
-            # champion buckets are both empty; all incentive is on per-epoch
-            # fulfillment winners and the weekly top-3 leaderboard.
+            # MAX_SOURCING_SHARE is strictly 0% under the Research Lab split:
+            # 10% Research Lab + 80.5% per-epoch fulfillment + 9.5%
+            # fulfillment leaderboard = 100%. Sourcing and the retired legacy
+            # champion bucket are empty.
             MAX_SOURCING_SHARE = (
                 1.0
+                - RESEARCH_LAB_SHARE
                 - CHAMPION_SHARE
                 - FULFILLMENT_POOL_SHARE
                 - LEADERBOARD_BONUS_SHARE
@@ -3668,6 +3798,7 @@ class Validator(BaseValidatorNeuron):
             print(
                 f"\n   📊 SPLIT: Sourcing={MAX_SOURCING_SHARE*100:.0f}%, "
                 f"Champion={effective_champion_share*100:.0f}%, "
+                f"Research Lab={RESEARCH_LAB_SHARE*100:.0f}%, "
                 f"Fulfillment={effective_fulfillment_pool*100:.0f}%, "
                 f"Leaderboard={effective_leaderboard_share*100:.0f}%"
             )
@@ -3696,12 +3827,19 @@ class Validator(BaseValidatorNeuron):
             # the fulfillment pool using metagraph.hotkeys directly (it does
             # not depend on hotkey_to_uid, which is sourcing-only), so an
             # empty sourcing roster must NOT block fulfillment payouts.
-            if not hotkey_to_uid and not ff_enabled:
+            if not hotkey_to_uid and not ff_enabled and not research_lab_has_live_allocations:
                 # FALLBACK: No valid miner UIDs found - submit burn weights
                 print(f"   ⚠️  No valid miner UIDs found")
                 print(f"      Miners have left the subnet or are not registered")
                 print(f"   🔥 Submitting 100% burn weights...")
                 
+                if not _verify_burn_target_owner(
+                    self.metagraph,
+                    BURN_TARGET_UID,
+                    EXPECTED_BURN_TARGET_HOTKEY,
+                ):
+                    return False
+
                 result = self.subtensor.set_weights(
                     netuid=self.config.netuid,
                     wallet=self.wallet,
@@ -3848,6 +3986,12 @@ class Validator(BaseValidatorNeuron):
                     f"(safe fallback — full {effective_leaderboard_share*100:.2f}% to burn): {e}"
                 )
 
+            research_lab_per_uid, research_lab_burn, research_lab_breakdown = _research_lab_uid_weights_from_allocation(
+                research_lab_allocation_doc,
+                metagraph=self.metagraph,
+                reserved_share=RESEARCH_LAB_SHARE,
+            )
+
             # Calculate total burn share.
             # Includes: threshold shortfall + deregistered miners + unused
             # fulfillment pool + leaderboard fall-through + unallocated champion.
@@ -3866,6 +4010,7 @@ class Validator(BaseValidatorNeuron):
                 + dereg_burn
                 + unused_fulfillment
                 + leaderboard_burn
+                + research_lab_burn
             )
             
             print()
@@ -3874,6 +4019,7 @@ class Validator(BaseValidatorNeuron):
             print(f"      Unused sourcing:      {unused_sourcing_share*100:.2f}% (threshold shortfall)")
             print(f"      Unused champion:      {unused_champion*100:.2f}% (no active champion)")
             print(f"      Unused fulfillment:   {unused_fulfillment*100:.2f}%")
+            print(f"      Research Lab burn:    {research_lab_burn*100:.2f}%")
             print(f"      Deregistered miners:  {dereg_burn*100:.2f}%")
             print(f"      Leaderboard burn:     {leaderboard_burn*100:.2f}%")
             print(f"      ─────────────────────────────")
@@ -3881,6 +4027,7 @@ class Validator(BaseValidatorNeuron):
             print(f"      Champion → UID {champion_uid if champion_uid else '?'}:     {effective_champion_share*100:.0f}%")
             print(f"      Fulfillment miners:   {fulfillment_share*100:.4f}%")
             print(f"      Leaderboard top-3:    {leaderboard_paid*100:.2f}%")
+            print(f"      Research Lab miners:  {research_lab_breakdown['paid']*100:.4f}%")
             print(f"      Sourcing miners:      {effective_sourcing_to_miners*100:.2f}%")
             print()
             
@@ -3920,6 +4067,13 @@ class Validator(BaseValidatorNeuron):
                     uid_weights[lb_uid] = 0
                 uid_weights[lb_uid] += lb_pct
                 print(f"   🏆 Leaderboard bonus (UID {lb_uid}): {lb_pct*100:.2f}%")
+
+            # Research Lab reimbursements and promoted model-improvement rewards.
+            for lab_uid, lab_pct in research_lab_per_uid.items():
+                if lab_uid not in uid_weights:
+                    uid_weights[lab_uid] = 0
+                uid_weights[lab_uid] += lab_pct
+                print(f"   🔬 Research Lab (UID {lab_uid}): {lab_pct*100:.4f}%")
             
             # ═══════════════════════════════════════════════════════════════════
             # DISTRIBUTE SOURCING SHARE BY REP SCORE
@@ -3970,6 +4124,14 @@ class Validator(BaseValidatorNeuron):
             if not (0.999 <= weight_sum <= 1.001):
                 print(f"   ❌ ERROR: Weights sum to {weight_sum}, not 1.0!")
                 return False
+
+            if uid_weights.get(BURN_TARGET_UID, 0.0) > 0.0000001:
+                if not _verify_burn_target_owner(
+                    self.metagraph,
+                    BURN_TARGET_UID,
+                    EXPECTED_BURN_TARGET_HOTKEY,
+                ):
+                    return False
             
             # Use final_uids and final_weights
             uids = final_uids

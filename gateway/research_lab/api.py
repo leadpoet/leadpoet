@@ -24,6 +24,7 @@ from gateway.qualification.utils.chain import (
 )
 from gateway.utils.bans import is_hotkey_banned
 
+from .allocations import build_research_lab_allocation_bundle
 from .arweave_audit import latest_arweave_anchor
 from .bundles import build_research_lab_audit_bundle, build_shadow_report_bundle
 from .config import ResearchLabGatewayConfig
@@ -887,6 +888,25 @@ async def get_research_lab_shadow_report(epoch: int):
         )
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/allocations/live/{epoch}")
+async def get_research_lab_live_allocation(epoch: int):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    _require_enabled(config.shadow_bundles_enabled, "Research Lab report bundles are disabled")
+    try:
+        return await build_research_lab_allocation_bundle(
+            config=config,
+            epoch=int(epoch),
+            netuid=BITTENSOR_NETUID,
+            persist_snapshot=bool(config.weight_mutation_enabled),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Research Lab allocation unavailable: {str(exc)[:200]}") from exc
 
 
 async def _verify_signed_miner(payload: object) -> None:

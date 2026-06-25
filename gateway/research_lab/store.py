@@ -77,6 +77,42 @@ async def select_many(
     return [dict(row) for row in (getattr(response, "data", None) or [])]
 
 
+async def select_all(
+    table: str,
+    *,
+    columns: str = "*",
+    filters: Iterable[tuple[str, Any]],
+    order_by: Iterable[tuple[str, bool]] = (),
+    batch_size: int = 1000,
+    max_rows: int = 10000,
+) -> list[dict[str, Any]]:
+    """Fetch rows with explicit PostgREST pagination for weight-critical paths."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if max_rows <= 0:
+        raise ValueError("max_rows must be positive")
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    while offset < max_rows:
+        end = min(offset + batch_size - 1, max_rows - 1)
+
+        def _call() -> Any:
+            query = get_write_client().table(table).select(columns)
+            for field, value in filters:
+                query = query.eq(field, str(value) if isinstance(value, UUID) else value)
+            for field, desc in order_by:
+                query = query.order(field, desc=desc)
+            return query.range(offset, end).execute()
+
+        response = await asyncio.to_thread(_call)
+        batch = [dict(row) for row in (getattr(response, "data", None) or [])]
+        rows.extend(batch)
+        if len(batch) < batch_size:
+            return rows
+        offset += batch_size
+    raise RuntimeError(f"{table}: paginated select exceeded max_rows={max_rows}")
+
+
 async def next_event_seq(table: str, key_field: str, key_value: Any) -> int:
     def _call() -> Any:
         return (
@@ -546,6 +582,8 @@ async def create_private_model_benchmark_bundle(
     private_model_manifest_hash: str,
     rolling_window_hash: str,
     evaluation_epoch: int,
+    benchmark_attempt: int = 0,
+    benchmark_quality: str = "passed",
     aggregate_score: float,
     scoring_worker_ref: str,
     proxy_ref_hash: str | None,
@@ -558,6 +596,8 @@ async def create_private_model_benchmark_bundle(
         "private_model_manifest_hash": private_model_manifest_hash,
         "rolling_window_hash": rolling_window_hash,
         "evaluation_epoch": int(evaluation_epoch),
+        "benchmark_attempt": int(benchmark_attempt),
+        "benchmark_quality": str(benchmark_quality),
         "aggregate_score": float(aggregate_score),
         "scoring_worker_ref": scoring_worker_ref,
         "proxy_ref_hash": proxy_ref_hash,
@@ -881,6 +921,8 @@ async def create_public_benchmark_report(
     private_model_manifest_hash: str,
     rolling_window_hash: str,
     aggregate_score: float,
+    benchmark_attempt: int = 0,
+    benchmark_quality: str = "passed",
     report_doc: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     payload = {
@@ -890,6 +932,8 @@ async def create_public_benchmark_report(
         "private_model_manifest_hash": private_model_manifest_hash,
         "rolling_window_hash": rolling_window_hash,
         "aggregate_score": float(aggregate_score),
+        "benchmark_attempt": int(benchmark_attempt),
+        "benchmark_quality": str(benchmark_quality),
         "report_doc": report_doc,
     }
     report_hash = canonical_hash(payload)
@@ -1022,6 +1066,41 @@ async def create_champion_reward_event(
         "anchored_hash": canonical_hash(payload),
     }
     return await insert_row("research_lab_champion_reward_events", row)
+
+
+async def create_research_lab_emission_allocation_snapshot(
+    *,
+    epoch: int,
+    netuid: int,
+    policy_id: str,
+    snapshot_status: str,
+    allocation_doc: dict[str, Any],
+) -> dict[str, Any]:
+    allocation_hash = str(allocation_doc["allocation_hash"])
+    allocation_id = "lab_allocation:" + allocation_hash
+    existing = await select_one(
+        "research_lab_emission_allocation_snapshots",
+        filters=(("allocation_id", allocation_id),),
+    )
+    if existing:
+        return existing
+    row = {
+        "allocation_id": allocation_id,
+        "schema_version": "1.0",
+        "epoch": int(epoch),
+        "netuid": int(netuid),
+        "policy_id": str(policy_id),
+        "snapshot_status": str(snapshot_status),
+        "lab_cap_alpha_percent": float(allocation_doc.get("lab_cap_percent") or 0.0),
+        "reimbursement_alpha_percent": float(allocation_doc.get("reimbursement_alpha_percent") or 0.0),
+        "champion_alpha_percent": float(allocation_doc.get("champion_alpha_percent") or 0.0),
+        "queued_champion_alpha_percent": float(allocation_doc.get("queued_champion_alpha_percent") or 0.0),
+        "unallocated_alpha_percent": float(allocation_doc.get("unallocated_percent") or 0.0),
+        "input_hash": str(allocation_doc.get("input_hash") or ""),
+        "allocation_hash": allocation_hash,
+        "allocation_doc": allocation_doc,
+    }
+    return await insert_row("research_lab_emission_allocation_snapshots", row)
 
 
 async def create_signed_audit_bundle(

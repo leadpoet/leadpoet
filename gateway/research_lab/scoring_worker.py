@@ -10,6 +10,7 @@ import time
 from typing import Any, Mapping
 
 from gateway.research_lab.bundles import build_research_lab_audit_bundle
+from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.icp_window import (
     RollingIcpWindowUnavailable,
@@ -44,8 +45,10 @@ from research_lab.eval import (
     DockerPrivateModelRunner,
     DockerPrivateModelSpec,
     PrivateModelArtifactManifest,
+    PrivateModelRuntimeError,
     SealedBenchmarkSet,
     evaluate_private_model_pair,
+    ensure_private_model_outputs,
     sign_digest_with_kms,
 )
 from research_lab.eval.evaluator import QualificationStyleCompanyScorer
@@ -70,30 +73,6 @@ def _error_backoff_seconds() -> float:
 
 def _short_error(exc: BaseException) -> str:
     return f"{exc.__class__.__name__}: {str(exc)[:300]}"
-
-
-def _fetch_current_chain_epoch_direct() -> tuple[int, int, str]:
-    """Resolve the current Bittensor epoch for worker subprocesses.
-
-    Research Lab scoring workers run as child processes, so they do not share
-    the AsyncSubtensor injected into gateway.utils.epoch by gateway/main.py.
-    """
-    import bittensor as bt
-
-    network = os.getenv("BITTENSOR_NETWORK", "finney")
-    proxy_keys = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
-    saved_proxy_env = {key: os.environ.pop(key) for key in proxy_keys if key in os.environ}
-    try:
-        subtensor = bt.subtensor(network=network)
-        try:
-            block = int(subtensor.block)
-        finally:
-            close = getattr(subtensor, "close", None)
-            if callable(close):
-                close()
-    finally:
-        os.environ.update(saved_proxy_env)
-    return block // 360, block, network
 
 
 class ResearchLabGatewayScoringWorker:
@@ -517,12 +496,14 @@ class ResearchLabGatewayScoringWorker:
             allow_partial=self.config.scoring_worker_allow_partial_icp_window,
         )
         existing = await select_many(
-            "research_lab_private_model_benchmark_bundles",
-            columns="benchmark_bundle_id",
+            "research_lab_private_model_benchmark_current",
+            columns="*",
             filters=(("benchmark_date", today), ("rolling_window_hash", window.window_hash)),
-            limit=1,
+            order_by=(("created_at", True),),
+            limit=25,
         )
-        if existing:
+        valid_existing = [row for row in existing if _private_benchmark_row_is_valid(row)]
+        if valid_existing:
             already_key = f"{today}:{window.window_hash}"
             if self._baseline_already_logged_date != already_key:
                 logger.info(
@@ -543,6 +524,7 @@ class ResearchLabGatewayScoringWorker:
                 "benchmark_date": today,
                 "rolling_window_hash": window.window_hash,
             }
+        benchmark_attempt = _next_benchmark_attempt(existing)
         await create_rolling_icp_window(window)
         active = await load_active_private_model(self.config, register_bootstrap=True)
         artifact = active.artifact
@@ -570,18 +552,72 @@ class ResearchLabGatewayScoringWorker:
         )
         scorer = QualificationStyleCompanyScorer()
         per_icp_summaries: list[dict[str, Any]] = []
-        for item in window.benchmark_items:
-            outputs = await asyncio.to_thread(runner, item["icp"], {"mode": "private_baseline"})
-            score_breakdowns = await scorer.score_with_breakdowns(outputs, item["icp"], True)
-            scores = [float(row.get("final_score", 0.0) or 0.0) for row in score_breakdowns]
-            per_icp_summaries.append(
-                sanitize_benchmark_item_summary(
-                    item=item,
-                    score=_average(scores),
-                    company_count=len(scores),
-                    score_breakdowns=score_breakdowns,
+        try:
+            await create_scoring_dispatch_event(
+                dispatch_type="private_baseline_rebenchmark",
+                dispatch_status="assigned",
+                worker_ref=self.worker_ref,
+                proxy_ref_hash=self.proxy_ref_hash,
+                rolling_window_hash=window.window_hash,
+                event_doc={
+                    "benchmark_date": today,
+                    "benchmark_attempt": benchmark_attempt,
+                    "selected_icp_count": len(window.item_refs),
+                },
+            )
+            for item in window.benchmark_items:
+                label = str(item.get("icp_ref") or item.get("icp_hash") or "unknown_icp")
+                outputs = ensure_private_model_outputs(
+                    await asyncio.to_thread(runner, item["icp"], {"mode": "private_baseline"}),
+                    context_label=f"private baseline for {label}",
+                    require_non_empty=True,
+                )
+                score_breakdowns = await scorer.score_with_breakdowns(outputs, item["icp"], True)
+                if not score_breakdowns:
+                    raise PrivateModelRuntimeError(f"private baseline produced no scoreable companies for {label}")
+                scores = [float(row.get("final_score", 0.0) or 0.0) for row in score_breakdowns]
+                per_icp_summaries.append(
+                    sanitize_benchmark_item_summary(
+                        item=item,
+                        score=_average(scores),
+                        company_count=len(scores),
+                        score_breakdowns=score_breakdowns,
+                    )
+                )
+        except Exception as exc:
+            await create_scoring_dispatch_event(
+                dispatch_type="private_baseline_rebenchmark",
+                dispatch_status="failed",
+                worker_ref=self.worker_ref,
+                proxy_ref_hash=self.proxy_ref_hash,
+                rolling_window_hash=window.window_hash,
+                event_doc={
+                    "benchmark_date": today,
+                    "benchmark_attempt": benchmark_attempt,
+                    "selected_icp_count": len(window.item_refs),
+                    "error": str(exc)[:500],
+                    "elapsed_seconds": round(time.time() - start, 3),
+                },
+            )
+            logger.exception(
+                format_worker_block(
+                    "RESEARCH LAB PRIVATE BASELINE FAILED",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Benchmark date", today),
+                        ("Rolling window", compact_ref(window.window_hash)),
+                        ("Evaluation epoch", evaluation_epoch),
+                        ("Attempt", benchmark_attempt),
+                        ("Error", str(exc)[:300]),
+                    ),
                 )
             )
+            return {
+                "status": "failed",
+                "benchmark_date": today,
+                "rolling_window_hash": window.window_hash,
+                "error": str(exc)[:300],
+            }
         aggregate_score = _average([summary["score"] for summary in per_icp_summaries])
         visibility_split = build_benchmark_visibility_split(
             rolling_window_hash=window.window_hash,
@@ -592,6 +628,8 @@ class ResearchLabGatewayScoringWorker:
         )
         score_summary_doc = {
             "schema_version": "1.0",
+            "benchmark_quality": "passed",
+            "benchmark_attempt": benchmark_attempt,
             "rolling_window_hash": window.window_hash,
             "per_icp_summaries": per_icp_summaries,
             "visibility_split": visibility_split,
@@ -611,6 +649,8 @@ class ResearchLabGatewayScoringWorker:
             private_model_manifest_hash=artifact.manifest_hash,
             rolling_window_hash=window.window_hash,
             evaluation_epoch=evaluation_epoch,
+            benchmark_attempt=benchmark_attempt,
+            benchmark_quality="passed",
             aggregate_score=aggregate_score,
             scoring_worker_ref=self.worker_ref,
             proxy_ref_hash=self.proxy_ref_hash,
@@ -648,6 +688,8 @@ class ResearchLabGatewayScoringWorker:
             private_model_manifest_hash=artifact.manifest_hash,
             rolling_window_hash=window.window_hash,
             aggregate_score=aggregate_score,
+            benchmark_attempt=benchmark_attempt,
+            benchmark_quality="passed",
             report_doc=public_report_doc,
         )
         await self._write_audit_bundle(evaluation_epoch)
@@ -662,6 +704,7 @@ class ResearchLabGatewayScoringWorker:
                     ("Rolling window", compact_ref(window.window_hash)),
                     ("Evaluation epoch", evaluation_epoch),
                     ("Selected ICPs", len(window.item_refs)),
+                    ("Attempt", benchmark_attempt),
                     ("Public ICPs", visibility_split.get("public_count")),
                     ("Private holdout ICPs", visibility_split.get("private_count")),
                     ("Public strength", visibility_split.get("public_strength_counts")),
@@ -683,26 +726,13 @@ class ResearchLabGatewayScoringWorker:
         return self.config.scoring_worker_index == 0
 
     async def _resolve_evaluation_epoch(self) -> int:
-        configured_epoch = int(self.config.evaluation_epoch or 0)
-        if configured_epoch > 0:
-            return configured_epoch
-
         now = time.monotonic()
         if self._resolved_epoch_cache is not None:
             cached_epoch, cached_at = self._resolved_epoch_cache
             if now - cached_at <= 60.0:
                 return cached_epoch
 
-        try:
-            from gateway.utils.epoch import get_current_epoch_id_async
-
-            epoch = int(await get_current_epoch_id_async())
-            source = "gateway_epoch_utils"
-            block = None
-            network = os.getenv("BITTENSOR_NETWORK", "finney")
-        except Exception:
-            epoch, block, network = await asyncio.to_thread(_fetch_current_chain_epoch_direct)
-            source = "direct_subtensor"
+        epoch, block, source = await resolve_research_lab_evaluation_epoch(self.config.evaluation_epoch)
 
         if epoch <= 0:
             raise RuntimeError(
@@ -710,10 +740,9 @@ class ResearchLabGatewayScoringWorker:
             )
         self._resolved_epoch_cache = (epoch, now)
         logger.info(
-            "Research Lab scoring worker resolved evaluation epoch: epoch=%s block=%s network=%s source=%s",
+            "Research Lab scoring worker resolved evaluation epoch: epoch=%s block=%s source=%s",
             epoch,
             block,
-            network,
             source,
         )
         return epoch
@@ -938,3 +967,34 @@ class ResearchLabGatewayScoringWorker:
 
 def _average(values: list[float]) -> float:
     return float(sum(values) / len(values)) if values else 0.0
+
+
+def _next_benchmark_attempt(rows: list[Mapping[str, Any]]) -> int:
+    attempts: list[int] = []
+    for row in rows:
+        try:
+            attempts.append(int(row.get("benchmark_attempt") or 0))
+        except (TypeError, ValueError):
+            attempts.append(0)
+    return (max(attempts) + 1) if attempts else 0
+
+
+def _private_benchmark_row_is_valid(row: Mapping[str, Any]) -> bool:
+    status = str(row.get("current_benchmark_status") or row.get("benchmark_status") or "")
+    if status and status != "completed":
+        return False
+    if str(row.get("benchmark_quality") or "") == "passed":
+        return True
+    try:
+        if int(row.get("evaluation_epoch") or 0) <= 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    doc = row.get("score_summary_doc") if isinstance(row.get("score_summary_doc"), Mapping) else {}
+    summaries = doc.get("per_icp_summaries") if isinstance(doc, Mapping) else None
+    if not isinstance(summaries, list) or not summaries:
+        return False
+    return all(
+        isinstance(item, Mapping) and int(item.get("company_count") or 0) > 0
+        for item in summaries
+    )

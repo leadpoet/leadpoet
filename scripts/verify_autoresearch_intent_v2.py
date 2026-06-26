@@ -160,6 +160,7 @@ class AutoresearchScorerTests(unittest.TestCase):
 
     def test_passing_gates_use_capped_sum_and_zero_icp_fit(self):
         async def fake_signal_score(*_args, **_kwargs):
+            self.assertIs(_kwargs.get("trust_signal_date"), True)
             return 50.0, 90, "verified", None, 0
 
         company = self._company(
@@ -208,6 +209,40 @@ class AutoresearchScorerTests(unittest.TestCase):
         self.assertEqual(result.icp_fit, 0)
         self.assertEqual(result.intent_signal_final, 80)
         self.assertEqual(result.final_score, 80)
+
+    def test_stale_autoresearch_signal_zeroes_before_llm(self):
+        company = self._company(
+            intent_signals=[
+                {
+                    "source": "news",
+                    "description": "Acme raised a funding round.",
+                    "url": "https://acmefundingnews.com/acme-old",
+                    "date": "2024-01-01",
+                    "snippet": "Acme raised capital.",
+                    "matched_icp_signal": 0,
+                },
+            ]
+        )
+        icp = self._icp(intent_max_age_days=30)
+        with (
+            mock.patch(
+                "qualification.scoring.lead_scorer.verify_company_exists",
+                return_value=(True, "ok"),
+            ),
+            mock.patch(
+                "qualification.scoring.lead_scorer._score_single_intent_signal",
+                side_effect=AssertionError("stale signal should not reach LLM scorer"),
+            ),
+        ):
+            result = asyncio.run(score_company_autoresearch_intent_v2(
+                company=company,
+                icp=icp,
+                run_cost_usd=0,
+                run_time_seconds=0,
+                seen_companies=set(),
+            ))
+        self.assertEqual(result.final_score, 0)
+        self.assertIn("Intent fabrication", result.failure_reason)
 
 
 if __name__ == "__main__":

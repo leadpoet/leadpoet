@@ -61,7 +61,7 @@ from qualification.scoring.verification_helpers import (
     check_future_date,
     openrouter_chat,
 )
-from qualification.scoring.intent_signal_gate import judge_intent_signal
+from qualification.scoring.intent_signal_gate import check_evidence_freshness, judge_intent_signal
 from qualification.scoring.company_verification import verify_company_exists
 
 # Feature flag for the strict LLM judge (Layer 4 of intent_signal_gate).
@@ -697,9 +697,18 @@ async def score_company_intent_signal(
 
 
 async def score_company_autoresearch_intent_signal(
-    company: CompanyOutput, icp: ICPPrompt, api_key: str = ""
+    company: CompanyOutput,
+    icp: ICPPrompt,
+    api_key: str = "",
+    trust_signal_date: bool = True,
+    no_time_decay: bool = True,
 ) -> Tuple[float, float, float, int, bool]:
-    """Score CompanyOutput intent signals with capped-sum breadth rewards."""
+    """Score CompanyOutput intent signals with capped-sum breadth rewards.
+
+    Research Lab private-model evidence dates come from the sourcing pipeline's
+    discovery layer. Enforce the buyer freshness cap deterministically here,
+    then avoid a second Sonar date veto or graded decay for in-window evidence.
+    """
     icp_criteria = None
     seen_domains: set = set()
     signal_results = []
@@ -721,6 +730,34 @@ async def score_company_autoresearch_intent_signal(
             continue
         seen_domains.add(domain)
 
+        matched_idx = getattr(signal, "matched_icp_signal", -1)
+        icp_signals = list(getattr(icp, "intent_signals", None) or [])
+        target_signal = (
+            icp_signals[matched_idx]
+            if isinstance(matched_idx, int) and 0 <= matched_idx < len(icp_signals)
+            else ""
+        )
+        freshness_reason = check_evidence_freshness(
+            claim_text=str(target_signal or signal.description or ""),
+            signal_date=signal.date,
+            buyer_cap_days=getattr(icp, "intent_max_age_days", None),
+        )
+        if freshness_reason:
+            logger.info(
+                "Autoresearch intent signal rejected by freshness gate: %s  "
+                "source=%s",
+                freshness_reason,
+                signal.url[:60],
+            )
+            signal_results.append({
+                "raw": 0.0,
+                "after_decay": 0.0,
+                "decay": 0.0,
+                "confidence": 0,
+                "date_status": "fabricated",
+            })
+            continue
+
         score, confidence, date_status, content_found_date, _matched_idx = (
             await _score_single_intent_signal(
                 signal,
@@ -731,13 +768,17 @@ async def score_company_autoresearch_intent_signal(
                 api_key=api_key,
                 company_linkedin=getattr(company, "company_linkedin", "") or "",
                 product_service_context=getattr(icp, "product_service", "") or "",
+                trust_signal_date=trust_signal_date,
             )
         )
-        after_decay, decay = _apply_signal_time_decay(
-            score, signal.date, date_status,
-            signal.source.value if hasattr(signal.source, 'value') else str(signal.source),
-            content_found_date=content_found_date,
-        )
+        if no_time_decay:
+            after_decay, decay = score, 1.0 if score > 0 else 0.0
+        else:
+            after_decay, decay = _apply_signal_time_decay(
+                score, signal.date, date_status,
+                signal.source.value if hasattr(signal.source, 'value') else str(signal.source),
+                content_found_date=content_found_date,
+            )
         signal_results.append({
             "raw": score,
             "after_decay": after_decay,
@@ -1008,6 +1049,7 @@ async def _score_single_intent_signal(
     api_key: str = "",
     company_linkedin: str = "",
     product_service_context: str = "",
+    trust_signal_date: bool = False,
 ) -> Tuple[float, int, str, Optional[str], int]:
     """
     Verify and score a single intent signal.
@@ -1212,13 +1254,19 @@ async def _score_single_intent_signal(
     miner_date_match = (
         (three_stage_result.get("stage3") or {}).get("claim_matches_miner_date")
     )
-    if miner_date_match == "contradicted":
+    if miner_date_match == "contradicted" and not trust_signal_date:
         logger.info(
             "Intent signal three-stage REJECT  reason=miner_date_contradicted  "
             "miner_date=%s  source=%s",
             (str(signal.date) if signal.date else None), signal.url[:60],
         )
         return 0.0, confidence, "fabricated", content_found_date, -1
+    if miner_date_match == "contradicted" and trust_signal_date:
+        logger.info(
+            "Intent date contradiction ignored after deterministic freshness gate  "
+            "source=%s",
+            signal.url[:60],
+        )
 
     logger.info(
         "Intent signal three-stage ACCEPT  decision=%s  "

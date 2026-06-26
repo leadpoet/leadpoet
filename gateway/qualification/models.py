@@ -581,6 +581,11 @@ class ICPPrompt(BaseModel):
     country: str = Field("", description="Target country (extracted)")
     product_service: str = Field(..., description="Product/service being sold")
     intent_signals: List[str] = Field(default_factory=list, description="Intent signals to look for")
+    intent_max_age_days: int = Field(
+        365,
+        ge=1,
+        description="Maximum age in days for intent evidence when the ICP carries an explicit cap",
+    )
     # Sibling list mapping 1:1 to ``intent_signals`` carrying the
     # buyer-side evidence_type for each signal (HIRING / FUNDING /
     # SOCIAL_POSTING / PODCAST_APPEARANCE / TECHSTACK / CASE_STUDY /

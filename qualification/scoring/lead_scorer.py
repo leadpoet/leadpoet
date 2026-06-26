@@ -1137,12 +1137,9 @@ async def _score_single_intent_signal(
         if isinstance(target_signal_raw, dict)
         else str(target_signal_raw)
     )
-    if product_service_context:
-        target_signal_text = (
-            f"{target_signal_text}\n"
-            f"Product/service buying-fit context: the evidence should indicate "
-            f"credible buying need or relevance for {product_service_context}."
-        )
+    # Keep the strict intent verifier focused on the requested event class.
+    # Product/service fit is scored separately by ICP fit; appending it here
+    # makes valid event evidence look like it failed the target signal.
     # Pull spec.evidence_type off the matched ICP signal so the verifier's
     # prompt dispatcher routes to the per-type module (PART D for
     # SOCIAL_POSTING, PART E for TECHSTACK, PART F for

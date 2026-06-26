@@ -136,6 +136,7 @@ class ResearchLabGatewayConfig:
     scoring_worker_require_proxy: bool = False
     scoring_worker_proxy_url: str = ""
     scoring_worker_model_timeout_seconds: int = 900
+    private_model_docker_global_proxy_enabled: bool = False
     scoring_worker_allow_partial_icp_window: bool = False
     private_baseline_rebenchmark_enabled: bool = False
     auto_research_min_seconds: int = 600
@@ -276,6 +277,10 @@ class ResearchLabGatewayConfig:
             scoring_worker_model_timeout_seconds=max(
                 30,
                 _int("RESEARCH_LAB_SCORING_WORKER_MODEL_TIMEOUT_SECONDS", 900),
+            ),
+            private_model_docker_global_proxy_enabled=_truthy(
+                "RESEARCH_LAB_PRIVATE_MODEL_DOCKER_GLOBAL_PROXY_ENABLED",
+                "false",
             ),
             scoring_worker_allow_partial_icp_window=_truthy(
                 "RESEARCH_LAB_SCORING_ALLOW_PARTIAL_ICP_WINDOW",
@@ -677,6 +682,7 @@ class ResearchLabGatewayConfig:
                 "scoring_worker_total_workers": self.scoring_worker_total_workers,
                 "scoring_worker_require_proxy": self.scoring_worker_require_proxy,
                 "scoring_worker_proxy_configured": bool(self.scoring_worker_proxy_url),
+                "private_model_docker_global_proxy_enabled": self.private_model_docker_global_proxy_enabled,
                 "scoring_worker_allow_partial_icp_window": self.scoring_worker_allow_partial_icp_window,
                 "private_baseline_rebenchmark_enabled": self.private_baseline_rebenchmark_enabled,
                 "auto_promotion_enabled": self.auto_promotion_enabled,

@@ -55,6 +55,7 @@ from research_lab.eval import (
     SealedBenchmarkSet,
     evaluate_private_model_pair,
     ensure_private_model_outputs,
+    private_model_env_passthrough,
     sign_digest_with_kms,
 )
 from research_lab.eval.evaluator import QualificationStyleCompanyScorer
@@ -478,6 +479,7 @@ class ResearchLabGatewayScoringWorker:
                 DockerPrivateModelSpec(
                     image_digest=artifact.image_digest,
                     timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
+                    env_passthrough=self._private_model_env_passthrough(),
                     extra_env=self._private_scoring_env(),
                 )
             )
@@ -689,6 +691,7 @@ class ResearchLabGatewayScoringWorker:
                     DockerPrivateModelSpec(
                         image_digest=active.artifact.image_digest,
                         timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
+                        env_passthrough=self._private_model_env_passthrough(),
                         extra_env=self._private_scoring_env(),
                     )
                 )
@@ -741,6 +744,7 @@ class ResearchLabGatewayScoringWorker:
                 DockerPrivateModelSpec(
                     image_digest=active.artifact.image_digest,
                     timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
+                    env_passthrough=self._private_model_env_passthrough(),
                     extra_env=self._private_scoring_env(),
                 )
             )
@@ -901,6 +905,7 @@ class ResearchLabGatewayScoringWorker:
             DockerPrivateModelSpec(
                 image_digest=artifact.image_digest,
                 timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
+                env_passthrough=self._private_model_env_passthrough(),
                 extra_env=self._private_scoring_env(),
             )
         )
@@ -1416,7 +1421,7 @@ class ResearchLabGatewayScoringWorker:
             value = os.getenv(name)
             if value:
                 env[name] = value
-        if self.proxy_url:
+        if self.proxy_url and self.config.private_model_docker_global_proxy_enabled:
             env.update(
                 {
                     "HTTP_PROXY": self.proxy_url,
@@ -1430,6 +1435,11 @@ class ResearchLabGatewayScoringWorker:
             env["NO_PROXY"] = no_proxy
             env["no_proxy"] = no_proxy
         return env
+
+    def _private_model_env_passthrough(self) -> tuple[str, ...]:
+        return private_model_env_passthrough(
+            include_proxy=self.config.private_model_docker_global_proxy_enabled
+        )
 
 
 def _average(values: list[float]) -> float:

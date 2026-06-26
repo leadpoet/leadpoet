@@ -45,10 +45,40 @@ DEFAULT_ENV_PASSTHROUGH = (
     "https_proxy",
     "no_proxy",
 )
+PROVIDER_KEY_ENV_PASSTHROUGH = (
+    "EXA_API_KEY",
+    "SCRAPINGDOG_API_KEY",
+    "QUALIFICATION_SCRAPINGDOG_API_KEY",
+    "OPENROUTER_API_KEY",
+    "QUALIFICATION_OPENROUTER_API_KEY",
+    "OPENROUTER_KEY",
+)
+PROVIDER_PROXY_ENV_PASSTHROUGH = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
 
 
 class PrivateModelRuntimeError(RuntimeError):
     """Raised when the private model artifact cannot be executed safely."""
+
+
+def private_model_env_passthrough(*, include_proxy: bool = False) -> tuple[str, ...]:
+    """Provider env names for private model containers.
+
+    Worker processes may carry global Webshare proxy vars for their own network
+    path. Do not implicitly forward those into provider-backed model containers:
+    Exa, ScrapingDog, and OpenRouter are API services, and ScrapingDog performs
+    its own upstream proxying. Operators can opt in when testing a proxy-specific
+    provider path.
+    """
+    if include_proxy:
+        return PROVIDER_KEY_ENV_PASSTHROUGH + PROVIDER_PROXY_ENV_PASSTHROUGH
+    return PROVIDER_KEY_ENV_PASSTHROUGH
 
 
 def _default_docker_platform() -> str:

@@ -56,6 +56,7 @@ from research_lab.auto_research_prompt import build_validated_candidate_manifest
 from research_lab.eval import (
     DockerPrivateModelRunner,
     DockerPrivateModelSpec,
+    private_model_env_passthrough,
 )
 
 
@@ -502,6 +503,7 @@ class ResearchLabHostedWorker:
             **_worker_proxy_env(self.config),
         }
         context.provider_env = provider_env
+        docker_provider_env = _private_model_docker_env(self.config, provider_env)
         budget_context = self._run_budget_context(context)
         _tier, model_id, model_doc = self.config.resolve_auto_research_model(
             str(budget_context.get("research_model_tier") or "")
@@ -514,7 +516,8 @@ class ResearchLabHostedWorker:
         runner = DockerPrivateModelRunner(
             DockerPrivateModelSpec(
                 image_digest=artifact.image_digest,
-                extra_env=provider_env,
+                env_passthrough=_private_model_env_passthrough(self.config),
+                extra_env=docker_provider_env,
                 timeout_seconds=900,
             )
         )
@@ -653,7 +656,8 @@ class ResearchLabHostedWorker:
                 latest_runner = DockerPrivateModelRunner(
                     DockerPrivateModelSpec(
                         image_digest=final_artifact.image_digest,
-                        extra_env=provider_env,
+                        env_passthrough=_private_model_env_passthrough(self.config),
+                        extra_env=docker_provider_env,
                         timeout_seconds=900,
                     )
                 )
@@ -1525,6 +1529,34 @@ def _worker_proxy_env(config: ResearchLabGatewayConfig) -> dict[str, str]:
         env["NO_PROXY"] = no_proxy
         env["no_proxy"] = no_proxy
     return env
+
+
+_PROXY_ENV_NAMES = frozenset(
+    {
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    }
+)
+
+
+def _private_model_env_passthrough(config: ResearchLabGatewayConfig) -> tuple[str, ...]:
+    return private_model_env_passthrough(
+        include_proxy=config.private_model_docker_global_proxy_enabled
+    )
+
+
+def _private_model_docker_env(
+    config: ResearchLabGatewayConfig,
+    provider_env: Mapping[str, str],
+) -> dict[str, str]:
+    env = {str(key): str(value) for key, value in provider_env.items() if value}
+    if config.private_model_docker_global_proxy_enabled:
+        return env
+    return {key: value for key, value in env.items() if key not in _PROXY_ENV_NAMES}
 
 
 def _row_partition(row: Mapping[str, Any], total_workers: int) -> int:

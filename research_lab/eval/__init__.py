@@ -26,6 +26,7 @@ from .private_runtime import (
     compute_private_source_tree_hash,
     ensure_private_model_outputs,
     load_private_artifact_manifest,
+    private_model_env_passthrough,
     sign_digest_with_kms,
 )
 
@@ -45,6 +46,7 @@ __all__ = [
     "ensure_private_model_outputs",
     "evaluate_private_model_pair",
     "load_private_artifact_manifest",
+    "private_model_env_passthrough",
     "sign_digest_with_kms",
     "validate_candidate_patch_manifest",
     "validate_private_model_artifact_manifest",

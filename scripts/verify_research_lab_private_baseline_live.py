@@ -22,7 +22,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from research_lab.eval import DockerPrivateModelRunner, DockerPrivateModelSpec, ensure_private_model_outputs  # noqa: E402
+from research_lab.eval import (  # noqa: E402
+    DockerPrivateModelRunner,
+    DockerPrivateModelSpec,
+    ensure_private_model_outputs,
+    private_model_env_passthrough,
+)
 from research_lab.eval.evaluator import QualificationStyleCompanyScorer  # noqa: E402
 
 
@@ -79,6 +84,11 @@ def main() -> int:
     )
     parser.add_argument("--max-icps", type=int, default=1, help="Number of fixture ICPs to run.")
     parser.add_argument("--timeout-seconds", type=int, default=900, help="Per-ICP model timeout.")
+    parser.add_argument(
+        "--include-global-proxy",
+        action="store_true",
+        help="Forward HTTP_PROXY/HTTPS_PROXY into the model container for proxy A/B checks.",
+    )
     args = parser.parse_args()
 
     missing = [
@@ -93,14 +103,15 @@ def main() -> int:
         print("ERROR: --image or RESEARCH_LAB_PRIVATE_MODEL_IMAGE_DIGEST must be an immutable digest")
         return 2
 
-    return asyncio.run(_run(args.image, args.max_icps, args.timeout_seconds))
+    return asyncio.run(_run(args.image, args.max_icps, args.timeout_seconds, args.include_global_proxy))
 
 
-async def _run(image: str, max_icps: int, timeout_seconds: int) -> int:
+async def _run(image: str, max_icps: int, timeout_seconds: int, include_global_proxy: bool) -> int:
     runner = DockerPrivateModelRunner(
         DockerPrivateModelSpec(
             image_digest=image,
             timeout_seconds=timeout_seconds,
+            env_passthrough=private_model_env_passthrough(include_proxy=include_global_proxy),
             pull_before_run=False,
         )
     )

@@ -20,6 +20,7 @@ from research_lab.code_editing import (  # noqa: E402
 )
 from research_lab.eval import PrivateModelArtifactManifest, SealedBenchmarkSet  # noqa: E402
 from research_lab.eval.evaluator import evaluate_private_model_pair  # noqa: E402
+from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest  # noqa: E402
 
 
 def _manifest(name: str) -> PrivateModelArtifactManifest:
@@ -89,6 +90,41 @@ def test_code_edit_parser_rejects_dependency_edit() -> None:
         assert "disallowed_repo_path" in str(exc) or "path_not_in_code_edit_allowlist" in str(exc)
     else:
         raise AssertionError("requirements.txt edit should be rejected")
+
+
+def test_candidate_artifact_contract_requires_image_build() -> None:
+    parent = _manifest("parent")
+    candidate = _manifest("candidate")
+    compat_manifest = {
+        "parent_artifact_hash": parent.model_artifact_hash,
+        "candidate_artifact_hash": candidate.model_artifact_hash,
+    }
+    request = ResearchLabCandidateArtifactCreateRequest(
+        run_id="11111111-1111-4111-8111-111111111111",
+        ticket_id="22222222-2222-4222-8222-222222222222",
+        miner_hotkey="5EFakeMinerHotkey111111111111111111111111111",
+        island="generalist",
+        private_model_manifest=parent.to_dict(),
+        candidate_patch_manifest=compat_manifest,
+        candidate_model_manifest=candidate.to_dict(),
+        candidate_source_diff_hash=sha256_json({"diff": "safe"}),
+    )
+    reparsed = ResearchLabCandidateArtifactCreateRequest.model_validate(request.model_dump(mode="json"))
+    assert reparsed.candidate_kind == "image_build"
+
+    try:
+        ResearchLabCandidateArtifactCreateRequest(
+            run_id="11111111-1111-4111-8111-111111111111",
+            ticket_id="22222222-2222-4222-8222-222222222222",
+            miner_hotkey="5EFakeMinerHotkey111111111111111111111111111",
+            island="generalist",
+            candidate_kind="patch",
+            private_model_manifest=parent.to_dict(),
+            candidate_patch_manifest=compat_manifest,
+        )
+    except ValueError:
+        return
+    raise AssertionError("patch candidate creation should be rejected")
 
 
 async def test_image_build_score_bundle_contract(draft: CodeEditDraft) -> None:
@@ -165,6 +201,7 @@ async def test_image_build_score_bundle_contract(draft: CodeEditDraft) -> None:
 def main() -> None:
     draft = test_code_edit_parser_accepts_safe_diff()
     test_code_edit_parser_rejects_dependency_edit()
+    test_candidate_artifact_contract_requires_image_build()
     asyncio.run(test_image_build_score_bundle_contract(draft))
     print("research_lab_code_edit_pipeline_verifier: ok")
 

@@ -180,7 +180,7 @@ class ResearchLabCandidateArtifactCreateRequest(BaseModel):
     receipt_id: Optional[UUID] = None
     miner_hotkey: str = Field(min_length=16)
     island: str = Field(min_length=1, max_length=80)
-    candidate_kind: str = Field(default="patch", pattern="^(patch|image_build)$")
+    candidate_kind: str = Field(default="image_build", pattern="^image_build$")
     private_model_manifest: dict[str, Any]
     candidate_patch_manifest: dict[str, Any]
     candidate_model_manifest: Optional[dict[str, Any]] = None
@@ -192,11 +192,10 @@ class ResearchLabCandidateArtifactCreateRequest(BaseModel):
     @model_validator(mode="after")
     def no_secret_material(self) -> "ResearchLabCandidateArtifactCreateRequest":
         reject_secret_material(self.model_dump())
-        if self.candidate_kind == "image_build":
-            if not self.candidate_model_manifest:
-                raise ValueError("image_build candidate requires candidate_model_manifest")
-            if not self.candidate_source_diff_hash:
-                raise ValueError("image_build candidate requires candidate_source_diff_hash")
+        if not self.candidate_model_manifest:
+            raise ValueError("image_build candidate requires candidate_model_manifest")
+        if not self.candidate_source_diff_hash:
+            raise ValueError("image_build candidate requires candidate_source_diff_hash")
         return self
 
 

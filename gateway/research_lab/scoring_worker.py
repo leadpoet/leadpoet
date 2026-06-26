@@ -20,7 +20,6 @@ from gateway.research_lab.logging_utils import compact_ref, format_worker_block
 from gateway.research_lab.models import ResearchLabScoreBundleCreateRequest
 from gateway.research_lab.promotion import (
     ResearchLabPromotionController,
-    _rebased_candidate_request,
     load_active_private_model,
 )
 from gateway.research_lab.public_activity import safe_project_public_loop_activity
@@ -31,7 +30,6 @@ from gateway.research_lab.public_benchmarks import (
 )
 from gateway.research_lab.store import (
     canonical_hash,
-    create_candidate_artifact,
     create_candidate_evaluation_event,
     create_candidate_promotion_event,
     create_private_model_benchmark_bundle,
@@ -46,7 +44,6 @@ from gateway.research_lab.store import (
     select_many,
     select_one,
 )
-from research_lab.auto_research_prompt import coerce_component_registry
 from research_lab.eval import (
     DockerPrivateModelRunner,
     DockerPrivateModelSpec,
@@ -401,29 +398,27 @@ class ResearchLabGatewayScoringWorker:
                 elapsed_seconds=lambda: round(time.time() - start, 3),
             )
             if stale_result.get("status") in {
-                "stale_parent_rebased_candidate_queued",
-                "stale_parent_rebase_failed",
+                "legacy_patch_candidate_unsupported",
                 "stale_parent_needs_rescore",
             }:
                 await self._maybe_finalize_candidate_receipt(candidate)
                 await safe_project_public_loop_activity(
                     str(candidate["ticket_id"]),
-                    source_ref=f"candidate_stale_parent_rebased:{candidate_id}",
+                    source_ref=f"candidate_stale_parent_or_legacy_rejected:{candidate_id}",
                     reason=str(stale_result["status"]),
                     config=self.config,
                 )
                 try:
                     await self._write_audit_bundle(evaluation_epoch)
                 except Exception:
-                    logger.exception("Research Lab audit bundle write failed after stale-parent rebase")
+                    logger.exception("Research Lab audit bundle write failed after candidate rejection")
                 logger.info(
                     format_worker_block(
-                        "RESEARCH LAB CANDIDATE STALE PARENT HANDLED",
+                        "RESEARCH LAB CANDIDATE PRE-SCORING REJECTED",
                         (
                             ("Worker", self.worker_ref),
                             ("Candidate", compact_ref(candidate_id)),
                             ("Status", stale_result.get("status")),
-                            ("Derived", compact_ref(stale_result.get("derived_candidate_id"))),
                             ("Elapsed", f"{time.time() - start:.1f}s"),
                         ),
                     )
@@ -471,13 +466,13 @@ class ResearchLabGatewayScoringWorker:
 
             artifact = PrivateModelArtifactManifest.from_mapping(candidate["private_model_manifest_doc"])
             patch = candidate["candidate_patch_manifest"]
-            candidate_kind = str(candidate.get("candidate_kind") or "patch")
-            candidate_artifact = None
-            if candidate_kind == "image_build":
-                candidate_manifest_doc = candidate.get("candidate_model_manifest_doc")
-                if not isinstance(candidate_manifest_doc, Mapping):
-                    raise RuntimeError("image_build candidate is missing candidate_model_manifest_doc")
-                candidate_artifact = PrivateModelArtifactManifest.from_mapping(candidate_manifest_doc)
+            candidate_kind = str(candidate.get("candidate_kind") or "")
+            if candidate_kind != "image_build":
+                raise RuntimeError("candidate scoring requires image_build candidate_kind")
+            candidate_manifest_doc = candidate.get("candidate_model_manifest_doc")
+            if not isinstance(candidate_manifest_doc, Mapping):
+                raise RuntimeError("image_build candidate is missing candidate_model_manifest_doc")
+            candidate_artifact = PrivateModelArtifactManifest.from_mapping(candidate_manifest_doc)
             benchmark = SealedBenchmarkSet(
                 benchmark_id=window.benchmark_id,
                 icp_set_hash=window.window_hash,
@@ -494,16 +489,14 @@ class ResearchLabGatewayScoringWorker:
                     extra_env=self._private_scoring_env(),
                 )
             )
-            candidate_runner = runner
-            if candidate_artifact is not None:
-                candidate_runner = DockerPrivateModelRunner(
-                    DockerPrivateModelSpec(
-                        image_digest=candidate_artifact.image_digest,
-                        timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
-                        env_passthrough=self._private_model_env_passthrough(),
-                        extra_env=self._private_scoring_env(),
-                    )
+            candidate_runner = DockerPrivateModelRunner(
+                DockerPrivateModelSpec(
+                    image_digest=candidate_artifact.image_digest,
+                    timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
+                    env_passthrough=self._private_model_env_passthrough(),
+                    extra_env=self._private_scoring_env(),
                 )
+            )
             run_context = self._candidate_run_context(
                 candidate,
                 window_hash=window.window_hash,
@@ -513,7 +506,7 @@ class ResearchLabGatewayScoringWorker:
                 artifact_manifest=artifact,
                 benchmark=benchmark,
                 patch_manifest=patch,
-                candidate_artifact_manifest=candidate_artifact.to_dict() if candidate_artifact is not None else None,
+                candidate_artifact_manifest=candidate_artifact.to_dict(),
                 benchmark_items=window.benchmark_items,
                 base_runner=runner,
                 candidate_runner=candidate_runner,
@@ -705,21 +698,6 @@ class ResearchLabGatewayScoringWorker:
     ) -> dict[str, Any]:
         if not self.config.auto_promotion_enabled:
             return {"status": "disabled"}
-        active_registry = None
-        try:
-            active = await load_active_private_model(self.config, register_bootstrap=True)
-            if str(candidate.get("parent_artifact_hash") or "") != active.artifact.model_artifact_hash:
-                active_runner = DockerPrivateModelRunner(
-                    DockerPrivateModelSpec(
-                        image_digest=active.artifact.image_digest,
-                        timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
-                        env_passthrough=self._private_model_env_passthrough(),
-                        extra_env=self._private_scoring_env(),
-                    )
-                )
-                active_registry = coerce_component_registry(active_runner.metadata())
-        except Exception as exc:
-            logger.warning("Research Lab active model registry unavailable for promotion: %s", str(exc)[:200])
         return await ResearchLabPromotionController(
             self.config,
             worker_ref=self.worker_ref,
@@ -727,7 +705,6 @@ class ResearchLabGatewayScoringWorker:
             candidate=candidate,
             score_bundle_row=score_bundle_row,
             score_bundle=score_bundle,
-            active_component_registry=active_registry,
         )
 
     async def _maybe_rebase_stale_candidate_before_scoring(
@@ -740,13 +717,12 @@ class ResearchLabGatewayScoringWorker:
         active = await load_active_private_model(self.config, register_bootstrap=True)
         active_parent = active.artifact.model_artifact_hash
         candidate_parent = str(candidate.get("parent_artifact_hash") or "")
-        if candidate_parent == active_parent:
-            return {"status": "current_parent"}
-
         candidate_id = str(candidate["candidate_id"])
-        if str(candidate.get("candidate_kind") or "") == "image_build":
+        candidate_kind = str(candidate.get("candidate_kind") or "patch")
+        if candidate_kind != "image_build":
             base_event_doc = {
-                "action": "image_build_candidate_parent_changed_before_scoring",
+                "action": "legacy_patch_candidate_rejected_before_scoring",
+                "candidate_kind": candidate_kind,
                 "active_parent_artifact_hash": active_parent,
                 "candidate_parent_artifact_hash": candidate_parent,
                 "evaluation_epoch": int(evaluation_epoch),
@@ -755,8 +731,8 @@ class ResearchLabGatewayScoringWorker:
             }
             await create_candidate_promotion_event(
                 candidate_id=candidate_id,
-                event_type="stale_parent_detected",
-                promotion_status="stale_parent_needs_rescore",
+                event_type="unsupported_candidate_kind",
+                promotion_status="rejected",
                 active_parent_artifact_hash=active_parent,
                 candidate_parent_artifact_hash=candidate_parent,
                 worker_ref=self.worker_ref,
@@ -769,7 +745,7 @@ class ResearchLabGatewayScoringWorker:
                 event_type="rejected",
                 candidate_status="rejected",
                 evaluator_ref=self.worker_ref,
-                reason="stale_parent_needs_rescore",
+                reason="legacy_patch_candidate_unsupported",
                 event_doc={**base_event_doc, "elapsed_seconds": elapsed_seconds()},
             )
             await create_scoring_dispatch_event(
@@ -780,12 +756,15 @@ class ResearchLabGatewayScoringWorker:
                 candidate_id=candidate_id,
                 run_id=str(candidate["run_id"]),
                 ticket_id=str(candidate["ticket_id"]),
-                event_doc={**base_event_doc, "reason": "stale_parent_needs_rescore"},
+                event_doc={**base_event_doc, "reason": "legacy_patch_candidate_unsupported"},
             )
-            return {"status": "stale_parent_needs_rescore"}
+            return {"status": "legacy_patch_candidate_unsupported"}
+
+        if candidate_parent == active_parent:
+            return {"status": "current_parent"}
 
         base_event_doc = {
-            "action": "rebase_queued_candidate_against_active_model_before_scoring",
+            "action": "image_build_candidate_parent_changed_before_scoring",
             "active_parent_artifact_hash": active_parent,
             "candidate_parent_artifact_hash": candidate_parent,
             "evaluation_epoch": int(evaluation_epoch),
@@ -795,62 +774,11 @@ class ResearchLabGatewayScoringWorker:
         await create_candidate_promotion_event(
             candidate_id=candidate_id,
             event_type="stale_parent_detected",
-            promotion_status="rebase_required",
+            promotion_status="stale_parent_needs_rescore",
             active_parent_artifact_hash=active_parent,
             candidate_parent_artifact_hash=candidate_parent,
             worker_ref=self.worker_ref,
             event_doc={**base_event_doc, "stage": "before_scoring"},
-        )
-        try:
-            active_runner = DockerPrivateModelRunner(
-                DockerPrivateModelSpec(
-                    image_digest=active.artifact.image_digest,
-                    timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
-                    env_passthrough=self._private_model_env_passthrough(),
-                    extra_env=self._private_scoring_env(),
-                )
-            )
-            active_registry = coerce_component_registry(active_runner.metadata())
-            request = _rebased_candidate_request(candidate, active.artifact, active_registry)
-            derived_row, _event = await create_candidate_artifact(request)
-        except Exception as exc:
-            await create_candidate_evaluation_event(
-                candidate_id=candidate_id,
-                run_id=str(candidate["run_id"]),
-                ticket_id=str(candidate["ticket_id"]),
-                event_type="failed",
-                candidate_status="failed",
-                evaluator_ref=self.worker_ref,
-                reason="stale_parent_rebase_failed_before_scoring",
-                event_doc={**base_event_doc, "error": str(exc)[:500], "elapsed_seconds": elapsed_seconds()},
-            )
-            await create_scoring_dispatch_event(
-                dispatch_type="candidate_scoring",
-                dispatch_status="failed",
-                worker_ref=self.worker_ref,
-                proxy_ref_hash=self.proxy_ref_hash,
-                candidate_id=candidate_id,
-                run_id=str(candidate["run_id"]),
-                ticket_id=str(candidate["ticket_id"]),
-                event_doc={**base_event_doc, "error": str(exc)[:500]},
-            )
-            logger.exception("Research Lab stale-parent rebase failed before scoring candidate %s", candidate_id)
-            return {"status": "stale_parent_rebase_failed", "error": str(exc)[:200]}
-
-        await create_candidate_promotion_event(
-            candidate_id=candidate_id,
-            derived_candidate_id=str(derived_row["candidate_id"]),
-            event_type="rebase_queued",
-            promotion_status="rebenchmarking",
-            active_parent_artifact_hash=active_parent,
-            candidate_parent_artifact_hash=candidate_parent,
-            worker_ref=self.worker_ref,
-            event_doc={
-                **base_event_doc,
-                "derived_candidate_id": str(derived_row["candidate_id"]),
-                "derived_candidate_artifact_hash": str(derived_row["candidate_artifact_hash"]),
-                "derived_parent_artifact_hash": active_parent,
-            },
         )
         await create_candidate_evaluation_event(
             candidate_id=candidate_id,
@@ -859,12 +787,8 @@ class ResearchLabGatewayScoringWorker:
             event_type="rejected",
             candidate_status="rejected",
             evaluator_ref=self.worker_ref,
-            reason="stale_parent_rebased_before_scoring",
-            event_doc={
-                **base_event_doc,
-                "derived_candidate_id": str(derived_row["candidate_id"]),
-                "elapsed_seconds": elapsed_seconds(),
-            },
+            reason="stale_parent_needs_rescore",
+            event_doc={**base_event_doc, "elapsed_seconds": elapsed_seconds()},
         )
         await create_scoring_dispatch_event(
             dispatch_type="candidate_scoring",
@@ -874,16 +798,9 @@ class ResearchLabGatewayScoringWorker:
             candidate_id=candidate_id,
             run_id=str(candidate["run_id"]),
             ticket_id=str(candidate["ticket_id"]),
-            event_doc={
-                **base_event_doc,
-                "derived_candidate_id": str(derived_row["candidate_id"]),
-                "reason": "stale_parent_rebased_before_scoring",
-            },
+            event_doc={**base_event_doc, "reason": "stale_parent_needs_rescore"},
         )
-        return {
-            "status": "stale_parent_rebased_candidate_queued",
-            "derived_candidate_id": str(derived_row["candidate_id"]),
-        }
+        return {"status": "stale_parent_needs_rescore"}
 
     async def _maybe_run_private_baseline(self) -> dict[str, Any] | None:
         today = datetime.now(timezone.utc).date().isoformat()

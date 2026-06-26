@@ -2,12 +2,15 @@
 --
 -- Deployment policy:
 --   * Apply after scripts 33 and 44.
---   * Adds explicit image-build candidate fields while keeping patch candidates.
+--   * Adds explicit image-build candidate fields while preserving old patch rows
+--     only for legacy read/scoring compatibility.
 --   * Expands auto-research loop events for code edit/build lifecycle evidence.
 
 BEGIN;
 
 ALTER TABLE public.research_lab_candidate_artifacts
+    -- Temporary backfill default for existing rows; script 47 drops this default
+    -- and rejects future patch inserts.
     ADD COLUMN IF NOT EXISTS candidate_kind TEXT NOT NULL DEFAULT 'patch'
         CHECK (candidate_kind IN ('patch', 'image_build')),
     ADD COLUMN IF NOT EXISTS candidate_model_manifest_hash TEXT
@@ -80,7 +83,7 @@ ALTER TABLE public.research_lab_auto_research_loop_events
     );
 
 COMMENT ON COLUMN public.research_lab_candidate_artifacts.candidate_kind IS
-    'Candidate artifact type: patch compatibility candidate or built private model image candidate.';
+    'Candidate artifact type. New hosted auto-research candidates must be built private model images; patch is legacy read-only compatibility.';
 COMMENT ON COLUMN public.research_lab_candidate_artifacts.candidate_model_manifest_doc IS
     'For image_build candidates, the signed immutable private model manifest produced by the gateway builder.';
 COMMENT ON COLUMN public.research_lab_candidate_artifacts.candidate_build_doc IS

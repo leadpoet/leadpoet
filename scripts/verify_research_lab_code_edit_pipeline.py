@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Verify Research Lab code-edit image candidate contracts."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from research_lab.canonical import sha256_json  # noqa: E402
+from research_lab.code_editing import (  # noqa: E402
+    CodeEditDraft,
+    code_edit_candidate_manifest,
+    parse_code_edit_response,
+)
+from research_lab.eval import PrivateModelArtifactManifest, SealedBenchmarkSet  # noqa: E402
+from research_lab.eval.evaluator import evaluate_private_model_pair  # noqa: E402
+
+
+def _manifest(name: str) -> PrivateModelArtifactManifest:
+    payload = {
+        "model_artifact_hash": sha256_json({"model": name}),
+        "git_commit_sha": "abcdef1234567890",
+        "image_digest": f"493765492819.dkr.ecr.us-east-1.amazonaws.com/research-lab/{name}@sha256:"
+        + ("a" if name == "parent" else "b") * 64,
+        "config_hash": sha256_json({"config": name}),
+        "component_registry_version": "components:v1",
+        "scoring_adapter_version": "adapter:v1",
+        "manifest_uri": f"s3://leadpoet-private-model-artifacts-493765492819/research-lab/test/{name}.json",
+        "signature_ref": f"kms://test/{name}",
+        "build_id": f"build-{name}",
+    }
+    payload["manifest_hash"] = sha256_json(payload)
+    return PrivateModelArtifactManifest.from_mapping(payload)
+
+
+def _valid_response() -> str:
+    return json.dumps(
+        {
+            "candidates": [
+                {
+                    "lane": "query_construction",
+                    "hypothesis": {
+                        "failure_mode": "Queries are too broad.",
+                        "mechanism": "Add ICP-specific signal terms.",
+                        "expected_improvement": "More precise intent evidence.",
+                        "risk": "May reduce recall.",
+                        "predicted_delta": 1.0,
+                    },
+                    "code_edit": {
+                        "target_files": ["src/query_builder.py"],
+                        "unified_diff": (
+                            "diff --git a/src/query_builder.py b/src/query_builder.py\n"
+                            "--- a/src/query_builder.py\n"
+                            "+++ b/src/query_builder.py\n"
+                            "@@ -1,2 +1,2 @@\n"
+                            "-QUERY_SUFFIX = \"\"\n"
+                            "+QUERY_SUFFIX = \" buying intent evidence\"\n"
+                        ),
+                        "redacted_summary": "Tighten query construction around intent evidence.",
+                        "test_plan": "Run adapter metadata and public ICP smoke tests.",
+                        "rollback_plan": "Revert the query suffix change.",
+                    },
+                }
+            ]
+        }
+    )
+
+
+def test_code_edit_parser_accepts_safe_diff() -> CodeEditDraft:
+    drafts = parse_code_edit_response(_valid_response(), max_candidates=1)
+    assert len(drafts) == 1
+    draft = drafts[0]
+    assert draft.target_files == ("src/query_builder.py",)
+    assert "buying intent evidence" in draft.unified_diff
+    return draft
+
+
+def test_code_edit_parser_rejects_dependency_edit() -> None:
+    raw = _valid_response().replace("src/query_builder.py", "requirements.txt")
+    try:
+        parse_code_edit_response(raw, max_candidates=1)
+    except ValueError as exc:
+        assert "disallowed_repo_path" in str(exc) or "path_not_in_code_edit_allowlist" in str(exc)
+    else:
+        raise AssertionError("requirements.txt edit should be rejected")
+
+
+async def test_image_build_score_bundle_contract(draft: CodeEditDraft) -> None:
+    parent = _manifest("parent")
+    candidate = _manifest("candidate")
+    source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
+    build_doc = {
+        "schema_version": "1.0",
+        "candidate_kind": "image_build",
+        "source_diff_hash": source_diff_hash,
+        "candidate_model_manifest_hash": candidate.manifest_hash,
+    }
+    compat_manifest = code_edit_candidate_manifest(
+        draft=draft,
+        parent_artifact_hash=parent.model_artifact_hash,
+        candidate_artifact_hash=candidate.model_artifact_hash,
+        candidate_model_manifest_hash=candidate.manifest_hash,
+        source_diff_hash=source_diff_hash,
+        build_doc_hash=sha256_json(build_doc),
+    )
+    assert "buying intent evidence" not in json.dumps(compat_manifest)
+
+    benchmark = SealedBenchmarkSet(
+        benchmark_id="benchmark:test",
+        icp_set_hash=sha256_json({"icp": "set"}),
+        split_ref="split:test",
+        item_refs=("icp:test:1",),
+        scoring_version="qualification-company-scorer:v1",
+        hidden_plaintext_available=True,
+    )
+
+    async def parent_runner(_icp, _context):
+        return [{"company_name": "BaseCo", "company_website": "https://base.example"}]
+
+    async def candidate_runner(_icp, context):
+        assert "patch" not in context
+        return [{"company_name": "BetterCo", "company_website": "https://better.example"}]
+
+    def scorer(companies, _icp, is_reference_model):
+        return [50.0 if is_reference_model else 75.0 for _ in companies]
+
+    bundle = await evaluate_private_model_pair(
+        artifact_manifest=parent,
+        candidate_artifact_manifest=candidate,
+        benchmark=benchmark,
+        patch_manifest=compat_manifest,
+        benchmark_items=[{"icp_ref": "icp:test:1", "icp_hash": sha256_json({"i": 1}), "icp": {"industry": "Software"}}],
+        base_runner=parent_runner,
+        candidate_runner=candidate_runner,
+        company_scorer=scorer,
+        run_context={
+            "run_id": "run-test",
+            "ticket_id": "ticket-test",
+            "miner_hotkey": "5EFakeMinerHotkey111111111111111111111111111",
+            "island": "generalist",
+            "evaluation_epoch": 1,
+            "evaluator_version": "test",
+            "evidence_bundle_refs": [],
+            "execution_trace_ref": "trace:test",
+            "cost_ledger_ref": "cost:test",
+            "candidate_source_diff_hash": source_diff_hash,
+            "candidate_build_ref": sha256_json(build_doc),
+            "signature_ref": "pending",
+        },
+        policy={"min_delta": 1.0, "min_successful_icps": 1},
+    )
+    assert bundle["parent_artifact_hash"] == parent.model_artifact_hash
+    assert bundle["candidate_artifact_hash"] == candidate.model_artifact_hash
+    assert bundle["candidate_model_manifest_hash"] == candidate.manifest_hash
+    assert bundle["candidate_source_diff_hash"] == source_diff_hash
+    assert bundle["aggregates"]["mean_delta"] > 0
+
+
+def main() -> None:
+    draft = test_code_edit_parser_accepts_safe_diff()
+    test_code_edit_parser_rejects_dependency_edit()
+    asyncio.run(test_image_build_score_bundle_contract(draft))
+    print("research_lab_code_edit_pipeline_verifier: ok")
+
+
+if __name__ == "__main__":
+    main()

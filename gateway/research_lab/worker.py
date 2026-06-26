@@ -17,6 +17,8 @@ from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
+from gateway.research_lab.code_build import CodeEditCandidateBuilder
+from gateway.research_lab.code_loop_engine import CodeEditLoopEngine
 from gateway.research_lab.config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
 from gateway.research_lab.key_vault import OpenRouterKeyVaultError, decrypt_openrouter_key
 from gateway.research_lab.logging_utils import compact_ref, format_worker_block, format_worker_line
@@ -54,6 +56,7 @@ from research_lab.reimbursements import (
     compute_reimbursement_award,
 )
 from research_lab.auto_research_prompt import build_validated_candidate_manifest, coerce_component_registry
+from research_lab.canonical import sha256_json
 from research_lab.eval import (
     DockerPrivateModelRunner,
     DockerPrivateModelSpec,
@@ -703,135 +706,234 @@ class ResearchLabHostedWorker:
                     max_tokens=max_tokens,
                 )
 
-            loop_result = await AutoResearchLoopEngine(
-                settings=AutoResearchLoopSettings(
-                    min_seconds=self.config.auto_research_min_seconds,
-                    max_seconds=self.config.auto_research_max_seconds,
-                    min_iterations=self.config.auto_research_min_iterations,
-                    max_iterations=self.config.auto_research_max_iterations,
-                    draft_timeout_seconds=self.config.auto_research_draft_timeout_seconds,
-                    reflection_timeout_seconds=self.config.auto_research_reflection_timeout_seconds,
-                    estimated_iteration_cost_usd=self.config.auto_research_estimated_iteration_cost_usd,
-                    max_candidates=max_candidates,
-                ),
-                call_openrouter=_call_loop_model,
-                event_sink=_record_loop_event,
-            ).run(
-                run_id=context.run_id,
-                ticket=context.ticket,
-                artifact=artifact,
-                component_registry=registry,
-                benchmark_public_summary=benchmark_public_summary,
-                model_id=model_id,
-                budget_context=budget_context,
-                requested_loop_count=int(context.ticket.get("requested_loop_count") or 1),
-                miner_brief_ref=str(context.ticket.get("brief_sanitized_ref") or ""),
-                resume_state=resume_state,
-                should_pause=is_autoresearch_maintenance_paused,
+            loop_settings = AutoResearchLoopSettings(
+                min_seconds=self.config.auto_research_min_seconds,
+                max_seconds=self.config.auto_research_max_seconds,
+                min_iterations=self.config.auto_research_min_iterations,
+                max_iterations=self.config.auto_research_max_iterations,
+                draft_timeout_seconds=self.config.auto_research_draft_timeout_seconds,
+                reflection_timeout_seconds=self.config.auto_research_reflection_timeout_seconds,
+                estimated_iteration_cost_usd=self.config.auto_research_estimated_iteration_cost_usd,
+                max_candidates=max_candidates,
             )
-            if loop_result.status == "paused":
-                return await self._mark_paused(
-                    context,
-                    loop_result=loop_result,
-                    checkpoint_doc=loop_result.checkpoint_doc or latest_checkpoint,
-                    reason="maintenance_pause_checkpointed",
+            code_builder = CodeEditCandidateBuilder(self.config)
+            use_code_edit_candidates = self.config.code_edit_candidates_enabled and code_builder.enabled()
+            if self.config.code_edit_candidates_enabled and not code_builder.enabled():
+                logger.warning(
+                    "research_lab_code_edit_builder_not_configured_falling_back_to_patch_candidates run_id=%s",
+                    compact_ref(context.run_id),
                 )
-            if not loop_result.selected_candidates:
-                raise HostedResearchLabWorkerError("auto-research loop completed without valid candidate finalists")
 
-            active_finish = await load_active_private_model(self.config, register_bootstrap=True)
-            final_artifact = artifact
-            finalists: list[dict[str, Any]] = [
-                {
-                    "selected": candidate,
-                    "patch_manifest": candidate.patch_manifest,
-                    "hypothesis": candidate.hypothesis,
-                    "patch": candidate.patch,
-                    "iteration": candidate.iteration,
-                    "node_id": candidate.node_id,
-                }
-                for candidate in loop_result.selected_candidates
-            ]
-            if active_finish.artifact.model_artifact_hash != artifact.model_artifact_hash:
-                final_artifact = active_finish.artifact
-                latest_runner = DockerPrivateModelRunner(
-                    DockerPrivateModelSpec(
-                        image_digest=final_artifact.image_digest,
-                        env_passthrough=_private_model_env_passthrough(self.config),
-                        extra_env=docker_provider_env,
-                        timeout_seconds=900,
-                    )
+            if use_code_edit_candidates:
+                loop_result = await CodeEditLoopEngine(
+                    settings=loop_settings,
+                    call_openrouter=_call_loop_model,
+                    event_sink=_record_loop_event,
+                    builder=code_builder,
+                ).run(
+                    run_id=context.run_id,
+                    ticket=context.ticket,
+                    artifact=artifact,
+                    component_registry=registry.to_dict(),
+                    benchmark_public_summary=benchmark_public_summary,
+                    model_id=model_id,
+                    budget_context=budget_context,
+                    requested_loop_count=int(context.ticket.get("requested_loop_count") or 1),
+                    resume_state=resume_state,
+                    should_pause=is_autoresearch_maintenance_paused,
                 )
-                latest_registry = coerce_component_registry(latest_runner.metadata())
-                rebuilt: list[dict[str, Any]] = []
-                for index, candidate in enumerate(loop_result.selected_candidates):
-                    try:
-                        patch_manifest, hypothesis, patch = build_validated_candidate_manifest(
-                            draft=candidate.draft,
-                            artifact_manifest=final_artifact,
-                            component_registry=latest_registry,
-                            run_id=context.run_id,
-                            sequence=(candidate.iteration * 1000) + index,
-                            miner_brief_ref=str(context.ticket.get("brief_sanitized_ref") or ""),
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "Research Lab finalist dropped during active-parent refresh: run_id=%s node=%s error=%s",
-                            context.run_id,
-                            candidate.node_id,
-                            str(exc)[:200],
-                        )
-                        continue
-                    rebuilt.append(
-                        {
-                            "selected": candidate,
-                            "patch_manifest": patch_manifest,
-                            "hypothesis": hypothesis,
-                            "patch": patch,
-                            "iteration": candidate.iteration,
-                            "node_id": candidate.node_id,
-                        }
+                if loop_result.status == "paused":
+                    return await self._mark_paused(
+                        context,
+                        loop_result=loop_result,
+                        checkpoint_doc=loop_result.checkpoint_doc or latest_checkpoint,
+                        reason="maintenance_pause_checkpointed",
                     )
-                if not rebuilt:
-                    raise HostedResearchLabWorkerError("active model changed and no finalist rebased cleanly")
-                finalists = rebuilt
-                logger.info(
-                    "Research Lab finalists rebased to latest active artifact: run_id=%s old_parent=%s new_parent=%s count=%s",
-                    context.run_id,
-                    artifact.model_artifact_hash,
-                    final_artifact.model_artifact_hash,
-                    len(finalists),
+                if not loop_result.selected_candidates:
+                    raise HostedResearchLabWorkerError("auto-research loop completed without valid image-build finalists")
+                final_artifact = artifact
+                finalists = [
+                    {
+                        "candidate_kind": "image_build",
+                        "selected": candidate,
+                        "candidate_patch_manifest": candidate.build.code_edit_manifest,
+                        "candidate_model_manifest": candidate.build.candidate_model_manifest.to_dict(),
+                        "candidate_source_diff_hash": candidate.build.source_diff_hash,
+                        "candidate_build_doc": candidate.build.build_doc,
+                        "hypothesis_doc": {
+                            "failure_mode": candidate.draft.failure_mode,
+                            "mechanism": candidate.draft.mechanism,
+                            "expected_improvement": candidate.draft.expected_improvement,
+                            "risk": candidate.draft.risk,
+                            "focus_alignment": f"code_edit_lane:{candidate.draft.lane}",
+                            "predicted_delta": candidate.draft.predicted_delta,
+                            "falsifier": "official_scoring",
+                        },
+                        "patch_doc": {
+                            "code_edit": {
+                                "lane": candidate.draft.lane,
+                                "target_files": list(candidate.draft.target_files),
+                                "unified_diff_hash": sha256_json({"unified_diff": candidate.draft.unified_diff}),
+                                "redacted_summary": candidate.draft.redacted_summary,
+                                "test_plan": candidate.draft.test_plan,
+                                "rollback_plan": candidate.draft.rollback_plan,
+                            }
+                        },
+                        "iteration": candidate.iteration,
+                        "node_id": candidate.node_id,
+                        "redacted_public_summary": candidate.draft.redacted_summary,
+                    }
+                    for candidate in loop_result.selected_candidates
+                ]
+            else:
+                loop_result = await AutoResearchLoopEngine(
+                    settings=loop_settings,
+                    call_openrouter=_call_loop_model,
+                    event_sink=_record_loop_event,
+                ).run(
+                    run_id=context.run_id,
+                    ticket=context.ticket,
+                    artifact=artifact,
+                    component_registry=registry,
+                    benchmark_public_summary=benchmark_public_summary,
+                    model_id=model_id,
+                    budget_context=budget_context,
+                    requested_loop_count=int(context.ticket.get("requested_loop_count") or 1),
+                    miner_brief_ref=str(context.ticket.get("brief_sanitized_ref") or ""),
+                    resume_state=resume_state,
+                    should_pause=is_autoresearch_maintenance_paused,
                 )
+                if loop_result.status == "paused":
+                    return await self._mark_paused(
+                        context,
+                        loop_result=loop_result,
+                        checkpoint_doc=loop_result.checkpoint_doc or latest_checkpoint,
+                        reason="maintenance_pause_checkpointed",
+                    )
+                if not loop_result.selected_candidates:
+                    raise HostedResearchLabWorkerError("auto-research loop completed without valid candidate finalists")
+
+                active_finish = await load_active_private_model(self.config, register_bootstrap=True)
+                final_artifact = artifact
+                finalists = [
+                    {
+                        "candidate_kind": "patch",
+                        "selected": candidate,
+                        "patch_manifest": candidate.patch_manifest,
+                        "hypothesis": candidate.hypothesis,
+                        "patch": candidate.patch,
+                        "iteration": candidate.iteration,
+                        "node_id": candidate.node_id,
+                    }
+                    for candidate in loop_result.selected_candidates
+                ]
+                if active_finish.artifact.model_artifact_hash != artifact.model_artifact_hash:
+                    final_artifact = active_finish.artifact
+                    latest_runner = DockerPrivateModelRunner(
+                        DockerPrivateModelSpec(
+                            image_digest=final_artifact.image_digest,
+                            env_passthrough=_private_model_env_passthrough(self.config),
+                            extra_env=docker_provider_env,
+                            timeout_seconds=900,
+                        )
+                    )
+                    latest_registry = coerce_component_registry(latest_runner.metadata())
+                    rebuilt: list[dict[str, Any]] = []
+                    for index, candidate in enumerate(loop_result.selected_candidates):
+                        try:
+                            patch_manifest, hypothesis, patch = build_validated_candidate_manifest(
+                                draft=candidate.draft,
+                                artifact_manifest=final_artifact,
+                                component_registry=latest_registry,
+                                run_id=context.run_id,
+                                sequence=(candidate.iteration * 1000) + index,
+                                miner_brief_ref=str(context.ticket.get("brief_sanitized_ref") or ""),
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Research Lab finalist dropped during active-parent refresh: run_id=%s node=%s error=%s",
+                                context.run_id,
+                                candidate.node_id,
+                                str(exc)[:200],
+                            )
+                            continue
+                        rebuilt.append(
+                            {
+                                "candidate_kind": "patch",
+                                "selected": candidate,
+                                "patch_manifest": patch_manifest,
+                                "hypothesis": hypothesis,
+                                "patch": patch,
+                                "iteration": candidate.iteration,
+                                "node_id": candidate.node_id,
+                            }
+                        )
+                    if not rebuilt:
+                        raise HostedResearchLabWorkerError("active model changed and no finalist rebased cleanly")
+                    finalists = rebuilt
+                    logger.info(
+                        "Research Lab finalists rebased to latest active artifact: run_id=%s old_parent=%s new_parent=%s count=%s",
+                        context.run_id,
+                        artifact.model_artifact_hash,
+                        final_artifact.model_artifact_hash,
+                        len(finalists),
+                    )
 
         candidate_ids: list[str] = []
         candidate_summaries: list[dict[str, Any]] = []
         for index, finalist in enumerate(finalists):
-            patch_manifest = finalist["patch_manifest"]
-            hypothesis = finalist["hypothesis"]
-            patch = finalist["patch"]
+            candidate_kind = str(finalist.get("candidate_kind") or "patch")
+            if candidate_kind == "image_build":
+                candidate_patch_manifest = dict(finalist["candidate_patch_manifest"])
+                hypothesis_doc = dict(finalist.get("hypothesis_doc") or {})
+                patch_doc = dict(finalist.get("patch_doc") or {})
+                redacted_summary = str(finalist.get("redacted_public_summary") or "")
+                candidate_artifact_hash = str(candidate_patch_manifest["candidate_artifact_hash"])
+                candidate_patch_hash = sha256_json(candidate_patch_manifest)
+            else:
+                patch_manifest = finalist["patch_manifest"]
+                hypothesis = finalist["hypothesis"]
+                patch = finalist["patch"]
+                candidate_patch_manifest = patch_manifest.to_dict()
+                hypothesis_doc = hypothesis.to_dict()
+                patch_doc = patch.to_dict()
+                redacted_summary = patch_manifest.redacted_summary
+                candidate_artifact_hash = patch_manifest.candidate_artifact_hash
+                candidate_patch_hash = patch_manifest.manifest_hash()
             request = ResearchLabCandidateArtifactCreateRequest(
                 run_id=context.run_id,
                 ticket_id=context.ticket_id,
                 receipt_id=context.receipt_id,
                 miner_hotkey=str(context.ticket["miner_hotkey"]),
                 island=str(context.ticket["island"]),
+                candidate_kind=candidate_kind,
                 private_model_manifest=final_artifact.to_dict(),
-                candidate_patch_manifest=patch_manifest.to_dict(),
-                hypothesis_doc=hypothesis.to_dict(),
-                redacted_public_summary=patch_manifest.redacted_summary,
+                candidate_patch_manifest=candidate_patch_manifest,
+                candidate_model_manifest=finalist.get("candidate_model_manifest"),
+                candidate_source_diff_hash=finalist.get("candidate_source_diff_hash"),
+                candidate_build_doc=dict(finalist.get("candidate_build_doc") or {}),
+                hypothesis_doc=hypothesis_doc,
+                redacted_public_summary=redacted_summary,
             )
             candidate_row, _candidate_event = await create_candidate_artifact(request)
             candidate_ids.append(str(candidate_row["candidate_id"]))
             candidate_summaries.append(
                 {
                     "candidate_index": index,
+                    "candidate_kind": candidate_kind,
                     "loop_iteration": finalist["iteration"],
                     "loop_node_id": finalist["node_id"],
                     "candidate_id": str(candidate_row["candidate_id"]),
-                    "candidate_artifact_hash": patch_manifest.candidate_artifact_hash,
-                    "candidate_patch_hash": patch_manifest.manifest_hash(),
-                    "hypothesis": hypothesis.to_dict(),
-                    "patch": patch.to_dict(),
+                    "candidate_artifact_hash": candidate_artifact_hash,
+                    "candidate_patch_hash": candidate_patch_hash,
+                    "candidate_model_manifest_hash": (
+                        (finalist.get("candidate_model_manifest") or {}).get("manifest_hash")
+                        if isinstance(finalist.get("candidate_model_manifest"), Mapping)
+                        else None
+                    ),
+                    "candidate_source_diff_hash": finalist.get("candidate_source_diff_hash"),
+                    "hypothesis": hypothesis_doc,
+                    "patch": patch_doc,
                     "parent_artifact_hash": final_artifact.model_artifact_hash,
                 }
             )

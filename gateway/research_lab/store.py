@@ -538,9 +538,23 @@ async def create_receipt_event(
 async def create_candidate_artifact(request: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     artifact = dict(request.private_model_manifest)
     patch = dict(request.candidate_patch_manifest)
-    candidate_artifact_hash = str(patch["candidate_artifact_hash"])
+    candidate_kind = str(getattr(request, "candidate_kind", "patch") or "patch")
+    candidate_model_manifest = (
+        dict(getattr(request, "candidate_model_manifest", None) or {})
+        if candidate_kind == "image_build"
+        else {}
+    )
+    candidate_artifact_hash = str(
+        candidate_model_manifest.get("model_artifact_hash")
+        or patch["candidate_artifact_hash"]
+    )
     candidate_id = "candidate:" + candidate_artifact_hash.split(":", 1)[1]
     candidate_patch_hash = sha256_json(patch)
+    candidate_model_manifest_hash = str(
+        candidate_model_manifest.get("manifest_hash")
+        or patch.get("candidate_model_manifest_hash")
+        or ""
+    )
     existing = await select_one(
         "research_lab_candidate_artifacts",
         filters=(("candidate_id", candidate_id),),
@@ -583,6 +597,16 @@ async def create_candidate_artifact(request: Any) -> tuple[dict[str, Any], dict[
         "redacted_public_summary": request.redacted_public_summary or "",
         "anchored_hash": "",
     }
+    if candidate_kind == "image_build":
+        row.update(
+            {
+                "candidate_kind": "image_build",
+                "candidate_model_manifest_hash": candidate_model_manifest_hash,
+                "candidate_model_manifest_doc": candidate_model_manifest,
+                "candidate_source_diff_hash": str(getattr(request, "candidate_source_diff_hash", "") or ""),
+                "candidate_build_doc": dict(getattr(request, "candidate_build_doc", None) or {}),
+            }
+        )
     row["anchored_hash"] = canonical_hash(row)
     inserted = await insert_row("research_lab_candidate_artifacts", row)
     event = await create_candidate_evaluation_event(

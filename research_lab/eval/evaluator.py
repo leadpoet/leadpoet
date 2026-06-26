@@ -8,6 +8,7 @@ import os
 from typing import Any, Awaitable, Callable, Mapping, Sequence, Union
 
 from leadpoet_verifier.research_evaluation import build_research_evaluation_score_bundle
+from research_lab.canonical import sha256_json
 
 from .artifacts import PrivateModelArtifactManifest, validate_private_model_artifact_manifest
 from .benchmark import SealedBenchmarkSet, validate_sealed_benchmark_set
@@ -38,6 +39,7 @@ async def evaluate_private_model_pair(
     artifact_manifest: PrivateModelArtifactManifest | Mapping[str, Any],
     benchmark: SealedBenchmarkSet | Mapping[str, Any],
     patch_manifest: CandidatePatchManifest | Mapping[str, Any],
+    candidate_artifact_manifest: PrivateModelArtifactManifest | Mapping[str, Any] | None = None,
     benchmark_items: Sequence[Mapping[str, Any]],
     base_runner: ModelRunner | None,
     candidate_runner: ModelRunner | None,
@@ -52,12 +54,35 @@ async def evaluate_private_model_pair(
     """
     artifact = artifact_manifest if isinstance(artifact_manifest, PrivateModelArtifactManifest) else PrivateModelArtifactManifest.from_mapping(artifact_manifest)
     benchmark_set = benchmark if isinstance(benchmark, SealedBenchmarkSet) else SealedBenchmarkSet.from_mapping(benchmark)
-    patch = patch_manifest if isinstance(patch_manifest, CandidatePatchManifest) else CandidatePatchManifest.from_mapping(patch_manifest)
+    image_candidate = candidate_artifact_manifest is not None
+    candidate_artifact = (
+        candidate_artifact_manifest
+        if isinstance(candidate_artifact_manifest, PrivateModelArtifactManifest)
+        else (
+            PrivateModelArtifactManifest.from_mapping(candidate_artifact_manifest)
+            if candidate_artifact_manifest is not None
+            else None
+        )
+    )
+    patch = None if image_candidate else (
+        patch_manifest if isinstance(patch_manifest, CandidatePatchManifest) else CandidatePatchManifest.from_mapping(patch_manifest)
+    )
 
     errors = []
     errors.extend(validate_private_model_artifact_manifest(artifact))
     errors.extend(validate_sealed_benchmark_set(benchmark_set))
-    errors.extend(validate_candidate_patch_manifest(patch, expected_parent_artifact_hash=artifact.model_artifact_hash))
+    if image_candidate:
+        if candidate_artifact is None:
+            errors.append("candidate_artifact_manifest_required_for_image_candidate")
+        else:
+            errors.extend(validate_private_model_artifact_manifest(candidate_artifact))
+            if candidate_artifact.model_artifact_hash == artifact.model_artifact_hash:
+                errors.append("candidate_artifact_hash_must_differ_from_parent")
+            patch_parent = str(dict(patch_manifest).get("parent_artifact_hash") or "")
+            if patch_parent and patch_parent != artifact.model_artifact_hash:
+                errors.append("parent_artifact_hash_mismatch")
+    else:
+        errors.extend(validate_candidate_patch_manifest(patch, expected_parent_artifact_hash=artifact.model_artifact_hash))
     if errors:
         raise ValueError("; ".join(errors))
     if base_runner is None or candidate_runner is None:
@@ -66,7 +91,7 @@ async def evaluate_private_model_pair(
         raise RealEvaluatorRequired("sealed benchmark items are required")
 
     scorer = company_scorer or QualificationStyleCompanyScorer()
-    runtime_patch = runtime_compatible_candidate_patch_manifest(patch)
+    runtime_patch = None if image_candidate else runtime_compatible_candidate_patch_manifest(patch)
     per_icp_results: list[dict[str, Any]] = []
     for item in benchmark_items:
         icp = item.get("icp")
@@ -78,7 +103,12 @@ async def evaluate_private_model_pair(
             require_non_empty=False,
         )
         candidate_outputs = ensure_private_model_outputs(
-            await _maybe_await(candidate_runner(icp, {**dict(run_context), "patch": runtime_patch.to_dict()})),
+            await _maybe_await(
+                candidate_runner(
+                    icp,
+                    dict(run_context) if image_candidate else {**dict(run_context), "patch": runtime_patch.to_dict()},
+                )
+            ),
             context_label=f"candidate model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
             require_non_empty=False,
         )
@@ -108,7 +138,8 @@ async def evaluate_private_model_pair(
     return build_score_bundle_from_scored_icps(
         artifact_manifest=artifact,
         benchmark=benchmark_set,
-        patch_manifest=patch,
+        patch_manifest=patch_manifest,
+        candidate_artifact_manifest=candidate_artifact,
         per_icp_results=per_icp_results,
         run_context=run_context,
         policy=policy or {},
@@ -120,17 +151,39 @@ def build_score_bundle_from_scored_icps(
     artifact_manifest: PrivateModelArtifactManifest | Mapping[str, Any],
     benchmark: SealedBenchmarkSet | Mapping[str, Any],
     patch_manifest: CandidatePatchManifest | Mapping[str, Any],
+    candidate_artifact_manifest: PrivateModelArtifactManifest | Mapping[str, Any] | None = None,
     per_icp_results: Sequence[Mapping[str, Any]],
     run_context: Mapping[str, Any],
     policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     artifact = artifact_manifest if isinstance(artifact_manifest, PrivateModelArtifactManifest) else PrivateModelArtifactManifest.from_mapping(artifact_manifest)
     benchmark_set = benchmark if isinstance(benchmark, SealedBenchmarkSet) else SealedBenchmarkSet.from_mapping(benchmark)
-    patch = patch_manifest if isinstance(patch_manifest, CandidatePatchManifest) else CandidatePatchManifest.from_mapping(patch_manifest)
+    image_candidate = candidate_artifact_manifest is not None
+    candidate_artifact = (
+        candidate_artifact_manifest
+        if isinstance(candidate_artifact_manifest, PrivateModelArtifactManifest)
+        else (
+            PrivateModelArtifactManifest.from_mapping(candidate_artifact_manifest)
+            if candidate_artifact_manifest is not None
+            else None
+        )
+    )
+    patch = None if image_candidate else (
+        patch_manifest if isinstance(patch_manifest, CandidatePatchManifest) else CandidatePatchManifest.from_mapping(patch_manifest)
+    )
     errors = []
     errors.extend(validate_private_model_artifact_manifest(artifact))
     errors.extend(validate_sealed_benchmark_set(benchmark_set))
-    errors.extend(validate_candidate_patch_manifest(patch, expected_parent_artifact_hash=artifact.model_artifact_hash))
+    if image_candidate:
+        if candidate_artifact is None:
+            errors.append("candidate_artifact_manifest_required_for_image_candidate")
+        else:
+            errors.extend(validate_private_model_artifact_manifest(candidate_artifact))
+        patch_parent = str(dict(patch_manifest).get("parent_artifact_hash") or "")
+        if patch_parent and patch_parent != artifact.model_artifact_hash:
+            errors.append("parent_artifact_hash_mismatch")
+    else:
+        errors.extend(validate_candidate_patch_manifest(patch, expected_parent_artifact_hash=artifact.model_artifact_hash))
     if errors:
         raise ValueError("; ".join(errors))
     if not per_icp_results:
@@ -143,9 +196,17 @@ def build_score_bundle_from_scored_icps(
         island=str(run_context["island"]),
         evaluation_epoch=int(run_context["evaluation_epoch"]),
         parent_artifact_hash=artifact.model_artifact_hash,
-        candidate_artifact_hash=patch.candidate_artifact_hash,
+        candidate_artifact_hash=(
+            candidate_artifact.model_artifact_hash
+            if candidate_artifact is not None
+            else patch.candidate_artifact_hash
+        ),
         private_model_manifest_hash=artifact.manifest_hash,
-        candidate_patch_hash=patch.manifest_hash(),
+        candidate_patch_hash=(
+            sha256_json(dict(patch_manifest))
+            if image_candidate
+            else patch.manifest_hash()
+        ),
         icp_set_hash=benchmark_set.icp_set_hash,
         scoring_version=benchmark_set.scoring_version,
         evaluator_version=str(run_context["evaluator_version"]),
@@ -154,6 +215,13 @@ def build_score_bundle_from_scored_icps(
         execution_trace_ref=str(run_context["execution_trace_ref"]),
         cost_ledger_ref=str(run_context["cost_ledger_ref"]),
         benchmark_split_ref=benchmark_set.split_ref,
+        candidate_model_manifest_hash=(
+            candidate_artifact.manifest_hash
+            if candidate_artifact is not None
+            else None
+        ),
+        candidate_source_diff_hash=run_context.get("candidate_source_diff_hash") or None,
+        candidate_build_ref=run_context.get("candidate_build_ref") or None,
         policy=policy or {},
         signature_ref=str(run_context.get("signature_ref") or ""),
     )

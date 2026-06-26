@@ -168,6 +168,9 @@ def build_research_evaluation_score_bundle(
     execution_trace_ref: str,
     cost_ledger_ref: str,
     benchmark_split_ref: str,
+    candidate_model_manifest_hash: str | None = None,
+    candidate_source_diff_hash: str | None = None,
+    candidate_build_ref: str | None = None,
     policy: Mapping[str, Any] | None = None,
     signature_ref: str = "",
 ) -> dict[str, Any]:
@@ -210,6 +213,12 @@ def build_research_evaluation_score_bundle(
             "reason": "probation_gate_only; crown/grant require later gated workflow",
         },
     }
+    if candidate_model_manifest_hash:
+        bundle["candidate_model_manifest_hash"] = str(candidate_model_manifest_hash)
+    if candidate_source_diff_hash:
+        bundle["candidate_source_diff_hash"] = str(candidate_source_diff_hash)
+    if candidate_build_ref:
+        bundle["candidate_build_ref"] = str(candidate_build_ref)
     score_hash = score_bundle_hash(bundle)
     return {**bundle, "score_bundle_hash": score_hash, "anchored_hash": score_hash}
 

@@ -263,6 +263,19 @@ class ResearchLabPromotionController:
             event_doc={"auto_commit_enabled": self.config.auto_commit_enabled},
         )
 
+        if str(candidate.get("candidate_kind") or "") == "image_build":
+            return await self._promote_built_image_candidate(
+                candidate=candidate,
+                score_bundle_row=score_bundle_row,
+                score_bundle=score_bundle,
+                active=active,
+                active_parent=active_parent,
+                candidate_parent=candidate_parent,
+                rolling_window_hash=rolling_window_hash,
+                improvement_points=improvement_points,
+                threshold=threshold,
+            )
+
         if not self.config.auto_commit_enabled:
             return {"status": "promotion_passed_auto_commit_disabled"}
 
@@ -384,6 +397,83 @@ class ResearchLabPromotionController:
             },
         )
         return {"status": "stale_parent_rebased_candidate_queued", "derived_candidate_id": str(derived_row["candidate_id"])}
+
+    async def _promote_built_image_candidate(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_row: Mapping[str, Any],
+        score_bundle: Mapping[str, Any],
+        active: ActivePrivateModel,
+        active_parent: str,
+        candidate_parent: str,
+        rolling_window_hash: str,
+        improvement_points: float,
+        threshold: float,
+    ) -> dict[str, Any]:
+        manifest_doc = candidate.get("candidate_model_manifest_doc")
+        if not isinstance(manifest_doc, Mapping):
+            raise RuntimeError("image_build candidate missing candidate_model_manifest_doc")
+        new_artifact = PrivateModelArtifactManifest.from_mapping(manifest_doc)
+        errors = validate_private_model_artifact_manifest(new_artifact)
+        if errors:
+            raise RuntimeError("candidate image manifest failed validation: " + "; ".join(errors))
+        if str(score_bundle.get("candidate_artifact_hash") or "") != new_artifact.model_artifact_hash:
+            raise RuntimeError("score bundle candidate artifact does not match built image manifest")
+        if active.version_row:
+            await create_private_model_version_event(
+                private_model_version_id=str(active.version_row["private_model_version_id"]),
+                event_type="superseded",
+                version_status="superseded",
+                reason="superseded_by_research_lab_image_build_promotion",
+                event_doc={"source_candidate_id": str(candidate["candidate_id"])},
+            )
+        version_row, _version_event = await create_private_model_version(
+            artifact_manifest=new_artifact.to_dict(),
+            manifest_uri=new_artifact.manifest_uri,
+            source_candidate_id=str(candidate["candidate_id"]),
+            source_score_bundle_id=str(score_bundle_row["score_bundle_id"]),
+            redacted_version_doc={
+                "source": "gateway_code_edit_image_build",
+                "model_artifact_hash": new_artifact.model_artifact_hash,
+                "private_model_manifest_hash": new_artifact.manifest_hash,
+                "git_commit_sha": new_artifact.git_commit_sha,
+                "component_registry_version": new_artifact.component_registry_version,
+                "scoring_adapter_version": new_artifact.scoring_adapter_version,
+                "candidate_source_diff_hash": candidate.get("candidate_source_diff_hash"),
+            },
+            version_status="active",
+            reason="research_lab_image_build_candidate_promoted",
+        )
+        await create_candidate_promotion_event(
+            candidate_id=str(candidate["candidate_id"]),
+            source_score_bundle_id=str(score_bundle_row["score_bundle_id"]),
+            private_model_version_id=str(version_row["private_model_version_id"]),
+            event_type="active_version_created",
+            promotion_status="merged",
+            active_parent_artifact_hash=active_parent,
+            candidate_parent_artifact_hash=candidate_parent,
+            rolling_window_hash=rolling_window_hash,
+            improvement_points=improvement_points,
+            threshold_points=threshold,
+            worker_ref=self.worker_ref,
+            event_doc={
+                "new_model_artifact_hash": new_artifact.model_artifact_hash,
+                "candidate_kind": "image_build",
+            },
+        )
+        reward_status = await self._maybe_create_champion_reward(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            score_bundle=score_bundle,
+            improvement_points=improvement_points,
+            threshold=threshold,
+        )
+        return {
+            "status": "merged",
+            "private_model_version_id": str(version_row["private_model_version_id"]),
+            **reward_status,
+        }
 
     async def _maybe_create_champion_reward(
         self,

@@ -400,7 +400,11 @@ class ResearchLabGatewayScoringWorker:
                 evaluation_epoch=evaluation_epoch,
                 elapsed_seconds=lambda: round(time.time() - start, 3),
             )
-            if stale_result.get("status") in {"stale_parent_rebased_candidate_queued", "stale_parent_rebase_failed"}:
+            if stale_result.get("status") in {
+                "stale_parent_rebased_candidate_queued",
+                "stale_parent_rebase_failed",
+                "stale_parent_needs_rescore",
+            }:
                 await self._maybe_finalize_candidate_receipt(candidate)
                 await safe_project_public_loop_activity(
                     str(candidate["ticket_id"]),
@@ -467,6 +471,13 @@ class ResearchLabGatewayScoringWorker:
 
             artifact = PrivateModelArtifactManifest.from_mapping(candidate["private_model_manifest_doc"])
             patch = candidate["candidate_patch_manifest"]
+            candidate_kind = str(candidate.get("candidate_kind") or "patch")
+            candidate_artifact = None
+            if candidate_kind == "image_build":
+                candidate_manifest_doc = candidate.get("candidate_model_manifest_doc")
+                if not isinstance(candidate_manifest_doc, Mapping):
+                    raise RuntimeError("image_build candidate is missing candidate_model_manifest_doc")
+                candidate_artifact = PrivateModelArtifactManifest.from_mapping(candidate_manifest_doc)
             benchmark = SealedBenchmarkSet(
                 benchmark_id=window.benchmark_id,
                 icp_set_hash=window.window_hash,
@@ -483,6 +494,16 @@ class ResearchLabGatewayScoringWorker:
                     extra_env=self._private_scoring_env(),
                 )
             )
+            candidate_runner = runner
+            if candidate_artifact is not None:
+                candidate_runner = DockerPrivateModelRunner(
+                    DockerPrivateModelSpec(
+                        image_digest=candidate_artifact.image_digest,
+                        timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
+                        env_passthrough=self._private_model_env_passthrough(),
+                        extra_env=self._private_scoring_env(),
+                    )
+                )
             run_context = self._candidate_run_context(
                 candidate,
                 window_hash=window.window_hash,
@@ -492,9 +513,10 @@ class ResearchLabGatewayScoringWorker:
                 artifact_manifest=artifact,
                 benchmark=benchmark,
                 patch_manifest=patch,
+                candidate_artifact_manifest=candidate_artifact.to_dict() if candidate_artifact is not None else None,
                 benchmark_items=window.benchmark_items,
                 base_runner=runner,
-                candidate_runner=runner,
+                candidate_runner=candidate_runner,
                 run_context={**run_context, "signature_ref": "pending"},
                 policy=self._evaluation_policy(),
             )
@@ -722,6 +744,46 @@ class ResearchLabGatewayScoringWorker:
             return {"status": "current_parent"}
 
         candidate_id = str(candidate["candidate_id"])
+        if str(candidate.get("candidate_kind") or "") == "image_build":
+            base_event_doc = {
+                "action": "image_build_candidate_parent_changed_before_scoring",
+                "active_parent_artifact_hash": active_parent,
+                "candidate_parent_artifact_hash": candidate_parent,
+                "evaluation_epoch": int(evaluation_epoch),
+                "worker_ref": self.worker_ref,
+                "proxy_ref_hash": self.proxy_ref_hash,
+            }
+            await create_candidate_promotion_event(
+                candidate_id=candidate_id,
+                event_type="stale_parent_detected",
+                promotion_status="stale_parent_needs_rescore",
+                active_parent_artifact_hash=active_parent,
+                candidate_parent_artifact_hash=candidate_parent,
+                worker_ref=self.worker_ref,
+                event_doc={**base_event_doc, "stage": "before_scoring"},
+            )
+            await create_candidate_evaluation_event(
+                candidate_id=candidate_id,
+                run_id=str(candidate["run_id"]),
+                ticket_id=str(candidate["ticket_id"]),
+                event_type="rejected",
+                candidate_status="rejected",
+                evaluator_ref=self.worker_ref,
+                reason="stale_parent_needs_rescore",
+                event_doc={**base_event_doc, "elapsed_seconds": elapsed_seconds()},
+            )
+            await create_scoring_dispatch_event(
+                dispatch_type="candidate_scoring",
+                dispatch_status="rejected",
+                worker_ref=self.worker_ref,
+                proxy_ref_hash=self.proxy_ref_hash,
+                candidate_id=candidate_id,
+                run_id=str(candidate["run_id"]),
+                ticket_id=str(candidate["ticket_id"]),
+                event_doc={**base_event_doc, "reason": "stale_parent_needs_rescore"},
+            )
+            return {"status": "stale_parent_needs_rescore"}
+
         base_event_doc = {
             "action": "rebase_queued_candidate_against_active_model_before_scoring",
             "active_parent_artifact_hash": active_parent,
@@ -1365,7 +1427,7 @@ class ResearchLabGatewayScoringWorker:
         window_hash: str,
         evaluation_epoch: int,
     ) -> dict[str, Any]:
-        return {
+        context = {
             "run_id": str(candidate["run_id"]),
             "ticket_id": str(candidate["ticket_id"]),
             "miner_hotkey": str(candidate["miner_hotkey"]),
@@ -1382,6 +1444,16 @@ class ResearchLabGatewayScoringWorker:
                 }
             ).split(":", 1)[1],
         }
+        if str(candidate.get("candidate_kind") or "") == "image_build":
+            if candidate.get("candidate_source_diff_hash"):
+                context["candidate_source_diff_hash"] = str(candidate["candidate_source_diff_hash"])
+            build_doc = candidate.get("candidate_build_doc")
+            if isinstance(build_doc, Mapping):
+                context["candidate_build_ref"] = str(
+                    build_doc.get("build_doc_hash")
+                    or canonical_hash(build_doc)
+                )
+        return context
 
     def _evaluation_policy(self) -> dict[str, Any]:
         return {

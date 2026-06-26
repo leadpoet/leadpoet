@@ -430,6 +430,8 @@ def _count_band(count: int) -> str:
 
 
 def _bucket_text(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        value = ", ".join(str(item) for item in value if str(item).strip())
     text = " ".join(str(value or "").strip().lower().split())
     if not text:
         return "unspecified"
@@ -437,7 +439,8 @@ def _bucket_text(value: Any) -> str:
 
 
 def _company_size_bucket(icp: Mapping[str, Any]) -> str:
-    raw = str(icp.get("employee_count") or icp.get("company_size") or "").lower()
+    value = icp.get("employee_count") or icp.get("company_size") or ""
+    raw = " ".join(str(item) for item in value).lower() if isinstance(value, (list, tuple)) else str(value).lower()
     if any(marker in raw for marker in ("1-10", "small", "smb", "startup")):
         return "small"
     if any(marker in raw for marker in ("11-50", "51-200", "mid")):

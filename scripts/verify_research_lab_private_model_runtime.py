@@ -75,13 +75,12 @@ def run_icp(icp, context):
             "industry": "Software",
             "sub_industry": "Sales Automation",
             "target_geography": "United States",
-            "company_size": "51-200",
-            "employee_count_buckets": ["11-50", "51-200", "201-500"],
+            "employee_count": ["11-50", "51-200", "201-500"],
             "product_service": "AI sales automation platform",
             "intent_signals": ["Launched or announced a new product"],
         }
         legacy_icp = dict(research_lab_icp)
-        legacy_icp.pop("employee_count_buckets")
+        legacy_icp["employee_count"] = "51-200"
         canonical_icp = canonicalize_private_model_icp(legacy_icp)
         if canonical_icp["geography"] != "United States":
             errors.append("canonical private ICP did not map target_geography to geography")
@@ -93,7 +92,10 @@ def run_icp(icp, context):
         if "employee_count_buckets" in canonical_multi:
             errors.append("canonical private ICP leaked gateway-only employee_count_buckets")
         if employee_count_buckets_for_icp(research_lab_icp) != ["11-50", "51-200", "201-500"]:
-            errors.append("employee_count_buckets did not normalize")
+            errors.append("list-valued employee_count did not normalize")
+        legacy_bucket_icp = {**legacy_icp, "employee_count_buckets": ["11-50", "51-200", "201-500"]}
+        if employee_count_buckets_for_icp(legacy_bucket_icp) != ["11-50", "51-200", "201-500"]:
+            errors.append("legacy employee_count_buckets did not normalize")
         if canonical_icp["intent_signal"] != "Launched or announced a new product":
             errors.append("canonical private ICP did not extract intent signal text")
         if canonical_icp["intent_category"] != "PRODUCT_LAUNCH":

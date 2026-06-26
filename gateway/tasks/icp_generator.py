@@ -493,6 +493,12 @@ def _configured_employee_all_buckets() -> bool:
     return os.getenv("RESEARCH_LAB_ICP_EMPLOYEE_ALL_BUCKETS", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _employee_count_display(value: Any) -> str:
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value if str(item).strip())
+    return str(value or "").strip()
+
+
 def canonicalize_generated_icp(
     icp: Dict[str, Any],
     *,
@@ -506,15 +512,19 @@ def canonicalize_generated_icp(
     normalized = dict(icp)
     raw_employee_count = normalized.get("employee_count")
     employee_count = normalize_employee_count_bucket(raw_employee_count)
-    employee_count_buckets = normalize_employee_count_buckets(
-        normalized.get("employee_count_buckets") or normalized.get("employee_counts"),
+    allowed_employee_counts = normalize_employee_count_buckets(
+        normalized.get("employee_count_buckets")
+        or normalized.get("employee_counts")
+        or raw_employee_count,
         primary_bucket=employee_count,
         radius=_configured_employee_bucket_radius() if employee_bucket_radius is None else employee_bucket_radius,
         all_buckets=_configured_employee_all_buckets() if all_employee_buckets is None else all_employee_buckets,
     )
     prompt = str(normalized.get("prompt") or "")
-    if raw_employee_count and str(raw_employee_count) != employee_count:
-        prompt = prompt.replace(str(raw_employee_count), employee_count)
+    if raw_employee_count and isinstance(raw_employee_count, str):
+        prompt = prompt.replace(str(raw_employee_count), _employee_count_display(allowed_employee_counts))
+    elif raw_employee_count and employee_count:
+        prompt = prompt.replace(employee_count, _employee_count_display(allowed_employee_counts))
 
     intent_signals = _normalize_intent_signals(normalized.get("intent_signals"))
     explicit_required = " ".join(str(normalized.get("intent_signal") or "").strip().split())
@@ -549,8 +559,7 @@ def canonicalize_generated_icp(
     normalized.update(
         {
             "prompt": prompt,
-            "employee_count": employee_count,
-            "employee_count_buckets": employee_count_buckets,
+            "employee_count": allowed_employee_counts,
             "intent_signals": intent_signals,
             "intent_signal": intent_signal,
             "intent_category": intent_category,
@@ -563,6 +572,8 @@ def canonicalize_generated_icp(
             ),
         }
     )
+    normalized.pop("employee_count_buckets", None)
+    normalized.pop("employee_counts", None)
     return normalized
 
 
@@ -678,9 +689,8 @@ Do NOT cluster on later stages just because they're easier to verify. The realis
 
 ALLOWED EMPLOYEE BANDS — USE THESE EXACT LINKEDIN BUCKETS ONLY:
 11-50, 51-200, 201-500, 501-1,000, 1,001-5,000, 5,001-10,000, 10,001+
-- `employee_count` is the primary/anchor bucket.
-- `employee_count_buckets` is the allowed relaxed set. Include the primary bucket plus nearby contiguous buckets.
-- Prefer 3-5 buckets, but all values must come from the allowed list above.
+- `employee_count` must be a JSON array of the allowed LinkedIn buckets.
+- Prefer 3-5 contiguous buckets around the most realistic target size.
 - Do not use fake broad ranges like "51-5000".
 
 ALLOWED GEOGRAPHIES — STRONGLY PREFER BROAD VALUES:
@@ -713,8 +723,7 @@ OUTPUT — JSON ONLY, NO PROSE, NO MARKDOWN
       "sub_industry": "<natural sub-industry>",
       "geography": "<from allowed geographies, prefer broad>",
       "country": "United States",
-      "employee_count": "<from allowed LinkedIn bands>",
-      "employee_count_buckets": ["<primary bucket and nearby allowed LinkedIn buckets>"],
+      "employee_count": ["<3-5 contiguous allowed LinkedIn buckets>"],
       "company_stage": "<from allowed stages>",
       "product_service": "<broad category — NOT a single named tool>",
       "required_attribute": "The company offers or provides <product_service or broad category>",

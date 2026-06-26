@@ -42,6 +42,13 @@ LEGACY_EMPLOYEE_BUCKET_MAP = {
 def normalize_employee_count_bucket(value: Any, *, default: str | None = DEFAULT_EMPLOYEE_BUCKET) -> str:
     """Normalize a value to an exact LinkedIn employee bucket."""
 
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            normalized = normalize_employee_count_bucket(item, default=None)
+            if normalized:
+                return normalized
+        return str(default or "")
+
     raw = " ".join(str(value or "").strip().split())
     if raw in LINKEDIN_EMPLOYEE_BUCKETS:
         return raw

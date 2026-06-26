@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add relaxed employee_count_buckets to private Research Lab ICP sets.
+"""Normalize private Research Lab ICPs to list-valued employee_count.
 
 Default mode is read-only. Pass --apply to update Supabase.
 Required env:
@@ -126,15 +126,20 @@ def _expand_set(
         before = deepcopy(icp)
         after = deepcopy(icp)
         primary = normalize_employee_count_bucket(after.get("employee_count"))
+        explicit = after.get("employee_count_buckets") or after.get("employee_counts") or after.get("employee_count")
         buckets = normalize_employee_count_buckets(
-            after.get("employee_count_buckets") or after.get("employee_counts"),
+            explicit,
             primary_bucket=primary,
             radius=radius,
             all_buckets=all_buckets,
         )
-        after["employee_count_buckets"] = buckets
-        if before.get("employee_count_buckets") != after.get("employee_count_buckets"):
-            changed_fields["employee_count_buckets"] += 1
+        after["employee_count"] = buckets
+        after.pop("employee_count_buckets", None)
+        after.pop("employee_counts", None)
+        if before.get("employee_count") != after.get("employee_count"):
+            changed_fields["employee_count"] += 1
+        if "employee_count_buckets" in before or "employee_counts" in before:
+            changed_fields["removed_legacy_employee_count_fields"] += 1
         bucket_lengths[len(buckets)] += 1
         after_icps.append(after)
     new_hash = compute_icp_set_hash(after_icps)

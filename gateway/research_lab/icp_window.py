@@ -275,4 +275,6 @@ def _stable_icp_hash(icp: Mapping[str, Any]) -> str:
 
 
 def _normalize_feature(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        value = "|".join(str(item) for item in value if str(item).strip())
     return " ".join(str(value or "").strip().lower().split())

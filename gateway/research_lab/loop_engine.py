@@ -26,6 +26,8 @@ class OpenRouterCallResult:
 
 
 LoopEventSink = Callable[["AutoResearchLoopEvent"], Awaitable[None]]
+CheckpointSink = Callable[[dict[str, Any]], Awaitable[None]]
+PauseChecker = Callable[[], Awaitable[bool]]
 OpenRouterCaller = Callable[
     [Sequence[Mapping[str, str]], int, int],
     Awaitable[Union[str, OpenRouterCallResult]],
@@ -96,11 +98,15 @@ class AutoResearchLoopResult:
     actual_openrouter_cost_microusd: int
     openrouter_call_count: int
     provider_usage: tuple[dict[str, Any], ...] = ()
+    status: str = "completed"
+    checkpoint_doc: dict[str, Any] | None = None
 
     def cost_ledger(self) -> dict[str, Any]:
         return {
             "schema_version": "1.0",
-            "status": "completed" if self.selected_candidates else "failed",
+            "status": self.status if self.status in {"paused", "completed", "failed"} else (
+                "completed" if self.selected_candidates else "failed"
+            ),
             "total_usd": round(self.actual_openrouter_cost_usd, 6),
             "actual_openrouter_cost_usd": round(self.actual_openrouter_cost_usd, 6),
             "actual_openrouter_cost_microusd": int(self.actual_openrouter_cost_microusd),
@@ -120,10 +126,12 @@ class AutoResearchLoopEngine:
         settings: AutoResearchLoopSettings,
         call_openrouter: OpenRouterCaller,
         event_sink: LoopEventSink,
+        checkpoint_sink: CheckpointSink | None = None,
     ):
         self.settings = settings.normalized()
         self.call_openrouter = call_openrouter
         self.event_sink = event_sink
+        self.checkpoint_sink = checkpoint_sink
 
     async def run(
         self,
@@ -137,24 +145,47 @@ class AutoResearchLoopEngine:
         budget_context: Mapping[str, Any],
         requested_loop_count: int,
         miner_brief_ref: str,
+        resume_state: Mapping[str, Any] | None = None,
+        should_pause: PauseChecker | None = None,
     ) -> AutoResearchLoopResult:
         start = time.monotonic()
         settings = self._settings_for_budget(requested_loop_count, budget_context)
-        selected: list[AutoResearchSelectedCandidate] = []
-        seen_artifacts: set[str] = set()
-        reflections: list[dict[str, Any]] = []
-        openrouter_calls = 0
-        estimated_cost = 0.0
-        actual_cost_microusd = 0
-        provider_usage: list[dict[str, Any]] = []
+        resume = dict(resume_state or {})
+        selected = _selected_candidates_from_checkpoint(
+            run_id=run_id,
+            checkpoint=resume,
+            artifact=artifact,
+            component_registry=component_registry,
+            miner_brief_ref=miner_brief_ref,
+        )
+        seen_artifacts: set[str] = {
+            candidate.patch_manifest.candidate_artifact_hash
+            for candidate in selected
+        }
+        seen_artifacts.update(str(item) for item in resume.get("seen_artifacts", []) if item)
+        reflections: list[dict[str, Any]] = [
+            dict(item) for item in resume.get("reflections", []) if isinstance(item, Mapping)
+        ]
+        openrouter_calls = max(0, int(resume.get("openrouter_call_count") or 0))
+        estimated_cost = max(0.0, float(resume.get("estimated_cost_usd") or 0.0))
+        actual_cost_microusd = max(0, int(resume.get("actual_openrouter_cost_microusd") or 0))
+        provider_usage: list[dict[str, Any]] = [
+            dict(item) for item in resume.get("provider_usage", []) if isinstance(item, Mapping)
+        ]
+        elapsed_offset = max(0.0, float(resume.get("elapsed_seconds") or 0.0))
         budget_limit_microusd = _budget_limit_microusd(budget_context)
 
         await self.event_sink(
             AutoResearchLoopEvent(
-                event_type="loop_started",
+                event_type="loop_resumed" if resume else "loop_started",
                 loop_status="running",
-                elapsed_seconds=0.0,
-                cost_ledger=_running_cost_ledger(0, 0.0, 0, "loop_started"),
+                elapsed_seconds=elapsed_offset,
+                cost_ledger=_running_cost_ledger(
+                    openrouter_calls,
+                    estimated_cost,
+                    actual_cost_microusd,
+                    "loop_resumed" if resume else "loop_started",
+                ),
                 event_doc={
                     "run_id": run_id,
                     "requested_loop_count": int(requested_loop_count),
@@ -162,20 +193,24 @@ class AutoResearchLoopEngine:
                     "budget_context": _safe_budget_doc(budget_context),
                     "scoring_owner": "gateway_qualification_workers",
                     "candidate_queueing": "after_loop_completion_only",
+                    "resumed_from_checkpoint": bool(resume),
+                    "checkpoint_hash": resume.get("checkpoint_hash"),
                 },
             )
         )
 
-        iteration = 0
+        iteration = max(0, int(resume.get("iterations_completed") or 0))
         stop_reason = "max_iterations"
+        last_checkpoint: dict[str, Any] | None = None
+        elapsed = lambda: elapsed_offset + (time.monotonic() - start)
         while iteration < settings.max_iterations:
-            elapsed = time.monotonic() - start
-            if elapsed >= settings.max_seconds:
+            current_elapsed = elapsed()
+            if current_elapsed >= settings.max_seconds:
                 stop_reason = "max_seconds"
                 break
             if (
                 iteration >= settings.min_iterations
-                and elapsed >= settings.min_seconds
+                and current_elapsed >= settings.min_seconds
                 and len(selected) >= settings.max_candidates
             ):
                 stop_reason = "candidate_limit_reached_after_minimum_runtime"
@@ -187,6 +222,34 @@ class AutoResearchLoopEngine:
             ):
                 stop_reason = "compute_budget_exhausted_before_next_draft"
                 break
+            if should_pause and await should_pause():
+                last_checkpoint = await self._emit_checkpoint(
+                    run_id=run_id,
+                    settings=settings,
+                    selected=selected,
+                    seen_artifacts=seen_artifacts,
+                    reflections=reflections,
+                    openrouter_calls=openrouter_calls,
+                    estimated_cost=estimated_cost,
+                    actual_cost_microusd=actual_cost_microusd,
+                    provider_usage=provider_usage,
+                    iterations_completed=iteration,
+                    elapsed_seconds=elapsed(),
+                    stage="pause_before_next_iteration",
+                    artifact=artifact,
+                    model_id=model_id,
+                    budget_context=budget_context,
+                )
+                return await self._paused_result(
+                    checkpoint=last_checkpoint,
+                    selected=selected,
+                    iterations_completed=iteration,
+                    elapsed_seconds=elapsed(),
+                    estimated_cost=estimated_cost,
+                    actual_cost_microusd=actual_cost_microusd,
+                    openrouter_calls=openrouter_calls,
+                    provider_usage=provider_usage,
+                )
 
             iteration += 1
             draft_context = {
@@ -236,7 +299,7 @@ class AutoResearchLoopEngine:
                     AutoResearchLoopEvent(
                         event_type="patch_validation_failed",
                         loop_status="running",
-                        elapsed_seconds=time.monotonic() - start,
+                        elapsed_seconds=elapsed(),
                         node_id=draft_parse_node_id,
                         provider_usage=([provider_usage[-1]] if provider_usage else []),
                         cost_ledger=_running_cost_ledger(
@@ -273,7 +336,7 @@ class AutoResearchLoopEngine:
                     AutoResearchLoopEvent(
                         event_type="hypothesis_drafted",
                         loop_status="running",
-                        elapsed_seconds=time.monotonic() - start,
+                        elapsed_seconds=elapsed(),
                         node_id=node_id,
                         provider_usage=([provider_usage[-1]] if provider_usage else []),
                         cost_ledger=running_ledger,
@@ -289,7 +352,7 @@ class AutoResearchLoopEngine:
                     AutoResearchLoopEvent(
                         event_type="patch_drafted",
                         loop_status="running",
-                        elapsed_seconds=time.monotonic() - start,
+                        elapsed_seconds=elapsed(),
                         node_id=node_id,
                         cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "patch_drafted"),
                         event_doc={
@@ -312,7 +375,7 @@ class AutoResearchLoopEngine:
                         AutoResearchLoopEvent(
                             event_type="patch_validation_passed",
                             loop_status="running",
-                            elapsed_seconds=time.monotonic() - start,
+                            elapsed_seconds=elapsed(),
                             node_id=node_id,
                             candidate_artifact_hash=patch_manifest.candidate_artifact_hash,
                             candidate_patch_hash=candidate_patch_hash,
@@ -329,7 +392,7 @@ class AutoResearchLoopEngine:
                         AutoResearchLoopEvent(
                             event_type="dev_check_passed",
                             loop_status="running",
-                            elapsed_seconds=time.monotonic() - start,
+                            elapsed_seconds=elapsed(),
                             node_id=node_id,
                             candidate_artifact_hash=patch_manifest.candidate_artifact_hash,
                             candidate_patch_hash=candidate_patch_hash,
@@ -368,7 +431,7 @@ class AutoResearchLoopEngine:
                         AutoResearchLoopEvent(
                             event_type="patch_validation_failed",
                             loop_status="running",
-                            elapsed_seconds=time.monotonic() - start,
+                            elapsed_seconds=elapsed(),
                             node_id=node_id,
                             cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "patch_validation_failed"),
                             event_doc={
@@ -383,7 +446,7 @@ class AutoResearchLoopEngine:
                         AutoResearchLoopEvent(
                             event_type="dev_check_failed",
                             loop_status="running",
-                            elapsed_seconds=time.monotonic() - start,
+                            elapsed_seconds=elapsed(),
                             node_id=node_id,
                             cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "dev_check_failed"),
                             event_doc={
@@ -437,7 +500,7 @@ class AutoResearchLoopEngine:
                 AutoResearchLoopEvent(
                     event_type="reflection_recorded",
                     loop_status="running",
-                    elapsed_seconds=time.monotonic() - start,
+                    elapsed_seconds=elapsed(),
                     provider_usage=([provider_usage[-1]] if provider_usage else []),
                     cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "reflection_recorded"),
                     event_doc={
@@ -448,7 +511,35 @@ class AutoResearchLoopEngine:
             )
 
             selected = _rank_candidates(selected)[: settings.max_candidates]
-            if not selected and iteration >= settings.min_iterations and time.monotonic() - start >= settings.min_seconds:
+            last_checkpoint = await self._emit_checkpoint(
+                run_id=run_id,
+                settings=settings,
+                selected=selected,
+                seen_artifacts=seen_artifacts,
+                reflections=reflections,
+                openrouter_calls=openrouter_calls,
+                estimated_cost=estimated_cost,
+                actual_cost_microusd=actual_cost_microusd,
+                provider_usage=provider_usage,
+                iterations_completed=iteration,
+                elapsed_seconds=elapsed(),
+                stage="iteration_completed",
+                artifact=artifact,
+                model_id=model_id,
+                budget_context=budget_context,
+            )
+            if should_pause and await should_pause():
+                return await self._paused_result(
+                    checkpoint=last_checkpoint,
+                    selected=selected,
+                    iterations_completed=iteration,
+                    elapsed_seconds=elapsed(),
+                    estimated_cost=estimated_cost,
+                    actual_cost_microusd=actual_cost_microusd,
+                    openrouter_calls=openrouter_calls,
+                    provider_usage=provider_usage,
+                )
+            if not selected and iteration >= settings.min_iterations and elapsed() >= settings.min_seconds:
                 stop_reason = "no_valid_candidates_after_minimum_runtime"
                 break
 
@@ -457,9 +548,38 @@ class AutoResearchLoopEngine:
         elif iteration >= settings.max_iterations:
             stop_reason = "max_iterations"
 
+        if should_pause and await should_pause():
+            last_checkpoint = await self._emit_checkpoint(
+                run_id=run_id,
+                settings=settings,
+                selected=selected,
+                seen_artifacts=seen_artifacts,
+                reflections=reflections,
+                openrouter_calls=openrouter_calls,
+                estimated_cost=estimated_cost,
+                actual_cost_microusd=actual_cost_microusd,
+                provider_usage=provider_usage,
+                iterations_completed=iteration,
+                elapsed_seconds=elapsed(),
+                stage="pause_before_finalization",
+                artifact=artifact,
+                model_id=model_id,
+                budget_context=budget_context,
+            )
+            return await self._paused_result(
+                checkpoint=last_checkpoint,
+                selected=selected,
+                iterations_completed=iteration,
+                elapsed_seconds=elapsed(),
+                estimated_cost=estimated_cost,
+                actual_cost_microusd=actual_cost_microusd,
+                openrouter_calls=openrouter_calls,
+                provider_usage=provider_usage,
+            )
+
         if selected:
-            remaining_minimum = settings.min_seconds - (time.monotonic() - start)
-            remaining_maximum = settings.max_seconds - (time.monotonic() - start)
+            remaining_minimum = settings.min_seconds - elapsed()
+            remaining_maximum = settings.max_seconds - elapsed()
             if remaining_minimum > 0 and remaining_maximum > 0:
                 await asyncio.sleep(min(remaining_minimum, remaining_maximum))
 
@@ -469,7 +589,7 @@ class AutoResearchLoopEngine:
                 AutoResearchLoopEvent(
                     event_type="candidate_selected",
                     loop_status="running",
-                    elapsed_seconds=time.monotonic() - start,
+                    elapsed_seconds=elapsed(),
                     node_id=candidate.node_id,
                     candidate_artifact_hash=candidate.patch_manifest.candidate_artifact_hash,
                     candidate_patch_hash=candidate.patch_manifest.manifest_hash(),
@@ -488,12 +608,14 @@ class AutoResearchLoopEngine:
             selected_candidates=ranked,
             iterations_completed=iteration,
             stop_reason=stop_reason,
-            elapsed_seconds=time.monotonic() - start,
+            elapsed_seconds=elapsed(),
             estimated_cost_usd=estimated_cost,
             actual_openrouter_cost_usd=round(actual_cost_microusd / 1_000_000, 6),
             actual_openrouter_cost_microusd=actual_cost_microusd,
             openrouter_call_count=openrouter_calls,
             provider_usage=tuple(provider_usage),
+            status="completed" if ranked else "failed",
+            checkpoint_doc=last_checkpoint,
         )
         await self.event_sink(
             AutoResearchLoopEvent(
@@ -507,6 +629,119 @@ class AutoResearchLoopEngine:
                     "selected_candidate_count": len(ranked),
                     "stop_reason": result.stop_reason,
                     "validator_queue_visible_after_this_event": bool(ranked),
+                },
+            )
+        )
+        return result
+
+    async def _emit_checkpoint(
+        self,
+        *,
+        run_id: str,
+        settings: AutoResearchLoopSettings,
+        selected: Sequence[AutoResearchSelectedCandidate],
+        seen_artifacts: set[str],
+        reflections: Sequence[Mapping[str, Any]],
+        openrouter_calls: int,
+        estimated_cost: float,
+        actual_cost_microusd: int,
+        provider_usage: Sequence[Mapping[str, Any]],
+        iterations_completed: int,
+        elapsed_seconds: float,
+        stage: str,
+        artifact: PrivateModelArtifactManifest,
+        model_id: str,
+        budget_context: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        payload = {
+            "schema_version": "1.0",
+            "run_id": run_id,
+            "stage": stage,
+            "model_id": model_id,
+            "artifact_hash": artifact.model_artifact_hash,
+            "manifest_hash": artifact.manifest_hash,
+            "settings": _settings_doc(settings),
+            "budget_context": _safe_budget_doc(budget_context),
+            "iterations_completed": int(iterations_completed),
+            "next_iteration": int(iterations_completed) + 1,
+            "elapsed_seconds": round(float(elapsed_seconds), 3),
+            "selected_candidates": [
+                {
+                    "node_id": candidate.node_id,
+                    "iteration": candidate.iteration,
+                    "draft": candidate.draft.to_dict(),
+                    "candidate_artifact_hash": candidate.patch_manifest.candidate_artifact_hash,
+                    "candidate_patch_hash": candidate.patch_manifest.manifest_hash(),
+                }
+                for candidate in _rank_candidates(selected)
+            ],
+            "seen_artifacts": sorted(str(item) for item in seen_artifacts if item),
+            "reflections": [dict(item) for item in reflections[-10:] if isinstance(item, Mapping)],
+            "openrouter_call_count": int(openrouter_calls),
+            "estimated_cost_usd": round(float(estimated_cost), 6),
+            "actual_openrouter_cost_usd": round(int(actual_cost_microusd) / 1_000_000, 6),
+            "actual_openrouter_cost_microusd": int(actual_cost_microusd),
+            "provider_usage": [dict(item) for item in provider_usage if isinstance(item, Mapping)],
+        }
+        checkpoint = {**payload, "checkpoint_hash": sha256_json(payload)}
+        if self.checkpoint_sink:
+            await self.checkpoint_sink(checkpoint)
+        await self.event_sink(
+            AutoResearchLoopEvent(
+                event_type="checkpoint_saved",
+                loop_status="running",
+                elapsed_seconds=elapsed_seconds,
+                provider_usage=[dict(item) for item in provider_usage if isinstance(item, Mapping)],
+                cost_ledger=_running_cost_ledger(
+                    openrouter_calls,
+                    estimated_cost,
+                    actual_cost_microusd,
+                    "checkpoint_saved",
+                ),
+                event_doc={"checkpoint": checkpoint},
+            )
+        )
+        return checkpoint
+
+    async def _paused_result(
+        self,
+        *,
+        checkpoint: dict[str, Any],
+        selected: Sequence[AutoResearchSelectedCandidate],
+        iterations_completed: int,
+        elapsed_seconds: float,
+        estimated_cost: float,
+        actual_cost_microusd: int,
+        openrouter_calls: int,
+        provider_usage: Sequence[Mapping[str, Any]],
+    ) -> AutoResearchLoopResult:
+        ranked = tuple(_rank_candidates(selected)[: self.settings.max_candidates])
+        result = AutoResearchLoopResult(
+            selected_candidates=ranked,
+            iterations_completed=int(iterations_completed),
+            stop_reason="maintenance_pause_requested",
+            elapsed_seconds=round(float(elapsed_seconds), 3),
+            estimated_cost_usd=round(float(estimated_cost), 6),
+            actual_openrouter_cost_usd=round(int(actual_cost_microusd) / 1_000_000, 6),
+            actual_openrouter_cost_microusd=int(actual_cost_microusd),
+            openrouter_call_count=int(openrouter_calls),
+            provider_usage=tuple(dict(item) for item in provider_usage if isinstance(item, Mapping)),
+            status="paused",
+            checkpoint_doc=checkpoint,
+        )
+        await self.event_sink(
+            AutoResearchLoopEvent(
+                event_type="loop_paused",
+                loop_status="paused",
+                elapsed_seconds=result.elapsed_seconds,
+                provider_usage=list(result.provider_usage),
+                cost_ledger=result.cost_ledger(),
+                event_doc={
+                    "checkpoint_hash": checkpoint.get("checkpoint_hash"),
+                    "iterations_completed": result.iterations_completed,
+                    "selected_candidate_count": len(result.selected_candidates),
+                    "stop_reason": result.stop_reason,
+                    "validator_queue_visible_after_this_event": False,
                 },
             )
         )
@@ -609,6 +844,72 @@ def _rank_candidates(candidates: Sequence[AutoResearchSelectedCandidate]) -> lis
             candidate.patch_manifest.candidate_artifact_hash,
         ),
         reverse=True,
+    )
+
+
+def _selected_candidates_from_checkpoint(
+    *,
+    run_id: str,
+    checkpoint: Mapping[str, Any],
+    artifact: PrivateModelArtifactManifest,
+    component_registry: ComponentRegistry,
+    miner_brief_ref: str,
+) -> list[AutoResearchSelectedCandidate]:
+    raw_candidates = checkpoint.get("selected_candidates")
+    if not isinstance(raw_candidates, Sequence) or isinstance(raw_candidates, (str, bytes)):
+        return []
+    rebuilt: list[AutoResearchSelectedCandidate] = []
+    for index, raw_candidate in enumerate(raw_candidates):
+        if not isinstance(raw_candidate, Mapping):
+            continue
+        try:
+            draft = _draft_from_checkpoint_item(raw_candidate.get("draft"))
+            iteration = max(1, int(raw_candidate.get("iteration") or 1))
+            patch_manifest, hypothesis, patch = build_validated_candidate_manifest(
+                draft=draft,
+                artifact_manifest=artifact,
+                component_registry=component_registry,
+                run_id=run_id,
+                sequence=(iteration * 1000) + index,
+                miner_brief_ref=miner_brief_ref,
+            )
+        except Exception:
+            continue
+        rebuilt.append(
+            AutoResearchSelectedCandidate(
+                draft=draft,
+                patch_manifest=patch_manifest,
+                hypothesis=hypothesis,
+                patch=patch,
+                node_id=str(raw_candidate.get("node_id") or _node_id(run_id, iteration, index, draft)),
+                iteration=iteration,
+            )
+        )
+    return _rank_candidates(rebuilt)
+
+
+def _draft_from_checkpoint_item(value: Any) -> AutoResearchCandidateDraft:
+    if not isinstance(value, Mapping):
+        raise ValueError("checkpoint selected candidate is missing draft")
+    hypothesis = value.get("hypothesis")
+    patch = value.get("patch")
+    if not isinstance(hypothesis, Mapping) or not isinstance(patch, Mapping):
+        raise ValueError("checkpoint draft requires hypothesis and patch")
+    patch_doc = patch.get("patch_doc")
+    if not isinstance(patch_doc, Mapping):
+        raise ValueError("checkpoint draft patch_doc must be an object")
+    return AutoResearchCandidateDraft(
+        failure_mode=str(hypothesis.get("failure_mode") or "")[:600],
+        mechanism=str(hypothesis.get("mechanism") or "")[:900],
+        expected_improvement=str(hypothesis.get("expected_improvement") or "")[:900],
+        risk=str(hypothesis.get("risk") or "")[:600],
+        focus_alignment=str(hypothesis.get("focus_alignment") or "")[:500],
+        predicted_delta=float(hypothesis.get("predicted_delta") or 1.0),
+        falsifier=str(hypothesis.get("falsifier") or "proxy_score"),
+        patch_type=str(patch.get("patch_type") or ""),
+        target_component_id=str(patch.get("target_component_id") or ""),
+        patch_doc=dict(patch_doc),
+        redacted_summary=str(patch.get("redacted_summary") or "")[:900],
     )
 
 

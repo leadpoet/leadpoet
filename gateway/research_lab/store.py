@@ -385,6 +385,34 @@ async def create_queue_event(
     return await insert_row("research_loop_run_queue_events", row)
 
 
+async def create_gateway_control_event(
+    *,
+    control_key: str,
+    event_type: str,
+    control_status: str,
+    reason: str,
+    actor_ref: str | None = None,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    seq = await next_event_seq("research_lab_gateway_control_events", "control_key", control_key)
+    payload = {
+        "control_key": control_key,
+        "seq": seq,
+        "event_type": event_type,
+        "control_status": control_status,
+        "actor_ref": actor_ref,
+        "reason": reason,
+        "event_doc": event_doc or {},
+    }
+    row = {
+        "event_id": str(uuid4()),
+        "schema_version": "1.0",
+        **payload,
+        "anchored_hash": canonical_hash(payload),
+    }
+    return await insert_row("research_lab_gateway_control_events", row)
+
+
 async def create_loop_start_payment(
     *,
     ticket_id: str,
@@ -466,6 +494,19 @@ async def create_receipt(request: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         event_doc={"receipt_hash": receipt_payload["receipt_hash"]},
     )
     return receipt, event
+
+
+async def find_queued_receipt_for_run(run_id: str) -> dict[str, Any] | None:
+    rows = await select_many(
+        "research_loop_receipt_current",
+        filters=(("run_id", run_id),),
+        order_by=(("current_status_at", True),),
+        limit=10,
+    )
+    for row in rows:
+        if str(row.get("current_receipt_status") or row.get("receipt_status") or "") == "queued":
+            return row
+    return None
 
 
 async def create_receipt_event(
@@ -599,6 +640,21 @@ async def create_auto_research_loop_event(
         "anchored_hash": canonical_hash(payload),
     }
     return await insert_row("research_lab_auto_research_loop_events", row)
+
+
+async def latest_auto_research_checkpoint(run_id: str) -> dict[str, Any] | None:
+    rows = await select_many(
+        "research_lab_auto_research_loop_events",
+        filters=(("run_id", run_id), ("event_type", "checkpoint_saved")),
+        order_by=(("seq", True),),
+        limit=1,
+    )
+    if not rows:
+        return None
+    event_doc = rows[0].get("event_doc")
+    if isinstance(event_doc, dict) and isinstance(event_doc.get("checkpoint"), dict):
+        return dict(event_doc["checkpoint"])
+    return None
 
 
 async def create_rolling_icp_window(window: Any) -> dict[str, Any]:

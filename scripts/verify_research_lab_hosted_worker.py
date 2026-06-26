@@ -379,6 +379,114 @@ async def _verify_auto_research_loop_engine(artifact: PrivateModelArtifactManife
         errors.append("auto-research hard budget guard did not preserve actual draft spend only")
     if "reflection_recorded" in budget_guard_event_types:
         errors.append("auto-research hard budget guard still recorded a reflection")
+
+    pause_events: list[AutoResearchLoopEvent] = []
+    pause_calls: list[dict[str, object]] = []
+
+    async def _pause_call(messages, timeout_seconds: int, max_tokens: int) -> OpenRouterCallResult:
+        pause_calls.append({"timeout_seconds": timeout_seconds, "max_tokens": max_tokens, "message_count": len(messages)})
+        if max_tokens <= 700:
+            return OpenRouterCallResult(
+                content='{"worked":"kept valid typed patches","failed":"none","why":"checkpoint boundary reached","next_question":"resume later","decision":"continue"}',
+                provider_usage={"provider": "openrouter", "response_id": f"pause-reflection-{len(pause_calls)}", "cost_microusd": 100000},
+                cost_microusd=100000,
+            )
+        return OpenRouterCallResult(
+            content=_candidate_response(),
+            provider_usage={"provider": "openrouter", "response_id": f"pause-draft-{len(pause_calls)}", "cost_microusd": 400000},
+            cost_microusd=400000,
+        )
+
+    async def _pause_event_sink(event: AutoResearchLoopEvent) -> None:
+        pause_events.append(event)
+
+    async def _pause_after_first_checkpoint() -> bool:
+        return any(event.event_type == "checkpoint_saved" for event in pause_events)
+
+    paused_result = await AutoResearchLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=5,
+            min_iterations=1,
+            max_iterations=2,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.5,
+            max_candidates=2,
+        ),
+        call_openrouter=_pause_call,
+        event_sink=_pause_event_sink,
+    ).run(
+        run_id="55555555-5555-4555-8555-555555555555",
+        ticket={
+            "ticket_id": "66666666-6666-4666-8666-666666666666",
+            "miner_hotkey": "5FminerHotkey333",
+            "island": "generalist",
+            "brief_sanitized_ref": "brief_sanitized:sha256:ghi789",
+            "ticket_doc": {"brief_public_summary": "benchmark-wide improvement"},
+            "requested_loop_count": 2,
+        },
+        artifact=artifact,
+        component_registry=registry,
+        benchmark_public_summary={"item_count": "validator_resolved"},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+        requested_loop_count=2,
+        miner_brief_ref="brief_sanitized:sha256:ghi789",
+        should_pause=_pause_after_first_checkpoint,
+    )
+    pause_event_types = [event.event_type for event in pause_events]
+    if paused_result.status != "paused" or paused_result.stop_reason != "maintenance_pause_requested":
+        errors.append("auto-research maintenance pause did not return paused result")
+    if "checkpoint_saved" not in pause_event_types or "loop_paused" not in pause_event_types:
+        errors.append("auto-research maintenance pause did not emit checkpoint and paused events")
+    if not paused_result.checkpoint_doc or not paused_result.checkpoint_doc.get("checkpoint_hash"):
+        errors.append("auto-research maintenance pause did not return checkpoint doc")
+
+    resume_events: list[AutoResearchLoopEvent] = []
+
+    async def _resume_event_sink(event: AutoResearchLoopEvent) -> None:
+        resume_events.append(event)
+
+    resumed_result = await AutoResearchLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=5,
+            min_iterations=1,
+            max_iterations=2,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.5,
+            max_candidates=2,
+        ),
+        call_openrouter=_pause_call,
+        event_sink=_resume_event_sink,
+    ).run(
+        run_id="55555555-5555-4555-8555-555555555555",
+        ticket={
+            "ticket_id": "66666666-6666-4666-8666-666666666666",
+            "miner_hotkey": "5FminerHotkey333",
+            "island": "generalist",
+            "brief_sanitized_ref": "brief_sanitized:sha256:ghi789",
+            "ticket_doc": {"brief_public_summary": "benchmark-wide improvement"},
+            "requested_loop_count": 2,
+        },
+        artifact=artifact,
+        component_registry=registry,
+        benchmark_public_summary={"item_count": "validator_resolved"},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+        requested_loop_count=2,
+        miner_brief_ref="brief_sanitized:sha256:ghi789",
+        resume_state=paused_result.checkpoint_doc,
+    )
+    resume_event_types = [event.event_type for event in resume_events]
+    if "loop_resumed" not in resume_event_types:
+        errors.append("auto-research resume did not emit loop_resumed event")
+    if resumed_result.status != "completed" or not resumed_result.selected_candidates:
+        errors.append("auto-research resume did not complete with selected candidates")
+    if resumed_result.openrouter_call_count <= paused_result.openrouter_call_count:
+        errors.append("auto-research resume did not continue OpenRouter call accounting")
     return errors
 
 

@@ -38,6 +38,7 @@ from .key_vault import (
     openrouter_key_ref,
     preflight_openrouter_key,
 )
+from .maintenance import get_autoresearch_maintenance_state
 from .models import (
     ResearchLabCandidateEvaluationResultRequest,
     ResearchLabCandidateEvaluationResultResponse,
@@ -84,7 +85,7 @@ router = APIRouter(prefix="/research-lab", tags=["research-lab"])
 _OPENROUTER_KEY_REGISTRATION_ATTEMPTS: dict[str, list[float]] = {}
 _OPENROUTER_KEY_REGISTER_MIN_SECONDS = 60.0
 _OPENROUTER_KEY_REGISTER_MAX_PER_HOUR = 6
-ACTIVE_AUTORESEARCH_QUEUE_STATUSES = {"queued", "started"}
+ACTIVE_AUTORESEARCH_QUEUE_STATUSES = {"queued", "started", "paused"}
 AUTORESEARCH_PROXY_PREFIXES = (
     "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY",
     "RESEARCH_LAB_WORKER_PROXY",
@@ -95,6 +96,12 @@ AUTORESEARCH_PROXY_PREFIXES = (
 @router.get("/status")
 async def research_lab_status() -> dict[str, object]:
     config = ResearchLabGatewayConfig.from_env()
+    maintenance = await get_autoresearch_maintenance_state()
+    maintenance_public = {
+        key: maintenance.get(key)
+        for key in ("paused", "status", "reason", "status_at", "unavailable")
+        if key in maintenance
+    }
     latest_public_benchmark = None
     if config.api_enabled and config.reports_enabled:
         try:
@@ -118,6 +125,7 @@ async def research_lab_status() -> dict[str, object]:
         "service": "leadpoet-research-lab-gateway",
         "status": "configured" if config.api_enabled else "disabled",
         **config.public_status(),
+        "maintenance": maintenance_public,
         "latest_public_benchmark": latest_public_benchmark,
     }
 
@@ -128,6 +136,7 @@ async def create_research_lab_ticket(payload: ResearchLabTicketCreateRequest, re
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
     _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
     await _verify_signed_miner(payload)
+    await _require_autoresearch_not_paused()
     await _enforce_autoresearch_loop_capacity(config, payload.miner_hotkey)
     island = _validate_allowed_research_island(config, payload.island)
     _require_default_research_model_tier(config, payload.research_model_tier)
@@ -259,6 +268,7 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
     _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
     _require_enabled(config.paid_loops_enabled, "Research Lab paid loops are disabled")
     _require_enabled(config.hosted_runs_enabled, "Research Lab hosted runs are disabled")
+    await _require_autoresearch_not_paused()
     if config.miner_openrouter_key_required and payload.miner_openrouter_preflight_status != "passed":
         raise HTTPException(status_code=400, detail="miner OpenRouter key preflight must pass before queueing")
     await _verify_signed_miner(payload)
@@ -450,6 +460,7 @@ async def top_up_research_lab_paid_loop(payload: ResearchLabLoopTopUpRequest):
     _require_enabled(config.paid_loops_enabled, "Research Lab paid loops are disabled")
     _require_enabled(config.hosted_runs_enabled, "Research Lab hosted runs are disabled")
     _require_enabled(config.loop_topups_enabled, "Research Lab loop top-ups are disabled for launch")
+    await _require_autoresearch_not_paused()
     if config.miner_openrouter_key_required and payload.miner_openrouter_preflight_status != "passed":
         raise HTTPException(status_code=400, detail="miner OpenRouter key preflight must pass before queueing")
     await _verify_signed_miner(payload)
@@ -1117,6 +1128,21 @@ def _require_enabled(enabled: bool, detail: str) -> None:
         raise HTTPException(status_code=403, detail=detail)
 
 
+async def _require_autoresearch_not_paused() -> None:
+    state = await get_autoresearch_maintenance_state()
+    if not state.get("paused"):
+        return
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "code": "research_lab_maintenance_paused",
+            "message": "Research Lab auto-research is paused for maintenance",
+            "reason": state.get("reason"),
+            "status_at": state.get("status_at"),
+        },
+    )
+
+
 async def _safe_latest_arweave_anchor(epoch: int) -> dict[str, object] | None:
     try:
         return await latest_arweave_anchor(epoch=epoch, netuid=BITTENSOR_NETUID)
@@ -1469,6 +1495,8 @@ def _configured_autoresearch_proxy_count() -> int:
 
 
 def _autoresearch_active_row_is_fresh(row: Mapping[str, Any], config: ResearchLabGatewayConfig) -> bool:
+    if str(row.get("current_queue_status") or "").strip().lower() == "paused":
+        return True
     stale_after_seconds = max(60, int(config.active_loop_stale_after_seconds or 7200))
     raw_status_at = row.get("current_status_at")
     if not raw_status_at:

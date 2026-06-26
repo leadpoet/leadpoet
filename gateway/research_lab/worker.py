@@ -25,6 +25,7 @@ from gateway.research_lab.loop_engine import (
     AutoResearchLoopSettings,
     OpenRouterCallResult,
 )
+from gateway.research_lab.maintenance import is_autoresearch_maintenance_paused
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabReceiptCreateRequest
 from gateway.research_lab.promotion import latest_public_benchmark_summary, load_active_private_model
 from gateway.research_lab.public_activity import safe_project_public_loop_activity
@@ -39,6 +40,8 @@ from gateway.research_lab.store import (
     create_reimbursement_award,
     create_reimbursement_schedule,
     create_ticket_event,
+    find_queued_receipt_for_run,
+    latest_auto_research_checkpoint,
     select_all,
     select_many,
     select_one,
@@ -262,6 +265,12 @@ class ResearchLabHostedWorker:
 
     async def run_once(self) -> HostedWorkerOutcome:
         self._require_enabled()
+        if await is_autoresearch_maintenance_paused():
+            return HostedWorkerOutcome(
+                processed=False,
+                dry_run=self.config.hosted_worker_dry_run,
+                status="maintenance_paused",
+            )
         if not self.config.hosted_worker_dry_run:
             await self._recover_stale_started_runs()
         queued = await self._next_queued_run()
@@ -475,6 +484,14 @@ class ResearchLabHostedWorker:
 
     async def _process_run(self, context: HostedRunContext) -> HostedWorkerOutcome:
         await self._append_started_events(context)
+        context.receipt_id = await self._ensure_queued_receipt(context)
+        if await is_autoresearch_maintenance_paused():
+            return await self._mark_paused(
+                context,
+                loop_result=None,
+                checkpoint_doc=None,
+                reason="maintenance_pause_before_execution",
+            )
         resolved_openrouter_env = await self.key_resolver.resolve(
             _miner_openrouter_key_ref(context),
             miner_hotkey=str(context.ticket["miner_hotkey"]),
@@ -484,13 +501,12 @@ class ResearchLabHostedWorker:
             **_worker_proxy_env(self.config),
         }
         context.provider_env = provider_env
-        receipt, _event = await create_receipt(self._queued_receipt_request(context))
-        context.receipt_id = str(receipt["receipt_id"])
         budget_context = self._run_budget_context(context)
         _tier, model_id, model_doc = self.config.resolve_auto_research_model(
             str(budget_context.get("research_model_tier") or "")
         )
         max_candidates = self._max_candidates_for_run(budget_context, model_doc)
+        resume_state = await latest_auto_research_checkpoint(context.run_id)
 
         active_start = await load_active_private_model(self.config, register_bootstrap=True)
         artifact = active_start.artifact
@@ -521,13 +537,20 @@ class ResearchLabHostedWorker:
                 )
             )
 
+            latest_checkpoint: dict[str, Any] | None = None
+
             async def _record_loop_event(event: AutoResearchLoopEvent) -> None:
+                nonlocal latest_checkpoint
+                if event.event_type == "checkpoint_saved":
+                    checkpoint_doc = event.event_doc.get("checkpoint") if isinstance(event.event_doc, Mapping) else None
+                    if isinstance(checkpoint_doc, dict):
+                        latest_checkpoint = dict(checkpoint_doc)
                 await create_auto_research_loop_event(
                     run_id=context.run_id,
                     ticket_id=context.ticket_id,
-            receipt_id=context.receipt_id,
-            event_type=event.event_type,
-            loop_status=event.loop_status,
+                    receipt_id=context.receipt_id,
+                    event_type=event.event_type,
+                    loop_status=event.loop_status,
                     worker_ref=self.worker_ref,
                     node_id=event.node_id,
                     elapsed_seconds=event.elapsed_seconds,
@@ -598,7 +621,16 @@ class ResearchLabHostedWorker:
                 budget_context=budget_context,
                 requested_loop_count=int(context.ticket.get("requested_loop_count") or 1),
                 miner_brief_ref=str(context.ticket.get("brief_sanitized_ref") or ""),
+                resume_state=resume_state,
+                should_pause=is_autoresearch_maintenance_paused,
             )
+            if loop_result.status == "paused":
+                return await self._mark_paused(
+                    context,
+                    loop_result=loop_result,
+                    checkpoint_doc=loop_result.checkpoint_doc or latest_checkpoint,
+                    reason="maintenance_pause_checkpointed",
+                )
             if not loop_result.selected_candidates:
                 raise HostedResearchLabWorkerError("auto-research loop completed without valid candidate finalists")
 
@@ -789,6 +821,91 @@ class ResearchLabHostedWorker:
             candidate_ids=tuple(candidate_ids),
         )
 
+    async def _ensure_queued_receipt(self, context: HostedRunContext) -> str:
+        if context.receipt_id:
+            return context.receipt_id
+        existing = await find_queued_receipt_for_run(context.run_id)
+        if existing:
+            return str(existing["receipt_id"])
+        receipt, _event = await create_receipt(self._queued_receipt_request(context))
+        return str(receipt["receipt_id"])
+
+    async def _mark_paused(
+        self,
+        context: HostedRunContext,
+        *,
+        loop_result: Any | None,
+        checkpoint_doc: Mapping[str, Any] | None,
+        reason: str,
+    ) -> HostedWorkerOutcome:
+        receipt_id = context.receipt_id or await self._ensure_queued_receipt(context)
+        context.receipt_id = receipt_id
+        cost_ledger = loop_result.cost_ledger() if loop_result is not None else {
+            "schema_version": "1.0",
+            "status": "paused",
+            "total_usd": 0.0,
+            "stage": reason,
+        }
+        checkpoint_ref = None
+        if isinstance(checkpoint_doc, Mapping):
+            checkpoint_ref = checkpoint_doc.get("checkpoint_hash")
+        event_doc = {
+            "run_id": context.run_id,
+            "worker_ref": self.worker_ref,
+            "receipt_id": receipt_id,
+            "pause_reason": reason,
+            "checkpoint_hash": checkpoint_ref,
+            "auto_research_loop": {
+                "status": "paused",
+                "iterations_completed": int(getattr(loop_result, "iterations_completed", 0) or 0),
+                "elapsed_seconds": round(float(getattr(loop_result, "elapsed_seconds", 0.0) or 0.0), 3),
+                "stop_reason": getattr(loop_result, "stop_reason", "maintenance_pause_requested"),
+            },
+        }
+        if checkpoint_doc:
+            event_doc["checkpoint"] = dict(checkpoint_doc)
+        await create_receipt_event(
+            receipt_id=receipt_id,
+            ticket_id=context.ticket_id,
+            event_type="queued",
+            receipt_status="queued",
+            event_doc={
+                **event_doc,
+                "cost_ledger": cost_ledger,
+                "provider_usage": list(getattr(loop_result, "provider_usage", ()) or []) or self._provider_usage(context),
+            },
+        )
+        await create_queue_event(
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            event_type="paused",
+            queue_priority=int(context.queue_row.get("queue_priority") or 0),
+            worker_ref=self.worker_ref,
+            reason=reason,
+            event_doc=event_doc,
+        )
+        await create_ticket_event(
+            ticket_id=context.ticket_id,
+            event_type="running",
+            actor_hotkey=None,
+            reason=reason,
+            event_doc=event_doc,
+        )
+        await safe_project_public_loop_activity(
+            context.ticket_id,
+            source_ref=f"hosted_worker_paused:{context.run_id}",
+            reason=reason,
+            config=self.config,
+        )
+        return HostedWorkerOutcome(
+            processed=True,
+            dry_run=False,
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            status="maintenance_paused",
+            receipt_id=receipt_id,
+        )
+
     async def _maybe_create_reimbursement_decision(
         self,
         *,
@@ -918,7 +1035,7 @@ class ResearchLabHostedWorker:
             row
             for row in queue_rows
             if str(row.get("ticket_id")) in ticket_ids
-            and str(row.get("current_queue_status")) in {"queued", "started", "completed"}
+            and str(row.get("current_queue_status")) in {"queued", "started", "paused", "completed"}
             and _row_dt(row.get("current_status_at")) >= lookback_start
         ]
         distinct_hotkeys = {str(row.get("miner_hotkey")) for row in ticket_rows if row.get("miner_hotkey")}

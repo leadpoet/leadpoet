@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +32,9 @@ from research_lab.employee_buckets import (  # noqa: E402
     normalize_employee_count_bucket,
     normalize_employee_count_buckets,
 )
+
+REQUEST_ATTEMPTS = 4
+REQUEST_BACKOFF_SECONDS = 1.5
 
 
 def _headers() -> dict[str, str]:
@@ -65,13 +69,28 @@ def _request(method: str, path: str, *, body: Any | None = None, prefer: str = "
         method=method,
         headers=headers,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=45) as response:
-            raw = response.read().decode()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")
-        raise SystemExit(f"Supabase {method} {path} failed: HTTP {exc.code}: {detail}") from exc
-    return json.loads(raw) if raw else None
+    last_error: BaseException | None = None
+    for attempt in range(1, REQUEST_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=45) as response:
+                raw = response.read().decode()
+            return json.loads(raw) if raw else None
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")
+            if exc.code not in {429, 500, 502, 503, 504}:
+                raise SystemExit(f"Supabase {method} {path} failed: HTTP {exc.code}: {detail}") from exc
+            last_error = RuntimeError(f"HTTP {exc.code}: {detail}")
+        except (TimeoutError, urllib.error.URLError) as exc:
+            last_error = exc
+        if attempt < REQUEST_ATTEMPTS:
+            sleep_seconds = REQUEST_BACKOFF_SECONDS * attempt
+            print(
+                f"retrying Supabase {method} {path} after transient error "
+                f"({attempt}/{REQUEST_ATTEMPTS}): {last_error}",
+                file=sys.stderr,
+            )
+            time.sleep(sleep_seconds)
+    raise SystemExit(f"Supabase {method} {path} failed after {REQUEST_ATTEMPTS} attempts: {last_error}") from last_error
 
 
 def _fetch_sets(limit: int, set_ids: list[int]) -> list[dict[str, Any]]:

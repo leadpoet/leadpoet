@@ -25,6 +25,7 @@ from research_lab.eval.private_runtime import (  # noqa: E402
     build_local_private_artifact_manifest,
     canonicalize_private_model_icp,
     compute_private_source_tree_hash,
+    employee_count_buckets_for_icp,
     ensure_private_model_outputs,
     load_private_artifact_manifest,
 )
@@ -75,14 +76,24 @@ def run_icp(icp, context):
             "sub_industry": "Sales Automation",
             "target_geography": "United States",
             "company_size": "51-200",
+            "employee_count_buckets": ["11-50", "51-200", "201-500"],
             "product_service": "AI sales automation platform",
             "intent_signals": ["Launched or announced a new product"],
         }
-        canonical_icp = canonicalize_private_model_icp(research_lab_icp)
+        legacy_icp = dict(research_lab_icp)
+        legacy_icp.pop("employee_count_buckets")
+        canonical_icp = canonicalize_private_model_icp(legacy_icp)
         if canonical_icp["geography"] != "United States":
             errors.append("canonical private ICP did not map target_geography to geography")
         if canonical_icp["employee_count"] != "51-200":
-            errors.append("canonical private ICP did not map company_size to employee_count")
+            errors.append("canonical private ICP did not keep the primary employee_count")
+        canonical_multi = canonicalize_private_model_icp(research_lab_icp)
+        if canonical_multi["employee_count"] != ["11-50", "51-200", "201-500"]:
+            errors.append("canonical private ICP did not pass multi-band employee_count to adapter")
+        if "employee_count_buckets" in canonical_multi:
+            errors.append("canonical private ICP leaked gateway-only employee_count_buckets")
+        if employee_count_buckets_for_icp(research_lab_icp) != ["11-50", "51-200", "201-500"]:
+            errors.append("employee_count_buckets did not normalize")
         if canonical_icp["intent_signal"] != "Launched or announced a new product":
             errors.append("canonical private ICP did not extract intent signal text")
         if canonical_icp["intent_category"] != "PRODUCT_LAUNCH":

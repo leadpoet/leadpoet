@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable, Mapping, Sequence, Union
 
 from leadpoet_verifier.research_evaluation import build_research_evaluation_score_bundle
 from research_lab.canonical import sha256_json
+from research_lab.employee_buckets import normalize_employee_count_bucket
 
 from .artifacts import PrivateModelArtifactManifest, validate_private_model_artifact_manifest
 from .benchmark import SealedBenchmarkSet, validate_sealed_benchmark_set
@@ -17,8 +18,11 @@ from .patches import (
     runtime_compatible_candidate_patch_manifest,
     validate_candidate_patch_manifest,
 )
-from .private_runtime import canonicalize_private_model_icp, ensure_private_model_outputs
-
+from .private_runtime import (
+    canonicalize_private_model_icp,
+    employee_count_buckets_for_icp,
+    ensure_private_model_outputs,
+)
 
 ModelRunner = Callable[
     [Mapping[str, Any], Mapping[str, Any]],
@@ -98,16 +102,15 @@ async def evaluate_private_model_pair(
         if not isinstance(icp, Mapping):
             raise RealEvaluatorRequired("benchmark item is missing private ICP payload")
         base_outputs = ensure_private_model_outputs(
-            await _maybe_await(base_runner(icp, run_context)),
+            await _call_model_runner(base_runner, icp, run_context),
             context_label=f"reference model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
             require_non_empty=False,
         )
         candidate_outputs = ensure_private_model_outputs(
-            await _maybe_await(
-                candidate_runner(
-                    icp,
-                    dict(run_context) if image_candidate else {**dict(run_context), "patch": runtime_patch.to_dict()},
-                )
+            await _call_model_runner(
+                candidate_runner,
+                icp,
+                dict(run_context) if image_candidate else {**dict(run_context), "patch": runtime_patch.to_dict()},
             ),
             context_label=f"candidate model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
             require_non_empty=False,
@@ -257,11 +260,23 @@ class QualificationStyleCompanyScorer:
         ICPPrompt = getattr(models, "ICPPrompt")
         score_company = getattr(scorer_module, "score_company")
 
-        icp_obj = ICPPrompt(**canonicalize_private_model_icp(icp))
+        allowed_buckets = employee_count_buckets_for_icp(icp)
         seen_companies: set[str] = set()
         breakdowns: list[dict[str, Any]] = []
         for company in companies:
-            company_obj = CompanyOutput(**_normalize_company_output(company))
+            normalized_company = _normalize_company_output(company)
+            company_bucket = normalize_employee_count_bucket(
+                normalized_company.get("employee_count"),
+                default="",
+            )
+            if not company_bucket or company_bucket not in allowed_buckets:
+                continue
+            scoring_icp = dict(icp)
+            scoring_icp["employee_count"] = company_bucket
+            scoring_icp.pop("employee_count_buckets", None)
+            scoring_icp.pop("employee_counts", None)
+            icp_obj = ICPPrompt(**canonicalize_private_model_icp(scoring_icp))
+            company_obj = CompanyOutput(**normalized_company)
             result = await score_company(
                 company=company_obj,
                 icp=icp_obj,
@@ -295,6 +310,14 @@ async def _maybe_await(value: Any) -> Any:
     if asyncio.iscoroutine(value):
         return await value
     return value
+
+
+async def _call_model_runner(
+    runner: ModelRunner,
+    icp: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> Sequence[Mapping[str, Any]]:
+    return await _maybe_await(runner(icp, context))
 
 
 def _normalize_company_output(company: Mapping[str, Any]) -> dict[str, Any]:

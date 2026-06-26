@@ -18,6 +18,10 @@ import sys
 from typing import Any, Mapping, Sequence
 
 from research_lab.canonical import sha256_bytes, sha256_json
+from research_lab.employee_buckets import (
+    normalize_employee_count_bucket as _normalize_linkedin_employee_count_bucket,
+    normalize_employee_count_buckets,
+)
 
 SECRET_MARKERS = (
     "sk-or-",
@@ -61,32 +65,6 @@ PROVIDER_PROXY_ENV_PASSTHROUGH = (
     "https_proxy",
     "no_proxy",
 )
-LINKEDIN_EMPLOYEE_BUCKETS = (
-    "0-1",
-    "2-10",
-    "11-50",
-    "51-200",
-    "201-500",
-    "501-1,000",
-    "1,001-5,000",
-    "5,001-10,000",
-    "10,001+",
-)
-LEGACY_EMPLOYEE_BUCKET_MAP = {
-    "10-50": "11-50",
-    "50-200": "51-200",
-    "200-500": "201-500",
-    "500-1000": "501-1,000",
-    "501-1000": "501-1,000",
-    "1000-5000": "1,001-5,000",
-    "1001-5000": "1,001-5,000",
-    "5000-10000": "5,001-10,000",
-    "5001-10000": "5,001-10,000",
-    "5000+": "5,001-10,000",
-    "10000+": "10,001+",
-    "10001+": "10,001+",
-}
-
 
 class PrivateModelRuntimeError(RuntimeError):
     """Raised when the private model artifact cannot be executed safely."""
@@ -141,9 +119,10 @@ def canonicalize_private_model_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
         normalized.get("hq_country"),
         default="United States",
     )
+    raw_employee_count = normalized.get("employee_count")
     employee_count = _normalize_employee_count_bucket(
         _first_text(
-            normalized.get("employee_count"),
+            raw_employee_count,
             normalized.get("company_size"),
             normalized.get("company_size_bucket"),
             normalized.get("employee_range"),
@@ -162,7 +141,19 @@ def canonicalize_private_model_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
     normalized["sub_industry"] = sub_industry
     normalized["geography"] = geography
     normalized["country"] = _first_text(normalized.get("country"), geography)
-    normalized["employee_count"] = employee_count
+    employee_count_buckets = employee_count_buckets_for_icp(
+        {
+            "employee_count": raw_employee_count if raw_employee_count is not None else employee_count,
+            "employee_count_buckets": normalized.get("employee_count_buckets"),
+            "employee_counts": normalized.get("employee_counts"),
+            "company_size": normalized.get("company_size"),
+            "company_size_bucket": normalized.get("company_size_bucket"),
+            "employee_range": normalized.get("employee_range"),
+        }
+    )
+    normalized["employee_count"] = employee_count_buckets if len(employee_count_buckets) > 1 else employee_count
+    normalized.pop("employee_count_buckets", None)
+    normalized.pop("employee_counts", None)
     normalized["product_service"] = product_service or required_attribute
     normalized["required_attribute"] = required_attribute
     normalized["intent_signal"] = intent_signal
@@ -181,7 +172,7 @@ def canonicalize_private_model_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
                 "industry": industry,
                 "sub_industry": sub_industry,
                 "geography": geography,
-                "employee_count": employee_count,
+                "employee_count": employee_count_buckets if len(employee_count_buckets) > 1 else employee_count,
                 "product_service": normalized["product_service"],
                 "intent_signal": intent_signal,
             }
@@ -190,6 +181,37 @@ def canonicalize_private_model_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
     if not normalized["industry"] or not normalized["intent_signal"]:
         raise PrivateModelRuntimeError("private model ICP is missing industry or intent signal after canonicalization")
     return normalized
+
+
+def employee_count_buckets_for_icp(icp: Mapping[str, Any]) -> list[str]:
+    """Return the relaxed Research Lab employee buckets for an ICP."""
+
+    if not isinstance(icp, Mapping):
+        raise PrivateModelRuntimeError("private model ICP payload must be an object")
+    raw_employee_count = icp.get("employee_count")
+    primary = _normalize_employee_count_bucket(
+        _first_text(
+            raw_employee_count,
+            icp.get("company_size"),
+            icp.get("company_size_bucket"),
+            icp.get("employee_range"),
+            default="51-200",
+        )
+    )
+    explicit = icp.get("employee_count_buckets") or icp.get("employee_counts")
+    if explicit is None and (
+        isinstance(raw_employee_count, (list, tuple))
+        or any(sep in str(raw_employee_count or "") for sep in ("|", ";"))
+        or " or " in str(raw_employee_count or "").lower()
+    ):
+        explicit = raw_employee_count
+    if explicit is None:
+        return [primary]
+    return normalize_employee_count_buckets(
+        explicit,
+        primary_bucket=primary,
+        expand_single=False,
+    )
 
 
 def ensure_private_model_outputs(
@@ -667,14 +689,7 @@ def _first_text(*values: Any, default: str = "") -> str:
 
 
 def _normalize_employee_count_bucket(value: Any, *, default: str = "51-200") -> str:
-    raw = " ".join(str(value or "").strip().split())
-    if raw in LINKEDIN_EMPLOYEE_BUCKETS:
-        return raw
-    key = raw.replace(",", "")
-    normalized = LEGACY_EMPLOYEE_BUCKET_MAP.get(key) or LEGACY_EMPLOYEE_BUCKET_MAP.get(raw)
-    if normalized:
-        return normalized
-    return default
+    return _normalize_linkedin_employee_count_bucket(value, default=default)
 
 
 def _intent_signal_text(icp: Mapping[str, Any]) -> str:
@@ -779,12 +794,13 @@ def _positive_int(value: Any, *, default: int) -> int:
 
 
 def _prompt_from_icp(icp: Mapping[str, Any]) -> str:
+    employee_count = _employee_count_display(icp.get("employee_count"))
     return " ".join(
         part
         for part in (
             f"{icp.get('industry', '')} companies",
             f"in {icp.get('geography', '')}" if icp.get("geography") else "",
-            f"with {icp.get('employee_count', '')} employees" if icp.get("employee_count") else "",
+            f"with {employee_count} employees" if employee_count else "",
             f"that {str(icp.get('required_attribute', '')).removeprefix('The company ').strip()}"
             if icp.get("required_attribute")
             else "",
@@ -792,6 +808,14 @@ def _prompt_from_icp(icp: Mapping[str, Any]) -> str:
         )
         if part
     )
+
+
+def _employee_count_display(value: Any) -> str:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        buckets = [_first_text(item) for item in value]
+        buckets = [bucket for bucket in buckets if bucket]
+        return " or ".join(buckets)
+    return _first_text(value)
 
 
 def _excluded_source_path(rel: str) -> bool:

@@ -170,6 +170,7 @@ def canonicalize_private_model_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
     normalized["intent_signals"] = _intent_signals_list(normalized.get("intent_signals"), intent_signal)
     normalized["intent_category"] = _intent_category(normalized.get("intent_category"), intent_signal)
     normalized["intent_max_age_days"] = _positive_int(normalized.get("intent_max_age_days"), default=365)
+    normalized["bonus_intents"] = _bonus_intents_list(normalized.get("bonus_intents"))
     normalized["company_stage"] = _first_text(normalized.get("company_stage"), default="Any")
     normalized["prompt"] = _first_text(normalized.get("prompt"), _prompt_from_icp(normalized))
     normalized["target_roles"] = normalized.get("target_roles") if isinstance(normalized.get("target_roles"), list) else []
@@ -699,6 +700,27 @@ def _intent_signals_list(value: Any, fallback: str) -> list[str]:
     return signals
 
 
+def _bonus_intents_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        signal = _first_text(item.get("intent_signal"), item.get("signal"))
+        category = _intent_category(item.get("intent_category") or item.get("category"), signal)
+        if not signal or not category:
+            continue
+        normalized.append(
+            {
+                "intent_signal": signal,
+                "intent_category": category,
+                "intent_max_age_days": _positive_int(item.get("intent_max_age_days") or item.get("max_age"), default=365),
+            }
+        )
+    return normalized
+
+
 def _required_attribute(
     value: Any,
     *,
@@ -892,8 +914,27 @@ def _research_lab_patch_strict_qualify(adapter_module):
     def _strict_qualify(icp):
         if not isinstance(icp, dict) or not (icp.get("industry") or icp.get("intent_signal_text") or icp.get("intent_signal")):
             return []
-        if not (core._exa_key() and core._sd_key() and core._or_key()):
-            raise RuntimeError("Missing API keys for private sourcing model")
+        try:
+            import sourcing_model.clients as clients
+            has_keys = clients.has_keys()
+        except Exception:
+            try:
+                has_keys = bool(core._exa_key() and core._sd_key() and core._or_key())
+            except Exception:
+                has_keys = False
+        if not has_keys:
+            missing = []
+            if not os.environ.get("EXA_API_KEY"):
+                missing.append("EXA_API_KEY")
+            if not (os.environ.get("SCRAPINGDOG_API_KEY") or os.environ.get("QUALIFICATION_SCRAPINGDOG_API_KEY")):
+                missing.append("SCRAPINGDOG_API_KEY")
+            if not (
+                os.environ.get("OPENROUTER_API_KEY")
+                or os.environ.get("QUALIFICATION_OPENROUTER_API_KEY")
+                or os.environ.get("OPENROUTER_KEY")
+            ):
+                missing.append("OPENROUTER_API_KEY")
+            raise RuntimeError("Missing API keys for private sourcing model: " + ", ".join(missing))
         return asyncio.run(core._qualify_async(icp))
 
     try:

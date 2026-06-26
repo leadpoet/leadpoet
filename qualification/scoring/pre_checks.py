@@ -13,8 +13,10 @@ These checks are designed to be:
 
 Company-mode pre-checks (``run_company_zero_checks``):
 1. Per-lead HARD time limit (30 seconds) — instant fail safety net
-2. Industry fuzzy match (80% threshold)
-3. Sub-industry fuzzy match (70% threshold) — only if both sides set
+2. Industry sanity check — exact/fuzzy/broad-bucket matches pass;
+   plausible mismatches are deferred to the LLM ICP-fit scorer
+3. Sub-industry sanity check — exact/fuzzy matches pass; plausible
+   mismatches are deferred to the LLM ICP-fit scorer
 4. Country match
 5. Company-shaped data quality (placeholder text, suspicious chars)
 6. Duplicate company handling (first surface per company wins)
@@ -94,7 +96,7 @@ _INDUSTRY_BUCKETS: Dict[str, set[str]] = {
         "computer networking", "computer networking products", "computer games",
         "cloud computing", "data infrastructure and analytics",
         "mobile computing software products", "embedded software products",
-        "machine learning", "e-learning providers",
+        "machine learning",
     },
     "finance": {
         "financial services", "lending and investments", "payments",
@@ -111,7 +113,8 @@ _INDUSTRY_BUCKETS: Dict[str, set[str]] = {
     },
     "hardware_mfg": {
         "hardware", "manufacturing",
-        "computer hardware", "semiconductor manufacturing", "semiconductors",
+        "computer hardware", "computer hardware manufacturing",
+        "semiconductor manufacturing", "semiconductors",
         "electrical and electronic manufacturing", "electronics",
         "appliances electrical and electronics manufacturing",
         "industrial machinery manufacturing", "machinery", "robotics",
@@ -138,6 +141,7 @@ _INDUSTRY_BUCKETS: Dict[str, set[str]] = {
     "real_estate": {
         "real estate", "leasing real estate", "commercial real estate",
         "real estate and equipment rental services",
+        "property management software", "proptech",
     },
     "energy": {
         "energy", "oil and gas", "utilities", "renewables and environment",
@@ -151,7 +155,9 @@ _INDUSTRY_BUCKETS: Dict[str, set[str]] = {
     },
     "education": {
         "education", "education administration programs", "higher education",
-        "primary and secondary education",
+        "primary and secondary education", "e-learning providers",
+        "e learning providers", "e-learning", "e learning", "edtech",
+        "educational technology",
     },
 }
 
@@ -194,10 +200,11 @@ async def run_company_zero_checks(
     Checks (in order):
 
       * Hard time limit (30s safety net)
-      * Industry fuzzy match (80%)
-      * Sub-industry fuzzy match (70%) — only enforced if the ICP
-        provides a sub-industry AND the model provides one
-        (sub-industry is optional on CompanyOutput).
+      * Industry sanity check.  Exact/fuzzy/broad-bucket matches pass,
+        but semantic mismatches are not hard-zeroed here because the
+        downstream ICP-fit LLM scores industry/sub-industry nuance.
+      * Sub-industry sanity check.  Exact/fuzzy matches pass, but
+        mismatches are deferred to the downstream ICP-fit scorer.
       * Country match
       * Company-shaped data quality (placeholder text, suspicious
         chars in company name / website)
@@ -214,13 +221,15 @@ async def run_company_zero_checks(
         logger.info(f"Company failed hard time limit: {result.reason}")
         return False, result.reason
 
-    # Check 2: Industry fuzzy match (80% threshold) — unchanged.
+    # Check 2: Industry sanity check.  Do not hard-zero merely because
+    # LinkedIn and ICP labels use adjacent names; the ICP-fit scorer
+    # has the context needed to score this properly.
     result = check_industry_match(company.industry, icp.industry)
     if not result.passed:
         logger.info(f"Company failed industry check: {result.reason}")
         return False, result.reason
 
-    # Check 3: Sub-industry fuzzy match — relaxed.  CompanyOutput marks
+    # Check 3: Sub-industry sanity check — relaxed.  CompanyOutput marks
     # sub_industry as optional; if either side is empty we skip the check
     # rather than failing (industry fit is the primary filter).
     if (icp.sub_industry and icp.sub_industry.strip()
@@ -266,8 +275,9 @@ def _check_company_data_quality(
       * not match obvious placeholder text ('test', 'foo', etc.),
       * not contain suspicious characters that indicate templated junk.
 
-    Industry / sub-industry / country are already enforced by their own
-    fuzzy / exact-match checks elsewhere in run_company_zero_checks, so
+    Country is enforced by its own exact-match check elsewhere in
+    run_company_zero_checks.  Industry / sub-industry are sanity checks
+    and detailed fit is scored by the ICP-fit LLM, so
     we don't re-validate them here.
     """
     name = (company.company_name or "").strip()
@@ -349,7 +359,13 @@ def check_time_limit(run_time_seconds: float) -> ValidationResult:
 
 def check_industry_match(lead_industry: str, icp_industry: str) -> ValidationResult:
     """
-    Check 3: Verify lead's industry matches ICP (80% fuzzy match threshold).
+    Check 3: Verify lead's industry is present and not obviously impossible.
+
+    Exact/fuzzy/broad-bucket matches pass immediately.  If labels are
+    adjacent but not an exact deterministic match, defer to the ICP-fit
+    scorer instead of hard-zeroing the company.  This mirrors the private
+    model contract: deterministic industry logic may accept obvious
+    matches, but nuanced company/ICP fit belongs in the LLM scorer.
     
     Args:
         lead_industry: Industry from the lead
@@ -372,16 +388,21 @@ def check_industry_match(lead_industry: str, icp_industry: str) -> ValidationRes
     score = fuzz.ratio(lead_industry.lower().strip(), icp_industry.lower().strip())
     
     if score < INDUSTRY_MATCH_THRESHOLD:
-        return ValidationResult(
-            passed=False,
-            reason=f"Industry mismatch: '{lead_industry}' vs '{icp_industry}' (score: {score:.0f}%, threshold: {INDUSTRY_MATCH_THRESHOLD}%)"
+        logger.info(
+            "Company industry label deferred to ICP-fit scorer: "
+            "'%s' vs '%s' (score: %.0f%%, threshold: %s%%)",
+            lead_industry,
+            icp_industry,
+            score,
+            INDUSTRY_MATCH_THRESHOLD,
         )
     return ValidationResult(passed=True)
 
 
 def check_sub_industry_match(lead_sub_industry: str, icp_sub_industry: str) -> ValidationResult:
     """
-    Check 4: Verify lead's sub-industry matches ICP (70% fuzzy match threshold).
+    Check 4: Verify sub-industry is present and defer nuanced mismatch
+    handling to the ICP-fit scorer.
     
     More lenient than industry since sub-industry naming varies more.
     
@@ -401,9 +422,13 @@ def check_sub_industry_match(lead_sub_industry: str, icp_sub_industry: str) -> V
     score = fuzz.ratio(lead_sub_industry.lower().strip(), icp_sub_industry.lower().strip())
     
     if score < SUB_INDUSTRY_MATCH_THRESHOLD:
-        return ValidationResult(
-            passed=False,
-            reason=f"Sub-industry mismatch: '{lead_sub_industry}' vs '{icp_sub_industry}' (score: {score:.0f}%, threshold: {SUB_INDUSTRY_MATCH_THRESHOLD}%)"
+        logger.info(
+            "Company sub-industry label deferred to ICP-fit scorer: "
+            "'%s' vs '%s' (score: %.0f%%, threshold: %s%%)",
+            lead_sub_industry,
+            icp_sub_industry,
+            score,
+            SUB_INDUSTRY_MATCH_THRESHOLD,
         )
     return ValidationResult(passed=True)
 
@@ -438,6 +463,16 @@ def _normalize_country(name: str) -> str:
     return _COUNTRY_ALIASES.get(stripped, stripped)
 
 
+def _country_requirement_from_icp_geography(value: str) -> str:
+    """Extract the country portion from an ICP geography string.
+
+    Research Lab ICPs commonly use values such as
+    ``"United States, West Coast"``.  The deterministic pre-check should
+    verify the country, while regional nuance is scored by ICP fit.
+    """
+    return value.split(",", 1)[0].strip()
+
+
 def check_country_match(lead_country: str, icp_country: str) -> ValidationResult:
     """
     Verify lead's country matches ICP requirement.
@@ -455,7 +490,8 @@ def check_country_match(lead_country: str, icp_country: str) -> ValidationResult
             reason=f"Missing country (ICP requires '{icp_country}')"
         )
     
-    if _normalize_country(lead_country) != _normalize_country(icp_country):
+    required_country = _country_requirement_from_icp_geography(icp_country)
+    if _normalize_country(lead_country) != _normalize_country(required_country):
         return ValidationResult(
             passed=False,
             reason=f"Country mismatch: '{lead_country}' vs ICP '{icp_country}'"

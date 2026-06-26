@@ -83,6 +83,39 @@ def _short_error(exc: BaseException) -> str:
     return f"{exc.__class__.__name__}: {str(exc)[:300]}"
 
 
+def _runtime_error_diagnostics(error_text: str) -> dict[str, Any]:
+    """Return DB-safe runtime diagnostics without provider URLs or request text."""
+
+    lowered = error_text.lower()
+    provider = "unknown"
+    if "scrapingdog" in lowered:
+        provider = "scrapingdog"
+    elif "exa" in lowered:
+        provider = "exa"
+    elif "openrouter" in lowered:
+        provider = "openrouter"
+
+    status = 0
+    for code in (400, 401, 403, 404, 408, 409, 429, 500, 502, 503, 504):
+        if f"http error {code}" in lowered or f"status={code}" in lowered or f'"status":{code}' in lowered:
+            status = code
+            break
+
+    if status >= 500:
+        category = "provider_http_5xx"
+    elif status >= 400:
+        category = "provider_http_4xx"
+    else:
+        category = "runtime_provider_error"
+
+    return {
+        "error_class": "PrivateModelRuntimeError" if "privatemodelruntimeerror" in lowered else "RuntimeError",
+        "provider": provider,
+        "status": status,
+        "category": category,
+    }
+
+
 def _status_age_seconds(raw_status_at: object) -> float | None:
     if not raw_status_at:
         return None
@@ -918,10 +951,12 @@ class ResearchLabGatewayScoringWorker:
                 )
                 if runtime_error:
                     diagnostics = dict(item_summary.get("diagnostics") or {})
+                    runtime_diagnostics = _runtime_error_diagnostics(runtime_error)
                     categories = set(diagnostics.get("failure_categories") or [])
                     categories.add("runtime_provider_error")
+                    categories.add(str(runtime_diagnostics["category"]))
                     diagnostics["failure_categories"] = sorted(categories)
-                    diagnostics["runtime_error"] = runtime_error
+                    diagnostics["runtime_error"] = runtime_diagnostics
                     item_summary["diagnostics"] = diagnostics
                 per_icp_summaries.append(item_summary)
             if nonempty_output_count <= 0:

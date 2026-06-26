@@ -31,7 +31,7 @@ Do NOT modify any existing validation in validator_models/automated_checks.py
 
 import re
 import logging
-from typing import Tuple, Optional, Set, NamedTuple, List
+from typing import Tuple, Optional, Set, NamedTuple, List, Dict
 
 try:
     from rapidfuzz import fuzz
@@ -73,6 +73,97 @@ class ValidationResult(NamedTuple):
 # Fuzzy matching thresholds
 INDUSTRY_MATCH_THRESHOLD = 80  # 80% for industry
 SUB_INDUSTRY_MATCH_THRESHOLD = 70  # 70% for sub-industry
+
+
+def _norm_industry(label: str) -> str:
+    """Normalize LinkedIn/ICP industry labels for deterministic broad buckets."""
+    normalized = (label or "").lower().replace("&", " and ")
+    normalized = re.sub(r"[^a-z0-9 ]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+_INDUSTRY_BUCKETS: Dict[str, set[str]] = {
+    "software": {
+        "software", "information technology", "artificial intelligence",
+        "data and analytics", "privacy and security",
+        "software development", "computer software",
+        "it services and it consulting", "information technology and services",
+        "information services", "internet", "internet publishing",
+        "technology information and internet", "technology information and media",
+        "computer and network security", "network security",
+        "computer networking", "computer networking products", "computer games",
+        "cloud computing", "data infrastructure and analytics",
+        "mobile computing software products", "embedded software products",
+        "machine learning", "e-learning providers",
+    },
+    "finance": {
+        "financial services", "lending and investments", "payments",
+        "banking", "capital markets", "investment management",
+        "investment banking", "venture capital and private equity principals",
+        "insurance", "fintech",
+    },
+    "health_bio": {
+        "health care", "biotechnology",
+        "hospitals and health care", "biotechnology research",
+        "pharmaceutical manufacturing", "pharmaceuticals", "medical device",
+        "medical devices", "medical equipment manufacturing", "medical practices",
+        "mental health care", "wellness and fitness services",
+    },
+    "hardware_mfg": {
+        "hardware", "manufacturing",
+        "computer hardware", "semiconductor manufacturing", "semiconductors",
+        "electrical and electronic manufacturing", "electronics",
+        "appliances electrical and electronics manufacturing",
+        "industrial machinery manufacturing", "machinery", "robotics",
+        "automation machinery manufacturing", "nanotechnology research",
+        "defense and space manufacturing",
+        "aviation and aerospace component manufacturing",
+        "computers and electronics manufacturing",
+    },
+    "commerce_retail": {
+        "commerce and shopping", "retail", "e-commerce",
+        "consumer goods", "wholesale", "retail apparel and fashion",
+        "food and beverage services", "consumer services",
+    },
+    "prof_services": {
+        "professional services", "business consulting and services",
+        "management consulting", "legal services", "accounting",
+        "staffing and recruiting", "outsourcing and offshoring consulting",
+    },
+    "marketing_ad": {
+        "advertising", "sales and marketing", "advertising services",
+        "marketing services", "marketing and advertising",
+        "public relations and communications services",
+    },
+    "real_estate": {
+        "real estate", "leasing real estate", "commercial real estate",
+        "real estate and equipment rental services",
+    },
+    "energy": {
+        "energy", "oil and gas", "utilities", "renewables and environment",
+        "renewable energy semiconductor manufacturing",
+        "electric power generation", "services for renewable energy",
+    },
+    "transportation": {
+        "transportation", "transportation logistics supply chain and storage",
+        "truck transportation", "airlines and aviation", "freight and package transportation",
+        "logistics and supply chain",
+    },
+    "education": {
+        "education", "education administration programs", "higher education",
+        "primary and secondary education",
+    },
+}
+
+_INDUSTRY_TO_BUCKET: Dict[str, str] = {
+    _norm_industry(name): bucket
+    for bucket, names in _INDUSTRY_BUCKETS.items()
+    for name in names
+}
+
+
+def _industry_bucket(label: str) -> Optional[str]:
+    return _INDUSTRY_TO_BUCKET.get(_norm_industry(label))
 
 # Placeholder text patterns that indicate fake/test data
 PLACEHOLDER_PATTERNS: List[str] = [
@@ -273,6 +364,11 @@ def check_industry_match(lead_industry: str, icp_industry: str) -> ValidationRes
             reason="Missing industry field"
         )
     
+    lead_bucket = _industry_bucket(lead_industry)
+    icp_bucket = _industry_bucket(icp_industry)
+    if lead_bucket is not None and lead_bucket == icp_bucket:
+        return ValidationResult(passed=True)
+
     score = fuzz.ratio(lead_industry.lower().strip(), icp_industry.lower().strip())
     
     if score < INDUSTRY_MATCH_THRESHOLD:

@@ -83,7 +83,7 @@ def main() -> int:
         help="Immutable private model image digest. Defaults to RESEARCH_LAB_PRIVATE_MODEL_IMAGE_DIGEST.",
     )
     parser.add_argument("--max-icps", type=int, default=1, help="Number of fixture ICPs to run.")
-    parser.add_argument("--timeout-seconds", type=int, default=900, help="Per-ICP model timeout.")
+    parser.add_argument("--timeout-seconds", type=int, default=1800, help="Per-ICP model timeout.")
     parser.add_argument(
         "--include-global-proxy",
         action="store_true",

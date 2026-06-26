@@ -156,7 +156,7 @@ class ResearchLabGatewayConfig:
     scoring_worker_total_workers: int = 1
     scoring_worker_require_proxy: bool = False
     scoring_worker_proxy_url: str = ""
-    scoring_worker_model_timeout_seconds: int = 900
+    scoring_worker_model_timeout_seconds: int = 1800
     scoring_worker_max_claim_requeues: int = 3
     private_model_docker_global_proxy_enabled: bool = False
     scoring_worker_allow_partial_icp_window: bool = False
@@ -314,7 +314,7 @@ class ResearchLabGatewayConfig:
             scoring_worker_proxy_url=os.getenv("RESEARCH_LAB_SCORING_WORKER_PROXY", ""),
             scoring_worker_model_timeout_seconds=max(
                 30,
-                _int("RESEARCH_LAB_SCORING_WORKER_MODEL_TIMEOUT_SECONDS", 900),
+                _int("RESEARCH_LAB_SCORING_WORKER_MODEL_TIMEOUT_SECONDS", 1800),
             ),
             scoring_worker_max_claim_requeues=max(
                 1,

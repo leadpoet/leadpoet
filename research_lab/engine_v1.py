@@ -395,6 +395,19 @@ def select_uniform_prior_cell(cells: Sequence[BanditCell | Mapping[str, Any]]) -
 
 def _validate_prompt_edit(record: PatchRecord, component: ComponentManifestEntry) -> list[str]:
     errors: list[str] = []
+    query_prefix = str(record.payload.get("query_prefix") or "")
+    append_instruction = str(record.payload.get("append_instruction") or "")
+    if query_prefix or append_instruction:
+        for field_name, value in (
+            ("query_prefix", query_prefix),
+            ("append_instruction", append_instruction),
+        ):
+            if len(value) > max(component.token_budget, 1):
+                errors.append(f"PROMPT_EDIT {field_name} exceeds component token budget")
+            if "raw_customer_data" in value or "judge_prompt" in value:
+                errors.append("PROMPT_EDIT must not include raw customer data or judge prompts")
+        return errors
+
     template = str(record.payload.get("new_template") or "")
     template_name = str(record.payload.get("template_name") or "")
     if not template_name:
@@ -411,6 +424,26 @@ def _validate_prompt_edit(record: PatchRecord, component: ComponentManifestEntry
 
 
 def _validate_param_edit(record: PatchRecord, component: ComponentManifestEntry) -> list[str]:
+    params = record.payload.get("params")
+    if isinstance(params, Mapping):
+        errors: list[str] = []
+        if not params:
+            return ["PARAM_EDIT params must not be empty"]
+        for raw_name, raw_value in params.items():
+            param_name = str(raw_name)
+            bounds = (component.param_bounds or {}).get(param_name)
+            if not bounds:
+                errors.append(f"PARAM_EDIT unknown or disallowed param: {param_name}")
+                continue
+            try:
+                new_value = float(raw_value)
+            except Exception:
+                errors.append(f"PARAM_EDIT requires numeric value for {param_name}")
+                continue
+            if new_value < bounds[0] or new_value > bounds[1]:
+                errors.append(f"PARAM_EDIT {param_name}={new_value} outside bounds [{bounds[0]}, {bounds[1]}]")
+        return errors
+
     param_name = str(record.payload.get("param_name") or "")
     bounds = (component.param_bounds or {}).get(param_name)
     if not bounds:
@@ -425,7 +458,7 @@ def _validate_param_edit(record: PatchRecord, component: ComponentManifestEntry)
 
 
 def _validate_strategy_swap(record: PatchRecord, component: ComponentManifestEntry) -> list[str]:
-    strategy = str(record.payload.get("strategy_name") or "")
+    strategy = str(record.payload.get("strategy_option") or record.payload.get("strategy_name") or "")
     if strategy not in component.strategy_options:
         return [f"STRATEGY_SWAP strategy {strategy!r} not registered for component {component.name}"]
     return []

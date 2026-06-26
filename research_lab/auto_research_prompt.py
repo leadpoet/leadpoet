@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from typing import Any, Mapping, Sequence
 
@@ -20,6 +20,7 @@ from research_lab.engine_v1 import (
 from research_lab.eval.artifacts import PrivateModelArtifactManifest
 from research_lab.eval.patches import (
     CandidatePatchManifest,
+    normalize_runtime_patch_doc,
     runtime_compatible_strategy_options,
     validate_candidate_patch_manifest,
 )
@@ -99,6 +100,7 @@ def build_default_auto_research_messages(
         "hallucination rate, and repeatable lead quality. You must not request or reveal private "
         "code, raw provider keys, hidden benchmark plaintext, private customer data, or judge prompts."
     )
+    patch_contract_guidance = _runtime_patch_contract_guidance(component_registry)
     user = (
         "Generate candidate model-improvement patches from the JSON context below.\n"
         "Return strict JSON only, no markdown.\n\n"
@@ -115,9 +117,8 @@ def build_default_auto_research_messages(
         "- Never use CODE_EDIT or SOURCE_ADD.\n"
         "- target_component_id must be one of the component registry entry names.\n"
         "- patch_doc must match the component's patch contract.\n"
-        "- For PROMPT_EDIT, include template_name and new_template with all required placeholders.\n"
-        "- For PARAM_EDIT, include param_name and numeric new_value within registered bounds.\n"
-        "- For STRATEGY_SWAP, include strategy_name from registered options.\n"
+        + patch_contract_guidance
+        +
         "- Focus on improving lead fit, intent freshness, intent specificity, and evidence quality.\n"
         "- Prefer narrower, testable changes over broad vague changes.\n\n"
         "Expected output shape:\n"
@@ -331,6 +332,13 @@ def build_validated_candidate_manifest(
         if isinstance(component_registry, ComponentRegistry)
         else ComponentRegistry.from_mapping(component_registry)
     )
+    runtime_patch_doc = normalize_runtime_patch_doc(
+        draft.patch_type,
+        draft.target_component_id,
+        draft.patch_doc,
+        redacted_summary=draft.redacted_summary,
+    )
+    draft = replace(draft, patch_doc=runtime_patch_doc)
     seed = {
         "run_id": str(run_id),
         "sequence": int(sequence),
@@ -422,6 +430,41 @@ def _redacted_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
     if _contains_forbidden_material(data):
         raise ValueError("auto-research prompt context contains forbidden private or secret material")
     return data
+
+
+def _runtime_patch_contract_guidance(component_registry: Mapping[str, Any]) -> str:
+    """Return concise patch_doc instructions for the active private adapter."""
+    registry_payload = component_registry.get("component_registry", component_registry)
+    if isinstance(registry_payload, Mapping) and "entries" in registry_payload:
+        entries = [item for item in registry_payload.get("entries", []) if isinstance(item, Mapping)]
+    elif isinstance(registry_payload, Mapping):
+        entries = [
+            {"name": str(name), **dict(entry)}
+            for name, entry in registry_payload.items()
+            if isinstance(entry, Mapping)
+        ]
+    else:
+        entries = []
+
+    names = {str(entry.get("name") or "") for entry in entries}
+    guidance = [
+        (
+            "discovery_query_builder",
+            "- For discovery_query_builder PROMPT_EDIT, patch_doc must contain query_prefix and/or append_instruction only; keep each instruction <=220 chars; do not use template_name/new_template.\n",
+        ),
+        (
+            "output_budget",
+            "- For output_budget PARAM_EDIT, patch_doc must be {\"params\":{\"max_leads\":<integer>}} within registered bounds; do not use param_name/new_value.\n",
+        ),
+        (
+            "source_router",
+            "- For source_router STRATEGY_SWAP, patch_doc must be {\"strategy_option\":\"<registered option>\"}; do not use strategy_name.\n",
+        ),
+    ]
+    if not names:
+        return "".join(line for _, line in guidance)
+    active = [line for name, line in guidance if name in names]
+    return "".join(active or [line for _, line in guidance])
 
 
 def _contains_forbidden_material(value: Any) -> bool:

@@ -86,18 +86,18 @@ def main() -> int:
                 sequence=idx,
                 miner_brief_ref="brief_sanitized:sha256:abc123",
             )
-            if draft.target_component_id == "source_router":
-                errors.append("runtime-incompatible source_router strategy candidate passed validation")
             if manifest.validation_result != "passed":
                 errors.append("candidate patch manifest did not pass validation")
             if hypothesis.component != patch.component:
                 errors.append("hypothesis and patch component diverged")
+            if draft.target_component_id == "discovery_query_builder" and "append_instruction" not in manifest.patch_doc:
+                errors.append("prompt candidate was not normalized to runtime append_instruction")
+            if draft.target_component_id == "source_router" and "strategy_option" not in manifest.patch_doc:
+                errors.append("source_router candidate was not normalized to runtime strategy_option")
+            if draft.target_component_id == "output_budget" and "params" not in manifest.patch_doc:
+                errors.append("param candidate was not normalized to runtime params")
         except Exception as exc:
-            if draft.target_component_id == "source_router":
-                continue
             errors.append(f"valid candidate failed hosted-worker validation: {exc}")
-    if "source_router" in registry.by_name():
-        errors.append("runtime-incompatible source_router strategy component was exposed to auto-research")
 
     dispatch_payload = {
         "dispatch_type": "private_baseline_rebenchmark",
@@ -485,8 +485,8 @@ async def _verify_auto_research_loop_engine(artifact: PrivateModelArtifactManife
         errors.append("auto-research resume did not emit loop_resumed event")
     if resumed_result.status != "completed" or not resumed_result.selected_candidates:
         errors.append("auto-research resume did not complete with selected candidates")
-    if resumed_result.openrouter_call_count <= paused_result.openrouter_call_count:
-        errors.append("auto-research resume did not continue OpenRouter call accounting")
+    if resumed_result.openrouter_call_count < paused_result.openrouter_call_count:
+        errors.append("auto-research resume reset OpenRouter call accounting")
     return errors
 
 

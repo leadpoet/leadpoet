@@ -11,12 +11,8 @@ from research_lab.engine_v1 import ENGINE_V1_ENABLED_PATCH_TYPES
 
 FORBIDDEN_PATCH_TYPES = {"CODE_EDIT", "SOURCE_ADD"}
 SECRET_MARKERS = ("sk-or-", "raw_secret", "openrouter_api_key", "raw_openrouter_key")
-RUNTIME_COMPATIBLE_STRATEGY_OPTIONS: dict[str, tuple[str, ...]] = {
-    # The current private model adapter rejects non-reference source_router
-    # strategies at runtime. Keep the gateway validator stricter than the
-    # image-reported registry so bad candidates fail before Docker scoring.
-    "source_router": ("reference_routing",),
-}
+RUNTIME_PROMPT_INSTRUCTION_MAX_CHARS = 220
+RUNTIME_COMPATIBLE_STRATEGY_OPTIONS: dict[str, tuple[str, ...]] = {}
 
 
 @dataclass(frozen=True)
@@ -91,6 +87,88 @@ def validate_candidate_patch_manifest(
     return errors
 
 
+def normalize_runtime_patch_doc(
+    patch_type: str,
+    target_component_id: str,
+    patch_doc: Mapping[str, Any] | None,
+    *,
+    redacted_summary: str = "",
+) -> dict[str, Any]:
+    """Normalize Engine-v1 patch docs to the private adapter runtime contract.
+
+    The Sourcing_model adapter executes candidates as a parent image plus a
+    typed patch overlay. Older drafts used generic Engine-v1 shapes such as
+    ``param_name/new_value`` and ``new_template``; the adapter expects concrete
+    runtime shapes such as ``params.max_leads`` and ``append_instruction``.
+    """
+    payload = dict(patch_doc or {})
+    patch_type = str(patch_type or "")
+    target = str(target_component_id or "")
+
+    if patch_type == "PARAM_EDIT" and target == "output_budget":
+        params = payload.get("params")
+        if isinstance(params, Mapping):
+            return {"params": dict(params)}
+        param_name = str(payload.get("param_name") or "")
+        if param_name:
+            return {"params": {param_name: payload.get("new_value")}}
+        return payload
+
+    if patch_type == "PROMPT_EDIT" and target == "discovery_query_builder":
+        query_prefix = _runtime_instruction(payload.get("query_prefix"))
+        append_instruction = _runtime_instruction(payload.get("append_instruction"))
+        normalized: dict[str, Any] = {}
+        if query_prefix:
+            normalized["query_prefix"] = query_prefix
+        if append_instruction:
+            normalized["append_instruction"] = append_instruction
+        if normalized:
+            return normalized
+
+        legacy_summary = _runtime_instruction(payload.get("redacted_summary") or redacted_summary)
+        if legacy_summary:
+            return {"append_instruction": legacy_summary}
+
+        legacy_template = _runtime_instruction(_strip_template_placeholders(payload.get("new_template")))
+        if legacy_template:
+            return {"append_instruction": legacy_template}
+        return payload
+
+    if patch_type == "STRATEGY_SWAP" and target == "source_router":
+        strategy = str(payload.get("strategy_option") or payload.get("strategy_name") or "")
+        if strategy:
+            return {"strategy_option": strategy}
+        return payload
+
+    return payload
+
+
+def runtime_compatible_candidate_patch_manifest(
+    manifest: CandidatePatchManifest | Mapping[str, Any],
+) -> CandidatePatchManifest:
+    """Return a manifest view whose patch_doc can be executed by the adapter."""
+    if not isinstance(manifest, CandidatePatchManifest):
+        manifest = CandidatePatchManifest.from_mapping(manifest)
+    normalized_doc = normalize_runtime_patch_doc(
+        manifest.patch_type,
+        manifest.target_component_id,
+        manifest.patch_doc or {},
+        redacted_summary=manifest.redacted_summary,
+    )
+    if normalized_doc == (manifest.patch_doc or {}):
+        return manifest
+    return CandidatePatchManifest(
+        patch_type=manifest.patch_type,
+        target_component_id=manifest.target_component_id,
+        parent_artifact_hash=manifest.parent_artifact_hash,
+        patch_payload_hash=manifest.patch_payload_hash,
+        redacted_summary=manifest.redacted_summary,
+        validation_result=manifest.validation_result,
+        candidate_artifact_hash=manifest.candidate_artifact_hash,
+        patch_doc=normalized_doc,
+    )
+
+
 def runtime_compatible_strategy_options(
     component_id: str,
     strategy_options: Sequence[str],
@@ -100,6 +178,22 @@ def runtime_compatible_strategy_options(
         return tuple(str(item) for item in strategy_options)
     allowed = set(compatible_options)
     return tuple(str(item) for item in strategy_options if str(item) in allowed)
+
+
+def _runtime_instruction(value: Any) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return ""
+    return text[:RUNTIME_PROMPT_INSTRUCTION_MAX_CHARS].rstrip()
+
+
+def _strip_template_placeholders(value: Any) -> str:
+    text = str(value or "")
+    while "{" in text and "}" in text and text.index("{") < text.index("}"):
+        start = text.index("{")
+        end = text.index("}", start)
+        text = text[:start] + " " + text[end + 1 :]
+    return text
 
 
 def _contains_secret_material(value: Any) -> bool:

@@ -11,7 +11,11 @@ from leadpoet_verifier.research_evaluation import build_research_evaluation_scor
 
 from .artifacts import PrivateModelArtifactManifest, validate_private_model_artifact_manifest
 from .benchmark import SealedBenchmarkSet, validate_sealed_benchmark_set
-from .patches import CandidatePatchManifest, validate_candidate_patch_manifest
+from .patches import (
+    CandidatePatchManifest,
+    runtime_compatible_candidate_patch_manifest,
+    validate_candidate_patch_manifest,
+)
 from .private_runtime import canonicalize_private_model_icp, ensure_private_model_outputs
 
 
@@ -62,6 +66,7 @@ async def evaluate_private_model_pair(
         raise RealEvaluatorRequired("sealed benchmark items are required")
 
     scorer = company_scorer or QualificationStyleCompanyScorer()
+    runtime_patch = runtime_compatible_candidate_patch_manifest(patch)
     per_icp_results: list[dict[str, Any]] = []
     for item in benchmark_items:
         icp = item.get("icp")
@@ -73,7 +78,7 @@ async def evaluate_private_model_pair(
             require_non_empty=False,
         )
         candidate_outputs = ensure_private_model_outputs(
-            await _maybe_await(candidate_runner(icp, {**dict(run_context), "patch": patch.to_dict()})),
+            await _maybe_await(candidate_runner(icp, {**dict(run_context), "patch": runtime_patch.to_dict()})),
             context_label=f"candidate model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
             require_non_empty=False,
         )

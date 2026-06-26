@@ -119,6 +119,30 @@ def main() -> int:
             errors.append("empty base-output score bundle did not score candidate outputs")
         if "reference_model_zero_companies" not in zero_base_bundle["aggregates"]["per_icp_results"][0]["failure_reason"]:
             errors.append("empty base-output score bundle did not record sanitized failure reason")
+
+        captured_runtime_patch: dict[str, object] = {}
+
+        async def _capturing_candidate_runner(_icp: dict[str, object], context: dict[str, object]) -> list[dict[str, object]]:
+            captured_runtime_patch.update(dict(context.get("patch") or {}))
+            return [{"company_name": "Example Co"}]
+
+        asyncio.run(
+            evaluate_private_model_pair(
+                artifact_manifest=artifact,
+                benchmark=benchmark,
+                patch_manifest=_legacy_param_patch_manifest(artifact),
+                benchmark_items=[
+                    {"icp_ref": "icp:c", "icp_hash": "sha256:" + "c" * 64, "icp": {"industry": "Software"}},
+                ],
+                base_runner=_empty_base_runner,
+                candidate_runner=_capturing_candidate_runner,
+                company_scorer=_fixture_company_scorer,
+                run_context=run_context,
+                policy=zero_base_policy,
+            )
+        )
+        if captured_runtime_patch.get("patch_doc") != {"params": {"max_leads": 3}}:
+            errors.append("candidate runner did not receive runtime-normalized patch_doc")
     except Exception as exc:
         errors.append(f"unexpected verifier exception: {exc}")
 
@@ -159,6 +183,21 @@ def _valid_patch_manifest(artifact: PrivateModelArtifactManifest) -> CandidatePa
             "validation_result": "passed",
             "candidate_artifact_hash": "sha256:" + "5" * 64,
             "patch_doc": {"redacted": True},
+        }
+    )
+
+
+def _legacy_param_patch_manifest(artifact: PrivateModelArtifactManifest) -> CandidatePatchManifest:
+    return CandidatePatchManifest.from_mapping(
+        {
+            "patch_type": "PARAM_EDIT",
+            "target_component_id": "output_budget",
+            "parent_artifact_hash": artifact.model_artifact_hash,
+            "patch_payload_hash": "sha256:" + "9" * 64,
+            "redacted_summary": "Reduce max leads to concentrate precision.",
+            "validation_result": "passed",
+            "candidate_artifact_hash": "sha256:" + "a" * 64,
+            "patch_doc": {"param_name": "max_leads", "new_value": 3},
         }
     )
 

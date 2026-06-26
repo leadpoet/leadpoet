@@ -14,6 +14,7 @@ from .evaluator import (
     RealEvaluatorRequired,
     build_score_bundle_from_scored_icps,
     evaluate_private_model_pair,
+    score_private_model_pair_items,
 )
 from .patches import CandidatePatchManifest, validate_candidate_patch_manifest
 from .private_runtime import (
@@ -47,6 +48,7 @@ __all__ = [
     "evaluate_private_model_pair",
     "load_private_artifact_manifest",
     "private_model_env_passthrough",
+    "score_private_model_pair_items",
     "sign_digest_with_kms",
     "validate_candidate_patch_manifest",
     "validate_private_model_artifact_manifest",

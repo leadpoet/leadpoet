@@ -7,7 +7,10 @@ from importlib import import_module
 import os
 from typing import Any, Awaitable, Callable, Mapping, Sequence, Union
 
-from leadpoet_verifier.research_evaluation import build_research_evaluation_score_bundle
+from leadpoet_verifier.research_evaluation import (
+    build_research_evaluation_score_bundle,
+    score_bundle_hash,
+)
 from research_lab.canonical import sha256_json
 from research_lab.employee_buckets import normalize_employee_count_bucket
 
@@ -50,6 +53,7 @@ async def evaluate_private_model_pair(
     company_scorer: CompanyScorer | None = None,
     run_context: Mapping[str, Any],
     policy: Mapping[str, Any] | None = None,
+    private_holdout_gate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run a real paired base-vs-candidate evaluation.
 
@@ -96,6 +100,61 @@ async def evaluate_private_model_pair(
 
     scorer = company_scorer or QualificationStyleCompanyScorer()
     runtime_patch = None if image_candidate else runtime_compatible_candidate_patch_manifest(patch)
+    if private_holdout_gate:
+        per_icp_results, gate_result = await _score_with_private_holdout_gate(
+            benchmark_items=benchmark_items,
+            base_runner=base_runner,
+            candidate_runner=candidate_runner,
+            scorer=scorer,
+            run_context=run_context,
+            image_candidate=image_candidate,
+            runtime_patch=runtime_patch,
+            gate=private_holdout_gate,
+        )
+        return build_score_bundle_from_scored_icps(
+            artifact_manifest=artifact,
+            benchmark=benchmark_set,
+            patch_manifest=patch_manifest,
+            candidate_artifact_manifest=candidate_artifact,
+            per_icp_results=per_icp_results,
+            run_context=run_context,
+            policy=policy or {},
+            extra_bundle_fields={"private_holdout_gate": gate_result},
+        )
+
+    per_icp_results = await score_private_model_pair_items(
+        benchmark_items=benchmark_items,
+        base_runner=base_runner,
+        candidate_runner=candidate_runner,
+        company_scorer=scorer,
+        run_context=run_context,
+        image_candidate=image_candidate,
+        runtime_patch=runtime_patch,
+    )
+    return build_score_bundle_from_scored_icps(
+        artifact_manifest=artifact,
+        benchmark=benchmark_set,
+        patch_manifest=patch_manifest,
+        candidate_artifact_manifest=candidate_artifact,
+        per_icp_results=per_icp_results,
+        run_context=run_context,
+        policy=policy or {},
+    )
+
+
+async def score_private_model_pair_items(
+    *,
+    benchmark_items: Sequence[Mapping[str, Any]],
+    base_runner: ModelRunner,
+    candidate_runner: ModelRunner,
+    company_scorer: CompanyScorer | None = None,
+    run_context: Mapping[str, Any],
+    image_candidate: bool,
+    runtime_patch: CandidatePatchManifest | None = None,
+) -> list[dict[str, Any]]:
+    """Score a subset of private benchmark items without building a bundle."""
+
+    scorer = company_scorer or QualificationStyleCompanyScorer()
     per_icp_results: list[dict[str, Any]] = []
     for item in benchmark_items:
         icp = item.get("icp")
@@ -106,12 +165,13 @@ async def evaluate_private_model_pair(
             context_label=f"reference model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
             require_non_empty=False,
         )
+        candidate_context = dict(run_context)
+        if not image_candidate:
+            if runtime_patch is None:
+                raise RealEvaluatorRequired("candidate patch runtime payload is required for patch candidates")
+            candidate_context["patch"] = runtime_patch.to_dict()
         candidate_outputs = ensure_private_model_outputs(
-            await _call_model_runner(
-                candidate_runner,
-                icp,
-                dict(run_context) if image_candidate else {**dict(run_context), "patch": runtime_patch.to_dict()},
-            ),
+            await _call_model_runner(candidate_runner, icp, candidate_context),
             context_label=f"candidate model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
             require_non_empty=False,
         )
@@ -137,16 +197,93 @@ async def evaluate_private_model_pair(
                 "failure_reason": ";".join(failure_reasons),
             }
         )
+    return per_icp_results
 
-    return build_score_bundle_from_scored_icps(
-        artifact_manifest=artifact,
-        benchmark=benchmark_set,
-        patch_manifest=patch_manifest,
-        candidate_artifact_manifest=candidate_artifact,
-        per_icp_results=per_icp_results,
+
+async def _score_with_private_holdout_gate(
+    *,
+    benchmark_items: Sequence[Mapping[str, Any]],
+    base_runner: ModelRunner,
+    candidate_runner: ModelRunner,
+    scorer: CompanyScorer,
+    run_context: Mapping[str, Any],
+    image_candidate: bool,
+    runtime_patch: CandidatePatchManifest | None,
+    gate: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    public_refs = {
+        str(item)
+        for item in gate.get("public_icp_refs", ())
+        if str(item).strip()
+    }
+    if not public_refs:
+        raise RealEvaluatorRequired("private holdout gate requires public ICP refs")
+    public_items = [
+        item for item in benchmark_items
+        if str(item.get("icp_ref") or item.get("icp_hash") or "") in public_refs
+    ]
+    private_items = [
+        item for item in benchmark_items
+        if str(item.get("icp_ref") or item.get("icp_hash") or "") not in public_refs
+    ]
+    if not public_items:
+        raise RealEvaluatorRequired("private holdout gate matched zero public ICPs")
+    if not private_items:
+        raise RealEvaluatorRequired("private holdout gate leaves no private ICPs")
+
+    public_results = await score_private_model_pair_items(
+        benchmark_items=public_items,
+        base_runner=base_runner,
+        candidate_runner=candidate_runner,
+        company_scorer=scorer,
         run_context=run_context,
-        policy=policy or {},
+        image_candidate=image_candidate,
+        runtime_patch=runtime_patch,
     )
+    baseline_public_score = float(gate.get("baseline_public_score") or 0.0)
+    candidate_public_score = _benchmark_style_score(public_results, "candidate_company_scores")
+    base_public_score = _benchmark_style_score(public_results, "base_company_scores")
+    passed_public_gate = candidate_public_score + 1e-9 >= baseline_public_score
+    gate_result = {
+        "schema_version": "1.0",
+        "gate_type": "public_score_before_private_holdout",
+        "decision": "private_holdout_approved" if passed_public_gate else "rejected_before_private_holdout",
+        "baseline_benchmark_bundle_id": str(gate.get("baseline_benchmark_bundle_id") or ""),
+        "baseline_public_score": round(baseline_public_score, 6),
+        "candidate_public_score": round(candidate_public_score, 6),
+        "paired_base_public_score": round(base_public_score, 6),
+        "public_icp_count": len(public_items),
+        "private_holdout_icp_count": len(private_items),
+        "private_holdout_evaluated": bool(passed_public_gate),
+    }
+    if not passed_public_gate:
+        return public_results, gate_result
+
+    private_results = await score_private_model_pair_items(
+        benchmark_items=private_items,
+        base_runner=base_runner,
+        candidate_runner=candidate_runner,
+        company_scorer=scorer,
+        run_context=run_context,
+        image_candidate=image_candidate,
+        runtime_patch=runtime_patch,
+    )
+    return [*public_results, *private_results], gate_result
+
+
+def _benchmark_style_score(
+    per_icp_results: Sequence[Mapping[str, Any]],
+    score_field: str,
+) -> float:
+    per_icp_scores: list[float] = []
+    for row in per_icp_results:
+        scores = row.get(score_field)
+        if not isinstance(scores, Sequence) or isinstance(scores, (str, bytes, bytearray)):
+            per_icp_scores.append(0.0)
+            continue
+        values = [float(item or 0.0) for item in scores]
+        per_icp_scores.append(float(sum(values) / len(values)) if values else 0.0)
+    return float(sum(per_icp_scores) / len(per_icp_scores)) if per_icp_scores else 0.0
 
 
 def build_score_bundle_from_scored_icps(
@@ -158,6 +295,7 @@ def build_score_bundle_from_scored_icps(
     per_icp_results: Sequence[Mapping[str, Any]],
     run_context: Mapping[str, Any],
     policy: Mapping[str, Any] | None = None,
+    extra_bundle_fields: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     artifact = artifact_manifest if isinstance(artifact_manifest, PrivateModelArtifactManifest) else PrivateModelArtifactManifest.from_mapping(artifact_manifest)
     benchmark_set = benchmark if isinstance(benchmark, SealedBenchmarkSet) else SealedBenchmarkSet.from_mapping(benchmark)
@@ -192,7 +330,7 @@ def build_score_bundle_from_scored_icps(
     if not per_icp_results:
         raise RealEvaluatorRequired("real scored ICP results are required")
 
-    return build_research_evaluation_score_bundle(
+    bundle = build_research_evaluation_score_bundle(
         run_id=str(run_context["run_id"]),
         ticket_id=str(run_context["ticket_id"]),
         miner_hotkey=str(run_context["miner_hotkey"]),
@@ -228,6 +366,16 @@ def build_score_bundle_from_scored_icps(
         policy=policy or {},
         signature_ref=str(run_context.get("signature_ref") or ""),
     )
+    if not extra_bundle_fields:
+        return bundle
+    enriched = {
+        **bundle,
+        **dict(extra_bundle_fields),
+        "score_bundle_hash": "",
+        "anchored_hash": "",
+    }
+    enriched_hash = score_bundle_hash(enriched)
+    return {**enriched, "score_bundle_hash": enriched_hash, "anchored_hash": enriched_hash}
 
 
 class QualificationStyleCompanyScorer:

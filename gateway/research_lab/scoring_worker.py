@@ -542,6 +542,10 @@ class ResearchLabGatewayScoringWorker:
                 scoring_version="qualification-company-scorer:v1",
                 hidden_plaintext_available=True,
             )
+            private_holdout_gate = await self._candidate_private_holdout_gate(
+                artifact=artifact,
+                window_hash=window.window_hash,
+            )
             runner = DockerPrivateModelRunner(
                 DockerPrivateModelSpec(
                     image_digest=artifact.image_digest,
@@ -573,6 +577,12 @@ class ResearchLabGatewayScoringWorker:
                 candidate_runner=candidate_runner,
                 run_context={**run_context, "signature_ref": "pending"},
                 policy=self._evaluation_policy(),
+                private_holdout_gate=private_holdout_gate,
+            )
+            gate_result = score_bundle.get("private_holdout_gate")
+            private_holdout_rejected = (
+                isinstance(gate_result, Mapping)
+                and str(gate_result.get("decision") or "") == "rejected_before_private_holdout"
             )
             unsigned_hash = str(score_bundle["score_bundle_hash"])
             signature_ref = await asyncio.to_thread(
@@ -604,6 +614,7 @@ class ResearchLabGatewayScoringWorker:
                     "elapsed_seconds": round(time.time() - start, 3),
                     "worker_ref": self.worker_ref,
                     "proxy_ref_hash": self.proxy_ref_hash,
+                    "private_holdout_gate": _candidate_gate_event_doc(gate_result),
                 },
             )
             scored_event_written = True
@@ -617,12 +628,19 @@ class ResearchLabGatewayScoringWorker:
                 ticket_id=str(candidate["ticket_id"]),
                 rolling_window_hash=window.window_hash,
                 score_bundle_id=str(bundle["score_bundle_id"]),
-                event_doc={"elapsed_seconds": round(time.time() - start, 3)},
+                event_doc={
+                    "elapsed_seconds": round(time.time() - start, 3),
+                    "private_holdout_gate": _candidate_gate_event_doc(gate_result),
+                },
             )
-            promotion_result = await self._maybe_promote_scored_candidate(
-                candidate=candidate,
-                score_bundle_row=bundle,
-                score_bundle=score_bundle,
+            promotion_result = (
+                {"status": "rejected_public_holdout_gate"}
+                if private_holdout_rejected
+                else await self._maybe_promote_scored_candidate(
+                    candidate=candidate,
+                    score_bundle_row=bundle,
+                    score_bundle=score_bundle,
+                )
             )
             await self._maybe_finalize_candidate_receipt(candidate)
             await safe_project_public_loop_activity(
@@ -641,6 +659,7 @@ class ResearchLabGatewayScoringWorker:
                         ("Run", compact_ref(candidate.get("run_id"))),
                         ("Score bundle", compact_ref(bundle["score_bundle_id"])),
                         ("Rolling window", compact_ref(window.window_hash)),
+                        ("Private holdout gate", (gate_result or {}).get("decision") if isinstance(gate_result, Mapping) else "-"),
                         ("Promotion", promotion_result.get("status")),
                         ("Elapsed", f"{time.time() - start:.1f}s"),
                     ),
@@ -862,6 +881,37 @@ class ResearchLabGatewayScoringWorker:
             event_doc={**base_event_doc, "reason": "stale_parent_needs_rescore"},
         )
         return {"status": "stale_parent_needs_rescore"}
+
+    async def _candidate_private_holdout_gate(
+        self,
+        *,
+        artifact: PrivateModelArtifactManifest,
+        window_hash: str,
+    ) -> dict[str, Any]:
+        rows = await select_many(
+            "research_lab_private_model_benchmark_current",
+            columns=(
+                "benchmark_bundle_id,private_model_manifest_hash,rolling_window_hash,"
+                "benchmark_quality,evaluation_epoch,score_summary_doc,current_benchmark_status,created_at"
+            ),
+            filters=(
+                ("private_model_manifest_hash", artifact.manifest_hash),
+                ("rolling_window_hash", window_hash),
+                ("current_benchmark_status", "completed"),
+            ),
+            order_by=(("created_at", True),),
+            limit=10,
+        )
+        for row in rows:
+            if not _private_benchmark_row_is_valid(row):
+                continue
+            gate = _private_holdout_gate_from_baseline_row(row)
+            if gate:
+                return gate
+        raise RuntimeError(
+            "matching_completed_private_baseline_required_before_candidate_private_holdout: "
+            f"manifest={compact_ref(artifact.manifest_hash)} window={compact_ref(window_hash)}"
+        )
 
     async def _maybe_run_private_baseline(self) -> dict[str, Any] | None:
         today = datetime.now(timezone.utc).date().isoformat()
@@ -1553,6 +1603,72 @@ def _benchmark_summary_has_companies(item: Any) -> bool:
         return int(item.get("company_count") or 0) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _private_holdout_gate_from_baseline_row(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    doc = row.get("score_summary_doc") if isinstance(row.get("score_summary_doc"), Mapping) else {}
+    split = doc.get("visibility_split") if isinstance(doc.get("visibility_split"), Mapping) else {}
+    items = split.get("items") if isinstance(split.get("items"), list) else []
+    public_items = [
+        item for item in items
+        if isinstance(item, Mapping) and str(item.get("visibility") or "") == "public"
+    ]
+    private_count = _safe_int(split.get("private_count"), default=0)
+    if private_count <= 0:
+        private_count = sum(
+            1
+            for item in items
+            if isinstance(item, Mapping) and str(item.get("visibility") or "") == "private"
+        )
+    public_refs = [
+        str(item.get("icp_ref") or "")
+        for item in public_items
+        if str(item.get("icp_ref") or "").strip()
+    ]
+    if not public_refs or private_count <= 0:
+        return None
+    public_scores = [_safe_float(item.get("score"), default=0.0) for item in public_items]
+    return {
+        "schema_version": "1.0",
+        "gate_type": "public_score_before_private_holdout",
+        "baseline_benchmark_bundle_id": str(row.get("benchmark_bundle_id") or ""),
+        "baseline_public_score": _average(public_scores),
+        "baseline_public_icp_count": len(public_refs),
+        "baseline_private_holdout_icp_count": private_count,
+        "rolling_window_hash": str(row.get("rolling_window_hash") or ""),
+        "private_model_manifest_hash": str(row.get("private_model_manifest_hash") or ""),
+        "public_icp_refs": public_refs,
+    }
+
+
+def _candidate_gate_event_doc(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        "gate_type": str(value.get("gate_type") or ""),
+        "decision": str(value.get("decision") or ""),
+        "baseline_benchmark_bundle_id": str(value.get("baseline_benchmark_bundle_id") or ""),
+        "baseline_public_score": _safe_float(value.get("baseline_public_score"), default=0.0),
+        "candidate_public_score": _safe_float(value.get("candidate_public_score"), default=0.0),
+        "paired_base_public_score": _safe_float(value.get("paired_base_public_score"), default=0.0),
+        "public_icp_count": _safe_int(value.get("public_icp_count"), default=0),
+        "private_holdout_icp_count": _safe_int(value.get("private_holdout_icp_count"), default=0),
+        "private_holdout_evaluated": bool(value.get("private_holdout_evaluated")),
+    }
+
+
+def _safe_float(value: Any, *, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, *, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _is_candidate_claim_race_error(exc: BaseException) -> bool:

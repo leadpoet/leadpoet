@@ -143,6 +143,92 @@ def main() -> int:
         )
         if captured_runtime_patch.get("patch_doc") != {"params": {"max_leads": 3}}:
             errors.append("candidate runner did not receive runtime-normalized patch_doc")
+
+        rejected_calls: list[tuple[str, str]] = []
+
+        async def _gated_reject_base_runner(icp: dict[str, object], _context: dict[str, object]) -> list[dict[str, object]]:
+            rejected_calls.append(("base", str(icp.get("id"))))
+            return [{"score": 80.0}]
+
+        async def _gated_reject_candidate_runner(icp: dict[str, object], _context: dict[str, object]) -> list[dict[str, object]]:
+            rejected_calls.append(("candidate", str(icp.get("id"))))
+            return [{"score": 60.0}]
+
+        rejected_gate_bundle = asyncio.run(
+            evaluate_private_model_pair(
+                artifact_manifest=artifact,
+                benchmark=benchmark,
+                patch_manifest=patch,
+                benchmark_items=[
+                    {"icp_ref": "icp:a", "icp_hash": "sha256:" + "a" * 64, "icp": {"id": "public"}},
+                    {"icp_ref": "icp:b", "icp_hash": "sha256:" + "b" * 64, "icp": {"id": "private"}},
+                ],
+                base_runner=_gated_reject_base_runner,
+                candidate_runner=_gated_reject_candidate_runner,
+                company_scorer=_score_marker_company_scorer,
+                run_context=run_context,
+                policy={**_policy(), "min_successful_icps": 2},
+                private_holdout_gate={
+                    "baseline_benchmark_bundle_id": "private_benchmark:test",
+                    "baseline_public_score": 80.0,
+                    "public_icp_refs": ["icp:a"],
+                },
+            )
+        )
+        rejected_gate = rejected_gate_bundle.get("private_holdout_gate") or {}
+        if rejected_gate.get("decision") != "rejected_before_private_holdout":
+            errors.append("private holdout gate did not reject below-baseline public score")
+        if rejected_gate.get("private_holdout_evaluated"):
+            errors.append("private holdout gate evaluated private ICPs after rejection")
+        if any(call[1] == "private" for call in rejected_calls):
+            errors.append("private ICP runner was called despite public gate rejection")
+        rejected_verification = verify_research_evaluation_score_bundle(
+            rejected_gate_bundle,
+            policy={**_policy(), "min_successful_icps": 2},
+        )
+        if not rejected_verification["passed"]:
+            errors.append("public-gate rejected score bundle failed verification: " + "; ".join(rejected_verification["errors"]))
+
+        passed_calls: list[tuple[str, str]] = []
+
+        async def _gated_pass_base_runner(icp: dict[str, object], _context: dict[str, object]) -> list[dict[str, object]]:
+            passed_calls.append(("base", str(icp.get("id"))))
+            return [{"score": 70.0}]
+
+        async def _gated_pass_candidate_runner(icp: dict[str, object], _context: dict[str, object]) -> list[dict[str, object]]:
+            passed_calls.append(("candidate", str(icp.get("id"))))
+            return [{"score": 85.0}]
+
+        passed_gate_bundle = asyncio.run(
+            evaluate_private_model_pair(
+                artifact_manifest=artifact,
+                benchmark=benchmark,
+                patch_manifest=patch,
+                benchmark_items=[
+                    {"icp_ref": "icp:a", "icp_hash": "sha256:" + "a" * 64, "icp": {"id": "public"}},
+                    {"icp_ref": "icp:b", "icp_hash": "sha256:" + "b" * 64, "icp": {"id": "private"}},
+                ],
+                base_runner=_gated_pass_base_runner,
+                candidate_runner=_gated_pass_candidate_runner,
+                company_scorer=_score_marker_company_scorer,
+                run_context=run_context,
+                policy={**_policy(), "min_successful_icps": 2},
+                private_holdout_gate={
+                    "baseline_benchmark_bundle_id": "private_benchmark:test",
+                    "baseline_public_score": 80.0,
+                    "public_icp_refs": ["icp:a"],
+                },
+            )
+        )
+        passed_gate = passed_gate_bundle.get("private_holdout_gate") or {}
+        if passed_gate.get("decision") != "private_holdout_approved":
+            errors.append("private holdout gate did not approve above-baseline public score")
+        if not passed_gate.get("private_holdout_evaluated"):
+            errors.append("private holdout gate did not mark private holdout as evaluated")
+        if not any(call[1] == "private" for call in passed_calls):
+            errors.append("private ICP runner was not called after public gate pass")
+        if int((passed_gate_bundle.get("aggregates") or {}).get("icp_count") or 0) != 2:
+            errors.append("public-gate passed score bundle did not include public and private ICPs")
     except Exception as exc:
         errors.append(f"unexpected verifier exception: {exc}")
 
@@ -263,6 +349,14 @@ async def _fixture_company_scorer(
     _is_reference_model: bool,
 ) -> list[float]:
     return [75.0 for _company in companies]
+
+
+async def _score_marker_company_scorer(
+    companies: list[dict[str, object]],
+    _icp: dict[str, object],
+    _is_reference_model: bool,
+) -> list[float]:
+    return [float(company.get("score") or 0.0) for company in companies]
 
 
 if __name__ == "__main__":

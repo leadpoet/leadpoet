@@ -390,6 +390,8 @@ class ResearchLabGatewayScoringWorker:
     async def _score_candidate(self, candidate: Mapping[str, Any]) -> None:
         candidate_id = str(candidate["candidate_id"])
         start = time.time()
+        scored_event_written = False
+        scored_score_bundle_id = ""
         try:
             evaluation_epoch = await self._resolve_evaluation_epoch()
             stale_result = await self._maybe_rebase_stale_candidate_before_scoring(
@@ -508,6 +510,7 @@ class ResearchLabGatewayScoringWorker:
                 score_bundle=score_bundle,
             )
             bundle, _bundle_event = await create_score_bundle(score_bundle_request)
+            scored_score_bundle_id = str(bundle["score_bundle_id"])
             await create_candidate_evaluation_event(
                 candidate_id=candidate_id,
                 run_id=str(candidate["run_id"]),
@@ -516,7 +519,7 @@ class ResearchLabGatewayScoringWorker:
                 candidate_status="scored",
                 evaluator_ref=self.worker_ref,
                 reason="gateway_qualification_worker_scored_candidate",
-                score_bundle_id=str(bundle["score_bundle_id"]),
+                score_bundle_id=scored_score_bundle_id,
                 event_doc={
                     "score_bundle_hash": score_bundle["score_bundle_hash"],
                     "rolling_window_hash": window.window_hash,
@@ -525,6 +528,7 @@ class ResearchLabGatewayScoringWorker:
                     "proxy_ref_hash": self.proxy_ref_hash,
                 },
             )
+            scored_event_written = True
             await create_scoring_dispatch_event(
                 dispatch_type="candidate_scoring",
                 dispatch_status="scored",
@@ -565,6 +569,15 @@ class ResearchLabGatewayScoringWorker:
                 )
             )
         except Exception as exc:
+            if scored_event_written:
+                await self._record_scored_candidate_side_effect_failure(
+                    candidate=candidate,
+                    candidate_id=candidate_id,
+                    score_bundle_id=scored_score_bundle_id,
+                    error=exc,
+                    elapsed_seconds=round(time.time() - start, 3),
+                )
+                return
             await create_candidate_evaluation_event(
                 candidate_id=candidate_id,
                 run_id=str(candidate["run_id"]),
@@ -613,6 +626,51 @@ class ResearchLabGatewayScoringWorker:
                     ),
                 )
             )
+
+    async def _record_scored_candidate_side_effect_failure(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        candidate_id: str,
+        score_bundle_id: str,
+        error: BaseException,
+        elapsed_seconds: float,
+    ) -> None:
+        event_doc = {
+            "error": str(error)[:500],
+            "elapsed_seconds": elapsed_seconds,
+            "worker_ref": self.worker_ref,
+            "proxy_ref_hash": self.proxy_ref_hash,
+            "score_bundle_id": score_bundle_id,
+            "candidate_status_preserved": "scored",
+        }
+        try:
+            await create_scoring_dispatch_event(
+                dispatch_type="candidate_scoring_side_effect",
+                dispatch_status="failed",
+                worker_ref=self.worker_ref,
+                proxy_ref_hash=self.proxy_ref_hash,
+                candidate_id=candidate_id,
+                run_id=str(candidate["run_id"]),
+                ticket_id=str(candidate["ticket_id"]),
+                score_bundle_id=score_bundle_id or None,
+                event_doc=event_doc,
+            )
+        except Exception:
+            logger.exception("research_lab_scored_candidate_side_effect_dispatch_failed")
+        logger.exception(
+            format_worker_block(
+                "RESEARCH LAB CANDIDATE POST-SCORE SIDE EFFECT FAILED",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Candidate", compact_ref(candidate_id)),
+                    ("Run", compact_ref(candidate.get("run_id"))),
+                    ("Score bundle", compact_ref(score_bundle_id)),
+                    ("Error", str(error)[:300]),
+                    ("Candidate state", "scored"),
+                ),
+            )
+        )
 
     async def _maybe_promote_scored_candidate(
         self,
@@ -1235,24 +1293,50 @@ class ResearchLabGatewayScoringWorker:
             "score_bundle_ids": score_bundle_ids,
             "finalization_source": "gateway_qualification_worker_results",
         }
-        await create_receipt_event(
-            receipt_id=str(receipt_id),
-            ticket_id=str(candidate["ticket_id"]),
-            event_type="completed" if has_scored_candidate else "failed",
-            receipt_status="completed" if has_scored_candidate else "failed",
-            event_doc=event_doc,
-        )
-        await create_ticket_event(
-            ticket_id=str(candidate["ticket_id"]),
-            event_type="completed" if has_scored_candidate else "cancelled",
-            actor_hotkey=None,
-            reason=(
-                "gateway_research_lab_candidate_evaluation_completed"
-                if has_scored_candidate
-                else "gateway_research_lab_candidate_evaluation_failed"
-            ),
-            event_doc=event_doc,
-        )
+        try:
+            await create_receipt_event(
+                receipt_id=str(receipt_id),
+                ticket_id=str(candidate["ticket_id"]),
+                event_type="completed" if has_scored_candidate else "failed",
+                receipt_status="completed" if has_scored_candidate else "failed",
+                event_doc=event_doc,
+            )
+        except Exception as exc:
+            if not _is_event_sequence_race_error(exc):
+                raise
+            latest_receipt = await select_one(
+                "research_loop_receipt_current",
+                filters=(("receipt_id", str(receipt_id)),),
+            )
+            if latest_receipt and latest_receipt.get("current_receipt_status") != "queued":
+                logger.info(
+                    "research_lab_receipt_finalization_race_lost receipt_id=%s status=%s",
+                    compact_ref(receipt_id),
+                    latest_receipt.get("current_receipt_status"),
+                )
+                return False
+            raise
+        try:
+            await create_ticket_event(
+                ticket_id=str(candidate["ticket_id"]),
+                event_type="completed" if has_scored_candidate else "cancelled",
+                actor_hotkey=None,
+                reason=(
+                    "gateway_research_lab_candidate_evaluation_completed"
+                    if has_scored_candidate
+                    else "gateway_research_lab_candidate_evaluation_failed"
+                ),
+                event_doc=event_doc,
+            )
+        except Exception as exc:
+            if not _is_event_sequence_race_error(exc):
+                raise
+            logger.warning(
+                "research_lab_ticket_finalization_race_lost ticket_id=%s receipt_id=%s error=%s",
+                compact_ref(candidate["ticket_id"]),
+                compact_ref(receipt_id),
+                str(exc)[:240],
+            )
         logger.info(
             format_worker_block(
                 "RESEARCH LAB RECEIPT FINALIZED",
@@ -1395,6 +1479,15 @@ def _is_candidate_claim_race_error(exc: BaseException) -> bool:
         "research_lab_candidate_claim_conflict" in message
         or "research_lab_candidate_eval_events_candidate_seq_key" in message
         or "duplicate key" in message
+        or "unique constraint" in message
+        or "23505" in message
+    )
+
+
+def _is_event_sequence_race_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return (
+        "duplicate key" in message
         or "unique constraint" in message
         or "23505" in message
     )

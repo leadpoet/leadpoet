@@ -2797,6 +2797,15 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
         print(f"   {loop_result['error']}")
         return
 
+    if loop_result.get("queued") is False:
+        print("⚠️  Research Lab loop-start was not queued")
+        print(f"   Status: {loop_result.get('status')}")
+        if loop_result.get("credit_preserved"):
+            print("   Retry credit preserved: yes")
+            print(f"   Credit ID: {loop_result.get('credit_id')}")
+        print(f"   Payment ref: {loop_result.get('payment_ref')}")
+        return
+
     print("✅ Research Lab loop-start accepted")
     print(f"   Run ID: {loop_result.get('run_id')}")
     print(f"   Status: {loop_result.get('status')}")

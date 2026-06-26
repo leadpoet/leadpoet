@@ -22,6 +22,7 @@ DECLARE
     v_miner_hotkey TEXT;
     active_count INTEGER;
     same_hotkey_count INTEGER;
+    is_existing_run_requeue BOOLEAN;
 BEGIN
     IF NEW.event_type <> 'queued' THEN
         RETURN NEW;
@@ -67,6 +68,10 @@ BEGIN
             USING ERRCODE = '23505';
     END IF;
 
+    is_existing_run_requeue :=
+        (NEW.event_doc ? 'resume_source')
+        OR (NEW.event_doc ? 'recovering_worker_ref');
+
     PERFORM pg_catalog.pg_advisory_xact_lock(
         pg_catalog.hashtext('research_lab_queue_capacity'),
         pg_catalog.hashtext(COALESCE(NEW.event_doc->>'autoresearch_capacity_policy', 'proxy_worker_capacity:v1'))
@@ -76,7 +81,8 @@ BEGIN
       INTO same_hotkey_count
       FROM public.research_loop_run_queue_current q
       JOIN public.research_loop_tickets t ON t.ticket_id = q.ticket_id
-     WHERE q.current_queue_status IN ('queued', 'started', 'paused')
+     WHERE q.run_id <> NEW.run_id
+       AND q.current_queue_status IN ('queued', 'started', 'paused')
        AND (q.current_queue_status = 'paused' OR q.current_status_at >= cutoff)
        AND btrim(t.miner_hotkey) = btrim(v_miner_hotkey);
 
@@ -88,10 +94,21 @@ BEGIN
     END IF;
 
     SELECT COUNT(*)
-     INTO active_count
+      INTO active_count
       FROM public.research_loop_run_queue_current q
-     WHERE q.current_queue_status IN ('queued', 'started', 'paused')
-       AND (q.current_queue_status = 'paused' OR q.current_status_at >= cutoff);
+     WHERE q.run_id <> NEW.run_id
+       AND (
+           (
+             is_existing_run_requeue
+             AND q.current_queue_status IN ('queued', 'started')
+             AND q.current_status_at >= cutoff
+           )
+           OR (
+             NOT is_existing_run_requeue
+             AND q.current_queue_status IN ('queued', 'started', 'paused')
+             AND (q.current_queue_status = 'paused' OR q.current_status_at >= cutoff)
+           )
+       );
 
     IF active_count >= capacity THEN
         RAISE EXCEPTION

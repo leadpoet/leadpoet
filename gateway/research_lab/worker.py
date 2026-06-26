@@ -25,7 +25,7 @@ from gateway.research_lab.loop_engine import (
     AutoResearchLoopSettings,
     OpenRouterCallResult,
 )
-from gateway.research_lab.maintenance import is_autoresearch_maintenance_paused
+from gateway.research_lab.maintenance import autoresearch_queue_capacity_doc, is_autoresearch_maintenance_paused
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabReceiptCreateRequest
 from gateway.research_lab.promotion import latest_public_benchmark_summary, load_active_private_model
 from gateway.research_lab.public_activity import safe_project_public_loop_activity
@@ -420,6 +420,7 @@ class ResearchLabHostedWorker:
                     worker_ref=self.worker_ref,
                     reason="stale_started_requeued",
                     event_doc={
+                        **autoresearch_queue_capacity_doc(self.config),
                         "recovering_worker_ref": self.worker_ref,
                         "previous_worker_ref": row.get("worker_ref"),
                         "previous_event_hash": row.get("current_event_hash"),

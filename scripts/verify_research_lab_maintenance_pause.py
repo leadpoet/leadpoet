@@ -21,6 +21,8 @@ def main() -> int:
                 "'loop_paused'",
                 "'loop_resumed'",
                 "current_queue_status IN ('queued', 'started', 'paused')",
+                "is_existing_run_requeue BOOLEAN",
+                "q.run_id <> NEW.run_id",
             },
         ),
         "api": (
@@ -35,11 +37,20 @@ def main() -> int:
             ROOT / "gateway" / "research_lab" / "worker.py",
             {
                 "is_autoresearch_maintenance_paused",
+                "autoresearch_queue_capacity_doc",
                 "_mark_paused",
                 "latest_auto_research_checkpoint",
                 "find_queued_receipt_for_run",
                 "event_type=\"paused\"",
                 "resume_state=resume_state",
+            },
+        ),
+        "maintenance": (
+            ROOT / "gateway" / "research_lab" / "maintenance.py",
+            {
+                "autoresearch_queue_capacity_doc",
+                "research_lab_maintenance_resume_capacity_limited",
+                "requeue_paused_autoresearch_runs",
             },
         ),
         "engine": (
@@ -50,6 +61,7 @@ def main() -> int:
                 "loop_resumed",
                 "resume_state",
                 "should_pause",
+                "pause_after_minimum_runtime",
                 "_selected_candidates_from_checkpoint",
             },
         ),

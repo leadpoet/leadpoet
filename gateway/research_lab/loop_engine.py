@@ -582,6 +582,34 @@ class AutoResearchLoopEngine:
             remaining_maximum = settings.max_seconds - elapsed()
             if remaining_minimum > 0 and remaining_maximum > 0:
                 await asyncio.sleep(min(remaining_minimum, remaining_maximum))
+            if should_pause and await should_pause():
+                last_checkpoint = await self._emit_checkpoint(
+                    run_id=run_id,
+                    settings=settings,
+                    selected=selected,
+                    seen_artifacts=seen_artifacts,
+                    reflections=reflections,
+                    openrouter_calls=openrouter_calls,
+                    estimated_cost=estimated_cost,
+                    actual_cost_microusd=actual_cost_microusd,
+                    provider_usage=provider_usage,
+                    iterations_completed=iteration,
+                    elapsed_seconds=elapsed(),
+                    stage="pause_after_minimum_runtime",
+                    artifact=artifact,
+                    model_id=model_id,
+                    budget_context=budget_context,
+                )
+                return await self._paused_result(
+                    checkpoint=last_checkpoint,
+                    selected=selected,
+                    iterations_completed=iteration,
+                    elapsed_seconds=elapsed(),
+                    estimated_cost=estimated_cost,
+                    actual_cost_microusd=actual_cost_microusd,
+                    openrouter_calls=openrouter_calls,
+                    provider_usage=provider_usage,
+                )
 
         ranked = tuple(_rank_candidates(selected)[: settings.max_candidates])
         for index, candidate in enumerate(ranked):

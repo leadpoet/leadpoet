@@ -9,12 +9,18 @@ import os
 import time
 from typing import Any, Mapping
 
+from .config import ResearchLabGatewayConfig
 from .store import create_gateway_control_event, create_queue_event, select_all, select_one
 
 
 logger = logging.getLogger(__name__)
 
 AUTORESEARCH_MAINTENANCE_CONTROL_KEY = "autoresearch_maintenance"
+AUTORESEARCH_PROXY_PREFIXES = (
+    "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY",
+    "RESEARCH_LAB_WORKER_PROXY",
+    "RESEARCH_LAB_WORKER_HTTPS_PROXY",
+)
 
 
 async def get_autoresearch_maintenance_state() -> dict[str, Any]:
@@ -97,6 +103,8 @@ async def autoresearch_queue_status_counts() -> dict[str, int]:
 
 
 async def requeue_paused_autoresearch_runs(*, actor_ref: str | None = None, reason: str = "maintenance_resume") -> int:
+    config = ResearchLabGatewayConfig.from_env()
+    capacity_doc = autoresearch_queue_capacity_doc(config)
     rows = await select_all(
         "research_loop_run_queue_current",
         columns="run_id,ticket_id,current_queue_status,queue_priority,current_event_hash,current_status_at",
@@ -105,21 +113,31 @@ async def requeue_paused_autoresearch_runs(*, actor_ref: str | None = None, reas
     )
     requeued = 0
     for row in rows:
-        await create_queue_event(
-            run_id=str(row["run_id"]),
-            ticket_id=str(row["ticket_id"]),
-            event_type="queued",
-            queue_priority=int(row.get("queue_priority") or 0),
-            worker_ref=actor_ref,
-            reason=reason,
-            event_doc={
-                "schema_version": "1.0",
-                "resume_source": "research_lab_maintenance_cli",
-                "previous_event_hash": row.get("current_event_hash"),
-                "previous_status_at": row.get("current_status_at"),
-            },
-        )
-        requeued += 1
+        try:
+            await create_queue_event(
+                run_id=str(row["run_id"]),
+                ticket_id=str(row["ticket_id"]),
+                event_type="queued",
+                queue_priority=int(row.get("queue_priority") or 0),
+                worker_ref=actor_ref,
+                reason=reason,
+                event_doc={
+                    "schema_version": "1.0",
+                    **capacity_doc,
+                    "resume_source": "research_lab_maintenance_cli",
+                    "previous_event_hash": row.get("current_event_hash"),
+                    "previous_status_at": row.get("current_status_at"),
+                },
+            )
+            requeued += 1
+        except Exception as exc:
+            if not _is_queue_capacity_conflict(exc):
+                raise
+            logger.info(
+                "research_lab_maintenance_resume_capacity_limited run_id=%s error=%s",
+                row.get("run_id"),
+                str(exc)[:240],
+            )
     return requeued
 
 
@@ -146,3 +164,45 @@ def default_actor_ref() -> str:
 
 def dumps_status(payload: Mapping[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, indent=2, default=str)
+
+
+def autoresearch_queue_capacity_doc(config: ResearchLabGatewayConfig | None = None) -> dict[str, int | str]:
+    config = config or ResearchLabGatewayConfig.from_env()
+    return {
+        "autoresearch_capacity_policy": "proxy_worker_capacity:v1",
+        "autoresearch_capacity": int(_autoresearch_loop_capacity(config)),
+        "active_loop_stale_after_seconds": max(60, int(config.active_loop_stale_after_seconds or 7200)),
+    }
+
+
+def _autoresearch_loop_capacity(config: ResearchLabGatewayConfig) -> int:
+    proxy_count = _configured_autoresearch_proxy_count()
+    total_workers = max(0, int(config.hosted_worker_total_workers or 0))
+    if config.hosted_worker_require_proxy and not proxy_count and not config.hosted_worker_proxy_url:
+        return 0
+    if proxy_count and total_workers:
+        return max(1, min(proxy_count, total_workers))
+    if proxy_count:
+        return max(1, proxy_count)
+    if total_workers:
+        return max(1, total_workers)
+    if config.hosted_worker_proxy_url:
+        return 1
+    return 0
+
+
+def _configured_autoresearch_proxy_count() -> int:
+    count = 0
+    for index in range(1, 501):
+        if any(os.getenv(f"{prefix}_{index}", "").strip() for prefix in AUTORESEARCH_PROXY_PREFIXES):
+            count += 1
+    return count
+
+
+def _is_queue_capacity_conflict(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return (
+        "research_lab_queue_capacity_conflict" in message
+        or "research_lab_queue_hotkey_conflict" in message
+        or "23505" in message
+    )

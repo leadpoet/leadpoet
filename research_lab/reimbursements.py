@@ -817,8 +817,7 @@ def _policy_hash_dict(policy: ReimbursementPolicy) -> dict[str, Any]:
 
 
 def _with_award_id(award: ReimbursementAward) -> ReimbursementAward:
-    data = award.to_dict()
-    data.pop("award_id", None)
+    data = {"run_id": award.run_id}
     award_id = "reimbursement_award:" + sha256_json(data)
     return ReimbursementAward(**{**award.__dict__, "award_id": award_id})
 

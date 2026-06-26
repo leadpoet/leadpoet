@@ -31,7 +31,7 @@ from gateway.utils.bans import is_hotkey_banned
 from .allocations import build_research_lab_allocation_bundle
 from .arweave_audit import latest_arweave_anchor
 from .bundles import build_research_lab_audit_bundle, build_shadow_report_bundle, contains_secret_material
-from .config import ResearchLabGatewayConfig
+from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
 from .key_vault import (
     OpenRouterKeyVaultError,
     encrypt_openrouter_key,
@@ -1482,7 +1482,10 @@ def _queue_capacity_doc(config: ResearchLabGatewayConfig) -> dict[str, int | str
     return {
         "autoresearch_capacity_policy": "proxy_worker_capacity:v1",
         "autoresearch_capacity": int(_autoresearch_loop_capacity(config)),
-        "active_loop_stale_after_seconds": max(60, int(config.active_loop_stale_after_seconds or 7200)),
+        "active_loop_stale_after_seconds": max(
+            60,
+            int(config.active_loop_stale_after_seconds or DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS),
+        ),
     }
 
 
@@ -1497,7 +1500,10 @@ def _configured_autoresearch_proxy_count() -> int:
 def _autoresearch_active_row_is_fresh(row: Mapping[str, Any], config: ResearchLabGatewayConfig) -> bool:
     if str(row.get("current_queue_status") or "").strip().lower() == "paused":
         return True
-    stale_after_seconds = max(60, int(config.active_loop_stale_after_seconds or 7200))
+    stale_after_seconds = max(
+        60,
+        int(config.active_loop_stale_after_seconds or DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS),
+    )
     raw_status_at = row.get("current_status_at")
     if not raw_status_at:
         return True

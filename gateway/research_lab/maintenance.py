@@ -9,7 +9,7 @@ import os
 import time
 from typing import Any, Mapping
 
-from .config import ResearchLabGatewayConfig
+from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
 from .store import create_gateway_control_event, create_queue_event, select_all, select_one
 
 
@@ -33,9 +33,10 @@ async def get_autoresearch_maintenance_state() -> dict[str, Any]:
         logger.warning("research_lab_maintenance_state_unavailable: %s", str(exc)[:240])
         return {
             "control_key": AUTORESEARCH_MAINTENANCE_CONTROL_KEY,
-            "paused": False,
-            "status": "unavailable",
+            "paused": True,
+            "status": "unavailable_fail_closed",
             "unavailable": True,
+            "fail_closed": True,
             "error": str(exc)[:240],
         }
     return normalize_autoresearch_maintenance_state(row)
@@ -171,7 +172,10 @@ def autoresearch_queue_capacity_doc(config: ResearchLabGatewayConfig | None = No
     return {
         "autoresearch_capacity_policy": "proxy_worker_capacity:v1",
         "autoresearch_capacity": int(_autoresearch_loop_capacity(config)),
-        "active_loop_stale_after_seconds": max(60, int(config.active_loop_stale_after_seconds or 7200)),
+        "active_loop_stale_after_seconds": max(
+            60,
+            int(config.active_loop_stale_after_seconds or DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS),
+        ),
     }
 
 

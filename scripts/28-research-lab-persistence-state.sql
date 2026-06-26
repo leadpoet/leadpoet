@@ -387,6 +387,9 @@ CREATE INDEX IF NOT EXISTS idx_research_island_participation_snapshots_island
 CREATE INDEX IF NOT EXISTS idx_research_reimbursement_awards_miner_day
     ON public.research_reimbursement_awards(miner_hotkey, run_day DESC);
 
+CREATE UNIQUE INDEX IF NOT EXISTS ux_research_reimbursement_awards_run_id
+    ON public.research_reimbursement_awards(run_id);
+
 CREATE INDEX IF NOT EXISTS idx_research_reimbursement_awards_island_status
     ON public.research_reimbursement_awards(island, award_status, created_at DESC);
 

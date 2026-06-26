@@ -178,9 +178,9 @@ BEGIN
             USING ERRCODE = '23505';
     END IF;
 
-    stale_text := COALESCE(NEW.event_doc->>'active_loop_stale_after_seconds', '7200');
+    stale_text := COALESCE(NEW.event_doc->>'active_loop_stale_after_seconds', '300');
     IF stale_text !~ '^[0-9]+$' THEN
-        stale_text := '7200';
+        stale_text := '300';
     END IF;
 
     capacity := capacity_text::INTEGER;

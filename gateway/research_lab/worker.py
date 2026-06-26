@@ -10,13 +10,14 @@ from decimal import Decimal, ROUND_HALF_UP
 import json
 import logging
 import os
+import socket
 import time
 from typing import Any, Iterable, Mapping, Sequence
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
-from gateway.research_lab.config import ResearchLabGatewayConfig
+from gateway.research_lab.config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
 from gateway.research_lab.key_vault import OpenRouterKeyVaultError, decrypt_openrouter_key
 from gateway.research_lab.logging_utils import compact_ref, format_worker_block, format_worker_line
 from gateway.research_lab.loop_engine import (
@@ -91,15 +92,83 @@ def _status_age_seconds(raw_status_at: object) -> float | None:
 
 def _status_is_stale(raw_status_at: object, stale_after_seconds: int) -> bool:
     age_seconds = _status_age_seconds(raw_status_at)
-    return age_seconds is not None and age_seconds > max(60, int(stale_after_seconds or 7200))
+    return age_seconds is not None and age_seconds > max(
+        60,
+        int(stale_after_seconds or DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS),
+    )
 
 
 class HostedResearchLabWorkerError(RuntimeError):
     """Raised when a hosted Research Lab run cannot complete safely."""
 
 
+class RetryableHostedResearchLabWorkerError(HostedResearchLabWorkerError):
+    """Raised when a paid hosted run should be requeued instead of terminally failed."""
+
+
 class HostedResearchLabClaimLost(HostedResearchLabWorkerError):
     """Raised when another worker safely claimed the queued run first."""
+
+
+_RETRYABLE_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+_RETRYABLE_ERROR_MARKERS = (
+    "timeout",
+    "timed out",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "temporarily unavailable",
+    "service unavailable",
+    "too many requests",
+    "rate limit",
+    "http 408",
+    "http 409",
+    "http 425",
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "status 408",
+    "status 409",
+    "status 425",
+    "status 429",
+    "status 500",
+    "status 502",
+    "status 503",
+    "status 504",
+)
+_PERMANENT_ERROR_MARKERS = (
+    "duplicate key",
+    "violates unique constraint",
+    "check constraint",
+    "foreign key",
+    "invalid input syntax",
+    "permission denied",
+    "research_lab_queue_capacity_conflict",
+    "research_lab_queue_hotkey_conflict",
+    "research_lab_run_claim_conflict",
+)
+
+
+def _is_retryable_worker_exception(exc: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, RetryableHostedResearchLabWorkerError):
+            return True
+        if isinstance(current, HTTPError):
+            code = int(getattr(current, "code", 0) or 0)
+            return code in _RETRYABLE_HTTP_CODES
+        if isinstance(current, (URLError, TimeoutError, asyncio.TimeoutError, socket.timeout, ConnectionError)):
+            return True
+        current = current.__cause__ or current.__context__
+
+    message = str(exc).lower()
+    if any(marker in message for marker in _PERMANENT_ERROR_MARKERS):
+        return False
+    return any(marker in message for marker in _RETRYABLE_ERROR_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -333,6 +402,35 @@ class ResearchLabHostedWorker:
                 error=str(exc)[:500],
             )
         except Exception as exc:
+            if _is_retryable_worker_exception(exc):
+                retry_count = _retryable_requeue_count(context)
+                retry_limit = int(self.config.hosted_worker_retryable_failure_limit)
+                if retry_count < retry_limit:
+                    logger.warning(
+                        format_worker_block(
+                            "RESEARCH LAB AUTO-RESEARCH TRANSIENT FAILURE REQUEUED",
+                            (
+                                ("Worker", self.worker_ref),
+                                ("Run", compact_ref(run_id)),
+                                ("Ticket", compact_ref(ticket_id)),
+                                ("Retry", f"{retry_count + 1}/{retry_limit}"),
+                                ("Error", str(exc)[:300]),
+                            ),
+                        )
+                    )
+                    return await self._mark_retryable(context, str(exc), retry_count=retry_count + 1)
+                logger.error(
+                    format_worker_block(
+                        "RESEARCH LAB AUTO-RESEARCH TRANSIENT RETRY LIMIT EXCEEDED",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("Run", compact_ref(run_id)),
+                            ("Ticket", compact_ref(ticket_id)),
+                            ("Retries", retry_count),
+                            ("Error", str(exc)[:300]),
+                        ),
+                    )
+                )
             logger.exception(
                 format_worker_block(
                     "RESEARCH LAB AUTO-RESEARCH FAILED",
@@ -393,7 +491,10 @@ class ResearchLabHostedWorker:
         return rows[0]
 
     async def _recover_stale_started_runs(self) -> int:
-        stale_after_seconds = max(60, int(self.config.active_loop_stale_after_seconds or 7200))
+        stale_after_seconds = max(
+            60,
+            int(self.config.active_loop_stale_after_seconds or DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS),
+        )
         rows = await select_many(
             "research_loop_run_queue_current",
             columns=(
@@ -702,25 +803,6 @@ class ResearchLabHostedWorker:
                     len(finalists),
                 )
 
-        reimbursement_decision = await self._maybe_create_reimbursement_decision(
-            context=context,
-            budget_context=budget_context,
-            loop_result=loop_result,
-        )
-        await create_receipt_event(
-            receipt_id=str(context.receipt_id),
-            ticket_id=context.ticket_id,
-            event_type="completed",
-            receipt_status="completed",
-            event_doc={
-                "run_id": context.run_id,
-                "worker_ref": self.worker_ref,
-                "final_cost_ledger": loop_result.cost_ledger(),
-                "provider_usage": list(loop_result.provider_usage) or self._provider_usage(context),
-                "reimbursement": reimbursement_decision or {"status": "not_written"},
-            },
-        )
-
         candidate_ids: list[str] = []
         candidate_summaries: list[dict[str, Any]] = []
         for index, finalist in enumerate(finalists):
@@ -754,53 +836,104 @@ class ResearchLabHostedWorker:
                 }
             )
 
-        await create_queue_event(
-            run_id=context.run_id,
-            ticket_id=context.ticket_id,
-            event_type="completed",
-            queue_priority=int(context.queue_row.get("queue_priority") or 0),
-            worker_ref=self.worker_ref,
-            reason="candidate_generation_completed_evaluation_queued",
-            event_doc={
-                "receipt_id": context.receipt_id,
-                "candidate_ids": candidate_ids,
-                "candidate_count": len(candidate_ids),
-                "budget_context": _redacted_budget_context(budget_context),
-                "auto_research_loop": {
-                    "iterations_completed": loop_result.iterations_completed,
-                    "elapsed_seconds": round(loop_result.elapsed_seconds, 3),
-                    "stop_reason": loop_result.stop_reason,
-                    "openrouter_call_count": loop_result.openrouter_call_count,
-                    "estimated_cost_usd": round(loop_result.estimated_cost_usd, 6),
-                    "actual_openrouter_cost_usd": round(loop_result.actual_openrouter_cost_usd, 6),
-                },
-                "reimbursement": reimbursement_decision or {"status": "not_written"},
-                "next_stage": "gateway_qualification_worker_evaluation",
+        reimbursement_decision = await self._maybe_create_reimbursement_decision(
+            context=context,
+            budget_context=budget_context,
+            loop_result=loop_result,
+        )
+        completion_receipt_doc = {
+            "run_id": context.run_id,
+            "worker_ref": self.worker_ref,
+            "final_cost_ledger": loop_result.cost_ledger(),
+            "provider_usage": list(loop_result.provider_usage) or self._provider_usage(context),
+            "candidate_ids": list(candidate_ids),
+            "reimbursement": reimbursement_decision or {"status": "not_written"},
+        }
+
+        completion_queue_doc = {
+            "receipt_id": context.receipt_id,
+            "candidate_ids": candidate_ids,
+            "candidate_count": len(candidate_ids),
+            "budget_context": _redacted_budget_context(budget_context),
+            "auto_research_loop": {
+                "iterations_completed": loop_result.iterations_completed,
+                "elapsed_seconds": round(loop_result.elapsed_seconds, 3),
+                "stop_reason": loop_result.stop_reason,
+                "openrouter_call_count": loop_result.openrouter_call_count,
+                "estimated_cost_usd": round(loop_result.estimated_cost_usd, 6),
+                "actual_openrouter_cost_usd": round(loop_result.actual_openrouter_cost_usd, 6),
             },
-        )
-        await create_ticket_event(
-            ticket_id=context.ticket_id,
-            event_type="running",
-            actor_hotkey=None,
-            reason="candidate_generation_completed_evaluation_queued",
-            event_doc={
-                "run_id": context.run_id,
-                "receipt_id": context.receipt_id,
-                "candidate_ids": candidate_ids,
-                "auto_research_loop": {
-                    "iterations_completed": loop_result.iterations_completed,
-                    "elapsed_seconds": round(loop_result.elapsed_seconds, 3),
-                    "stop_reason": loop_result.stop_reason,
+            "reimbursement": reimbursement_decision or {"status": "not_written"},
+            "next_stage": "gateway_qualification_worker_evaluation",
+        }
+        try:
+            await create_queue_event(
+                run_id=context.run_id,
+                ticket_id=context.ticket_id,
+                event_type="completed",
+                queue_priority=int(context.queue_row.get("queue_priority") or 0),
+                worker_ref=self.worker_ref,
+                reason="candidate_generation_completed_evaluation_queued",
+                event_doc=completion_queue_doc,
+            )
+        except Exception:
+            current_after_completion = await select_one(
+                "research_loop_run_queue_current",
+                columns="run_id,current_queue_status,current_event_hash,current_event_seq",
+                filters=(("run_id", context.run_id),),
+            )
+            if not current_after_completion or current_after_completion.get("current_queue_status") != "completed":
+                raise
+            logger.warning(
+                "research_lab_completion_queue_event_insert_uncertain_but_projected_completed run_id=%s event_hash=%s",
+                compact_ref(context.run_id),
+                current_after_completion.get("current_event_hash"),
+            )
+        try:
+            await create_receipt_event(
+                receipt_id=str(context.receipt_id),
+                ticket_id=context.ticket_id,
+                event_type="completed",
+                receipt_status="completed",
+                event_doc=completion_receipt_doc,
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_completion_receipt_projection_failed run_id=%s receipt_id=%s error=%s",
+                compact_ref(context.run_id),
+                compact_ref(context.receipt_id),
+                str(exc)[:240],
+            )
+        try:
+            await create_ticket_event(
+                ticket_id=context.ticket_id,
+                event_type="running",
+                actor_hotkey=None,
+                reason="candidate_generation_completed_evaluation_queued",
+                event_doc={
+                    "run_id": context.run_id,
+                    "receipt_id": context.receipt_id,
+                    "candidate_ids": candidate_ids,
+                    "auto_research_loop": {
+                        "iterations_completed": loop_result.iterations_completed,
+                        "elapsed_seconds": round(loop_result.elapsed_seconds, 3),
+                        "stop_reason": loop_result.stop_reason,
+                    },
+                    "next_stage": "gateway_qualification_worker_evaluation",
                 },
-                "next_stage": "gateway_qualification_worker_evaluation",
-            },
-        )
-        await safe_project_public_loop_activity(
-            context.ticket_id,
-            source_ref=f"hosted_worker_completed:{context.run_id}",
-            reason="candidate_generation_completed_evaluation_queued",
-            config=self.config,
-        )
+            )
+            await safe_project_public_loop_activity(
+                context.ticket_id,
+                source_ref=f"hosted_worker_completed:{context.run_id}",
+                reason="candidate_generation_completed_evaluation_queued",
+                config=self.config,
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_completion_noncritical_projection_failed run_id=%s error=%s",
+                compact_ref(context.run_id),
+                str(exc)[:240],
+            )
         logger.info(
             format_worker_block(
                 "RESEARCH LAB AUTO-RESEARCH QUEUED CANDIDATES",
@@ -982,6 +1115,12 @@ class ResearchLabHostedWorker:
             policy_id=str(policy["policy_id"]),
             award_doc=award_doc,
         )
+        if str(award_row["award_id"]) != str(schedule["award_id"]):
+            schedule = build_reimbursement_schedule(
+                {**award, "award_id": str(award_row["award_id"])},
+                start_epoch=max(0, int(evaluation_epoch) + 1),
+            ).to_dict()
+            schedule_doc = {**schedule_doc, "schedule": schedule}
         schedule_row = await create_reimbursement_schedule(schedule=schedule, schedule_doc=schedule_doc)
         logger.info(
             format_worker_block(
@@ -1188,6 +1327,81 @@ class ResearchLabHostedWorker:
             error=error[:500],
         )
 
+    async def _mark_retryable(
+        self,
+        context: HostedRunContext,
+        error: str,
+        *,
+        retry_count: int,
+    ) -> HostedWorkerOutcome:
+        event_doc = {
+            **autoresearch_queue_capacity_doc(self.config),
+            "schema_version": "1.0",
+            "run_id": context.run_id,
+            "worker_ref": self.worker_ref,
+            "recovering_worker_ref": self.worker_ref,
+            "retrying_worker_ref": self.worker_ref,
+            "retryable_error": error[:500],
+            "retryable_error_count": int(retry_count),
+            "retryable_failure_limit": int(self.config.hosted_worker_retryable_failure_limit),
+            "previous_event_hash": context.queue_row.get("current_event_hash"),
+            "previous_status_at": context.queue_row.get("current_status_at"),
+        }
+        if context.receipt_id:
+            try:
+                await create_receipt_event(
+                    receipt_id=context.receipt_id,
+                    ticket_id=context.ticket_id,
+                    event_type="queued",
+                    receipt_status="queued",
+                    event_doc=event_doc,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_retryable_receipt_event_failed run_id=%s receipt_id=%s error=%s",
+                    compact_ref(context.run_id),
+                    compact_ref(context.receipt_id),
+                    str(exc)[:240],
+                )
+        await create_queue_event(
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            event_type="queued",
+            queue_priority=int(context.queue_row.get("queue_priority") or 0),
+            worker_ref=self.worker_ref,
+            reason="transient_worker_error_requeued",
+            event_doc=event_doc,
+        )
+        try:
+            await create_ticket_event(
+                ticket_id=context.ticket_id,
+                event_type="running",
+                actor_hotkey=None,
+                reason="transient_worker_error_requeued",
+                event_doc=event_doc,
+            )
+            await safe_project_public_loop_activity(
+                context.ticket_id,
+                source_ref=f"hosted_worker_retryable_requeued:{context.run_id}",
+                reason="transient_worker_error_requeued",
+                config=self.config,
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_retryable_noncritical_projection_failed run_id=%s error=%s",
+                compact_ref(context.run_id),
+                str(exc)[:240],
+            )
+        return HostedWorkerOutcome(
+            processed=True,
+            dry_run=False,
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            status="transient_worker_error_requeued",
+            receipt_id=context.receipt_id,
+            error=error[:500],
+        )
+
     def _queued_receipt_request(self, context: HostedRunContext) -> ResearchLabReceiptCreateRequest:
         budget_context = self._run_budget_context(context)
         return ResearchLabReceiptCreateRequest(
@@ -1300,9 +1514,14 @@ class ResearchLabHostedWorker:
                     decoded = json.loads(response.read().decode("utf-8"))
             except HTTPError as exc:
                 message = exc.read().decode("utf-8", errors="replace")[:500]
-                raise HostedResearchLabWorkerError(f"OpenRouter candidate generation failed: HTTP {exc.code}: {message}") from exc
+                error = f"OpenRouter candidate generation failed: HTTP {exc.code}: {message}"
+                if int(exc.code) in _RETRYABLE_HTTP_CODES:
+                    raise RetryableHostedResearchLabWorkerError(error) from exc
+                raise HostedResearchLabWorkerError(error) from exc
             except URLError as exc:
-                raise HostedResearchLabWorkerError(f"OpenRouter candidate generation failed: {exc}") from exc
+                raise RetryableHostedResearchLabWorkerError(
+                    f"OpenRouter candidate generation failed: {exc}"
+                ) from exc
             choices = decoded.get("choices") if isinstance(decoded, Mapping) else None
             if not choices:
                 raise HostedResearchLabWorkerError("OpenRouter returned no candidate-generation choices")
@@ -1465,6 +1684,21 @@ def _payment_id_from_queue_events(events: Sequence[Mapping[str, Any]]) -> str:
         if isinstance(event_doc, Mapping) and event_doc.get("payment_id"):
             return str(event_doc["payment_id"])
     return ""
+
+
+def _retryable_requeue_count(context: HostedRunContext) -> int:
+    count = 0
+    for event in context.queue_events:
+        event_doc = event.get("event_doc")
+        if not isinstance(event_doc, Mapping):
+            event_doc = {}
+        if str(event.get("reason") or "") == "transient_worker_error_requeued" or event_doc.get("retryable_error"):
+            count += 1
+            try:
+                count = max(count, int(event_doc.get("retryable_error_count") or 0))
+            except (TypeError, ValueError):
+                pass
+    return count
 
 
 def _loop_start_credit_id_from_queue_events(events: Sequence[Mapping[str, Any]]) -> str | None:

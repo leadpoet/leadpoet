@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 # Single code-level default for the Research Lab loop-start fee. Operators can
 # still override it at runtime with RESEARCH_LAB_LOOP_START_FEE_USD.
 DEFAULT_LOOP_START_FEE_USD = 0.2
+DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS = 300
+DEFAULT_HOSTED_WORKER_RETRYABLE_FAILURE_LIMIT = 3
 
 
 def _is_production_subnet() -> bool:
@@ -126,7 +128,8 @@ class ResearchLabGatewayConfig:
     hosted_worker_queue_fetch_limit: int = 20
     hosted_worker_require_proxy: bool = False
     hosted_worker_proxy_url: str = ""
-    active_loop_stale_after_seconds: int = 7200
+    active_loop_stale_after_seconds: int = DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS
+    hosted_worker_retryable_failure_limit: int = DEFAULT_HOSTED_WORKER_RETRYABLE_FAILURE_LIMIT
     scoring_worker_enabled: bool = False
     scoring_worker_poll_seconds: int = 15
     scoring_worker_max_candidates: int = 1
@@ -261,7 +264,14 @@ class ResearchLabGatewayConfig:
             hosted_worker_proxy_url=os.getenv("RESEARCH_LAB_HOSTED_WORKER_PROXY", ""),
             active_loop_stale_after_seconds=max(
                 60,
-                _int("RESEARCH_LAB_ACTIVE_LOOP_STALE_AFTER_SECONDS", 7200),
+                _int("RESEARCH_LAB_ACTIVE_LOOP_STALE_AFTER_SECONDS", DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS),
+            ),
+            hosted_worker_retryable_failure_limit=max(
+                0,
+                _int(
+                    "RESEARCH_LAB_HOSTED_WORKER_RETRYABLE_FAILURE_LIMIT",
+                    DEFAULT_HOSTED_WORKER_RETRYABLE_FAILURE_LIMIT,
+                ),
             ),
             scoring_worker_enabled=_truthy("RESEARCH_LAB_SCORING_WORKER_ENABLED"),
             scoring_worker_poll_seconds=max(1, _int("RESEARCH_LAB_SCORING_WORKER_POLL_SECONDS", 15)),

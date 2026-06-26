@@ -35,7 +35,7 @@ def main() -> int:
         "_queue_capacity_doc(config)",
         '"autoresearch_capacity_policy": "proxy_worker_capacity:v1"',
         '"autoresearch_capacity": int(_autoresearch_loop_capacity(config))',
-        '"active_loop_stale_after_seconds": max(60, int(config.active_loop_stale_after_seconds or 7200))',
+        "DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS",
         "research_lab_queue_capacity_conflict",
         "research_lab_queue_hotkey_conflict",
     }

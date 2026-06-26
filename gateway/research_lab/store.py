@@ -1511,18 +1511,24 @@ async def create_reimbursement_award(
     award_doc: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     existing = await select_one("research_reimbursement_awards", filters=(("award_id", award["award_id"]),))
+    if not existing:
+        existing = await select_one("research_reimbursement_awards", filters=(("run_id", str(award["run_id"])),))
     if existing:
+        existing_award_id = str(existing["award_id"])
         event = await _existing_or_recovered_event(
             "research_reimbursement_award_events",
             "award_id",
-            award["award_id"],
+            existing_award_id,
             lambda: create_reimbursement_award_event(
-                award_id=str(award["award_id"]),
-                event_type=str(award["status"]),
-                award_status=str(award["status"]),
+                award_id=existing_award_id,
+                event_type=str(existing.get("award_status") or award["status"]),
+                award_status=str(existing.get("award_status") or award["status"]),
                 event_doc={
-                    "award_id": str(award["award_id"]),
-                    "target_reimbursement_microusd": int(award["target_reimbursement_microusd"]),
+                    "award_id": existing_award_id,
+                    "target_reimbursement_microusd": int(
+                        existing.get("target_reimbursement_microusd")
+                        or award["target_reimbursement_microusd"]
+                    ),
                 },
             ),
         )

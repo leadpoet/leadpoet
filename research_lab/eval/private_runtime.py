@@ -61,6 +61,31 @@ PROVIDER_PROXY_ENV_PASSTHROUGH = (
     "https_proxy",
     "no_proxy",
 )
+LINKEDIN_EMPLOYEE_BUCKETS = (
+    "0-1",
+    "2-10",
+    "11-50",
+    "51-200",
+    "201-500",
+    "501-1,000",
+    "1,001-5,000",
+    "5,001-10,000",
+    "10,001+",
+)
+LEGACY_EMPLOYEE_BUCKET_MAP = {
+    "10-50": "11-50",
+    "50-200": "51-200",
+    "200-500": "201-500",
+    "500-1000": "501-1,000",
+    "501-1000": "501-1,000",
+    "1000-5000": "1,001-5,000",
+    "1001-5000": "1,001-5,000",
+    "5000-10000": "5,001-10,000",
+    "5001-10000": "5,001-10,000",
+    "5000+": "5,001-10,000",
+    "10000+": "10,001+",
+    "10001+": "10,001+",
+}
 
 
 class PrivateModelRuntimeError(RuntimeError):
@@ -116,12 +141,14 @@ def canonicalize_private_model_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
         normalized.get("hq_country"),
         default="United States",
     )
-    employee_count = _first_text(
-        normalized.get("employee_count"),
-        normalized.get("company_size"),
-        normalized.get("company_size_bucket"),
-        normalized.get("employee_range"),
-        default="50-200",
+    employee_count = _normalize_employee_count_bucket(
+        _first_text(
+            normalized.get("employee_count"),
+            normalized.get("company_size"),
+            normalized.get("company_size_bucket"),
+            normalized.get("employee_range"),
+            default="51-200",
+        )
     )
     intent_signal = _intent_signal_text(normalized)
     required_attribute = _required_attribute(
@@ -635,6 +662,17 @@ def _first_text(*values: Any, default: str = "") -> str:
         text = " ".join(str(value).strip().split())
         if text:
             return text
+    return default
+
+
+def _normalize_employee_count_bucket(value: Any, *, default: str = "51-200") -> str:
+    raw = " ".join(str(value or "").strip().split())
+    if raw in LINKEDIN_EMPLOYEE_BUCKETS:
+        return raw
+    key = raw.replace(",", "")
+    normalized = LEGACY_EMPLOYEE_BUCKET_MAP.get(key) or LEGACY_EMPLOYEE_BUCKET_MAP.get(raw)
+    if normalized:
+        return normalized
     return default
 
 

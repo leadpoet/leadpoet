@@ -188,9 +188,46 @@ SUB_INDUSTRIES = {
 }
 
 # Company sizes
-COMPANY_SIZES = [
-    "10-50", "50-200", "200-500", "500-1000", "1000-5000", "5000+"
+# Keep these exact. They mirror LinkedIn company employee bands and the
+# validator's hard-gate vocabulary; off-by-one legacy buckets like "200-500"
+# cause exact-band private model matches to fail.
+LINKEDIN_EMPLOYEE_BUCKETS = [
+    "0-1",
+    "2-10",
+    "11-50",
+    "51-200",
+    "201-500",
+    "501-1,000",
+    "1,001-5,000",
+    "5,001-10,000",
+    "10,001+",
 ]
+
+# Avoid tiny buckets in generated ICPs unless explicitly introduced later.
+COMPANY_SIZES = [
+    "11-50",
+    "51-200",
+    "201-500",
+    "501-1,000",
+    "1,001-5,000",
+    "5,001-10,000",
+    "10,001+",
+]
+
+LEGACY_EMPLOYEE_BUCKET_MAP = {
+    "10-50": "11-50",
+    "50-200": "51-200",
+    "200-500": "201-500",
+    "500-1000": "501-1,000",
+    "501-1000": "501-1,000",
+    "1000-5000": "1,001-5,000",
+    "1001-5000": "1,001-5,000",
+    "5000-10000": "5,001-10,000",
+    "5001-10000": "5,001-10,000",
+    "5000+": "5,001-10,000",
+    "10000+": "10,001+",
+    "10001+": "10,001+",
+}
 
 # Company stages
 COMPANY_STAGES = [
@@ -382,12 +419,164 @@ INTENT_SIGNALS = [
     # ---- Moderately verifiable (specific but harder to date) ----
     "Hiring for senior engineering or sales roles",
     "Recent factory / facility / store opening",
-    # ---- Lower verifiability (editorial / commentary) ----
-    "Public commentary about digital transformation",
-    "New regulatory or compliance pressure",
-    "Evaluating new vendors or platforms",
-    "Executive spoke at industry conference",
 ]
+
+INTENT_SIGNAL_CATEGORY_MAP = {
+    "Recently raised funding": "FUNDING",
+    "Just closed a round": "FUNDING",
+    "Launched or announced a new product": "PRODUCT_LAUNCH",
+    "Expanded to new markets": "MARKET_EXPANSION",
+    "Acquired another company": "ACQUISITION",
+    "Recent leadership change": "LEADERSHIP_CHANGE",
+    "Achieved regulatory clearance or certification": "REGULATORY_CLEARANCE",
+    "Announced a strategic partnership": "PARTNERSHIP",
+    "Hiring for senior engineering or sales roles": "HIRING",
+    "Recent factory / facility / store opening": "FACILITY_OPENING",
+}
+
+INTENT_CATEGORY_MAX_AGE_DAYS = {
+    "HIRING": 90,
+    "TECHSTACK": 180,
+    "SOCIAL_POSTING": 180,
+    "FUNDING": 365,
+    "ACQUISITION": 365,
+    "PARTNERSHIP": 365,
+    "PRODUCT_LAUNCH": 365,
+    "LEADERSHIP_CHANGE": 365,
+    "MARKET_EXPANSION": 365,
+    "REGULATORY_CLEARANCE": 365,
+    "FACILITY_OPENING": 365,
+    "SALES_GROWTH": 365,
+}
+
+
+def normalize_employee_count_bucket(value: Any, *, default: str = "51-200") -> str:
+    """Normalize generated ICP size bands to exact LinkedIn employee buckets."""
+
+    raw = " ".join(str(value or "").strip().split())
+    if raw in LINKEDIN_EMPLOYEE_BUCKETS:
+        return raw
+    key = raw.replace(",", "")
+    normalized = LEGACY_EMPLOYEE_BUCKET_MAP.get(key) or LEGACY_EMPLOYEE_BUCKET_MAP.get(raw)
+    if normalized:
+        return normalized
+    return default
+
+
+def intent_category_for_signal(signal: Any) -> str:
+    text = " ".join(str(signal or "").strip().split())
+    if text in INTENT_SIGNAL_CATEGORY_MAP:
+        return INTENT_SIGNAL_CATEGORY_MAP[text]
+    lowered = text.lower()
+    if any(word in lowered for word in ("hiring", "job", "role", "career", "recruit")):
+        return "HIRING"
+    if any(word in lowered for word in ("tech stack", "installed", "uses ", "using ", "software", "tool", "vendor", "platform")):
+        return "TECHSTACK"
+    if any(word in lowered for word in ("linkedin", "posted", "social", "tweet", "x.com")):
+        return "SOCIAL_POSTING"
+    if any(word in lowered for word in ("funding", "raised", "round", "financing")):
+        return "FUNDING"
+    if any(word in lowered for word in ("acquired", "acquisition", "merger", "bought")):
+        return "ACQUISITION"
+    if any(word in lowered for word in ("partner", "partnership", "integration")):
+        return "PARTNERSHIP"
+    if any(word in lowered for word in ("launch", "launched", "announced", "released", "new product")):
+        return "PRODUCT_LAUNCH"
+    if any(word in lowered for word in ("executive", "ceo", "cfo", "cto", "appointed", "joined", "leadership")):
+        return "LEADERSHIP_CHANGE"
+    if any(word in lowered for word in ("expanded", "expansion", "new market")):
+        return "MARKET_EXPANSION"
+    if any(word in lowered for word in ("regulatory", "clearance", "certification", "approved", "compliance")):
+        return "REGULATORY_CLEARANCE"
+    if any(word in lowered for word in ("factory", "facility", "store", "warehouse", "office opening")):
+        return "FACILITY_OPENING"
+    return "SALES_GROWTH"
+
+
+def intent_max_age_days_for_category(category: str) -> int:
+    return INTENT_CATEGORY_MAX_AGE_DAYS.get(str(category or "").strip().upper(), 365)
+
+
+def _normalize_intent_signals(value: Any) -> list[str]:
+    if isinstance(value, str):
+        signals = [value]
+    elif isinstance(value, list):
+        signals = [str(item) for item in value]
+    else:
+        signals = []
+    cleaned = [" ".join(signal.strip().split()) for signal in signals if signal.strip()]
+    return cleaned[:5]
+
+
+def _required_attribute_for_icp(icp: Dict[str, Any], *, industry: str, sub_industry: str) -> str:
+    existing = " ".join(str(icp.get("required_attribute") or "").strip().split())
+    if existing:
+        return existing
+    product = " ".join(str(icp.get("product_service") or "").strip().split())
+    if product:
+        return f"The company offers or provides {product}"
+    if sub_industry:
+        return f"The company operates in {sub_industry}"
+    return f"The company operates in {industry}" if industry else "The company matches the target customer profile"
+
+
+def canonicalize_generated_icp(icp: Dict[str, Any], *, industry: str, sub_industry: str) -> Dict[str, Any]:
+    """Apply the private sourcing-model ICP contract before storage."""
+
+    normalized = dict(icp)
+    raw_employee_count = normalized.get("employee_count")
+    employee_count = normalize_employee_count_bucket(raw_employee_count)
+    prompt = str(normalized.get("prompt") or "")
+    if raw_employee_count and str(raw_employee_count) != employee_count:
+        prompt = prompt.replace(str(raw_employee_count), employee_count)
+
+    intent_signals = _normalize_intent_signals(normalized.get("intent_signals"))
+    explicit_required = " ".join(str(normalized.get("intent_signal") or "").strip().split())
+    if explicit_required and explicit_required not in intent_signals:
+        intent_signals.insert(0, explicit_required)
+    if not intent_signals:
+        intent_signals = random.sample(INTENT_SIGNALS, random.randint(1, 2))
+
+    intent_signal = intent_signals[0]
+    intent_category = str(normalized.get("intent_category") or "").strip().upper()
+    if not intent_category:
+        intent_category = intent_category_for_signal(intent_signal)
+    intent_max_age_days = normalized.get("intent_max_age_days")
+    try:
+        intent_max_age_days = int(intent_max_age_days)
+    except (TypeError, ValueError):
+        intent_max_age_days = intent_max_age_days_for_category(intent_category)
+    if intent_max_age_days <= 0:
+        intent_max_age_days = intent_max_age_days_for_category(intent_category)
+
+    bonus_intents = []
+    for signal in intent_signals[1:5]:
+        category = intent_category_for_signal(signal)
+        bonus_intents.append(
+            {
+                "intent_signal": signal,
+                "intent_category": category,
+                "intent_max_age_days": intent_max_age_days_for_category(category),
+            }
+        )
+
+    normalized.update(
+        {
+            "prompt": prompt,
+            "employee_count": employee_count,
+            "intent_signals": intent_signals,
+            "intent_signal": intent_signal,
+            "intent_category": intent_category,
+            "intent_max_age_days": intent_max_age_days,
+            "bonus_intents": bonus_intents,
+            "required_attribute": _required_attribute_for_icp(
+                normalized,
+                industry=industry,
+                sub_industry=sub_industry,
+            ),
+        }
+    )
+    return normalized
 
 
 # =============================================================================
@@ -500,8 +689,9 @@ Target distribution across the 20 ICPs (approximate, ±2 per bucket is fine):
 
 Do NOT cluster on later stages just because they're easier to verify. The realism rule still applies (every ICP must have a real `verified_example_company`), but Seed and Series A startups exist with verifiable funding announcements — find them.
 
-ALLOWED EMPLOYEE BANDS: 10-50, 50-200, 200-500, 500-1000, 1000-5000, 5000+
-(Prefer 50-500 or 200-1000 for broader coverage.)
+ALLOWED EMPLOYEE BANDS — USE THESE EXACT LINKEDIN BUCKETS ONLY:
+11-50, 51-200, 201-500, 501-1,000, 1,001-5,000, 5,001-10,000, 10,001+
+(Prefer 51-200, 201-500, or 501-1,000 for broader coverage.)
 
 ALLOWED GEOGRAPHIES — STRONGLY PREFER BROAD VALUES:
 - "United States" (whole country — use this for ~50% of ICPs)
@@ -533,10 +723,17 @@ OUTPUT — JSON ONLY, NO PROSE, NO MARKDOWN
       "sub_industry": "<natural sub-industry>",
       "geography": "<from allowed geographies, prefer broad>",
       "country": "United States",
-      "employee_count": "<from allowed bands>",
+      "employee_count": "<from allowed LinkedIn bands>",
       "company_stage": "<from allowed stages>",
       "product_service": "<broad category — NOT a single named tool>",
-      "intent_signals": ["<1 or 2 from allowed intent list>"],
+      "required_attribute": "The company offers or provides <product_service or broad category>",
+      "intent_signal": "<required intent from allowed intent list>",
+      "intent_category": "<FUNDING | ACQUISITION | PARTNERSHIP | PRODUCT_LAUNCH | LEADERSHIP_CHANGE | MARKET_EXPANSION | REGULATORY_CLEARANCE | FACILITY_OPENING | HIRING>",
+      "intent_max_age_days": 365,
+      "intent_signals": ["<required intent first>", "<optional bonus intent second>"],
+      "bonus_intents": [
+        {{"intent_signal": "<optional bonus intent>", "intent_category": "<matching category>", "intent_max_age_days": 365}}
+      ],
       "verified_example_company": "<MANDATORY: the real company name you found while verifying this ICP>"
     }}
   ]
@@ -665,9 +862,9 @@ FINAL CHECK before output (for every ICP):
             # Count distribution
             actual_distribution[industry_normalized] += 1
 
-            intent_signals = icp.get("intent_signals", [])
-            if isinstance(intent_signals, str):
-                intent_signals = [intent_signals]
+            intent_signals = _normalize_intent_signals(icp.get("intent_signals"))
+            if not intent_signals and icp.get("intent_signal"):
+                intent_signals = _normalize_intent_signals(icp.get("intent_signal"))
             if not intent_signals:
                 intent_signals = random.sample(INTENT_SIGNALS, random.randint(1, 2))
                 logger.warning(f"ICP {icp_id} had empty intent_signals from LLM, assigned fallback: {intent_signals}")
@@ -708,33 +905,44 @@ FINAL CHECK before output (for every ICP):
                     f"(industry={industry_normalized})"
                 )
 
+            sub_industry = icp.get("sub_industry", SUB_INDUSTRIES.get(industry_normalized, ["General"])[0])
             validated_icp = {
                 "icp_id": icp_id,
                 "prompt": prompt,
                 "industry": industry_normalized,
-                "sub_industry": icp.get("sub_industry", SUB_INDUSTRIES.get(industry_normalized, ["General"])[0]),
+                "sub_industry": sub_industry,
                 "target_roles": [],
                 "target_seniority": "",
-                "employee_count": icp.get("employee_count", "50-200"),
+                "employee_count": icp.get("employee_count", "51-200"),
                 "company_stage": icp.get("company_stage", "Series A"),
                 "geography": geography,
                 "country": country,
                 "product_service": icp.get("product_service", "Software solution"),
                 "intent_signals": intent_signals,
+                "intent_signal": icp.get("intent_signal", intent_signals[0]),
+                "intent_category": icp.get("intent_category", ""),
+                "intent_max_age_days": icp.get("intent_max_age_days"),
+                "bonus_intents": icp.get("bonus_intents", []),
+                "required_attribute": icp.get("required_attribute", ""),
                 "buyer_description": prompt,                  # Legacy alias of prompt
                 "verified_example_company": verified_example, # Sonar's supply receipt
             }
+            validated_icp = canonicalize_generated_icp(
+                validated_icp,
+                industry=industry_normalized,
+                sub_industry=str(sub_industry or ""),
+            )
 
             validated_icps.append(validated_icp)
 
-        # Set is exactly 25; allow some slack but anything significantly
+        # Set is exactly the configured industry count; allow some slack but anything significantly
         # short of expected count is a bad generation and we fall back.
         min_acceptable = max(int(total_icps * 0.9), total_icps - 2)
         if len(validated_icps) < min_acceptable:
             logger.error(f"Only {len(validated_icps)} valid ICPs (expected ~{total_icps}), falling back to template")
             return None
         
-        # If we got fewer than 100, that's OK - the distribution is approximate
+        # If the distribution is slightly imperfect, that's OK - the LLM output is approximate
         logger.info(f"Validated {len(validated_icps)} ICPs with distribution: {actual_distribution}")
         
         # Compute hash
@@ -828,7 +1036,7 @@ def generate_single_icp(
 
     prompt = random.choice(prompt_templates)
 
-    return {
+    icp = {
         "icp_id": icp_id,
         "prompt": prompt,
         "industry": industry,
@@ -845,6 +1053,7 @@ def generate_single_icp(
         "intent_signals": intent_signals,
         "buyer_description": prompt,  # Legacy alias of prompt
     }
+    return canonicalize_generated_icp(icp, industry=industry, sub_industry=sub_industry)
 
 
 def generate_icp_set(
@@ -1089,7 +1298,7 @@ async def generate_and_activate_icp_set(
     NO FALLBACK - if OpenRouter fails, returns None and the system will
     automatically retry on the next gateway restart or rotation check.
 
-    Generates exactly ``len(INDUSTRY_DISTRIBUTION)`` ICPs (currently 25, one
+    Generates exactly ``len(INDUSTRY_DISTRIBUTION)`` ICPs (currently 20, one
     per industry).
 
     Args:

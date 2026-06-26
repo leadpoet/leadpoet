@@ -81,7 +81,7 @@ async def main() -> int:
         return 0
 
     # ── Step 3: import + run configured arms ──────────────────────────
-    from qualification.scoring.lead_scorer import score_company
+    from qualification.scoring.lead_scorer import score_company_autoresearch_intent_v2
 
     failures = 0
     for arm in arms:
@@ -100,7 +100,7 @@ async def main() -> int:
                 set_id=today_set_id,
                 icp_set=icps,
                 qualify_fn=qualify,
-                score_fn=score_company,
+                score_fn=score_company_autoresearch_intent_v2,
                 model_id=arm.model_id,
                 score_cost_exempt=True,
             )

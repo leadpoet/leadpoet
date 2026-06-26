@@ -89,6 +89,15 @@ logger = logging.getLogger(__name__)
 MAX_COMPANY_ICP_FIT_SCORE = 40
 MAX_COMPANY_INTENT_SIGNAL_SCORE = 60
 MAX_COMPANY_TOTAL_SCORE = MAX_COMPANY_ICP_FIT_SCORE + MAX_COMPANY_INTENT_SIGNAL_SCORE  # = 100
+MAX_AUTORESEARCH_INTENT_SCORE = 100
+AUTORESEARCH_INTENT_CAP_BY_SIGNAL_COUNT = {
+    1: 60.0,
+    2: 80.0,
+    3: 88.0,
+    4: 92.0,
+    5: 96.0,
+    6: 100.0,
+}
 
 # Per-signal LLM score cap (each individual intent signal scores 0-60
 # inside ``_score_single_intent_signal``).  Kept as an alias for the
@@ -353,6 +362,166 @@ async def score_company(
     )
 
 
+async def score_company_autoresearch_intent_v2(
+    company: CompanyOutput,
+    icp: ICPPrompt,
+    run_cost_usd: float,
+    run_time_seconds: float,
+    seen_companies: Set[str],
+    force_fail_reason: Optional[str] = None,
+    is_reference_model: bool = False,
+) -> LeadScoreBreakdown:
+    """Opt-in Research Lab scorer: binary fit gates, 0-100 intent-only score.
+
+    This intentionally leaves ``score_company`` unchanged for the public model
+    competition and fulfillment-adjacent imports.  The Research Lab private
+    evaluator opts into this function explicitly.
+    """
+    if force_fail_reason:
+        logger.info(
+            f"Autoresearch company forced to fail: {force_fail_reason}"
+        )
+        return _zero_company_breakdown(force_fail_reason)
+
+    passes, failure_reason = await run_company_zero_checks(
+        company, icp, run_cost_usd, run_time_seconds, seen_companies
+    )
+    if not passes:
+        logger.info(f"Autoresearch company failed pre-checks: {failure_reason}")
+        return _zero_company_breakdown(failure_reason)
+
+    binary_passed, binary_reason = _run_autoresearch_binary_fit_checks(company, icp)
+    if not binary_passed:
+        logger.info(f"Autoresearch company failed binary fit: {binary_reason}")
+        return _zero_company_breakdown(binary_reason)
+
+    try:
+        co_verified, co_reason = await verify_company_exists(
+            company.company_name, company.company_website
+        )
+    except Exception as e:
+        logger.error(f"Autoresearch company verification raised: {e}")
+        co_verified, co_reason = False, f"company verification error: {str(e)[:120]}"
+    if not co_verified:
+        return _zero_company_breakdown(f"Company verification failed: {co_reason}")
+
+    if company.company_name:
+        seen_companies.add(company.company_name.lower().strip())
+
+    try:
+        intent_raw, intent_final, decay_multiplier, _max_confidence, all_fabricated = (
+            await score_company_autoresearch_intent_signal(company, icp)
+        )
+        if all_fabricated:
+            logger.warning(
+                f"❌ ALL AUTORESEARCH INTENT SIGNALS FABRICATED for company "
+                f"{company.company_name!r} — zeroing entire score"
+            )
+            return _zero_company_breakdown(
+                "Intent fabrication detected (hardcoded date or generic claim)"
+            )
+    except Exception as e:
+        logger.error(f"Autoresearch intent scoring failed: {e}")
+        return _zero_company_breakdown(f"LLM scoring error: {str(e)[:100]}")
+
+    final_score = max(0.0, min(float(MAX_AUTORESEARCH_INTENT_SCORE), intent_final))
+    role_tag = "reference" if is_reference_model else "miner"
+    logger.info(
+        f"Autoresearch company scored [{role_tag}]: {final_score:.2f} "
+        f"(IntentV2:{intent_final:.2f}, cost=${run_cost_usd:.4f}, "
+        f"time={run_time_seconds:.1f}s)"
+    )
+    return LeadScoreBreakdown(
+        icp_fit=0,
+        decision_maker=0,
+        intent_signal_raw=intent_raw,
+        time_decay_multiplier=decay_multiplier,
+        intent_signal_final=final_score,
+        cost_penalty=0,
+        time_penalty=0,
+        final_score=final_score,
+        failure_reason=None,
+    )
+
+
+def _zero_company_breakdown(reason: Optional[str]) -> LeadScoreBreakdown:
+    return LeadScoreBreakdown(
+        icp_fit=0,
+        decision_maker=0,
+        intent_signal_raw=0,
+        time_decay_multiplier=1.0,
+        intent_signal_final=0,
+        cost_penalty=0,
+        time_penalty=0,
+        final_score=0,
+        failure_reason=reason,
+    )
+
+
+def _run_autoresearch_binary_fit_checks(
+    company: CompanyOutput, icp: ICPPrompt
+) -> Tuple[bool, Optional[str]]:
+    company_bucket = _normalize_linkedin_employee_bucket(company.employee_count)
+    icp_buckets = _normalize_icp_employee_buckets(icp.employee_count)
+    if icp_buckets:
+        if not company_bucket:
+            return False, "Missing employee_count bucket"
+        if company_bucket not in icp_buckets:
+            return (
+                False,
+                f"Employee count mismatch: '{company.employee_count}' not in {sorted(icp_buckets)}",
+            )
+
+    icp_stage = _normalize_company_stage(icp.company_stage)
+    if icp_stage:
+        company_stage = _normalize_company_stage(company.company_stage)
+        if not company_stage:
+            return False, f"Missing company_stage (ICP requires '{icp.company_stage}')"
+        if company_stage != icp_stage:
+            return (
+                False,
+                f"Company stage mismatch: '{company.company_stage}' vs '{icp.company_stage}'",
+            )
+    return True, None
+
+
+def _normalize_linkedin_employee_bucket(value) -> str:
+    try:
+        from research_lab.employee_buckets import normalize_employee_count_bucket
+
+        return normalize_employee_count_bucket(value, default=None)
+    except Exception as e:
+        logger.warning(
+            "autoresearch employee bucket normalization failed: %s: %s",
+            type(e).__name__, e,
+        )
+        return ""
+
+
+def _normalize_icp_employee_buckets(value) -> set:
+    raw = str(value or "").strip()
+    if not raw or raw.lower() in {"any", "all", "unknown", "n/a", "na"}:
+        return set()
+    pieces = [
+        item.strip()
+        for item in re.split(r"\s*(?:\||;|,|\bor\b)\s*", raw, flags=re.I)
+        if item.strip()
+    ]
+    buckets = {
+        _normalize_linkedin_employee_bucket(piece)
+        for piece in pieces
+    }
+    return {bucket for bucket in buckets if bucket}
+
+
+def _normalize_company_stage(value) -> str:
+    text = str(value or "").strip().lower()
+    if not text or text in {"any", "all", "unknown", "n/a", "na", "not specified"}:
+        return ""
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
 async def score_company_icp_fit(
     company: CompanyOutput, icp: ICPPrompt, api_key: str = ""
 ) -> float:
@@ -525,6 +694,83 @@ async def score_company_intent_signal(
     all_fabricated = all(r["raw"] == 0.0 for r in signal_results)
 
     return avg_raw, avg_final, avg_decay, max_confidence, all_fabricated
+
+
+async def score_company_autoresearch_intent_signal(
+    company: CompanyOutput, icp: ICPPrompt, api_key: str = ""
+) -> Tuple[float, float, float, int, bool]:
+    """Score CompanyOutput intent signals with capped-sum breadth rewards."""
+    icp_criteria = None
+    seen_domains: set = set()
+    signal_results = []
+
+    for signal in company.intent_signals:
+        domain = _extract_domain(signal.url)
+        if domain in seen_domains:
+            logger.warning(
+                f"  ⚠ Duplicate domain {domain!r} on autoresearch company "
+                f"{company.company_name!r} — signal scores 0 (URL dedup)"
+            )
+            signal_results.append({
+                "raw": 0.0,
+                "after_decay": 0.0,
+                "decay": 0.0,
+                "confidence": 0,
+                "date_status": "fabricated",
+            })
+            continue
+        seen_domains.add(domain)
+
+        score, confidence, date_status, content_found_date, _matched_idx = (
+            await _score_single_intent_signal(
+                signal,
+                icp,
+                icp_criteria,
+                company.company_name,
+                company.company_website,
+                api_key=api_key,
+                company_linkedin=getattr(company, "company_linkedin", "") or "",
+                product_service_context=getattr(icp, "product_service", "") or "",
+            )
+        )
+        after_decay, decay = _apply_signal_time_decay(
+            score, signal.date, date_status,
+            signal.source.value if hasattr(signal.source, 'value') else str(signal.source),
+            content_found_date=content_found_date,
+        )
+        signal_results.append({
+            "raw": score,
+            "after_decay": after_decay,
+            "decay": decay,
+            "confidence": confidence,
+            "date_status": date_status,
+        })
+
+    if not signal_results:
+        return 0.0, 0.0, 0.0, 0, True
+
+    raw_scores = [r["raw"] for r in signal_results]
+    decayed_scores = [r["after_decay"] for r in signal_results]
+    decays = [r["decay"] for r in signal_results if r["decay"] > 0]
+    confidences = [r["confidence"] for r in signal_results]
+    raw_total = aggregate_autoresearch_intent_scores(raw_scores)
+    final_total = aggregate_autoresearch_intent_scores(decayed_scores)
+    avg_decay = sum(decays) / len(decays) if decays else 0.0
+    max_confidence = max(confidences) if confidences else 0
+    all_fabricated = all(r["raw"] == 0.0 for r in signal_results)
+    return raw_total, final_total, avg_decay, max_confidence, all_fabricated
+
+
+def aggregate_autoresearch_intent_scores(signal_scores: List[float]) -> float:
+    """Capped sum over top verified signals, with monotonic breadth caps."""
+    positives = sorted(
+        [max(0.0, float(score or 0.0)) for score in signal_scores if float(score or 0.0) > 0.0],
+        reverse=True,
+    )[:6]
+    if not positives:
+        return 0.0
+    cap = AUTORESEARCH_INTENT_CAP_BY_SIGNAL_COUNT[len(positives)]
+    return min(sum(positives), cap)
 
 
 # =============================================================================
@@ -761,6 +1007,7 @@ async def _score_single_intent_signal(
     company_website: str = "",
     api_key: str = "",
     company_linkedin: str = "",
+    product_service_context: str = "",
 ) -> Tuple[float, int, str, Optional[str], int]:
     """
     Verify and score a single intent signal.
@@ -890,6 +1137,12 @@ async def _score_single_intent_signal(
         if isinstance(target_signal_raw, dict)
         else str(target_signal_raw)
     )
+    if product_service_context:
+        target_signal_text = (
+            f"{target_signal_text}\n"
+            f"Product/service buying-fit context: the evidence should indicate "
+            f"credible buying need or relevance for {product_service_context}."
+        )
     # Pull spec.evidence_type off the matched ICP signal so the verifier's
     # prompt dispatcher routes to the per-type module (PART D for
     # SOCIAL_POSTING, PART E for TECHSTACK, PART F for

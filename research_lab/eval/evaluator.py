@@ -406,24 +406,25 @@ class QualificationStyleCompanyScorer:
         _ensure_qualification_provider_env()
         CompanyOutput = getattr(models, "CompanyOutput")
         ICPPrompt = getattr(models, "ICPPrompt")
-        score_company = getattr(scorer_module, "score_company")
+        score_company = getattr(scorer_module, "score_company_autoresearch_intent_v2")
 
         allowed_buckets = employee_count_buckets_for_icp(icp)
         seen_companies: set[str] = set()
         breakdowns: list[dict[str, Any]] = []
         for company in companies:
-            normalized_company = _normalize_company_output(company)
+            scoring_icp = dict(icp)
             company_bucket = normalize_employee_count_bucket(
-                normalized_company.get("employee_count"),
+                (company or {}).get("employee_count"),
                 default="",
             )
             if not company_bucket or company_bucket not in allowed_buckets:
                 continue
-            scoring_icp = dict(icp)
             scoring_icp["employee_count"] = company_bucket
-            scoring_icp.pop("employee_count_buckets", None)
-            scoring_icp.pop("employee_counts", None)
-            icp_obj = ICPPrompt(**canonicalize_private_model_icp(scoring_icp))
+            normalized_company, normalized_icp = prepare_autoresearch_scoring_payload(
+                company,
+                scoring_icp,
+            )
+            icp_obj = ICPPrompt(**normalized_icp)
             company_obj = CompanyOutput(**normalized_company)
             result = await score_company(
                 company=company_obj,
@@ -468,7 +469,53 @@ async def _call_model_runner(
     return await _maybe_await(runner(icp, context))
 
 
-def _normalize_company_output(company: Mapping[str, Any]) -> dict[str, Any]:
+def prepare_autoresearch_scoring_payload(
+    company: Mapping[str, Any],
+    icp: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Normalize private ICP/output into strict CompanyOutput/ICPPrompt shapes."""
+    normalized_icp = canonicalize_private_model_icp(icp)
+    normalized_icp.pop("employee_count_buckets", None)
+    normalized_icp.pop("employee_counts", None)
+    if isinstance(normalized_icp.get("employee_count"), Sequence) and not isinstance(
+        normalized_icp.get("employee_count"), (str, bytes, bytearray)
+    ):
+        normalized_icp["employee_count"] = "|".join(
+            str(item).strip()
+            for item in normalized_icp["employee_count"]
+            if str(item).strip()
+        )
+    normalized_icp = _append_bonus_intents_to_icp_signals(normalized_icp)
+    normalized_company = _normalize_company_output(company, normalized_icp)
+    return normalized_company, normalized_icp
+
+
+def _append_bonus_intents_to_icp_signals(icp: Mapping[str, Any]) -> dict[str, Any]:
+    out = dict(icp)
+    signals: list[str] = []
+    evidence_types: list[str | None] = []
+    for signal in out.get("intent_signals") or []:
+        text = _text_from_signal_like(signal)
+        if text and text not in signals:
+            signals.append(text)
+            evidence_types.append(_evidence_type_from_signal_like(signal))
+    for bonus in out.get("bonus_intents") or []:
+        if not isinstance(bonus, Mapping):
+            continue
+        text = _text_from_signal_like(bonus)
+        if text and text not in signals:
+            signals.append(text)
+            evidence_types.append(_evidence_type_from_signal_like(bonus))
+    out["intent_signals"] = signals
+    out["intent_signal_evidence_types"] = evidence_types
+    out.pop("bonus_intents", None)
+    return out
+
+
+def _normalize_company_output(
+    company: Mapping[str, Any],
+    icp: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Normalize private sourcing-model output into CompanyOutput shape.
 
     The private model currently returns a product-facing company record with
@@ -477,26 +524,27 @@ def _normalize_company_output(company: Mapping[str, Any]) -> dict[str, Any]:
     ``intent_signals``. This adapter is intentionally narrow and deterministic.
     """
     row = dict(company)
+    icp_signal_texts = [
+        _text_from_signal_like(item)
+        for item in ((icp or {}).get("intent_signals") or [])
+    ]
     intent = row.get("intent") if isinstance(row.get("intent"), Mapping) else {}
-    signal = {
-        "source": _normalize_intent_source(intent.get("source") or row.get("intent_source") or "news"),
-        "description": str(
-            intent.get("signal")
-            or intent.get("description")
-            or row.get("intent_signal")
-            or "Private sourcing model returned intent evidence."
-        )[:350],
-        "url": str(intent.get("url") or row.get("intent_url") or row.get("company_website") or ""),
-        "date": intent.get("date") or row.get("intent_date"),
-        "snippet": str(
-            intent.get("snippet")
-            or intent.get("signal")
-            or intent.get("description")
-            or row.get("description")
-            or "Private sourcing model returned intent evidence."
-        )[:600],
-        "matched_icp_signal": int(intent.get("matched_icp_signal", 0) or 0),
-    }
+    signals = []
+    if isinstance(row.get("intent_signals"), Sequence) and not isinstance(
+        row.get("intent_signals"), (str, bytes, bytearray)
+    ):
+        signals = list(row.get("intent_signals") or [])
+    else:
+        signals.append(_intent_dict_from_private_record(intent, row, 0))
+
+    for additional in row.get("additional_intents") or []:
+        if not isinstance(additional, Mapping):
+            continue
+        matched_idx = _matched_intent_index(additional, icp_signal_texts)
+        if matched_idx is None:
+            continue
+        signals.append(_intent_dict_from_private_record(additional, row, matched_idx))
+
     return {
         "company_name": row.get("company_name", ""),
         "company_website": row.get("company_website", ""),
@@ -508,8 +556,76 @@ def _normalize_company_output(company: Mapping[str, Any]) -> dict[str, Any]:
         "country": row.get("country") or row.get("hq_country") or "",
         "state": row.get("state") or row.get("hq_state") or "",
         "description": row.get("description", ""),
-        "intent_signals": row.get("intent_signals") or [signal],
+        "intent_signals": signals,
     }
+
+
+def _intent_dict_from_private_record(
+    record: Mapping[str, Any],
+    row: Mapping[str, Any],
+    matched_idx: int,
+) -> dict[str, Any]:
+    signal_text = (
+        record.get("signal")
+        or record.get("intent_signal")
+        or record.get("description")
+        or row.get("intent_signal")
+        or "Private sourcing model returned intent evidence."
+    )
+    return {
+        "source": _normalize_intent_source(record.get("source") or row.get("intent_source") or "news"),
+        "description": str(signal_text)[:350],
+        "url": str(record.get("url") or row.get("intent_url") or row.get("company_website") or ""),
+        "date": record.get("date") or row.get("intent_date"),
+        "snippet": str(
+            record.get("snippet")
+            or record.get("why_valid")
+            or record.get("description")
+            or signal_text
+            or row.get("description")
+            or "Private sourcing model returned intent evidence."
+        )[:600],
+        "matched_icp_signal": int(matched_idx),
+    }
+
+
+def _matched_intent_index(
+    item: Mapping[str, Any],
+    icp_signal_texts: Sequence[str],
+) -> int | None:
+    explicit = item.get("matched_icp_signal")
+    if isinstance(explicit, int) and 0 <= explicit < len(icp_signal_texts):
+        return explicit
+    target = _normalize_match_text(_text_from_signal_like(item))
+    if not target:
+        return None
+    for idx, text in enumerate(icp_signal_texts):
+        if _normalize_match_text(text) == target:
+            return idx
+    return None
+
+
+def _text_from_signal_like(item: Any) -> str:
+    if isinstance(item, Mapping):
+        return str(
+            item.get("intent_signal")
+            or item.get("signal")
+            or item.get("text")
+            or ""
+        ).strip()
+    return str(item or "").strip()
+
+
+def _evidence_type_from_signal_like(item: Any) -> str | None:
+    if not isinstance(item, Mapping):
+        return None
+    raw = item.get("intent_category") or item.get("category") or item.get("evidence_type")
+    text = str(raw or "").strip().upper()
+    return text or None
+
+
+def _normalize_match_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
 
 
 def _normalize_intent_source(value: Any) -> str:

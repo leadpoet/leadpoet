@@ -15,6 +15,8 @@ Scoring Components (per company):
 - ICP Fit:        0-40 points  (industry + product + structural + intent fit)
 - Intent Signal:  0-60 points  (per-signal verification + time decay,
                                 averaged across all submitted signals)
+- Autoresearch:   opt-in intent_v2 path scores 0-100 from verified intent
+                  evidence only after binary fit gates
 - Penalties:      cost variability deduction
 
 Max Score per Company: MAX_COMPANY_TOTAL_SCORE = 100 points
@@ -71,8 +73,11 @@ from qualification.scoring.verification_helpers import (
 
 from qualification.scoring.lead_scorer import (
     score_company,
+    score_company_autoresearch_intent_v2,
     score_company_icp_fit,
     score_company_intent_signal,
+    score_company_autoresearch_intent_signal,
+    aggregate_autoresearch_intent_scores,
     calculate_age_months,
     calculate_time_decay_multiplier,
     extract_score,
@@ -80,6 +85,7 @@ from qualification.scoring.lead_scorer import (
     MAX_COMPANY_ICP_FIT_SCORE,
     MAX_COMPANY_INTENT_SIGNAL_SCORE,
     MAX_COMPANY_TOTAL_SCORE,
+    MAX_AUTORESEARCH_INTENT_SCORE,
 )
 
 from qualification.scoring.company_verification import (
@@ -160,8 +166,11 @@ __all__ = [
     "CachedVerification",
     # Company scoring
     "score_company",
+    "score_company_autoresearch_intent_v2",
     "score_company_icp_fit",
     "score_company_intent_signal",
+    "score_company_autoresearch_intent_signal",
+    "aggregate_autoresearch_intent_scores",
     "calculate_age_months",
     "calculate_time_decay_multiplier",
     "extract_score",
@@ -169,6 +178,7 @@ __all__ = [
     "MAX_COMPANY_ICP_FIT_SCORE",
     "MAX_COMPANY_INTENT_SIGNAL_SCORE",
     "MAX_COMPANY_TOTAL_SCORE",
+    "MAX_AUTORESEARCH_INTENT_SCORE",
     # Company-existence verification
     "verify_company_exists",
     # Champion selection

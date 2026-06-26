@@ -441,6 +441,7 @@ def load_completed_baseline_arms_from_db(
 # Type aliases for the injectable callables. Real callers pass:
 #   qualify_fn = miner_models.qualification_model.qualify   (sync; uses asyncio.run internally)
 #   score_fn   = qualification.scoring.lead_scorer.score_company   (async)
+#             or score_company_autoresearch_intent_v2 for Research Lab arms
 QualifyFn = Callable[[Dict[str, Any]], List[Dict[str, Any]]]
 ScoreFn = Callable[..., Awaitable[Any]]
 
@@ -477,12 +478,13 @@ async def run_and_save_baseline(
     qualification model itself uses (``qualify(icp)`` returns ``[]`` on
     failure rather than raising).
     """
-    # score_company expects Pydantic CompanyOutput / ICPPrompt objects.
+    # score functions expect Pydantic CompanyOutput / ICPPrompt objects.
     # qualify_fn returns dicts (CompanyOutput-shaped). Without this coercion
     # score_company crashes on `company.industry` access — silently caught
     # by the per-lead try/except below, so every lead contributed 0 and
     # baseline_score landed as 0.00. Observed on the 20260530 bootstrap run.
     from gateway.qualification.models import CompanyOutput, ICPPrompt
+    from research_lab.eval.evaluator import prepare_autoresearch_scoring_payload
 
     # ─── Per-ICP checkpoint (resume after kill) ────────────────────────────
     # Each ICP costs LLM + scrape API calls. If the process gets killed
@@ -541,14 +543,6 @@ async def run_and_save_baseline(
             _save_ckpt(ckpt_path, set_id, per_icp_scores, model_id)
             continue
 
-        try:
-            icp_obj = ICPPrompt(**icp) if isinstance(icp, dict) else icp
-        except Exception as e:
-            logger.warning(f"reference: ICPPrompt coercion failed for icp={icp_id}: {e}; scoring 0")
-            per_icp_scores.append(0.0)
-            _save_ckpt(ckpt_path, set_id, per_icp_scores, model_id)
-            continue
-
         icp_total = 0.0
         # Per-ICP dedup set — score_company's run_company_zero_checks uses
         # this to detect repeated companies within the same ICP submission
@@ -558,7 +552,16 @@ async def run_and_save_baseline(
         seen_companies: set = set()
         for lead in leads:
             try:
-                lead_obj = CompanyOutput(**lead) if isinstance(lead, dict) else lead
+                if isinstance(lead, dict) and isinstance(icp, dict):
+                    normalized_lead, normalized_icp = prepare_autoresearch_scoring_payload(
+                        lead,
+                        icp,
+                    )
+                    lead_obj = CompanyOutput(**normalized_lead)
+                    icp_obj = ICPPrompt(**normalized_icp)
+                else:
+                    lead_obj = CompanyOutput(**lead) if isinstance(lead, dict) else lead
+                    icp_obj = ICPPrompt(**icp) if isinstance(icp, dict) else icp
                 result = await score_fn(
                     company=lead_obj,
                     icp=icp_obj,

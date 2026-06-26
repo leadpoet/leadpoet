@@ -723,13 +723,14 @@ class LeadScoreBreakdown(BaseModel):
     Detailed score breakdown for a single company.
     Used internally during scoring and included in transparency logs.
 
-    Score caps used by ``score_company``:
+    Score caps used by ``score_company`` / opt-in Research Lab scorers:
       * ``icp_fit``        ≤ 40
       * ``decision_maker`` = 0   (no contact dimension in the model
                                   competition; field kept on the
                                   breakdown for backward compatibility
                                   with downstream readers)
-      * ``intent_signal``  ≤ 60   (after time decay)
+      * ``intent_signal``  ≤ 100  (after time decay; legacy scorer caps at 60,
+                                   autoresearch intent_v2 caps at 100)
       * Total              ≤ 100
 
     NOTE: The historical class name ``LeadScoreBreakdown`` is retained
@@ -741,11 +742,11 @@ class LeadScoreBreakdown(BaseModel):
     # Component scores
     icp_fit: float = Field(..., ge=0, le=40, description="ICP fit score (0-40)")
     decision_maker: float = Field(..., ge=0, le=30, description="Always 0 in company-mode (no contact)")
-    intent_signal_raw: float = Field(..., ge=0, le=60, description="Intent signal score before decay (0-60)")
+    intent_signal_raw: float = Field(..., ge=0, le=100, description="Intent signal score before decay (0-100)")
     
     # Time decay
     time_decay_multiplier: float = Field(..., ge=0, le=1, description="1.0, 0.5, or 0.25 based on signal age")
-    intent_signal_final: float = Field(..., ge=0, le=60, description="Intent signal score after decay (0-60)")
+    intent_signal_final: float = Field(..., ge=0, le=100, description="Intent signal score after decay (0-100)")
     
     # Penalties
     cost_penalty: float = Field(..., ge=0, description="Penalty for API costs")

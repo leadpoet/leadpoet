@@ -3,18 +3,16 @@
 
 Default mode is read-only. Pass --apply and --confirm-delete-all to delete all
 existing rows from qualification_private_icp_sets and insert a fresh rolling
-window of OpenRouter/Sonar-generated sets.
+window of generated sets.
 
 Required env:
   SUPABASE_URL
   SUPABASE_SERVICE_ROLE_KEY
-  OPENROUTER_API_KEY
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import os
 import sys
@@ -30,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from gateway.tasks.icp_generator import generate_icps_with_openrouter  # noqa: E402
+from gateway.tasks.icp_generator import generate_icp_set  # noqa: E402
 
 
 TABLE = "qualification_private_icp_sets"
@@ -38,6 +36,7 @@ REQUEST_ATTEMPTS = 4
 REQUEST_BACKOFF_SECONDS = 1.5
 DEFAULT_END_DATE = date(2026, 6, 26)
 DEFAULT_DAYS = 10
+DEFAULT_BASE_SEED = 710_000
 
 
 def _headers() -> dict[str, str]:
@@ -111,18 +110,14 @@ def _fetch_existing_summary() -> dict[str, Any]:
     }
 
 
-async def _build_rows(*, end_date: date, days: int) -> list[dict[str, Any]]:
-    if not os.environ.get("OPENROUTER_API_KEY", "").strip():
-        raise SystemExit("OPENROUTER_API_KEY is required; reset script uses production OpenRouter/Sonar ICP generation")
+def _build_rows(*, end_date: date, days: int, base_seed: int) -> list[dict[str, Any]]:
     start_date = end_date - timedelta(days=days - 1)
     rows: list[dict[str, Any]] = []
     for offset in range(days):
         current_day = start_date + timedelta(days=offset)
         set_id = int(current_day.strftime("%Y%m%d"))
-        result = await generate_icps_with_openrouter(set_id, total_icps=20)
-        if not result:
-            raise SystemExit(f"OpenRouter/Sonar ICP generation failed for set_id={set_id}; no rows were written")
-        icps, industry_distribution, icp_set_hash = result
+        seed = base_seed + set_id
+        icps, industry_distribution, icp_set_hash = generate_icp_set(set_id, base_seed=seed)
         active_from = datetime.combine(current_day, dt_time.min, tzinfo=timezone.utc)
         active_until = active_from + timedelta(days=1)
         rows.append(
@@ -133,7 +128,7 @@ async def _build_rows(*, end_date: date, days: int) -> list[dict[str, Any]]:
                 "industry_distribution": industry_distribution,
                 "active_from": active_from.isoformat(),
                 "active_until": active_until.isoformat(),
-                "generation_seed": f"openrouter_sonar_reset_{end_date.isoformat()}_{set_id}",
+                "generation_seed": f"research_lab_reset_{end_date.isoformat()}_{seed}",
                 "is_active": current_day == end_date,
             }
         )
@@ -177,6 +172,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--end-date", default=DEFAULT_END_DATE.isoformat(), help="Last active day to create, YYYY-MM-DD")
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS, help="Number of daily sets to create")
+    parser.add_argument("--base-seed", type=int, default=DEFAULT_BASE_SEED, help="Deterministic seed prefix for generated ICPs")
     parser.add_argument("--apply", action="store_true", help="Actually delete and insert Supabase rows")
     parser.add_argument("--confirm-delete-all", action="store_true", help="Required with --apply because this deletes all existing private ICP sets")
     args = parser.parse_args()
@@ -184,7 +180,7 @@ def main() -> int:
     end_date = date.fromisoformat(args.end_date)
     days = max(1, int(args.days))
     existing = _fetch_existing_summary()
-    rows = asyncio.run(_build_rows(end_date=end_date, days=days))
+    rows = _build_rows(end_date=end_date, days=days, base_seed=int(args.base_seed))
     _validate_rows(rows)
     summary = {
         "apply": bool(args.apply),

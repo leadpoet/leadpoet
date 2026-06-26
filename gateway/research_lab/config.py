@@ -131,6 +131,7 @@ class ResearchLabGatewayConfig:
     auto_promotion_enabled: bool = False
     auto_commit_enabled: bool = False
     miner_openrouter_key_required: bool = True
+    max_open_tickets_per_hotkey: int = 3
     loop_start_fee_usd: float = DEFAULT_LOOP_START_FEE_USD
     allowed_research_islands: tuple[str, ...] = ("generalist",)
     internal_api_key: str = ""
@@ -156,6 +157,7 @@ class ResearchLabGatewayConfig:
     scoring_worker_require_proxy: bool = False
     scoring_worker_proxy_url: str = ""
     scoring_worker_model_timeout_seconds: int = 900
+    scoring_worker_max_claim_requeues: int = 3
     private_model_docker_global_proxy_enabled: bool = False
     scoring_worker_allow_partial_icp_window: bool = False
     private_baseline_rebenchmark_enabled: bool = False
@@ -267,6 +269,10 @@ class ResearchLabGatewayConfig:
             auto_promotion_enabled=_truthy("RESEARCH_LAB_AUTO_PROMOTION_ENABLED"),
             auto_commit_enabled=_truthy("RESEARCH_LAB_AUTO_COMMIT_ENABLED"),
             miner_openrouter_key_required=_truthy("RESEARCH_LAB_MINER_OPENROUTER_KEY_REQUIRED", "true"),
+            max_open_tickets_per_hotkey=max(
+                1,
+                _int("RESEARCH_LAB_MAX_OPEN_TICKETS_PER_HOTKEY", 3),
+            ),
             loop_start_fee_usd=_float("RESEARCH_LAB_LOOP_START_FEE_USD", DEFAULT_LOOP_START_FEE_USD),
             allowed_research_islands=_normalized_csv("RESEARCH_LAB_ALLOWED_ISLANDS", "generalist"),
             internal_api_key=os.getenv("RESEARCH_LAB_INTERNAL_API_KEY", ""),
@@ -309,6 +315,10 @@ class ResearchLabGatewayConfig:
             scoring_worker_model_timeout_seconds=max(
                 30,
                 _int("RESEARCH_LAB_SCORING_WORKER_MODEL_TIMEOUT_SECONDS", 900),
+            ),
+            scoring_worker_max_claim_requeues=max(
+                1,
+                _int("RESEARCH_LAB_SCORING_WORKER_MAX_CLAIM_REQUEUES", 3),
             ),
             private_model_docker_global_proxy_enabled=_truthy(
                 "RESEARCH_LAB_PRIVATE_MODEL_DOCKER_GLOBAL_PROXY_ENABLED",

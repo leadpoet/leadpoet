@@ -337,6 +337,8 @@ class ResearchLabHostedWorker:
 
     async def run_once(self) -> HostedWorkerOutcome:
         self._require_enabled()
+        if not self.config.hosted_worker_dry_run:
+            await self._recover_stale_started_runs()
         if await is_autoresearch_maintenance_paused():
             return HostedWorkerOutcome(
                 processed=False,
@@ -344,7 +346,7 @@ class ResearchLabHostedWorker:
                 status="maintenance_paused",
             )
         if not self.config.hosted_worker_dry_run:
-            await self._recover_stale_started_runs()
+            await self._recover_stale_paused_runs()
         queued = await self._next_queued_run()
         if not queued:
             return HostedWorkerOutcome(processed=False, dry_run=self.config.hosted_worker_dry_run)
@@ -548,6 +550,63 @@ class ResearchLabHostedWorker:
             )
         return recovered
 
+    async def _recover_stale_paused_runs(self) -> int:
+        stale_after_seconds = max(
+            60,
+            int(self.config.active_loop_stale_after_seconds or DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS),
+        )
+        rows = await select_many(
+            "research_loop_run_queue_current",
+            columns=(
+                "run_id,ticket_id,current_queue_status,current_status_at,"
+                "current_event_hash,queue_priority,worker_ref"
+            ),
+            filters=(("current_queue_status", "paused"),),
+            order_by=(("current_status_at", True),),
+            limit=50,
+        )
+        recovered = 0
+        for row in rows:
+            if not _status_is_stale(row.get("current_status_at"), stale_after_seconds):
+                continue
+            run_id = str(row.get("run_id") or "")
+            ticket_id = str(row.get("ticket_id") or "")
+            if not run_id or not ticket_id:
+                continue
+            try:
+                await create_queue_event(
+                    run_id=run_id,
+                    ticket_id=ticket_id,
+                    event_type="queued",
+                    queue_priority=int(row.get("queue_priority") or 0),
+                    worker_ref=self.worker_ref,
+                    reason="stale_paused_requeued",
+                    event_doc={
+                        **autoresearch_queue_capacity_doc(self.config),
+                        "resume_source": "hosted_worker_stale_paused_reaper",
+                        "recovering_worker_ref": self.worker_ref,
+                        "previous_worker_ref": row.get("worker_ref"),
+                        "previous_event_hash": row.get("current_event_hash"),
+                        "previous_status_at": row.get("current_status_at"),
+                        "stale_after_seconds": stale_after_seconds,
+                    },
+                )
+                recovered += 1
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_stale_paused_run_requeue_failed run_id=%s error=%s",
+                    compact_ref(run_id),
+                    str(exc)[:240],
+                )
+        if recovered:
+            logger.info(
+                "research_lab_stale_paused_runs_requeued worker_ref=%s count=%s stale_after_seconds=%s",
+                self.worker_ref,
+                recovered,
+                stale_after_seconds,
+            )
+        return recovered
+
     async def _load_run_context(self, queue_row: Mapping[str, Any]) -> HostedRunContext:
         ticket = await select_one(
             "research_loop_ticket_current",
@@ -588,8 +647,17 @@ class ResearchLabHostedWorker:
         )
 
     async def _process_run(self, context: HostedRunContext) -> HostedWorkerOutcome:
+        terminal = await self._already_completed_outcome(context)
+        if terminal:
+            return terminal
         await self._append_started_events(context)
+        completed_receipt_outcome = await self._complete_from_existing_completed_receipt(context)
+        if completed_receipt_outcome:
+            return completed_receipt_outcome
         context.receipt_id = await self._ensure_queued_receipt(context)
+        existing_candidate_outcome = await self._complete_from_existing_candidate_artifacts(context)
+        if existing_candidate_outcome:
+            return existing_candidate_outcome
         if await is_autoresearch_maintenance_paused():
             return await self._mark_paused(
                 context,
@@ -813,7 +881,10 @@ class ResearchLabHostedWorker:
                 hypothesis_doc=hypothesis_doc,
                 redacted_public_summary=redacted_summary,
             )
-            candidate_row, _candidate_event = await create_candidate_artifact(request)
+            candidate_row, _candidate_event = await self._store_write_with_retry(
+                "candidate_artifact_create",
+                lambda request=request: create_candidate_artifact(request),
+            )
             candidate_ids.append(str(candidate_row["candidate_id"]))
             candidate_summaries.append(
                 {
@@ -867,14 +938,17 @@ class ResearchLabHostedWorker:
             "next_stage": "gateway_qualification_worker_evaluation",
         }
         try:
-            await create_queue_event(
-                run_id=context.run_id,
-                ticket_id=context.ticket_id,
-                event_type="completed",
-                queue_priority=int(context.queue_row.get("queue_priority") or 0),
-                worker_ref=self.worker_ref,
-                reason="candidate_generation_completed_evaluation_queued",
-                event_doc=completion_queue_doc,
+            await self._store_write_with_retry(
+                "completion_queue_event",
+                lambda: create_queue_event(
+                    run_id=context.run_id,
+                    ticket_id=context.ticket_id,
+                    event_type="completed",
+                    queue_priority=int(context.queue_row.get("queue_priority") or 0),
+                    worker_ref=self.worker_ref,
+                    reason="candidate_generation_completed_evaluation_queued",
+                    event_doc=completion_queue_doc,
+                ),
             )
         except Exception:
             current_after_completion = await select_one(
@@ -890,12 +964,15 @@ class ResearchLabHostedWorker:
                 current_after_completion.get("current_event_hash"),
             )
         try:
-            await create_receipt_event(
-                receipt_id=str(context.receipt_id),
-                ticket_id=context.ticket_id,
-                event_type="completed",
-                receipt_status="completed",
-                event_doc=completion_receipt_doc,
+            await self._store_write_with_retry(
+                "completion_receipt_event",
+                lambda: create_receipt_event(
+                    receipt_id=str(context.receipt_id),
+                    ticket_id=context.ticket_id,
+                    event_type="completed",
+                    receipt_status="completed",
+                    event_doc=completion_receipt_doc,
+                ),
             )
         except Exception as exc:
             logger.warning(
@@ -958,6 +1035,153 @@ class ResearchLabHostedWorker:
             receipt_id=context.receipt_id,
             candidate_ids=tuple(candidate_ids),
         )
+
+    async def _store_write_with_retry(self, label: str, operation: Any, *, attempts: int = 3) -> Any:
+        last_exc: BaseException | None = None
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                return await operation()
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= attempts or not _is_retryable_worker_exception(exc):
+                    raise
+                logger.warning(
+                    "research_lab_store_write_retry label=%s run_attempt=%s/%s error=%s",
+                    label,
+                    attempt,
+                    attempts,
+                    str(exc)[:240],
+                )
+                await asyncio.sleep(0.25 * attempt)
+        raise RuntimeError(f"Research Lab store write failed after retries: {label}") from last_exc
+
+    async def _already_completed_outcome(self, context: HostedRunContext) -> HostedWorkerOutcome | None:
+        current = await select_one(
+            "research_loop_run_queue_current",
+            filters=(("run_id", context.run_id),),
+        )
+        if current and str(current.get("current_queue_status") or "") == "completed":
+            candidate_ids = await self._candidate_ids_for_run(context.run_id)
+            receipt_id = await self._receipt_id_for_run(context.run_id)
+            return HostedWorkerOutcome(
+                processed=False,
+                dry_run=False,
+                run_id=context.run_id,
+                ticket_id=context.ticket_id,
+                status="already_completed",
+                receipt_id=receipt_id,
+                candidate_ids=tuple(candidate_ids),
+            )
+        return None
+
+    async def _complete_from_existing_completed_receipt(self, context: HostedRunContext) -> HostedWorkerOutcome | None:
+        receipt_id = await self._completed_receipt_id_for_run(context.run_id)
+        if not receipt_id:
+            return None
+        candidate_ids = await self._candidate_ids_for_run(context.run_id)
+        event_doc = {
+            "receipt_id": receipt_id,
+            "candidate_ids": candidate_ids,
+            "candidate_count": len(candidate_ids),
+            "source": "existing_completed_receipt_after_recovery",
+        }
+        await create_queue_event(
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            event_type="completed",
+            queue_priority=int(context.queue_row.get("queue_priority") or 0),
+            worker_ref=self.worker_ref,
+            reason="candidate_generation_completed_from_existing_receipt",
+            event_doc=event_doc,
+        )
+        return HostedWorkerOutcome(
+            processed=True,
+            dry_run=False,
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            status="candidate_generation_completed_from_existing_receipt",
+            receipt_id=receipt_id,
+            candidate_ids=tuple(candidate_ids),
+        )
+
+    async def _complete_from_existing_candidate_artifacts(self, context: HostedRunContext) -> HostedWorkerOutcome | None:
+        candidate_ids = await self._candidate_ids_for_run(context.run_id)
+        if not candidate_ids:
+            return None
+        receipt_id = context.receipt_id or await self._ensure_queued_receipt(context)
+        context.receipt_id = receipt_id
+        event_doc = {
+            "receipt_id": receipt_id,
+            "candidate_ids": candidate_ids,
+            "candidate_count": len(candidate_ids),
+            "source": "existing_candidate_artifacts_after_recovery",
+            "next_stage": "gateway_qualification_worker_evaluation",
+        }
+        await create_queue_event(
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            event_type="completed",
+            queue_priority=int(context.queue_row.get("queue_priority") or 0),
+            worker_ref=self.worker_ref,
+            reason="candidate_generation_completed_from_existing_artifacts",
+            event_doc=event_doc,
+        )
+        try:
+            await create_receipt_event(
+                receipt_id=receipt_id,
+                ticket_id=context.ticket_id,
+                event_type="completed",
+                receipt_status="completed",
+                event_doc=event_doc,
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_existing_candidate_receipt_completion_failed run_id=%s receipt_id=%s error=%s",
+                compact_ref(context.run_id),
+                compact_ref(receipt_id),
+                str(exc)[:240],
+            )
+        return HostedWorkerOutcome(
+            processed=True,
+            dry_run=False,
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            status="candidate_generation_completed_from_existing_artifacts",
+            receipt_id=receipt_id,
+            candidate_ids=tuple(candidate_ids),
+        )
+
+    async def _candidate_ids_for_run(self, run_id: str) -> list[str]:
+        rows = await select_many(
+            "research_lab_candidate_artifacts",
+            columns="candidate_id",
+            filters=(("run_id", run_id),),
+            limit=max(10, int(self.config.hosted_worker_max_candidates or 1) * 5),
+        )
+        return [str(row["candidate_id"]) for row in rows if row.get("candidate_id")]
+
+    async def _receipt_id_for_run(self, run_id: str) -> str | None:
+        rows = await select_many(
+            "research_loop_receipt_current",
+            columns="receipt_id,current_receipt_status",
+            filters=(("run_id", run_id),),
+            order_by=(("current_status_at", True),),
+            limit=10,
+        )
+        return str(rows[0]["receipt_id"]) if rows else None
+
+    async def _completed_receipt_id_for_run(self, run_id: str) -> str | None:
+        rows = await select_many(
+            "research_loop_receipt_current",
+            columns="receipt_id,current_receipt_status",
+            filters=(("run_id", run_id),),
+            order_by=(("current_status_at", True),),
+            limit=10,
+        )
+        for row in rows:
+            if str(row.get("current_receipt_status") or "") == "completed":
+                return str(row["receipt_id"])
+        return None
 
     async def _ensure_queued_receipt(self, context: HostedRunContext) -> str:
         if context.receipt_id:

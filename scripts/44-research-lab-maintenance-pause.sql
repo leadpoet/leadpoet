@@ -222,7 +222,7 @@ BEGIN
       JOIN public.research_loop_tickets t ON t.ticket_id = q.ticket_id
      WHERE q.run_id <> NEW.run_id
        AND q.current_queue_status IN ('queued', 'started', 'paused')
-       AND (q.current_queue_status = 'paused' OR q.current_status_at >= cutoff)
+       AND q.current_status_at >= cutoff
        AND btrim(t.miner_hotkey) = btrim(v_miner_hotkey);
 
     IF same_hotkey_count > 0 THEN
@@ -245,7 +245,7 @@ BEGIN
            OR (
              NOT is_existing_run_requeue
              AND q.current_queue_status IN ('queued', 'started', 'paused')
-             AND (q.current_queue_status = 'paused' OR q.current_status_at >= cutoff)
+             AND q.current_status_at >= cutoff
            )
        );
 

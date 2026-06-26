@@ -132,10 +132,15 @@ async def requeue_paused_autoresearch_runs(*, actor_ref: str | None = None, reas
             )
             requeued += 1
         except Exception as exc:
-            if not _is_queue_capacity_conflict(exc):
-                raise
-            logger.info(
-                "research_lab_maintenance_resume_capacity_limited run_id=%s error=%s",
+            if _is_queue_capacity_conflict(exc):
+                logger.info(
+                    "research_lab_maintenance_resume_capacity_limited run_id=%s error=%s",
+                    row.get("run_id"),
+                    str(exc)[:240],
+                )
+                continue
+            logger.warning(
+                "research_lab_maintenance_resume_row_failed run_id=%s error=%s",
                 row.get("run_id"),
                 str(exc)[:240],
             )

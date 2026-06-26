@@ -2330,6 +2330,12 @@ def _research_lab_insecure_gateway_allowed(url: str) -> bool:
     return os.getenv("RESEARCH_LAB_ALLOW_INSECURE_GATEWAY", "").strip().lower() in {"1", "true", "yes"}
 
 
+def _research_lab_raw_key_gateway_allowed(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" or host in {"localhost", "127.0.0.1", "::1"}
+
+
 def _post_research_lab_json(path: str, payload: dict, *, timeout: int = 60) -> dict:
     if path.startswith("/research-lab/") and not _research_lab_insecure_gateway_allowed(QUALIFICATION_GATEWAY_URL):
         return {
@@ -2352,9 +2358,9 @@ def _post_research_lab_json(path: str, payload: dict, *, timeout: int = 60) -> d
 
 def _register_research_lab_openrouter_key(wallet, status: dict) -> tuple[str, str] | None:
     if status.get("openrouter_key_registration_enabled"):
-        if not _research_lab_insecure_gateway_allowed(QUALIFICATION_GATEWAY_URL):
+        if not _research_lab_raw_key_gateway_allowed(QUALIFICATION_GATEWAY_URL):
             print("❌ Refusing to send raw OpenRouter API key over an insecure gateway URL.")
-            print("   Set GATEWAY_URL to an https:// gateway, or set RESEARCH_LAB_ALLOW_INSECURE_GATEWAY=true for local/dev testing only.")
+            print("   Set GATEWAY_URL to an https:// gateway. Localhost HTTP is allowed for local/dev testing only.")
             return None
         raw_key = getpass.getpass("   OpenRouter API key (hidden; encrypted by gateway): ").strip()
         if not raw_key:
@@ -2889,6 +2895,14 @@ def _run_research_lab_topup_flow(
     if "error" in topup_result:
         print(f"❌ Top-up failed: HTTP {topup_result.get('status_code')}")
         print(f"   {topup_result['error']}")
+        return
+    if topup_result.get("queued") is False:
+        print("⚠️  Research Lab top-up was not queued")
+        print(f"   Status: {topup_result.get('status')}")
+        if topup_result.get("credit_preserved"):
+            print("   Retry credit preserved: yes")
+            print(f"   Credit ID: {topup_result.get('credit_id')}")
+        print(f"   Payment ref: {topup_result.get('payment_ref')}")
         return
     print("✅ Research Lab top-up accepted")
     print(f"   New run ID: {topup_result.get('run_id')}")

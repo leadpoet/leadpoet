@@ -27,6 +27,7 @@ from gateway.qualification.utils.chain import (
     verify_hotkey_signature,
 )
 from gateway.utils.bans import is_hotkey_banned
+from gateway.utils.rate_limiter import reserve_submission_slot
 
 from .allocations import build_research_lab_allocation_bundle
 from .arweave_audit import latest_arweave_anchor
@@ -136,6 +137,8 @@ async def create_research_lab_ticket(payload: ResearchLabTicketCreateRequest, re
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
     _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
     await _verify_signed_miner(payload)
+    await _enforce_research_lab_submission_rate_limit(payload.miner_hotkey, route="tickets")
+    await _enforce_open_ticket_cap(config, payload.miner_hotkey)
     await _require_autoresearch_not_paused()
     await _enforce_autoresearch_loop_capacity(config, payload.miner_hotkey)
     island = _validate_allowed_research_island(config, payload.island)
@@ -185,6 +188,7 @@ async def create_research_lab_probe(payload: ResearchLabProbeRequest):
     _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
     _require_enabled(config.probes_enabled, "Research Lab probes are disabled")
     await _verify_signed_miner(payload)
+    await _enforce_research_lab_submission_rate_limit(payload.miner_hotkey, route="probes")
 
     ticket = await _get_ticket_for_miner(str(payload.ticket_id), payload.miner_hotkey)
     try:
@@ -268,10 +272,10 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
     _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
     _require_enabled(config.paid_loops_enabled, "Research Lab paid loops are disabled")
     _require_enabled(config.hosted_runs_enabled, "Research Lab hosted runs are disabled")
+    await _verify_signed_miner(payload)
     await _require_autoresearch_not_paused()
     if config.miner_openrouter_key_required and payload.miner_openrouter_preflight_status != "passed":
         raise HTTPException(status_code=400, detail="miner OpenRouter key preflight must pass before queueing")
-    await _verify_signed_miner(payload)
     ticket = await _get_ticket_for_miner(str(payload.ticket_id), payload.miner_hotkey)
     await _validate_miner_openrouter_key_ref(
         config,
@@ -406,22 +410,15 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
             },
         )
     except Exception as exc:
-        credit_id = "loop_start_credit:" + canonical_hash(
-            {"ticket_id": str(payload.ticket_id), "payment_ref": payment_ref, "run_id": run_id}
-        ).split(":", 1)[1][:32]
-        await create_credit_event(
-            credit_id=credit_id,
+        credit_id = await _preserve_loop_start_credit_after_queue_failure(
             ticket_id=str(payload.ticket_id),
-            payment_id=payment["payment_id"],
+            payment_id=str(payment["payment_id"]),
             payment_ref=payment_ref,
             miner_hotkey=payload.miner_hotkey,
-            event_type="granted",
-            credit_status="available",
+            run_id=run_id,
             reason="queue_failed_after_credit_consumed" if consumed_credit else "queue_failed_before_work_started",
-            event_doc={
-                "error": str(exc)[:200],
-                "replaces_credit_id": payload.credit_id,
-            },
+            error=exc,
+            replaces_credit_id=payload.credit_id,
         )
         logger.exception("Research Lab queue failed after payment; retry credit preserved")
         return ResearchLabLoopStartResponse(
@@ -460,10 +457,10 @@ async def top_up_research_lab_paid_loop(payload: ResearchLabLoopTopUpRequest):
     _require_enabled(config.paid_loops_enabled, "Research Lab paid loops are disabled")
     _require_enabled(config.hosted_runs_enabled, "Research Lab hosted runs are disabled")
     _require_enabled(config.loop_topups_enabled, "Research Lab loop top-ups are disabled for launch")
+    await _verify_signed_miner(payload)
     await _require_autoresearch_not_paused()
     if config.miner_openrouter_key_required and payload.miner_openrouter_preflight_status != "passed":
         raise HTTPException(status_code=400, detail="miner OpenRouter key preflight must pass before queueing")
-    await _verify_signed_miner(payload)
     ticket = await _get_ticket_for_miner(str(payload.ticket_id), payload.miner_hotkey)
     await _validate_miner_openrouter_key_ref(
         config,
@@ -569,7 +566,28 @@ async def top_up_research_lab_paid_loop(payload: ResearchLabLoopTopUpRequest):
             event_doc={"payment_id": payment["payment_id"], "run_id": run_id, **budget_doc},
         )
     except Exception as exc:
-        _raise_storage_error(exc)
+        credit_id = await _preserve_loop_start_credit_after_queue_failure(
+            ticket_id=str(payload.ticket_id),
+            payment_id=str(payment["payment_id"]),
+            payment_ref=payment_ref,
+            miner_hotkey=payload.miner_hotkey,
+            run_id=run_id,
+            reason="topup_queue_failed_before_work_started",
+            error=exc,
+            replaces_credit_id=None,
+        )
+        logger.exception("Research Lab top-up queue failed after payment; retry credit preserved")
+        return ResearchLabLoopTopUpResponse(
+            ticket_id=str(payload.ticket_id),
+            run_id=run_id,
+            continued_from_run_id=str(payload.continue_from_run_id) if payload.continue_from_run_id else None,
+            topup_payment_id=payment["payment_id"],
+            payment_ref=payment_ref,
+            queued=False,
+            credit_preserved=True,
+            credit_id=credit_id,
+            status="credit_preserved_after_topup_queue_failure",
+        )
 
     await safe_project_public_loop_activity(
         str(payload.ticket_id),
@@ -901,23 +919,29 @@ async def get_research_lab_latest_audit_bundle(epoch: int):
         row["arweave_anchor"] = await _safe_latest_arweave_anchor(epoch)
         return row
 
-    ticket_rows = await select_many("research_loop_ticket_current", filters=(), limit=1000)
-    queue_rows = await select_many("research_loop_run_queue_current", filters=(), limit=1000)
-    receipt_rows = await select_many("research_loop_receipt_current", filters=(), limit=1000)
-    candidate_rows = await select_many("research_lab_candidate_evaluation_current", filters=(), limit=1000)
-    candidate_event_rows = await select_many("research_lab_candidate_evaluation_events", filters=(), limit=1000)
-    loop_event_rows = await select_many("research_lab_auto_research_loop_events", filters=(), limit=1000)
-    dispatch_event_rows = await select_many("research_lab_scoring_dispatch_events", filters=(), limit=1000)
-    rolling_window_rows = await select_many("research_lab_rolling_icp_windows", filters=(), limit=1000)
-    benchmark_rows = await select_many("research_lab_private_model_benchmark_current", filters=(), limit=1000)
-    private_model_version_rows = await select_many("research_lab_private_model_version_current", filters=(), limit=1000)
-    promotion_event_rows = await select_many("research_lab_candidate_promotion_events", filters=(), limit=1000)
-    private_repo_commit_event_rows = await select_many("research_lab_private_repo_commit_events", filters=(), limit=1000)
-    public_benchmark_report_rows = await select_many("research_lab_public_benchmark_report_current", filters=(), limit=1000)
-    score_bundle_rows = await select_many(
+    ticket_rows = await _audit_preview_select_all("research_loop_ticket_current", current_view=True)
+    queue_rows = await _audit_preview_select_all("research_loop_run_queue_current", current_view=True)
+    receipt_rows = await _audit_preview_select_all("research_loop_receipt_current", current_view=True)
+    candidate_rows = await _audit_preview_select_all("research_lab_candidate_evaluation_current", current_view=True)
+    candidate_event_rows = await _audit_preview_select_all("research_lab_candidate_evaluation_events")
+    loop_event_rows = await _audit_preview_select_all("research_lab_auto_research_loop_events")
+    dispatch_event_rows = await _audit_preview_select_all("research_lab_scoring_dispatch_events")
+    rolling_window_rows = await _audit_preview_select_all("research_lab_rolling_icp_windows")
+    benchmark_rows = await _audit_preview_select_all("research_lab_private_model_benchmark_current", current_view=True)
+    private_model_version_rows = await _audit_preview_select_all(
+        "research_lab_private_model_version_current",
+        current_view=True,
+    )
+    promotion_event_rows = await _audit_preview_select_all("research_lab_candidate_promotion_events")
+    private_repo_commit_event_rows = await _audit_preview_select_all("research_lab_private_repo_commit_events")
+    public_benchmark_report_rows = await _audit_preview_select_all(
+        "research_lab_public_benchmark_report_current",
+        current_view=True,
+    )
+    score_bundle_rows = await _audit_preview_select_all(
         "research_evaluation_score_bundle_current",
         filters=(("evaluation_epoch", epoch),),
-        limit=1000,
+        current_view=True,
     )
     try:
         preview = build_research_lab_audit_bundle(
@@ -1151,6 +1175,25 @@ async def _safe_latest_arweave_anchor(epoch: int) -> dict[str, object] | None:
         return None
 
 
+async def _audit_preview_select_all(
+    table: str,
+    *,
+    filters: tuple[tuple[Any, ...], ...] = (),
+    current_view: bool = False,
+) -> list[dict[str, Any]]:
+    primary_order = (("current_status_at", True),) if current_view else (("created_at", True),)
+    try:
+        return await select_all(table, filters=filters, order_by=primary_order, max_rows=50000)
+    except Exception as exc:
+        logger.warning(
+            "research_lab_audit_preview_select_order_fallback table=%s order=%s error=%s",
+            table,
+            primary_order,
+            str(exc)[:200],
+        )
+        return await select_all(table, filters=filters, max_rows=50000)
+
+
 def _require_internal_key(config: ResearchLabGatewayConfig, provided: Optional[str]) -> None:
     if not config.internal_api_key:
         raise HTTPException(status_code=403, detail="Research Lab internal API key is not configured")
@@ -1172,6 +1215,140 @@ def _enforce_openrouter_key_registration_rate_limit(miner_hotkey: str) -> None:
         raise HTTPException(status_code=429, detail="OpenRouter key registration hourly limit exceeded")
     attempts.append(now)
     _OPENROUTER_KEY_REGISTRATION_ATTEMPTS[key] = attempts
+
+
+async def _enforce_research_lab_submission_rate_limit(miner_hotkey: str, *, route: str) -> None:
+    try:
+        allowed, reason, stats = reserve_submission_slot(str(miner_hotkey or ""))
+    except Exception as exc:
+        logger.warning(
+            "research_lab_rate_limit_unavailable route=%s hotkey=%s error=%s",
+            route,
+            str(miner_hotkey or "")[:16],
+            str(exc)[:240],
+        )
+        raise HTTPException(status_code=503, detail="Research Lab rate limiter unavailable") from exc
+    if allowed:
+        return
+    raise HTTPException(
+        status_code=429,
+        detail={
+            "code": "research_lab_rate_limited",
+            "route": route,
+            "message": reason or "Research Lab rate limit exceeded",
+            "stats": stats,
+        },
+    )
+
+
+async def _enforce_open_ticket_cap(config: ResearchLabGatewayConfig, miner_hotkey: str) -> None:
+    rows = await select_all(
+        "research_loop_ticket_current",
+        columns="ticket_id,current_ticket_status,current_status_at",
+        filters=(("miner_hotkey", str(miner_hotkey)),),
+        order_by=(("current_status_at", True),),
+        max_rows=500,
+    )
+    terminal_statuses = {"completed", "cancelled", "failed", "tombstoned"}
+    open_rows = [
+        row
+        for row in rows
+        if str(row.get("current_ticket_status") or "").strip().lower() not in terminal_statuses
+    ]
+    if len(open_rows) < int(config.max_open_tickets_per_hotkey):
+        return
+    raise HTTPException(
+        status_code=429,
+        detail={
+            "code": "research_lab_open_ticket_cap_exceeded",
+            "message": "too many open Research Lab tickets for this hotkey",
+            "open_ticket_count": len(open_rows),
+            "max_open_tickets": int(config.max_open_tickets_per_hotkey),
+        },
+    )
+
+
+async def _preserve_loop_start_credit_after_queue_failure(
+    *,
+    ticket_id: str,
+    payment_id: str,
+    payment_ref: str,
+    miner_hotkey: str,
+    run_id: str,
+    reason: str,
+    error: BaseException,
+    replaces_credit_id: str | None,
+) -> str:
+    credit_id = _deterministic_loop_start_credit_id(
+        ticket_id=ticket_id,
+        payment_ref=payment_ref,
+        run_id=run_id,
+    )
+    event_doc = {
+        "error": str(error)[:200],
+        "replaces_credit_id": replaces_credit_id,
+        "run_id": run_id,
+    }
+    last_exc: BaseException | None = None
+    for attempt in range(1, 4):
+        try:
+            await create_credit_event(
+                credit_id=credit_id,
+                ticket_id=ticket_id,
+                payment_id=payment_id,
+                payment_ref=payment_ref,
+                miner_hotkey=miner_hotkey,
+                event_type="granted",
+                credit_status="available",
+                reason=reason,
+                event_doc={**event_doc, "credit_preservation_attempt": attempt},
+            )
+            return credit_id
+        except Exception as exc:
+            last_exc = exc
+            existing = await _existing_available_credit(credit_id)
+            if existing:
+                return credit_id
+            await asyncio.sleep(0.2 * attempt)
+    logger.exception(
+        "research_lab_credit_preservation_failed credit_id=%s payment_ref=%s error=%s",
+        credit_id,
+        payment_ref,
+        str(last_exc)[:240] if last_exc else "",
+    )
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "code": "research_lab_credit_preservation_failed",
+            "message": "Payment was verified but retry credit could not be persisted; operator reconciliation required",
+            "credit_id": credit_id,
+            "payment_ref": payment_ref,
+        },
+    ) from last_exc
+
+
+async def _existing_available_credit(credit_id: str) -> dict[str, Any] | None:
+    try:
+        row = await select_one(
+            "research_loop_start_credit_current",
+            filters=(("credit_id", credit_id),),
+        )
+    except Exception as exc:
+        logger.warning(
+            "research_lab_existing_credit_lookup_failed credit_id=%s error=%s",
+            credit_id,
+            str(exc)[:240],
+        )
+        return None
+    if row and str(row.get("current_credit_status") or "") == "available":
+        return row
+    return None
+
+
+def _deterministic_loop_start_credit_id(*, ticket_id: str, payment_ref: str, run_id: str) -> str:
+    return "loop_start_credit:" + canonical_hash(
+        {"ticket_id": ticket_id, "payment_ref": payment_ref, "run_id": run_id}
+    ).split(":", 1)[1][:32]
 
 
 async def _consume_loop_start_credit(
@@ -1498,8 +1675,6 @@ def _configured_autoresearch_proxy_count() -> int:
 
 
 def _autoresearch_active_row_is_fresh(row: Mapping[str, Any], config: ResearchLabGatewayConfig) -> bool:
-    if str(row.get("current_queue_status") or "").strip().lower() == "paused":
-        return True
     stale_after_seconds = max(
         60,
         int(config.active_loop_stale_after_seconds or DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS),

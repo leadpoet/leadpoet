@@ -278,6 +278,8 @@ class ResearchLabLoopTopUpResponse(BaseModel):
     topup_payment_id: str
     payment_ref: str
     queued: bool
+    credit_preserved: bool = False
+    credit_id: Optional[str] = None
     status: str
 
 

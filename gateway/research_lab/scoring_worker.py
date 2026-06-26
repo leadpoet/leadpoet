@@ -41,6 +41,7 @@ from gateway.research_lab.store import (
     create_scoring_dispatch_event,
     create_signed_audit_bundle,
     create_ticket_event,
+    select_all,
     select_many,
     select_one,
 )
@@ -351,6 +352,51 @@ class ResearchLabGatewayScoringWorker:
             ticket_id = str(row.get("ticket_id") or "")
             if not candidate_id or not run_id or not ticket_id:
                 continue
+            claim_attempts = await self._candidate_claim_attempt_count(candidate_id)
+            max_attempts = int(self.config.scoring_worker_max_claim_requeues)
+            if claim_attempts >= max_attempts:
+                try:
+                    await create_candidate_evaluation_event(
+                        candidate_id=candidate_id,
+                        run_id=run_id,
+                        ticket_id=ticket_id,
+                        event_type="failed",
+                        candidate_status="failed",
+                        evaluator_ref=self.worker_ref,
+                        reason="stale_gateway_scoring_retry_limit_exceeded",
+                        event_doc={
+                            "recovering_worker_ref": self.worker_ref,
+                            "previous_evaluator_ref": row.get("current_evaluator_ref"),
+                            "previous_candidate_status": row.get("current_candidate_status"),
+                            "previous_event_hash": row.get("current_event_hash"),
+                            "previous_status_at": row.get("current_status_at"),
+                            "stale_after_seconds": stale_after_seconds,
+                            "claim_attempts": claim_attempts,
+                            "max_claim_attempts": max_attempts,
+                        },
+                    )
+                    await create_scoring_dispatch_event(
+                        dispatch_type="candidate_scoring_recovery",
+                        dispatch_status="failed",
+                        worker_ref=self.worker_ref,
+                        proxy_ref_hash=self.proxy_ref_hash,
+                        candidate_id=candidate_id,
+                        run_id=run_id,
+                        ticket_id=ticket_id,
+                        event_doc={
+                            "reason": "stale_gateway_scoring_retry_limit_exceeded",
+                            "claim_attempts": claim_attempts,
+                            "max_claim_attempts": max_attempts,
+                        },
+                    )
+                    recovered += 1
+                except Exception as exc:
+                    logger.warning(
+                        "research_lab_stale_candidate_fail_limit_failed candidate_id=%s error=%s",
+                        compact_ref(candidate_id),
+                        str(exc)[:240],
+                    )
+                continue
             try:
                 await create_candidate_evaluation_event(
                     candidate_id=candidate_id,
@@ -384,6 +430,21 @@ class ResearchLabGatewayScoringWorker:
                 stale_after_seconds,
             )
         return recovered
+
+    async def _candidate_claim_attempt_count(self, candidate_id: str) -> int:
+        rows = await select_many(
+            "research_lab_candidate_evaluation_events",
+            columns="candidate_id,event_type,candidate_status,reason",
+            filters=(("candidate_id", candidate_id),),
+            order_by=(("seq", True),),
+            limit=100,
+        )
+        return sum(
+            1
+            for row in rows
+            if str(row.get("candidate_status") or "") in {"assigned", "evaluating"}
+            or str(row.get("reason") or "") == "stale_gateway_scoring_requeued"
+        )
 
     async def _score_candidate(self, candidate: Mapping[str, Any]) -> None:
         candidate_id = str(candidate["candidate_id"])
@@ -1173,23 +1234,26 @@ class ResearchLabGatewayScoringWorker:
         return epoch
 
     async def _write_audit_bundle(self, epoch: int) -> None:
-        ticket_rows = await select_many("research_loop_ticket_current", filters=(), limit=1000)
-        queue_rows = await select_many("research_loop_run_queue_current", filters=(), limit=1000)
-        receipt_rows = await select_many("research_loop_receipt_current", filters=(), limit=1000)
-        candidate_rows = await select_many("research_lab_candidate_evaluation_current", filters=(), limit=1000)
-        candidate_event_rows = await select_many("research_lab_candidate_evaluation_events", filters=(), limit=1000)
-        loop_event_rows = await select_many("research_lab_auto_research_loop_events", filters=(), limit=1000)
-        dispatch_event_rows = await select_many("research_lab_scoring_dispatch_events", filters=(), limit=1000)
-        rolling_window_rows = await select_many("research_lab_rolling_icp_windows", filters=(), limit=1000)
-        benchmark_rows = await select_many("research_lab_private_model_benchmark_current", filters=(), limit=1000)
-        private_model_version_rows = await select_many("research_lab_private_model_version_current", filters=(), limit=1000)
-        promotion_event_rows = await select_many("research_lab_candidate_promotion_events", filters=(), limit=1000)
-        private_repo_commit_event_rows = await select_many("research_lab_private_repo_commit_events", filters=(), limit=1000)
-        public_benchmark_report_rows = await select_many("research_lab_public_benchmark_report_current", filters=(), limit=1000)
-        score_bundle_rows = await select_many(
+        ticket_rows = await self._audit_select_all("research_loop_ticket_current", current_view=True)
+        queue_rows = await self._audit_select_all("research_loop_run_queue_current", current_view=True)
+        receipt_rows = await self._audit_select_all("research_loop_receipt_current", current_view=True)
+        candidate_rows = await self._audit_select_all("research_lab_candidate_evaluation_current", current_view=True)
+        candidate_event_rows = await self._audit_select_all("research_lab_candidate_evaluation_events")
+        loop_event_rows = await self._audit_select_all("research_lab_auto_research_loop_events")
+        dispatch_event_rows = await self._audit_select_all("research_lab_scoring_dispatch_events")
+        rolling_window_rows = await self._audit_select_all("research_lab_rolling_icp_windows")
+        benchmark_rows = await self._audit_select_all("research_lab_private_model_benchmark_current", current_view=True)
+        private_model_version_rows = await self._audit_select_all("research_lab_private_model_version_current", current_view=True)
+        promotion_event_rows = await self._audit_select_all("research_lab_candidate_promotion_events")
+        private_repo_commit_event_rows = await self._audit_select_all("research_lab_private_repo_commit_events")
+        public_benchmark_report_rows = await self._audit_select_all(
+            "research_lab_public_benchmark_report_current",
+            current_view=True,
+        )
+        score_bundle_rows = await self._audit_select_all(
             "research_evaluation_score_bundle_current",
             filters=(("evaluation_epoch", epoch),),
-            limit=1000,
+            current_view=True,
         )
         bundle_doc = build_research_lab_audit_bundle(
             epoch=epoch,
@@ -1241,6 +1305,25 @@ class ResearchLabGatewayScoringWorker:
                 ),
             )
         )
+
+    async def _audit_select_all(
+        self,
+        table: str,
+        *,
+        filters: tuple[tuple[Any, ...], ...] = (),
+        current_view: bool = False,
+    ) -> list[dict[str, Any]]:
+        primary_order = (("current_status_at", True),) if current_view else (("created_at", True),)
+        try:
+            return await select_all(table, filters=filters, order_by=primary_order, max_rows=50000)
+        except Exception as exc:
+            logger.warning(
+                "research_lab_audit_select_order_fallback table=%s order=%s error=%s",
+                table,
+                primary_order,
+                str(exc)[:200],
+            )
+            return await select_all(table, filters=filters, max_rows=50000)
 
     async def _maybe_finalize_candidate_receipt(self, candidate: Mapping[str, Any]) -> bool:
         receipt_id = candidate.get("receipt_id")

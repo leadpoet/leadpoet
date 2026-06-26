@@ -174,6 +174,7 @@ class CodeEditLoopEngine:
                 )
 
             iteration += 1
+            remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
             draft_result = _coerce_call_result(
                 await self.call_openrouter(
                     build_code_edit_auto_research_messages(
@@ -197,7 +198,7 @@ class CodeEditLoopEngine:
                         },
                         max_candidates=settings.max_candidates,
                     ),
-                    settings.draft_timeout_seconds,
+                    min(settings.draft_timeout_seconds, remaining_call_seconds),
                     3000,
                 )
             )
@@ -207,6 +208,9 @@ class CodeEditLoopEngine:
             actual_cost_microusd += max(0, int(draft_result.cost_microusd))
             if draft_result.provider_usage:
                 provider_usage.append({**draft_result.provider_usage, "loop_iteration": iteration, "call_stage": "code_edit_draft"})
+            budget_exhausted_after_call = (
+                budget_limit_microusd > 0 and actual_cost_microusd >= budget_limit_microusd
+            )
             try:
                 drafts = parse_code_edit_response(raw, max_candidates=settings.max_candidates)
             except Exception as exc:
@@ -325,6 +329,9 @@ class CodeEditLoopEngine:
                     provider_usage=provider_usage,
                     checkpoint=last_checkpoint,
                 )
+            if budget_exhausted_after_call:
+                stop_reason = "compute_budget_exhausted_after_code_edit"
+                break
 
         if selected:
             remaining_minimum = settings.min_seconds - elapsed()
@@ -332,7 +339,12 @@ class CodeEditLoopEngine:
             if remaining_minimum > 0 and remaining_maximum > 0:
                 import asyncio
 
-                await asyncio.sleep(min(remaining_minimum, remaining_maximum))
+                sleep_remaining = min(remaining_minimum, remaining_maximum)
+                while sleep_remaining > 0:
+                    await asyncio.sleep(min(5.0, sleep_remaining))
+                    sleep_remaining = min(settings.min_seconds - elapsed(), settings.max_seconds - elapsed())
+                    if should_pause and await should_pause():
+                        break
             if should_pause and await should_pause():
                 last_checkpoint = await self._emit_checkpoint(
                     run_id=run_id,

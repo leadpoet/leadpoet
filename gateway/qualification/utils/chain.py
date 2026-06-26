@@ -161,6 +161,14 @@ async def reset_substrate_interface():
         _substrate_interface = None
 
 
+async def _substrate_call(method_name: str, *args, **kwargs):
+    """Serialize calls on the shared SubstrateInterface websocket."""
+    substrate = await get_substrate_interface()
+    async with _substrate_lock:
+        method = getattr(substrate, method_name)
+        return await asyncio.to_thread(method, *args, **kwargs)
+
+
 # =============================================================================
 # Block Fetching
 # =============================================================================
@@ -176,13 +184,7 @@ async def fetch_block(block_hash: str) -> Optional[Dict[str, Any]]:
         Block data as dict with 'extrinsics' and 'header', or None if not found
     """
     try:
-        substrate = await get_substrate_interface()
-        
-        # Fetch block in thread pool
-        block = await asyncio.to_thread(
-            substrate.get_block,
-            block_hash=block_hash
-        )
+        block = await _substrate_call("get_block", block_hash=block_hash)
         
         if not block:
             logger.warning(f"Block not found: {block_hash[:16]}...")
@@ -337,13 +339,7 @@ async def extrinsic_failed(block_hash: str, extrinsic_index: int) -> bool:
         True if extrinsic failed, False if it succeeded
     """
     try:
-        substrate = await get_substrate_interface()
-        
-        # Get events for this block
-        events = await asyncio.to_thread(
-            substrate.get_events,
-            block_hash=block_hash
-        )
+        events = await _substrate_call("get_events", block_hash=block_hash)
         
         if not events:
             logger.warning(f"No events found for block {block_hash[:16]}...")
@@ -601,16 +597,8 @@ async def get_current_block() -> int:
         Current block number
     """
     try:
-        substrate = await get_substrate_interface()
-        
-        # Get latest block hash
-        block_hash = await asyncio.to_thread(substrate.get_chain_head)
-        
-        # Get block header
-        header = await asyncio.to_thread(
-            substrate.get_block_header,
-            block_hash=block_hash
-        )
+        block_hash = await _substrate_call("get_chain_head")
+        header = await _substrate_call("get_block_header", block_hash=block_hash)
         
         return int(header['header']['number'])
         

@@ -540,7 +540,7 @@ def _research_lab_uid_weights_from_allocation(
     }
 
 
-def _verify_burn_target_owner(metagraph: Any, uid: int, expected_hotkey: str | None) -> bool:
+def _verify_burn_target_owner(metagraph: Any, uid: int, expected_hotkey: Optional[str]) -> bool:
     try:
         actual_hotkey = metagraph.hotkeys[int(uid)]
     except Exception as exc:

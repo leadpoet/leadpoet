@@ -3402,7 +3402,7 @@ class Validator(BaseValidatorNeuron):
         Research Lab allocation only: the reserved Lab share burns while
         fulfillment, leaderboard, and global weight safety checks continue.
         """
-        def _research_lab_failed_closed(reason: str, *, errors: list | None = None) -> dict:
+        def _research_lab_failed_closed(reason: str, *, errors: Optional[list] = None) -> dict:
             print(
                 "   ⚠️ Research Lab failed closed; continuing weight submission "
                 "with Research Lab allocation burned"

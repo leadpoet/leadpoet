@@ -113,6 +113,7 @@ def _tuple_from_json_or_csv(raw: str, default: tuple[str, ...]) -> tuple[str, ..
 class ResearchLabGatewayConfig:
     api_enabled: bool = False
     production_writes_enabled: bool = False
+    miner_submissions_enabled: bool = False
     paid_loops_enabled: bool = False
     loop_topups_enabled: bool = False
     probes_enabled: bool = False
@@ -251,6 +252,7 @@ class ResearchLabGatewayConfig:
         return cls(
             api_enabled=_truthy("RESEARCH_LAB_GATEWAY_API_ENABLED", prod_on),
             production_writes_enabled=_truthy("RESEARCH_LAB_PRODUCTION_WRITES_ENABLED", prod_on),
+            miner_submissions_enabled=_truthy("RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED", prod_on),
             paid_loops_enabled=_truthy("RESEARCH_LAB_PAID_LOOPS_ENABLED", prod_on),
             loop_topups_enabled=_truthy("RESEARCH_LAB_LOOP_TOPUPS_ENABLED", "false"),
             probes_enabled=_truthy("RESEARCH_LAB_PROBES_ENABLED", prod_on),
@@ -582,6 +584,7 @@ class ResearchLabGatewayConfig:
 
     def live_mutation_flags(self) -> dict[str, bool]:
         return {
+            "RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED": self.miner_submissions_enabled,
             "RESEARCH_LAB_PAID_LOOPS_ENABLED": self.paid_loops_enabled,
             "RESEARCH_LAB_LOOP_TOPUPS_ENABLED": self.loop_topups_enabled,
             "RESEARCH_LAB_HOSTED_RUNS_ENABLED": self.hosted_runs_enabled,
@@ -672,6 +675,7 @@ class ResearchLabGatewayConfig:
         return {
             "api_enabled": self.api_enabled,
             "production_writes_enabled": self.production_writes_enabled,
+            "miner_submissions_enabled": self.miner_submissions_enabled,
             "paid_loops_enabled": self.paid_loops_enabled,
             "loop_topups_enabled": self.loop_topups_enabled,
             "probes_enabled": self.probes_enabled,

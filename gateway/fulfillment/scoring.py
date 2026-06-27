@@ -530,12 +530,18 @@ async def score_fulfillment_lead(
         email_verified = bool(email_result and email_result.get("status") == "email_ok")
 
         # --- Company verification (always uses ScrapingDog LinkedIn) ---
+        # Location is only a verification criterion when the ICP actually
+        # requires a company location.  When it doesn't, a company whose
+        # LinkedIn page exposes no HQ must not be rejected for an absent,
+        # un-requested field (the "no HQ on LinkedIn" gate is skipped).
+        location_required = bool(icp.company_country or icp.company_region)
         s5_passed, s5_rejection = await fulfillment_company_verification(
             validator_dict, scrapingdog_key, openrouter_key,
             icp_prompt=icp.prompt,
             icp_product_service=icp.product_service,
             icp_industry=icp.industry or [],
             icp_sub_industry=icp.sub_industry or [],
+            location_required=location_required,
         )
         if not s5_passed:
             reason = s5_rejection.get("check_name", "fulfillment_company_failed") if s5_rejection else "fulfillment_company_failed"

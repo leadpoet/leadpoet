@@ -410,12 +410,17 @@ async def _llm_hq_match(
     lead: dict,
     sd_data: dict,
     openrouter_key: str,
+    location_required: bool = True,
 ) -> bool:
     """Compare HQ location. US: rule-based first, LLM fallback. Non-US: LLM only.
 
-    LinkedIn page is the source of truth. If LinkedIn has no HQ location,
-    reject (return False). Otherwise check if miner's claimed location
-    matches what LinkedIn shows.
+    LinkedIn page is the source of truth. If LinkedIn has no HQ location and
+    the ICP imposes a location requirement, reject (return False) — the
+    company's region can't be confirmed.  If the ICP has NO location
+    requirement (``location_required=False``) and LinkedIn also exposes no
+    HQ, pass: there is nothing the client asked for and nothing to verify.
+    When LinkedIn does show an HQ, the miner's claimed location is still
+    verified against it regardless of ``location_required`` (anti-fraud).
     """
     sd_hq = sd_data.get("headquarters", "")
     sd_address = ""
@@ -424,8 +429,11 @@ async def _llm_hq_match(
             sd_address = loc.get("office_address_line_2", "")
             break
 
-    # No HQ location on LinkedIn page → invalid
+    # No HQ location on LinkedIn page.
     if not sd_hq and not sd_address:
+        if not location_required:
+            print("   ✅ HQ location: not required by ICP and absent from LinkedIn — skipped")
+            return True
         print("   ❌ No HQ location on LinkedIn page")
         return False
 
@@ -740,6 +748,7 @@ async def fulfillment_company_verification(
     icp_product_service: str = "",
     icp_industry: list = None,
     icp_sub_industry: list = None,
+    location_required: bool = True,
 ) -> Tuple[bool, Optional[dict]]:
     """
     Fulfillment-specific Stage 5 company verification using ScrapingDog LinkedIn.
@@ -858,7 +867,7 @@ async def fulfillment_company_verification(
     print(f"   ✅ Employee count match: {sd_size_clean}")
 
     # ---- 3. HQ location match ----
-    hq_match = await _llm_hq_match(lead, sd_data, or_key)
+    hq_match = await _llm_hq_match(lead, sd_data, or_key, location_required=location_required)
     if not hq_match:
         sd_hq = sd_data.get("headquarters", "")
         m_hq = f"{lead.get('hq_city', '')}, {lead.get('hq_state', '')}, {lead.get('hq_country', '')}"

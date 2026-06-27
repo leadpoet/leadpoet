@@ -520,30 +520,14 @@ async def score_fulfillment_lead(
     openrouter_key = os.environ.get("OPENROUTER_KEY", "")
 
     if scrapingdog_key:
-        # --- Email check (precomputed from two-stage TrueList inline) ---
-        # Path: thorough → enhanced retry on inconclusive verdicts
-        #       (unknown / unknown_error / timeout / error / failed_greylisted).
-        #       email_ok → pass.  Anything else, including catch-all
-        #       (accept_all) and failed_no_mailbox → reject.
-        # See _run_batch_email_verification below for the full pipeline.
-        email_verified = False
-        if email_result:
-            batch_status = email_result.get("status", "unknown")
-            if batch_status == "email_ok":
-                email_verified = True
-            else:
-                _email_reason = f"email_{batch_status}"
-                return FulfillmentScoreResult(
-                    tier1_passed=True, tier2_passed=False,
-                    failure_reason=_email_reason,
-                    failure_detail=_build_failure_detail(_email_reason),
-                )
-        else:
-            return FulfillmentScoreResult(
-                tier1_passed=True, tier2_passed=False,
-                failure_reason="email_verification_unavailable",
-                failure_detail=_build_failure_detail("email_verification_unavailable"),
-            )
+        # --- Email (no longer verified or used as a gate) ---
+        # Contact emails are sourced out-of-band, not from miner
+        # submissions, so email is optional and never verified.  We keep
+        # ``email_verified`` purely as a recorded/consensus flag: it stays
+        # False unless an email_result is somehow already present and says
+        # email_ok, but it NEVER rejects a lead.  Verification is skipped
+        # upstream in score_fulfillment_batch (email_result is None here).
+        email_verified = bool(email_result and email_result.get("status") == "email_ok")
 
         # --- Company verification (always uses ScrapingDog LinkedIn) ---
         s5_passed, s5_rejection = await fulfillment_company_verification(
@@ -973,10 +957,11 @@ async def score_fulfillment_batch(
     """Score a batch of fulfillment leads with two-stage email verification."""
     seen_companies: Set[str] = set()
 
-    # Verify every email up-front via TrueList inline (thorough → enhanced
-    # retry on inconclusive verdicts) so each per-lead scorer just reads
-    # the precomputed status — no API calls in the per-lead hot path.
-    email_results_map = await _run_batch_email_verification(leads)
+    # Email is no longer verified — contact emails are sourced out-of-band,
+    # not from miner submissions, so email is optional and never gates a
+    # lead.  Skip the TrueList/ScrapingDog batch entirely (no API calls, no
+    # cost); per-lead scorers see email_result=None and never reject on it.
+    email_results_map: dict = {}
 
     # Role-match pre-pass: anything that hits Path 2 (token overlap >= 50%
     # but no Path 1 title+function overlap) used to auto-accept and was
@@ -1010,7 +995,7 @@ async def score_fulfillment_batch(
                 if lead.role in icp.target_roles:
                     continue  # exact match — handled by tier1_check directly
                 if classify_role(lead.role, icp.target_roles) != "no_match":
-                    lid = getattr(lead, "lead_id", None) or lead.email
+                    lid = getattr(lead, "lead_id", None) or lead.email or lead.full_name
                     judge_queue.append({"id": lid, "role": lead.role})
             if judge_queue:
                 role_decisions = await _role_batch_check(judge_queue, icp.target_roles)
@@ -1349,10 +1334,14 @@ async def _run_verification_stages(
     skip_stage4: bool = False,
     skip_stage5: bool = False,
 ) -> Tuple[Optional[str], dict]:
-    """Run Stage 3 (email) + Stage 4 (person) + Stage 5 (company) + rep score.
+    """Run Stage 4 (person) + Stage 5 (company) + rep score.
 
-    Delegates to the validator pipeline's ``run_stage4_5_repscore`` which
-    expects pre-computed TrueList email results and the Stage 0-2 data dict.
+    Stage 3 (email) is always skipped in fulfillment (skip_stage3=True) —
+    contact emails are sourced out-of-band, so email is optional and never
+    verified.  ``email_result`` is therefore ignored and may be ``None``.
+
+    Delegates to the validator pipeline's ``run_stage4_5_repscore`` with the
+    Stage 0-2 data dict.
 
     When *skip_stage4* is True (Apify already verified the person), Stage 4
     inside ``run_stage4_5_repscore`` is skipped.  When *skip_stage5* is True
@@ -1362,14 +1351,16 @@ async def _run_verification_stages(
     """
     from validator_models.automated_checks import run_stage4_5_repscore
 
-    if not email_result:
-        return "email_verification_unavailable", stage0_2_data or {}
-
+    # Email is no longer verified in fulfillment (contact emails are sourced
+    # out-of-band, so email is optional).  Skip Stage 3 entirely via
+    # skip_stage3=True rather than treating a missing email_result as a
+    # verification failure — a missing email must never reject a lead.
     if not stage0_2_data:
         return "stage0_2_data_missing", {}
 
     passed, full_data = await run_stage4_5_repscore(
-        validator_dict, email_result, stage0_2_data,
+        validator_dict, email_result or {}, stage0_2_data,
+        skip_stage3=True,
         skip_stage4=skip_stage4, skip_stage5=skip_stage5,
     )
     if not passed:

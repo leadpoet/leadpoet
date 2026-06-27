@@ -950,14 +950,19 @@ class FulfillmentICP(BaseModel):
 class FulfillmentLead(BaseModel):
     """Lead schema with PII — used in fulfillment commit-reveal.
 
-    All fields are required except ``phone``.  Miners that submit
-    sparse leads will be rejected at parse time rather than silently
-    scoring zero.
+    All fields are required except ``phone`` and ``email``.  Miners that
+    submit sparse leads will be rejected at parse time rather than silently
+    scoring zero.  ``email`` is optional: contact emails are sourced
+    out-of-band, so miners are not required to submit one and it is never
+    verified.  Keeping it as a defaulted field (rather than removing it)
+    keeps the commit-reveal hash backward-compatible — miners that still
+    submit an email hash it normally, and miners that omit it produce a
+    consistent ``email:""`` in both commit and reveal.
     """
 
     # PII fields (included in hash, stripped by to_lead_output)
     full_name: str
-    email: str
+    email: str = ""
     linkedin_url: str
     phone: str = ""
 

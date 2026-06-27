@@ -61,7 +61,7 @@ echo ""
 echo "📦 Step 1: Checking base image..."
 if ! docker images -q validator-base:v1 | grep -q .; then
     echo "   Building base image (one-time operation)..."
-    docker build \
+    docker build --no-cache \
         -f "$VALIDATOR_TEE_DIR/Dockerfile.base" \
         -t validator-base:v1 \
         "$REPO_ROOT"
@@ -119,7 +119,12 @@ def normalize_docker_image(image_name, normalized_name):
         
         # Process each layer - normalize timestamps AND file order
         new_layers = []
+        normalized_layer_paths = {}
         for layer_path in layers:
+            if layer_path in normalized_layer_paths:
+                new_layers.append(normalized_layer_paths[layer_path])
+                continue
+
             full_path = work_dir / layer_path
             norm_path = str(full_path) + ".norm"
             
@@ -155,6 +160,7 @@ def normalize_docker_image(image_name, normalized_name):
                 except:
                     pass
             
+            normalized_layer_paths[layer_path] = new_layer_name
             new_layers.append(new_layer_name)
         
         # Normalize config
@@ -193,17 +199,14 @@ def normalize_docker_image(image_name, normalized_name):
         with open(work_dir / "manifest.json", "w") as f:
             json.dump(manifest, f)
         
-        # Update index.json if it exists (OCI format requires this)
-        index_path = work_dir / "index.json"
-        if index_path.exists():
-            with open(index_path) as f:
-                index = json.load(f)
-            for m in index.get("manifests", []):
-                if m.get("digest", "").startswith("sha256:"):
-                    m["digest"] = "sha256:" + new_config_hash
-            with open(index_path, "w") as f:
-                json.dump(index, f)
-            print("   Updated index.json for OCI format")
+        # docker save may emit OCI archive metadata on newer Docker versions.
+        # The normalized archive is intentionally written as a Docker archive
+        # using manifest.json only; stale OCI index entries would point at the
+        # pre-normalized manifest/config and make docker load reject the tar.
+        for metadata_name in ("index.json", "oci-layout"):
+            metadata_path = work_dir / metadata_name
+            if metadata_path.exists():
+                metadata_path.unlink()
         
         # Create normalized tar
         with tarfile.open(f"{work_dir}/normalized.tar", "w") as tar:
@@ -225,7 +228,8 @@ def normalize_docker_image(image_name, normalized_name):
     finally:
         shutil.rmtree(work_dir)
 
-normalize_docker_image("validator-tee-enclave:raw", "validator-tee-enclave:latest")
+if not normalize_docker_image("validator-tee-enclave:raw", "validator-tee-enclave:latest"):
+    raise SystemExit(1)
 NORMALIZE_SCRIPT
 
 # Cleanup raw image

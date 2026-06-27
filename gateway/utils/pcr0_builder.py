@@ -409,7 +409,12 @@ def normalize_docker_image(image_name: str, normalized_name: str) -> bool:
         
         # Process each layer - normalize tar timestamps AND file order
         new_layers = []
+        normalized_layer_paths = {}
         for layer_path in layers:
+            if layer_path in normalized_layer_paths:
+                new_layers.append(normalized_layer_paths[layer_path])
+                continue
+
             full_path = work_dir / layer_path
             norm_path = str(full_path) + ".norm"
             
@@ -446,6 +451,7 @@ def normalize_docker_image(image_name: str, normalized_name: str) -> bool:
                 except:
                     pass
             
+            normalized_layer_paths[layer_path] = new_layer_name
             new_layers.append(new_layer_name)
         
         # Normalize config JSON
@@ -489,18 +495,14 @@ def normalize_docker_image(image_name: str, normalized_name: str) -> bool:
         with open(work_dir / "manifest.json", "w") as f:
             json.dump(manifest, f)
         
-        # Update index.json if it exists (OCI format requires this)
-        index_path = work_dir / "index.json"
-        if index_path.exists():
-            with open(index_path) as f:
-                index = json.load(f)
-            # Update the digest in index.json to point to new config
-            for m in index.get("manifests", []):
-                if m.get("digest", "").startswith("sha256:"):
-                    m["digest"] = "sha256:" + new_config_hash
-            with open(index_path, "w") as f:
-                json.dump(index, f)
-            logger.info("[PCR0] Updated index.json for OCI format")
+        # docker save may emit OCI archive metadata on newer Docker versions.
+        # The normalized archive is intentionally written as a Docker archive
+        # using manifest.json only; stale OCI index entries would point at the
+        # pre-normalized manifest/config and make docker load reject the tar.
+        for metadata_name in ("index.json", "oci-layout"):
+            metadata_path = work_dir / metadata_name
+            if metadata_path.exists():
+                metadata_path.unlink()
         
         # Create normalized tar
         with tarfile.open(f"{work_dir}/normalized.tar", "w") as tar:
@@ -537,8 +539,10 @@ def normalize_docker_image(image_name: str, normalized_name: str) -> bool:
 
 # Base image name - built once and cached
 BASE_IMAGE_NAME = "validator-base:v1"
-# Label used to track Dockerfile.base content hash
-BASE_IMAGE_HASH_LABEL = "dockerfile.base.hash"
+# External stamp used to track Dockerfile.base content hash without mutating
+# Docker image metadata. Gateway and validator base images must have identical
+# Docker config, so do not use labels for freshness tracking.
+BASE_IMAGE_STAMP_FILENAME = ".validator-base.dockerfile.sha256"
 
 
 def compute_dockerfile_base_hash(repo_dir: str) -> Optional[str]:
@@ -553,24 +557,31 @@ def compute_dockerfile_base_hash(repo_dir: str) -> Optional[str]:
         return None
 
 
-async def get_base_image_hash_label() -> Optional[str]:
-    """Get the dockerfile.base.hash label from existing base image."""
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "inspect", BASE_IMAGE_NAME,
-        "--format", "{{index .Config.Labels \"" + BASE_IMAGE_HASH_LABEL + "\"}}",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    
-    if proc.returncode != 0:
-        return None  # Image doesn't exist
-    
-    label_value = stdout.decode().strip()
-    if not label_value or label_value == "<no value>":
-        return None  # Label not set
-    
-    return label_value
+def get_base_image_stamp_path(repo_dir: str) -> str:
+    """Return path to external base-image freshness stamp."""
+    return os.path.join(repo_dir, BASE_IMAGE_STAMP_FILENAME)
+
+
+def read_base_image_stamp(repo_dir: str) -> Optional[str]:
+    """Read the Dockerfile.base content hash stamp, if present."""
+    try:
+        with open(get_base_image_stamp_path(repo_dir), "r", encoding="utf-8") as f:
+            value = f.read().strip()
+        return value or None
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.warning(f"[PCR0] Could not read base image stamp: {e}")
+        return None
+
+
+def write_base_image_stamp(repo_dir: str, dockerfile_hash: str) -> None:
+    """Write the Dockerfile.base content hash stamp outside Docker metadata."""
+    try:
+        with open(get_base_image_stamp_path(repo_dir), "w", encoding="utf-8") as f:
+            f.write(dockerfile_hash + "\n")
+    except Exception as e:
+        logger.warning(f"[PCR0] Could not write base image stamp: {e}")
 
 
 async def ensure_base_image_exists(repo_dir: str) -> bool:
@@ -581,9 +592,9 @@ async def ensure_base_image_exists(repo_dir: str) -> bool:
     However, once built and cached, it's stable. The enclave image built
     on top uses only COPY operations which are deterministic.
     
-    This function tracks Dockerfile.base content via a Docker label. When
-    Dockerfile.base changes, the old base image is deleted and rebuilt.
-    This ensures automatic updates when Dockerfile.base is pushed to GitHub.
+    This function tracks Dockerfile.base content via an external stamp file.
+    The stamp avoids gateway-only Docker labels, which change image metadata
+    and can break PCR0 reproducibility versus the validator build.
     """
     # Compute current Dockerfile.base hash
     current_hash = compute_dockerfile_base_hash(repo_dir)
@@ -601,8 +612,10 @@ async def ensure_base_image_exists(repo_dir: str) -> bool:
     image_exists = bool(stdout.decode().strip())
     
     if image_exists:
-        # Check if the existing image matches current Dockerfile.base
-        existing_hash = await get_base_image_hash_label()
+        # Check if the existing image matches current Dockerfile.base.
+        # The hash is tracked outside Docker image config to keep gateway and
+        # validator base builds byte/config equivalent.
+        existing_hash = read_base_image_stamp(repo_dir)
         
         if existing_hash == current_hash:
             logger.info(f"[PCR0] Base image {BASE_IMAGE_NAME} up-to-date (hash: {current_hash})")
@@ -621,13 +634,16 @@ async def ensure_base_image_exists(repo_dir: str) -> bool:
         await proc.communicate()
         # Ignore errors - image might be in use, but we'll build a new one anyway
     
-    # Build base image with hash label
+    # Build base image with the same command shape used by the validator script.
+    # --no-cache is intentional: the base layer contains yum/rpm work and must
+    # be rebuilt from the pinned Dockerfile inputs when the stamp is absent or
+    # stale, not silently resurrected from old BuildKit cache.
     logger.info(f"[PCR0] Building base image {BASE_IMAGE_NAME} (hash: {current_hash})...")
     proc = await asyncio.create_subprocess_exec(
         "sudo", "docker", "build",
+        "--no-cache",
         "-f", "validator_tee/Dockerfile.base",
         "-t", BASE_IMAGE_NAME,
-        "--label", f"{BASE_IMAGE_HASH_LABEL}={current_hash}",
         ".",
         cwd=repo_dir,
         stdout=asyncio.subprocess.PIPE,
@@ -639,6 +655,7 @@ async def ensure_base_image_exists(repo_dir: str) -> bool:
         logger.error(f"[PCR0] Failed to build base image: {stderr.decode()[-500:]}")
         return False
     
+    write_base_image_stamp(repo_dir, current_hash)
     logger.info(f"[PCR0] ✓ Base image {BASE_IMAGE_NAME} built successfully (hash: {current_hash})")
     return True
 

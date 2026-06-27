@@ -41,7 +41,10 @@ PERCENT_EPSILON = 0.000001
 def _request_headers(*, include_internal_key: bool = False) -> dict[str, str]:
     headers = {"Accept": "application/json"}
     if include_internal_key:
-        internal_key = os.getenv("RESEARCH_LAB_INTERNAL_API_KEY", "").strip()
+        internal_key = (
+            os.getenv("RESEARCH_LAB_INTERNAL_API_KEY", "").strip()
+            or os.getenv("LEADPOET_INTERNAL_SECRET", "").strip()
+        )
         if internal_key:
             headers["x-leadpoet-internal-key"] = internal_key
     return headers

@@ -10,7 +10,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Iterable, Mapping
+from typing import Mapping
 
 
 TRUTHY = {"1", "true", "yes", "on"}
@@ -25,18 +25,6 @@ SCORING_PROXY_PREFIXES = (
     "QUALIFICATION_WEBSHARE_PROXY",
     "RESEARCH_LAB_SCORING_WORKER_PROXY",
 )
-PROXY_ENV_FILE_VARS = (
-    "RESEARCH_LAB_WORKER_PROXY_ENV_FILE",
-    "RESEARCH_LAB_PROXY_ENV_FILE",
-)
-DEFAULT_PROXY_ENV_FILES = (
-    ".env.research_lab_workers",
-    ".env.docker",
-    "~/.research_lab_worker_proxies.env",
-    "~/gateway/.env.research_lab_workers",
-    "~/gateway/.env.docker",
-)
-PROXY_ENV_PREFIXES = HOSTED_PROXY_PREFIXES + SCORING_PROXY_PREFIXES
 
 
 def _truthy_env(env: Mapping[str, str], name: str, default: str = "false") -> bool:
@@ -68,90 +56,6 @@ def _configured_proxies(env: Mapping[str, str], prefixes: tuple[str, ...]) -> tu
     return tuple(proxies)
 
 
-def _autostart_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
-    load_defaults = env is None
-    merged = dict(os.environ if env is None else env)
-    for path in _proxy_env_paths(merged, include_defaults=load_defaults):
-        for key, value in _read_proxy_env_file(path).items():
-            merged.setdefault(key, value)
-    return merged
-
-
-def _proxy_env_paths(env: Mapping[str, str], *, include_defaults: bool) -> tuple[Path, ...]:
-    paths: list[Path] = []
-    for name in PROXY_ENV_FILE_VARS:
-        raw = str(env.get(name, "")).strip()
-        if raw:
-            paths.extend(_split_env_file_paths(raw))
-    if include_defaults:
-        paths.extend(Path(item).expanduser() for item in DEFAULT_PROXY_ENV_FILES)
-
-    unique: list[Path] = []
-    seen: set[str] = set()
-    for path in paths:
-        expanded = path.expanduser()
-        key = str(expanded)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(expanded)
-    return tuple(unique)
-
-
-def _split_env_file_paths(raw: str) -> Iterable[Path]:
-    for item in raw.replace(",", ":").split(":"):
-        value = item.strip()
-        if value:
-            yield Path(value)
-
-
-def _read_proxy_env_file(path: Path) -> dict[str, str]:
-    if not path.exists() or not path.is_file():
-        return {}
-    values: dict[str, str] = {}
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        print(f"⚠️  Research Lab worker proxy env file unreadable: {path} ({exc})", flush=True)
-        return {}
-    for line in lines:
-        parsed = _parse_proxy_env_line(line)
-        if parsed is None:
-            continue
-        key, value = parsed
-        if _is_proxy_env_key(key) and value:
-            values[key] = value
-    if values:
-        print(
-            f"   Loaded {len(values)} Research Lab worker proxy env var(s) from {path}",
-            flush=True,
-        )
-    return values
-
-
-def _parse_proxy_env_line(line: str) -> tuple[str, str] | None:
-    stripped = line.strip()
-    if not stripped or stripped.startswith("#") or "=" not in stripped:
-        return None
-    if stripped.startswith("export "):
-        stripped = stripped[len("export "):].lstrip()
-    key, value = stripped.split("=", 1)
-    key = key.strip()
-    value = value.strip()
-    if "#" in value and not value.startswith(("'", '"')):
-        value = value.split("#", 1)[0].strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        value = value[1:-1]
-    return key, value
-
-
-def _is_proxy_env_key(key: str) -> bool:
-    return any(
-        key == prefix or (key.startswith(f"{prefix}_") and key[len(prefix) + 1:].isdigit())
-        for prefix in PROXY_ENV_PREFIXES
-    )
-
-
 def _proxy_ref(proxy_url: str) -> str:
     return "sha256:" + hashlib.sha256(proxy_url.encode("utf-8")).hexdigest()[:16]
 
@@ -178,7 +82,7 @@ class ResearchLabWorkerAutoStartPlan:
 def build_research_lab_worker_autostart_plan(
     env: Mapping[str, str] | None = None,
 ) -> ResearchLabWorkerAutoStartPlan:
-    env = _autostart_env(env)
+    env = env or os.environ
     auto_start_enabled = _truthy_env(env, "RESEARCH_LAB_AUTO_START_WORKERS", "true")
     hosted_proxies = _configured_proxies(env, HOSTED_PROXY_PREFIXES)
     scoring_proxies = _configured_proxies(env, SCORING_PROXY_PREFIXES)

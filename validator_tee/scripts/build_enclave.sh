@@ -26,35 +26,93 @@ echo "Validator TEE dir: $VALIDATOR_TEE_DIR"
 echo "Repo root: $REPO_ROOT"
 echo ""
 
-# Step 0: Clean Python cache files for reproducibility
-# __pycache__ directories and .pyc files can differ between machines
-# They MUST be removed before Docker build or they'll be included in layers
-echo "🧹 Step 0a: Cleaning Python cache files..."
 cd "$REPO_ROOT"
-find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-find . -type f -name "*.pyc" -delete 2>/dev/null || true
-find . -type f -name "*.pyo" -delete 2>/dev/null || true
-echo "   ✓ Python cache cleaned"
 
-# Step 0b: Normalize file permissions for reproducibility
-# Docker COPY includes file permissions in layer hash
-# Different machines may have different umask settings (644 vs 664)
-# We normalize ALL files to 644 to ensure identical layer hashes
-echo "🔧 Step 0b: Normalizing file permissions..."
+PCR0_COPY_PATHS=(
+    "validator_tee/enclave"
+    "leadpoet_canonical"
+    "leadpoet_verifier"
+    "research_lab"
+    "gateway/research_lab"
+    "gateway/qualification/utils"
+    "qualification/scoring"
+    "gateway/__init__.py"
+    "gateway/qualification/__init__.py"
+    "gateway/qualification/models.py"
+    "gateway/qualification/config.py"
+    "gateway/db/__init__.py"
+    "gateway/db/client.py"
+    "gateway/tasks/__init__.py"
+    "gateway/tasks/icp_generator.py"
+    "qualification/__init__.py"
+    "scripts/run_research_lab_hosted_worker.py"
+    "scripts/run_research_lab_hosted_worker_fleet.py"
+    "scripts/run_research_lab_scoring_worker.py"
+    "scripts/run_research_lab_scoring_worker_fleet.py"
+    "neurons/validator.py"
+    "validator_models/automated_checks.py"
+)
 
-# Normalize permissions on all files that will be copied into the enclave
-chmod 644 validator_tee/enclave/requirements.txt 2>/dev/null || true
-chmod 644 validator_tee/enclave/*.py 2>/dev/null || true
-chmod 644 leadpoet_canonical/*.py 2>/dev/null || true
-chmod 644 neurons/validator.py 2>/dev/null || true
-chmod 644 validator_models/automated_checks.py 2>/dev/null || true
+# Step 0a: Clean PCR0 build context for reproducibility.
+#
+# The validator intentionally builds from this local checkout, but the Docker
+# context must still equal the checked-out commit. Untracked local leftovers
+# inside copied paths (.bak files, __pycache__, pyc, temp files, etc.) would be
+# copied into the enclave and produce a PCR0 that the gateway's clean GitHub
+# rebuild can never match.
+echo "🧹 Step 0a: Cleaning PCR0 Docker context..."
+git clean -ffdx -- "${PCR0_COPY_PATHS[@]}" >/dev/null 2>&1 || true
+for path in "${PCR0_COPY_PATHS[@]}"; do
+    if [ -d "$path" ]; then
+        find "$path" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+        find "$path" -type f -name "*.pyc" -delete 2>/dev/null || true
+        find "$path" -type f -name "*.pyo" -delete 2>/dev/null || true
+    fi
+done
+echo "   ✓ PCR0 Docker context cleaned"
 
-# Also normalize any other Python files that might be included
-find validator_tee/enclave -type f -name "*.py" -exec chmod 644 {} \; 2>/dev/null || true
-find validator_tee/enclave -type f -name "*.txt" -exec chmod 644 {} \; 2>/dev/null || true
-find leadpoet_canonical -type f -name "*.py" -exec chmod 644 {} \; 2>/dev/null || true
+# Step 0b: Normalize file and directory permissions for reproducibility.
+#
+# Docker COPY preserves mode bits. A local checkout with 664 files and a sparse
+# GitHub checkout with 644 files have identical content but different PCR0.
+echo "🔧 Step 0b: Normalizing PCR0 Docker context permissions..."
+for path in "${PCR0_COPY_PATHS[@]}"; do
+    if [ -d "$path" ]; then
+        find "$path" -type d -exec chmod 755 {} + 2>/dev/null || true
+        find "$path" -type f -exec chmod 644 {} + 2>/dev/null || true
+    elif [ -f "$path" ]; then
+        chmod 644 "$path" 2>/dev/null || true
+    fi
+done
 
-echo "   ✓ File permissions normalized to 644"
+echo "   ✓ PCR0 Docker context permissions normalized"
+
+echo "🔎 Step 0c: PCR0 Docker context manifest hash..."
+python3 - "${PCR0_COPY_PATHS[@]}" <<'PY'
+import hashlib
+import os
+import sys
+
+copied_files = []
+for rel_path in sys.argv[1:]:
+    if os.path.isdir(rel_path):
+        for root, _dirs, files in os.walk(rel_path):
+            for name in files:
+                copied_files.append(os.path.join(root, name))
+    elif os.path.isfile(rel_path):
+        copied_files.append(rel_path)
+
+manifest_hash = hashlib.sha256()
+for rel_path in sorted(set(copied_files)):
+    st = os.stat(rel_path)
+    manifest_hash.update(f"{st.st_mode & 0o777} {st.st_size} {rel_path}\n".encode())
+    with open(rel_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            manifest_hash.update(chunk)
+    manifest_hash.update(b"\n")
+
+print(f"   manifest_sha256={manifest_hash.hexdigest()}")
+PY
 
 # Step 1: Ensure base image exists (built once, cached)
 echo ""

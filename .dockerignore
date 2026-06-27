@@ -22,9 +22,14 @@ __pycache__/
 .env
 *.log
 gateway.log
+*.bak
+*.bak-*
+*.backup
+*.backup-*
+*.backup_*
+*.orig
 
 # Exclude test and temp files
 *.tmp
 test_*
 /data/
-

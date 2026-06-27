@@ -113,6 +113,33 @@ MONITORED_DIR_SUFFIXES: Set[str] = {".py", ".json", ".txt"}
 # Working directory for builds
 BUILD_DIR = os.environ.get("PCR0_BUILD_DIR", "/tmp/pcr0_builder")
 
+# Paths copied by validator_tee/Dockerfile.enclave. These are the exact local
+# build inputs that must be clean and mode-normalized before Docker sees them.
+PCR0_COPY_PATHS: List[str] = [
+    "validator_tee/enclave",
+    "leadpoet_canonical",
+    "leadpoet_verifier",
+    "research_lab",
+    "gateway/research_lab",
+    "gateway/qualification/utils",
+    "qualification/scoring",
+    "gateway/__init__.py",
+    "gateway/qualification/__init__.py",
+    "gateway/qualification/models.py",
+    "gateway/qualification/config.py",
+    "gateway/db/__init__.py",
+    "gateway/db/client.py",
+    "gateway/tasks/__init__.py",
+    "gateway/tasks/icp_generator.py",
+    "qualification/__init__.py",
+    "scripts/run_research_lab_hosted_worker.py",
+    "scripts/run_research_lab_hosted_worker_fleet.py",
+    "scripts/run_research_lab_scoring_worker.py",
+    "scripts/run_research_lab_scoring_worker_fleet.py",
+    "neurons/validator.py",
+    "validator_models/automated_checks.py",
+]
+
 
 # =============================================================================
 # Cache
@@ -672,67 +699,72 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
             logger.error("[PCR0] Cannot proceed without base image")
             return None
         
-        # Step 0.4: Clean Python cache files for reproducibility
-        # __pycache__ directories and .pyc files can differ between machines
-        logger.info("[PCR0] Cleaning Python cache files...")
+        # Step 0.4: Clean and normalize the exact Docker COPY inputs.
+        #
+        # The gateway uses a sparse GitHub checkout, but this keeps the builder
+        # self-healing if a reused /tmp/pcr0_builder ever accumulates untracked
+        # files in paths copied into the enclave image.
+        logger.info("[PCR0] Cleaning PCR0 Docker context...")
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clean", "-ffdx", "--", *PCR0_COPY_PATHS,
+            cwd=repo_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+
+        # __pycache__ directories and .pyc files can differ between machines.
         import shutil
-        for root, dirs, files in os.walk(repo_dir):
-            for d in dirs:
-                if d == "__pycache__":
-                    shutil.rmtree(os.path.join(root, d), ignore_errors=True)
-            for f in files:
-                if f.endswith(".pyc") or f.endswith(".pyo"):
-                    try:
-                        os.remove(os.path.join(root, f))
-                    except:
-                        pass
+        for rel_path in PCR0_COPY_PATHS:
+            full_copy_path = os.path.join(repo_dir, rel_path)
+            if os.path.isdir(full_copy_path):
+                for root, dirs, files in os.walk(full_copy_path):
+                    for d in list(dirs):
+                        if d == "__pycache__":
+                            shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                    for f in files:
+                        if f.endswith(".pyc") or f.endswith(".pyo"):
+                            try:
+                                os.remove(os.path.join(root, f))
+                            except:
+                                pass
         
         # Step 0.5: Normalize file permissions for reproducibility
         # Docker COPY includes file permissions in layer hash
         # Different machines may have different umask settings (644 vs 664)
-        # We normalize ALL files to 644 to ensure identical layer hashes
-        logger.info("[PCR0] Normalizing file permissions to 644...")
-        permission_files = [
-            "validator_tee/enclave/requirements.txt",
-            "neurons/validator.py",
-            "validator_models/automated_checks.py",
-            "gateway/__init__.py",
-            "gateway/qualification/__init__.py",
-            "gateway/qualification/models.py",
-            "gateway/qualification/config.py",
-            "gateway/db/__init__.py",
-            "gateway/db/client.py",
-            "gateway/tasks/__init__.py",
-            "gateway/tasks/icp_generator.py",
-            "qualification/__init__.py",
-            "scripts/run_research_lab_hosted_worker.py",
-            "scripts/run_research_lab_hosted_worker_fleet.py",
-            "scripts/run_research_lab_scoring_worker.py",
-            "scripts/run_research_lab_scoring_worker_fleet.py",
-        ]
-        for pf in permission_files:
-            full_path = os.path.join(repo_dir, pf)
-            if os.path.exists(full_path):
-                os.chmod(full_path, 0o644)
-        
-        # Also normalize monitored files in directories
-        for subdir in [
-            "validator_tee/enclave",
-            "leadpoet_canonical",
-            "leadpoet_verifier",
-            "research_lab",
-            "gateway/research_lab",
-            "gateway/qualification/utils",
-            "qualification/scoring",
-        ]:
-            subdir_path = os.path.join(repo_dir, subdir)
-            if os.path.isdir(subdir_path):
-                for root, _dirs, files in os.walk(subdir_path):
+        # We normalize every copied file to 644 and every copied directory to
+        # 755 to ensure identical layer hashes.
+        logger.info("[PCR0] Normalizing PCR0 Docker context permissions...")
+        copied_files = []
+        for rel_path in PCR0_COPY_PATHS:
+            full_path = os.path.join(repo_dir, rel_path)
+            if os.path.isdir(full_path):
+                for root, dirs, files in os.walk(full_path):
+                    for dirname in dirs:
+                        os.chmod(os.path.join(root, dirname), 0o755)
+                    os.chmod(root, 0o755)
                     for fname in files:
-                        if any(fname.endswith(suffix) for suffix in MONITORED_DIR_SUFFIXES):
-                            fpath = os.path.join(root, fname)
-                            if os.path.isfile(fpath):
-                                os.chmod(fpath, 0o644)
+                        fpath = os.path.join(root, fname)
+                        if os.path.isfile(fpath):
+                            os.chmod(fpath, 0o644)
+                            copied_files.append(os.path.relpath(fpath, repo_dir))
+            elif os.path.isfile(full_path):
+                os.chmod(full_path, 0o644)
+                copied_files.append(rel_path)
+
+        manifest_hash = hashlib.sha256()
+        for rel_path in sorted(set(copied_files)):
+            full_path = os.path.join(repo_dir, rel_path)
+            try:
+                st = os.stat(full_path)
+                manifest_hash.update(f"{st.st_mode & 0o777} {st.st_size} {rel_path}\n".encode())
+                with open(full_path, "rb") as f:
+                    for chunk in iter(lambda: f.read(8192), b""):
+                        manifest_hash.update(chunk)
+                manifest_hash.update(b"\n")
+            except FileNotFoundError:
+                manifest_hash.update(f"MISSING {rel_path}\n".encode())
+        logger.info(f"[PCR0] PCR0 Docker context manifest_sha256={manifest_hash.hexdigest()}")
         
         # Step 1: Build Docker image with --no-cache
         # The base image is cached, so only our code layers rebuild

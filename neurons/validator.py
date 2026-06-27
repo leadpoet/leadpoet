@@ -3398,10 +3398,26 @@ class Validator(BaseValidatorNeuron):
     async def _research_lab_pre_weight_submission_guard(self, current_epoch: int) -> dict:
         """Fetch and verify Research Lab shadow output before any set_weights call.
 
-        Default behavior is read-only. If Research Lab mutation/submission flags
-        are enabled, this guard fails closed unless the fetched bundle is both
-        locally verified and explicitly allowed for on-chain submission.
+        Default behavior is read-only. Research Lab failures fail closed for the
+        Research Lab allocation only: the reserved Lab share burns while
+        fulfillment, leaderboard, and global weight safety checks continue.
         """
+        def _research_lab_failed_closed(reason: str, *, errors: list | None = None) -> dict:
+            print(
+                "   ⚠️ Research Lab failed closed; continuing weight submission "
+                "with Research Lab allocation burned"
+            )
+            return {
+                "abort_chain_submission": False,
+                "verified": False,
+                "research_lab_failed_closed": True,
+                "reason": reason,
+                "errors": errors or [],
+                "allocation_component": None,
+                "allocation_verification": None,
+                "evaluation_verification": None,
+            }
+
         try:
             from research_lab.validator_integration import (
                 ResearchLabValidatorFlags,
@@ -3421,8 +3437,11 @@ class Validator(BaseValidatorNeuron):
                 _research_lab_production_subnet_default(),
             )
             if mutation_enabled:
-                print(f"   ❌ Research Lab verifier import failed while mutation is enabled: {exc}")
-                return {"abort_chain_submission": True, "reason": "research_lab_verifier_import_failed"}
+                print(f"   ⚠️ Research Lab verifier import failed while mutation is enabled: {exc}")
+                return _research_lab_failed_closed(
+                    "research_lab_verifier_import_failed",
+                    errors=[str(exc)],
+                )
             return {"abort_chain_submission": False, "skipped": True, "reason": f"import_failed:{exc}"}
 
         flags = ResearchLabValidatorFlags.from_mapping(os.environ)
@@ -3463,8 +3482,10 @@ class Validator(BaseValidatorNeuron):
                     or flags.submit_on_chain_enabled
                     or flags.require_shadow_verification_before_submit
                 ):
-                    print("   ❌ Aborting weights because Research Lab verification is required")
-                    return {"abort_chain_submission": True, "reason": "research_lab_verification_failed"}
+                    return _research_lab_failed_closed(
+                        "research_lab_verification_failed",
+                        errors=list(verification.get("errors") or []),
+                    )
                 return {"abort_chain_submission": False, "verified": False, "errors": verification.get("errors", [])}
 
             print(f"   ✅ Research Lab shadow bundle verified: {verification.get('weight_vector_hash')}")
@@ -3490,7 +3511,10 @@ class Validator(BaseValidatorNeuron):
                 print(f"   Research Lab allocation artifact written: {allocation_artifact_path}")
                 if not allocation_verification.get("passed"):
                     print(f"   ❌ Research Lab live allocation verification failed: {allocation_verification.get('errors')}")
-                    return {"abort_chain_submission": True, "reason": "research_lab_allocation_verification_failed"}
+                    return _research_lab_failed_closed(
+                        "research_lab_allocation_verification_failed",
+                        errors=list(allocation_verification.get("errors") or []),
+                    )
                 allocation_doc = allocation_component.get("allocation_doc", {})
                 print(
                     "   ✅ Research Lab live allocation verified: "
@@ -3534,8 +3558,10 @@ class Validator(BaseValidatorNeuron):
                         or flags.submit_on_chain_enabled
                         or flags.require_evaluation_verification_before_submit
                     ):
-                        print("   ❌ Aborting weights because Research Lab evaluation verification is required")
-                        return {"abort_chain_submission": True, "reason": "research_lab_evaluation_verification_failed"}
+                        return _research_lab_failed_closed(
+                            "research_lab_evaluation_verification_failed",
+                            errors=list(evaluation_verification.get("errors") or []),
+                        )
                 else:
                     print(
                         "   ✅ Research Lab evaluation bundles verified: "
@@ -3554,8 +3580,10 @@ class Validator(BaseValidatorNeuron):
         except Exception as exc:
             print(f"   ⚠️ Research Lab validator guard error: {exc}")
             if flags.weight_mutation_enabled or flags.submit_on_chain_enabled or flags.require_shadow_verification_before_submit:
-                print("   ❌ Aborting weights because Research Lab verification is required")
-                return {"abort_chain_submission": True, "reason": "research_lab_guard_error"}
+                return _research_lab_failed_closed(
+                    "research_lab_guard_error",
+                    errors=[str(exc)],
+                )
             return {"abort_chain_submission": False, "verified": False, "errors": [str(exc)]}
 
     async def submit_weights_at_epoch_end(self):

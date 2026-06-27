@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 import sys
 
@@ -25,6 +26,7 @@ from gateway.research_lab.scoring_worker import _private_benchmark_row_is_valid 
 from gateway.research_lab.worker import (  # noqa: E402
     HostedResearchLabWorkerError,
     ResearchLabHostedWorker,
+    _build_openrouter_provider_usage,
     _is_claim_race_error,
     _row_partition,
     _worker_proxy_env,
@@ -69,6 +71,34 @@ def main() -> int:
     )
     if budget_settings.max_iterations != 2:
         errors.append("auto-research budget did not cap requested loop iterations")
+    provider_usage, reconciled_cost = _build_openrouter_provider_usage(
+        decoded={"id": "gen-test-1", "model": "test/model"},
+        usage={"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost": 0.000111},
+        model_id="fallback/model",
+        api_key="test-openrouter-api-key",
+        generation_stats_opener=_fake_generation_stats_opener(
+            {
+                "data": {
+                    "id": "gen-test-1",
+                    "model": "test/model",
+                    "provider_name": "test-provider",
+                    "total_cost": 0.001234,
+                    "tokens_prompt": 10,
+                    "tokens_completion": 20,
+                }
+            }
+        ),
+    )
+    if reconciled_cost != 1234:
+        errors.append("OpenRouter generation stats reconciliation did not override usage cost")
+    if provider_usage.get("cost_source") != "openrouter_generation_stats":
+        errors.append("OpenRouter provider usage did not record authoritative cost source")
+    if provider_usage.get("cost_reconciliation_status") != "confirmed":
+        errors.append("OpenRouter provider usage did not mark reconciled cost as confirmed")
+    if provider_usage.get("usage_generation_cost_delta_microusd") != 1123:
+        errors.append("OpenRouter provider usage did not preserve usage-vs-generation cost delta")
+    if not isinstance(provider_usage.get("generation_stats"), dict) or provider_usage["generation_stats"].get("provider_name") != "test-provider":
+        errors.append("OpenRouter provider usage did not store sanitized generation stats")
 
     artifact = _artifact()
     registry = coerce_component_registry(_metadata())
@@ -236,6 +266,29 @@ def main() -> int:
         "validator scored-bundle filtering, worker partitioning, claim-race detection, no gateway benchmark path."
     )
     return 0
+
+
+class _FakeOpenRouterResponse:
+    def __init__(self, body: dict[str, object]):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self) -> bytes:
+        return json.dumps(self._body).encode("utf-8")
+
+
+def _fake_generation_stats_opener(body: dict[str, object]):
+    def _open(_request, timeout: int):
+        if timeout != 5:
+            raise AssertionError("generation stats timeout changed unexpectedly")
+        return _FakeOpenRouterResponse(body)
+
+    return _open
 
 
 async def _verify_auto_research_loop_engine(artifact: PrivateModelArtifactManifest, registry) -> list[str]:

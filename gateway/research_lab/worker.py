@@ -13,6 +13,7 @@ import os
 import socket
 import time
 from typing import Any, Iterable, Mapping, Sequence
+from urllib import parse as urlparse
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
@@ -113,6 +114,43 @@ class HostedResearchLabClaimLost(HostedResearchLabWorkerError):
 
 
 _RETRYABLE_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+_OPENROUTER_GENERATION_STATS_URL = "https://openrouter.ai/api/v1/generation"
+_OPENROUTER_GENERATION_STATS_TIMEOUT_SECONDS = 5
+_OPENROUTER_GENERATION_STATS_ATTEMPTS = 3
+_OPENROUTER_GENERATION_STATS_RETRY_DELAYS_SECONDS = (0.5, 1.0)
+_OPENROUTER_GENERATION_STATS_RETRYABLE_HTTP_CODES = {404, 408, 409, 425, 429, 500, 502, 503, 504}
+_OPENROUTER_GENERATION_STATS_FIELDS = {
+    "id",
+    "api_type",
+    "cache_discount",
+    "cancelled",
+    "created_at",
+    "data_region",
+    "finish_reason",
+    "generation_time",
+    "is_byok",
+    "latency",
+    "model",
+    "native_finish_reason",
+    "native_tokens_cached",
+    "native_tokens_completion",
+    "native_tokens_completion_images",
+    "native_tokens_prompt",
+    "native_tokens_reasoning",
+    "num_input_audio_prompt",
+    "num_media_completion",
+    "num_media_prompt",
+    "num_search_results",
+    "provider_name",
+    "router",
+    "service_tier",
+    "streamed",
+    "tokens_completion",
+    "tokens_prompt",
+    "total_cost",
+    "upstream_inference_cost",
+    "usage",
+}
 _RETRYABLE_ERROR_MARKERS = (
     "timeout",
     "timed out",
@@ -1753,20 +1791,12 @@ class ResearchLabHostedWorker:
             if not content:
                 raise HostedResearchLabWorkerError("OpenRouter returned empty candidate-generation content")
             usage = decoded.get("usage") if isinstance(decoded.get("usage"), Mapping) else {}
-            cost_usd = _usage_cost_usd(usage)
-            cost_microusd = _usd_to_microusd(cost_usd)
-            provider_usage = {
-                "provider": "openrouter",
-                "key_source": "miner_key_ref",
-                "response_id": str(decoded.get("id") or ""),
-                "model": str(decoded.get("model") or model_id),
-                "prompt_tokens": _int_or_none(usage.get("prompt_tokens")),
-                "completion_tokens": _int_or_none(usage.get("completion_tokens")),
-                "total_tokens": _int_or_none(usage.get("total_tokens")),
-                "cost_usd": round(cost_microusd / 1_000_000, 6),
-                "cost_microusd": cost_microusd,
-                "cost_details": _safe_cost_details(usage.get("cost_details")),
-            }
+            provider_usage, cost_microusd = _build_openrouter_provider_usage(
+                decoded=decoded,
+                usage=usage,
+                model_id=model_id,
+                api_key=api_key,
+            )
             return OpenRouterCallResult(
                 content=str(content),
                 provider_usage=provider_usage,
@@ -2046,6 +2076,21 @@ def _usage_cost_usd(usage: Mapping[str, Any]) -> Decimal:
     return Decimal("0")
 
 
+def _generation_stats_cost_usd(stats: Mapping[str, Any]) -> Decimal | None:
+    for key in ("total_cost", "usage"):
+        value = stats.get(key)
+        if value is None:
+            continue
+        try:
+            decimal_value = Decimal(str(value))
+        except Exception:
+            continue
+        if decimal_value < 0:
+            return Decimal("0")
+        return decimal_value
+    return None
+
+
 def _usd_to_microusd(value: Decimal | float | int | str) -> int:
     try:
         decimal_value = Decimal(str(value))
@@ -2066,6 +2111,134 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+def _build_openrouter_provider_usage(
+    *,
+    decoded: Mapping[str, Any],
+    usage: Mapping[str, Any],
+    model_id: str,
+    api_key: str,
+    generation_stats_opener: Any | None = None,
+) -> tuple[dict[str, Any], int]:
+    usage_cost_microusd = _usd_to_microusd(_usage_cost_usd(usage))
+    response_id = str(decoded.get("id") or "")
+    provider_usage: dict[str, Any] = {
+        "provider": "openrouter",
+        "key_source": "miner_key_ref",
+        "response_id": response_id,
+        "model": str(decoded.get("model") or model_id),
+        "prompt_tokens": _int_or_none(usage.get("prompt_tokens")),
+        "completion_tokens": _int_or_none(usage.get("completion_tokens")),
+        "total_tokens": _int_or_none(usage.get("total_tokens")),
+        "usage_cost_usd": round(usage_cost_microusd / 1_000_000, 6),
+        "usage_cost_microusd": usage_cost_microusd,
+        "cost_usd": round(usage_cost_microusd / 1_000_000, 6),
+        "cost_microusd": usage_cost_microusd,
+        "cost_source": "chat_completion_usage",
+        "cost_reconciliation_status": "pending_generation_stats",
+        "cost_details": _safe_cost_details(usage.get("cost_details")),
+    }
+    if not response_id:
+        provider_usage["cost_reconciliation_status"] = "missing_response_id"
+        return provider_usage, usage_cost_microusd
+
+    generation_stats, stats_status = _fetch_openrouter_generation_stats(
+        api_key=api_key,
+        response_id=response_id,
+        opener=generation_stats_opener,
+    )
+    provider_usage["generation_stats_status"] = stats_status
+    if generation_stats is None:
+        provider_usage["cost_reconciliation_status"] = "generation_stats_unavailable"
+        return provider_usage, usage_cost_microusd
+
+    provider_usage["generation_stats"] = _safe_generation_stats(generation_stats)
+    generation_cost_usd = _generation_stats_cost_usd(generation_stats)
+    if generation_cost_usd is None:
+        provider_usage["cost_reconciliation_status"] = "generation_stats_missing_cost"
+        return provider_usage, usage_cost_microusd
+
+    generation_cost_microusd = _usd_to_microusd(generation_cost_usd)
+    provider_usage.update(
+        {
+            "generation_cost_usd": round(generation_cost_microusd / 1_000_000, 6),
+            "generation_cost_microusd": generation_cost_microusd,
+            "cost_usd": round(generation_cost_microusd / 1_000_000, 6),
+            "cost_microusd": generation_cost_microusd,
+            "cost_source": "openrouter_generation_stats",
+            "cost_reconciliation_status": "confirmed",
+        }
+    )
+    if generation_cost_microusd != usage_cost_microusd:
+        provider_usage["usage_generation_cost_delta_microusd"] = generation_cost_microusd - usage_cost_microusd
+    return provider_usage, generation_cost_microusd
+
+
+def _fetch_openrouter_generation_stats(
+    *,
+    api_key: str,
+    response_id: str,
+    opener: Any | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    if not api_key or not response_id:
+        return None, "missing_inputs"
+    open_fn = opener or urlrequest.urlopen
+    query = urlparse.urlencode({"id": response_id})
+    req = urlrequest.Request(
+        f"{_OPENROUTER_GENERATION_STATS_URL}?{query}",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    last_status = "not_attempted"
+    for attempt in range(1, _OPENROUTER_GENERATION_STATS_ATTEMPTS + 1):
+        try:
+            with open_fn(req, timeout=_OPENROUTER_GENERATION_STATS_TIMEOUT_SECONDS) as response:
+                decoded = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            last_status = f"http_{int(exc.code)}"
+            if int(exc.code) not in _OPENROUTER_GENERATION_STATS_RETRYABLE_HTTP_CODES:
+                logger.warning(
+                    "research_lab_openrouter_generation_stats_failed response_id=%s status=%s",
+                    compact_ref(response_id),
+                    last_status,
+                )
+                return None, last_status
+        except URLError as exc:
+            last_status = f"url_error:{type(exc.reason).__name__}"
+        except TimeoutError:
+            last_status = "timeout"
+        except Exception as exc:
+            last_status = f"error:{type(exc).__name__}"
+            logger.warning(
+                "research_lab_openrouter_generation_stats_error response_id=%s status=%s",
+                compact_ref(response_id),
+                last_status,
+            )
+            return None, last_status
+        else:
+            data = decoded.get("data") if isinstance(decoded, Mapping) else None
+            if isinstance(data, Mapping):
+                return dict(data), "ok"
+            logger.warning(
+                "research_lab_openrouter_generation_stats_invalid_response response_id=%s",
+                compact_ref(response_id),
+            )
+            return None, "invalid_response"
+        if attempt < _OPENROUTER_GENERATION_STATS_ATTEMPTS:
+            delay_index = min(attempt - 1, len(_OPENROUTER_GENERATION_STATS_RETRY_DELAYS_SECONDS) - 1)
+            time.sleep(_OPENROUTER_GENERATION_STATS_RETRY_DELAYS_SECONDS[delay_index])
+
+    logger.warning(
+        "research_lab_openrouter_generation_stats_unavailable response_id=%s status=%s attempts=%s",
+        compact_ref(response_id),
+        last_status,
+        _OPENROUTER_GENERATION_STATS_ATTEMPTS,
+    )
+    return None, last_status
+
+
 def _safe_cost_details(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
@@ -2078,6 +2251,17 @@ def _safe_cost_details(value: Any) -> dict[str, Any]:
         if isinstance(item, (str, int, float, bool)) or item is None:
             allowed[key] = item
     return allowed
+
+
+def _safe_generation_stats(value: Mapping[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key in sorted(_OPENROUTER_GENERATION_STATS_FIELDS):
+        if key not in value:
+            continue
+        item = value.get(key)
+        if isinstance(item, (str, int, float, bool)) or item is None:
+            safe[key] = item
+    return safe
 
 
 @contextmanager

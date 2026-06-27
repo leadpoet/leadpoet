@@ -432,7 +432,15 @@ async def _llm_hq_match(
     # No HQ location on LinkedIn page.
     if not sd_hq and not sd_address:
         if not location_required:
-            print("   ✅ HQ location: not required by ICP and absent from LinkedIn — skipped")
+            # Nothing to verify and nothing the ICP asked for: don't reject the
+            # lead, but flag the HQ as UNVERIFIED so the miner's (unverifiable)
+            # claimed location is recorded as not-confirmed downstream rather
+            # than being presented as a verified HQ.  Without a LinkedIn HQ to
+            # check against, the submitted location could be fabricated; since
+            # location isn't an ICP criterion it can't bypass a filter or
+            # affect score, but it must not be marked verified.
+            lead["_hq_location_unverified"] = True
+            print("   ⚠️ HQ location: not required by ICP and absent from LinkedIn — passing UNVERIFIED")
             return True
         print("   ❌ No HQ location on LinkedIn page")
         return False
@@ -1066,7 +1074,9 @@ async def fulfillment_company_verification(
     # ---- Populate lead dict for downstream ----
     lead["stage5_name_match"] = True
     lead["stage5_size_match"] = True
-    lead["stage5_hq_match"] = True
+    # HQ is "matched" unless it was skipped as unverified (location not required
+    # AND no LinkedIn HQ to verify the miner's claim against) — see _llm_hq_match.
+    lead["stage5_hq_match"] = not lead.get("_hq_location_unverified", False)
     lead["stage5_industry_match"] = True
     lead["stage5_extracted_name"] = sd_name
     lead["stage5_extracted_size"] = sd_size_clean

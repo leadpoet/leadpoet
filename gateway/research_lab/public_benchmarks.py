@@ -9,7 +9,6 @@ from typing import Any, Mapping, Optional, Sequence
 from gateway.research_lab.bundles import contains_secret_material, sha256_json
 
 
-ZERO_LEAD_SCORE_THRESHOLD = 1e-9
 DEFAULT_PUBLIC_ICPS_PER_DAY = 3
 DEFAULT_PUBLIC_WEAK_PER_DAY = 2
 SPLIT_POLICY = "global_score_rank_public_split:v2"
@@ -68,28 +67,21 @@ def build_public_benchmark_report(
     split_by_ref = {str(row["icp_ref"]): row for row in split}
     bucket_rows: list[dict[str, Any]] = []
     public_icps: list[dict[str, Any]] = []
-    error_counts: Counter[str] = Counter()
+    failure_counts: Counter[str] = Counter()
+    model_issue_counts: Counter[str] = Counter()
+    model_issue_public_icps: dict[str, list[dict[str, Any]]] = {}
     score_bands: Counter[str] = Counter()
-    zero_lead_count = 0
-    low_intent_count = 0
-    low_icp_fit_count = 0
 
     for index, summary in enumerate(per_icp_summaries, start=1):
         diagnostics = summary.get("diagnostics") if isinstance(summary.get("diagnostics"), Mapping) else {}
-        failures = Counter(str(key) for key in diagnostics.get("failure_categories", []) if key)
-        error_counts.update(failures)
+        failures = _normalized_failure_categories(diagnostics.get("failure_categories", []))
         score = float(summary.get("score") or 0.0)
         band = _score_band(score)
         score_bands[band] += 1
         company_count = int(summary.get("company_count") or 0)
-        if company_count <= 0 or score <= ZERO_LEAD_SCORE_THRESHOLD:
-            zero_lead_count += 1
-        if float(diagnostics.get("avg_intent_signal_final") or 0.0) < 15.0:
-            low_intent_count += 1
-        if float(diagnostics.get("avg_icp_fit") or 0.0) < 15.0:
-            low_icp_fit_count += 1
         icp_ref = str(summary.get("icp_ref") or "")
         split_row = split_by_ref.get(icp_ref)
+        is_public = bool(split_row and split_row.get("visibility") == "public")
         bucket_rows.append(
             {
                 "item_rank": index,
@@ -103,11 +95,24 @@ def build_public_benchmark_report(
                 "intent_category_bucket": _bucket_text(summary.get("intent_category_bucket")),
                 "score_band": band,
                 "company_count_band": _count_band(company_count),
-                "failure_categories": sorted(failures),
+                "failure_categories": failures if is_public else [],
             }
         )
-        if split_row and split_row.get("visibility") == "public":
+        if is_public and split_row:
             public_icps.append(_public_icp_entry(split_row))
+            failure_counts.update(failures)
+            for issue_key in _model_issue_keys_for_public_summary(
+                summary=summary,
+                failure_categories=failures,
+            ):
+                model_issue_counts[issue_key] += 1
+                model_issue_public_icps.setdefault(issue_key, []).append(
+                    _model_issue_public_icp_entry(
+                        row=split_row,
+                        summary=summary,
+                        industry_bucket=_bucket_text(summary.get("industry")),
+                    )
+                )
 
     split_summary = _visibility_split_summary(split) if split else {
         "split_policy": "summary_only",
@@ -117,7 +122,7 @@ def build_public_benchmark_report(
     }
 
     report = {
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "report_type": "research_lab_public_daily_benchmark",
         "benchmark_date": str(benchmark_date),
         "rolling_window_hash": str(rolling_window_hash),
@@ -126,11 +131,16 @@ def build_public_benchmark_report(
         "item_count": len(bucket_rows),
         "public_icp_count": len(public_icps),
         "private_holdout_icp_count": int(split_summary.get("private_count") or 0),
-        "zero_lead_icp_count": zero_lead_count,
-        "low_intent_fit_icp_count": low_intent_count,
-        "low_icp_fit_count": low_icp_fit_count,
+        "zero_lead_icp_count": int(model_issue_counts.get("zero_company_results", 0)),
+        "low_intent_fit_icp_count": int(model_issue_counts.get("low_intent_fit", 0)),
+        "low_icp_fit_count": int(model_issue_counts.get("icp_or_geo_mismatch", 0)),
         "score_band_counts": dict(sorted(score_bands.items())),
-        "failure_category_counts": dict(sorted(error_counts.items())),
+        "failure_category_counts": dict(sorted(failure_counts.items())),
+        "model_issue_counts": dict(sorted(model_issue_counts.items())),
+        "model_issue_public_icps": {
+            key: sorted(rows, key=lambda row: int(row.get("item_rank") or 0))
+            for key, rows in sorted(model_issue_public_icps.items())
+        },
         "visibility_split": split_summary,
         "public_icps": public_icps,
         "icp_buckets": bucket_rows,
@@ -361,6 +371,53 @@ def _public_icp_doc(value: Any) -> Any:
 def _public_icp_key_allowed(key: str) -> bool:
     lowered = key.lower()
     return not any(marker in lowered for marker in PUBLIC_ICP_FORBIDDEN_KEY_MARKERS)
+
+
+def _normalized_failure_categories(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw = [value]
+    elif isinstance(value, Sequence):
+        raw = [str(item) for item in value if str(item).strip()]
+    else:
+        raw = []
+    categories = {item.strip() for item in raw if item.strip()}
+    if "provider_http_4xx" in categories or "provider_http_5xx" in categories:
+        categories.discard("runtime_provider_error")
+    return sorted(categories)
+
+
+def _model_issue_keys_for_public_summary(
+    *,
+    summary: Mapping[str, Any],
+    failure_categories: Sequence[str],
+) -> list[str]:
+    keys = set(str(item) for item in failure_categories if str(item).strip())
+    company_count = int(summary.get("company_count") or 0)
+    diagnostics = summary.get("diagnostics") if isinstance(summary.get("diagnostics"), Mapping) else {}
+    if company_count <= 0:
+        keys.add("zero_company_results")
+    elif not keys and float(diagnostics.get("avg_intent_signal_final") or 0.0) < 15.0:
+        keys.add("low_intent_fit")
+    return sorted(keys)
+
+
+def _model_issue_public_icp_entry(
+    *,
+    row: Mapping[str, Any],
+    summary: Mapping[str, Any],
+    industry_bucket: str,
+) -> dict[str, Any]:
+    return {
+        "item_rank": int(row.get("item_rank") or 0),
+        "icp_ref": str(row.get("icp_ref") or ""),
+        "icp_hash": str(row.get("icp_hash") or ""),
+        "set_id": int(row.get("set_id") or 0),
+        "day_index": int(row.get("day_index") or 0),
+        "day_rank": int(row.get("day_rank") or 0),
+        "industry_bucket": str(industry_bucket),
+        "score": round(float(summary.get("score") or 0.0), 6),
+        "company_count": int(summary.get("company_count") or 0),
+    }
 
 
 def _set_id_from_item(item: Mapping[str, Any]) -> int:

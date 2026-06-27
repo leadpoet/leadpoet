@@ -35,8 +35,8 @@ def main() -> int:
             errors.append(f"public benchmark report leaked forbidden marker: {forbidden}")
     if "intent_signals" not in encoded:
         errors.append("public benchmark report must expose exact intent_signals for public ICPs")
-    if report["schema_version"] != "1.1":
-        errors.append(f"public benchmark report schema was not 1.1: {report['schema_version']}")
+    if report["schema_version"] != "1.2":
+        errors.append(f"public benchmark report schema was not 1.2: {report['schema_version']}")
     if report["item_count"] != 6:
         errors.append(f"public benchmark report expected 6 total ICPs, got {report['item_count']}")
     if report["public_icp_count"] != 3:
@@ -52,8 +52,24 @@ def main() -> int:
         errors.append(f"private split did not reserve 1 weak / 2 strong ICPs: {split['private_strength_counts']}")
     if report["zero_lead_icp_count"] != 1:
         errors.append("zero-lead ICP count did not match expected value")
+    if report["low_intent_fit_icp_count"] != 1:
+        errors.append("public low-intent ICP count did not match expected value")
+    if report["low_icp_fit_count"] != 0:
+        errors.append("ICP mismatch count must not be derived from avg_icp_fit")
     if report["failure_category_counts"].get("hallucinated_or_generic_intent") != 1:
         errors.append("hallucinated/generic intent failure was not counted")
+    issue_counts = report.get("model_issue_counts", {})
+    if issue_counts.get("zero_company_results") != 1:
+        errors.append("model_issue_counts did not include the public zero-company ICP")
+    if issue_counts.get("low_intent_fit") != 1:
+        errors.append("model_issue_counts did not include the public low-intent ICP")
+    if issue_counts.get("hallucinated_or_generic_intent") != 1:
+        errors.append("model_issue_counts did not include the public hallucinated/generic ICP")
+    issue_icps = report.get("model_issue_public_icps", {})
+    for issue_key in ("zero_company_results", "low_intent_fit", "hallucinated_or_generic_intent"):
+        rows = issue_icps.get(issue_key) if isinstance(issue_icps, dict) else None
+        if not isinstance(rows, list) or not rows:
+            errors.append(f"model issue {issue_key} did not map to public ICP rows")
 
     daily_counts = _daily_counts_from_score_bundle(_score_bundle())
     if daily_counts != {str(day): 6 for day in range(100, 110)}:

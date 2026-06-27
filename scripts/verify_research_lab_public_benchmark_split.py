@@ -27,12 +27,14 @@ def main() -> int:
     deterministic_errors = _verify_controlled_split()
     skewed_errors = _verify_skewed_global_split()
     launch_config_errors = _verify_20_icp_total_split()
+    issue_scope_errors = _verify_public_only_model_issues()
     fuzz_errors = _verify_fuzzed_splits(seed=71060, runs=200)
     secret_errors = _verify_secret_rejection()
     migration_errors = _verify_migration_policy()
     errors.extend(deterministic_errors)
     errors.extend(skewed_errors)
     errors.extend(launch_config_errors)
+    errors.extend(issue_scope_errors)
     errors.extend(fuzz_errors)
     errors.extend(secret_errors)
     errors.extend(migration_errors)
@@ -64,8 +66,8 @@ def _verify_controlled_split() -> list[str]:
     )
     errors = _assert_split(split)
     encoded = json.dumps(report, sort_keys=True).lower()
-    if report.get("schema_version") != "1.1":
-        errors.append("public report schema must be 1.1")
+    if report.get("schema_version") != "1.2":
+        errors.append("public report schema must be 1.2")
     if report.get("public_icp_count") != 30:
         errors.append(f"public report must expose 30 ICPs, got {report.get('public_icp_count')}")
     if report.get("private_holdout_icp_count") != 30:
@@ -171,6 +173,95 @@ def _verify_20_icp_total_split() -> list[str]:
             "20-ICP launch report must expose 10 public ICPs and withhold 10 private ICPs, "
             f"got public={report.get('public_icp_count')} private={report.get('private_holdout_icp_count')}"
         )
+    return errors
+
+
+def _verify_public_only_model_issues() -> list[str]:
+    items, summaries = _fixture_20()
+    split = build_benchmark_visibility_split(
+        rolling_window_hash="sha256:" + "5" * 64,
+        benchmark_items=items,
+        per_icp_summaries=summaries,
+        public_icps_per_day=1,
+        public_weak_per_day=1,
+        public_total_icps=10,
+        public_weak_total=7,
+    )
+    public_refs = [
+        str(item.get("icp_ref"))
+        for item in split.get("items", [])
+        if item.get("visibility") == "public"
+    ]
+    private_refs = [
+        str(item.get("icp_ref"))
+        for item in split.get("items", [])
+        if item.get("visibility") == "private"
+    ]
+    if len(public_refs) < 3 or not private_refs:
+        return ["public-only issue fixture did not produce enough public/private ICPs"]
+
+    for summary in summaries:
+        ref = str(summary.get("icp_ref"))
+        diagnostics = dict(summary.get("diagnostics") or {})
+        diagnostics["failure_categories"] = []
+        diagnostics["avg_intent_signal_final"] = 40.0
+        if ref == public_refs[0]:
+            summary["company_count"] = 0
+            diagnostics["failure_categories"] = ["runtime_provider_error", "provider_http_5xx"]
+            diagnostics["avg_intent_signal_final"] = 0.0
+        elif ref == public_refs[1]:
+            summary["company_count"] = 2
+            diagnostics["avg_intent_signal_final"] = 10.0
+        elif ref == public_refs[2]:
+            summary["company_count"] = 2
+            diagnostics["avg_icp_fit"] = 0.0
+        elif ref == private_refs[0]:
+            summary["company_count"] = 3
+            diagnostics["failure_categories"] = [
+                "company_verification_failed",
+                "hallucinated_or_generic_intent",
+            ]
+        summary["diagnostics"] = diagnostics
+
+    report = build_public_benchmark_report(
+        benchmark_date="2026-06-25",
+        rolling_window_hash="sha256:" + "5" * 64,
+        aggregate_score=42.0,
+        benchmark_items=items,
+        per_icp_summaries=summaries,
+        public_icps_per_day=1,
+        public_weak_per_day=1,
+        public_total_icps=10,
+        public_weak_total=7,
+    )
+    errors: list[str] = []
+    issue_counts = report.get("model_issue_counts", {})
+    if issue_counts.get("provider_http_5xx") != 1:
+        errors.append(f"public provider issue count wrong: {issue_counts}")
+    if issue_counts.get("runtime_provider_error"):
+        errors.append("runtime_provider_error must be suppressed when provider_http_5xx is present")
+    if issue_counts.get("zero_company_results") != 1:
+        errors.append(f"public zero-company count wrong: {issue_counts}")
+    if issue_counts.get("low_intent_fit") != 1:
+        errors.append(f"public low-intent count wrong: {issue_counts}")
+    if issue_counts.get("icp_or_geo_mismatch") or report.get("low_icp_fit_count"):
+        errors.append("ICP mismatch must not be derived from avg_icp_fit")
+    for private_key in ("company_verification_failed", "hallucinated_or_generic_intent"):
+        if issue_counts.get(private_key) or report.get("failure_category_counts", {}).get(private_key):
+            errors.append(f"private issue leaked into public model issues: {private_key}")
+    issue_icps = report.get("model_issue_public_icps", {})
+    provider_rows = issue_icps.get("provider_http_5xx") if isinstance(issue_icps, dict) else None
+    if not isinstance(provider_rows, list) or len(provider_rows) != 1:
+        errors.append("provider issue must map to exactly one public ICP")
+    elif provider_rows[0].get("icp_ref") != public_refs[0]:
+        errors.append("provider issue mapped to the wrong public ICP")
+    private_bucket_failures = [
+        row.get("failure_categories")
+        for row in report.get("icp_buckets", [])
+        if row.get("visibility") == "private" and row.get("failure_categories")
+    ]
+    if private_bucket_failures:
+        errors.append("private icp_buckets rows must not expose failure_categories")
     return errors
 
 

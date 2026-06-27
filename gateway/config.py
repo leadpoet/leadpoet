@@ -8,6 +8,8 @@ Environment variables should be set in .env file in project root.
 """
 
 import os
+import re
+from pathlib import Path
 
 # Load environment variables from .env file (if dotenv available)
 try:
@@ -16,6 +18,46 @@ try:
 except ImportError:
     # dotenv not installed - environment variables must be set directly
     pass
+
+
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _load_gateway_env_file(path: Path) -> None:
+    """Load newline- or NUL-separated KEY=VALUE entries without overriding env."""
+    if not path.is_file():
+        return
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        import warnings
+
+        warnings.warn(f"Gateway env file unreadable at {path}: {exc}")
+        return
+
+    loaded = 0
+    for raw in re.split(rb"[\n\0]+", data):
+        line = raw.strip()
+        if not line or line.startswith(b"#") or b"=" not in line:
+            continue
+        key_raw, value_raw = line.split(b"=", 1)
+        key = key_raw.decode("utf-8", errors="ignore").strip()
+        if not _ENV_KEY_RE.fullmatch(key):
+            continue
+        if key in os.environ:
+            continue
+        value = value_raw.decode("utf-8", errors="ignore").strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ[key] = value
+        loaded += 1
+
+    if loaded:
+        print(f"Loaded {loaded} fallback env var(s) from {path}", flush=True)
+
+
+_gateway_env_file = os.getenv("GATEWAY_ENV_FILE", "/home/ec2-user/gw.environ")
+_load_gateway_env_file(Path(_gateway_env_file).expanduser())
 
 if os.getenv("AWS_PROFILE") and os.getenv("LEADPOET_AWS_PROFILE_OVERRIDES_ENV_KEYS", "true").lower() == "true":
     # Local/testnet operators often use a named AWS profile while .env still

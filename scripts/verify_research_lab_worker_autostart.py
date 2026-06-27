@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +75,31 @@ def main() -> int:
     )
     assert no_flags.hosted.enabled is False
     assert no_flags.hosted.reason == "hosted_runs_disabled"
+
+    with TemporaryDirectory() as tmp:
+        proxy_file = Path(tmp) / ".env.docker"
+        proxy_file.write_text(
+            "\n".join(
+                [
+                    *(f'RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_{idx}="http://hosted-{idx}.example:8000"' for idx in range(1, 6)),
+                    *(f'RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_{idx}="http://scoring-{idx}.example:9000"' for idx in range(1, 6)),
+                    'OPENROUTER_API_KEY="not-loaded-by-proxy-loader"',
+                ]
+            ),
+            encoding="utf-8",
+        )
+        file_env_plan = build_research_lab_worker_autostart_plan(
+            {
+                **_base_env(),
+                "RESEARCH_LAB_WORKER_PROXY_ENV_FILE": str(proxy_file),
+            }
+        )
+        assert file_env_plan.hosted.enabled is True
+        assert file_env_plan.hosted.worker_count == 5
+        assert len(file_env_plan.hosted.proxy_refs) == 5
+        assert file_env_plan.scoring.enabled is True
+        assert file_env_plan.scoring.worker_count == 5
+        assert len(file_env_plan.scoring.proxy_refs) == 5
 
     print("research lab worker autostart verification passed")
     return 0

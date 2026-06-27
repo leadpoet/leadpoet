@@ -769,6 +769,10 @@ async def score_company_autoresearch_intent_signal(
                 company_linkedin=getattr(company, "company_linkedin", "") or "",
                 product_service_context=getattr(icp, "product_service", "") or "",
                 trust_signal_date=trust_signal_date,
+                # Research-lab autoresearch path only: declaw Stage-1's blind
+                # reject so Stage 3 makes the call. Fulfillment calls
+                # _score_single_intent_signal directly and keeps the default.
+                stage1_soft_reject=True,
             )
         )
         if no_time_decay:
@@ -1050,6 +1054,7 @@ async def _score_single_intent_signal(
     company_linkedin: str = "",
     product_service_context: str = "",
     trust_signal_date: bool = False,
+    stage1_soft_reject: bool = False,
 ) -> Tuple[float, int, str, Optional[str], int]:
     """
     Verify and score a single intent signal.
@@ -1224,6 +1229,7 @@ async def _score_single_intent_signal(
                 target_signal_text=target_signal_text,
                 miner_signal_date=(str(signal.date) if signal.date else None),
                 evidence_type=target_evidence_type,
+                stage1_soft_reject=stage1_soft_reject,
             )
     except Exception as three_stage_error:
         logger.error(

@@ -494,11 +494,16 @@ def _append_bonus_intents_to_icp_signals(icp: Mapping[str, Any]) -> dict[str, An
     out = dict(icp)
     signals: list[str] = []
     evidence_types: list[str | None] = []
+    # The required intent_signals are plain strings post-canonicalization, so their
+    # evidence_type isn't on the entry — fall back to the ICP's flat intent_category
+    # so the verifier still routes required SOCIAL_POSTING / TECHSTACK /
+    # PODCAST_APPEARANCE intents to their per-type module instead of the default.
+    required_evidence_type = (str(out.get("intent_category") or "").strip().upper() or None)
     for signal in out.get("intent_signals") or []:
         text = _text_from_signal_like(signal)
         if text and text not in signals:
             signals.append(text)
-            evidence_types.append(_evidence_type_from_signal_like(signal))
+            evidence_types.append(_evidence_type_from_signal_like(signal) or required_evidence_type)
     for bonus in out.get("bonus_intents") or []:
         if not isinstance(bonus, Mapping):
             continue

@@ -1189,6 +1189,7 @@ async def verify_three_stage(
     stage3_model: Optional[str] = None,
     miner_signal_date: Optional[str] = None,
     evidence_type: Optional[str] = None,
+    stage1_soft_reject: bool = False,
 ) -> Dict[str, Any]:
     """3-stage intent verification (sonar -> SD/Exa -> sonar-pro).
 
@@ -1308,6 +1309,12 @@ async def verify_three_stage(
         # We do NOT override `wrong_entity` rejects that are actually
         # for claim-mismatch (same_entity_check != "fail"), nor any
         # other reject status like `contradicted`.
+        # A DEFINITIVE wrong-entity (entity mismatch on a URL that is NOT on
+        # the lead's own domain) is a cheap, reliable "different company"
+        # filter and always hard-rejects.
+        definitively_wrong_entity = (
+            s1_item.get("same_entity_check") == "fail" and not _on_lead_domain
+        )
         if (
             _on_lead_domain
             and s1_item.get("signal_status") == "wrong_entity"
@@ -1317,6 +1324,17 @@ async def verify_three_stage(
             stage1_info["decision"] = "review"
             stage1_info["same_entity_check"] = "pass"
             stage1_info["domain_override"] = "url_on_lead_domain"
+            # Fall through to Stage 2/3 below
+        elif stage1_soft_reject and not definitively_wrong_entity:
+            # Research-lab opt-in (default OFF, so fulfillment is unchanged):
+            # Stage 1 is blind `sonar` (it never reads the cited URL) and
+            # false-rejects valid evidence as contradicted / unable_to_verify.
+            # Downgrade every non-definitive-wrong-entity reject to review so
+            # Stage 2 (fetch the real URL) + Stage 3 (`sonar-pro` reads it)
+            # make the final call instead of trusting Stage 1's blind verdict.
+            stage1_info["status"] = "review"
+            stage1_info["decision"] = "review"
+            stage1_info["stage1_reject_downgraded"] = s1_item.get("signal_status") or "reject"
             # Fall through to Stage 2/3 below
         else:
             return {

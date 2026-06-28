@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import posixpath
 import re
@@ -76,6 +76,9 @@ class CodeEditDraft:
         payload["target_files"] = list(self.target_files)
         payload["unified_diff_hash"] = sha256_json({"unified_diff": self.unified_diff})
         return payload
+
+    def with_unified_diff(self, unified_diff: str) -> "CodeEditDraft":
+        return replace(self, unified_diff=normalize_unified_diff_text(unified_diff))
 
 
 @dataclass(frozen=True)
@@ -251,6 +254,69 @@ def build_code_edit_auto_research_messages(
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
+def build_code_edit_repair_messages(
+    *,
+    draft: CodeEditDraft,
+    apply_error: str,
+    source_inspection_context: Mapping[str, Any],
+    runtime_source_context: Mapping[str, Any] | None,
+    budget_context: Mapping[str, Any] | None,
+    repair_attempt: int,
+    max_candidates: int = 1,
+) -> list[dict[str, str]]:
+    """Ask the model to repair a generated diff that failed git apply."""
+
+    source_context = _redacted_source_context(runtime_source_context or {})
+    inspection_context = _redacted_source_context(source_inspection_context or {})
+    context = {
+        "repair_attempt": max(1, int(repair_attempt)),
+        "failed_patch": {
+            "lane": draft.lane,
+            "target_files": list(draft.target_files),
+            "unified_diff": normalize_unified_diff_text(draft.unified_diff),
+            "unified_diff_hash": sha256_json({"unified_diff": draft.unified_diff}),
+            "hypothesis": {
+                "failure_mode": draft.failure_mode,
+                "mechanism": draft.mechanism,
+                "expected_improvement": draft.expected_improvement,
+                "risk": draft.risk,
+                "predicted_delta": draft.predicted_delta,
+            },
+            "redacted_summary": draft.redacted_summary,
+            "test_plan": draft.test_plan,
+            "rollback_plan": draft.rollback_plan,
+        },
+        "git_apply_error": str(apply_error or "")[:2000],
+        "runtime_source_context": source_context,
+        "source_inspection_context": inspection_context,
+        "budget_context": _redacted_mapping(budget_context or {}),
+        "max_candidates": max(1, int(max_candidates)),
+    }
+    system = (
+        "You are Leadpoet Research Lab's patch repair engine. A previous "
+        "code-edit diff failed git apply against the extracted current ECR image "
+        "source. Repair only the unified diff formatting or hunk context needed "
+        "to make it apply. Do not broaden scope, change intent, add files, edit "
+        "unread files, or use external knowledge."
+    )
+    user = (
+        "Return strict JSON only, no markdown.\n\n"
+        "Repair the failed patch so it applies cleanly to the exact source shown "
+        "in source_inspection_context. Keep the same improvement intent and only "
+        "target files listed in source_inspection_context.read_files.\n\n"
+        "Rules:\n"
+        "- Output the same candidates JSON shape used by the original code-edit draft.\n"
+        "- Include exactly one candidate.\n"
+        "- The unified_diff must start at the diff header or ---/+++ header; no prose.\n"
+        "- Do not create new files.\n"
+        "- Do not edit dependency, Docker, CI, env, credential, or lock files.\n"
+        "- Do not include secrets, hidden ICPs, judge prompts, or provider keys.\n\n"
+        "Context JSON:\n"
+        + json.dumps(context, sort_keys=True, separators=(",", ":"))
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
 def parse_code_edit_source_inspection_response(
     raw_text: str,
     *,
@@ -315,7 +381,7 @@ def parse_code_edit_response(raw_text: str, *, max_candidates: int = 1) -> list[
         if not isinstance(hypothesis, Mapping) or not isinstance(code_edit, Mapping):
             raise ValueError("candidate requires hypothesis and code_edit objects")
         target_files = tuple(_normalize_repo_path(path) for path in code_edit.get("target_files") or ())
-        unified_diff = str(code_edit.get("unified_diff") or "")
+        unified_diff = normalize_unified_diff_text(str(code_edit.get("unified_diff") or ""))
         if not unified_diff.strip():
             raise ValueError("code_edit.unified_diff is required")
         draft = CodeEditDraft(
@@ -334,6 +400,38 @@ def parse_code_edit_response(raw_text: str, *, max_candidates: int = 1) -> list[
         validate_code_edit_draft(draft)
         drafts.append(draft)
     return drafts
+
+
+def normalize_unified_diff_text(value: str) -> str:
+    """Normalize common LLM wrappers without changing patch semantics."""
+
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].lstrip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    diff_index = text.find("diff --git ")
+    if diff_index > 0:
+        text = text[diff_index:].strip()
+    elif diff_index < 0:
+        header_candidates = [
+            index
+            for marker in ("\n--- ", "--- ")
+            if (index := text.find(marker)) >= 0
+        ]
+        if header_candidates:
+            start = min(header_candidates)
+            if text[start:].startswith("\n"):
+                start += 1
+            text = text[start:].strip()
+    if text.startswith("```"):
+        return normalize_unified_diff_text(text)
+    return text.rstrip() + "\n"
 
 
 def validate_code_edit_draft(

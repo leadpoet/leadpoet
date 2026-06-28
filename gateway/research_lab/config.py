@@ -335,6 +335,7 @@ class ResearchLabGatewayConfig:
     code_edit_source_inspection_file_bytes: int = 24_000
     code_edit_source_inspection_total_bytes: int = 120_000
     code_edit_source_inspection_search_matches: int = 30
+    code_edit_patch_repair_attempts: int = 2
     score_bundle_kms_key_id: str = "alias/leadpoet-research-lab-artifact-signing"
     score_bundle_signature_uri_prefix: str = ""
     auto_research_model: str = ""
@@ -607,6 +608,10 @@ class ResearchLabGatewayConfig:
             code_edit_source_inspection_search_matches=max(
                 1,
                 _int("RESEARCH_LAB_CODE_EDIT_SOURCE_INSPECTION_SEARCH_MATCHES", 30),
+            ),
+            code_edit_patch_repair_attempts=max(
+                0,
+                _int("RESEARCH_LAB_CODE_EDIT_PATCH_REPAIR_ATTEMPTS", 2),
             ),
             score_bundle_kms_key_id=os.getenv(
                 "RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID",
@@ -917,6 +922,7 @@ class ResearchLabGatewayConfig:
                     "total_bytes": self.code_edit_source_inspection_total_bytes,
                     "search_matches": self.code_edit_source_inspection_search_matches,
                 },
+                "code_edit_patch_repair_attempts": self.code_edit_patch_repair_attempts,
                 "auto_research_model_configured": bool(self.auto_research_model),
                 "approved_model_tiers": {
                     tier: {

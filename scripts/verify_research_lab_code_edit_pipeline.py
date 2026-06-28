@@ -16,6 +16,7 @@ from research_lab.canonical import sha256_json  # noqa: E402
 from research_lab.code_editing import (  # noqa: E402
     CodeEditDraft,
     code_edit_candidate_manifest,
+    normalize_unified_diff_text,
     parse_code_edit_response,
 )
 from research_lab.eval import PrivateModelArtifactManifest, SealedBenchmarkSet  # noqa: E402
@@ -54,11 +55,11 @@ def _valid_response() -> str:
                         "predicted_delta": 1.0,
                     },
                     "code_edit": {
-                        "target_files": ["src/query_builder.py"],
+                        "target_files": ["sourcing_model/query_builder.py"],
                         "unified_diff": (
-                            "diff --git a/src/query_builder.py b/src/query_builder.py\n"
-                            "--- a/src/query_builder.py\n"
-                            "+++ b/src/query_builder.py\n"
+                            "diff --git a/sourcing_model/query_builder.py b/sourcing_model/query_builder.py\n"
+                            "--- a/sourcing_model/query_builder.py\n"
+                            "+++ b/sourcing_model/query_builder.py\n"
                             "@@ -1,2 +1,2 @@\n"
                             "-QUERY_SUFFIX = \"\"\n"
                             "+QUERY_SUFFIX = \" buying intent evidence\"\n"
@@ -77,13 +78,24 @@ def test_code_edit_parser_accepts_safe_diff() -> CodeEditDraft:
     drafts = parse_code_edit_response(_valid_response(), max_candidates=1)
     assert len(drafts) == 1
     draft = drafts[0]
-    assert draft.target_files == ("src/query_builder.py",)
+    assert draft.target_files == ("sourcing_model/query_builder.py",)
     assert "buying intent evidence" in draft.unified_diff
     return draft
 
 
+def test_code_edit_parser_normalizes_markdown_wrapped_diff() -> None:
+    payload = json.loads(_valid_response())
+    code_edit = payload["candidates"][0]["code_edit"]
+    code_edit["unified_diff"] = "Here is the patch:\n```diff\n" + code_edit["unified_diff"] + "```\n"
+    wrapped = json.dumps(payload)
+    drafts = parse_code_edit_response(wrapped, max_candidates=1)
+    assert drafts[0].unified_diff.startswith("diff --git ")
+    assert not drafts[0].unified_diff.startswith("Here is the patch")
+    assert normalize_unified_diff_text("```diff\ndiff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n```").startswith("diff --git ")
+
+
 def test_code_edit_parser_rejects_dependency_edit() -> None:
-    raw = _valid_response().replace("src/query_builder.py", "requirements.txt")
+    raw = _valid_response().replace("sourcing_model/query_builder.py", "requirements.txt")
     try:
         parse_code_edit_response(raw, max_candidates=1)
     except ValueError as exc:
@@ -200,6 +212,7 @@ async def test_image_build_score_bundle_contract(draft: CodeEditDraft) -> None:
 
 def main() -> None:
     draft = test_code_edit_parser_accepts_safe_diff()
+    test_code_edit_parser_normalizes_markdown_wrapped_diff()
     test_code_edit_parser_rejects_dependency_edit()
     test_candidate_artifact_contract_requires_image_build()
     asyncio.run(test_image_build_score_bundle_contract(draft))

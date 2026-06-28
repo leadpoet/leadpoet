@@ -32,6 +32,35 @@ from research_lab.eval import (
 class CodeEditBuildError(RuntimeError):
     """Raised when a code-edit candidate cannot be built safely."""
 
+    default_failure_stage = "candidate_build_failed"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_stage: str | None = None,
+        stderr: str = "",
+        stdout: str = "",
+        exit_code: int | None = None,
+    ):
+        super().__init__(message)
+        self.failure_stage = failure_stage or self.default_failure_stage
+        self.stderr = stderr
+        self.stdout = stdout
+        self.exit_code = exit_code
+
+
+class CodeEditPatchApplyError(CodeEditBuildError):
+    default_failure_stage = "candidate_patch_apply_failed"
+
+
+class CodeEditPrivateTestError(CodeEditBuildError):
+    default_failure_stage = "candidate_test_failed"
+
+
+class CodeEditImageBuildError(CodeEditBuildError):
+    default_failure_stage = "candidate_image_build_failed"
+
 
 @dataclass(frozen=True)
 class CodeEditBuildResult:
@@ -177,6 +206,49 @@ class CodeEditCandidateBuilder:
                 errors.append(f"code_edit_unread_source_file:{path}")
         return errors
 
+    def check_patch_applies(
+        self,
+        *,
+        draft: CodeEditDraft,
+        parent_artifact: PrivateModelArtifactManifest,
+        source_context: ParentImageSourceContext | None = None,
+    ) -> None:
+        """Validate that a draft patch applies before starting the full build."""
+
+        try:
+            validate_code_edit_draft(
+                draft,
+                allowed_prefixes=self.config.code_edit_allowed_path_prefixes(),
+                allowed_exact_paths=self.config.code_edit_allowed_exact_paths(),
+                allowed_suffixes=self.config.code_edit_allowed_suffixes(),
+            )
+        except ValueError as exc:
+            raise CodeEditPatchApplyError(str(exc)) from exc
+        with tempfile.TemporaryDirectory(prefix="research-lab-code-edit-check-") as tmp:
+            tmp_dir = Path(tmp)
+            repo_dir = tmp_dir / "repo"
+            _prepare_parent_image_workspace(
+                image_digest=parent_artifact.image_digest,
+                repo_dir=repo_dir,
+                timeout_seconds=self.config.code_edit_build_timeout_seconds,
+                source_context=source_context,
+            )
+            if source_context is not None:
+                context_errors = self.validate_draft_against_source_context(draft, source_context)
+                if context_errors:
+                    raise CodeEditPatchApplyError("; ".join(context_errors))
+            diff_path = tmp_dir / "candidate.diff"
+            diff_path.write_text(draft.unified_diff, encoding="utf-8")
+            try:
+                _run(["git", "apply", "--recount", "--check", str(diff_path)], cwd=repo_dir, timeout_seconds=120)
+            except CodeEditBuildError as exc:
+                raise CodeEditPatchApplyError(
+                    str(exc),
+                    stderr=exc.stderr,
+                    stdout=exc.stdout,
+                    exit_code=exc.exit_code,
+                ) from exc
+
     def build(
         self,
         *,
@@ -224,32 +296,48 @@ class CodeEditCandidateBuilder:
             if source_context is not None:
                 context_errors = self.validate_draft_against_source_context(draft, source_context)
                 if context_errors:
-                    raise CodeEditBuildError("; ".join(context_errors))
+                    raise CodeEditPatchApplyError("; ".join(context_errors))
             diff_path = tmp_dir / "candidate.diff"
             draft_path = tmp_dir / "code_edit_draft.json"
             parent_manifest_path = tmp_dir / "parent_manifest.json"
             diff_path.write_text(draft.unified_diff, encoding="utf-8")
             draft_path.write_text(json.dumps(draft.to_dict(), sort_keys=True), encoding="utf-8")
             parent_manifest_path.write_text(json.dumps(parent_artifact.to_dict(), sort_keys=True), encoding="utf-8")
-            _run(["git", "apply", "--recount", "--check", str(diff_path)], cwd=repo_dir, timeout_seconds=120)
-            _run(["git", "apply", "--recount", str(diff_path)], cwd=repo_dir, timeout_seconds=120)
+            try:
+                _run(["git", "apply", "--recount", "--check", str(diff_path)], cwd=repo_dir, timeout_seconds=120)
+                _run(["git", "apply", "--recount", str(diff_path)], cwd=repo_dir, timeout_seconds=120)
+            except CodeEditBuildError as exc:
+                raise CodeEditPatchApplyError(
+                    str(exc),
+                    stderr=exc.stderr,
+                    stdout=exc.stdout,
+                    exit_code=exc.exit_code,
+                ) from exc
             changed_files = _changed_files(repo_dir)
             if not changed_files:
-                raise CodeEditBuildError("code edit produced no repository changes")
-            _py_compile_changed_files(repo_dir, changed_files)
-            _run_shell(
-                self.config.private_test_cmd,
-                cwd=repo_dir,
-                env=self._build_env(
-                    draft_path=draft_path,
-                    parent_manifest_path=parent_manifest_path,
-                    diff_path=diff_path,
-                    run_id=run_id,
-                    candidate_index=candidate_index,
-                    include_aws=False,
-                ),
-                timeout_seconds=self.config.code_edit_build_timeout_seconds,
-            )
+                raise CodeEditPatchApplyError("code edit produced no repository changes")
+            try:
+                _py_compile_changed_files(repo_dir, changed_files)
+                _run_shell(
+                    self.config.private_test_cmd,
+                    cwd=repo_dir,
+                    env=self._build_env(
+                        draft_path=draft_path,
+                        parent_manifest_path=parent_manifest_path,
+                        diff_path=diff_path,
+                        run_id=run_id,
+                        candidate_index=candidate_index,
+                        include_aws=False,
+                    ),
+                    timeout_seconds=self.config.code_edit_build_timeout_seconds,
+                )
+            except CodeEditBuildError as exc:
+                raise CodeEditPrivateTestError(
+                    str(exc),
+                    stderr=exc.stderr,
+                    stdout=exc.stdout,
+                    exit_code=exc.exit_code,
+                ) from exc
             _run(["git", "config", "user.name", "Leadpoet Research Lab"], cwd=repo_dir, timeout_seconds=60)
             _run(["git", "config", "user.email", "research-lab@leadpoet.local"], cwd=repo_dir, timeout_seconds=60)
             _run(["git", "add", "-A"], cwd=repo_dir, timeout_seconds=120)
@@ -264,36 +352,44 @@ class CodeEditCandidateBuilder:
                 timeout_seconds=120,
             )
             git_commit_sha = _run(["git", "rev-parse", "HEAD"], cwd=repo_dir, timeout_seconds=60).strip()
-            _run_shell(
-                self.config.private_build_cmd,
-                cwd=repo_dir,
-                env={
-                    **self._build_env(
-                        draft_path=draft_path,
-                        parent_manifest_path=parent_manifest_path,
-                        diff_path=diff_path,
-                        run_id=run_id,
-                        candidate_index=candidate_index,
-                        include_aws=True,
-                    ),
-                    "RESEARCH_LAB_PRIVATE_COMMIT_SHA": git_commit_sha,
-                    "RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT": self.config.private_artifact_manifest_output,
-                },
-                timeout_seconds=self.config.code_edit_build_timeout_seconds,
-            )
+            try:
+                _run_shell(
+                    self.config.private_build_cmd,
+                    cwd=repo_dir,
+                    env={
+                        **self._build_env(
+                            draft_path=draft_path,
+                            parent_manifest_path=parent_manifest_path,
+                            diff_path=diff_path,
+                            run_id=run_id,
+                            candidate_index=candidate_index,
+                            include_aws=True,
+                        ),
+                        "RESEARCH_LAB_PRIVATE_COMMIT_SHA": git_commit_sha,
+                        "RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT": self.config.private_artifact_manifest_output,
+                    },
+                    timeout_seconds=self.config.code_edit_build_timeout_seconds,
+                )
+            except CodeEditBuildError as exc:
+                raise CodeEditImageBuildError(
+                    str(exc),
+                    stderr=exc.stderr,
+                    stdout=exc.stdout,
+                    exit_code=exc.exit_code,
+                ) from exc
             manifest_path = Path(self.config.private_artifact_manifest_output)
             if not manifest_path.is_absolute():
                 manifest_path = repo_dir / manifest_path
             if not manifest_path.exists():
-                raise CodeEditBuildError("private build did not produce artifact manifest output")
+                raise CodeEditImageBuildError("private build did not produce artifact manifest output")
             candidate_manifest = PrivateModelArtifactManifest.from_mapping(
                 json.loads(manifest_path.read_text(encoding="utf-8"))
             )
             errors = validate_private_model_artifact_manifest(candidate_manifest)
             if errors:
-                raise CodeEditBuildError("candidate artifact manifest failed validation: " + "; ".join(errors))
+                raise CodeEditImageBuildError("candidate artifact manifest failed validation: " + "; ".join(errors))
             if candidate_manifest.model_artifact_hash == parent_artifact.model_artifact_hash:
-                raise CodeEditBuildError("candidate artifact hash must differ from parent artifact hash")
+                raise CodeEditImageBuildError("candidate artifact hash must differ from parent artifact hash")
             build_doc = {
                 "schema_version": "1.1",
                 "candidate_kind": "image_build",
@@ -877,7 +973,10 @@ def _run(cmd: list[str], *, cwd: Path, timeout_seconds: int) -> str:
         raise CodeEditBuildError(f"command timed out: {_safe_cmd(cmd)}") from exc
     except subprocess.CalledProcessError as exc:
         raise CodeEditBuildError(
-            f"command failed exit={exc.returncode}: {_safe_cmd(cmd)} stderr={_safe_text(exc.stderr)}"
+            f"command failed exit={exc.returncode}: {_safe_cmd(cmd)} stderr={_safe_text(exc.stderr)}",
+            stderr=_safe_text(exc.stderr, limit=12000),
+            stdout=_safe_text(exc.stdout, limit=12000),
+            exit_code=int(exc.returncode),
         ) from exc
 
 
@@ -898,7 +997,10 @@ def _run_shell(cmd: str, *, cwd: Path, env: Mapping[str, str], timeout_seconds: 
         raise CodeEditBuildError("configured private build/test command timed out") from exc
     except subprocess.CalledProcessError as exc:
         raise CodeEditBuildError(
-            f"configured private build/test command failed exit={exc.returncode} stderr={_safe_text(exc.stderr)}"
+            f"configured private build/test command failed exit={exc.returncode} stderr={_safe_text(exc.stderr)}",
+            stderr=_safe_text(exc.stderr, limit=12000),
+            stdout=_safe_text(exc.stdout, limit=12000),
+            exit_code=int(exc.returncode),
         ) from exc
 
 
@@ -913,8 +1015,8 @@ def _safe_cmd(cmd: list[str]) -> str:
     return " ".join(redacted)
 
 
-def _safe_text(value: str | None) -> str:
+def _safe_text(value: str | None, *, limit: int = 500) -> str:
     text = str(value or "")
     for marker in ("sk-or-", "service_role", "openrouter_api_key", "raw_secret"):
         text = text.replace(marker, "[redacted]")
-    return " ".join(text.split())[:500]
+    return " ".join(text.split())[: max(1, int(limit))]

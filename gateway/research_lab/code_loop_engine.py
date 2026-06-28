@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
+import re
 import tempfile
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from gateway.research_lab.code_build import (
     CodeEditBuildError,
+    CodeEditImageBuildError,
+    CodeEditPatchApplyError,
+    CodeEditPrivateTestError,
     CodeEditBuildResult,
     CodeEditCandidateBuilder,
     resolve_source_inspection_requests,
@@ -31,6 +37,7 @@ from research_lab.canonical import sha256_json
 from research_lab.code_editing import (
     CodeEditDraft,
     build_code_edit_auto_research_messages,
+    build_code_edit_repair_messages,
     build_code_edit_source_inspection_messages,
     parse_code_edit_response,
     parse_code_edit_source_inspection_response,
@@ -521,6 +528,35 @@ class CodeEditLoopEngine:
                         },
                     )
                 )
+                (
+                    candidate_draft,
+                    openrouter_calls,
+                    estimated_cost,
+                    actual_cost_microusd,
+                    patch_budget_exhausted,
+                ) = await self._ensure_patch_applies_or_repair(
+                    draft=draft,
+                    run_id=run_id,
+                    node_id=node_id,
+                    iteration=iteration,
+                    settings=settings,
+                    artifact=artifact,
+                    source_context=source_context,
+                    source_inspection_context=source_inspection_context,
+                    read_paths=tuple(sorted(read_paths)),
+                    budget_context=budget_context,
+                    budget_limit_microusd=budget_limit_microusd,
+                    elapsed=elapsed,
+                    openrouter_calls=openrouter_calls,
+                    estimated_cost=estimated_cost,
+                    actual_cost_microusd=actual_cost_microusd,
+                    provider_usage=provider_usage,
+                )
+                if patch_budget_exhausted:
+                    budget_exhausted_after_call = True
+                    continue
+                if candidate_draft is None:
+                    continue
                 try:
                     await self.event_sink(
                         AutoResearchLoopEvent(
@@ -529,17 +565,20 @@ class CodeEditLoopEngine:
                             elapsed_seconds=elapsed(),
                             node_id=node_id,
                             cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "candidate_build_started"),
-                            event_doc={"iteration": iteration, "source_diff_hash": sha256_json({"unified_diff": draft.unified_diff})},
+                            event_doc={
+                                "iteration": iteration,
+                                "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
+                            },
                         )
                     )
                     build = self.builder.build(
-                        draft=draft,
+                        draft=candidate_draft,
                         parent_artifact=artifact,
                         run_id=run_id,
                         candidate_index=len(selected),
                         source_context=source_context,
                     )
-                    selected.append(BuiltCodeEditCandidate(draft=draft, build=build, node_id=node_id, iteration=iteration))
+                    selected.append(BuiltCodeEditCandidate(draft=candidate_draft, build=build, node_id=node_id, iteration=iteration))
                     await self.event_sink(
                         AutoResearchLoopEvent(
                             event_type="candidate_build_passed",
@@ -558,6 +597,34 @@ class CodeEditLoopEngine:
                             },
                         )
                     )
+                except (CodeEditPrivateTestError, CodeEditImageBuildError, CodeEditPatchApplyError) as exc:
+                    event_type = str(getattr(exc, "failure_stage", "") or "candidate_build_failed")
+                    diagnostic_doc = await _write_private_code_edit_diagnostic(
+                        artifact=artifact,
+                        run_id=run_id,
+                        node_id=node_id,
+                        iteration=iteration,
+                        stage=event_type,
+                        draft=candidate_draft,
+                        error=exc,
+                    )
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type=event_type,
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            node_id=node_id,
+                            cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, event_type),
+                            event_doc={
+                                "iteration": iteration,
+                                "target_files": list(candidate_draft.target_files),
+                                "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
+                                "error": str(exc)[:500],
+                                "error_hash": sha256_json({"error": str(exc)}),
+                                **diagnostic_doc,
+                            },
+                        )
+                    )
                 except CodeEditBuildError as exc:
                     await self.event_sink(
                         AutoResearchLoopEvent(
@@ -566,7 +633,13 @@ class CodeEditLoopEngine:
                             elapsed_seconds=elapsed(),
                             node_id=node_id,
                             cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "candidate_build_failed"),
-                            event_doc={"iteration": iteration, "error": str(exc)[:500]},
+                            event_doc={
+                                "iteration": iteration,
+                                "target_files": list(candidate_draft.target_files),
+                                "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
+                                "error": str(exc)[:500],
+                                "error_hash": sha256_json({"error": str(exc)}),
+                            },
                         )
                     )
             selected = selected[: settings.max_candidates]
@@ -784,6 +857,361 @@ class CodeEditLoopEngine:
             status=status,
             checkpoint_doc=checkpoint,
         )
+
+    async def _ensure_patch_applies_or_repair(
+        self,
+        *,
+        draft: CodeEditDraft,
+        run_id: str,
+        node_id: str,
+        iteration: int,
+        settings: AutoResearchLoopSettings,
+        artifact: PrivateModelArtifactManifest,
+        source_context: Any,
+        source_inspection_context: Mapping[str, Any],
+        read_paths: Sequence[str],
+        budget_context: Mapping[str, Any],
+        budget_limit_microusd: int,
+        elapsed: Callable[[], float],
+        openrouter_calls: int,
+        estimated_cost: float,
+        actual_cost_microusd: int,
+        provider_usage: list[dict[str, Any]],
+    ) -> tuple[CodeEditDraft | None, int, float, int, bool]:
+        candidate_draft = draft.with_unified_diff(draft.unified_diff)
+        max_repairs = max(0, int(self.builder.config.code_edit_patch_repair_attempts))
+        for repair_attempt in range(0, max_repairs + 1):
+            try:
+                self.builder.check_patch_applies(
+                    draft=candidate_draft,
+                    parent_artifact=artifact,
+                    source_context=source_context,
+                )
+                return candidate_draft, openrouter_calls, estimated_cost, actual_cost_microusd, False
+            except CodeEditPatchApplyError as exc:
+                diagnostic_doc = await _write_private_code_edit_diagnostic(
+                    artifact=artifact,
+                    run_id=run_id,
+                    node_id=node_id,
+                    iteration=iteration,
+                    stage="candidate_patch_apply_failed",
+                    draft=candidate_draft,
+                    error=exc,
+                )
+                await self.event_sink(
+                    AutoResearchLoopEvent(
+                        event_type="candidate_patch_apply_failed",
+                        loop_status="running",
+                        elapsed_seconds=elapsed(),
+                        node_id=node_id,
+                        provider_usage=([provider_usage[-1]] if provider_usage else []),
+                        cost_ledger=_running_cost_ledger(
+                            openrouter_calls,
+                            estimated_cost,
+                            actual_cost_microusd,
+                            "candidate_patch_apply_failed",
+                        ),
+                        event_doc={
+                            "iteration": iteration,
+                            "repair_attempt": repair_attempt,
+                            "target_files": list(candidate_draft.target_files),
+                            "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
+                            "error": str(exc)[:500],
+                            "error_hash": sha256_json({"error": str(exc)}),
+                            "stderr_hash": sha256_json({"stderr": getattr(exc, "stderr", "")}),
+                            **diagnostic_doc,
+                        },
+                    )
+                )
+                if repair_attempt >= max_repairs:
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="code_edit_repair_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            node_id=node_id,
+                            provider_usage=([provider_usage[-1]] if provider_usage else []),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "code_edit_repair_failed",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "repair_attempts": max_repairs,
+                                "target_files": list(candidate_draft.target_files),
+                                "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
+                                "error": str(exc)[:500],
+                                "error_hash": sha256_json({"error": str(exc)}),
+                            },
+                        )
+                    )
+                    return None, openrouter_calls, estimated_cost, actual_cost_microusd, False
+
+                if elapsed() >= settings.max_seconds:
+                    return None, openrouter_calls, estimated_cost, actual_cost_microusd, False
+                if _would_exceed_budget(
+                    actual_cost_microusd,
+                    _estimated_call_microusd(settings.estimated_iteration_cost_usd),
+                    budget_limit_microusd,
+                ):
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="code_edit_repair_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            node_id=node_id,
+                            provider_usage=([provider_usage[-1]] if provider_usage else []),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "code_edit_repair_budget_exhausted",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "repair_attempt": repair_attempt + 1,
+                                "error": "compute_budget_exhausted_before_code_edit_repair",
+                                "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
+                            },
+                        )
+                    )
+                    return None, openrouter_calls, estimated_cost, actual_cost_microusd, True
+
+                await self.event_sink(
+                    AutoResearchLoopEvent(
+                        event_type="code_edit_repair_requested",
+                        loop_status="running",
+                        elapsed_seconds=elapsed(),
+                        node_id=node_id,
+                        provider_usage=([provider_usage[-1]] if provider_usage else []),
+                        cost_ledger=_running_cost_ledger(
+                            openrouter_calls,
+                            estimated_cost,
+                            actual_cost_microusd,
+                            "code_edit_repair_requested",
+                        ),
+                        event_doc={
+                            "iteration": iteration,
+                            "repair_attempt": repair_attempt + 1,
+                            "target_files": list(candidate_draft.target_files),
+                            "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
+                            "apply_error_hash": sha256_json({"error": str(exc)}),
+                        },
+                    )
+                )
+
+                remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
+                repair_result = _coerce_call_result(
+                    await self.call_openrouter(
+                        build_code_edit_repair_messages(
+                            draft=candidate_draft,
+                            apply_error=str(exc),
+                            source_inspection_context=source_inspection_context,
+                            runtime_source_context=source_context.prompt_context(),
+                            budget_context={
+                                **dict(budget_context),
+                                "loop_iteration": iteration,
+                                "repair_attempt": repair_attempt + 1,
+                                "candidate_kind": "image_build",
+                            },
+                            repair_attempt=repair_attempt + 1,
+                            max_candidates=1,
+                        ),
+                        min(settings.draft_timeout_seconds, remaining_call_seconds),
+                        3000,
+                    )
+                )
+                openrouter_calls += 1
+                estimated_cost += settings.estimated_iteration_cost_usd
+                actual_cost_microusd += max(0, int(repair_result.cost_microusd))
+                if repair_result.provider_usage:
+                    provider_usage.append(
+                        {
+                            **repair_result.provider_usage,
+                            "loop_iteration": iteration,
+                            "repair_attempt": repair_attempt + 1,
+                            "call_stage": "code_edit_repair",
+                        }
+                    )
+                try:
+                    repaired_drafts = parse_code_edit_response(repair_result.content, max_candidates=1)
+                except Exception as parse_exc:
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="code_edit_repair_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            node_id=node_id,
+                            provider_usage=([provider_usage[-1]] if provider_usage else []),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "code_edit_repair_parse_failed",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "repair_attempt": repair_attempt + 1,
+                                "error": str(parse_exc)[:500],
+                                "raw_response_hash": sha256_json({"raw_response": repair_result.content}),
+                            },
+                        )
+                    )
+                    return None, openrouter_calls, estimated_cost, actual_cost_microusd, False
+                repaired = repaired_drafts[0].with_unified_diff(repaired_drafts[0].unified_diff)
+                source_errors = self.builder.validate_draft_against_source_context(
+                    repaired,
+                    source_context,
+                    read_paths=read_paths,
+                    require_read=True,
+                )
+                if source_errors:
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="code_edit_repair_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            node_id=node_id,
+                            provider_usage=([provider_usage[-1]] if provider_usage else []),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "code_edit_repair_source_context_failed",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "repair_attempt": repair_attempt + 1,
+                                "target_files": list(repaired.target_files),
+                                "error": "; ".join(source_errors)[:500],
+                                "source_diff_hash": sha256_json({"unified_diff": repaired.unified_diff}),
+                                "source_tree_hash": source_context.source_tree_hash,
+                            },
+                        )
+                    )
+                    return None, openrouter_calls, estimated_cost, actual_cost_microusd, False
+                candidate_draft = repaired
+                await self.event_sink(
+                    AutoResearchLoopEvent(
+                        event_type="code_edit_repair_drafted",
+                        loop_status="running",
+                        elapsed_seconds=elapsed(),
+                        node_id=node_id,
+                        provider_usage=([provider_usage[-1]] if provider_usage else []),
+                        cost_ledger=_running_cost_ledger(
+                            openrouter_calls,
+                            estimated_cost,
+                            actual_cost_microusd,
+                            "code_edit_repair_drafted",
+                        ),
+                        event_doc={
+                            "iteration": iteration,
+                            "repair_attempt": repair_attempt + 1,
+                            "target_files": list(candidate_draft.target_files),
+                            "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
+                            "original_source_diff_hash": sha256_json({"unified_diff": draft.unified_diff}),
+                        },
+                    )
+                )
+        return None, openrouter_calls, estimated_cost, actual_cost_microusd, False
+
+
+async def _write_private_code_edit_diagnostic(
+    *,
+    artifact: PrivateModelArtifactManifest,
+    run_id: str,
+    node_id: str,
+    iteration: int,
+    stage: str,
+    draft: CodeEditDraft,
+    error: BaseException,
+) -> dict[str, Any]:
+    manifest_uri = str(getattr(artifact, "manifest_uri", "") or "")
+    if not manifest_uri.startswith("s3://"):
+        return {"diagnostic_artifact_skipped": "manifest_uri_not_s3"}
+    try:
+        bucket, key = _parse_s3_uri(manifest_uri)
+    except ValueError as exc:
+        return {"diagnostic_artifact_error": str(exc)[:200]}
+    base_prefix = key.rsplit("/", 1)[0] if "/" in key else "research-lab/sourcing-model"
+    safe_node = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(node_id or "node"))[:80]
+    safe_stage = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(stage or "failure"))[:80]
+    object_key = f"{base_prefix}/candidates/{run_id}/diagnostics/{int(iteration):03d}-{safe_node}-{safe_stage}.json"
+    payload = {
+        "schema_version": "1.0",
+        "artifact_type": "research_lab_code_edit_failure_diagnostic",
+        "run_id": str(run_id),
+        "node_id": str(node_id),
+        "iteration": int(iteration),
+        "stage": str(stage),
+        "target_files": list(draft.target_files),
+        "source_diff_hash": sha256_json({"unified_diff": draft.unified_diff}),
+        "unified_diff": draft.unified_diff,
+        "error": _diagnostic_text(str(error), limit=12000),
+        "stderr": _diagnostic_text(str(getattr(error, "stderr", "") or ""), limit=12000),
+        "stdout": _diagnostic_text(str(getattr(error, "stdout", "") or ""), limit=12000),
+        "exit_code": getattr(error, "exit_code", None),
+    }
+    payload_hash = sha256_json(payload)
+
+    def _put() -> None:
+        import boto3  # type: ignore
+
+        boto3.client("s3").put_object(
+            Bucket=bucket,
+            Key=object_key,
+            Body=json.dumps({**payload, "diagnostic_hash": payload_hash}, sort_keys=True).encode("utf-8"),
+            ContentType="application/json",
+        )
+
+    try:
+        await asyncio.to_thread(_put)
+    except Exception as exc:
+        return {
+            "diagnostic_artifact_hash": payload_hash,
+            "diagnostic_artifact_error": str(exc)[:300],
+        }
+    return {
+        "diagnostic_artifact_uri": f"s3://{bucket}/{object_key}",
+        "diagnostic_artifact_hash": payload_hash,
+    }
+
+
+def _parse_s3_uri(uri: str) -> tuple[str, str]:
+    raw = str(uri or "")
+    if not raw.startswith("s3://"):
+        raise ValueError("s3_uri_required")
+    rest = raw[5:]
+    bucket, sep, key = rest.partition("/")
+    if not bucket or not sep or not key:
+        raise ValueError("invalid_s3_uri")
+    return bucket, key
+
+
+def _diagnostic_text(value: str, *, limit: int) -> str:
+    text = str(value or "")
+    text = re.sub(r"sk-or-[A-Za-z0-9._:-]+", "[redacted-openrouter-key]", text)
+    text = re.sub(r"sb_secret_[A-Za-z0-9._:-]+", "[redacted-supabase-service-role-key]", text)
+    text = re.sub(r"sb_publishable_[A-Za-z0-9._:-]+", "[redacted-supabase-anon-key]", text)
+    text = re.sub(r"AKIA[A-Z0-9]{16}", "[redacted-aws-access-key-id]", text)
+    text = re.sub(r"https?://[^@\s]+@([^\s/]+)", r"[redacted-proxy-url]@\1", text)
+    text = re.sub(r"(?i)(api_key=)[^&\s]+", r"\1[redacted]", text)
+    replacements = (
+        "service_role",
+        "openrouter_api_key",
+        "raw_openrouter_key",
+        "raw_secret",
+        "aws_secret_access_key",
+        "password",
+        "proxy",
+        "webshare",
+    )
+    lowered = text.lower()
+    if any(marker in lowered for marker in replacements):
+        return "[redacted secret-like diagnostic text]"
+    return text[: max(1, int(limit))]
 
 
 def _node_id(run_id: str, iteration: int, candidate_index: int, draft: CodeEditDraft) -> str:

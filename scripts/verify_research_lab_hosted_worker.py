@@ -757,11 +757,18 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
             nonlocal inspection_call_count
             content = "\n".join(str(message.get("content") or "") for message in messages)
             is_source_inspection = "runtime_source_index" in content
+            is_repair = "failed_patch" in content and "git_apply_error" in content
             if is_source_inspection:
                 inspection_call_count += 1
             calls.append(
                 {
-                    "stage": "source_inspection" if is_source_inspection else "code_edit_draft",
+                    "stage": (
+                        "source_inspection"
+                        if is_source_inspection
+                        else "code_edit_repair"
+                        if is_repair
+                        else "code_edit_draft"
+                    ),
                     "timeout_seconds": timeout_seconds,
                     "max_tokens": max_tokens,
                     "has_runtime_source_context": "runtime_source_context" in content,
@@ -806,6 +813,35 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                     },
                     cost_microusd=1000,
                 )
+            if is_repair:
+                return OpenRouterCallResult(
+                    content=json.dumps(
+                        {
+                            "candidates": [
+                                {
+                                    "lane": "query_construction",
+                                    "hypothesis": {
+                                        "failure_mode": "stale query constant",
+                                        "mechanism": "repair patch hunk against exact extracted source",
+                                        "expected_improvement": "better source-context grounded edits",
+                                        "risk": "low",
+                                        "predicted_delta": 1.0,
+                                    },
+                                    "code_edit": {
+                                        "target_files": ["sourcing_model/__init__.py"],
+                                        "unified_diff": _allowed_runtime_patch_draft().unified_diff,
+                                        "redacted_summary": "repair existing extracted file edit",
+                                        "test_plan": "py_compile changed file",
+                                        "rollback_plan": "revert patch",
+                                    },
+                                }
+                            ]
+                        },
+                        sort_keys=True,
+                    ),
+                    provider_usage={"provider": "openrouter", "response_id": "code-edit-repair-draft", "cost_microusd": 1000},
+                    cost_microusd=1000,
+                )
             return OpenRouterCallResult(
                 content=json.dumps(
                     {
@@ -821,7 +857,15 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                                 },
                                 "code_edit": {
                                     "target_files": ["sourcing_model/__init__.py"],
-                                    "unified_diff": _allowed_runtime_patch_draft().unified_diff,
+                                    "unified_diff": (
+                                        "Here is the patch:\n```diff\n"
+                                        "diff --git a/sourcing_model/__init__.py b/sourcing_model/__init__.py\n"
+                                        "--- a/sourcing_model/__init__.py\n"
+                                        "+++ b/sourcing_model/__init__.py\n"
+                                        "@@ -1,5 +1,5 @@\n"
+                                        "this is not a valid unified diff hunk\n"
+                                        "```\n"
+                                    ),
                                     "redacted_summary": "edit existing extracted file",
                                     "test_plan": "py_compile changed file",
                                     "rollback_plan": "revert patch",
@@ -907,8 +951,19 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                 and event_types.index("source_inspection_resolved") > event_types.index("code_edit_drafted")
             ):
                 errors.append("code-edit loop drafted before resolving source inspection")
+            if "candidate_patch_apply_failed" not in event_types:
+                errors.append("code-edit loop did not classify the malformed draft as candidate_patch_apply_failed")
+            if "code_edit_repair_requested" not in event_types:
+                errors.append("code-edit loop did not request patch repair after apply failure")
+            if "code_edit_repair_drafted" not in event_types:
+                errors.append("code-edit loop did not record repaired patch draft")
             if "candidate_build_passed" not in event_types:
                 errors.append("code-edit loop did not record candidate_build_passed")
+            elif (
+                "code_edit_repair_drafted" in event_types
+                and event_types.index("code_edit_repair_drafted") > event_types.index("candidate_build_passed")
+            ):
+                errors.append("candidate build passed before repaired patch was drafted")
             first_doc = events[0].event_doc if events else {}
             if first_doc.get("source_mode") != "parent_image_extract":
                 errors.append("code-edit loop start event did not record parent image extraction")

@@ -16,20 +16,13 @@
 
 ---
 
-Leadpoet is Bittensor Subnet 71. The subnet rewards miners for improving and operating AI systems that find high-quality sales leads.
-
-The network has two miner tracks:
-
-- **Research Lab** - miners fund hosted auto-research loops that try to improve Leadpoet's model.
-- **Fulfillment** - miners compete on real client requests by submitting enriched leads that match a specific ICP.
+Leadpoet is a Bittensor subnet (SN71). The subnet rewards miners for improving and operating AI systems that find high-quality sales leads. Miners contribute in two tracks, the Research Lab and Fulfillment. In the Research Lab, miners direct research and compute through auto-research loops that try to improve an AI sales agent. In Fulfillment, miners compete on real lead requests by submitting qualified leads.
 
 ## Dashboard
 
-Use the public dashboard to track:
+Use the dashboard to track:
 
-- Current model benchmark score.
-- Public ICP benchmark examples and scores.
-- Recent Research Lab activity.
+- Research Lab agent benchmark examples and scores, areas to improve, and activity.
 - Fulfillment activity and leaderboard.
 
 Dashboard: [subnet71.com](https://subnet71.com)
@@ -82,42 +75,26 @@ python neurons/miner.py \
 
 The miner will ask which mode to run:
 
-- **Auto Research** - default Research Lab mode.
-- **Fulfillment** - client-request lead fulfillment mode.
+- **Auto Research**
+- **Fulfillment**
 
 ### Research Lab
 
-Research Lab lets miners contribute compute toward improving Leadpoet's sourcing model.
+Research Lab lets miners contribute direction and compute toward improving the AI sales agent.
 
 How it works:
 
-1. The miner provides an OpenRouter key.
+1. The miner securely provides an OpenRouter key.
 2. The miner enters a research direction.
-3. The miner pays the loop-start fee in TAO.
-4. The gateway runs the hosted auto-research loop.
+3. The miner pays the loop-start fee in TAO to cover benchmark costs.
+4. The TEE gateway runs the auto-research loop.
 5. Candidate improvements are scored.
 6. Miners are provided with their respective rewards.
 
-Model runtime edit scope:
+Research Lab rewards result from provided compute or model improvements:
 
-Daily rebenchmarking and candidate scoring run the current model image referenced by the Research Lab `current.json` manifest. Hosted auto-research candidate builds also start from that same image: the gateway extracts `/app`, lets the research model inspect the extracted runtime source, applies the proposed patch, rebuilds a candidate image, and sends that image through the existing scoring path.
-
-The research model can search and read source from the extracted runtime before it drafts a patch. It does not get arbitrary repository access or shell access. Candidate patches are accepted only for files that were actually read during that loop iteration.
-
-Candidate patches are limited to the extracted runtime code:
-
-- `gateway/`
-- `qualification/`
-- `sourcing_model/`
-- `validator_models/`
-- `research_lab_adapter.py`
-
-`requirements.txt` is used as a build/runtime dependency when present in the image, but it is not an editable miner target. New top-level folders, Dockerfiles, dependency files, CI files, deployment scripts, lockfiles, env files, and credential handling are outside the Research Lab edit scope.
-
-Research Lab rewards have two parts:
-
-- Compute reimbursement for verified OpenRouter spend from accepted research loops.
-- Additional improvement rewards when a candidate improvement beats the current model benchmark.
+- Compute reimbursement covers a portion of verified compute spend from research loops.
+- Verfied model improvements result in substantial rewards when a candidate improvement beats the current model benchmark.
 
 At a high level, rewards are calculated per reward epoch:
 
@@ -141,6 +118,28 @@ winner_reward = remaining_lab_allocation * winner_improvement_credit / total_win
 ```
 
 The reward records tie miner hotkeys to the run, candidate, verified spend, benchmark result, and validator weight input. More information can be found through investigating the relevant code in the neurons/validator.py.
+
+### Agent Runtime, Privacy, and Verification
+
+Research Lab runs daily rebenchmarks and candidate scoring against the current model runtime image listed in the `current.json` manifest. Hosted auto-research builds start from that same image, which gives every candidate the same baseline before changes are tested.
+
+For each candidate, the gateway extracts the runtime app from `/app` and gives the research model limited access to inspect that extracted source. The model can read the code it needs in order to suggest an improvement, but it does not get general repository access, shell access, credentials, deployment access, or access to files outside the runtime scope.
+
+After the model proposes a patch, the system checks that the patch only touches files the model actually read during that loop and only within the allowed edit paths. If the patch passes those checks, it is applied to the extracted runtime source, rebuilt into a candidate image, and evaluated through the normal scoring and benchmarking pipeline.
+
+The research model itself is not public to prevent miners from overfitting to the model's suggestions, prompts, hidden assumptions, or internal scoring preferences. Miners compete on the measured quality of their submitted candidates, not on reverse-engineering the improvement model.
+
+The TEE-based design makes that possible: a non-public improvement model can run in a secure, attested environment, while the important parts of the process remain verifiable. The system knows which image was used, which files were inspected, what patch was proposed, whether the patch stayed in scope, and how the rebuilt candidate performed.
+
+Candidate patches are limited to the extracted runtime code:
+
+- `gateway/`
+- `qualification/`
+- `sourcing_model/`
+- `validator_models/`
+- `research_lab_adapter.py`
+
+`requirements.txt` may be used as a build/runtime dependency when present in the image, but it is not an editable candidate target. New top-level folders, Dockerfiles, dependency files, CI files, deployment scripts, lockfiles, env files, and credential handling are outside the Research Lab edit scope.
 
 ### Fulfillment
 

@@ -144,6 +144,7 @@ class ResearchLabGatewayScoringWorker:
         self.proxy_ref_hash = canonical_hash({"proxy_ref": self.proxy_url}) if self.proxy_url else None
         self._baseline_skip_logged = False
         self._baseline_already_logged_date: str | None = None
+        self._private_scoring_env_not_ready_logged = False
         self._resolved_epoch_cache: tuple[int, float] | None = None
 
     async def run_forever(self) -> None:
@@ -202,6 +203,38 @@ class ResearchLabGatewayScoringWorker:
             return {"processed": False, "status": "writes_or_eval_disabled"}
         if self.config.scoring_worker_require_proxy and not self.proxy_url:
             return {"processed": False, "status": "scoring_worker_proxy_required"}
+
+        missing_private_env = self._missing_private_scoring_env()
+        if missing_private_env:
+            if not self._private_scoring_env_not_ready_logged:
+                logger.warning(
+                    format_worker_block(
+                        "RESEARCH LAB SCORING WORKER PRIVATE MODEL ENV NOT READY",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("Missing", ", ".join(missing_private_env)),
+                            ("Action", "leaving queued candidates untouched"),
+                        ),
+                    )
+                )
+                self._private_scoring_env_not_ready_logged = True
+            return {
+                "processed": False,
+                "status": "idle",
+                "private_model_env_ready": False,
+                "missing_private_model_env": list(missing_private_env),
+            }
+        if self._private_scoring_env_not_ready_logged:
+            logger.info(
+                format_worker_block(
+                    "RESEARCH LAB SCORING WORKER PRIVATE MODEL ENV READY",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Action", "candidate scoring enabled"),
+                    ),
+                )
+            )
+            self._private_scoring_env_not_ready_logged = False
 
         await self._recover_stale_candidate_claims()
 
@@ -1631,6 +1664,20 @@ class ResearchLabGatewayScoringWorker:
             env["NO_PROXY"] = no_proxy
             env["no_proxy"] = no_proxy
         return env
+
+    def _missing_private_scoring_env(self) -> tuple[str, ...]:
+        missing: list[str] = []
+        if not os.getenv("EXA_API_KEY"):
+            missing.append("EXA_API_KEY")
+        if not (os.getenv("SCRAPINGDOG_API_KEY") or os.getenv("QUALIFICATION_SCRAPINGDOG_API_KEY")):
+            missing.append("SCRAPINGDOG_API_KEY or QUALIFICATION_SCRAPINGDOG_API_KEY")
+        if not (
+            os.getenv("OPENROUTER_API_KEY")
+            or os.getenv("QUALIFICATION_OPENROUTER_API_KEY")
+            or os.getenv("OPENROUTER_KEY")
+        ):
+            missing.append("OPENROUTER_API_KEY or QUALIFICATION_OPENROUTER_API_KEY or OPENROUTER_KEY")
+        return tuple(missing)
 
     def _private_model_env_passthrough(self) -> tuple[str, ...]:
         return private_model_env_passthrough(

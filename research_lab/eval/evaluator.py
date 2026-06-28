@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from importlib import import_module
+import inspect
 import os
 from typing import Any, Awaitable, Callable, Mapping, Sequence, Union
 
@@ -466,7 +467,13 @@ async def _call_model_runner(
     icp: Mapping[str, Any],
     context: Mapping[str, Any],
 ) -> Sequence[Mapping[str, Any]]:
-    return await _maybe_await(runner(icp, context))
+    if inspect.iscoroutinefunction(runner) or inspect.iscoroutinefunction(getattr(runner, "__call__", None)):
+        result = runner(icp, context)
+    else:
+        result = await asyncio.to_thread(runner, icp, context)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 def prepare_autoresearch_scoring_payload(

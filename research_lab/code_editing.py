@@ -25,24 +25,13 @@ FORBIDDEN_CODE_EDIT_TERMS = (
 )
 
 DEFAULT_ALLOWED_PATH_PREFIXES = (
-    "app/",
-    "leadpoet/",
-    "model/",
-    "models/",
-    "prompts/",
-    "providers/",
-    "ranking/",
-    "scoring/",
-    "search/",
+    "gateway/",
+    "qualification/",
     "sourcing_model/",
-    "src/",
+    "validator_models/",
 )
 DEFAULT_ALLOWED_EXACT_PATHS = (
-    "adapter.py",
-    "main.py",
-    "model_config.json",
-    "openrouter_models.json",
-    "config/openrouter_models.json",
+    "research_lab_adapter.py",
 )
 DEFAULT_ALLOWED_SUFFIXES = (".py", ".json", ".yaml", ".yml", ".toml", ".txt", ".md")
 DISALLOWED_PATH_PATTERNS = (
@@ -111,6 +100,14 @@ def build_code_edit_auto_research_messages(
         "benchmark_public_summary": _redacted_mapping(benchmark_public_summary),
         "budget_context": _redacted_mapping(budget_context or {}),
         "max_candidates": max(1, int(max_candidates)),
+        "source_mode": "parent_image_extract",
+        "allowed_runtime_roots": [
+            "gateway/",
+            "qualification/",
+            "sourcing_model/",
+            "validator_models/",
+            "research_lab_adapter.py",
+        ],
         "allowed_lanes": [
             "icp_normalization",
             "query_construction",
@@ -125,8 +122,9 @@ def build_code_edit_auto_research_messages(
         "You are Leadpoet Research Lab's code-editing auto-research engine. "
         "Your task is to improve the private sourcing model so it finds more "
         "perfect-fit companies for a supplied ICP plus observable buying-intent "
-        "signals. You may propose small source, prompt, or checked-in model-config "
-        "edits only. Optimize for general improvements across future sealed ICPs, "
+        "signals. You may propose small source, prompt, or model logic edits only "
+        "inside the runtime extracted from the current ECR image. Optimize for "
+        "general improvements across future sealed ICPs, "
         "not one visible ICP. Never request, infer, reveal, or store secrets, hidden "
         "benchmark plaintext, judge prompts, provider keys, private repo URLs, or "
         "customer-private data."
@@ -137,24 +135,26 @@ def build_code_edit_auto_research_messages(
         "provider fallback, intent evidence quality, company fit filtering, OpenRouter model "
         "selection, or output ranking.\n\n"
         "Allowed edit scope:\n"
-        "- private model source files\n"
-        "- prompt files\n"
-        "- search/provider/scoring/ranking logic\n"
-        "- checked-in OpenRouter model config files\n\n"
+        "- gateway/\n"
+        "- qualification/\n"
+        "- sourcing_model/\n"
+        "- validator_models/\n"
+        "- research_lab_adapter.py\n\n"
         "Forbidden edits:\n"
         "- Dockerfile, CI, dependency files, lockfiles, deploy scripts, credentials, env files\n"
+        "- new top-level folders or files outside the allowed runtime roots\n"
         "- new external endpoints or new network clients outside existing provider modules\n"
         "- subprocess/shell execution additions\n"
         "- hidden ICP access, raw judge prompts, raw model responses, secrets, or key handling changes\n\n"
         "Diff requirements:\n"
-        "- Produce a small unified diff that applies to the active private repo commit.\n"
+        "- Produce a small unified diff that applies to the active runtime source extracted from the current ECR image.\n"
         "- Keep the change testable and reversible.\n"
         "- Prefer one narrow code path over broad rewrites.\n"
         "- Do not overfit to one public ICP; the improvement must generalize.\n\n"
         "Expected output shape:\n"
         "{\"candidates\":[{\"lane\":\"query_construction\",\"hypothesis\":{\"failure_mode\":\"...\","
         "\"mechanism\":\"...\",\"expected_improvement\":\"...\",\"risk\":\"...\","
-        "\"predicted_delta\":1.0},\"code_edit\":{\"target_files\":[\"src/example.py\"],"
+        "\"predicted_delta\":1.0},\"code_edit\":{\"target_files\":[\"sourcing_model/example.py\"],"
         "\"unified_diff\":\"diff --git ...\",\"redacted_summary\":\"...\","
         "\"test_plan\":\"...\",\"rollback_plan\":\"...\"}}]}\n\n"
         "Context JSON:\n"

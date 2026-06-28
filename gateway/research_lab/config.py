@@ -22,8 +22,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_LOOP_START_FEE_USD = 0.2
 DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS = 300
 DEFAULT_HOSTED_WORKER_RETRYABLE_FAILURE_LIMIT = 3
-DEFAULT_PRIVATE_REPO_URL = "https://github.com/tasnimuldatascience/Sourcing_model.git"
-DEFAULT_PRIVATE_TEST_CMD = "python -m unittest tests/test_research_lab_adapter.py"
+DEFAULT_PRIVATE_REPO_URL = ""
+DEFAULT_PRIVATE_TEST_CMD = r"""
+python3 - <<'PY'
+import research_lab_adapter
+import sourcing_model
+
+metadata = research_lab_adapter.adapter_metadata()
+assert metadata.get("adapter_version")
+assert sourcing_model is not None
+PY
+""".strip()
 DEFAULT_PRIVATE_ARTIFACT_MANIFEST_OUTPUT = ".research_lab/candidate_manifest.json"
 DEFAULT_PRIVATE_BUILD_CMD = r"""
 bash <<'BASH'
@@ -59,7 +68,7 @@ DIGEST="$(aws ecr describe-images \
   --output text)"
 IMAGE_DIGEST="${REGISTRY}/${ECR_REPOSITORY}@${DIGEST}"
 
-python - "${OUTPUT_PATH}" "${IMAGE_DIGEST}" "${MANIFEST_URI}" "${SIGNATURE_URI}" "${COMMIT_SHA}" <<'PY'
+python3 - "${OUTPUT_PATH}" "${IMAGE_DIGEST}" "${MANIFEST_URI}" "${SIGNATURE_URI}" "${COMMIT_SHA}" <<'PY'
 import hashlib
 import json
 from pathlib import Path
@@ -112,7 +121,7 @@ output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encodin
 print(manifest["manifest_hash"])
 PY
 
-MANIFEST_HASH="$(python -c "import json; print(json.load(open('${OUTPUT_PATH}'))['manifest_hash'])")"
+MANIFEST_HASH="$(python3 -c "import json; print(json.load(open('${OUTPUT_PATH}'))['manifest_hash'])")"
 printf '%s' "${MANIFEST_HASH}" > /tmp/research_lab_candidate_manifest_hash.txt
 aws kms sign \
   --key-id "${KMS_KEY_ID}" \

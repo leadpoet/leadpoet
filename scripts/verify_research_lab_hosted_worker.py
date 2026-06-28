@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
+import textwrap
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from leadpoet_verifier.research_evaluation import build_research_evaluation_score_bundle  # noqa: E402
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
+from gateway.research_lab.code_build import CodeEditBuildError, CodeEditCandidateBuilder  # noqa: E402
 from gateway.research_lab.loop_engine import (  # noqa: E402
     AutoResearchLoopEngine,
     AutoResearchLoopEvent,
@@ -38,6 +42,7 @@ from research_lab.auto_research_prompt import (  # noqa: E402
     parse_auto_research_response,
 )
 from research_lab.canonical import sha256_json  # noqa: E402
+from research_lab.code_editing import CodeEditDraft, validate_code_edit_draft  # noqa: E402
 from research_lab.eval.private_runtime import DEFAULT_ENV_PASSTHROUGH  # noqa: E402
 from research_lab.eval.artifacts import PrivateModelArtifactManifest  # noqa: E402
 from research_lab.validator_integration import verify_research_lab_evaluation_bundle_page  # noqa: E402
@@ -199,6 +204,7 @@ def main() -> int:
         errors.append("scoring worker must rebase stale-parent candidates before evaluation")
     if "private_model_manifest_hash\", artifact.manifest_hash" not in scoring_worker_text:
         errors.append("private baseline lookup must filter by active private model manifest hash")
+    errors.extend(_verify_image_extracted_code_builder(artifact))
 
     eval_bundle = _score_bundle()
     page = {
@@ -263,7 +269,8 @@ def main() -> int:
         return 1
     print(
         "Research Lab hosted worker contracts verified: candidate parser, Engine v1 validation, "
-        "validator scored-bundle filtering, worker partitioning, claim-race detection, no gateway benchmark path."
+        "image-extracted code builder, validator scored-bundle filtering, worker partitioning, "
+        "claim-race detection, no gateway benchmark path."
     )
     return 0
 
@@ -541,6 +548,263 @@ async def _verify_auto_research_loop_engine(artifact: PrivateModelArtifactManife
     if resumed_result.openrouter_call_count < paused_result.openrouter_call_count:
         errors.append("auto-research resume reset OpenRouter call accounting")
     return errors
+
+
+def _verify_image_extracted_code_builder(artifact: PrivateModelArtifactManifest) -> list[str]:
+    errors: list[str] = []
+    try:
+        validate_code_edit_draft(_new_top_level_folder_draft())
+        errors.append("code-edit validation accepted a new top-level folder")
+    except ValueError:
+        pass
+
+    with tempfile.TemporaryDirectory(prefix="research-lab-builder-verify-") as tmp:
+        tmp_dir = Path(tmp)
+        fake_app = tmp_dir / "fake_parent_app"
+        _write_fake_parent_app(fake_app)
+        fake_docker = _write_fake_docker(tmp_dir)
+        manifest_writer = _write_fake_manifest_writer(tmp_dir)
+        docker_log = tmp_dir / "docker.log"
+        old_env = {
+            "PATH": os.environ.get("PATH", ""),
+            "FAKE_PARENT_APP": os.environ.get("FAKE_PARENT_APP"),
+            "FAKE_DOCKER_LOG": os.environ.get("FAKE_DOCKER_LOG"),
+        }
+        os.environ["PATH"] = str(fake_docker.parent) + os.pathsep + old_env["PATH"]
+        os.environ["FAKE_PARENT_APP"] = str(fake_app)
+        os.environ["FAKE_DOCKER_LOG"] = str(docker_log)
+        try:
+            config = ResearchLabGatewayConfig(
+                private_test_cmd="python3 -m py_compile research_lab_adapter.py sourcing_model/__init__.py",
+                private_build_cmd=f"python3 {manifest_writer}",
+                private_artifact_manifest_output=".research_lab/candidate_manifest.json",
+                code_edit_build_timeout_seconds=30,
+            )
+            result = CodeEditCandidateBuilder(config).build(
+                draft=_allowed_runtime_patch_draft(),
+                parent_artifact=artifact,
+                run_id="77777777-7777-4777-8777-777777777777",
+                candidate_index=0,
+            )
+            build_doc = result.build_doc
+            if build_doc.get("source_mode") != "parent_image_extract":
+                errors.append("code builder did not record parent image extraction source mode")
+            if not build_doc.get("generated_build_scaffold"):
+                errors.append("code builder did not record generated build scaffold")
+            if not build_doc.get("extracted_source_tree_hash_before_patch", "").startswith("sha256:"):
+                errors.append("code builder did not record extracted source tree hash")
+            if "sourcing_model/__init__.py" not in build_doc.get("changed_files", []):
+                errors.append("code builder did not apply the allowed runtime patch")
+            if result.candidate_model_manifest.model_artifact_hash == artifact.model_artifact_hash:
+                errors.append("code builder accepted candidate manifest with unchanged artifact hash")
+            docker_calls = docker_log.read_text(encoding="utf-8").splitlines()
+            for expected in ("image inspect", "create", "cp", "rm -f"):
+                if not any(expected in call for call in docker_calls):
+                    errors.append(f"fake docker did not observe expected call: {expected}")
+            if any(" pull " in f" {call} " for call in docker_calls):
+                errors.append("code builder pulled parent image even though image inspect succeeded")
+        except Exception as exc:
+            errors.append(f"image-extracted code builder failed valid fake build: {exc}")
+        finally:
+            os.environ["PATH"] = old_env["PATH"]
+            for key in ("FAKE_PARENT_APP", "FAKE_DOCKER_LOG"):
+                old_value = old_env[key]
+                if old_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old_value
+
+    with tempfile.TemporaryDirectory(prefix="research-lab-builder-missing-") as tmp:
+        tmp_dir = Path(tmp)
+        fake_app = tmp_dir / "fake_parent_app"
+        _write_fake_parent_app(fake_app, omit=("validator_models",))
+        fake_docker = _write_fake_docker(tmp_dir)
+        manifest_writer = _write_fake_manifest_writer(tmp_dir)
+        docker_log = tmp_dir / "docker.log"
+        old_env = {
+            "PATH": os.environ.get("PATH", ""),
+            "FAKE_PARENT_APP": os.environ.get("FAKE_PARENT_APP"),
+            "FAKE_DOCKER_LOG": os.environ.get("FAKE_DOCKER_LOG"),
+        }
+        os.environ["PATH"] = str(fake_docker.parent) + os.pathsep + old_env["PATH"]
+        os.environ["FAKE_PARENT_APP"] = str(fake_app)
+        os.environ["FAKE_DOCKER_LOG"] = str(docker_log)
+        try:
+            config = ResearchLabGatewayConfig(
+                private_test_cmd="python3 -m py_compile research_lab_adapter.py sourcing_model/__init__.py",
+                private_build_cmd=f"python3 {manifest_writer}",
+                private_artifact_manifest_output=".research_lab/candidate_manifest.json",
+                code_edit_build_timeout_seconds=30,
+            )
+            CodeEditCandidateBuilder(config).build(
+                draft=_allowed_runtime_patch_draft(),
+                parent_artifact=artifact,
+                run_id="88888888-8888-4888-8888-888888888888",
+                candidate_index=0,
+            )
+            errors.append("code builder accepted parent image /app missing required runtime path")
+        except CodeEditBuildError as exc:
+            if "missing required runtime paths" not in str(exc):
+                errors.append(f"missing runtime path error was not clear: {exc}")
+        except Exception as exc:
+            errors.append(f"missing runtime path check raised wrong exception: {exc}")
+        finally:
+            os.environ["PATH"] = old_env["PATH"]
+            for key in ("FAKE_PARENT_APP", "FAKE_DOCKER_LOG"):
+                old_value = old_env[key]
+                if old_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old_value
+    return errors
+
+
+def _write_fake_parent_app(root: Path, *, omit: tuple[str, ...] = ()) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    for rel in ("gateway", "qualification", "sourcing_model", "validator_models"):
+        if rel in omit:
+            continue
+        (root / rel).mkdir(parents=True, exist_ok=True)
+        (root / rel / "__init__.py").write_text("", encoding="utf-8")
+    (root / "sourcing_model" / "__init__.py").write_text(
+        'VALUE = "old"\n\n\ndef qualify():\n    return VALUE\n',
+        encoding="utf-8",
+    )
+    if "research_lab_adapter.py" not in omit:
+        (root / "research_lab_adapter.py").write_text(
+            'def adapter_metadata():\n    return {"adapter_version": "fake-adapter:v1"}\n',
+            encoding="utf-8",
+        )
+    if "requirements.txt" not in omit:
+        (root / "requirements.txt").write_text("", encoding="utf-8")
+
+
+def _write_fake_docker(root: Path) -> Path:
+    docker_path = root / "docker"
+    docker_path.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import os
+            import shutil
+            import sys
+            from pathlib import Path
+
+            log_path = Path(os.environ["FAKE_DOCKER_LOG"])
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.open("a", encoding="utf-8").write(" ".join(sys.argv[1:]) + "\\n")
+
+            args = sys.argv[1:]
+            if args[:2] == ["image", "inspect"]:
+                sys.exit(0)
+            if args and args[0] == "pull":
+                sys.exit(0)
+            if args and args[0] == "create":
+                print("fake-container")
+                sys.exit(0)
+            if args and args[0] == "cp":
+                src = Path(os.environ["FAKE_PARENT_APP"])
+                dest = Path(args[-1])
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(src, dest, dirs_exist_ok=True)
+                sys.exit(0)
+            if args[:2] == ["rm", "-f"]:
+                sys.exit(0)
+            sys.stderr.write("unexpected fake docker command: " + " ".join(args))
+            sys.exit(2)
+            """
+        ),
+        encoding="utf-8",
+    )
+    docker_path.chmod(0o700)
+    return docker_path
+
+
+def _write_fake_manifest_writer(root: Path) -> Path:
+    writer = root / "write_candidate_manifest.py"
+    writer.write_text(
+        textwrap.dedent(
+            """\
+            import hashlib
+            import json
+            import os
+            from pathlib import Path
+
+            def sha256_json(value):
+                encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+            output = Path(os.environ["RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT"])
+            git_commit_sha = os.environ["RESEARCH_LAB_PRIVATE_COMMIT_SHA"]
+            payload = {
+                "model_artifact_hash": "sha256:" + "8" * 64,
+                "git_commit_sha": git_commit_sha,
+                "image_digest": "123456789012.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:" + "9" * 64,
+                "config_hash": "sha256:" + "a" * 64,
+                "component_registry_version": "sourcing-model-components:v1",
+                "scoring_adapter_version": "qualification-company-scorer:v1",
+                "manifest_uri": "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/candidates/test.json",
+                "signature_ref": "kms-signature:test",
+                "build_id": "fake-build",
+            }
+            manifest = {**payload, "manifest_hash": sha256_json(payload)}
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+            """
+        ),
+        encoding="utf-8",
+    )
+    return writer
+
+
+def _allowed_runtime_patch_draft() -> CodeEditDraft:
+    return CodeEditDraft(
+        failure_mode="Runtime query term is stale.",
+        mechanism="Small source edit inside extracted runtime.",
+        expected_improvement="Better precision on future ICPs.",
+        risk="Low.",
+        lane="query_construction",
+        target_files=("sourcing_model/__init__.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/__init__.py b/sourcing_model/__init__.py\n"
+            "--- a/sourcing_model/__init__.py\n"
+            "+++ b/sourcing_model/__init__.py\n"
+            "@@ -1,5 +1,5 @@\n"
+            '-VALUE = "old"\n'
+            '+VALUE = "new"\n'
+            " \n"
+            " \n"
+            " def qualify():\n"
+            "     return VALUE\n"
+        ),
+        redacted_summary="Change one runtime source constant.",
+        test_plan="py_compile changed file.",
+        rollback_plan="Revert this diff.",
+    )
+
+
+def _new_top_level_folder_draft() -> CodeEditDraft:
+    return CodeEditDraft(
+        failure_mode="Bad scope.",
+        mechanism="Attempts to create a new top-level folder.",
+        expected_improvement="None.",
+        risk="High.",
+        lane="query_construction",
+        target_files=("new_folder/file.py",),
+        unified_diff=textwrap.dedent(
+            """\
+            diff --git a/new_folder/file.py b/new_folder/file.py
+            new file mode 100644
+            --- /dev/null
+            +++ b/new_folder/file.py
+            @@ -0,0 +1 @@
+            +VALUE = 1
+            """
+        ),
+        redacted_summary="Invalid top-level folder edit.",
+        test_plan="N/A",
+        rollback_plan="N/A",
+    )
 
 
 def _metadata() -> dict[str, object]:

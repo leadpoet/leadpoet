@@ -98,6 +98,20 @@ How it works:
 5. Candidate improvements are scored.
 6. Miners are provided with their respective rewards.
 
+Model runtime edit scope:
+
+Daily rebenchmarking and candidate scoring run the current model image referenced by the Research Lab `current.json` manifest. Hosted auto-research candidate builds also start from that same image: the gateway extracts `/app`, applies the proposed patch, rebuilds a candidate image, and sends that image through the existing scoring path.
+
+Candidate patches are limited to the extracted runtime code:
+
+- `gateway/`
+- `qualification/`
+- `sourcing_model/`
+- `validator_models/`
+- `research_lab_adapter.py`
+
+`requirements.txt` is used as a build/runtime dependency when present in the image, but it is not an editable miner target. New top-level folders, Dockerfiles, dependency files, CI files, deployment scripts, lockfiles, env files, and credential handling are outside the Research Lab edit scope.
+
 Research Lab rewards have two parts:
 
 - Compute reimbursement for verified OpenRouter spend from accepted research loops.

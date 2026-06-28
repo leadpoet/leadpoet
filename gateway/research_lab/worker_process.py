@@ -64,15 +64,6 @@ def _proxy_for_worker(prefixes: tuple[str, ...], index: int) -> str:
     return ""
 
 
-def _apply_proxy_env(proxy_url: str) -> None:
-    if not proxy_url:
-        return
-    os.environ["HTTP_PROXY"] = proxy_url
-    os.environ["HTTPS_PROXY"] = proxy_url
-    os.environ["http_proxy"] = proxy_url
-    os.environ["https_proxy"] = proxy_url
-
-
 def _configure_hosted_worker(index: int, total_workers: int, worker_prefix: str) -> str:
     worker_id = f"{worker_prefix}-{index + 1}"
     proxy = os.getenv("RESEARCH_LAB_HOSTED_WORKER_PROXY", "").strip() or _proxy_for_worker(
@@ -85,7 +76,6 @@ def _configure_hosted_worker(index: int, total_workers: int, worker_prefix: str)
     os.environ["RESEARCH_LAB_HOSTED_WORKER_TOTAL_WORKERS"] = str(total_workers)
     if proxy:
         os.environ["RESEARCH_LAB_HOSTED_WORKER_PROXY"] = proxy
-        _apply_proxy_env(proxy)
     return worker_id
 
 
@@ -101,7 +91,6 @@ def _configure_scoring_worker(index: int, total_workers: int, worker_prefix: str
     os.environ["RESEARCH_LAB_SCORING_WORKER_TOTAL_WORKERS"] = str(total_workers)
     if proxy:
         os.environ["RESEARCH_LAB_SCORING_WORKER_PROXY"] = proxy
-        _apply_proxy_env(proxy)
     return worker_id
 
 

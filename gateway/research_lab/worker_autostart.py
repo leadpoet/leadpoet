@@ -205,18 +205,10 @@ class ResearchLabWorkerSupervisor:
             env.setdefault("RESEARCH_LAB_HOSTED_WORKER_ENABLED", "true")
             if index < len(fleet.proxy_values):
                 env["RESEARCH_LAB_HOSTED_WORKER_PROXY"] = fleet.proxy_values[index]
-                env["HTTP_PROXY"] = fleet.proxy_values[index]
-                env["HTTPS_PROXY"] = fleet.proxy_values[index]
-                env["http_proxy"] = fleet.proxy_values[index]
-                env["https_proxy"] = fleet.proxy_values[index]
         else:
             env.setdefault("RESEARCH_LAB_SCORING_WORKER_ENABLED", "true")
             if index < len(fleet.proxy_values):
                 env["RESEARCH_LAB_SCORING_WORKER_PROXY"] = fleet.proxy_values[index]
-                env["HTTP_PROXY"] = fleet.proxy_values[index]
-                env["HTTPS_PROXY"] = fleet.proxy_values[index]
-                env["http_proxy"] = fleet.proxy_values[index]
-                env["https_proxy"] = fleet.proxy_values[index]
         command = [
             sys.executable,
             str(self._worker_script),

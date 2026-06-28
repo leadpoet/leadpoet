@@ -759,12 +759,15 @@ class ResearchLabHostedWorker:
             _miner_openrouter_key_ref(context),
             miner_hotkey=str(context.ticket["miner_hotkey"]),
         )
-        provider_env = {
-            **resolved_openrouter_env,
-            **_worker_proxy_env(self.config),
-        }
+        provider_env = dict(resolved_openrouter_env)
         context.provider_env = provider_env
-        docker_provider_env = _private_model_docker_env(self.config, provider_env)
+        docker_provider_env = _private_model_docker_env(
+            self.config,
+            {
+                **provider_env,
+                **_worker_proxy_env(self.config),
+            },
+        )
         budget_context = self._run_budget_context(context)
         _tier, model_id, model_doc = self.config.resolve_auto_research_model(
             str(budget_context.get("research_model_tier") or "")

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -16,6 +17,7 @@ from gateway.research_lab.store import canonical_hash
 from research_lab.canonical import sha256_json
 from research_lab.code_editing import (
     CodeEditDraft,
+    CodeEditSourceInspectionRequest,
     code_edit_candidate_manifest,
     extract_unified_diff_paths,
     validate_code_edit_draft,
@@ -40,6 +42,14 @@ class CodeEditBuildResult:
 
 
 @dataclass(frozen=True)
+class SourceInspectionBatch:
+    model_context: dict[str, Any]
+    event_doc: dict[str, Any]
+    read_paths: tuple[str, ...]
+    bytes_returned: int
+
+
+@dataclass(frozen=True)
 class ParentImageSourceContext:
     """Sanitized source inventory extracted from the parent runtime image."""
 
@@ -59,11 +69,42 @@ class ParentImageSourceContext:
             "extracted_top_level_paths": list(self.top_level_paths),
             "editable_file_count": len(self.editable_files),
             "editable_files": list(self.editable_files),
-            "file_previews": [dict(item) for item in self.file_previews],
+            "file_previews_available": len(self.file_previews),
             "rules": [
                 "Only edit files listed in editable_files.",
-                "Prefer files in file_previews because exact source excerpts are included.",
+                "Every edited file must first be read through source inspection.",
                 "Do not invent paths or create new files.",
+            ],
+        }
+
+    def inspection_index(self) -> dict[str, Any]:
+        files: list[dict[str, Any]] = []
+        for rel in self.editable_files:
+            path = self.source_root / rel
+            try:
+                stat = path.stat()
+                raw = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            files.append(
+                {
+                    "path": rel,
+                    "size_bytes": int(stat.st_size),
+                    "line_count": raw.count("\n") + (1 if raw else 0),
+                }
+            )
+        return {
+            "source_mode": self.source_mode,
+            "parent_image_digest_hash": self.parent_image_digest_hash,
+            "source_tree_hash": self.source_tree_hash,
+            "extracted_top_level_paths": list(self.top_level_paths),
+            "editable_file_count": len(self.editable_files),
+            "editable_files": list(self.editable_files),
+            "file_inventory": files,
+            "rules": [
+                "Search and read only files in editable_files.",
+                "Do not request dependency, env, credential, Docker, CI, or generated files.",
+                "A final patch may edit only files returned by read_file in this iteration.",
             ],
         }
 
@@ -121,13 +162,19 @@ class CodeEditCandidateBuilder:
         self,
         draft: CodeEditDraft,
         source_context: ParentImageSourceContext,
+        *,
+        read_paths: Sequence[str] | None = None,
+        require_read: bool = False,
     ) -> list[str]:
         allowed = set(source_context.editable_files)
+        read = set(read_paths or ())
         paths = set(draft.target_files) | extract_unified_diff_paths(draft.unified_diff)
         errors: list[str] = []
         for path in sorted(paths):
             if path not in allowed:
                 errors.append(f"code_edit_path_not_in_extracted_source:{path}")
+            if require_read and path not in read:
+                errors.append(f"code_edit_unread_source_file:{path}")
         return errors
 
     def build(
@@ -457,6 +504,36 @@ def _top_level_paths(repo_dir: Path) -> list[str]:
 _SOURCE_CONTEXT_MAX_FILES = 300
 _SOURCE_CONTEXT_MAX_PREVIEW_FILES = 12
 _SOURCE_CONTEXT_MAX_PREVIEW_CHARS = 12000
+_SOURCE_SEARCH_MAX_SNIPPET_CHARS = 320
+_SOURCE_SECRET_LINE_MARKERS = (
+    "sk-or-",
+    "sb_secret",
+    "service_role_key",
+    "aws_secret_access_key",
+    "aws_access_key_id",
+    "password=",
+    "password:",
+    "private_key",
+    "authorization:",
+    "bearer ",
+    "api_key=",
+    "api-key",
+    "webshare",
+)
+_SOURCE_DISALLOWED_PATH_PATTERNS = (
+    r"(^|/)Dockerfile(\.[^/]*)?$",
+    r"(^|/)docker-compose[^/]*\.ya?ml$",
+    r"(^|/)\.github/",
+    r"(^|/)\.git/",
+    r"(^|/)\.env",
+    r"(^|/)requirements[^/]*\.txt$",
+    r"(^|/)pyproject\.toml$",
+    r"(^|/)poetry\.lock$",
+    r"(^|/)uv\.lock$",
+    r"(^|/)Pipfile(\.lock)?$",
+    r"(^|/)package(-lock)?\.json$",
+    r"(^|/)\.research_lab/",
+)
 
 
 def _editable_runtime_files(
@@ -474,10 +551,193 @@ def _editable_runtime_files(
         rel = path.relative_to(source_dir).as_posix()
         if rel.startswith(".git/") or rel.startswith(".research_lab/"):
             continue
+        if _source_path_disallowed(rel):
+            continue
         if rel in allowed_exact or any(rel.startswith(prefix) for prefix in allowed_prefixes):
             if rel.endswith(tuple(allowed_suffixes)):
                 allowed.append(rel)
     return sorted(allowed)[:_SOURCE_CONTEXT_MAX_FILES]
+
+
+def resolve_source_inspection_requests(
+    source_context: ParentImageSourceContext,
+    requests: Sequence[CodeEditSourceInspectionRequest],
+    *,
+    already_read_paths: Sequence[str],
+    max_files: int,
+    max_file_bytes: int,
+    max_total_bytes: int,
+    max_search_matches: int,
+) -> SourceInspectionBatch:
+    allowed = set(source_context.editable_files)
+    read_paths = set(already_read_paths)
+    remaining_bytes = max(0, int(max_total_bytes))
+    max_files = max(1, int(max_files))
+    max_file_bytes = max(1, int(max_file_bytes))
+    max_search_matches = max(1, int(max_search_matches))
+    results: list[dict[str, Any]] = []
+    event_results: list[dict[str, Any]] = []
+    bytes_returned = 0
+
+    for request in requests:
+        operation = request.operation
+        if operation == "finish":
+            result = {
+                "operation": "finish",
+                "rationale_hash": sha256_json({"rationale": request.rationale}) if request.rationale else "",
+            }
+            results.append({key: value for key, value in result.items() if value})
+            event_results.append({key: value for key, value in result.items() if value})
+            continue
+        if operation == "search":
+            search_results = _search_source_files(
+                source_context.source_root,
+                source_context.editable_files,
+                query=request.query,
+                max_matches=max_search_matches,
+            )
+            model_result = {
+                "operation": "search",
+                "query_hash": sha256_json({"query": request.query}),
+                "matches": search_results,
+                "match_count": len(search_results),
+                "truncated": len(search_results) >= max_search_matches,
+            }
+            results.append(model_result)
+            event_results.append(
+                {
+                    "operation": "search",
+                    "query_hash": model_result["query_hash"],
+                    "match_count": len(search_results),
+                    "result_hash": sha256_json(model_result),
+                }
+            )
+            continue
+        if operation != "read_file":
+            raise CodeEditBuildError(f"unsupported source-inspection operation:{operation}")
+        rel = request.path
+        if rel not in allowed:
+            raise CodeEditBuildError(f"source_inspection_path_not_editable:{rel}")
+        if len(read_paths) >= max_files and rel not in read_paths:
+            event_results.append(
+                {
+                    "operation": "read_file",
+                    "path": rel,
+                    "skipped": "max_files_reached",
+                }
+            )
+            continue
+        if rel in read_paths:
+            event_results.append(
+                {
+                    "operation": "read_file",
+                    "path": rel,
+                    "skipped": "already_read",
+                }
+            )
+            continue
+        if remaining_bytes <= 0:
+            event_results.append(
+                {
+                    "operation": "read_file",
+                    "path": rel,
+                    "skipped": "max_total_bytes_reached",
+                }
+            )
+            continue
+        model_result = _read_source_file_for_model(
+            source_context.source_root,
+            rel,
+            max_bytes=min(max_file_bytes, remaining_bytes),
+        )
+        returned = int(model_result.get("bytes_returned") or 0)
+        read_paths.add(rel)
+        remaining_bytes = max(0, remaining_bytes - returned)
+        bytes_returned += returned
+        results.append(model_result)
+        event_results.append(
+            {
+                "operation": "read_file",
+                "path": rel,
+                "bytes_returned": returned,
+                "truncated": bool(model_result.get("truncated")),
+                "line_count": model_result.get("line_count"),
+                "result_hash": sha256_json(model_result),
+            }
+        )
+
+    model_context = {
+        "schema_version": "1.0",
+        "source_tree_hash": source_context.source_tree_hash,
+        "read_files": sorted(read_paths),
+        "results": results,
+        "bytes_returned": bytes_returned,
+    }
+    event_doc = {
+        "source_tree_hash": source_context.source_tree_hash,
+        "read_files": sorted(read_paths),
+        "read_file_count": len(read_paths),
+        "result_count": len(results),
+        "bytes_returned": bytes_returned,
+        "results": event_results,
+        "result_hash": sha256_json(model_context),
+    }
+    return SourceInspectionBatch(
+        model_context=model_context,
+        event_doc=event_doc,
+        read_paths=tuple(sorted(read_paths)),
+        bytes_returned=bytes_returned,
+    )
+
+
+def _search_source_files(
+    source_root: Path,
+    editable_files: Sequence[str],
+    *,
+    query: str,
+    max_matches: int,
+) -> list[dict[str, Any]]:
+    needle = str(query or "").strip().lower()
+    if not needle:
+        return []
+    terms = [term for term in re.split(r"\W+", needle) if len(term) >= 3]
+    matches: list[dict[str, Any]] = []
+    for rel in editable_files:
+        path = source_root / rel
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line_number, line in enumerate(lines, start=1):
+            lowered = line.lower()
+            if needle not in lowered and not (terms and all(term in lowered for term in terms[:4])):
+                continue
+            snippet = _redact_source_excerpt(line.strip())[:_SOURCE_SEARCH_MAX_SNIPPET_CHARS]
+            matches.append({"path": rel, "line": line_number, "snippet": snippet})
+            if len(matches) >= max_matches:
+                return matches
+    return matches
+
+
+def _read_source_file_for_model(source_root: Path, rel: str, *, max_bytes: int) -> dict[str, Any]:
+    path = source_root / rel
+    try:
+        raw_bytes = path.read_bytes()
+    except OSError as exc:
+        raise CodeEditBuildError(f"source_inspection_read_failed:{rel}") from exc
+    clipped = raw_bytes[: max(1, int(max_bytes))]
+    content = clipped.decode("utf-8", errors="replace")
+    redacted = _redact_source_excerpt(content)
+    return {
+        "operation": "read_file",
+        "path": rel,
+        "size_bytes": len(raw_bytes),
+        "bytes_returned": len(clipped),
+        "truncated": len(raw_bytes) > len(clipped),
+        "line_count": content.count("\n") + (1 if content else 0),
+        "content": redacted,
+        "content_hash": sha256_json({"path": rel, "content": redacted}),
+    }
 
 
 def _source_file_previews(source_dir: Path, editable_files: Sequence[str]) -> list[dict[str, Any]]:
@@ -519,11 +779,15 @@ def _redact_source_excerpt(text: str) -> str:
     redacted_lines = []
     for line in text.splitlines():
         lowered = line.lower()
-        if any(marker in lowered for marker in ("sk-or-", "sb_secret", "aws_secret_access_key", "password=")):
+        if any(marker in lowered for marker in _SOURCE_SECRET_LINE_MARKERS):
             redacted_lines.append("[redacted secret-like source line]")
         else:
             redacted_lines.append(line)
     return "\n".join(redacted_lines)
+
+
+def _source_path_disallowed(rel: str) -> bool:
+    return any(re.search(pattern, rel) for pattern in _SOURCE_DISALLOWED_PATH_PATTERNS)
 
 
 def _write_research_lab_build_scaffold(repo_dir: Path, *, base_image_ref: str) -> None:

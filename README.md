@@ -100,7 +100,9 @@ How it works:
 
 Model runtime edit scope:
 
-Daily rebenchmarking and candidate scoring run the current model image referenced by the Research Lab `current.json` manifest. Hosted auto-research candidate builds also start from that same image: the gateway extracts `/app`, applies the proposed patch, rebuilds a candidate image, and sends that image through the existing scoring path.
+Daily rebenchmarking and candidate scoring run the current model image referenced by the Research Lab `current.json` manifest. Hosted auto-research candidate builds also start from that same image: the gateway extracts `/app`, lets the research model inspect the extracted runtime source, applies the proposed patch, rebuilds a candidate image, and sends that image through the existing scoring path.
+
+The research model can search and read source from the extracted runtime before it drafts a patch. It does not get arbitrary repository access or shell access. Candidate patches are accepted only for files that were actually read during that loop iteration.
 
 Candidate patches are limited to the extracted runtime code:
 

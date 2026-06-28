@@ -8,7 +8,12 @@ import tempfile
 import time
 from typing import Any, Mapping, Sequence
 
-from gateway.research_lab.code_build import CodeEditBuildError, CodeEditBuildResult, CodeEditCandidateBuilder
+from gateway.research_lab.code_build import (
+    CodeEditBuildError,
+    CodeEditBuildResult,
+    CodeEditCandidateBuilder,
+    resolve_source_inspection_requests,
+)
 from gateway.research_lab.loop_engine import (
     AutoResearchLoopEvent,
     AutoResearchLoopResult,
@@ -26,7 +31,9 @@ from research_lab.canonical import sha256_json
 from research_lab.code_editing import (
     CodeEditDraft,
     build_code_edit_auto_research_messages,
+    build_code_edit_source_inspection_messages,
     parse_code_edit_response,
+    parse_code_edit_source_inspection_response,
 )
 from research_lab.eval import PrivateModelArtifactManifest
 
@@ -190,63 +197,284 @@ class CodeEditLoopEngine:
 
             iteration += 1
             remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
-            draft_result = _coerce_call_result(
-                await self.call_openrouter(
-                    build_code_edit_auto_research_messages(
-                        ticket={
-                            "ticket_id": str(ticket.get("ticket_id") or ""),
-                            "run_id": run_id,
-                            "miner_hotkey": ticket.get("miner_hotkey"),
-                            "island": ticket.get("island"),
-                            "brief_sanitized_ref": ticket.get("brief_sanitized_ref"),
-                            "brief_public_summary": _ticket_doc_value(ticket, "brief_public_summary"),
-                            "requested_loop_count": requested_loop_count,
-                            "loop_iteration": iteration,
-                        },
-                        artifact_manifest=artifact.to_dict(),
-                        component_registry=dict(component_registry),
-                        benchmark_public_summary=benchmark_public_summary,
-                        runtime_source_context=source_context.prompt_context(),
-                        budget_context={
-                            **dict(budget_context),
-                            "loop_iteration": iteration,
-                            "candidate_kind": "image_build",
-                        },
-                        max_candidates=settings.max_candidates,
-                    ),
-                    min(settings.draft_timeout_seconds, remaining_call_seconds),
-                    3000,
+            source_inspection_context: dict[str, Any] = {
+                "schema_version": "1.0",
+                "source_tree_hash": source_context.source_tree_hash,
+                "read_files": [],
+                "results": [],
+                "bytes_returned": 0,
+            }
+            read_paths: set[str] = set()
+            source_bytes_returned = 0
+            budget_exhausted_after_source_inspection = False
+            for inspection_round in range(1, max(1, int(self.builder.config.code_edit_source_inspection_rounds)) + 1):
+                if elapsed() >= settings.max_seconds:
+                    stop_reason = "max_seconds"
+                    break
+                if _would_exceed_budget(
+                    actual_cost_microusd,
+                    _estimated_call_microusd(settings.estimated_iteration_cost_usd),
+                    budget_limit_microusd,
+                ):
+                    stop_reason = "compute_budget_exhausted_before_source_inspection"
+                    budget_exhausted_after_source_inspection = True
+                    break
+                remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
+                inspection_result = _coerce_call_result(
+                    await self.call_openrouter(
+                        build_code_edit_source_inspection_messages(
+                            ticket={
+                                "ticket_id": str(ticket.get("ticket_id") or ""),
+                                "run_id": run_id,
+                                "miner_hotkey": ticket.get("miner_hotkey"),
+                                "island": ticket.get("island"),
+                                "brief_sanitized_ref": ticket.get("brief_sanitized_ref"),
+                                "brief_public_summary": _ticket_doc_value(ticket, "brief_public_summary"),
+                                "requested_loop_count": requested_loop_count,
+                                "loop_iteration": iteration,
+                                "inspection_round": inspection_round,
+                            },
+                            artifact_manifest=artifact.to_dict(),
+                            component_registry=dict(component_registry),
+                            benchmark_public_summary=benchmark_public_summary,
+                            runtime_source_index=source_context.inspection_index(),
+                            source_inspection_context=source_inspection_context,
+                            budget_context={
+                                **dict(budget_context),
+                                "loop_iteration": iteration,
+                                "inspection_round": inspection_round,
+                                "candidate_kind": "image_build",
+                            },
+                            max_requests=4,
+                        ),
+                        min(settings.draft_timeout_seconds, remaining_call_seconds),
+                        3000,
+                    )
                 )
-            )
-            raw = draft_result.content
-            openrouter_calls += 1
-            estimated_cost += settings.estimated_iteration_cost_usd
-            actual_cost_microusd += max(0, int(draft_result.cost_microusd))
-            if draft_result.provider_usage:
-                provider_usage.append({**draft_result.provider_usage, "loop_iteration": iteration, "call_stage": "code_edit_draft"})
-            budget_exhausted_after_call = (
-                budget_limit_microusd > 0 and actual_cost_microusd >= budget_limit_microusd
-            )
-            try:
-                drafts = parse_code_edit_response(raw, max_candidates=settings.max_candidates)
-            except Exception as exc:
+                raw_inspection = inspection_result.content
+                openrouter_calls += 1
+                estimated_cost += settings.estimated_iteration_cost_usd
+                actual_cost_microusd += max(0, int(inspection_result.cost_microusd))
+                if inspection_result.provider_usage:
+                    provider_usage.append(
+                        {
+                            **inspection_result.provider_usage,
+                            "loop_iteration": iteration,
+                            "inspection_round": inspection_round,
+                            "call_stage": "source_inspection",
+                        }
+                    )
+                try:
+                    requests = parse_code_edit_source_inspection_response(raw_inspection, max_requests=4)
+                except Exception as exc:
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="source_inspection_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            provider_usage=([provider_usage[-1]] if provider_usage else []),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "source_inspection_parse_failed",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "inspection_round": inspection_round,
+                                "error": str(exc)[:500],
+                                "raw_response_hash": sha256_json({"raw_response": raw_inspection}),
+                                "source_tree_hash": source_context.source_tree_hash,
+                            },
+                        )
+                    )
+                    break
+                await self.event_sink(
+                    AutoResearchLoopEvent(
+                        event_type="source_inspection_requested",
+                        loop_status="running",
+                        elapsed_seconds=elapsed(),
+                        provider_usage=([provider_usage[-1]] if provider_usage else []),
+                        cost_ledger=_running_cost_ledger(
+                            openrouter_calls,
+                            estimated_cost,
+                            actual_cost_microusd,
+                            "source_inspection_requested",
+                        ),
+                        event_doc={
+                            "iteration": iteration,
+                            "inspection_round": inspection_round,
+                            "source_tree_hash": source_context.source_tree_hash,
+                            "requests": [request.to_event_doc() for request in requests],
+                            "request_hash": sha256_json({"requests": [request.to_event_doc() for request in requests]}),
+                        },
+                    )
+                )
+                if any(request.operation == "finish" for request in requests):
+                    break
+                try:
+                    batch = resolve_source_inspection_requests(
+                        source_context,
+                        requests,
+                        already_read_paths=tuple(sorted(read_paths)),
+                        max_files=self.builder.config.code_edit_source_inspection_max_files,
+                        max_file_bytes=self.builder.config.code_edit_source_inspection_file_bytes,
+                        max_total_bytes=max(
+                            0,
+                            self.builder.config.code_edit_source_inspection_total_bytes - source_bytes_returned,
+                        ),
+                        max_search_matches=self.builder.config.code_edit_source_inspection_search_matches,
+                    )
+                except CodeEditBuildError as exc:
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="source_inspection_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            provider_usage=([provider_usage[-1]] if provider_usage else []),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "source_inspection_resolution_failed",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "inspection_round": inspection_round,
+                                "error": str(exc)[:500],
+                                "source_tree_hash": source_context.source_tree_hash,
+                            },
+                        )
+                    )
+                    break
+                source_bytes_returned += batch.bytes_returned
+                read_paths = set(batch.read_paths)
+                source_inspection_context = _merge_source_inspection_context(
+                    source_inspection_context,
+                    batch.model_context,
+                    total_bytes=source_bytes_returned,
+                    read_paths=read_paths,
+                )
+                await self.event_sink(
+                    AutoResearchLoopEvent(
+                        event_type="source_inspection_resolved",
+                        loop_status="running",
+                        elapsed_seconds=elapsed(),
+                        cost_ledger=_running_cost_ledger(
+                            openrouter_calls,
+                            estimated_cost,
+                            actual_cost_microusd,
+                            "source_inspection_resolved",
+                        ),
+                        event_doc={
+                            "iteration": iteration,
+                            "inspection_round": inspection_round,
+                            **batch.event_doc,
+                        },
+                    )
+                )
+                if source_bytes_returned >= self.builder.config.code_edit_source_inspection_total_bytes:
+                    break
+                if actual_cost_microusd >= budget_limit_microusd > 0:
+                    stop_reason = "compute_budget_exhausted_after_source_inspection"
+                    budget_exhausted_after_source_inspection = True
+                    break
+            if budget_exhausted_after_source_inspection:
+                break
+            if not read_paths:
                 await self.event_sink(
                     AutoResearchLoopEvent(
                         event_type="code_edit_validation_failed",
                         loop_status="running",
                         elapsed_seconds=elapsed(),
-                        cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "code_edit_parse_failed"),
+                        cost_ledger=_running_cost_ledger(
+                            openrouter_calls,
+                            estimated_cost,
+                            actual_cost_microusd,
+                            "code_edit_no_source_files_read",
+                        ),
                         event_doc={
                             "iteration": iteration,
-                            "error": str(exc)[:500],
-                            "raw_response_hash": sha256_json({"raw_response": raw}),
+                            "error": "code_edit_no_source_files_read",
+                            "source_tree_hash": source_context.source_tree_hash,
                         },
                     )
                 )
                 drafts = []
+                budget_exhausted_after_call = actual_cost_microusd >= budget_limit_microusd > 0
+                raw = ""
+            else:
+                remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
+                if _would_exceed_budget(
+                    actual_cost_microusd,
+                    _estimated_call_microusd(settings.estimated_iteration_cost_usd),
+                    budget_limit_microusd,
+                ):
+                    stop_reason = "compute_budget_exhausted_before_code_edit"
+                    break
+                draft_result = _coerce_call_result(
+                    await self.call_openrouter(
+                        build_code_edit_auto_research_messages(
+                            ticket={
+                                "ticket_id": str(ticket.get("ticket_id") or ""),
+                                "run_id": run_id,
+                                "miner_hotkey": ticket.get("miner_hotkey"),
+                                "island": ticket.get("island"),
+                                "brief_sanitized_ref": ticket.get("brief_sanitized_ref"),
+                                "brief_public_summary": _ticket_doc_value(ticket, "brief_public_summary"),
+                                "requested_loop_count": requested_loop_count,
+                                "loop_iteration": iteration,
+                            },
+                            artifact_manifest=artifact.to_dict(),
+                            component_registry=dict(component_registry),
+                            benchmark_public_summary=benchmark_public_summary,
+                            runtime_source_context=source_context.prompt_context(),
+                            source_inspection_context=source_inspection_context,
+                            budget_context={
+                                **dict(budget_context),
+                                "loop_iteration": iteration,
+                                "candidate_kind": "image_build",
+                            },
+                            max_candidates=settings.max_candidates,
+                        ),
+                        min(settings.draft_timeout_seconds, remaining_call_seconds),
+                        3000,
+                    )
+                )
+                raw = draft_result.content
+                openrouter_calls += 1
+                estimated_cost += settings.estimated_iteration_cost_usd
+                actual_cost_microusd += max(0, int(draft_result.cost_microusd))
+                if draft_result.provider_usage:
+                    provider_usage.append({**draft_result.provider_usage, "loop_iteration": iteration, "call_stage": "code_edit_draft"})
+                budget_exhausted_after_call = (
+                    budget_limit_microusd > 0 and actual_cost_microusd >= budget_limit_microusd
+                )
+                try:
+                    drafts = parse_code_edit_response(raw, max_candidates=settings.max_candidates)
+                except Exception as exc:
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="code_edit_validation_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "code_edit_parse_failed"),
+                            event_doc={
+                                "iteration": iteration,
+                                "error": str(exc)[:500],
+                                "raw_response_hash": sha256_json({"raw_response": raw}),
+                            },
+                        )
+                    )
+                    drafts = []
             for draft_index, draft in enumerate(drafts):
                 node_id = _node_id(run_id, iteration, draft_index, draft)
-                source_errors = self.builder.validate_draft_against_source_context(draft, source_context)
+                source_errors = self.builder.validate_draft_against_source_context(
+                    draft,
+                    source_context,
+                    read_paths=tuple(sorted(read_paths)),
+                    require_read=True,
+                )
                 if source_errors:
                     await self.event_sink(
                         AutoResearchLoopEvent(
@@ -583,6 +811,35 @@ def _redacted_draft_doc(draft: CodeEditDraft) -> dict[str, Any]:
         "test_plan": draft.test_plan,
         "rollback_plan": draft.rollback_plan,
         "predicted_delta": draft.predicted_delta,
+    }
+
+
+def _merge_source_inspection_context(
+    existing: Mapping[str, Any],
+    update: Mapping[str, Any],
+    *,
+    total_bytes: int,
+    read_paths: set[str],
+) -> dict[str, Any]:
+    existing_results = existing.get("results") if isinstance(existing, Mapping) else []
+    update_results = update.get("results") if isinstance(update, Mapping) else []
+    results: list[dict[str, Any]] = []
+    for item in list(existing_results or []) + list(update_results or []):
+        if isinstance(item, Mapping):
+            results.append(dict(item))
+    return {
+        "schema_version": "1.0",
+        "source_tree_hash": str(update.get("source_tree_hash") or existing.get("source_tree_hash") or ""),
+        "read_files": sorted(read_paths),
+        "results": results,
+        "bytes_returned": int(total_bytes),
+        "context_hash": sha256_json(
+            {
+                "read_files": sorted(read_paths),
+                "result_hashes": [sha256_json(item) for item in results],
+                "bytes_returned": int(total_bytes),
+            }
+        ),
     }
 
 

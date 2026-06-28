@@ -18,7 +18,11 @@ if str(ROOT) not in sys.path:
 
 from leadpoet_verifier.research_evaluation import build_research_evaluation_score_bundle  # noqa: E402
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
-from gateway.research_lab.code_build import CodeEditBuildError, CodeEditCandidateBuilder  # noqa: E402
+from gateway.research_lab.code_build import (  # noqa: E402
+    CodeEditBuildError,
+    CodeEditCandidateBuilder,
+    resolve_source_inspection_requests,
+)
 from gateway.research_lab.code_loop_engine import CodeEditLoopEngine  # noqa: E402
 from gateway.research_lab.loop_engine import (  # noqa: E402
     AutoResearchLoopEngine,
@@ -45,7 +49,7 @@ from research_lab.auto_research_prompt import (  # noqa: E402
 from research_lab.canonical import sha256_json  # noqa: E402
 from research_lab.code_editing import (
     CodeEditDraft,
-    build_code_edit_auto_research_messages,
+    CodeEditSourceInspectionRequest,
     validate_code_edit_draft,
 )  # noqa: E402
 from research_lab.eval.private_runtime import DEFAULT_ENV_PASSTHROUGH  # noqa: E402
@@ -586,6 +590,57 @@ def _verify_image_extracted_code_builder(artifact: PrivateModelArtifactManifest)
                 private_artifact_manifest_output=".research_lab/candidate_manifest.json",
                 code_edit_build_timeout_seconds=30,
             )
+            builder = CodeEditCandidateBuilder(config)
+            source_context = builder.prepare_parent_source_context(
+                parent_artifact=artifact,
+                workspace_dir=tmp_dir / "source_context",
+            )
+            if "requirements.txt" in source_context.editable_files:
+                errors.append("source context exposed requirements.txt as editable")
+            if any(path.endswith(".env") or "/.env" in path for path in source_context.editable_files):
+                errors.append("source context exposed env files as editable")
+            unread_errors = builder.validate_draft_against_source_context(
+                _allowed_runtime_patch_draft(),
+                source_context,
+                read_paths=(),
+                require_read=True,
+            )
+            if "code_edit_unread_source_file:sourcing_model/__init__.py" not in unread_errors:
+                errors.append("source context validation did not reject unread target file")
+            batch = resolve_source_inspection_requests(
+                source_context,
+                [
+                    CodeEditSourceInspectionRequest(
+                        operation="search",
+                        query="qualify",
+                        rationale="locate model entry point",
+                    ),
+                    CodeEditSourceInspectionRequest(
+                        operation="read_file",
+                        path="sourcing_model/__init__.py",
+                        rationale="read exact target file",
+                    ),
+                    CodeEditSourceInspectionRequest(
+                        operation="read_file",
+                        path="sourcing_model/secret_like.py",
+                        rationale="verify redaction",
+                    ),
+                ],
+                already_read_paths=(),
+                max_files=8,
+                max_file_bytes=24_000,
+                max_total_bytes=120_000,
+                max_search_matches=30,
+            )
+            if "sourcing_model/__init__.py" not in batch.read_paths:
+                errors.append("source inspection read did not record requested file")
+            if batch.model_context.get("bytes_returned", 0) <= 0:
+                errors.append("source inspection read returned no source bytes")
+            serialized_context = json.dumps(batch.model_context)
+            if "password=not-a-real-secret" in serialized_context:
+                errors.append("source inspection leaked secret-like source content")
+            if "[redacted secret-like source line]" not in serialized_context:
+                errors.append("source inspection did not redact secret-like source line")
             result = CodeEditCandidateBuilder(config).build(
                 draft=_allowed_runtime_patch_draft(),
                 parent_artifact=artifact,
@@ -696,19 +751,61 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
         os.environ["PATH"] = str(fake_docker.parent) + os.pathsep + old_env["PATH"]
         os.environ["FAKE_PARENT_APP"] = str(fake_app)
         os.environ["FAKE_DOCKER_LOG"] = str(docker_log)
+        inspection_call_count = 0
 
         async def _call_model(messages, timeout_seconds: int, max_tokens: int) -> OpenRouterCallResult:
+            nonlocal inspection_call_count
             content = "\n".join(str(message.get("content") or "") for message in messages)
+            is_source_inspection = "runtime_source_index" in content
+            if is_source_inspection:
+                inspection_call_count += 1
             calls.append(
                 {
+                    "stage": "source_inspection" if is_source_inspection else "code_edit_draft",
                     "timeout_seconds": timeout_seconds,
                     "max_tokens": max_tokens,
                     "has_runtime_source_context": "runtime_source_context" in content,
+                    "has_runtime_source_index": "runtime_source_index" in content,
+                    "has_source_inspection_context": "source_inspection_context" in content,
                     "has_real_file": "sourcing_model/__init__.py" in content,
                     "has_source_excerpt": "VALUE" in content and "def qualify" in content,
                     "has_bad_example": "sourcing_model/example.py" in content,
                 }
             )
+            if is_source_inspection:
+                if inspection_call_count == 1:
+                    return OpenRouterCallResult(
+                        content=json.dumps(
+                            {
+                                "requests": [
+                                    {
+                                        "operation": "read_file",
+                                        "path": "sourcing_model/__init__.py",
+                                        "rationale": "read exact model entry source before editing",
+                                    }
+                                ]
+                            },
+                            sort_keys=True,
+                        ),
+                        provider_usage={
+                            "provider": "openrouter",
+                            "response_id": f"code-edit-source-inspection-{inspection_call_count}",
+                            "cost_microusd": 1000,
+                        },
+                        cost_microusd=1000,
+                    )
+                return OpenRouterCallResult(
+                    content=json.dumps(
+                        {"requests": [{"operation": "finish", "rationale": "enough source has been read"}]},
+                        sort_keys=True,
+                    ),
+                    provider_usage={
+                        "provider": "openrouter",
+                        "response_id": f"code-edit-source-inspection-{inspection_call_count}",
+                        "cost_microusd": 1000,
+                    },
+                    cost_microusd=1000,
+                )
             return OpenRouterCallResult(
                 content=json.dumps(
                     {
@@ -734,7 +831,7 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                     },
                     sort_keys=True,
                 ),
-                provider_usage={"provider": "openrouter", "response_id": "code-edit-source-context", "cost_microusd": 1000},
+                provider_usage={"provider": "openrouter", "response_id": "code-edit-source-context-draft", "cost_microusd": 1000},
                 cost_microusd=1000,
             )
 
@@ -781,15 +878,35 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
             )
             if not result.selected_candidates:
                 errors.append("code-edit loop did not build a candidate from extracted source context")
-            if not calls or not calls[0].get("has_runtime_source_context"):
+            if not calls or calls[0].get("stage") != "source_inspection":
+                errors.append("code-edit loop did not inspect source before drafting")
+            if not calls or not calls[0].get("has_runtime_source_index"):
+                errors.append("source inspection prompt did not include runtime_source_index")
+            if calls and calls[0].get("has_source_excerpt"):
+                errors.append("source inspection prompt included raw source before read_file")
+            draft_calls = [call for call in calls if call.get("stage") == "code_edit_draft"]
+            if not draft_calls or not draft_calls[0].get("has_runtime_source_context"):
                 errors.append("code-edit draft prompt did not include runtime_source_context")
-            if not calls or not calls[0].get("has_real_file"):
+            if not draft_calls or not draft_calls[0].get("has_source_inspection_context"):
+                errors.append("code-edit draft prompt did not include source_inspection_context")
+            if not draft_calls or not draft_calls[0].get("has_real_file"):
                 errors.append("code-edit draft prompt did not include real extracted editable file paths")
-            if not calls or not calls[0].get("has_source_excerpt"):
-                errors.append("code-edit draft prompt did not include extracted source excerpts")
-            if calls and calls[0].get("has_bad_example"):
+            if not draft_calls or not draft_calls[0].get("has_source_excerpt"):
+                errors.append("code-edit draft prompt did not include inspected source content")
+            if calls and any(call.get("has_bad_example") for call in calls):
                 errors.append("code-edit draft prompt still suggests nonexistent sourcing_model/example.py")
             event_types = [event.event_type for event in events]
+            if "source_inspection_requested" not in event_types:
+                errors.append("code-edit loop did not record source_inspection_requested")
+            if "source_inspection_resolved" not in event_types:
+                errors.append("code-edit loop did not record source_inspection_resolved")
+            if "code_edit_drafted" not in event_types:
+                errors.append("code-edit loop did not record code_edit_drafted")
+            elif (
+                "source_inspection_resolved" in event_types
+                and event_types.index("source_inspection_resolved") > event_types.index("code_edit_drafted")
+            ):
+                errors.append("code-edit loop drafted before resolving source inspection")
             if "candidate_build_passed" not in event_types:
                 errors.append("code-edit loop did not record candidate_build_passed")
             first_doc = events[0].event_doc if events else {}
@@ -823,6 +940,11 @@ def _write_fake_parent_app(root: Path, *, omit: tuple[str, ...] = ()) -> None:
         'VALUE = "old"\n\n\ndef qualify():\n    return VALUE\n',
         encoding="utf-8",
     )
+    (root / "sourcing_model" / "secret_like.py").write_text(
+        'CONFIG_VALUE = "password=not-a-real-secret"\n',
+        encoding="utf-8",
+    )
+    (root / "gateway" / ".env").write_text("SHOULD_NOT_BE_INDEXED=1\n", encoding="utf-8")
     if "research_lab_adapter.py" not in omit:
         (root / "research_lab_adapter.py").write_text(
             'def adapter_metadata():\n    return {"adapter_version": "fake-adapter:v1"}\n',

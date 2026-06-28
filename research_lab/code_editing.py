@@ -78,6 +78,75 @@ class CodeEditDraft:
         return payload
 
 
+@dataclass(frozen=True)
+class CodeEditSourceInspectionRequest:
+    operation: str
+    query: str = ""
+    path: str = ""
+    rationale: str = ""
+
+    def to_event_doc(self) -> dict[str, Any]:
+        payload = {
+            "operation": self.operation,
+            "query_hash": sha256_json({"query": self.query}) if self.query else "",
+            "path": self.path,
+            "rationale_hash": sha256_json({"rationale": self.rationale}) if self.rationale else "",
+        }
+        return {key: value for key, value in payload.items() if value not in {"", None}}
+
+
+def build_code_edit_source_inspection_messages(
+    *,
+    ticket: Mapping[str, Any],
+    artifact_manifest: Mapping[str, Any],
+    component_registry: Mapping[str, Any],
+    benchmark_public_summary: Mapping[str, Any],
+    runtime_source_index: Mapping[str, Any],
+    source_inspection_context: Mapping[str, Any] | None,
+    budget_context: Mapping[str, Any] | None,
+    max_requests: int = 4,
+) -> list[dict[str, str]]:
+    """Ask the model which extracted source files it needs before drafting."""
+
+    context = {
+        "ticket": _redacted_mapping(ticket),
+        "artifact_manifest": _redacted_mapping(artifact_manifest),
+        "component_registry": _redacted_mapping(component_registry),
+        "benchmark_public_summary": _redacted_mapping(benchmark_public_summary),
+        "runtime_source_index": _redacted_source_context(runtime_source_index),
+        "source_inspection_context": _redacted_source_context(source_inspection_context or {}),
+        "budget_context": _redacted_mapping(budget_context or {}),
+        "max_requests": max(1, int(max_requests)),
+        "allowed_operations": ["search", "read_file", "finish"],
+    }
+    system = (
+        "You are Leadpoet Research Lab's source-inspection planner for code-edit "
+        "autoresearch. You are inspecting the private sourcing model runtime extracted "
+        "from the current ECR image. You cannot use external tools or GitHub. Request "
+        "only local searches or exact file reads that are necessary to produce a small, "
+        "generalizable improvement patch later. Never request secrets, hidden benchmark "
+        "plaintext, judge prompts, provider keys, raw private data, or environment files."
+    )
+    user = (
+        "Return strict JSON only, no markdown.\n\n"
+        "Your job in this stage is not to write a patch. Request source context first.\n\n"
+        "Allowed request shapes:\n"
+        "{\"requests\":[{\"operation\":\"search\",\"query\":\"...\",\"rationale\":\"...\"}]}\n"
+        "{\"requests\":[{\"operation\":\"read_file\",\"path\":\"sourcing_model/foo.py\",\"rationale\":\"...\"}]}\n"
+        "{\"requests\":[{\"operation\":\"finish\",\"rationale\":\"enough exact source has been read\"}]}\n\n"
+        "Rules:\n"
+        "- Use search to locate relevant code when the exact path is unclear.\n"
+        "- Use read_file before proposing edits to any file.\n"
+        "- Only request paths listed in runtime_source_index.editable_files.\n"
+        "- Do not request Dockerfile, dependency files, lockfiles, env files, CI, credentials, or new files.\n"
+        "- Stop with finish once you have enough exact file content to draft a narrow patch.\n"
+        "- Prefer source related to query construction, ICP normalization, provider fallback, intent evidence, ranking, and adapter output.\n\n"
+        "Context JSON:\n"
+        + json.dumps(context, sort_keys=True, separators=(",", ":"))
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
 def build_code_edit_auto_research_messages(
     *,
     ticket: Mapping[str, Any],
@@ -85,6 +154,7 @@ def build_code_edit_auto_research_messages(
     component_registry: Mapping[str, Any],
     benchmark_public_summary: Mapping[str, Any],
     runtime_source_context: Mapping[str, Any] | None = None,
+    source_inspection_context: Mapping[str, Any] | None = None,
     budget_context: Mapping[str, Any] | None,
     max_candidates: int,
 ) -> list[dict[str, str]]:
@@ -95,15 +165,17 @@ def build_code_edit_auto_research_messages(
     """
 
     source_context = _redacted_source_context(runtime_source_context or {})
+    inspection_context = _redacted_source_context(source_inspection_context or {})
     editable_files = source_context.get("editable_files") if isinstance(source_context, Mapping) else None
-    preview_files = source_context.get("file_previews") if isinstance(source_context, Mapping) else None
-    example_target = _example_target_file(editable_files, preview_files)
+    read_files = inspection_context.get("read_files") if isinstance(inspection_context, Mapping) else None
+    example_target = _example_target_file(read_files, None) or _example_target_file(editable_files, None)
     context = {
         "ticket": _redacted_mapping(ticket),
         "artifact_manifest": _redacted_mapping(artifact_manifest),
         "component_registry": _redacted_mapping(component_registry),
         "benchmark_public_summary": _redacted_mapping(benchmark_public_summary),
         "runtime_source_context": source_context,
+        "source_inspection_context": inspection_context,
         "budget_context": _redacted_mapping(budget_context or {}),
         "max_candidates": max(1, int(max_candidates)),
         "source_mode": "parent_image_extract",
@@ -149,7 +221,8 @@ def build_code_edit_auto_research_messages(
         "Active extracted source rules:\n"
         "- The current ECR image has already been pulled and /app has already been extracted before this prompt.\n"
         "- Use only exact files listed in Context JSON runtime_source_context.editable_files.\n"
-        "- Prefer files listed in runtime_source_context.file_previews because exact source excerpts are included.\n"
+        "- Every target file must be listed in source_inspection_context.read_files.\n"
+        "- Build hunks only from exact file content returned in source_inspection_context.results.\n"
         "- Do not target example, placeholder, guessed, deleted, or non-listed paths.\n\n"
         "Forbidden edits:\n"
         "- Dockerfile, CI, dependency files, lockfiles, deploy scripts, credentials, env files\n"
@@ -160,9 +233,9 @@ def build_code_edit_auto_research_messages(
         "- hidden ICP access, raw judge prompts, raw model responses, secrets, or key handling changes\n\n"
         "Diff requirements:\n"
         "- Produce a small unified diff that applies to the active runtime source extracted from the current ECR image.\n"
-        "- Build every hunk from exact source lines visible in runtime_source_context.file_previews.\n"
-        "- If a file preview is truncated, edit only the visible excerpt, or choose another listed file with visible relevant code.\n"
-        "- Do not guess function bodies, line numbers, imports, or context lines that are not visible in file_previews.\n"
+        "- Build every hunk from exact source lines visible in source_inspection_context read_file results.\n"
+        "- If a read_file result is truncated, edit only the visible excerpt, or inspect a narrower relevant file in the next iteration.\n"
+        "- Do not guess function bodies, line numbers, imports, or context lines that are not visible in source_inspection_context.\n"
         "- Keep the change testable and reversible.\n"
         "- Prefer one narrow code path over broad rewrites.\n"
         "- Do not overfit to one public ICP; the improvement must generalize.\n\n"
@@ -176,6 +249,51 @@ def build_code_edit_auto_research_messages(
         + json.dumps(context, sort_keys=True, separators=(",", ":"))
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def parse_code_edit_source_inspection_response(
+    raw_text: str,
+    *,
+    max_requests: int = 4,
+) -> list[CodeEditSourceInspectionRequest]:
+    decoded = json.loads(_extract_json_object(raw_text))
+    if not isinstance(decoded, Mapping):
+        raise ValueError("source-inspection response must be a JSON object")
+    if _contains_forbidden_material(decoded):
+        raise ValueError("source-inspection response contains forbidden private or secret material")
+    requests = decoded.get("requests")
+    if decoded.get("finish") is True and not requests:
+        return [CodeEditSourceInspectionRequest(operation="finish", rationale=str(decoded.get("rationale") or "")[:500])]
+    if not isinstance(requests, list) or not requests:
+        raise ValueError("source-inspection response requires a non-empty requests array")
+    parsed: list[CodeEditSourceInspectionRequest] = []
+    for item in requests[: max(1, int(max_requests))]:
+        if not isinstance(item, Mapping):
+            raise ValueError("source-inspection request must be an object")
+        operation = str(item.get("operation") or "").strip().lower()
+        if operation not in {"search", "read_file", "finish"}:
+            raise ValueError(f"unsupported source-inspection operation:{operation}")
+        query = str(item.get("query") or "")[:500]
+        path = ""
+        if item.get("path") is not None:
+            path = _normalize_repo_path(item.get("path"))
+        rationale = str(item.get("rationale") or "")[:700]
+        if operation == "search" and not query.strip():
+            raise ValueError("source-inspection search requires query")
+        if operation == "read_file" and not path:
+            raise ValueError("source-inspection read_file requires path")
+        if operation == "finish":
+            query = ""
+            path = ""
+        parsed.append(
+            CodeEditSourceInspectionRequest(
+                operation=operation,
+                query=query,
+                path=path,
+                rationale=rationale,
+            )
+        )
+    return parsed
 
 
 def parse_code_edit_response(raw_text: str, *, max_candidates: int = 1) -> list[CodeEditDraft]:

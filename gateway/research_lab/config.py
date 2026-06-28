@@ -330,6 +330,11 @@ class ResearchLabGatewayConfig:
     code_edit_allowed_paths_json: str = ""
     code_edit_allowed_exact_paths_json: str = ""
     code_edit_allowed_suffixes_json: str = ""
+    code_edit_source_inspection_rounds: int = 3
+    code_edit_source_inspection_max_files: int = 8
+    code_edit_source_inspection_file_bytes: int = 24_000
+    code_edit_source_inspection_total_bytes: int = 120_000
+    code_edit_source_inspection_search_matches: int = 30
     score_bundle_kms_key_id: str = "alias/leadpoet-research-lab-artifact-signing"
     score_bundle_signature_uri_prefix: str = ""
     auto_research_model: str = ""
@@ -583,6 +588,26 @@ class ResearchLabGatewayConfig:
             code_edit_allowed_paths_json=os.getenv("RESEARCH_LAB_CODE_EDIT_ALLOWED_PATHS_JSON", ""),
             code_edit_allowed_exact_paths_json=os.getenv("RESEARCH_LAB_CODE_EDIT_ALLOWED_EXACT_PATHS_JSON", ""),
             code_edit_allowed_suffixes_json=os.getenv("RESEARCH_LAB_CODE_EDIT_ALLOWED_SUFFIXES_JSON", ""),
+            code_edit_source_inspection_rounds=max(
+                1,
+                _int("RESEARCH_LAB_CODE_EDIT_SOURCE_INSPECTION_ROUNDS", 3),
+            ),
+            code_edit_source_inspection_max_files=max(
+                1,
+                _int("RESEARCH_LAB_CODE_EDIT_SOURCE_INSPECTION_MAX_FILES", 8),
+            ),
+            code_edit_source_inspection_file_bytes=max(
+                1024,
+                _int("RESEARCH_LAB_CODE_EDIT_SOURCE_INSPECTION_FILE_BYTES", 24_000),
+            ),
+            code_edit_source_inspection_total_bytes=max(
+                4096,
+                _int("RESEARCH_LAB_CODE_EDIT_SOURCE_INSPECTION_TOTAL_BYTES", 120_000),
+            ),
+            code_edit_source_inspection_search_matches=max(
+                1,
+                _int("RESEARCH_LAB_CODE_EDIT_SOURCE_INSPECTION_SEARCH_MATCHES", 30),
+            ),
             score_bundle_kms_key_id=os.getenv(
                 "RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID",
                 "alias/leadpoet-research-lab-artifact-signing",
@@ -885,6 +910,13 @@ class ResearchLabGatewayConfig:
                 "private_test_cmd_configured": bool(self.private_test_cmd),
                 "private_build_cmd_configured": bool(self.private_build_cmd),
                 "private_artifact_manifest_output_configured": bool(self.private_artifact_manifest_output),
+                "code_edit_source_inspection": {
+                    "rounds": self.code_edit_source_inspection_rounds,
+                    "max_files": self.code_edit_source_inspection_max_files,
+                    "file_bytes": self.code_edit_source_inspection_file_bytes,
+                    "total_bytes": self.code_edit_source_inspection_total_bytes,
+                    "search_matches": self.code_edit_source_inspection_search_matches,
+                },
                 "auto_research_model_configured": bool(self.auto_research_model),
                 "approved_model_tiers": {
                     tier: {

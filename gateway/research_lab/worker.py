@@ -606,6 +606,8 @@ class ResearchLabHostedWorker:
             ticket_id = str(row.get("ticket_id") or "")
             if not run_id or not ticket_id:
                 continue
+            if await self._loop_activity_blocks_stale_requeue(run_id, stale_after_seconds):
+                continue
             try:
                 await create_queue_event(
                     run_id=run_id,
@@ -662,6 +664,8 @@ class ResearchLabHostedWorker:
             ticket_id = str(row.get("ticket_id") or "")
             if not run_id or not ticket_id:
                 continue
+            if await self._loop_activity_blocks_stale_requeue(run_id, stale_after_seconds):
+                continue
             try:
                 await create_queue_event(
                     run_id=run_id,
@@ -695,6 +699,39 @@ class ResearchLabHostedWorker:
                 stale_after_seconds,
             )
         return recovered
+
+    async def _loop_activity_blocks_stale_requeue(self, run_id: str, stale_after_seconds: int) -> bool:
+        row = await select_one(
+            "research_lab_auto_research_loop_current",
+            columns=(
+                "run_id,current_loop_status,current_status_at,current_event_seq,"
+                "current_event_type,current_worker_ref"
+            ),
+            filters=(("run_id", run_id),),
+        )
+        if not row:
+            return False
+        loop_status = str(row.get("current_loop_status") or "")
+        if loop_status == "completed":
+            logger.info(
+                "research_lab_stale_hosted_requeue_skipped_completed_loop run_id=%s loop_seq=%s",
+                compact_ref(run_id),
+                row.get("current_event_seq"),
+            )
+            return True
+        if loop_status in {"running", "paused"} and not _status_is_stale(
+            row.get("current_status_at"),
+            stale_after_seconds,
+        ):
+            logger.info(
+                "research_lab_stale_hosted_requeue_skipped_active_loop run_id=%s loop_status=%s loop_seq=%s loop_worker=%s",
+                compact_ref(run_id),
+                loop_status,
+                row.get("current_event_seq"),
+                row.get("current_worker_ref"),
+            )
+            return True
+        return False
 
     async def _load_run_context(self, queue_row: Mapping[str, Any]) -> HostedRunContext:
         ticket = await select_one(
@@ -806,14 +843,15 @@ class ResearchLabHostedWorker:
             )
 
             latest_checkpoint: dict[str, Any] | None = None
+            last_queue_heartbeat_at = 0.0
 
             async def _record_loop_event(event: AutoResearchLoopEvent) -> None:
-                nonlocal latest_checkpoint
+                nonlocal latest_checkpoint, last_queue_heartbeat_at
                 if event.event_type == "checkpoint_saved":
                     checkpoint_doc = event.event_doc.get("checkpoint") if isinstance(event.event_doc, Mapping) else None
                     if isinstance(checkpoint_doc, dict):
                         latest_checkpoint = dict(checkpoint_doc)
-                await create_auto_research_loop_event(
+                loop_event_row = await create_auto_research_loop_event(
                     run_id=context.run_id,
                     ticket_id=context.ticket_id,
                     receipt_id=context.receipt_id,
@@ -828,6 +866,18 @@ class ResearchLabHostedWorker:
                     cost_ledger=event.cost_ledger,
                     event_doc=event.event_doc,
                 )
+                now_monotonic = time.monotonic()
+                if (
+                    event.event_type in {"candidate_build_started", "candidate_build_passed", "checkpoint_saved"}
+                    or now_monotonic - last_queue_heartbeat_at >= 30.0
+                ):
+                    if await self._append_queue_heartbeat(
+                        context,
+                        source_event_type=event.event_type,
+                        source_event_seq=loop_event_row.get("seq"),
+                        source_event_hash=loop_event_row.get("anchored_hash"),
+                    ):
+                        last_queue_heartbeat_at = now_monotonic
                 if event.event_type in {"candidate_selected", "loop_completed", "loop_failed"}:
                     logger.info(
                         format_worker_block(
@@ -1590,6 +1640,52 @@ class ResearchLabHostedWorker:
             reason="hosted_worker_started",
             config=self.config,
         )
+
+    async def _append_queue_heartbeat(
+        self,
+        context: HostedRunContext,
+        *,
+        source_event_type: str,
+        source_event_seq: object,
+        source_event_hash: object,
+    ) -> bool:
+        current = await select_one(
+            "research_loop_run_queue_current",
+            columns="run_id,current_queue_status,worker_ref,current_event_hash,current_event_seq,queue_priority",
+            filters=(("run_id", context.run_id),),
+        )
+        if (
+            not current
+            or current.get("current_queue_status") != "started"
+            or current.get("worker_ref") != self.worker_ref
+        ):
+            return False
+        try:
+            await create_queue_event(
+                run_id=context.run_id,
+                ticket_id=context.ticket_id,
+                event_type="started",
+                queue_priority=int(current.get("queue_priority") or context.queue_row.get("queue_priority") or 0),
+                worker_ref=self.worker_ref,
+                reason="hosted_worker_heartbeat",
+                event_doc={
+                    "worker_ref": self.worker_ref,
+                    "source_event_type": source_event_type,
+                    "source_event_seq": source_event_seq,
+                    "source_event_hash": source_event_hash,
+                    "previous_queue_event_hash": current.get("current_event_hash"),
+                    "previous_queue_event_seq": current.get("current_event_seq"),
+                },
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "research_lab_hosted_queue_heartbeat_failed run_id=%s worker_ref=%s error=%s",
+                compact_ref(context.run_id),
+                self.worker_ref,
+                str(exc)[:240],
+            )
+            return False
 
     async def _mark_failed(self, context: HostedRunContext, error: str) -> HostedWorkerOutcome:
         event_doc = {"run_id": context.run_id, "worker_ref": self.worker_ref, "error": error[:500]}

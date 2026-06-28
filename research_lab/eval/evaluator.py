@@ -23,6 +23,7 @@ from .patches import (
     validate_candidate_patch_manifest,
 )
 from .private_runtime import (
+    PrivateModelRuntimeError,
     canonicalize_private_model_icp,
     employee_count_buckets_for_icp,
     ensure_private_model_outputs,
@@ -161,24 +162,36 @@ async def score_private_model_pair_items(
         icp = item.get("icp")
         if not isinstance(icp, Mapping):
             raise RealEvaluatorRequired("benchmark item is missing private ICP payload")
-        base_outputs = ensure_private_model_outputs(
-            await _call_model_runner(base_runner, icp, run_context),
-            context_label=f"reference model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
-            require_non_empty=False,
-        )
+        failure_reasons: list[str] = []
+        try:
+            base_outputs = ensure_private_model_outputs(
+                await _call_model_runner(base_runner, icp, run_context),
+                context_label=f"reference model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
+                require_non_empty=False,
+            )
+        except PrivateModelRuntimeError as exc:
+            if not _is_provider_backed_sourcing_error(exc):
+                raise
+            base_outputs = []
+            failure_reasons.append("reference_model_runtime_provider_error")
         candidate_context = dict(run_context)
         if not image_candidate:
             if runtime_patch is None:
                 raise RealEvaluatorRequired("candidate patch runtime payload is required for patch candidates")
             candidate_context["patch"] = runtime_patch.to_dict()
-        candidate_outputs = ensure_private_model_outputs(
-            await _call_model_runner(candidate_runner, icp, candidate_context),
-            context_label=f"candidate model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
-            require_non_empty=False,
-        )
+        try:
+            candidate_outputs = ensure_private_model_outputs(
+                await _call_model_runner(candidate_runner, icp, candidate_context),
+                context_label=f"candidate model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
+                require_non_empty=False,
+            )
+        except PrivateModelRuntimeError as exc:
+            if not _is_provider_backed_sourcing_error(exc):
+                raise
+            candidate_outputs = []
+            failure_reasons.append("candidate_model_runtime_provider_error")
         base_scores = await _maybe_await(scorer(base_outputs, icp, True))
         candidate_scores = await _maybe_await(scorer(candidate_outputs, icp, False))
-        failure_reasons: list[str] = []
         if not base_outputs:
             failure_reasons.append("reference_model_zero_companies")
         elif not base_scores:
@@ -474,6 +487,10 @@ async def _call_model_runner(
     if inspect.isawaitable(result):
         return await result
     return result
+
+
+def _is_provider_backed_sourcing_error(exc: PrivateModelRuntimeError) -> bool:
+    return "provider-backed sourcing failed before returning companies" in str(exc).lower()
 
 
 def prepare_autoresearch_scoring_payload(

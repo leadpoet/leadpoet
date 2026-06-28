@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import datetime, timezone
 import logging
 import os
@@ -442,9 +443,66 @@ class ResearchLabGatewayScoringWorker:
         return sum(
             1
             for row in rows
-            if str(row.get("candidate_status") or "") in {"assigned", "evaluating"}
+            if str(row.get("event_type") or "") == "assigned"
             or str(row.get("reason") or "") == "stale_gateway_scoring_requeued"
         )
+
+    async def _candidate_scoring_heartbeat(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        candidate_id: str,
+        started_at: float,
+    ) -> None:
+        try:
+            interval = max(
+                60.0,
+                float(os.environ.get("RESEARCH_LAB_SCORING_HEARTBEAT_SECONDS", "120")),
+            )
+        except ValueError:
+            interval = 120.0
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                current = await select_one(
+                    "research_lab_candidate_evaluation_current",
+                    columns="candidate_id,current_candidate_status,current_evaluator_ref",
+                    filters=(("candidate_id", candidate_id),),
+                )
+                if (
+                    not current
+                    or current.get("current_candidate_status") != "evaluating"
+                    or current.get("current_evaluator_ref") != self.worker_ref
+                ):
+                    logger.warning(
+                        "research_lab_candidate_heartbeat_claim_lost candidate_id=%s worker_ref=%s",
+                        compact_ref(candidate_id),
+                        self.worker_ref,
+                    )
+                    return
+                await create_candidate_evaluation_event(
+                    candidate_id=candidate_id,
+                    run_id=str(candidate["run_id"]),
+                    ticket_id=str(candidate["ticket_id"]),
+                    event_type="evaluating",
+                    candidate_status="evaluating",
+                    evaluator_ref=self.worker_ref,
+                    reason="gateway_qualification_worker_heartbeat",
+                    event_doc={
+                        "worker_ref": self.worker_ref,
+                        "proxy_ref_hash": self.proxy_ref_hash,
+                        "elapsed_seconds": round(time.time() - started_at, 3),
+                    },
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_candidate_heartbeat_failed candidate_id=%s worker_ref=%s error=%s",
+                    compact_ref(candidate_id),
+                    self.worker_ref,
+                    str(exc)[:240],
+                )
 
     async def _score_candidate(self, candidate: Mapping[str, Any]) -> None:
         candidate_id = str(candidate["candidate_id"])
@@ -567,18 +625,30 @@ class ResearchLabGatewayScoringWorker:
                 window_hash=window.window_hash,
                 evaluation_epoch=evaluation_epoch,
             )
-            score_bundle = await evaluate_private_model_pair(
-                artifact_manifest=artifact,
-                benchmark=benchmark,
-                patch_manifest=patch,
-                candidate_artifact_manifest=candidate_artifact.to_dict(),
-                benchmark_items=window.benchmark_items,
-                base_runner=runner,
-                candidate_runner=candidate_runner,
-                run_context={**run_context, "signature_ref": "pending"},
-                policy=self._evaluation_policy(),
-                private_holdout_gate=private_holdout_gate,
+            heartbeat_task = asyncio.create_task(
+                self._candidate_scoring_heartbeat(
+                    candidate=candidate,
+                    candidate_id=candidate_id,
+                    started_at=start,
+                )
             )
+            try:
+                score_bundle = await evaluate_private_model_pair(
+                    artifact_manifest=artifact,
+                    benchmark=benchmark,
+                    patch_manifest=patch,
+                    candidate_artifact_manifest=candidate_artifact.to_dict(),
+                    benchmark_items=window.benchmark_items,
+                    base_runner=runner,
+                    candidate_runner=candidate_runner,
+                    run_context={**run_context, "signature_ref": "pending"},
+                    policy=self._evaluation_policy(),
+                    private_holdout_gate=private_holdout_gate,
+                )
+            finally:
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await heartbeat_task
             gate_result = score_bundle.get("private_holdout_gate")
             private_holdout_rejected = (
                 isinstance(gate_result, Mapping)

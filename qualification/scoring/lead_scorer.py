@@ -409,9 +409,14 @@ async def score_company_autoresearch_intent_v2(
         seen_companies.add(company.company_name.lower().strip())
 
     try:
-        intent_raw, intent_final, decay_multiplier, _max_confidence, all_fabricated = (
-            await score_company_autoresearch_intent_signal(company, icp)
-        )
+        (
+            intent_raw,
+            intent_final,
+            decay_multiplier,
+            _max_confidence,
+            all_fabricated,
+            signal_results,
+        ) = await score_company_autoresearch_intent_signal(company, icp)
         if all_fabricated:
             logger.warning(
                 f"❌ ALL AUTORESEARCH INTENT SIGNALS FABRICATED for company "
@@ -441,6 +446,7 @@ async def score_company_autoresearch_intent_v2(
         time_penalty=0,
         final_score=final_score,
         failure_reason=None,
+        intent_signals_detail=signal_results,
     )
 
 
@@ -702,16 +708,31 @@ async def score_company_autoresearch_intent_signal(
     api_key: str = "",
     trust_signal_date: bool = True,
     no_time_decay: bool = True,
-) -> Tuple[float, float, float, int, bool]:
+) -> Tuple[float, float, float, int, bool, List[dict]]:
     """Score CompanyOutput intent signals with capped-sum breadth rewards.
 
     Research Lab private-model evidence dates come from the sourcing pipeline's
     discovery layer. Enforce the buyer freshness cap deterministically here,
     then avoid a second Sonar date veto or graded decay for in-window evidence.
+
+    Returns ``(raw_total, final_total, avg_decay, max_confidence, all_fabricated,
+    signal_results)``.  ``signal_results`` is the per-signal detail list — one
+    row per company intent signal carrying ``matched_icp_signal`` (the index
+    into ``icp.intent_signals`` this evidence satisfies, -1 if none) and
+    ``evidence_type`` (the buyer-side type for that ICP signal) — so the
+    benchmark layer can build per-signal funnel / coverage stats without
+    re-scoring.  Aggregate scoring is unchanged.
     """
     icp_criteria = None
     seen_domains: set = set()
     signal_results = []
+    icp_signals = list(getattr(icp, "intent_signals", None) or [])
+    icp_evidence_types = list(getattr(icp, "intent_signal_evidence_types", None) or [])
+
+    def _evidence_type_for(idx: int) -> str:
+        if isinstance(idx, int) and 0 <= idx < len(icp_evidence_types):
+            return str(icp_evidence_types[idx] or "UNSPECIFIED").upper()
+        return "UNSPECIFIED"
 
     for signal in company.intent_signals:
         domain = _extract_domain(signal.url)
@@ -720,18 +741,20 @@ async def score_company_autoresearch_intent_signal(
                 f"  ⚠ Duplicate domain {domain!r} on autoresearch company "
                 f"{company.company_name!r} — signal scores 0 (URL dedup)"
             )
+            dup_idx = getattr(signal, "matched_icp_signal", -1)
             signal_results.append({
                 "raw": 0.0,
                 "after_decay": 0.0,
                 "decay": 0.0,
                 "confidence": 0,
                 "date_status": "fabricated",
+                "matched_icp_signal": dup_idx,
+                "evidence_type": _evidence_type_for(dup_idx),
             })
             continue
         seen_domains.add(domain)
 
         matched_idx = getattr(signal, "matched_icp_signal", -1)
-        icp_signals = list(getattr(icp, "intent_signals", None) or [])
         target_signal = (
             icp_signals[matched_idx]
             if isinstance(matched_idx, int) and 0 <= matched_idx < len(icp_signals)
@@ -755,6 +778,8 @@ async def score_company_autoresearch_intent_signal(
                 "decay": 0.0,
                 "confidence": 0,
                 "date_status": "fabricated",
+                "matched_icp_signal": matched_idx,
+                "evidence_type": _evidence_type_for(matched_idx),
             })
             continue
 
@@ -783,16 +808,21 @@ async def score_company_autoresearch_intent_signal(
                 signal.source.value if hasattr(signal.source, 'value') else str(signal.source),
                 content_found_date=content_found_date,
             )
+        # Prefer the verifier's authoritative matched index; fall back to the
+        # company-asserted one when the verifier didn't resolve a match.
+        resolved_idx = _matched_idx if isinstance(_matched_idx, int) and _matched_idx >= 0 else matched_idx
         signal_results.append({
             "raw": score,
             "after_decay": after_decay,
             "decay": decay,
             "confidence": confidence,
             "date_status": date_status,
+            "matched_icp_signal": resolved_idx,
+            "evidence_type": _evidence_type_for(resolved_idx),
         })
 
     if not signal_results:
-        return 0.0, 0.0, 0.0, 0, True
+        return 0.0, 0.0, 0.0, 0, True, []
 
     raw_scores = [r["raw"] for r in signal_results]
     decayed_scores = [r["after_decay"] for r in signal_results]
@@ -803,7 +833,7 @@ async def score_company_autoresearch_intent_signal(
     avg_decay = sum(decays) / len(decays) if decays else 0.0
     max_confidence = max(confidences) if confidences else 0
     all_fabricated = all(r["raw"] == 0.0 for r in signal_results)
-    return raw_total, final_total, avg_decay, max_confidence, all_fabricated
+    return raw_total, final_total, avg_decay, max_confidence, all_fabricated, signal_results
 
 
 def aggregate_autoresearch_intent_scores(signal_scores: List[float]) -> float:

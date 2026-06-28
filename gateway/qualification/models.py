@@ -762,7 +762,18 @@ class LeadScoreBreakdown(BaseModel):
     
     # Failure tracking
     failure_reason: Optional[str] = Field(None, description="Set when pre-checks fail (score = 0)")
-    
+
+    # Per-signal detail (autoresearch / Research Lab benchmark only).  One row
+    # per company intent signal: {raw, after_decay, decay, confidence,
+    # date_status, matched_icp_signal, evidence_type}.  Optional and defaults to
+    # None so legacy lead-mode callers and persisted breakdown readers are
+    # unaffected; consumed by the benchmark layer to build per-signal funnel /
+    # coverage stats without re-scoring.
+    intent_signals_detail: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Per-signal scoring detail (autoresearch benchmark); None for lead-mode",
+    )
+
     @model_validator(mode='after')
     def validate_score_consistency(self) -> 'LeadScoreBreakdown':
         """Validate that scores are consistent."""

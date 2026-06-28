@@ -7,6 +7,7 @@ import re
 from typing import Any, Mapping, Optional, Sequence
 
 from gateway.research_lab.bundles import contains_secret_material, sha256_json
+from research_lab.eval.miner_report_stats import build_icp_stats
 
 
 DEFAULT_PUBLIC_ICPS_PER_DAY = 3
@@ -202,17 +203,29 @@ def sanitize_benchmark_item_summary(
     score: float,
     company_count: int,
     score_breakdowns: Sequence[Mapping[str, Any]],
+    sourced_count: Optional[int] = None,
 ) -> dict[str, Any]:
     failures = []
     icp_fit_values: list[float] = []
     intent_values: list[float] = []
+    signal_details: list[Sequence[Mapping[str, Any]]] = []
     for breakdown in score_breakdowns:
         reason = str(breakdown.get("failure_reason") or "")
         if reason:
             failures.append(_failure_category(reason))
         icp_fit_values.append(float(breakdown.get("icp_fit") or 0.0))
         intent_values.append(float(breakdown.get("intent_signal_final") or 0.0))
+        signal_details.append(breakdown.get("intent_signals_detail") or [])
     icp = item.get("icp") if isinstance(item.get("icp"), Mapping) else {}
+    # Funnel (companies discovered -> passed) + per-signal coverage. ``sourced_count``
+    # is the model's pre-bucket-filter output count; default to the scored count so
+    # the funnel still balances when callers don't supply it.
+    effective_sourced = int(sourced_count) if sourced_count is not None else int(company_count)
+    stats = build_icp_stats(
+        sourced_count=effective_sourced,
+        breakdowns=score_breakdowns,
+        signal_details=signal_details,
+    )
     return {
         "icp_ref": str(item.get("icp_ref") or ""),
         "icp_hash": str(item.get("icp_hash") or ""),
@@ -227,6 +240,11 @@ def sanitize_benchmark_item_summary(
             "failure_categories": sorted(failures),
             "avg_icp_fit": _average(icp_fit_values),
             "avg_intent_signal_final": _average(intent_values),
+            "sourcing_failed": stats["sourcing_failed"],
+            "funnel": stats["funnel"],
+            "per_signal": stats["per_signal"],
+            "evidence_types": stats["evidence_types"],
+            "rejection_reasons": stats["rejection_reasons"],
         },
     }
 

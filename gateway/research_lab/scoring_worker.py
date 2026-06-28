@@ -1171,6 +1171,10 @@ class ResearchLabGatewayScoringWorker:
                     score=icp_score,
                     company_count=len(scores),
                     score_breakdowns=score_breakdowns,
+                    # Model output count BEFORE the scorer's employee-bucket
+                    # pre-filter, so the funnel's first stage is the true
+                    # "companies discovered" number.
+                    sourced_count=len(outputs),
                 )
                 if runtime_error:
                     diagnostics = dict(item_summary.get("diagnostics") or {})

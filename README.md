@@ -36,17 +36,18 @@ python3 -m venv venv
 source venv/bin/activate
 
 pip install --upgrade pip
+pip install -r requirements.txt
 pip install -e .
 ```
 
 Requirements:
 
-- Python 3.9 to 3.12
+- Python 3.9 or 3.10 recommended
 - Bittensor wallet
 - Bittensor CLI
 
 ```bash
-pip install "bittensor>=9.10"
+pip install "bittensor>=9.10,<10.0.0" "bittensor-cli>=1.0.0"
 btcli wallet create
 ```
 
@@ -93,7 +94,7 @@ How it works:
 Research Lab rewards result from provided compute or model improvements:
 
 - Compute reimbursement covers a portion of verified compute spend from research loops.
-- Verfied model improvements result in substantial rewards when a candidate improvement beats the current model benchmark.
+- Verified model improvements result in substantial rewards when a candidate improvement beats the current model benchmark.
 
 At a high level, rewards are calculated per reward epoch:
 
@@ -130,7 +131,7 @@ The research model itself is not public to prevent miners from overfitting to th
 
 The TEE-based design makes that possible: a non-public improvement model can run in a secure, attested environment, while the important parts of the process remain verifiable. The system knows which image was used, which files were inspected, what patch was proposed, whether the patch stayed in scope, and how the rebuilt candidate performed.
 
-Candidate patches are limited to the extracted runtime code:
+Candidate patches are limited to the extracted runtime code paths inside the runtime image:
 
 - `gateway/`
 - `qualification/`
@@ -139,6 +140,8 @@ Candidate patches are limited to the extracted runtime code:
 - `research_lab_adapter.py`
 
 `requirements.txt` may be used as a build/runtime dependency when present in the image, but it is not an editable candidate target. New top-level folders, Dockerfiles, dependency files, CI files, deployment scripts, lockfiles, env files, and credential handling are outside the Research Lab edit scope.
+
+These are runtime image paths, so some entries may not exist as top-level folders in this repository.
 
 ### Fulfillment
 

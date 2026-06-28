@@ -184,8 +184,8 @@ class CodeEditCandidateBuilder:
             diff_path.write_text(draft.unified_diff, encoding="utf-8")
             draft_path.write_text(json.dumps(draft.to_dict(), sort_keys=True), encoding="utf-8")
             parent_manifest_path.write_text(json.dumps(parent_artifact.to_dict(), sort_keys=True), encoding="utf-8")
-            _run(["git", "apply", "--check", str(diff_path)], cwd=repo_dir, timeout_seconds=120)
-            _run(["git", "apply", str(diff_path)], cwd=repo_dir, timeout_seconds=120)
+            _run(["git", "apply", "--recount", "--check", str(diff_path)], cwd=repo_dir, timeout_seconds=120)
+            _run(["git", "apply", "--recount", str(diff_path)], cwd=repo_dir, timeout_seconds=120)
             changed_files = _changed_files(repo_dir)
             if not changed_files:
                 raise CodeEditBuildError("code edit produced no repository changes")

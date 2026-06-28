@@ -609,6 +609,15 @@ def _verify_image_extracted_code_builder(artifact: PrivateModelArtifactManifest)
                     errors.append(f"fake docker did not observe expected call: {expected}")
             if any(" pull " in f" {call} " for call in docker_calls):
                 errors.append("code builder pulled parent image even though image inspect succeeded")
+
+            result_recount = CodeEditCandidateBuilder(config).build(
+                draft=_allowed_runtime_patch_draft_with_bad_hunk_counts(),
+                parent_artifact=artifact,
+                run_id="77777777-7777-4777-8777-777777777778",
+                candidate_index=1,
+            )
+            if "sourcing_model/__init__.py" not in result_recount.build_doc.get("changed_files", []):
+                errors.append("code builder did not tolerate generated diff hunk count drift")
         except Exception as exc:
             errors.append(f"image-extracted code builder failed valid fake build: {exc}")
         finally:
@@ -924,6 +933,23 @@ def _allowed_runtime_patch_draft() -> CodeEditDraft:
         redacted_summary="Change one runtime source constant.",
         test_plan="py_compile changed file.",
         rollback_plan="Revert this diff.",
+    )
+
+
+def _allowed_runtime_patch_draft_with_bad_hunk_counts() -> CodeEditDraft:
+    draft = _allowed_runtime_patch_draft()
+    return CodeEditDraft(
+        failure_mode=draft.failure_mode,
+        mechanism=draft.mechanism,
+        expected_improvement=draft.expected_improvement,
+        risk=draft.risk,
+        lane=draft.lane,
+        target_files=draft.target_files,
+        unified_diff=draft.unified_diff.replace("@@ -1,5 +1,5 @@", "@@ -1,99 +1,99 @@"),
+        redacted_summary=draft.redacted_summary,
+        test_plan=draft.test_plan,
+        rollback_plan=draft.rollback_plan,
+        predicted_delta=draft.predicted_delta,
     )
 
 

@@ -216,7 +216,6 @@ Useful validator environment variables:
 export TRUELIST_API_KEY="your_truelist_key"
 export SCRAPINGDOG_API_KEY="your_scrapingdog_key"
 export OPENROUTER_KEY="your_openrouter_key"
-export COMPANIES_HOUSE_API_KEY="your_companies_house_key"
 ```
 
 See [`env.example`](env.example) for the full configuration template.

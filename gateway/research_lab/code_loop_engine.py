@@ -89,6 +89,119 @@ class CodeEditLoopEngine:
     event_sink: Any
     builder: CodeEditCandidateBuilder
 
+    async def _prepare_parent_source_context_with_heartbeat(
+        self,
+        *,
+        run_id: str,
+        artifact: PrivateModelArtifactManifest,
+        workspace_dir: Path,
+        elapsed: Callable[[], float],
+        openrouter_calls: int,
+        estimated_cost: float,
+        actual_cost_microusd: int,
+    ) -> Any:
+        await self.event_sink(
+            AutoResearchLoopEvent(
+                event_type="source_inspection_requested",
+                loop_status="running",
+                elapsed_seconds=elapsed(),
+                cost_ledger=_running_cost_ledger(
+                    openrouter_calls,
+                    estimated_cost,
+                    actual_cost_microusd,
+                    "parent_image_source_prepare_started",
+                ),
+                event_doc={
+                    "operation": "parent_image_source_prepare",
+                    "status": "started",
+                    "run_id": run_id,
+                    "parent_image_digest_hash": sha256_json({"image_digest": artifact.image_digest}),
+                },
+            )
+        )
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self.builder.prepare_parent_source_context,
+                parent_artifact=artifact,
+                workspace_dir=workspace_dir,
+            )
+        )
+        heartbeat_index = 0
+        try:
+            while not task.done():
+                done, _pending = await asyncio.wait({task}, timeout=30.0)
+                if done:
+                    break
+                heartbeat_index += 1
+                await self.event_sink(
+                    AutoResearchLoopEvent(
+                        event_type="source_inspection_requested",
+                        loop_status="running",
+                        elapsed_seconds=elapsed(),
+                        cost_ledger=_running_cost_ledger(
+                            openrouter_calls,
+                            estimated_cost,
+                            actual_cost_microusd,
+                            "parent_image_source_prepare_heartbeat",
+                        ),
+                        event_doc={
+                            "operation": "parent_image_source_prepare",
+                            "status": "heartbeat",
+                            "heartbeat_index": heartbeat_index,
+                            "run_id": run_id,
+                            "parent_image_digest_hash": sha256_json({"image_digest": artifact.image_digest}),
+                        },
+                    )
+                )
+            source_context = await task
+        except Exception as exc:
+            await self.event_sink(
+                AutoResearchLoopEvent(
+                    event_type="source_inspection_failed",
+                    loop_status="running",
+                    elapsed_seconds=elapsed(),
+                    cost_ledger=_running_cost_ledger(
+                        openrouter_calls,
+                        estimated_cost,
+                        actual_cost_microusd,
+                        "parent_image_source_prepare_failed",
+                    ),
+                    event_doc={
+                        "operation": "parent_image_source_prepare",
+                        "status": "failed",
+                        "run_id": run_id,
+                        "parent_image_digest_hash": sha256_json({"image_digest": artifact.image_digest}),
+                        "error": str(exc)[:500],
+                        "error_hash": sha256_json({"error": str(exc)}),
+                    },
+                )
+            )
+            raise
+        await self.event_sink(
+            AutoResearchLoopEvent(
+                event_type="source_inspection_resolved",
+                loop_status="running",
+                elapsed_seconds=elapsed(),
+                cost_ledger=_running_cost_ledger(
+                    openrouter_calls,
+                    estimated_cost,
+                    actual_cost_microusd,
+                    "parent_image_source_prepare_completed",
+                ),
+                event_doc={
+                    "operation": "parent_image_source_prepare",
+                    "status": "completed",
+                    "run_id": run_id,
+                    "source_mode": source_context.source_mode,
+                    "source_tree_hash": source_context.source_tree_hash,
+                    "parent_image_digest_hash": source_context.parent_image_digest_hash,
+                    "extracted_top_level_paths": list(source_context.top_level_paths),
+                    "editable_file_count": len(source_context.editable_files),
+                },
+            )
+        )
+        return source_context
+
     async def run(
         self,
         *,
@@ -119,10 +232,27 @@ class CodeEditLoopEngine:
         budget_limit_microusd = _budget_limit_microusd(budget_context)
 
         source_tmp = tempfile.TemporaryDirectory(prefix="research-lab-parent-image-source-")
-        source_context = self.builder.prepare_parent_source_context(
-            parent_artifact=artifact,
-            workspace_dir=Path(source_tmp.name),
-        )
+
+        def _cleanup_source_tmp() -> None:
+            nonlocal source_tmp
+            if source_tmp is None:
+                return
+            source_tmp.cleanup()
+            source_tmp = None
+
+        try:
+            source_context = await self._prepare_parent_source_context_with_heartbeat(
+                run_id=run_id,
+                artifact=artifact,
+                workspace_dir=Path(source_tmp.name),
+                elapsed=elapsed,
+                openrouter_calls=openrouter_calls,
+                estimated_cost=estimated_cost,
+                actual_cost_microusd=actual_cost_microusd,
+            )
+        except Exception:
+            _cleanup_source_tmp()
+            raise
 
         await self.event_sink(
             AutoResearchLoopEvent(
@@ -190,6 +320,7 @@ class CodeEditLoopEngine:
                     actual_cost_microusd=actual_cost_microusd,
                     stage="pause_before_next_code_edit",
                 )
+                _cleanup_source_tmp()
                 return self._result(
                     selected=selected,
                     status="paused",
@@ -660,6 +791,7 @@ class CodeEditLoopEngine:
                 stage="code_edit_iteration_completed",
             )
             if should_pause and await should_pause():
+                _cleanup_source_tmp()
                 return self._result(
                     selected=selected,
                     status="paused",
@@ -704,6 +836,7 @@ class CodeEditLoopEngine:
                     actual_cost_microusd=actual_cost_microusd,
                     stage="pause_after_code_edit_minimum_runtime",
                 )
+                _cleanup_source_tmp()
                 return self._result(
                     selected=selected,
                     status="paused",
@@ -768,6 +901,7 @@ class CodeEditLoopEngine:
                 },
             )
         )
+        _cleanup_source_tmp()
         return result
 
     async def _emit_checkpoint(

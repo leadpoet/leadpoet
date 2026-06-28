@@ -48,6 +48,16 @@ CANDIDATE_INDEX="${RESEARCH_LAB_CANDIDATE_INDEX:?RESEARCH_LAB_CANDIDATE_INDEX is
 IMAGE_TAG_RAW="research-lab-${RUN_ID}-${CANDIDATE_INDEX}-${COMMIT_SHA}"
 IMAGE_TAG="$(printf '%s' "${IMAGE_TAG_RAW}" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-120)"
 IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+IMAGE_DIGEST=""
+cleanup_candidate_image() {
+  if [ -n "${IMAGE_DIGEST:-}" ]; then
+    docker image rm "${IMAGE_DIGEST}" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${IMAGE_URI:-}" ]; then
+    docker image rm "${IMAGE_URI}" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_candidate_image EXIT
 PLATFORM="${RESEARCH_LAB_PRIVATE_MODEL_DOCKER_PLATFORM:-linux/amd64}"
 PARENT_MANIFEST_URI="${RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI:-s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json}"
 MANIFEST_BASE="${PARENT_MANIFEST_URI%/*}"
@@ -349,7 +359,7 @@ class ResearchLabGatewayConfig:
     miner_openrouter_key_ref_env_map_json: str = ""
     openrouter_key_kms_key_id: str = ""
     evaluation_epoch: int = 0
-    arweave_audit_enabled: bool = False
+    arweave_audit_enabled: bool = True
     arweave_audit_shadow_enabled: bool = False
 
     @classmethod
@@ -629,7 +639,7 @@ class ResearchLabGatewayConfig:
             miner_openrouter_key_ref_env_map_json=os.getenv("RESEARCH_LAB_OPENROUTER_KEY_REF_ENV_MAP_JSON", ""),
             openrouter_key_kms_key_id=os.getenv("RESEARCH_LAB_OPENROUTER_KEY_KMS_KEY_ID", ""),
             evaluation_epoch=_int("RESEARCH_LAB_EVALUATION_EPOCH", 0),
-            arweave_audit_enabled=_truthy("RESEARCH_LAB_ARWEAVE_AUDIT_ENABLED"),
+            arweave_audit_enabled=_truthy("RESEARCH_LAB_ARWEAVE_AUDIT_ENABLED", "true"),
             arweave_audit_shadow_enabled=_truthy("RESEARCH_LAB_ARWEAVE_AUDIT_SHADOW_ENABLED"),
         )
 

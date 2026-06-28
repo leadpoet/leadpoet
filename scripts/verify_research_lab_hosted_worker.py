@@ -165,6 +165,24 @@ def main() -> int:
         finally:
             worker_module.urlrequest.urlopen = original_urlopen
 
+    async def _verify_worker_retry_classification() -> None:
+        retryable_messages = (
+            "AWS KMS ThrottlingException: rate exceeded",
+            "docker daemon unavailable during image build",
+            "Docker exited with exit status 137",
+            "No space left on device while extracting parent image",
+        )
+        for message in retryable_messages:
+            if not _is_retryable_worker_exception(RuntimeError(message)):
+                errors.append(f"worker did not classify transient infra error as retryable: {message}")
+        permanent_messages = (
+            "AccessDeniedException: not authorized to perform kms:Decrypt",
+            "permission denied for table research_loop_ticket_current",
+        )
+        for message in permanent_messages:
+            if _is_retryable_worker_exception(RuntimeError(message)):
+                errors.append(f"worker incorrectly classified permanent auth error as retryable: {message}")
+
     async def _noop_call(*_args, **_kwargs):
         return OpenRouterCallResult(content='{"candidates":[]}')
 
@@ -388,6 +406,7 @@ def main() -> int:
         errors.append("builder-not-ready errors must be retryable/requeue-classified")
     asyncio.run(_verify_builder_not_ready_skips_queue())
     asyncio.run(_verify_openrouter_no_choices_is_retryable())
+    asyncio.run(_verify_worker_retry_classification())
     proxy_cfg = ResearchLabGatewayConfig(hosted_worker_require_proxy=True, hosted_worker_proxy_url="http://proxy.example:8080")
     proxy_env = _worker_proxy_env(proxy_cfg)
     if proxy_env.get("HTTPS_PROXY") != "http://proxy.example:8080" or proxy_env.get("HTTP_PROXY") != "http://proxy.example:8080":
@@ -1095,9 +1114,17 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                 and event_types.index("code_edit_repair_drafted") > event_types.index("candidate_build_passed")
             ):
                 errors.append("candidate build passed before repaired patch was drafted")
-            first_doc = events[0].event_doc if events else {}
+            start_events = [event for event in events if event.event_type in {"loop_started", "loop_resumed"}]
+            first_doc = start_events[0].event_doc if start_events else {}
             if first_doc.get("source_mode") != "parent_image_extract":
                 errors.append("code-edit loop start event did not record parent image extraction")
+            source_prepare_events = [
+                event for event in events if event.event_doc.get("operation") == "parent_image_source_prepare"
+            ]
+            if not source_prepare_events:
+                errors.append("code-edit loop did not record parent image source preparation events")
+            elif source_prepare_events[0].event_type != "source_inspection_requested":
+                errors.append("code-edit source preparation did not start with source_inspection_requested")
             docker_calls = docker_log.read_text(encoding="utf-8").splitlines()
             if sum(1 for call in docker_calls if call.startswith("cp ")) != 1:
                 errors.append("code-edit loop should extract parent image once before drafting")

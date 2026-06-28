@@ -220,7 +220,7 @@ def fetch_research_lab_audit_bundle(
     base = gateway_url.rstrip("/")
     request = Request(
         f"{base}/research-lab/audit/latest/{int(epoch)}",
-        headers=_request_headers(),
+        headers=_request_headers(include_internal_key=True),
         method="GET",
     )
     with urlopen(request, timeout=timeout_seconds) as response:

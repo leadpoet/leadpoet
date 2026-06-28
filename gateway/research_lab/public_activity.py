@@ -748,11 +748,11 @@ async def _promotion_events_for_candidates(candidate_rows: Sequence[Mapping[str,
         return []
     rows = await select_many(
         "research_lab_candidate_promotion_events",
-        filters=(),
+        filters=(("candidate_id", "in", sorted(candidate_ids)),),
         order_by=(("created_at", True),),
         limit=1000,
     )
-    return [row for row in rows if str(row.get("candidate_id") or "") in candidate_ids]
+    return rows
 
 
 def _status_counts(rows: Sequence[Mapping[str, Any]], field: str) -> dict[str, int]:

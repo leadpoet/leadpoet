@@ -908,7 +908,10 @@ async def get_public_benchmark_report_by_date(benchmark_date: str):
 
 
 @router.get("/audit/latest/{epoch}")
-async def get_research_lab_latest_audit_bundle(epoch: int):
+async def get_research_lab_latest_audit_bundle(
+    epoch: int,
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
     config = ResearchLabGatewayConfig.from_env()
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
     _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
@@ -923,6 +926,8 @@ async def get_research_lab_latest_audit_bundle(epoch: int):
         row = dict(signed_rows[0])
         row["arweave_anchor"] = await _safe_latest_arweave_anchor(epoch)
         return row
+
+    _require_internal_key(config, x_leadpoet_internal_key)
 
     ticket_rows = await _audit_preview_select_all("research_loop_ticket_current", current_view=True)
     queue_rows = await _audit_preview_select_all("research_loop_run_queue_current", current_view=True)

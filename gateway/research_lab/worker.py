@@ -162,10 +162,20 @@ _RETRYABLE_ERROR_MARKERS = (
     "connection reset",
     "connection aborted",
     "connection refused",
+    "endpoint connection",
+    "read timed out",
     "temporarily unavailable",
     "service unavailable",
+    "throttl",
+    "rate exceeded",
     "too many requests",
     "rate limit",
+    "docker daemon",
+    "cannot connect to the docker daemon",
+    "manifest unknown",
+    "no space left on device",
+    "exit status 137",
+    "killed",
     "http 408",
     "http 409",
     "http 425",
@@ -190,6 +200,9 @@ _PERMANENT_ERROR_MARKERS = (
     "foreign key",
     "invalid input syntax",
     "permission denied",
+    "access denied",
+    "accessdenied",
+    "not authorized",
     "research_lab_queue_capacity_conflict",
     "research_lab_queue_hotkey_conflict",
     "research_lab_run_claim_conflict",
@@ -950,16 +963,24 @@ class ResearchLabHostedWorker:
 
         active_start = await load_active_private_model(self.config, register_bootstrap=True)
         artifact = active_start.artifact
-        runner = DockerPrivateModelRunner(
-            DockerPrivateModelSpec(
-                image_digest=artifact.image_digest,
-                env_passthrough=_private_model_env_passthrough(self.config),
-                extra_env=docker_provider_env,
-                timeout_seconds=900,
+
+        def _load_runtime_metadata() -> Mapping[str, Any]:
+            runner = DockerPrivateModelRunner(
+                DockerPrivateModelSpec(
+                    image_digest=artifact.image_digest,
+                    env_passthrough=_private_model_env_passthrough(self.config),
+                    extra_env=docker_provider_env,
+                    timeout_seconds=900,
+                )
             )
-        )
+            return runner.metadata()
+
         with _temporary_env(provider_env):
-            metadata = runner.metadata()
+            metadata = await self._to_thread_with_queue_heartbeat(
+                context,
+                heartbeat_label="private_runtime_metadata",
+                func=_load_runtime_metadata,
+            )
             registry = coerce_component_registry(metadata)
             benchmark_public_summary = await latest_public_benchmark_summary()
             logger.info(
@@ -1822,6 +1843,34 @@ class ResearchLabHostedWorker:
                 str(exc)[:240],
             )
             return False
+
+    async def _to_thread_with_queue_heartbeat(
+        self,
+        context: HostedRunContext,
+        *,
+        heartbeat_label: str,
+        func: Any,
+    ) -> Any:
+        await self._append_queue_heartbeat(
+            context,
+            source_event_type=f"{heartbeat_label}_started",
+            source_event_seq=None,
+            source_event_hash=None,
+        )
+        task = asyncio.create_task(asyncio.to_thread(func))
+        heartbeat_index = 0
+        while not task.done():
+            done, _pending = await asyncio.wait({task}, timeout=30.0)
+            if done:
+                break
+            heartbeat_index += 1
+            await self._append_queue_heartbeat(
+                context,
+                source_event_type=f"{heartbeat_label}_heartbeat_{heartbeat_index}",
+                source_event_seq=None,
+                source_event_hash=None,
+            )
+        return await task
 
     async def _mark_failed(self, context: HostedRunContext, error: str) -> HostedWorkerOutcome:
         event_doc = {"run_id": context.run_id, "worker_ref": self.worker_ref, "error": error[:500]}

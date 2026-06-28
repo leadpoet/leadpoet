@@ -6,9 +6,10 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.store import canonical_hash
@@ -16,6 +17,7 @@ from research_lab.canonical import sha256_json
 from research_lab.code_editing import (
     CodeEditDraft,
     code_edit_candidate_manifest,
+    extract_unified_diff_paths,
     validate_code_edit_draft,
 )
 from research_lab.eval import (
@@ -37,6 +39,35 @@ class CodeEditBuildResult:
     build_doc: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ParentImageSourceContext:
+    """Sanitized source inventory extracted from the parent runtime image."""
+
+    source_root: Path
+    source_mode: str
+    parent_image_digest_hash: str
+    source_tree_hash: str
+    top_level_paths: tuple[str, ...]
+    editable_files: tuple[str, ...]
+    file_previews: tuple[dict[str, Any], ...]
+
+    def prompt_context(self) -> dict[str, Any]:
+        return {
+            "source_mode": self.source_mode,
+            "parent_image_digest_hash": self.parent_image_digest_hash,
+            "source_tree_hash": self.source_tree_hash,
+            "extracted_top_level_paths": list(self.top_level_paths),
+            "editable_file_count": len(self.editable_files),
+            "editable_files": list(self.editable_files),
+            "file_previews": [dict(item) for item in self.file_previews],
+            "rules": [
+                "Only edit files listed in editable_files.",
+                "Prefer files in file_previews because exact source excerpts are included.",
+                "Do not invent paths or create new files.",
+            ],
+        }
+
+
 class CodeEditCandidateBuilder:
     """Build a candidate private model image from a validated unified diff."""
 
@@ -50,6 +81,55 @@ class CodeEditCandidateBuilder:
             and self.config.private_artifact_manifest_output
         )
 
+    def prepare_parent_source_context(
+        self,
+        *,
+        parent_artifact: PrivateModelArtifactManifest,
+        workspace_dir: Path,
+    ) -> ParentImageSourceContext:
+        """Extract the parent image /app once before the first model draft call."""
+
+        image_digest = str(parent_artifact.image_digest or "").strip()
+        if not image_digest:
+            raise CodeEditBuildError("parent artifact image_digest is required for code-edit source context")
+        source_root = workspace_dir / "parent_image_app"
+        source_root.mkdir(parents=True, exist_ok=True)
+        source_tree_hash, top_level_paths = _extract_parent_image_source(
+            image_digest=image_digest,
+            source_dir=source_root,
+            timeout_seconds=self.config.code_edit_build_timeout_seconds,
+        )
+        editable_files = _editable_runtime_files(
+            source_root,
+            allowed_prefixes=self.config.code_edit_allowed_path_prefixes(),
+            allowed_exact_paths=self.config.code_edit_allowed_exact_paths(),
+            allowed_suffixes=self.config.code_edit_allowed_suffixes(),
+        )
+        if not editable_files:
+            raise CodeEditBuildError("parent image /app has no editable runtime files in the code-edit allowlist")
+        return ParentImageSourceContext(
+            source_root=source_root,
+            source_mode="parent_image_extract",
+            parent_image_digest_hash=canonical_hash({"image_digest": image_digest}),
+            source_tree_hash=source_tree_hash,
+            top_level_paths=tuple(top_level_paths),
+            editable_files=tuple(editable_files),
+            file_previews=tuple(_source_file_previews(source_root, editable_files)),
+        )
+
+    def validate_draft_against_source_context(
+        self,
+        draft: CodeEditDraft,
+        source_context: ParentImageSourceContext,
+    ) -> list[str]:
+        allowed = set(source_context.editable_files)
+        paths = set(draft.target_files) | extract_unified_diff_paths(draft.unified_diff)
+        errors: list[str] = []
+        for path in sorted(paths):
+            if path not in allowed:
+                errors.append(f"code_edit_path_not_in_extracted_source:{path}")
+        return errors
+
     def build(
         self,
         *,
@@ -57,6 +137,7 @@ class CodeEditCandidateBuilder:
         parent_artifact: PrivateModelArtifactManifest,
         run_id: str,
         candidate_index: int,
+        source_context: ParentImageSourceContext | None = None,
     ) -> CodeEditBuildResult:
         if not self.enabled():
             missing = [
@@ -91,7 +172,12 @@ class CodeEditCandidateBuilder:
                 image_digest=parent_artifact.image_digest,
                 repo_dir=repo_dir,
                 timeout_seconds=self.config.code_edit_build_timeout_seconds,
+                source_context=source_context,
             )
+            if source_context is not None:
+                context_errors = self.validate_draft_against_source_context(draft, source_context)
+                if context_errors:
+                    raise CodeEditBuildError("; ".join(context_errors))
             diff_path = tmp_dir / "candidate.diff"
             draft_path = tmp_dir / "code_edit_draft.json"
             parent_manifest_path = tmp_dir / "parent_manifest.json"
@@ -272,19 +358,44 @@ def _prepare_parent_image_workspace(
     image_digest: str,
     repo_dir: Path,
     timeout_seconds: int,
+    source_context: ParentImageSourceContext | None = None,
+) -> tuple[str, list[str]]:
+    if source_context is not None:
+        if not source_context.source_root.is_dir():
+            raise CodeEditBuildError("prepared parent image source context is missing its source root")
+        if repo_dir.exists():
+            shutil.rmtree(repo_dir)
+        shutil.copytree(source_context.source_root, repo_dir)
+        _validate_parent_app_runtime(repo_dir)
+        extracted_top_level_paths = list(source_context.top_level_paths)
+        extracted_source_tree_hash_before_patch = source_context.source_tree_hash
+    else:
+        extracted_source_tree_hash_before_patch, extracted_top_level_paths = _extract_parent_image_source(
+            image_digest=image_digest,
+            source_dir=repo_dir,
+            timeout_seconds=timeout_seconds,
+        )
+    _write_research_lab_build_scaffold(repo_dir)
+    _initialize_temporary_git_repo(repo_dir)
+    return extracted_source_tree_hash_before_patch, extracted_top_level_paths
+
+
+def _extract_parent_image_source(
+    *,
+    image_digest: str,
+    source_dir: Path,
+    timeout_seconds: int,
 ) -> tuple[str, list[str]]:
     image_ref = str(image_digest or "").strip()
     if not image_ref:
         raise CodeEditBuildError("parent artifact image_digest is required for code-edit candidate builds")
+    if source_dir.exists() and any(source_dir.iterdir()):
+        shutil.rmtree(source_dir)
+    source_dir.mkdir(parents=True, exist_ok=True)
     _ensure_parent_image_available(image_ref, timeout_seconds=timeout_seconds)
-    repo_dir.mkdir(parents=True, exist_ok=True)
-    _extract_parent_image_app(image_ref, repo_dir=repo_dir, timeout_seconds=timeout_seconds)
-    _validate_parent_app_runtime(repo_dir)
-    extracted_top_level_paths = _top_level_paths(repo_dir)
-    extracted_source_tree_hash_before_patch = compute_private_source_tree_hash(repo_dir)
-    _write_research_lab_build_scaffold(repo_dir)
-    _initialize_temporary_git_repo(repo_dir)
-    return extracted_source_tree_hash_before_patch, extracted_top_level_paths
+    _extract_parent_image_app(image_ref, repo_dir=source_dir, timeout_seconds=timeout_seconds)
+    _validate_parent_app_runtime(source_dir)
+    return compute_private_source_tree_hash(source_dir), _top_level_paths(source_dir)
 
 
 def _ensure_parent_image_available(image_ref: str, *, timeout_seconds: int) -> None:
@@ -341,6 +452,78 @@ def _top_level_paths(repo_dir: Path) -> list[str]:
         for path in repo_dir.iterdir()
         if path.name not in {".git", ".research_lab"}
     )
+
+
+_SOURCE_CONTEXT_MAX_FILES = 300
+_SOURCE_CONTEXT_MAX_PREVIEW_FILES = 12
+_SOURCE_CONTEXT_MAX_PREVIEW_CHARS = 3500
+
+
+def _editable_runtime_files(
+    source_dir: Path,
+    *,
+    allowed_prefixes: Sequence[str],
+    allowed_exact_paths: Sequence[str],
+    allowed_suffixes: Sequence[str],
+) -> list[str]:
+    allowed_exact = set(allowed_exact_paths)
+    allowed = []
+    for path in source_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(source_dir).as_posix()
+        if rel.startswith(".git/") or rel.startswith(".research_lab/"):
+            continue
+        if rel in allowed_exact or any(rel.startswith(prefix) for prefix in allowed_prefixes):
+            if rel.endswith(tuple(allowed_suffixes)):
+                allowed.append(rel)
+    return sorted(allowed)[:_SOURCE_CONTEXT_MAX_FILES]
+
+
+def _source_file_previews(source_dir: Path, editable_files: Sequence[str]) -> list[dict[str, Any]]:
+    previews: list[dict[str, Any]] = []
+    for rel in sorted(editable_files, key=_preview_priority)[:_SOURCE_CONTEXT_MAX_PREVIEW_FILES]:
+        path = source_dir / rel
+        try:
+            raw = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        excerpt = raw[:_SOURCE_CONTEXT_MAX_PREVIEW_CHARS]
+        previews.append(
+            {
+                "path": rel,
+                "line_count": raw.count("\n") + (1 if raw else 0),
+                "size_bytes": path.stat().st_size,
+                "excerpt_truncated": len(raw) > len(excerpt),
+                "content_excerpt": _redact_source_excerpt(excerpt),
+            }
+        )
+    return previews
+
+
+def _preview_priority(path: str) -> tuple[int, str]:
+    if path == "research_lab_adapter.py":
+        return (0, path)
+    if path.startswith("sourcing_model/"):
+        return (1, path)
+    if path.startswith("gateway/research_lab/"):
+        return (2, path)
+    if path.startswith("qualification/scoring/"):
+        return (3, path)
+    if path.startswith("validator_models/"):
+        return (4, path)
+    return (5, path)
+
+
+def _redact_source_excerpt(text: str) -> str:
+    redacted_lines = []
+    for line in text.splitlines():
+        lowered = line.lower()
+        if any(marker in lowered for marker in ("sk-or-", "sb_secret", "aws_secret_access_key", "password=")):
+            redacted_lines.append("[redacted secret-like source line]")
+        else:
+            redacted_lines.append(line)
+    return "\n".join(redacted_lines)
 
 
 def _write_research_lab_build_scaffold(repo_dir: Path) -> None:

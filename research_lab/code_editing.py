@@ -84,6 +84,7 @@ def build_code_edit_auto_research_messages(
     artifact_manifest: Mapping[str, Any],
     component_registry: Mapping[str, Any],
     benchmark_public_summary: Mapping[str, Any],
+    runtime_source_context: Mapping[str, Any] | None = None,
     budget_context: Mapping[str, Any] | None,
     max_candidates: int,
 ) -> list[dict[str, str]]:
@@ -93,11 +94,16 @@ def build_code_edit_auto_research_messages(
     untrusted input even though miners do not supply code.
     """
 
+    source_context = _redacted_source_context(runtime_source_context or {})
+    editable_files = source_context.get("editable_files") if isinstance(source_context, Mapping) else None
+    preview_files = source_context.get("file_previews") if isinstance(source_context, Mapping) else None
+    example_target = _example_target_file(editable_files, preview_files)
     context = {
         "ticket": _redacted_mapping(ticket),
         "artifact_manifest": _redacted_mapping(artifact_manifest),
         "component_registry": _redacted_mapping(component_registry),
         "benchmark_public_summary": _redacted_mapping(benchmark_public_summary),
+        "runtime_source_context": source_context,
         "budget_context": _redacted_mapping(budget_context or {}),
         "max_candidates": max(1, int(max_candidates)),
         "source_mode": "parent_image_extract",
@@ -140,9 +146,15 @@ def build_code_edit_auto_research_messages(
         "- sourcing_model/\n"
         "- validator_models/\n"
         "- research_lab_adapter.py\n\n"
+        "Active extracted source rules:\n"
+        "- The current ECR image has already been pulled and /app has already been extracted before this prompt.\n"
+        "- Use only exact files listed in Context JSON runtime_source_context.editable_files.\n"
+        "- Prefer files listed in runtime_source_context.file_previews because exact source excerpts are included.\n"
+        "- Do not target example, placeholder, guessed, deleted, or non-listed paths.\n\n"
         "Forbidden edits:\n"
         "- Dockerfile, CI, dependency files, lockfiles, deploy scripts, credentials, env files\n"
         "- new top-level folders or files outside the allowed runtime roots\n"
+        "- new files, even under an allowed root, unless the path already appears in editable_files\n"
         "- new external endpoints or new network clients outside existing provider modules\n"
         "- subprocess/shell execution additions\n"
         "- hidden ICP access, raw judge prompts, raw model responses, secrets, or key handling changes\n\n"
@@ -154,7 +166,7 @@ def build_code_edit_auto_research_messages(
         "Expected output shape:\n"
         "{\"candidates\":[{\"lane\":\"query_construction\",\"hypothesis\":{\"failure_mode\":\"...\","
         "\"mechanism\":\"...\",\"expected_improvement\":\"...\",\"risk\":\"...\","
-        "\"predicted_delta\":1.0},\"code_edit\":{\"target_files\":[\"sourcing_model/example.py\"],"
+        "\"predicted_delta\":1.0},\"code_edit\":{\"target_files\":[\"" + example_target + "\"],"
         "\"unified_diff\":\"diff --git ...\",\"redacted_summary\":\"...\","
         "\"test_plan\":\"...\",\"rollback_plan\":\"...\"}}]}\n\n"
         "Context JSON:\n"
@@ -344,6 +356,26 @@ def _redacted_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
     return decoded
 
 
+def _redacted_source_context(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep source inventory usable while removing obvious raw secret values."""
+
+    decoded = json.loads(json.dumps(value, default=str))
+    secret_markers = ("sk-or-", "sb_secret", "aws_secret_access_key", "password=", "private_key")
+
+    def scrub(item: Any) -> Any:
+        if isinstance(item, Mapping):
+            return {str(key): scrub(val) for key, val in item.items()}
+        if isinstance(item, list):
+            return [scrub(val) for val in item]
+        if isinstance(item, str):
+            if any(marker in item.lower() for marker in secret_markers):
+                return "[redacted secret-like value]"
+            return item
+        return item
+
+    return scrub(decoded)
+
+
 def _extract_json_object(raw_text: str) -> str:
     text = raw_text.strip()
     if text.startswith("```"):
@@ -351,7 +383,26 @@ def _extract_json_object(raw_text: str) -> str:
         if "\n" in text:
             text = text.split("\n", 1)[1].strip()
     start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end < start:
+    if start < 0:
         raise ValueError("response did not contain a JSON object")
-    return text[start : end + 1]
+    decoder = json.JSONDecoder()
+    try:
+        _obj, end = decoder.raw_decode(text[start:])
+    except json.JSONDecodeError as exc:
+        raise ValueError(str(exc)) from exc
+    return text[start : start + end]
+
+
+def _example_target_file(editable_files: Any, file_previews: Any) -> str:
+    if isinstance(file_previews, list):
+        for item in file_previews:
+            if isinstance(item, Mapping):
+                path = str(item.get("path") or "")
+                if path:
+                    return path
+    if isinstance(editable_files, list):
+        for item in editable_files:
+            path = str(item or "")
+            if path:
+                return path
+    return "research_lab_adapter.py"

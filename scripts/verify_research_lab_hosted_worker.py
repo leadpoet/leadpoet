@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 from leadpoet_verifier.research_evaluation import build_research_evaluation_score_bundle  # noqa: E402
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
 from gateway.research_lab.code_build import CodeEditBuildError, CodeEditCandidateBuilder  # noqa: E402
+from gateway.research_lab.code_loop_engine import CodeEditLoopEngine  # noqa: E402
 from gateway.research_lab.loop_engine import (  # noqa: E402
     AutoResearchLoopEngine,
     AutoResearchLoopEvent,
@@ -42,7 +43,11 @@ from research_lab.auto_research_prompt import (  # noqa: E402
     parse_auto_research_response,
 )
 from research_lab.canonical import sha256_json  # noqa: E402
-from research_lab.code_editing import CodeEditDraft, validate_code_edit_draft  # noqa: E402
+from research_lab.code_editing import (
+    CodeEditDraft,
+    build_code_edit_auto_research_messages,
+    validate_code_edit_draft,
+)  # noqa: E402
 from research_lab.eval.private_runtime import DEFAULT_ENV_PASSTHROUGH  # noqa: E402
 from research_lab.eval.artifacts import PrivateModelArtifactManifest  # noqa: E402
 from research_lab.validator_integration import verify_research_lab_evaluation_bundle_page  # noqa: E402
@@ -205,6 +210,7 @@ def main() -> int:
     if "private_model_manifest_hash\", artifact.manifest_hash" not in scoring_worker_text:
         errors.append("private baseline lookup must filter by active private model manifest hash")
     errors.extend(_verify_image_extracted_code_builder(artifact))
+    errors.extend(asyncio.run(_verify_code_edit_loop_uses_extracted_source_context(artifact)))
 
     eval_bundle = _score_bundle()
     page = {
@@ -656,6 +662,144 @@ def _verify_image_extracted_code_builder(artifact: PrivateModelArtifactManifest)
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = old_value
+    return errors
+
+
+async def _verify_code_edit_loop_uses_extracted_source_context(
+    artifact: PrivateModelArtifactManifest,
+) -> list[str]:
+    errors: list[str] = []
+    events: list[AutoResearchLoopEvent] = []
+    calls: list[dict[str, object]] = []
+
+    with tempfile.TemporaryDirectory(prefix="research-lab-code-loop-verify-") as tmp:
+        tmp_dir = Path(tmp)
+        fake_app = tmp_dir / "fake_parent_app"
+        _write_fake_parent_app(fake_app)
+        fake_docker = _write_fake_docker(tmp_dir)
+        manifest_writer = _write_fake_manifest_writer(tmp_dir)
+        docker_log = tmp_dir / "docker.log"
+        old_env = {
+            "PATH": os.environ.get("PATH", ""),
+            "FAKE_PARENT_APP": os.environ.get("FAKE_PARENT_APP"),
+            "FAKE_DOCKER_LOG": os.environ.get("FAKE_DOCKER_LOG"),
+        }
+        os.environ["PATH"] = str(fake_docker.parent) + os.pathsep + old_env["PATH"]
+        os.environ["FAKE_PARENT_APP"] = str(fake_app)
+        os.environ["FAKE_DOCKER_LOG"] = str(docker_log)
+
+        async def _call_model(messages, timeout_seconds: int, max_tokens: int) -> OpenRouterCallResult:
+            content = "\n".join(str(message.get("content") or "") for message in messages)
+            calls.append(
+                {
+                    "timeout_seconds": timeout_seconds,
+                    "max_tokens": max_tokens,
+                    "has_runtime_source_context": "runtime_source_context" in content,
+                    "has_real_file": "sourcing_model/__init__.py" in content,
+                    "has_source_excerpt": "VALUE" in content and "def qualify" in content,
+                    "has_bad_example": "sourcing_model/example.py" in content,
+                }
+            )
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "lane": "query_construction",
+                                "hypothesis": {
+                                    "failure_mode": "stale query constant",
+                                    "mechanism": "small source edit against extracted file",
+                                    "expected_improvement": "better source-context grounded edits",
+                                    "risk": "low",
+                                    "predicted_delta": 1.0,
+                                },
+                                "code_edit": {
+                                    "target_files": ["sourcing_model/__init__.py"],
+                                    "unified_diff": _allowed_runtime_patch_draft().unified_diff,
+                                    "redacted_summary": "edit existing extracted file",
+                                    "test_plan": "py_compile changed file",
+                                    "rollback_plan": "revert patch",
+                                },
+                            }
+                        ]
+                    },
+                    sort_keys=True,
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "code-edit-source-context", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+
+        async def _event_sink(event: AutoResearchLoopEvent) -> None:
+            events.append(event)
+
+        try:
+            config = ResearchLabGatewayConfig(
+                private_test_cmd="python3 -m py_compile research_lab_adapter.py sourcing_model/__init__.py",
+                private_build_cmd=f"python3 {manifest_writer}",
+                private_artifact_manifest_output=".research_lab/candidate_manifest.json",
+                code_edit_build_timeout_seconds=30,
+            )
+            result = await CodeEditLoopEngine(
+                settings=AutoResearchLoopSettings(
+                    min_seconds=0,
+                    max_seconds=30,
+                    min_iterations=1,
+                    max_iterations=1,
+                    draft_timeout_seconds=10,
+                    reflection_timeout_seconds=10,
+                    estimated_iteration_cost_usd=0.01,
+                    max_candidates=1,
+                ),
+                call_openrouter=_call_model,
+                event_sink=_event_sink,
+                builder=CodeEditCandidateBuilder(config),
+            ).run(
+                run_id="99999999-9999-4999-8999-999999999999",
+                ticket={
+                    "ticket_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    "miner_hotkey": "5FminerHotkeyCodeEdit",
+                    "island": "generalist",
+                    "brief_sanitized_ref": "brief_sanitized:sha256:sourcecontext",
+                    "ticket_doc": {"brief_public_summary": "source-context grounded code edit"},
+                    "requested_loop_count": 1,
+                },
+                artifact=artifact,
+                component_registry={},
+                benchmark_public_summary={"item_count": 10},
+                model_id="test/code-edit-model",
+                budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+                requested_loop_count=1,
+            )
+            if not result.selected_candidates:
+                errors.append("code-edit loop did not build a candidate from extracted source context")
+            if not calls or not calls[0].get("has_runtime_source_context"):
+                errors.append("code-edit draft prompt did not include runtime_source_context")
+            if not calls or not calls[0].get("has_real_file"):
+                errors.append("code-edit draft prompt did not include real extracted editable file paths")
+            if not calls or not calls[0].get("has_source_excerpt"):
+                errors.append("code-edit draft prompt did not include extracted source excerpts")
+            if calls and calls[0].get("has_bad_example"):
+                errors.append("code-edit draft prompt still suggests nonexistent sourcing_model/example.py")
+            event_types = [event.event_type for event in events]
+            if "candidate_build_passed" not in event_types:
+                errors.append("code-edit loop did not record candidate_build_passed")
+            first_doc = events[0].event_doc if events else {}
+            if first_doc.get("source_mode") != "parent_image_extract":
+                errors.append("code-edit loop start event did not record parent image extraction")
+            docker_calls = docker_log.read_text(encoding="utf-8").splitlines()
+            if sum(1 for call in docker_calls if call.startswith("cp ")) != 1:
+                errors.append("code-edit loop should extract parent image once before drafting")
+        except Exception as exc:
+            errors.append(f"code-edit loop source-context verification failed: {exc}")
+        finally:
+            os.environ["PATH"] = old_env["PATH"]
+            for key in ("FAKE_PARENT_APP", "FAKE_DOCKER_LOG"):
+                old_value = old_env[key]
+                if old_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old_value
+
     return errors
 
 

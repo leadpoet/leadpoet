@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
+import tempfile
 import time
 from typing import Any, Mapping, Sequence
 
@@ -101,6 +103,12 @@ class CodeEditLoopEngine:
         elapsed = lambda: elapsed_offset + (time.monotonic() - start)
         budget_limit_microusd = _budget_limit_microusd(budget_context)
 
+        source_tmp = tempfile.TemporaryDirectory(prefix="research-lab-parent-image-source-")
+        source_context = self.builder.prepare_parent_source_context(
+            parent_artifact=artifact,
+            workspace_dir=Path(source_tmp.name),
+        )
+
         await self.event_sink(
             AutoResearchLoopEvent(
                 event_type="loop_resumed" if resume else "loop_started",
@@ -120,6 +128,13 @@ class CodeEditLoopEngine:
                     "budget_context": _safe_budget_doc(budget_context),
                     "resumed_from_checkpoint": bool(resume),
                     "checkpoint_hash": resume.get("checkpoint_hash"),
+                    "source_mode": source_context.source_mode,
+                    "source_tree_hash": source_context.source_tree_hash,
+                    "parent_image_digest_hash": source_context.parent_image_digest_hash,
+                    "extracted_top_level_paths": list(source_context.top_level_paths),
+                    "editable_file_count": len(source_context.editable_files),
+                    "editable_file_sample": list(source_context.editable_files[:25]),
+                    "file_preview_count": len(source_context.file_previews),
                 },
             )
         )
@@ -191,6 +206,7 @@ class CodeEditLoopEngine:
                         artifact_manifest=artifact.to_dict(),
                         component_registry=dict(component_registry),
                         benchmark_public_summary=benchmark_public_summary,
+                        runtime_source_context=source_context.prompt_context(),
                         budget_context={
                             **dict(budget_context),
                             "loop_iteration": iteration,
@@ -230,6 +246,30 @@ class CodeEditLoopEngine:
                 drafts = []
             for draft_index, draft in enumerate(drafts):
                 node_id = _node_id(run_id, iteration, draft_index, draft)
+                source_errors = self.builder.validate_draft_against_source_context(draft, source_context)
+                if source_errors:
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="code_edit_validation_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            node_id=node_id,
+                            provider_usage=([provider_usage[-1]] if provider_usage else []),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "code_edit_source_context_failed",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "target_files": list(draft.target_files),
+                                "error": "; ".join(source_errors)[:500],
+                                "source_tree_hash": source_context.source_tree_hash,
+                            },
+                        )
+                    )
+                    continue
                 await self.event_sink(
                     AutoResearchLoopEvent(
                         event_type="code_edit_drafted",
@@ -269,6 +309,7 @@ class CodeEditLoopEngine:
                         parent_artifact=artifact,
                         run_id=run_id,
                         candidate_index=len(selected),
+                        source_context=source_context,
                     )
                     selected.append(BuiltCodeEditCandidate(draft=draft, build=build, node_id=node_id, iteration=iteration))
                     await self.event_sink(

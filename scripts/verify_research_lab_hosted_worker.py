@@ -889,6 +889,11 @@ def _write_fake_manifest_writer(root: Path) -> Path:
 
             output = Path(os.environ["RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT"])
             git_commit_sha = os.environ["RESEARCH_LAB_PRIVATE_COMMIT_SHA"]
+            dockerfile = Path("Dockerfile.research-lab").read_text(encoding="utf-8")
+            if "python:3.11-slim" in dockerfile:
+                raise SystemExit("candidate Dockerfile should not use Docker Hub python base image")
+            if not dockerfile.startswith("FROM 123456789012.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:"):
+                raise SystemExit("candidate Dockerfile should inherit from parent ECR image")
             payload = {
                 "model_artifact_hash": "sha256:" + "8" * 64,
                 "git_commit_sha": git_commit_sha,

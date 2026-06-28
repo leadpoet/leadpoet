@@ -375,7 +375,7 @@ def _prepare_parent_image_workspace(
             source_dir=repo_dir,
             timeout_seconds=timeout_seconds,
         )
-    _write_research_lab_build_scaffold(repo_dir)
+    _write_research_lab_build_scaffold(repo_dir, base_image_ref=image_digest)
     _initialize_temporary_git_repo(repo_dir)
     return extracted_source_tree_hash_before_patch, extracted_top_level_paths
 
@@ -456,7 +456,7 @@ def _top_level_paths(repo_dir: Path) -> list[str]:
 
 _SOURCE_CONTEXT_MAX_FILES = 300
 _SOURCE_CONTEXT_MAX_PREVIEW_FILES = 12
-_SOURCE_CONTEXT_MAX_PREVIEW_CHARS = 3500
+_SOURCE_CONTEXT_MAX_PREVIEW_CHARS = 12000
 
 
 def _editable_runtime_files(
@@ -526,14 +526,13 @@ def _redact_source_excerpt(text: str) -> str:
     return "\n".join(redacted_lines)
 
 
-def _write_research_lab_build_scaffold(repo_dir: Path) -> None:
+def _write_research_lab_build_scaffold(repo_dir: Path, *, base_image_ref: str) -> None:
+    base_image = _safe_docker_base_image_ref(base_image_ref)
     (repo_dir / "Dockerfile.research-lab").write_text(
-        """FROM python:3.11-slim
+        f"""FROM {base_image}
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY . /app
 RUN python - <<'PY'
 import research_lab_adapter
@@ -564,6 +563,15 @@ parent_manifest.json
 """,
         encoding="utf-8",
     )
+
+
+def _safe_docker_base_image_ref(value: str) -> str:
+    image_ref = str(value or "").strip()
+    if not image_ref or any(char.isspace() for char in image_ref):
+        raise CodeEditBuildError("invalid parent image digest for generated candidate Dockerfile")
+    if not image_ref.startswith(("public.ecr.aws/", "localhost/", "127.0.0.1/")) and ".dkr.ecr." not in image_ref:
+        raise CodeEditBuildError("parent image digest must be an ECR image reference for code-edit candidate builds")
+    return image_ref
 
 
 def _initialize_temporary_git_repo(repo_dir: Path) -> None:

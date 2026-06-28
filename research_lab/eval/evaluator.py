@@ -158,6 +158,7 @@ async def score_private_model_pair_items(
 
     scorer = company_scorer or QualificationStyleCompanyScorer()
     per_icp_results: list[dict[str, Any]] = []
+    candidate_runtime_skip_reason = ""
     for item in benchmark_items:
         icp = item.get("icp")
         if not isinstance(icp, Mapping):
@@ -179,17 +180,23 @@ async def score_private_model_pair_items(
             if runtime_patch is None:
                 raise RealEvaluatorRequired("candidate patch runtime payload is required for patch candidates")
             candidate_context["patch"] = runtime_patch.to_dict()
-        try:
-            candidate_outputs = ensure_private_model_outputs(
-                await _call_model_runner(candidate_runner, icp, candidate_context),
-                context_label=f"candidate model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
-                require_non_empty=False,
-            )
-        except PrivateModelRuntimeError as exc:
-            if not _is_provider_backed_sourcing_error(exc):
-                raise
+        if candidate_runtime_skip_reason:
             candidate_outputs = []
-            failure_reasons.append("candidate_model_runtime_provider_error")
+            failure_reasons.append(candidate_runtime_skip_reason)
+        else:
+            try:
+                candidate_outputs = ensure_private_model_outputs(
+                    await _call_model_runner(candidate_runner, icp, candidate_context),
+                    context_label=f"candidate model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
+                    require_non_empty=False,
+                )
+            except PrivateModelRuntimeError as exc:
+                candidate_failure_reason = _scoreable_candidate_runtime_failure_reason(exc)
+                if not candidate_failure_reason:
+                    raise
+                candidate_outputs = []
+                failure_reasons.append(candidate_failure_reason)
+                candidate_runtime_skip_reason = _candidate_runtime_skip_reason(candidate_failure_reason)
         base_scores = await _maybe_await(scorer(base_outputs, icp, True))
         candidate_scores = await _maybe_await(scorer(candidate_outputs, icp, False))
         if not base_outputs:
@@ -491,6 +498,40 @@ async def _call_model_runner(
 
 def _is_provider_backed_sourcing_error(exc: PrivateModelRuntimeError) -> bool:
     return "provider-backed sourcing failed before returning companies" in str(exc).lower()
+
+
+def _scoreable_candidate_runtime_failure_reason(exc: PrivateModelRuntimeError) -> str:
+    """Classify candidate-only adapter failures that should score as zero output.
+
+    The reference model remains strict for non-provider runtime failures. A
+    generated candidate can hang, return malformed output, or break its adapter;
+    those are model-quality failures and should produce a score bundle instead
+    of aborting the whole scoring job.
+    """
+
+    if _is_provider_backed_sourcing_error(exc):
+        return "candidate_model_runtime_provider_error"
+    lowered = str(exc).lower()
+    if "adapter timed out" in lowered:
+        return "candidate_model_runtime_timeout"
+    if "adapter returned invalid json" in lowered:
+        return "candidate_model_runtime_invalid_json"
+    if "adapter failed with code" in lowered:
+        return "candidate_model_runtime_adapter_failed"
+    if "adapter must return a json array" in lowered:
+        return "candidate_model_runtime_invalid_output"
+    if "adapter returned a non-object company row" in lowered:
+        return "candidate_model_runtime_invalid_output"
+    if "adapter returned raw secret material" in lowered:
+        return "candidate_model_runtime_invalid_output"
+    return ""
+
+
+def _candidate_runtime_skip_reason(failure_reason: str) -> str:
+    if failure_reason == "candidate_model_runtime_provider_error":
+        return ""
+    suffix = failure_reason.removeprefix("candidate_model_runtime_")
+    return f"candidate_model_runtime_skipped_after_{suffix}"
 
 
 def prepare_autoresearch_scoring_payload(

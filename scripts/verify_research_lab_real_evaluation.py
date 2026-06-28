@@ -17,6 +17,7 @@ from research_lab.canonical import sha256_json
 from research_lab.eval import (
     CandidatePatchManifest,
     PrivateModelArtifactManifest,
+    PrivateModelRuntimeError,
     RealEvaluatorRequired,
     SealedBenchmarkSet,
     build_score_bundle_from_scored_icps,
@@ -188,6 +189,84 @@ def main() -> int:
         )
         if not rejected_verification["passed"]:
             errors.append("public-gate rejected score bundle failed verification: " + "; ".join(rejected_verification["errors"]))
+
+        timeout_candidate_calls: list[str] = []
+
+        async def _timeout_candidate_runner(icp: dict[str, object], _context: dict[str, object]) -> list[dict[str, object]]:
+            timeout_candidate_calls.append(str(icp.get("id")))
+            raise PrivateModelRuntimeError("docker private model adapter timed out")
+
+        timeout_bundle = asyncio.run(
+            evaluate_private_model_pair(
+                artifact_manifest=artifact,
+                benchmark=benchmark,
+                patch_manifest=patch,
+                benchmark_items=[
+                    {"icp_ref": "icp:a", "icp_hash": "sha256:" + "a" * 64, "icp": {"id": "public-a"}},
+                    {"icp_ref": "icp:b", "icp_hash": "sha256:" + "b" * 64, "icp": {"id": "public-b"}},
+                    {"icp_ref": "icp:c", "icp_hash": "sha256:" + "c" * 64, "icp": {"id": "private"}},
+                ],
+                base_runner=_gated_reject_base_runner,
+                candidate_runner=_timeout_candidate_runner,
+                company_scorer=_score_marker_company_scorer,
+                run_context=run_context,
+                policy={**_policy(), "min_delta": -100.0, "min_delta_lcb": -100.0, "min_candidate_score": 0.0},
+                private_holdout_gate={
+                    "baseline_benchmark_bundle_id": "private_benchmark:test",
+                    "baseline_public_score": 1.0,
+                    "public_icp_refs": ["icp:a", "icp:b"],
+                },
+            )
+        )
+        timeout_verification = verify_research_evaluation_score_bundle(
+            timeout_bundle,
+            policy={**_policy(), "min_delta": -100.0, "min_delta_lcb": -100.0, "min_candidate_score": 0.0},
+        )
+        if not timeout_verification["passed"]:
+            errors.append("candidate timeout score bundle failed verification: " + "; ".join(timeout_verification["errors"]))
+        if timeout_bundle["aggregates"]["candidate_score"] != 0.0:
+            errors.append("candidate timeout did not score candidate as zero")
+        timeout_results = timeout_bundle["aggregates"]["per_icp_results"]
+        if "candidate_model_runtime_timeout" not in timeout_results[0]["failure_reason"]:
+            errors.append("candidate timeout failure reason was not recorded")
+        if "candidate_model_runtime_skipped_after_timeout" not in timeout_results[1]["failure_reason"]:
+            errors.append("candidate timeout did not skip remaining public ICP candidate calls")
+        if timeout_candidate_calls != ["public-a"]:
+            errors.append(f"candidate timeout called candidate runner too many times: {timeout_candidate_calls}")
+        timeout_gate = timeout_bundle.get("private_holdout_gate") or {}
+        if timeout_gate.get("decision") != "rejected_before_private_holdout":
+            errors.append("candidate timeout did not reject before private holdout")
+        if int((timeout_bundle.get("aggregates") or {}).get("icp_count") or 0) != 2:
+            errors.append("candidate timeout should only score public gate ICPs before rejection")
+
+        async def _timeout_base_runner(_icp: dict[str, object], _context: dict[str, object]) -> list[dict[str, object]]:
+            raise PrivateModelRuntimeError("docker private model adapter timed out")
+
+        try:
+            asyncio.run(
+                evaluate_private_model_pair(
+                    artifact_manifest=artifact,
+                    benchmark=benchmark,
+                    patch_manifest=patch,
+                    benchmark_items=[
+                        {"icp_ref": "icp:a", "icp_hash": "sha256:" + "a" * 64, "icp": {"id": "public"}},
+                        {"icp_ref": "icp:b", "icp_hash": "sha256:" + "b" * 64, "icp": {"id": "private"}},
+                    ],
+                    base_runner=_timeout_base_runner,
+                    candidate_runner=_gated_reject_candidate_runner,
+                    company_scorer=_score_marker_company_scorer,
+                    run_context=run_context,
+                    policy={**_policy(), "min_successful_icps": 2},
+                    private_holdout_gate={
+                        "baseline_benchmark_bundle_id": "private_benchmark:test",
+                        "baseline_public_score": 1.0,
+                        "public_icp_refs": ["icp:a"],
+                    },
+                )
+            )
+            errors.append("reference model timeout did not fail closed")
+        except PrivateModelRuntimeError:
+            pass
 
         passed_calls: list[tuple[str, str]] = []
 

@@ -32,11 +32,14 @@ from gateway.research_lab.loop_engine import (  # noqa: E402
 )
 from gateway.research_lab.store import canonical_hash, scoring_dispatch_event_anchor_payload  # noqa: E402
 from gateway.research_lab.scoring_worker import _private_benchmark_row_is_valid  # noqa: E402
+import gateway.research_lab.worker as worker_module  # noqa: E402
 from gateway.research_lab.worker import (  # noqa: E402
+    HostedResearchLabBuilderNotReady,
     HostedResearchLabWorkerError,
     ResearchLabHostedWorker,
     _build_openrouter_provider_usage,
     _is_claim_race_error,
+    _is_retryable_worker_exception,
     _row_partition,
     _worker_proxy_env,
 )
@@ -59,6 +62,49 @@ from research_lab.validator_integration import verify_research_lab_evaluation_bu
 
 def main() -> int:
     errors: list[str] = []
+
+    async def _verify_builder_not_ready_skips_queue() -> None:
+        class _NoClaimWorker(ResearchLabHostedWorker):
+            def __init__(self, config: ResearchLabGatewayConfig):
+                super().__init__(config, worker_ref="test-worker-builder-not-ready")
+                self.queue_was_read = False
+
+            async def _next_queued_run(self):  # type: ignore[override]
+                self.queue_was_read = True
+                return {
+                    "run_id": "11111111-1111-4111-8111-111111111111",
+                    "ticket_id": "22222222-2222-4222-8222-222222222222",
+                    "queue_priority": 0,
+                }
+
+        cfg = ResearchLabGatewayConfig(
+            hosted_worker_enabled=True,
+            hosted_worker_dry_run=True,
+            production_writes_enabled=True,
+            hosted_runs_enabled=True,
+            receipts_enabled=True,
+            private_model_manifest_uri=(
+                "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json"
+            ),
+            auto_research_model="test/model",
+            private_build_cmd="",
+        )
+        worker = _NoClaimWorker(cfg)
+        original_pause_check = worker_module.is_autoresearch_maintenance_paused
+
+        async def _not_paused() -> bool:
+            return False
+
+        worker_module.is_autoresearch_maintenance_paused = _not_paused
+        try:
+            outcome = await worker.run_once()
+        finally:
+            worker_module.is_autoresearch_maintenance_paused = original_pause_check
+        if worker.queue_was_read:
+            errors.append("builder-not-ready worker read the queue before readiness passed")
+        if outcome.status != "code_edit_builder_not_ready":
+            errors.append(f"builder-not-ready worker returned unexpected status: {outcome.status}")
+
     async def _noop_call(*_args, **_kwargs):
         return OpenRouterCallResult(content='{"candidates":[]}')
 
@@ -261,6 +307,26 @@ def main() -> int:
         errors.append("worker did not prefer its assigned queue partition")
     if not _is_claim_race_error(Exception("duplicate key violates research_loop_run_queue_events_run_seq_key")):
         errors.append("worker claim-race detector missed queue event duplicate-key errors")
+    ready_worker = ResearchLabHostedWorker(ResearchLabGatewayConfig(), worker_ref="test-worker-ready")
+    if ready_worker._code_edit_builder_unavailable_reason():
+        errors.append("default code-edit image builder should be ready from code-level defaults")
+    disabled_builder_worker = ResearchLabHostedWorker(
+        ResearchLabGatewayConfig(code_edit_candidates_enabled=False),
+        worker_ref="test-worker-builder-disabled",
+    )
+    disabled_reason = disabled_builder_worker._code_edit_builder_unavailable_reason() or ""
+    if "RESEARCH_LAB_CODE_EDIT_CANDIDATES_ENABLED" not in disabled_reason:
+        errors.append("disabled code-edit builder did not report a readiness reason")
+    missing_builder_worker = ResearchLabHostedWorker(
+        ResearchLabGatewayConfig(private_build_cmd=""),
+        worker_ref="test-worker-builder-missing",
+    )
+    missing_reason = missing_builder_worker._code_edit_builder_unavailable_reason() or ""
+    if "RESEARCH_LAB_PRIVATE_BUILD_CMD" not in missing_reason:
+        errors.append("missing private build command did not report a readiness reason")
+    if not _is_retryable_worker_exception(HostedResearchLabBuilderNotReady("builder not ready")):
+        errors.append("builder-not-ready errors must be retryable/requeue-classified")
+    asyncio.run(_verify_builder_not_ready_skips_queue())
     proxy_cfg = ResearchLabGatewayConfig(hosted_worker_require_proxy=True, hosted_worker_proxy_url="http://proxy.example:8080")
     proxy_env = _worker_proxy_env(proxy_cfg)
     if proxy_env.get("HTTPS_PROXY") != "http://proxy.example:8080" or proxy_env.get("HTTP_PROXY") != "http://proxy.example:8080":

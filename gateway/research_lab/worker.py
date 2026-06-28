@@ -109,6 +109,10 @@ class RetryableHostedResearchLabWorkerError(HostedResearchLabWorkerError):
     """Raised when a paid hosted run should be requeued instead of terminally failed."""
 
 
+class HostedResearchLabBuilderNotReady(RetryableHostedResearchLabWorkerError):
+    """Raised when image-build candidate infrastructure is not ready yet."""
+
+
 class HostedResearchLabClaimLost(HostedResearchLabWorkerError):
     """Raised when another worker safely claimed the queued run first."""
 
@@ -385,6 +389,19 @@ class ResearchLabHostedWorker:
             )
         if not self.config.hosted_worker_dry_run:
             await self._recover_stale_paused_runs()
+        builder_unavailable = self._code_edit_builder_unavailable_reason()
+        if builder_unavailable:
+            logger.warning(
+                "research_lab_code_edit_builder_not_ready worker_ref=%s reason=%s",
+                self.worker_ref,
+                builder_unavailable[:240],
+            )
+            return HostedWorkerOutcome(
+                processed=False,
+                dry_run=self.config.hosted_worker_dry_run,
+                status="code_edit_builder_not_ready",
+                error=builder_unavailable[:500],
+            )
         queued = await self._next_queued_run()
         if not queued:
             return HostedWorkerOutcome(processed=False, dry_run=self.config.hosted_worker_dry_run)
@@ -443,6 +460,19 @@ class ResearchLabHostedWorker:
                 status="claim_lost",
                 error=str(exc)[:500],
             )
+        except HostedResearchLabBuilderNotReady as exc:
+            logger.warning(
+                format_worker_block(
+                    "RESEARCH LAB AUTO-RESEARCH BUILDER NOT READY",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Run", compact_ref(run_id)),
+                        ("Ticket", compact_ref(ticket_id)),
+                        ("Reason", str(exc)[:300]),
+                    ),
+                )
+            )
+            return await self._mark_builder_not_ready(context, str(exc))
         except Exception as exc:
             if _is_retryable_worker_exception(exc):
                 retry_count = _retryable_requeue_count(context)
@@ -499,6 +529,27 @@ class ResearchLabHostedWorker:
             raise HostedResearchLabWorkerError("private model manifest URI is not configured")
         if not self.config.approved_auto_research_models():
             raise HostedResearchLabWorkerError("auto-research OpenRouter model is not configured")
+
+    def _code_edit_builder_unavailable_reason(self) -> str | None:
+        if not self.config.code_edit_candidates_enabled:
+            return "RESEARCH_LAB_CODE_EDIT_CANDIDATES_ENABLED is false"
+        missing: list[str] = []
+        if not self.config.private_test_cmd:
+            missing.append("RESEARCH_LAB_PRIVATE_TEST_CMD")
+        if not self.config.private_build_cmd:
+            missing.append("RESEARCH_LAB_PRIVATE_BUILD_CMD")
+        if not self.config.private_artifact_manifest_output:
+            missing.append("RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT")
+        if missing:
+            return "code-edit image-build candidate builder missing: " + ", ".join(missing)
+        if not CodeEditCandidateBuilder(self.config).enabled():
+            return "code-edit image-build candidate builder is not configured"
+        return None
+
+    def _require_code_edit_builder_ready(self) -> None:
+        reason = self._code_edit_builder_unavailable_reason()
+        if reason:
+            raise HostedResearchLabBuilderNotReady(reason)
 
     def _require_worker_proxy_for_execution(self) -> None:
         if not self.config.hosted_worker_require_proxy:
@@ -689,6 +740,7 @@ class ResearchLabHostedWorker:
         if terminal:
             return terminal
         await self._append_started_events(context)
+        self._require_code_edit_builder_ready()
         completed_receipt_outcome = await self._complete_from_existing_completed_receipt(context)
         if completed_receipt_outcome:
             return completed_receipt_outcome
@@ -822,14 +874,7 @@ class ResearchLabHostedWorker:
                 max_candidates=max_candidates,
             )
             code_builder = CodeEditCandidateBuilder(self.config)
-            if not self.config.code_edit_candidates_enabled:
-                raise HostedResearchLabWorkerError(
-                    "code-edit image-build candidates are required; RESEARCH_LAB_CODE_EDIT_CANDIDATES_ENABLED is false"
-                )
-            if not code_builder.enabled():
-                raise HostedResearchLabWorkerError(
-                    "code-edit image-build candidates are required but the gateway builder is not configured"
-                )
+            self._require_code_edit_builder_ready()
 
             loop_result = await CodeEditLoopEngine(
                 settings=loop_settings,
@@ -1586,6 +1631,73 @@ class ResearchLabHostedWorker:
             ticket_id=context.ticket_id,
             status="failed",
             receipt_id=receipt_id,
+            error=error[:500],
+        )
+
+    async def _mark_builder_not_ready(self, context: HostedRunContext, error: str) -> HostedWorkerOutcome:
+        event_doc = {
+            **autoresearch_queue_capacity_doc(self.config),
+            "schema_version": "1.0",
+            "run_id": context.run_id,
+            "worker_ref": self.worker_ref,
+            "recovering_worker_ref": self.worker_ref,
+            "retrying_worker_ref": self.worker_ref,
+            "builder_not_ready_error": error[:500],
+            "previous_event_hash": context.queue_row.get("current_event_hash"),
+            "previous_status_at": context.queue_row.get("current_status_at"),
+        }
+        if context.receipt_id:
+            try:
+                await create_receipt_event(
+                    receipt_id=context.receipt_id,
+                    ticket_id=context.ticket_id,
+                    event_type="queued",
+                    receipt_status="queued",
+                    event_doc=event_doc,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_builder_not_ready_receipt_event_failed run_id=%s receipt_id=%s error=%s",
+                    compact_ref(context.run_id),
+                    compact_ref(context.receipt_id),
+                    str(exc)[:240],
+                )
+        await create_queue_event(
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            event_type="queued",
+            queue_priority=int(context.queue_row.get("queue_priority") or 0),
+            worker_ref=self.worker_ref,
+            reason="code_edit_builder_not_ready_requeued",
+            event_doc=event_doc,
+        )
+        try:
+            await create_ticket_event(
+                ticket_id=context.ticket_id,
+                event_type="running",
+                actor_hotkey=None,
+                reason="code_edit_builder_not_ready_requeued",
+                event_doc=event_doc,
+            )
+            await safe_project_public_loop_activity(
+                context.ticket_id,
+                source_ref=f"hosted_worker_builder_not_ready_requeued:{context.run_id}",
+                reason="code_edit_builder_not_ready_requeued",
+                config=self.config,
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_builder_not_ready_noncritical_projection_failed run_id=%s error=%s",
+                compact_ref(context.run_id),
+                str(exc)[:240],
+            )
+        return HostedWorkerOutcome(
+            processed=True,
+            dry_run=False,
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            status="code_edit_builder_not_ready_requeued",
+            receipt_id=context.receipt_id,
             error=error[:500],
         )
 

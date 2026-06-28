@@ -10,6 +10,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import json
 import logging
 import os
+import re
 import socket
 import time
 from typing import Any, Iterable, Mapping, Sequence
@@ -193,6 +194,43 @@ _PERMANENT_ERROR_MARKERS = (
     "research_lab_queue_hotkey_conflict",
     "research_lab_run_claim_conflict",
 )
+_OPENROUTER_PERMANENT_ERROR_MARKERS = (
+    "invalid api key",
+    "unauthorized",
+    "forbidden",
+    "authentication",
+    "not authenticated",
+    "invalid model",
+    "model not found",
+    "unknown model",
+    "no endpoints found",
+    "insufficient credits",
+    "insufficient balance",
+    "payment required",
+)
+_OPENROUTER_TRANSIENT_ERROR_MARKERS = (
+    "no candidate-generation choices",
+    "empty candidate-generation content",
+    "empty choices",
+    "provider",
+    "upstream",
+    "overloaded",
+    "capacity",
+    "temporarily",
+    "try again",
+    "timeout",
+    "timed out",
+    "rate limit",
+    "too many requests",
+    "http 408",
+    "http 409",
+    "http 425",
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+)
 
 
 def _is_retryable_worker_exception(exc: BaseException) -> bool:
@@ -213,6 +251,104 @@ def _is_retryable_worker_exception(exc: BaseException) -> bool:
     if any(marker in message for marker in _PERMANENT_ERROR_MARKERS):
         return False
     return any(marker in message for marker in _RETRYABLE_ERROR_MARKERS)
+
+
+def _raise_openrouter_generation_response_error(
+    decoded: object,
+    *,
+    failure: str,
+    default_retryable: bool,
+) -> None:
+    summary = _openrouter_response_summary(decoded)
+    error = f"OpenRouter candidate generation failed: {failure}: {summary}"
+    if _openrouter_generation_response_is_retryable(
+        decoded,
+        error,
+        default_retryable=default_retryable,
+    ):
+        raise RetryableHostedResearchLabWorkerError(error)
+    raise HostedResearchLabWorkerError(error)
+
+
+def _openrouter_generation_response_is_retryable(
+    decoded: object,
+    message: str,
+    *,
+    default_retryable: bool,
+) -> bool:
+    lowered = str(message or "").lower()
+    if isinstance(decoded, Mapping):
+        raw_error = decoded.get("error")
+        if isinstance(raw_error, Mapping):
+            code = str(raw_error.get("code") or raw_error.get("status") or "").lower()
+            if code in {"400", "401", "403", "404"}:
+                return False
+            if code in {"408", "409", "425", "429", "500", "502", "503", "504"}:
+                return True
+            lowered += " " + str(raw_error.get("message") or raw_error.get("type") or "").lower()
+        elif raw_error:
+            lowered += " " + str(raw_error).lower()
+    if any(marker in lowered for marker in _OPENROUTER_PERMANENT_ERROR_MARKERS):
+        return False
+    if any(marker in lowered for marker in _OPENROUTER_TRANSIENT_ERROR_MARKERS):
+        return True
+    return bool(default_retryable)
+
+
+def _openrouter_response_summary(decoded: object) -> str:
+    if not isinstance(decoded, Mapping):
+        return f"non_object_response:{type(decoded).__name__}"
+    summary: dict[str, object] = {
+        "keys": sorted(str(key)[:80] for key in decoded.keys())[:20],
+    }
+    if decoded.get("id"):
+        summary["id"] = str(decoded.get("id"))[:120]
+    if decoded.get("model"):
+        summary["model"] = str(decoded.get("model"))[:120]
+    choices = decoded.get("choices")
+    if isinstance(choices, list):
+        summary["choices_len"] = len(choices)
+        if choices and isinstance(choices[0], Mapping):
+            summary["first_choice_keys"] = sorted(str(key)[:80] for key in choices[0].keys())[:20]
+            summary["finish_reason"] = str(choices[0].get("finish_reason") or "")[:120]
+    else:
+        summary["choices_type"] = type(choices).__name__
+    usage = decoded.get("usage")
+    if isinstance(usage, Mapping):
+        summary["usage_keys"] = sorted(str(key)[:80] for key in usage.keys())[:20]
+    raw_error = decoded.get("error")
+    if isinstance(raw_error, Mapping):
+        summary["error"] = {
+            "code": str(raw_error.get("code") or raw_error.get("status") or "")[:80],
+            "type": str(raw_error.get("type") or "")[:120],
+            "message": _redact_openrouter_diagnostic(str(raw_error.get("message") or ""), limit=300),
+        }
+    elif raw_error:
+        summary["error"] = _redact_openrouter_diagnostic(str(raw_error), limit=300)
+    return _redact_openrouter_diagnostic(
+        json.dumps(summary, sort_keys=True, separators=(",", ":")),
+        limit=700,
+    )
+
+
+def _redact_openrouter_diagnostic(value: str, *, limit: int) -> str:
+    text = str(value or "")
+    text = re.sub(r"sk-or-[A-Za-z0-9._:-]+", "[redacted-openrouter-key]", text)
+    text = re.sub(r"sb_secret_[A-Za-z0-9._:-]+", "[redacted-supabase-service-role-key]", text)
+    text = re.sub(r"sb_publishable_[A-Za-z0-9._:-]+", "[redacted-supabase-anon-key]", text)
+    text = re.sub(r"AKIA[A-Z0-9]{16}", "[redacted-aws-access-key-id]", text)
+    text = re.sub(r"https?://[^@\s]+@([^\s/]+)", r"[redacted-proxy-url]@\1", text)
+    lowered = text.lower()
+    secret_markers = (
+        "openrouter_api_key",
+        "raw_openrouter_key",
+        "aws_secret_access_key",
+        "service_role_key",
+        "proxy password",
+    )
+    if any(marker in lowered for marker in secret_markers):
+        return "[redacted secret-like diagnostic text]"
+    return text[: max(1, int(limit))]
 
 
 @dataclass(frozen=True)
@@ -1996,11 +2132,21 @@ class ResearchLabHostedWorker:
                     f"OpenRouter candidate generation failed: {exc}"
                 ) from exc
             choices = decoded.get("choices") if isinstance(decoded, Mapping) else None
-            if not choices:
-                raise HostedResearchLabWorkerError("OpenRouter returned no candidate-generation choices")
-            content = choices[0].get("message", {}).get("content")
+            if not isinstance(choices, list) or not choices:
+                _raise_openrouter_generation_response_error(
+                    decoded,
+                    failure="no candidate-generation choices",
+                    default_retryable=True,
+                )
+            first_choice = choices[0] if isinstance(choices[0], Mapping) else {}
+            message = first_choice.get("message") if isinstance(first_choice.get("message"), Mapping) else {}
+            content = message.get("content")
             if not content:
-                raise HostedResearchLabWorkerError("OpenRouter returned empty candidate-generation content")
+                _raise_openrouter_generation_response_error(
+                    decoded,
+                    failure="empty candidate-generation content",
+                    default_retryable=True,
+                )
             usage = decoded.get("usage") if isinstance(decoded.get("usage"), Mapping) else {}
             provider_usage, cost_microusd = _build_openrouter_provider_usage(
                 decoded=decoded,

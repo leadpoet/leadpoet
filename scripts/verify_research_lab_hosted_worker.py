@@ -35,6 +35,7 @@ from gateway.research_lab.scoring_worker import _private_benchmark_row_is_valid 
 import gateway.research_lab.worker as worker_module  # noqa: E402
 from gateway.research_lab.worker import (  # noqa: E402
     HostedResearchLabBuilderNotReady,
+    RetryableHostedResearchLabWorkerError,
     HostedResearchLabWorkerError,
     ResearchLabHostedWorker,
     _build_openrouter_provider_usage,
@@ -104,6 +105,65 @@ def main() -> int:
             errors.append("builder-not-ready worker read the queue before readiness passed")
         if outcome.status != "code_edit_builder_not_ready":
             errors.append(f"builder-not-ready worker returned unexpected status: {outcome.status}")
+
+    async def _verify_openrouter_no_choices_is_retryable() -> None:
+        cfg = ResearchLabGatewayConfig(auto_research_model="test/model")
+        hosted_worker = ResearchLabHostedWorker(cfg, worker_ref="test-worker-openrouter")
+        original_urlopen = worker_module.urlrequest.urlopen
+        fake_key = "sk-or-" + "v1-test-key"
+
+        def _fake_no_choices(_request, timeout: int):
+            if timeout != 7:
+                raise AssertionError("OpenRouter call timeout was not forwarded")
+            return _FakeOpenRouterResponse({"id": "gen-no-choices", "model": "test/model", "choices": []})
+
+        worker_module.urlrequest.urlopen = _fake_no_choices
+        try:
+            try:
+                await hosted_worker._call_openrouter(
+                    messages=[{"role": "user", "content": '{"task":"test"}'}],
+                    api_key=fake_key,
+                    model_id="test/model",
+                    timeout_seconds=7,
+                    max_tokens=16,
+                )
+                errors.append("OpenRouter no-choices response did not raise")
+            except RetryableHostedResearchLabWorkerError as exc:
+                message = str(exc)
+                if "no candidate-generation choices" not in message:
+                    errors.append("OpenRouter no-choices retryable error lost failure reason")
+                if "gen-no-choices" not in message:
+                    errors.append("OpenRouter no-choices retryable error lost response id")
+                if fake_key in message:
+                    errors.append("OpenRouter no-choices retryable error leaked API key")
+            except HostedResearchLabWorkerError as exc:
+                errors.append(f"OpenRouter no-choices response was terminal instead of retryable: {exc}")
+        finally:
+            worker_module.urlrequest.urlopen = original_urlopen
+
+        def _fake_permanent_error(_request, timeout: int):
+            return _FakeOpenRouterResponse(
+                {"error": {"code": 401, "message": "invalid api key " + fake_key}}
+            )
+
+        worker_module.urlrequest.urlopen = _fake_permanent_error
+        try:
+            try:
+                await hosted_worker._call_openrouter(
+                    messages=[{"role": "user", "content": '{"task":"test"}'}],
+                    api_key=fake_key,
+                    model_id="test/model",
+                    timeout_seconds=7,
+                    max_tokens=16,
+                )
+                errors.append("OpenRouter permanent error did not raise")
+            except RetryableHostedResearchLabWorkerError as exc:
+                errors.append(f"OpenRouter permanent error was incorrectly retryable: {exc}")
+            except HostedResearchLabWorkerError as exc:
+                if fake_key in str(exc):
+                    errors.append("OpenRouter permanent error leaked API key")
+        finally:
+            worker_module.urlrequest.urlopen = original_urlopen
 
     async def _noop_call(*_args, **_kwargs):
         return OpenRouterCallResult(content='{"candidates":[]}')
@@ -327,6 +387,7 @@ def main() -> int:
     if not _is_retryable_worker_exception(HostedResearchLabBuilderNotReady("builder not ready")):
         errors.append("builder-not-ready errors must be retryable/requeue-classified")
     asyncio.run(_verify_builder_not_ready_skips_queue())
+    asyncio.run(_verify_openrouter_no_choices_is_retryable())
     proxy_cfg = ResearchLabGatewayConfig(hosted_worker_require_proxy=True, hosted_worker_proxy_url="http://proxy.example:8080")
     proxy_env = _worker_proxy_env(proxy_cfg)
     if proxy_env.get("HTTPS_PROXY") != "http://proxy.example:8080" or proxy_env.get("HTTP_PROXY") != "http://proxy.example:8080":

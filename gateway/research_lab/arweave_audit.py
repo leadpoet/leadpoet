@@ -27,6 +27,7 @@ async def publish_research_lab_epoch_audit(
     epoch: int,
     netuid: int,
     audit_kind: str,
+    actor_hotkey: str | None = None,
     weight_bundle: Mapping[str, Any] | None = None,
     config: ResearchLabGatewayConfig | None = None,
 ) -> dict[str, Any] | None:
@@ -43,6 +44,7 @@ async def publish_research_lab_epoch_audit(
         epoch=epoch,
         netuid=netuid,
         audit_kind=audit_kind,
+        actor_hotkey=actor_hotkey,
         weight_bundle=weight_bundle,
     )
     payload_hash = sha256_json(payload)
@@ -84,11 +86,13 @@ async def build_research_lab_epoch_audit_payload(
     epoch: int,
     netuid: int,
     audit_kind: str,
+    actor_hotkey: str | None = None,
     weight_bundle: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     audit_bundle = await _latest_signed_audit_bundle(epoch)
     allocation = await _latest_lab_allocation(epoch=epoch, netuid=netuid)
     weight_bundle = dict(weight_bundle or await _latest_weight_bundle(epoch=epoch, netuid=netuid) or {})
+    actor_hotkey = actor_hotkey or weight_bundle.get("validator_hotkey") or "system"
     score_bundles = await select_many(
         "research_evaluation_score_bundle_current",
         filters=(("evaluation_epoch", epoch),),
@@ -109,6 +113,7 @@ async def build_research_lab_epoch_audit_payload(
     payload = {
         "schema_version": "1.0",
         "event_type": RESEARCH_LAB_EPOCH_AUDIT_EVENT_TYPE,
+        "actor_hotkey": actor_hotkey,
         "epoch": int(epoch),
         "netuid": int(netuid),
         "audit_kind": audit_kind,

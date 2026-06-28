@@ -574,6 +574,7 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
                     epoch=submission.epoch_id,
                     netuid=submission.netuid,
                     audit_kind="shadow",
+                    actor_hotkey=submission.validator_hotkey,
                     weight_bundle=bundle_data,
                     config=research_lab_config,
                 )
@@ -581,14 +582,18 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
             except Exception as e:
                 logger.warning("[RESEARCH_LAB_ARWEAVE] Shadow audit publish failed: %s", e)
     elif research_lab_config.arweave_audit_enabled:
-        await publish_research_lab_epoch_audit(
-            epoch=submission.epoch_id,
-            netuid=submission.netuid,
-            audit_kind="active",
-            weight_bundle=bundle_data,
-            config=research_lab_config,
-        )
-        print("   ✅ Research Lab active Arweave audit buffered")
+        try:
+            await publish_research_lab_epoch_audit(
+                epoch=submission.epoch_id,
+                netuid=submission.netuid,
+                audit_kind="active",
+                actor_hotkey=submission.validator_hotkey,
+                weight_bundle=bundle_data,
+                config=research_lab_config,
+            )
+            print("   ✅ Research Lab active Arweave audit buffered")
+        except Exception as e:
+            logger.warning("[RESEARCH_LAB_ARWEAVE] Active audit publish failed: %s", e)
     print(f"   📝 Event hash: {weight_submission_event_hash}")
     print(f"{'='*60}\n")
     

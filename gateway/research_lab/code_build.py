@@ -113,6 +113,7 @@ class CodeEditCandidateBuilder:
                     diff_path=diff_path,
                     run_id=run_id,
                     candidate_index=candidate_index,
+                    include_aws=False,
                 ),
                 timeout_seconds=self.config.code_edit_build_timeout_seconds,
             )
@@ -140,8 +141,10 @@ class CodeEditCandidateBuilder:
                         diff_path=diff_path,
                         run_id=run_id,
                         candidate_index=candidate_index,
+                        include_aws=True,
                     ),
                     "RESEARCH_LAB_PRIVATE_COMMIT_SHA": git_commit_sha,
+                    "RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT": self.config.private_artifact_manifest_output,
                 },
                 timeout_seconds=self.config.code_edit_build_timeout_seconds,
             )
@@ -198,6 +201,7 @@ class CodeEditCandidateBuilder:
         diff_path: Path,
         run_id: str,
         candidate_index: int,
+        include_aws: bool,
     ) -> dict[str, str]:
         env: dict[str, str] = {}
         for key, value in os.environ.items():
@@ -205,6 +209,11 @@ class CodeEditCandidateBuilder:
             if any(marker in lowered for marker in _PROVIDER_OR_SECRET_ENV_MARKERS):
                 continue
             env[key] = value
+        if include_aws:
+            for key in _AWS_BUILD_ENV_NAMES:
+                value = os.environ.get(key)
+                if value:
+                    env[key] = value
         env.update(
             {
                 "RESEARCH_LAB_CODE_EDIT_DRAFT_PATH": str(draft_path),
@@ -229,6 +238,15 @@ _PROVIDER_OR_SECRET_ENV_MARKERS = (
     "password",
     "private_key",
     "webshare",
+)
+
+_AWS_BUILD_ENV_NAMES = (
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
 )
 
 

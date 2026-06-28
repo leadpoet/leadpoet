@@ -22,6 +22,109 @@ logger = logging.getLogger(__name__)
 DEFAULT_LOOP_START_FEE_USD = 0.2
 DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS = 300
 DEFAULT_HOSTED_WORKER_RETRYABLE_FAILURE_LIMIT = 3
+DEFAULT_PRIVATE_REPO_URL = "https://github.com/tasnimuldatascience/Sourcing_model.git"
+DEFAULT_PRIVATE_TEST_CMD = "python -m unittest tests/test_research_lab_adapter.py"
+DEFAULT_PRIVATE_ARTIFACT_MANIFEST_OUTPUT = ".research_lab/candidate_manifest.json"
+DEFAULT_PRIVATE_BUILD_CMD = r"""
+bash <<'BASH'
+set -euo pipefail
+
+AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
+ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+ECR_REPOSITORY="${RESEARCH_LAB_PRIVATE_ECR_REPOSITORY:-leadpoet/sourcing-model}"
+REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+COMMIT_SHA="${RESEARCH_LAB_PRIVATE_COMMIT_SHA:?RESEARCH_LAB_PRIVATE_COMMIT_SHA is required}"
+RUN_ID="${RESEARCH_LAB_RUN_ID:?RESEARCH_LAB_RUN_ID is required}"
+CANDIDATE_INDEX="${RESEARCH_LAB_CANDIDATE_INDEX:?RESEARCH_LAB_CANDIDATE_INDEX is required}"
+IMAGE_TAG_RAW="research-lab-${RUN_ID}-${CANDIDATE_INDEX}-${COMMIT_SHA}"
+IMAGE_TAG="$(printf '%s' "${IMAGE_TAG_RAW}" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-120)"
+IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+PLATFORM="${RESEARCH_LAB_PRIVATE_MODEL_DOCKER_PLATFORM:-linux/amd64}"
+PARENT_MANIFEST_URI="${RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI:-s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json}"
+MANIFEST_BASE="${PARENT_MANIFEST_URI%/*}"
+MANIFEST_URI="${MANIFEST_BASE}/candidates/${RUN_ID}/${CANDIDATE_INDEX}/${COMMIT_SHA}.json"
+SIGNATURE_URI="${MANIFEST_BASE}/candidates/${RUN_ID}/${CANDIDATE_INDEX}/${COMMIT_SHA}.sig.b64"
+KMS_KEY_ID="${RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID:?RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID is required}"
+OUTPUT_PATH="${RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT:-.research_lab/candidate_manifest.json}"
+
+aws ecr get-login-password --region "${AWS_REGION}" \
+  | docker login --username AWS --password-stdin "${REGISTRY}" >/dev/null
+
+docker build --platform "${PLATFORM}" -f Dockerfile.research-lab -t "${IMAGE_URI}" .
+docker push "${IMAGE_URI}"
+DIGEST="$(aws ecr describe-images \
+  --repository-name "${ECR_REPOSITORY}" \
+  --image-ids imageTag="${IMAGE_TAG}" \
+  --query 'imageDetails[0].imageDigest' \
+  --output text)"
+IMAGE_DIGEST="${REGISTRY}/${ECR_REPOSITORY}@${DIGEST}"
+
+python - "${OUTPUT_PATH}" "${IMAGE_DIGEST}" "${MANIFEST_URI}" "${SIGNATURE_URI}" "${COMMIT_SHA}" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+output = Path(sys.argv[1])
+image_digest, manifest_uri, signature_ref, git_commit_sha = sys.argv[2:6]
+excluded_parts = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".venv", "venv", ".research_lab"}
+excluded_suffixes = (".pyc", ".pyo", ".env", ".pem", ".key")
+
+def sha256_json(value):
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+def sha256_bytes(value):
+    return "sha256:" + hashlib.sha256(value).hexdigest()
+
+def excluded(rel):
+    parts = rel.split("/")
+    return any(part in excluded_parts for part in parts) or rel.endswith(excluded_suffixes) or rel == ".env" or rel.startswith(".env.")
+
+digest_inputs = []
+for path in sorted(Path(".").rglob("*")):
+    if not path.is_file():
+        continue
+    rel = path.as_posix()
+    if excluded(rel):
+        continue
+    digest_inputs.append((rel, sha256_bytes(path.read_bytes())))
+
+config_payload = {
+    "component_registry_version": "sourcing-model-components:v1",
+    "scoring_adapter_version": "qualification-company-scorer:v1",
+    "adapter_version": "sourcing-model-research-lab-adapter:v1",
+}
+payload = {
+    "model_artifact_hash": sha256_json(digest_inputs),
+    "git_commit_sha": git_commit_sha,
+    "image_digest": image_digest,
+    "config_hash": sha256_json(config_payload),
+    "component_registry_version": config_payload["component_registry_version"],
+    "scoring_adapter_version": config_payload["scoring_adapter_version"],
+    "manifest_uri": manifest_uri,
+    "signature_ref": signature_ref,
+    "build_id": f"gateway-code-edit:{git_commit_sha}",
+}
+manifest = {**payload, "manifest_hash": sha256_json(payload)}
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+print(manifest["manifest_hash"])
+PY
+
+MANIFEST_HASH="$(python -c "import json; print(json.load(open('${OUTPUT_PATH}'))['manifest_hash'])")"
+printf '%s' "${MANIFEST_HASH}" > /tmp/research_lab_candidate_manifest_hash.txt
+aws kms sign \
+  --key-id "${KMS_KEY_ID}" \
+  --message fileb:///tmp/research_lab_candidate_manifest_hash.txt \
+  --message-type RAW \
+  --signing-algorithm ECDSA_SHA_256 \
+  --query Signature \
+  --output text > /tmp/research_lab_candidate_manifest.sig.b64
+aws s3 cp /tmp/research_lab_candidate_manifest.sig.b64 "${SIGNATURE_URI}" >/dev/null
+aws s3 cp "${OUTPUT_PATH}" "${MANIFEST_URI}" >/dev/null
+BASH
+""".strip()
 
 
 def _is_production_subnet() -> bool:
@@ -206,12 +309,12 @@ class ResearchLabGatewayConfig:
     private_model_manifest_uri: str = (
         "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json"
     )
-    private_repo_url: str = ""
+    private_repo_url: str = DEFAULT_PRIVATE_REPO_URL
     private_repo_branch: str = "main"
     private_patch_applier_cmd: str = ""
-    private_test_cmd: str = ""
-    private_build_cmd: str = ""
-    private_artifact_manifest_output: str = ""
+    private_test_cmd: str = DEFAULT_PRIVATE_TEST_CMD
+    private_build_cmd: str = DEFAULT_PRIVATE_BUILD_CMD
+    private_artifact_manifest_output: str = DEFAULT_PRIVATE_ARTIFACT_MANIFEST_OUTPUT
     private_benchmark_path: str = ""
     code_edit_candidates_enabled: bool = True
     code_edit_build_timeout_seconds: int = 900
@@ -453,12 +556,15 @@ class ResearchLabGatewayConfig:
                 "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI",
                 "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json",
             ),
-            private_repo_url=os.getenv("RESEARCH_LAB_PRIVATE_REPO_URL", ""),
+            private_repo_url=os.getenv("RESEARCH_LAB_PRIVATE_REPO_URL", DEFAULT_PRIVATE_REPO_URL),
             private_repo_branch=os.getenv("RESEARCH_LAB_PRIVATE_REPO_BRANCH", "main") or "main",
             private_patch_applier_cmd=os.getenv("RESEARCH_LAB_PRIVATE_PATCH_APPLIER_CMD", ""),
-            private_test_cmd=os.getenv("RESEARCH_LAB_PRIVATE_TEST_CMD", ""),
-            private_build_cmd=os.getenv("RESEARCH_LAB_PRIVATE_BUILD_CMD", ""),
-            private_artifact_manifest_output=os.getenv("RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT", ""),
+            private_test_cmd=os.getenv("RESEARCH_LAB_PRIVATE_TEST_CMD", DEFAULT_PRIVATE_TEST_CMD),
+            private_build_cmd=os.getenv("RESEARCH_LAB_PRIVATE_BUILD_CMD", DEFAULT_PRIVATE_BUILD_CMD),
+            private_artifact_manifest_output=os.getenv(
+                "RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT",
+                DEFAULT_PRIVATE_ARTIFACT_MANIFEST_OUTPUT,
+            ),
             private_benchmark_path=os.getenv("RESEARCH_LAB_PRIVATE_BENCHMARK_PATH", ""),
             code_edit_candidates_enabled=_truthy("RESEARCH_LAB_CODE_EDIT_CANDIDATES_ENABLED", "true"),
             code_edit_build_timeout_seconds=max(

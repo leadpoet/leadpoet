@@ -39,6 +39,7 @@ from research_lab.code_editing import (
     build_code_edit_auto_research_messages,
     build_code_edit_repair_messages,
     build_code_edit_source_inspection_messages,
+    parse_code_edit_repair_response,
     parse_code_edit_response,
     parse_code_edit_source_inspection_response,
 )
@@ -1036,7 +1037,10 @@ class CodeEditLoopEngine:
                         }
                     )
                 try:
-                    repaired_drafts = parse_code_edit_response(repair_result.content, max_candidates=1)
+                    repaired_drafts = parse_code_edit_repair_response(
+                        repair_result.content,
+                        original_draft=draft,
+                    )
                 except Exception as parse_exc:
                     await self.event_sink(
                         AutoResearchLoopEvent(
@@ -1059,7 +1063,9 @@ class CodeEditLoopEngine:
                             },
                         )
                     )
-                    return None, openrouter_calls, estimated_cost, actual_cost_microusd, False
+                    if repair_attempt + 1 >= max_repairs:
+                        return None, openrouter_calls, estimated_cost, actual_cost_microusd, False
+                    continue
                 repaired = repaired_drafts[0].with_unified_diff(repaired_drafts[0].unified_diff)
                 source_errors = self.builder.validate_draft_against_source_context(
                     repaired,
@@ -1091,7 +1097,9 @@ class CodeEditLoopEngine:
                             },
                         )
                     )
-                    return None, openrouter_calls, estimated_cost, actual_cost_microusd, False
+                    if repair_attempt + 1 >= max_repairs:
+                        return None, openrouter_calls, estimated_cost, actual_cost_microusd, False
+                    continue
                 candidate_draft = repaired
                 await self.event_sink(
                     AutoResearchLoopEvent(

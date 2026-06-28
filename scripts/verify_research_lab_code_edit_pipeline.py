@@ -17,6 +17,7 @@ from research_lab.code_editing import (  # noqa: E402
     CodeEditDraft,
     code_edit_candidate_manifest,
     normalize_unified_diff_text,
+    parse_code_edit_repair_response,
     parse_code_edit_response,
 )
 from research_lab.eval import PrivateModelArtifactManifest, SealedBenchmarkSet  # noqa: E402
@@ -92,6 +93,44 @@ def test_code_edit_parser_normalizes_markdown_wrapped_diff() -> None:
     assert drafts[0].unified_diff.startswith("diff --git ")
     assert not drafts[0].unified_diff.startswith("Here is the patch")
     assert normalize_unified_diff_text("```diff\ndiff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n```").startswith("diff --git ")
+
+
+def test_code_edit_repair_parser_accepts_direct_code_edit() -> None:
+    original = test_code_edit_parser_accepts_safe_diff()
+    repaired_raw = json.dumps(
+        {
+            "code_edit": {
+                "target_files": ["sourcing_model/query_builder.py"],
+                "unified_diff": original.unified_diff.replace("buying intent evidence", "verified intent evidence"),
+                "redacted_summary": "Repair hunk context only.",
+                "test_plan": "Run py_compile.",
+                "rollback_plan": "Revert the patch.",
+            }
+        }
+    )
+    repaired = parse_code_edit_repair_response(repaired_raw, original_draft=original)
+    assert len(repaired) == 1
+    assert repaired[0].failure_mode == original.failure_mode
+    assert repaired[0].target_files == original.target_files
+    assert "verified intent evidence" in repaired[0].unified_diff
+
+
+def test_code_edit_parser_rejects_apply_patch_format() -> None:
+    payload = json.loads(_valid_response())
+    payload["candidates"][0]["code_edit"]["unified_diff"] = (
+        "*** Begin Patch\n"
+        "*** Update File: sourcing_model/query_builder.py\n"
+        "@@\n"
+        "-QUERY_SUFFIX = \"\"\n"
+        "+QUERY_SUFFIX = \" buying intent evidence\"\n"
+        "*** End Patch\n"
+    )
+    try:
+        parse_code_edit_response(json.dumps(payload), max_candidates=1)
+    except ValueError as exc:
+        assert "code_edit_uses_apply_patch_format" in str(exc) or "code_edit_requires_git_unified_diff" in str(exc)
+    else:
+        raise AssertionError("apply_patch format should be rejected before git apply")
 
 
 def test_code_edit_parser_rejects_dependency_edit() -> None:
@@ -213,6 +252,8 @@ async def test_image_build_score_bundle_contract(draft: CodeEditDraft) -> None:
 def main() -> None:
     draft = test_code_edit_parser_accepts_safe_diff()
     test_code_edit_parser_normalizes_markdown_wrapped_diff()
+    test_code_edit_repair_parser_accepts_direct_code_edit()
+    test_code_edit_parser_rejects_apply_patch_format()
     test_code_edit_parser_rejects_dependency_edit()
     test_candidate_artifact_contract_requires_image_build()
     asyncio.run(test_image_build_score_bundle_contract(draft))

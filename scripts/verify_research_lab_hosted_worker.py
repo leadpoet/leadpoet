@@ -752,14 +752,17 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
         os.environ["FAKE_PARENT_APP"] = str(fake_app)
         os.environ["FAKE_DOCKER_LOG"] = str(docker_log)
         inspection_call_count = 0
+        repair_call_count = 0
 
         async def _call_model(messages, timeout_seconds: int, max_tokens: int) -> OpenRouterCallResult:
-            nonlocal inspection_call_count
+            nonlocal inspection_call_count, repair_call_count
             content = "\n".join(str(message.get("content") or "") for message in messages)
             is_source_inspection = "runtime_source_index" in content
             is_repair = "failed_patch" in content and "git_apply_error" in content
             if is_source_inspection:
                 inspection_call_count += 1
+            if is_repair:
+                repair_call_count += 1
             calls.append(
                 {
                     "stage": (
@@ -811,31 +814,32 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                         "response_id": f"code-edit-source-inspection-{inspection_call_count}",
                         "cost_microusd": 1000,
                     },
-                    cost_microusd=1000,
-                )
+                        cost_microusd=1000,
+                    )
             if is_repair:
+                if repair_call_count == 1:
+                    return OpenRouterCallResult(
+                        content=json.dumps(
+                            {"candidates": [{"code_edit": {"target_files": ["sourcing_model/__init__.py"]}}]},
+                            sort_keys=True,
+                        ),
+                        provider_usage={
+                            "provider": "openrouter",
+                            "response_id": "code-edit-repair-bad-schema",
+                            "cost_microusd": 1000,
+                        },
+                        cost_microusd=1000,
+                    )
                 return OpenRouterCallResult(
                     content=json.dumps(
                         {
-                            "candidates": [
-                                {
-                                    "lane": "query_construction",
-                                    "hypothesis": {
-                                        "failure_mode": "stale query constant",
-                                        "mechanism": "repair patch hunk against exact extracted source",
-                                        "expected_improvement": "better source-context grounded edits",
-                                        "risk": "low",
-                                        "predicted_delta": 1.0,
-                                    },
-                                    "code_edit": {
-                                        "target_files": ["sourcing_model/__init__.py"],
-                                        "unified_diff": _allowed_runtime_patch_draft().unified_diff,
-                                        "redacted_summary": "repair existing extracted file edit",
-                                        "test_plan": "py_compile changed file",
-                                        "rollback_plan": "revert patch",
-                                    },
-                                }
-                            ]
+                            "code_edit": {
+                                "target_files": ["sourcing_model/__init__.py"],
+                                "unified_diff": _allowed_runtime_patch_draft().unified_diff,
+                                "redacted_summary": "repair existing extracted file edit",
+                                "test_plan": "py_compile changed file",
+                                "rollback_plan": "revert patch",
+                            },
                         },
                         sort_keys=True,
                     ),

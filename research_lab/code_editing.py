@@ -235,7 +235,10 @@ def build_code_edit_auto_research_messages(
         "- subprocess/shell execution additions\n"
         "- hidden ICP access, raw judge prompts, raw model responses, secrets, or key handling changes\n\n"
         "Diff requirements:\n"
-        "- Produce a small unified diff that applies to the active runtime source extracted from the current ECR image.\n"
+        "- Produce a small git unified diff that applies to the active runtime source extracted from the current ECR image.\n"
+        "- The unified_diff string must begin with 'diff --git a/<path> b/<path>'.\n"
+        "- Include the standard '--- a/<path>' and '+++ b/<path>' headers and valid '@@' hunks.\n"
+        "- Do not use Codex/apply_patch syntax. Never include '*** Begin Patch', '*** Update File', or '*** End Patch'.\n"
         "- Build every hunk from exact source lines visible in source_inspection_context read_file results.\n"
         "- If a read_file result is truncated, edit only the visible excerpt, or inspect a narrower relevant file in the next iteration.\n"
         "- Do not guess function bodies, line numbers, imports, or context lines that are not visible in source_inspection_context.\n"
@@ -246,7 +249,8 @@ def build_code_edit_auto_research_messages(
         "{\"candidates\":[{\"lane\":\"query_construction\",\"hypothesis\":{\"failure_mode\":\"...\","
         "\"mechanism\":\"...\",\"expected_improvement\":\"...\",\"risk\":\"...\","
         "\"predicted_delta\":1.0},\"code_edit\":{\"target_files\":[\"" + example_target + "\"],"
-        "\"unified_diff\":\"diff --git ...\",\"redacted_summary\":\"...\","
+        "\"unified_diff\":\"diff --git a/" + example_target + " b/" + example_target + "\\n--- a/" + example_target + "\\n+++ b/" + example_target + "\\n@@ ...\","
+        "\"redacted_summary\":\"...\","
         "\"test_plan\":\"...\",\"rollback_plan\":\"...\"}}]}\n\n"
         "Context JSON:\n"
         + json.dumps(context, sort_keys=True, separators=(",", ":"))
@@ -306,8 +310,13 @@ def build_code_edit_repair_messages(
         "target files listed in source_inspection_context.read_files.\n\n"
         "Rules:\n"
         "- Output the same candidates JSON shape used by the original code-edit draft.\n"
-        "- Include exactly one candidate.\n"
-        "- The unified_diff must start at the diff header or ---/+++ header; no prose.\n"
+        "- If you cannot safely restate the hypothesis, return a direct repair object instead: "
+        "{\"code_edit\":{\"target_files\":[...],\"unified_diff\":\"diff --git ...\","
+        "\"redacted_summary\":\"...\",\"test_plan\":\"...\",\"rollback_plan\":\"...\"}}.\n"
+        "- Include exactly one repaired code edit.\n"
+        "- The unified_diff must start with 'diff --git a/<path> b/<path>'; no prose.\n"
+        "- Include valid '--- a/<path>' and '+++ b/<path>' headers and '@@' hunks.\n"
+        "- Do not use Codex/apply_patch syntax. Never include '*** Begin Patch', '*** Update File', or '*** End Patch'.\n"
         "- Do not create new files.\n"
         "- Do not edit dependency, Docker, CI, env, credential, or lock files.\n"
         "- Do not include secrets, hidden ICPs, judge prompts, or provider keys.\n\n"
@@ -402,6 +411,83 @@ def parse_code_edit_response(raw_text: str, *, max_candidates: int = 1) -> list[
     return drafts
 
 
+def parse_code_edit_repair_response(
+    raw_text: str,
+    *,
+    original_draft: CodeEditDraft,
+) -> list[CodeEditDraft]:
+    """Parse a repair response, accepting narrow repair-only JSON shapes.
+
+    Live models sometimes follow the repair instruction literally and return
+    only a corrected ``code_edit`` object instead of repeating the complete
+    candidate/hypothesis wrapper. For repair calls the original hypothesis is
+    the source of truth, so carrying it forward is safer than discarding an
+    otherwise valid fixed diff.
+    """
+
+    decoded = json.loads(_extract_json_object(raw_text))
+    if not isinstance(decoded, Mapping):
+        raise ValueError("code-edit repair response must be a JSON object")
+    if _contains_forbidden_material(decoded):
+        raise ValueError("code-edit repair response contains forbidden private or secret material")
+
+    candidate_items: list[Mapping[str, Any]] = []
+    candidates = decoded.get("candidates")
+    if isinstance(candidates, list) and candidates:
+        for item in candidates[:1]:
+            if not isinstance(item, Mapping):
+                raise ValueError("repair candidate must be an object")
+            candidate_items.append(item)
+    elif isinstance(decoded.get("code_edit"), Mapping):
+        candidate_items.append(decoded)
+    elif decoded.get("unified_diff") is not None:
+        candidate_items.append({"code_edit": decoded})
+    else:
+        raise ValueError("code-edit repair response requires a candidate or code_edit object")
+
+    drafts: list[CodeEditDraft] = []
+    for item in candidate_items:
+        hypothesis = item.get("hypothesis")
+        if not isinstance(hypothesis, Mapping):
+            hypothesis = {
+                "failure_mode": original_draft.failure_mode,
+                "mechanism": original_draft.mechanism,
+                "expected_improvement": original_draft.expected_improvement,
+                "risk": original_draft.risk,
+                "predicted_delta": original_draft.predicted_delta,
+            }
+        code_edit = item.get("code_edit")
+        if not isinstance(code_edit, Mapping):
+            raise ValueError("repair candidate requires code_edit object")
+        raw_target_files = code_edit.get("target_files") or item.get("target_files") or original_draft.target_files
+        target_files = tuple(_normalize_repo_path(path) for path in raw_target_files)
+        unified_diff = normalize_unified_diff_text(str(code_edit.get("unified_diff") or item.get("unified_diff") or ""))
+        if not unified_diff.strip():
+            raise ValueError("code_edit.unified_diff is required")
+        draft = CodeEditDraft(
+            failure_mode=str(hypothesis.get("failure_mode") or original_draft.failure_mode)[:700],
+            mechanism=str(hypothesis.get("mechanism") or original_draft.mechanism)[:1000],
+            expected_improvement=str(
+                hypothesis.get("expected_improvement") or original_draft.expected_improvement
+            )[:1000],
+            risk=str(hypothesis.get("risk") or original_draft.risk)[:700],
+            lane=str(item.get("lane") or original_draft.lane)[:80],
+            target_files=target_files,
+            unified_diff=unified_diff,
+            redacted_summary=str(
+                code_edit.get("redacted_summary") or item.get("redacted_summary") or original_draft.redacted_summary
+            )[:1200],
+            test_plan=str(code_edit.get("test_plan") or item.get("test_plan") or original_draft.test_plan)[:1200],
+            rollback_plan=str(
+                code_edit.get("rollback_plan") or item.get("rollback_plan") or original_draft.rollback_plan
+            )[:1200],
+            predicted_delta=float(hypothesis.get("predicted_delta") or original_draft.predicted_delta or 1.0),
+        )
+        validate_code_edit_draft(draft)
+        drafts.append(draft)
+    return drafts
+
+
 def normalize_unified_diff_text(value: str) -> str:
     """Normalize common LLM wrappers without changing patch semantics."""
 
@@ -431,6 +517,10 @@ def normalize_unified_diff_text(value: str) -> str:
             text = text[start:].strip()
     if text.startswith("```"):
         return normalize_unified_diff_text(text)
+    # Keep apply_patch-style output parseable for diagnostics, but make sure it
+    # cannot be mistaken for a valid git unified diff.
+    if "*** Begin Patch" in text or "*** Update File:" in text or "*** End Patch" in text:
+        return text.rstrip() + "\n"
     return text.rstrip() + "\n"
 
 
@@ -445,6 +535,11 @@ def validate_code_edit_draft(
     payload = draft.to_dict()
     if _contains_forbidden_material(payload):
         errors.append("code_edit_contains_forbidden_material")
+    stripped_diff = draft.unified_diff.lstrip()
+    if "*** Begin Patch" in stripped_diff or "*** Update File:" in stripped_diff or "*** End Patch" in stripped_diff:
+        errors.append("code_edit_uses_apply_patch_format")
+    if stripped_diff and not stripped_diff.startswith("diff --git "):
+        errors.append("code_edit_requires_git_unified_diff")
     diff_paths = extract_unified_diff_paths(draft.unified_diff)
     target_paths = set(draft.target_files)
     all_paths = sorted(diff_paths | target_paths)

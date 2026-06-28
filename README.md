@@ -117,9 +117,9 @@ reimbursement_reward = min(remaining_verified_spend, reimbursement_capacity * mi
 winner_reward = remaining_lab_allocation * winner_improvement_credit / total_winner_improvement_credit
 ```
 
-The reward records tie miner hotkeys to the run, candidate, verified spend, benchmark result, and validator weight input. More information can be found through investigating the relevant code in the neurons/validator.py.
+The reward records tie miner hotkeys to the run, candidate, verified spend, benchmark result, and validator weight input. The validator and verifier code contain the replayable reward and weight checks.
 
-### Agent Runtime, Privacy, and Verification
+### Research Runtime
 
 Research Lab runs daily rebenchmarks and candidate scoring against the current model runtime image listed in the `current.json` manifest. Hosted auto-research builds start from that same image, which gives every candidate the same baseline before changes are tested.
 
@@ -129,7 +129,7 @@ After the model proposes a patch, the system checks that the patch only touches 
 
 The research model itself is not public to prevent miners from overfitting to the model's suggestions, prompts, hidden assumptions, or internal scoring preferences. Miners compete on the measured quality of their submitted candidates, not on reverse-engineering the improvement model.
 
-The TEE-based design makes that possible: a non-public improvement model can run in a secure, attested environment, while the important parts of the process remain verifiable. The system knows which image was used, which files were inspected, what patch was proposed, whether the patch stayed in scope, and how the rebuilt candidate performed.
+The TEE runs the non-public improvement model in an isolated environment while recording the runtime image, inspected files, proposed patch, scope checks, rebuilt candidate, and evaluation result.
 
 Candidate patches are limited to the extracted runtime code paths inside the runtime image:
 
@@ -219,7 +219,7 @@ export OPENROUTER_KEY="your_openrouter_key"
 export COMPANIES_HOUSE_API_KEY="your_companies_house_key"
 ```
 
-See [`env.example`](env.example) for a fuller configuration template.
+See [`env.example`](env.example) for the full configuration template.
 
 ## Rewards
 
@@ -234,11 +234,13 @@ Exact weights are computed by validators from signed gateway bundles, verified c
 
 ## Transparency
 
-Leadpoet uses a gateway TEE, signed gateway artifacts, validator-side verification, and Arweave checkpoints for Research Lab and Fulfillment outputs.
+Leadpoet uses a gateway TEE for Research Lab and Fulfillment outputs. The gateway enclave signs receipts, scoring bundles, allocation records, and compact audit anchors with an enclave-held signing key.
 
-The subnet is designed to be externally auditable without exposing model code, hidden ICPs, provider secrets, or candidate patch internals. The gateway emits signed receipts, scoring bundles, allocation records, and compact audit anchors from inside the TEE. Validators verify those artifacts before using them for weights.
+The gateway attestation binds the enclave public key to the gateway runtime measurement. Validators and auditors verify the attestation, check the measured runtime against the pinned allowlist, and verify enclave signatures before treating signed artifacts as gateway outputs.
 
-Arweave checkpoints anchor the hashes and status transitions used in the reward calculation. An external auditor can match the Arweave checkpoint data to the signed gateway artifacts, recompute the reward inputs, and verify that validator weights follow the published policy.
+Audit artifacts include the hashes, status transitions, signatures, and reward inputs needed to check validator behavior. They do not expose model code, hidden ICPs, provider secrets, raw private data, or candidate patch internals.
+
+Arweave checkpoints anchor the signed artifact hashes and status transitions used in reward calculations. Auditors can match checkpoint data to signed gateway artifacts, verify enclave signatures and attestation, recompute reward inputs, and compare validator weights against the published policy.
 
 Useful tools:
 
@@ -248,10 +250,6 @@ python scripts/decompress_arweave_checkpoint.py
 ```
 
 For more detail, see [`scripts/VERIFICATION_GUIDE.md`](scripts/VERIFICATION_GUIDE.md).
-
-## Support
-
-- Email: hello@leadpoet.com
 
 ## License
 

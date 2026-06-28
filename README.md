@@ -93,7 +93,7 @@ How it works:
 
 Research Lab rewards result from provided compute or model improvements:
 
-- Compute reimbursement covers a portion of verified compute spend from research loops.
+- Compute reimbursement covers a portion of verified compute spend from research loops based on the amount of participation.
 - Verified model improvements result in substantial rewards when a candidate improvement beats the current model benchmark.
 
 At a high level, rewards are calculated per reward epoch:

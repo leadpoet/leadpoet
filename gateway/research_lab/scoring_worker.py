@@ -1783,6 +1783,7 @@ class ResearchLabGatewayScoringWorker:
         env: dict[str, str] = {}
         for name in (
             "EXA_API_KEY",
+            "EXA_MAX_RPS",
             "SCRAPINGDOG_API_KEY",
             "QUALIFICATION_SCRAPINGDOG_API_KEY",
             "OPENROUTER_API_KEY",

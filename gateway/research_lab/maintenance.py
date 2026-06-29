@@ -7,10 +7,18 @@ import json
 import logging
 import os
 import time
+from datetime import datetime
 from typing import Any, Mapping
 
 from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
-from .store import create_gateway_control_event, create_queue_event, select_all, select_one
+from .store import (
+    create_candidate_evaluation_event,
+    create_gateway_control_event,
+    create_queue_event,
+    select_all,
+    select_many,
+    select_one,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -145,6 +153,138 @@ async def requeue_paused_autoresearch_runs(*, actor_ref: str | None = None, reas
                 str(exc)[:240],
             )
     return requeued
+
+
+# A candidate is safe to requeue when it failed the baseline-readiness race: the
+# scorer reached the private-holdout gate before the matching private baseline had
+# completed. Once that baseline exists, the same candidate can score cleanly. Anything
+# else (invalid patch, lost benchmark, runtime error) is a real failure and is NOT
+# auto-requeued unless the operator passes force.
+RECOVERABLE_CANDIDATE_FAILURE_MARKERS = ("matching_completed_private_baseline_required",)
+
+
+def _parse_iso(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+async def requeue_failed_candidate(
+    *,
+    candidate_id: str,
+    reason: str = "baseline_ready",
+    actor_ref: str | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Append-only requeue of a candidate that was terminally ``failed`` by the baseline
+    race, so a scoring worker re-claims and re-scores it against the now-completed
+    private baseline. Verifies (1) the candidate is currently ``failed``, (2) the failure
+    is the baseline race, (3) a completed+passed private baseline now exists that was
+    created after the failure, (4) the failed event is the latest event. ``force`` skips
+    the failure-class and baseline-existence checks; ``dry_run`` reports without writing."""
+    events = await select_many(
+        "research_lab_candidate_evaluation_events",
+        columns="seq,event_type,candidate_status,reason,event_doc,run_id,ticket_id,created_at",
+        filters=(("candidate_id", candidate_id),),
+        order_by=(("seq", True),),
+        limit=1,
+    )
+    if not events:
+        return {"ok": False, "error": "candidate_not_found", "candidate_id": candidate_id}
+    latest = events[0]
+    status = str(latest.get("candidate_status") or "")
+    event_type = str(latest.get("event_type") or "")
+    failure_reason = str(latest.get("reason") or "")
+    event_doc = latest.get("event_doc") if isinstance(latest.get("event_doc"), Mapping) else {}
+    error_detail = str(event_doc.get("error") or "")
+    failed_at = _parse_iso(latest.get("created_at"))
+
+    # (1) + (4): the latest event must itself be a failure (nothing has moved on since).
+    if status != "failed" or event_type != "failed":
+        return {
+            "ok": False,
+            "error": "candidate_not_in_failed_state",
+            "candidate_id": candidate_id,
+            "candidate_status": status,
+            "latest_event_type": event_type,
+        }
+
+    # (2): the failure must be the recoverable baseline race.
+    is_baseline_race = failure_reason == "baseline_not_ready" or any(
+        marker in error_detail for marker in RECOVERABLE_CANDIDATE_FAILURE_MARKERS
+    )
+    if not is_baseline_race and not force:
+        return {
+            "ok": False,
+            "error": "failure_not_baseline_race",
+            "candidate_id": candidate_id,
+            "failure_reason": failure_reason,
+            "error_detail": error_detail[:240],
+            "hint": "pass force=True only if you are certain this candidate is safe to rescore",
+        }
+
+    # (3): a completed+passed private baseline created after the failure must now exist.
+    baselines = await select_many(
+        "research_lab_private_model_benchmark_current",
+        columns=(
+            "private_model_manifest_hash,rolling_window_hash,"
+            "current_benchmark_status,benchmark_quality,created_at"
+        ),
+        filters=(("current_benchmark_status", "completed"), ("benchmark_quality", "passed")),
+        order_by=(("created_at", True),),
+        limit=20,
+    )
+    newer_baselines = [
+        b
+        for b in baselines
+        if failed_at is not None
+        and (_parse_iso(b.get("created_at")) or failed_at) > failed_at
+    ]
+    if not newer_baselines and not force:
+        return {
+            "ok": False,
+            "error": "no_completed_baseline_after_failure",
+            "candidate_id": candidate_id,
+            "failed_at": latest.get("created_at"),
+        }
+
+    plan = {
+        "ok": True,
+        "action": "requeue-candidate",
+        "candidate_id": candidate_id,
+        "prior_failed_seq": latest.get("seq"),
+        "failure_reason": failure_reason,
+        "matching_baselines_after_failure": len(newer_baselines),
+        "forced": bool(force),
+    }
+    if dry_run:
+        return {**plan, "dry_run": True}
+
+    event = await create_candidate_evaluation_event(
+        candidate_id=candidate_id,
+        run_id=str(latest["run_id"]),
+        ticket_id=str(latest["ticket_id"]),
+        event_type="queued",
+        candidate_status="queued",
+        reason=reason,
+        event_doc={
+            "operator_action": "requeue-candidate",
+            "recovered_from": "baseline_not_ready_race",
+            "prior_failed_seq": latest.get("seq"),
+            "actor_ref": actor_ref or default_actor_ref(),
+            "forced": bool(force),
+        },
+    )
+    return {
+        **plan,
+        "requeued_event_id": event.get("event_id"),
+        "requeued_event_seq": event.get("seq"),
+        "requeued_event_hash": event.get("anchored_hash"),
+    }
 
 
 async def wait_until_autoresearch_drained(timeout_seconds: int, poll_seconds: float = 5.0) -> dict[str, Any]:

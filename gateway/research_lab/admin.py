@@ -11,6 +11,7 @@ from .maintenance import (
     default_actor_ref,
     dumps_status,
     get_autoresearch_maintenance_state,
+    requeue_failed_candidate,
     requeue_paused_autoresearch_runs,
     set_autoresearch_maintenance_paused,
     wait_until_autoresearch_drained,
@@ -29,6 +30,22 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--reason", default="maintenance complete")
     resume.add_argument("--actor-ref", default=default_actor_ref())
     resume.add_argument("--no-requeue", action="store_true")
+
+    requeue_candidate = sub.add_parser(
+        "requeue-candidate",
+        help="Requeue a candidate terminally failed by the baseline-readiness race",
+    )
+    requeue_candidate.add_argument("--candidate-id", required=True)
+    requeue_candidate.add_argument("--reason", default="baseline_ready")
+    requeue_candidate.add_argument("--actor-ref", default=default_actor_ref())
+    requeue_candidate.add_argument(
+        "--dry-run", action="store_true", help="Report the planned requeue without writing"
+    )
+    requeue_candidate.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip the baseline-race and baseline-existence safety checks",
+    )
 
     sub.add_parser("status", help="Print maintenance state and queue counts")
 
@@ -76,6 +93,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "state": await get_autoresearch_maintenance_state(),
             "queue_counts": await autoresearch_queue_status_counts(),
         }
+    if args.command == "requeue-candidate":
+        return await requeue_failed_candidate(
+            candidate_id=args.candidate_id,
+            reason=args.reason,
+            actor_ref=args.actor_ref,
+            dry_run=args.dry_run,
+            force=args.force,
+        )
     if args.command == "status":
         return {
             "ok": True,

@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
@@ -109,6 +109,100 @@ async def autoresearch_queue_status_counts() -> dict[str, int]:
         )
         counts[status] = len(rows)
     return counts
+
+
+def _stale_after_seconds(config: ResearchLabGatewayConfig) -> int:
+    return max(
+        60,
+        int(config.active_loop_stale_after_seconds or DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS),
+    )
+
+
+def _status_is_stale(value: object, stale_after_seconds: int) -> bool:
+    status_at = _parse_iso(value)
+    if status_at is None:
+        return True
+    if status_at.tzinfo is None:
+        status_at = status_at.replace(tzinfo=timezone.utc)
+    now = datetime.now(status_at.tzinfo)
+    return (now - status_at).total_seconds() >= stale_after_seconds
+
+
+async def pause_pending_autoresearch_runs(
+    *,
+    actor_ref: str | None = None,
+    reason: str = "maintenance_pause",
+) -> dict[str, int]:
+    """Move non-running queue work out of queued/started while maintenance is active.
+
+    Queued runs can be paused immediately because workers stop claiming work once
+    maintenance is active. Started runs are paused only when their queue heartbeat
+    is stale; truly active workers should checkpoint and mark themselves paused.
+    """
+
+    config = ResearchLabGatewayConfig.from_env()
+    stale_after_seconds = _stale_after_seconds(config)
+    capacity_doc = autoresearch_queue_capacity_doc(config)
+    result = {
+        "queued_paused": 0,
+        "stale_started_paused": 0,
+        "active_started_left_running": 0,
+    }
+
+    for status in ("queued", "started"):
+        rows = await select_all(
+            "research_loop_run_queue_current",
+            columns=(
+                "run_id,ticket_id,current_queue_status,current_status_at,"
+                "current_event_hash,queue_priority,worker_ref"
+            ),
+            filters=(("current_queue_status", status),),
+            max_rows=10000,
+        )
+        for row in rows:
+            if status == "started" and not _status_is_stale(
+                row.get("current_status_at"),
+                stale_after_seconds,
+            ):
+                result["active_started_left_running"] += 1
+                continue
+            run_id = str(row.get("run_id") or "")
+            ticket_id = str(row.get("ticket_id") or "")
+            if not run_id or not ticket_id:
+                continue
+            pause_reason = "maintenance_pause_queued" if status == "queued" else "maintenance_pause_stale_started"
+            try:
+                await create_queue_event(
+                    run_id=run_id,
+                    ticket_id=ticket_id,
+                    event_type="paused",
+                    queue_priority=int(row.get("queue_priority") or 0),
+                    worker_ref=actor_ref,
+                    reason=pause_reason,
+                    event_doc={
+                        "schema_version": "1.0",
+                        **capacity_doc,
+                        "pause_source": "research_lab_maintenance_cli",
+                        "operator_reason": reason,
+                        "previous_queue_status": status,
+                        "previous_worker_ref": row.get("worker_ref"),
+                        "previous_event_hash": row.get("current_event_hash"),
+                        "previous_status_at": row.get("current_status_at"),
+                        "stale_after_seconds": stale_after_seconds,
+                    },
+                )
+                if status == "queued":
+                    result["queued_paused"] += 1
+                else:
+                    result["stale_started_paused"] += 1
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_maintenance_pause_row_failed run_id=%s status=%s error=%s",
+                    run_id,
+                    status,
+                    str(exc)[:240],
+                )
+    return result
 
 
 async def requeue_paused_autoresearch_runs(*, actor_ref: str | None = None, reason: str = "maintenance_resume") -> int:
@@ -287,15 +381,154 @@ async def requeue_failed_candidate(
     }
 
 
+async def requeue_failed_loop(
+    *,
+    run_id: str | None = None,
+    ticket_id: str | None = None,
+    reason: str = "operator_resume",
+    actor_ref: str | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Append-only requeue of an auto-research loop run whose queue row is terminally
+    ``failed``, so a worker re-claims it and resumes from its last checkpoint (or restarts
+    from scratch when none exists). The stale reaper recovers ``started`` and ``paused``
+    runs, never ``failed`` ones; this is the operator path to bring one back.
+    """
+    if not run_id and not ticket_id:
+        return {"ok": False, "error": "run_id_or_ticket_id_required"}
+
+    columns = (
+        "run_id,ticket_id,current_queue_status,queue_priority,"
+        "current_event_hash,current_status_at"
+    )
+    if run_id:
+        qrow = await select_one(
+            "research_loop_run_queue_current",
+            columns=columns,
+            filters=(("run_id", run_id),),
+        )
+    else:
+        rows = await select_many(
+            "research_loop_run_queue_current",
+            columns=columns,
+            filters=(("ticket_id", ticket_id),),
+            order_by=(("current_status_at", True),),
+            limit=1,
+        )
+        qrow = rows[0] if rows else None
+
+    if not qrow:
+        return {"ok": False, "error": "loop_run_not_found", "run_id": run_id, "ticket_id": ticket_id}
+
+    run_id = str(qrow["run_id"])
+    ticket_id = str(qrow["ticket_id"])
+    queue_status = str(qrow.get("current_queue_status") or "")
+    if queue_status != "failed" and not force:
+        return {
+            "ok": False,
+            "error": "loop_not_in_failed_state",
+            "run_id": run_id,
+            "queue_status": queue_status,
+            "hint": "pass force=True to requeue a run that is not in the failed state",
+        }
+
+    loop = await select_one(
+        "research_lab_auto_research_loop_current",
+        columns="run_id,current_loop_status,current_event_seq",
+        filters=(("run_id", run_id),),
+    )
+    loop_status = str(loop.get("current_loop_status") or "") if loop else ""
+    if loop_status == "completed" and not force:
+        return {
+            "ok": False,
+            "error": "loop_already_completed",
+            "run_id": run_id,
+            "loop_status": loop_status,
+        }
+
+    checkpoints = await select_many(
+        "research_lab_auto_research_loop_events",
+        columns="seq",
+        filters=(("run_id", run_id), ("event_type", "checkpoint_saved")),
+        order_by=(("seq", True),),
+        limit=1,
+    )
+    resume_mode = "resume_from_checkpoint" if checkpoints else "restart_from_scratch"
+    config = ResearchLabGatewayConfig.from_env()
+    capacity_doc = autoresearch_queue_capacity_doc(config)
+
+    plan = {
+        "ok": True,
+        "action": "requeue-loop",
+        "run_id": run_id,
+        "ticket_id": ticket_id,
+        "prior_queue_status": queue_status,
+        "loop_status": loop_status or None,
+        "resume_mode": resume_mode,
+        "checkpoint_seq": (checkpoints[0].get("seq") if checkpoints else None),
+        "forced": bool(force),
+    }
+    if dry_run:
+        return {**plan, "dry_run": True}
+
+    try:
+        event = await create_queue_event(
+            run_id=run_id,
+            ticket_id=ticket_id,
+            event_type="queued",
+            queue_priority=int(qrow.get("queue_priority") or 0),
+            worker_ref=actor_ref,
+            reason=reason,
+            event_doc={
+                "schema_version": "1.0",
+                **capacity_doc,
+                "operator_action": "requeue-loop",
+                "resume_source": "research_lab_maintenance_cli",
+                "resume_mode": resume_mode,
+                "previous_queue_status": queue_status,
+                "previous_event_hash": qrow.get("current_event_hash"),
+                "previous_status_at": qrow.get("current_status_at"),
+                "actor_ref": actor_ref or default_actor_ref(),
+                "forced": bool(force),
+            },
+        )
+    except Exception as exc:
+        if _is_queue_capacity_conflict(exc):
+            return {
+                "ok": False,
+                "error": "queue_capacity_or_hotkey_conflict",
+                "run_id": run_id,
+                "detail": str(exc)[:240],
+                "hint": "the miner already has an active run or the lab is at capacity; retry later",
+            }
+        raise
+    return {
+        **plan,
+        "requeued_event_id": event.get("event_id"),
+        "requeued_event_seq": event.get("seq"),
+        "requeued_event_hash": event.get("anchored_hash"),
+    }
+
+
 async def wait_until_autoresearch_drained(timeout_seconds: int, poll_seconds: float = 5.0) -> dict[str, Any]:
     deadline = time.monotonic() + max(1, int(timeout_seconds))
     last_counts: dict[str, int] = {}
+    pause_actions: list[dict[str, int]] = []
     while True:
+        state = await get_autoresearch_maintenance_state()
+        if state.get("paused"):
+            action = await pause_pending_autoresearch_runs(
+                actor_ref=default_actor_ref(),
+                reason="maintenance_wait_drained",
+            )
+            if any(int(value) for value in action.values()):
+                pause_actions.append(action)
         last_counts = await autoresearch_queue_status_counts()
         if int(last_counts.get("queued", 0)) == 0 and int(last_counts.get("started", 0)) == 0:
-            return {"drained": True, "counts": last_counts}
+            return {"drained": True, "counts": last_counts, "pause_actions": pause_actions[-10:]}
         if time.monotonic() >= deadline:
-            return {"drained": False, "counts": last_counts}
+            return {"drained": False, "counts": last_counts, "pause_actions": pause_actions[-10:]}
         await asyncio.sleep(max(1.0, float(poll_seconds)))
 
 

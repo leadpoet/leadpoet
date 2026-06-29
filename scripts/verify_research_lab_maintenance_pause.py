@@ -49,6 +49,10 @@ def main() -> int:
             ROOT / "gateway" / "research_lab" / "maintenance.py",
             {
                 "autoresearch_queue_capacity_doc",
+                "pause_pending_autoresearch_runs",
+                "maintenance_pause_stale_started",
+                "maintenance_wait_drained",
+                "requeue_failed_loop",
                 "research_lab_maintenance_resume_capacity_limited",
                 "requeue_paused_autoresearch_runs",
             },
@@ -68,7 +72,10 @@ def main() -> int:
         "admin": (
             ROOT / "gateway" / "research_lab" / "admin.py",
             {
+                "pause_pending_autoresearch_runs",
+                "pause_drain",
                 "pause-autoresearch",
+                "requeue-loop",
                 "resume-autoresearch",
                 "wait-drained",
                 "requeue_paused_autoresearch_runs",

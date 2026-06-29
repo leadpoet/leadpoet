@@ -11,7 +11,9 @@ from .maintenance import (
     default_actor_ref,
     dumps_status,
     get_autoresearch_maintenance_state,
+    pause_pending_autoresearch_runs,
     requeue_failed_candidate,
+    requeue_failed_loop,
     requeue_paused_autoresearch_runs,
     set_autoresearch_maintenance_paused,
     wait_until_autoresearch_drained,
@@ -47,6 +49,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the baseline-race and baseline-existence safety checks",
     )
 
+    requeue_loop = sub.add_parser(
+        "requeue-loop",
+        help="Requeue an auto-research loop run that is terminally failed (resumes from "
+        "checkpoint if present, else restarts); the reaper never recovers failed runs",
+    )
+    requeue_loop.add_argument("--run-id", help="exact run_id to requeue")
+    requeue_loop.add_argument(
+        "--ticket-id", help="ticket_id to requeue (resolves to that ticket's latest run)"
+    )
+    requeue_loop.add_argument("--reason", default="operator_resume")
+    requeue_loop.add_argument("--actor-ref", default=default_actor_ref())
+    requeue_loop.add_argument(
+        "--dry-run", action="store_true", help="Report the planned requeue without writing"
+    )
+    requeue_loop.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip the failed-state and not-completed safety checks",
+    )
+
     sub.add_parser("status", help="Print maintenance state and queue counts")
 
     wait = sub.add_parser("wait-drained", help="Wait until no queued/started hosted runs remain")
@@ -64,12 +86,17 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             actor_ref=args.actor_ref,
             event_doc={"operator_action": "pause-autoresearch"},
         )
+        pause_drain = await pause_pending_autoresearch_runs(
+            actor_ref=args.actor_ref,
+            reason=args.reason,
+        )
         return {
             "ok": True,
             "action": "pause-autoresearch",
             "event_id": event.get("event_id"),
             "event_seq": event.get("seq"),
             "event_hash": event.get("anchored_hash"),
+            "pause_drain": pause_drain,
             "state": await get_autoresearch_maintenance_state(),
             "queue_counts": await autoresearch_queue_status_counts(),
         }
@@ -96,6 +123,15 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "requeue-candidate":
         return await requeue_failed_candidate(
             candidate_id=args.candidate_id,
+            reason=args.reason,
+            actor_ref=args.actor_ref,
+            dry_run=args.dry_run,
+            force=args.force,
+        )
+    if args.command == "requeue-loop":
+        return await requeue_failed_loop(
+            run_id=args.run_id,
+            ticket_id=args.ticket_id,
             reason=args.reason,
             actor_ref=args.actor_ref,
             dry_run=args.dry_run,

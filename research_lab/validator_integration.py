@@ -95,6 +95,14 @@ def _default_for_prod(data: Mapping[str, Any] | None = None) -> bool:
     return _is_production_subnet(data)
 
 
+def _truthy_with_default(value: Any, default: bool) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, str) and not value.strip():
+        return bool(default)
+    return _truthy(value)
+
+
 @dataclass(frozen=True)
 class ResearchLabValidatorFlags:
     fetch_enabled: bool = False
@@ -103,7 +111,7 @@ class ResearchLabValidatorFlags:
     audit_verify_enabled: bool = False
     require_shadow_verification_before_submit: bool = False
     require_evaluation_verification_before_submit: bool = False
-    reimbursements_enabled: bool = False
+    reimbursements_enabled: bool = True
     weight_mutation_enabled: bool = False
     production_writes_enabled: bool = False
     submit_on_chain_enabled: bool = False
@@ -141,8 +149,9 @@ class ResearchLabValidatorFlags:
                     data.get("require_evaluation_verification_before_submit", prod_default),
                 )
             ),
-            reimbursements_enabled=_truthy(
-                data.get("RESEARCH_LAB_REIMBURSEMENTS_ENABLED", data.get("reimbursements_enabled", prod_default))
+            reimbursements_enabled=_truthy_with_default(
+                data.get("RESEARCH_LAB_REIMBURSEMENTS_ENABLED", data.get("reimbursements_enabled", True)),
+                True,
             ),
             weight_mutation_enabled=_truthy(
                 data.get("RESEARCH_LAB_WEIGHT_MUTATION_ENABLED", data.get("weight_mutation_enabled", prod_default))

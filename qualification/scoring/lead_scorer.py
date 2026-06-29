@@ -888,6 +888,54 @@ SOURCE_TYPE_MULTIPLIERS = {
 }
 
 
+# Novelty/throwaway TLDs that an article-mill fabrication ring used to host
+# bulk-generated fake "news" pages (URLs of the form
+# ``https://<host>/article/<millisecond-timestamp>`` with garbled snippets,
+# all dated to the day of submission). Across the entire historical evidence
+# corpus these TLDs carry ZERO legitimate B2B intent evidence — every
+# occurrence traces back to the same fabricated-domain ring — so a parseable
+# evidence URL on one of them is treated as fabricated. Widely-abused but
+# rare spam TLDs are included pre-emptively so the ring cannot simply rotate
+# to a new throwaway extension. Deliberately EXCLUDES TLDs with real
+# legitimate use as company-owned domains (.xyz/.online/.shop/.live/.store),
+# which are instead protected by the company-domain exemption below.
+_FABRICATED_EVIDENCE_TLDS = {
+    "beauty", "auction", "mom", "blog", "site",
+    "fun", "click", "sbs", "cyou", "rest", "icu", "top", "lol", "quest",
+}
+
+
+def _is_untrusted_evidence_source(url: str, company_website: str = "") -> str:
+    """Flag intent-signal evidence hosted on a fabricated-source domain.
+
+    Returns a non-empty reason string when the URL's registrable domain is a
+    throwaway/novelty TLD used by the article-mill fabrication ring, or "" when
+    the source is acceptable. The company's own domain and government/education
+    domains are always exempt so a real announcement on a company-owned site
+    (even on an unusual TLD) is never penalized.
+    """
+    dom = _extract_domain(url)
+    if not dom:
+        # No parseable domain — leave judgment to the content verifier rather
+        # than hard-rejecting; URL normalization happens upstream.
+        return ""
+    co = _extract_domain(company_website)
+    if co and (dom == co or dom.endswith("." + co)):
+        return ""
+    # Same brand label on a sibling TLD (e.g. company acme.com posting on
+    # acme.blog) is still first-party content — exempt it. The ring's fixed
+    # brand labels (compendium/prism/clarion/inkwell/wordcraft/growthposter)
+    # never coincide with a real lead's company brand, so no fraud leaks through.
+    if co and "." in dom and "." in co and dom.split(".")[0] == co.split(".")[0]:
+        return ""
+    if dom.endswith(".gov") or ".gov." in dom or dom.endswith(".edu") or ".edu." in dom:
+        return ""
+    tld = dom.rsplit(".", 1)[-1] if "." in dom else dom
+    if tld in _FABRICATED_EVIDENCE_TLDS:
+        return f"fabricated-source TLD .{tld} ({dom})"
+    return ""
+
+
 def _apply_signal_time_decay(
     raw_score: float,
     signal_date: Optional[str],
@@ -1152,6 +1200,20 @@ async def _score_single_intent_signal(
     future_err = check_future_date(signal.date)
     if future_err:
         logger.warning(f"Intent signal rejected: future date — {future_err}")
+        return 0.0, 0, "fabricated", None, -1
+
+    # ── Fabricated-source domain guard ───────────────────────────────────
+    # The three-stage content verifier checks whether a page's TEXT supports
+    # the claim, not whether the page is a credible source. An article-mill
+    # ring exploited this by bulk-generating fake "news" pages on throwaway
+    # novelty-TLD domains (compendium.beauty, prism.auction, clarion.blog,
+    # inkwell.mom, wordcraft.site, growthposter.site …) whose self-authored
+    # text trivially "confirms" any claim. Reject evidence hosted on these
+    # fabricated-source TLDs outright; the company's own domain and .gov/.edu
+    # are exempt so legitimate first-party announcements still pass.
+    untrusted = _is_untrusted_evidence_source(signal.url, company_website)
+    if untrusted:
+        logger.warning(f"Intent signal rejected: untrusted evidence source — {untrusted}")
         return 0.0, 0, "fabricated", None, -1
 
     # ── Self-contradicting evidence guard ────────────────────────────────

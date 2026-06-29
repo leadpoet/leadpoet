@@ -281,6 +281,8 @@ class ResearchLabGatewayConfig:
     scoring_worker_proxy_url: str = ""
     scoring_worker_model_timeout_seconds: int = 1800
     scoring_worker_max_claim_requeues: int = 3
+    scoring_worker_baseline_not_ready_retry_seconds: int = 900
+    scoring_worker_retryable_failure_retry_seconds: int = 300
     private_model_docker_global_proxy_enabled: bool = False
     scoring_worker_allow_partial_icp_window: bool = False
     private_baseline_rebenchmark_enabled: bool = False
@@ -449,6 +451,14 @@ class ResearchLabGatewayConfig:
             scoring_worker_max_claim_requeues=max(
                 1,
                 _int("RESEARCH_LAB_SCORING_WORKER_MAX_CLAIM_REQUEUES", 3),
+            ),
+            scoring_worker_baseline_not_ready_retry_seconds=max(
+                60,
+                _int("RESEARCH_LAB_SCORING_BASELINE_NOT_READY_RETRY_SECONDS", 900),
+            ),
+            scoring_worker_retryable_failure_retry_seconds=max(
+                60,
+                _int("RESEARCH_LAB_SCORING_RETRYABLE_FAILURE_RETRY_SECONDS", 300),
             ),
             private_model_docker_global_proxy_enabled=_truthy(
                 "RESEARCH_LAB_PRIVATE_MODEL_DOCKER_GLOBAL_PROXY_ENABLED",
@@ -915,6 +925,12 @@ class ResearchLabGatewayConfig:
                 "scoring_worker_total_workers": self.scoring_worker_total_workers,
                 "scoring_worker_require_proxy": self.scoring_worker_require_proxy,
                 "scoring_worker_proxy_configured": bool(self.scoring_worker_proxy_url),
+                "scoring_worker_baseline_not_ready_retry_seconds": (
+                    self.scoring_worker_baseline_not_ready_retry_seconds
+                ),
+                "scoring_worker_retryable_failure_retry_seconds": (
+                    self.scoring_worker_retryable_failure_retry_seconds
+                ),
                 "private_model_docker_global_proxy_enabled": self.private_model_docker_global_proxy_enabled,
                 "scoring_worker_allow_partial_icp_window": self.scoring_worker_allow_partial_icp_window,
                 "private_baseline_rebenchmark_enabled": self.private_baseline_rebenchmark_enabled,

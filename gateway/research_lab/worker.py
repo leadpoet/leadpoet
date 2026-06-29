@@ -1256,6 +1256,13 @@ class ResearchLabHostedWorker:
                 compact_ref(context.run_id),
                 current_after_completion.get("current_event_hash"),
             )
+        await self._ensure_terminal_loop_projection(
+            context,
+            event_type="loop_completed",
+            loop_status="completed",
+            reason="candidate_generation_completed_evaluation_queued",
+            event_doc=completion_queue_doc,
+        )
         try:
             await self._store_write_with_retry(
                 "completion_receipt_event",
@@ -1348,6 +1355,54 @@ class ResearchLabHostedWorker:
                 await asyncio.sleep(0.25 * attempt)
         raise RuntimeError(f"Research Lab store write failed after retries: {label}") from last_exc
 
+    async def _ensure_terminal_loop_projection(
+        self,
+        context: HostedRunContext,
+        *,
+        event_type: str,
+        loop_status: str,
+        reason: str,
+        event_doc: Mapping[str, Any] | None = None,
+    ) -> None:
+        current = await select_one(
+            "research_lab_auto_research_loop_current",
+            columns="run_id,current_loop_status,current_event_type,current_event_seq,current_event_hash",
+            filters=(("run_id", context.run_id),),
+        )
+        if current and str(current.get("current_loop_status") or "") in {"completed", "failed"}:
+            return
+        try:
+            provider_usage = self._provider_usage(context)
+        except HostedResearchLabWorkerError:
+            provider_usage = []
+        try:
+            await create_auto_research_loop_event(
+                run_id=context.run_id,
+                ticket_id=context.ticket_id,
+                receipt_id=context.receipt_id,
+                event_type=event_type,
+                loop_status=loop_status,
+                worker_ref=self.worker_ref,
+                provider_usage=provider_usage,
+                event_doc={
+                    "schema_version": "1.0",
+                    "reason": reason,
+                    "source": "hosted_worker_terminal_queue_projection",
+                    "previous_loop_status": current.get("current_loop_status") if current else None,
+                    "previous_loop_event_type": current.get("current_event_type") if current else None,
+                    "previous_loop_event_seq": current.get("current_event_seq") if current else None,
+                    "previous_loop_event_hash": current.get("current_event_hash") if current else None,
+                    **dict(event_doc or {}),
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_terminal_loop_projection_failed run_id=%s event_type=%s error=%s",
+                compact_ref(context.run_id),
+                event_type,
+                str(exc)[:240],
+            )
+
     async def _already_completed_outcome(self, context: HostedRunContext) -> HostedWorkerOutcome | None:
         current = await select_one(
             "research_loop_run_queue_current",
@@ -1356,6 +1411,14 @@ class ResearchLabHostedWorker:
         if current and str(current.get("current_queue_status") or "") == "completed":
             candidate_ids = await self._candidate_ids_for_run(context.run_id)
             receipt_id = await self._receipt_id_for_run(context.run_id)
+            context.receipt_id = context.receipt_id or receipt_id
+            await self._ensure_terminal_loop_projection(
+                context,
+                event_type="loop_completed",
+                loop_status="completed",
+                reason="queue_already_completed_terminal_projection",
+                event_doc={"candidate_ids": candidate_ids, "receipt_id": receipt_id},
+            )
             return HostedWorkerOutcome(
                 processed=False,
                 dry_run=False,
@@ -1384,6 +1447,14 @@ class ResearchLabHostedWorker:
             event_type="completed",
             queue_priority=int(context.queue_row.get("queue_priority") or 0),
             worker_ref=self.worker_ref,
+            reason="candidate_generation_completed_from_existing_receipt",
+            event_doc=event_doc,
+        )
+        context.receipt_id = context.receipt_id or receipt_id
+        await self._ensure_terminal_loop_projection(
+            context,
+            event_type="loop_completed",
+            loop_status="completed",
             reason="candidate_generation_completed_from_existing_receipt",
             event_doc=event_doc,
         )
@@ -1416,6 +1487,13 @@ class ResearchLabHostedWorker:
             event_type="completed",
             queue_priority=int(context.queue_row.get("queue_priority") or 0),
             worker_ref=self.worker_ref,
+            reason="candidate_generation_completed_from_existing_artifacts",
+            event_doc=event_doc,
+        )
+        await self._ensure_terminal_loop_projection(
+            context,
+            event_type="loop_completed",
+            loop_status="completed",
             reason="candidate_generation_completed_from_existing_artifacts",
             event_doc=event_doc,
         )
@@ -1892,6 +1970,14 @@ class ResearchLabHostedWorker:
             event_type="failed",
             queue_priority=int(context.queue_row.get("queue_priority") or 0),
             worker_ref=self.worker_ref,
+            reason="hosted_research_lab_run_failed",
+            event_doc={**event_doc, "receipt_id": receipt_id},
+        )
+        context.receipt_id = context.receipt_id or receipt_id
+        await self._ensure_terminal_loop_projection(
+            context,
+            event_type="loop_failed",
+            loop_status="failed",
             reason="hosted_research_lab_run_failed",
             event_doc={**event_doc, "receipt_id": receipt_id},
         )

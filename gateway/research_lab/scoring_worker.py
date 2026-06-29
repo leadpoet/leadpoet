@@ -116,6 +116,59 @@ def _runtime_error_diagnostics(error_text: str) -> dict[str, Any]:
     }
 
 
+class CandidateBaselineNotReady(RuntimeError):
+    """Raised when candidate scoring must wait for a matching private baseline."""
+
+
+def _candidate_scoring_failure_class(exc: BaseException) -> tuple[str, bool]:
+    text = f"{exc.__class__.__name__}: {str(exc)}"
+    lowered = text.lower()
+    if isinstance(exc, CandidateBaselineNotReady) or "matching_completed_private_baseline_required" in lowered:
+        return "baseline_not_ready", True
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) or "timed out" in lowered or "timeout" in lowered:
+        return "adapter_timeout", True
+    if any(
+        marker in lowered
+        for marker in (
+            "docker daemon",
+            "no space left on device",
+            "failed to prepare",
+            "failed to solve",
+            "exit status 137",
+            "killed",
+            "manifest unknown",
+        )
+    ):
+        return "infra_docker_error", True
+    diagnostics = _runtime_error_diagnostics(text)
+    category = str(diagnostics.get("category") or "")
+    provider = str(diagnostics.get("provider") or "unknown")
+    status = int(diagnostics.get("status") or 0)
+    provider_like = provider != "unknown" or status > 0 or any(
+        marker in lowered
+        for marker in (
+            "provider-backed sourcing failed",
+            "scrapingdog",
+            "openrouter",
+            "exa",
+            "internal server error",
+            "too many requests",
+            "rate limit",
+        )
+    )
+    if not provider_like:
+        if isinstance(exc, PrivateModelRuntimeError):
+            return "candidate_runtime_error", False
+        return "candidate_scoring_error", False
+    if category in {"provider_http_5xx", "runtime_provider_error"}:
+        return category, True
+    if category == "provider_http_4xx":
+        return category, False
+    if isinstance(exc, PrivateModelRuntimeError):
+        return "candidate_runtime_error", False
+    return "candidate_scoring_error", False
+
+
 def _status_age_seconds(raw_status_at: object) -> float | None:
     if not raw_status_at:
         return None
@@ -275,24 +328,37 @@ class ResearchLabGatewayScoringWorker:
         }
 
     async def _claim_next_candidate(self) -> dict[str, Any] | None:
-        from gateway.db.client import get_write_client
-
-        def _fetch() -> Any:
-            return (
-                get_write_client()
-                .table("research_lab_candidate_evaluation_current")
-                .select("*")
-                .eq("current_candidate_status", "queued")
-                .order("current_status_at", desc=False)
-                .limit(1)
-                .execute()
-            )
-
-        response = await asyncio.to_thread(_fetch)
-        rows = getattr(response, "data", None) or []
-        if not rows:
+        rows = await select_many(
+            "research_lab_candidate_evaluation_current",
+            columns="*",
+            filters=(("current_candidate_status", "queued"),),
+            order_by=(("current_status_at", False),),
+            limit=50,
+        )
+        candidate: dict[str, Any] | None = None
+        for row in rows:
+            reason = str(row.get("current_reason") or "")
+            status_at = row.get("current_status_at")
+            if reason == "baseline_not_ready" and not _status_is_stale(
+                status_at,
+                self.config.scoring_worker_baseline_not_ready_retry_seconds,
+            ):
+                continue
+            if reason == "candidate_scoring_retryable_failure" and not _status_is_stale(
+                status_at,
+                self.config.scoring_worker_retryable_failure_retry_seconds,
+            ):
+                continue
+            candidate = dict(row)
+            break
+        if not candidate:
+            if rows:
+                logger.info(
+                    "research_lab_candidate_claim_deferred worker_ref=%s queued_candidates=%s",
+                    self.worker_ref,
+                    len(rows),
+                )
             return None
-        candidate = dict(rows[0])
         candidate_id = str(candidate.get("candidate_id") or "")
         fresh = await select_one(
             "research_lab_candidate_evaluation_current",
@@ -399,6 +465,8 @@ class ResearchLabGatewayScoringWorker:
                         evaluator_ref=self.worker_ref,
                         reason="stale_gateway_scoring_retry_limit_exceeded",
                         event_doc={
+                            "failure_class": "stale_claim_retry_limit_exceeded",
+                            "retryable": False,
                             "recovering_worker_ref": self.worker_ref,
                             "previous_evaluator_ref": row.get("current_evaluator_ref"),
                             "previous_candidate_status": row.get("current_candidate_status"),
@@ -419,6 +487,8 @@ class ResearchLabGatewayScoringWorker:
                         ticket_id=ticket_id,
                         event_doc={
                             "reason": "stale_gateway_scoring_retry_limit_exceeded",
+                            "failure_class": "stale_claim_retry_limit_exceeded",
+                            "retryable": False,
                             "claim_attempts": claim_attempts,
                             "max_claim_attempts": max_attempts,
                         },
@@ -778,6 +848,68 @@ class ResearchLabGatewayScoringWorker:
                     elapsed_seconds=round(time.time() - start, 3),
                 )
                 return
+            failure_class, retryable = _candidate_scoring_failure_class(exc)
+            claim_attempts = await self._candidate_claim_attempt_count(candidate_id)
+            max_attempts = int(self.config.scoring_worker_max_claim_requeues)
+            if failure_class == "baseline_not_ready":
+                retry_after_seconds = int(self.config.scoring_worker_baseline_not_ready_retry_seconds)
+                await create_candidate_evaluation_event(
+                    candidate_id=candidate_id,
+                    run_id=str(candidate["run_id"]),
+                    ticket_id=str(candidate["ticket_id"]),
+                    event_type="queued",
+                    candidate_status="queued",
+                    evaluator_ref=self.worker_ref,
+                    reason="baseline_not_ready",
+                    event_doc={
+                        "failure_class": failure_class,
+                        "retryable": True,
+                        "retry_after_seconds": retry_after_seconds,
+                        "error": str(exc)[:500],
+                        "elapsed_seconds": round(time.time() - start, 3),
+                        "worker_ref": self.worker_ref,
+                        "proxy_ref_hash": self.proxy_ref_hash,
+                        "claim_attempts": claim_attempts,
+                    },
+                )
+                logger.warning(
+                    "research_lab_candidate_baseline_not_ready_requeued candidate_id=%s retry_after_seconds=%s error=%s",
+                    compact_ref(candidate_id),
+                    retry_after_seconds,
+                    str(exc)[:240],
+                )
+                return
+            if retryable and claim_attempts < max_attempts:
+                retry_after_seconds = int(self.config.scoring_worker_retryable_failure_retry_seconds)
+                await create_candidate_evaluation_event(
+                    candidate_id=candidate_id,
+                    run_id=str(candidate["run_id"]),
+                    ticket_id=str(candidate["ticket_id"]),
+                    event_type="queued",
+                    candidate_status="queued",
+                    evaluator_ref=self.worker_ref,
+                    reason="candidate_scoring_retryable_failure",
+                    event_doc={
+                        "failure_class": failure_class,
+                        "retryable": True,
+                        "retry_after_seconds": retry_after_seconds,
+                        "error": str(exc)[:500],
+                        "elapsed_seconds": round(time.time() - start, 3),
+                        "worker_ref": self.worker_ref,
+                        "proxy_ref_hash": self.proxy_ref_hash,
+                        "claim_attempts": claim_attempts,
+                        "max_claim_attempts": max_attempts,
+                    },
+                )
+                logger.warning(
+                    "research_lab_candidate_retryable_failure_requeued candidate_id=%s failure_class=%s claim_attempts=%s/%s error=%s",
+                    compact_ref(candidate_id),
+                    failure_class,
+                    claim_attempts,
+                    max_attempts,
+                    str(exc)[:240],
+                )
+                return
             await create_candidate_evaluation_event(
                 candidate_id=candidate_id,
                 run_id=str(candidate["run_id"]),
@@ -785,8 +917,12 @@ class ResearchLabGatewayScoringWorker:
                 event_type="failed",
                 candidate_status="failed",
                 evaluator_ref=self.worker_ref,
-                reason="gateway_qualification_worker_failed",
+                reason=f"candidate_scoring_{failure_class}",
                 event_doc={
+                    "failure_class": failure_class,
+                    "retryable": bool(retryable),
+                    "claim_attempts": claim_attempts,
+                    "max_claim_attempts": max_attempts,
                     "error": str(exc)[:500],
                     "elapsed_seconds": round(time.time() - start, 3),
                     "worker_ref": self.worker_ref,
@@ -801,13 +937,19 @@ class ResearchLabGatewayScoringWorker:
                 candidate_id=candidate_id,
                 run_id=str(candidate["run_id"]),
                 ticket_id=str(candidate["ticket_id"]),
-                event_doc={"error": str(exc)[:500]},
+                event_doc={
+                    "failure_class": failure_class,
+                    "retryable": bool(retryable),
+                    "claim_attempts": claim_attempts,
+                    "max_claim_attempts": max_attempts,
+                    "error": str(exc)[:500],
+                },
             )
             await self._maybe_finalize_candidate_receipt(candidate)
             await safe_project_public_loop_activity(
                 str(candidate["ticket_id"]),
                 source_ref=f"candidate_failed:{candidate_id}",
-                reason="gateway_qualification_worker_failed",
+                reason=f"candidate_scoring_{failure_class}",
                 config=self.config,
             )
             try:
@@ -1011,7 +1153,7 @@ class ResearchLabGatewayScoringWorker:
             gate = _private_holdout_gate_from_baseline_row(row)
             if gate:
                 return gate
-        raise RuntimeError(
+        raise CandidateBaselineNotReady(
             "matching_completed_private_baseline_required_before_candidate_private_holdout: "
             f"manifest={compact_ref(artifact.manifest_hash)} window={compact_ref(window_hash)}"
         )

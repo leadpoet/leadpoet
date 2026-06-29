@@ -13,6 +13,7 @@ from .store import (
     canonical_hash,
     create_arweave_epoch_audit_anchor,
     create_arweave_epoch_audit_anchor_event,
+    select_all,
     select_many,
     select_one,
 )
@@ -93,22 +94,37 @@ async def build_research_lab_epoch_audit_payload(
     allocation = await _latest_lab_allocation(epoch=epoch, netuid=netuid)
     weight_bundle = dict(weight_bundle or await _latest_weight_bundle(epoch=epoch, netuid=netuid) or {})
     actor_hotkey = actor_hotkey or weight_bundle.get("validator_hotkey") or "system"
-    score_bundles = await select_many(
+    score_bundles = await _audit_select_all(
         "research_evaluation_score_bundle_current",
         filters=(("evaluation_epoch", epoch),),
-        limit=1000,
+        order_by=(("created_at", True),),
     )
-    benchmarks = await select_many(
+    benchmarks = await _audit_select_all(
         "research_lab_private_model_benchmark_current",
         filters=(("evaluation_epoch", epoch),),
-        limit=1000,
+        order_by=(("created_at", True),),
     )
-    windows = await select_many("research_lab_rolling_icp_windows", filters=(), limit=1000)
-    model_versions = await select_many("research_lab_private_model_version_current", filters=(), limit=1000)
-    promotions = await select_many("research_lab_candidate_promotion_events", filters=(), limit=1000)
-    public_reports = await select_many("research_lab_public_benchmark_report_current", filters=(), limit=1000)
-    champion_rewards = await select_many("research_lab_champion_reward_current", filters=(), limit=1000)
-    reimbursement_awards = await select_many("research_reimbursement_award_current", filters=(), limit=1000)
+    windows = await _audit_select_all("research_lab_rolling_icp_windows", order_by=(("created_at", True),))
+    model_versions = await _audit_select_all(
+        "research_lab_private_model_version_current",
+        order_by=(("created_at", True),),
+    )
+    promotions = await _audit_select_all(
+        "research_lab_candidate_promotion_events",
+        order_by=(("created_at", True),),
+    )
+    public_reports = await _audit_select_all(
+        "research_lab_public_benchmark_report_current",
+        order_by=(("created_at", True),),
+    )
+    champion_rewards = await _audit_select_all(
+        "research_lab_champion_reward_current",
+        order_by=(("created_at", True),),
+    )
+    reimbursement_awards = await _audit_select_all(
+        "research_reimbursement_award_current",
+        order_by=(("created_at", True),),
+    )
 
     payload = {
         "schema_version": "1.0",
@@ -155,6 +171,26 @@ async def build_research_lab_epoch_audit_payload(
     if contains_secret_material(payload):
         raise ValueError("Research Lab Arweave audit payload contains private or secret material")
     return payload
+
+
+async def _audit_select_all(
+    table: str,
+    *,
+    filters: tuple[tuple[Any, ...], ...] = (),
+    order_by: tuple[tuple[str, bool], ...] = (("created_at", True),),
+) -> list[dict[str, Any]]:
+    """Fetch audit rows with deterministic pagination instead of PostgREST defaults."""
+
+    try:
+        return await select_all(table, filters=filters, order_by=order_by, max_rows=50000)
+    except Exception as exc:
+        logger.warning(
+            "research_lab_arweave_audit_select_order_fallback table=%s order=%s error=%s",
+            table,
+            order_by,
+            str(exc)[:200],
+        )
+        return await select_all(table, filters=filters, max_rows=50000)
 
 
 async def record_research_lab_checkpointed_events(

@@ -18,10 +18,12 @@ from gateway.research_lab.bundles import sha256_json
 
 async def main() -> int:
     original_select_many = arweave_audit.select_many
+    original_select_all = arweave_audit.select_all
     original_existing_anchor = arweave_audit._existing_anchor_for_payload
     original_create_event = arweave_audit.create_arweave_epoch_audit_anchor_event
     try:
         arweave_audit.select_many = _fake_select_many  # type: ignore[assignment]
+        arweave_audit.select_all = _fake_select_many  # type: ignore[assignment]
         payload = await arweave_audit.build_research_lab_epoch_audit_payload(
             epoch=123,
             netuid=401,
@@ -43,6 +45,7 @@ async def main() -> int:
                 return [secret_row]
             return await _fake_select_many(table, **kwargs)
         arweave_audit.select_many = fake_secret_select_many  # type: ignore[assignment]
+        arweave_audit.select_all = _fake_select_many  # type: ignore[assignment]
         try:
             await arweave_audit.build_research_lab_epoch_audit_payload(
                 epoch=123,
@@ -79,6 +82,7 @@ async def main() -> int:
 
     finally:
         arweave_audit.select_many = original_select_many  # type: ignore[assignment]
+        arweave_audit.select_all = original_select_all  # type: ignore[assignment]
         arweave_audit._existing_anchor_for_payload = original_existing_anchor  # type: ignore[assignment]
         arweave_audit.create_arweave_epoch_audit_anchor_event = original_create_event  # type: ignore[assignment]
 

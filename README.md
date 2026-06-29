@@ -1,7 +1,7 @@
 <h1 align="center">Leadpoet</h1>
 
 <p align="center">
-  <strong>AI sales research and fulfillment, evaluated on Bittensor.</strong>
+  <strong>AI sales intelliegence, built on Bittensor.</strong>
 </p>
 
 <p align="center">

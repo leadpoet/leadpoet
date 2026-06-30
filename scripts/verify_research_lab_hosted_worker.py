@@ -141,6 +141,36 @@ def main() -> int:
         finally:
             worker_module.urlrequest.urlopen = original_urlopen
 
+        captured_reasoning_body: dict[str, object] = {}
+
+        def _fake_reasoning_request(_request, timeout: int):
+            captured_reasoning_body.update(json.loads((_request.data or b"{}").decode("utf-8")))
+            return _FakeOpenRouterResponse(
+                {
+                    "model": "z-ai/glm-5.2",
+                    "choices": [{"message": {"content": '{"candidates":[]}'}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                }
+            )
+
+        worker_module.urlrequest.urlopen = _fake_reasoning_request
+        try:
+            await hosted_worker._call_openrouter(
+                messages=[{"role": "user", "content": '{"task":"test"}'}],
+                api_key=fake_key,
+                model_id="z-ai/glm-5.2",
+                reasoning_effort="xhigh",
+                timeout_seconds=7,
+                max_tokens=16,
+            )
+            if captured_reasoning_body.get("reasoning_effort") != "xhigh":
+                errors.append("OpenRouter reasoning_effort was not forwarded")
+            provider_doc = captured_reasoning_body.get("provider")
+            if not isinstance(provider_doc, dict) or provider_doc.get("data_collection") != "deny" or provider_doc.get("zdr") is not True:
+                errors.append("OpenRouter reasoning request lost provider privacy settings")
+        finally:
+            worker_module.urlrequest.urlopen = original_urlopen
+
         def _fake_permanent_error(_request, timeout: int):
             return _FakeOpenRouterResponse(
                 {"error": {"code": 401, "message": "invalid api key " + fake_key}}
@@ -209,6 +239,22 @@ def main() -> int:
     )
     if budget_settings.max_iterations != 2:
         errors.append("auto-research budget did not cap requested loop iterations")
+    glm_config = ResearchLabGatewayConfig(
+        auto_research_model="z-ai/glm-5.2",
+        auto_research_reasoning_effort="xhigh",
+    )
+    _tier, glm_model, glm_doc = glm_config.resolve_auto_research_model(None)
+    if glm_model != "z-ai/glm-5.2" or glm_doc.get("reasoning_effort") != "xhigh":
+        errors.append("default auto-research model config did not preserve GLM xhigh reasoning effort")
+    tier_reasoning_config = ResearchLabGatewayConfig(
+        auto_research_model="fallback/model",
+        auto_research_reasoning_effort="medium",
+        approved_auto_research_models_json='{"glm":{"model":"z-ai/glm-5.2","reasoning_effort":"xhigh"}}',
+        default_auto_research_model_tier="glm",
+    )
+    _tier, tier_model, tier_doc = tier_reasoning_config.resolve_auto_research_model(None)
+    if tier_model != "z-ai/glm-5.2" or tier_doc.get("reasoning_effort") != "xhigh":
+        errors.append("approved auto-research model tier did not preserve reasoning_effort")
     provider_usage, reconciled_cost = _build_openrouter_provider_usage(
         decoded={"id": "gen-test-1", "model": "test/model"},
         usage={"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost": 0.000111},

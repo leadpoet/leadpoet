@@ -1144,6 +1144,7 @@ class ResearchLabHostedWorker:
                     messages=messages,
                     api_key=context.provider_env["OPENROUTER_API_KEY"],
                     model_id=model_id,
+                    reasoning_effort=str(model_doc.get("reasoning_effort") or ""),
                     timeout_seconds=timeout_seconds,
                     max_tokens=max_tokens,
                 )
@@ -2558,6 +2559,7 @@ class ResearchLabHostedWorker:
         messages: Sequence[Mapping[str, str]],
         api_key: str,
         model_id: str,
+        reasoning_effort: str = "",
         timeout_seconds: int = 90,
         max_tokens: int = 1800,
     ) -> OpenRouterCallResult:
@@ -2576,6 +2578,8 @@ class ResearchLabHostedWorker:
                 "zdr": True,
             },
         }
+        if str(reasoning_effort or "").strip():
+            body["reasoning_effort"] = str(reasoning_effort).strip()
 
         def _call() -> OpenRouterCallResult:
             req = urlrequest.Request(

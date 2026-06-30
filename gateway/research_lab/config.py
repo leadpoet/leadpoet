@@ -172,6 +172,17 @@ def _truthy(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).strip().lower() in TRUTHY
 
 
+def _normalize_auto_research_reasoning_effort(value: Any) -> str:
+    effort = str(value or "").strip().lower()
+    if not effort:
+        return ""
+    allowed = {"minimal", "low", "medium", "high", "xhigh", "max"}
+    if effort not in allowed:
+        logger.warning("Ignoring unsupported RESEARCH_LAB_AUTO_RESEARCH_REASONING_EFFORT: %s", effort)
+        return ""
+    return effort
+
+
 def _float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, str(default)))
@@ -364,6 +375,7 @@ class ResearchLabGatewayConfig:
     score_bundle_kms_key_id: str = "alias/leadpoet-research-lab-artifact-signing"
     score_bundle_signature_uri_prefix: str = ""
     auto_research_model: str = ""
+    auto_research_reasoning_effort: str = ""
     approved_auto_research_models_json: str = ""
     default_auto_research_model_tier: str = "default"
     default_compute_budget_usd: float = 5.0
@@ -695,6 +707,7 @@ class ResearchLabGatewayConfig:
             ),
             score_bundle_signature_uri_prefix=os.getenv("RESEARCH_LAB_SCORE_BUNDLE_SIGNATURE_URI_PREFIX", ""),
             auto_research_model=os.getenv("RESEARCH_LAB_AUTO_RESEARCH_MODEL", ""),
+            auto_research_reasoning_effort=os.getenv("RESEARCH_LAB_AUTO_RESEARCH_REASONING_EFFORT", ""),
             approved_auto_research_models_json=os.getenv("RESEARCH_LAB_APPROVED_AUTO_RESEARCH_MODELS_JSON", ""),
             default_auto_research_model_tier=os.getenv("RESEARCH_LAB_DEFAULT_AUTO_RESEARCH_MODEL_TIER", "default"),
             default_compute_budget_usd=_float("RESEARCH_LAB_DEFAULT_COMPUTE_BUDGET_USD", 5.0),
@@ -715,12 +728,16 @@ class ResearchLabGatewayConfig:
             return configured
         if not self.auto_research_model:
             return {}
+        default_doc = {
+            "model": self.auto_research_model,
+            "max_candidates": self.hosted_worker_max_candidates,
+            "description": "Default hosted auto-research model",
+        }
+        reasoning_effort = _normalize_auto_research_reasoning_effort(self.auto_research_reasoning_effort)
+        if reasoning_effort:
+            default_doc["reasoning_effort"] = reasoning_effort
         return {
-            self.default_auto_research_model_tier: {
-                "model": self.auto_research_model,
-                "max_candidates": self.hosted_worker_max_candidates,
-                "description": "Default hosted auto-research model",
-            }
+            self.default_auto_research_model_tier: default_doc
         }
 
     def resolve_auto_research_model(self, tier: str | None) -> tuple[str, str, dict[str, Any]]:
@@ -741,6 +758,10 @@ class ResearchLabGatewayConfig:
         model = str(doc.get("model") or "")
         if not model:
             raise ValueError(f"approved auto-research model tier has no model: {effective_tier}")
+        if "reasoning_effort" not in doc:
+            reasoning_effort = _normalize_auto_research_reasoning_effort(self.auto_research_reasoning_effort)
+            if reasoning_effort:
+                doc["reasoning_effort"] = reasoning_effort
         return effective_tier, model, doc
 
     def clamp_compute_budget_usd(self, value: float | int | str | None) -> float:
@@ -775,8 +796,13 @@ class ResearchLabGatewayConfig:
             tiers[str(name)] = {
                 key: item
                 for key, item in dict(value).items()
-                if key in {"model", "max_candidates", "max_compute_budget_usd", "description"}
+                if key in {"model", "max_candidates", "max_compute_budget_usd", "description", "reasoning_effort"}
             }
+            reasoning_effort = _normalize_auto_research_reasoning_effort(tiers[str(name)].get("reasoning_effort"))
+            if reasoning_effort:
+                tiers[str(name)]["reasoning_effort"] = reasoning_effort
+            else:
+                tiers[str(name)].pop("reasoning_effort", None)
         return tiers
 
     def code_edit_allowed_path_prefixes(self) -> tuple[str, ...]:
@@ -1026,11 +1052,15 @@ class ResearchLabGatewayConfig:
                     ),
                 },
                 "auto_research_model_configured": bool(self.auto_research_model),
+                "auto_research_reasoning_effort": _normalize_auto_research_reasoning_effort(
+                    self.auto_research_reasoning_effort
+                ),
                 "approved_model_tiers": {
                     tier: {
                         "model_configured": bool(doc.get("model")),
                         "max_candidates": doc.get("max_candidates", self.hosted_worker_max_candidates),
                         "max_compute_budget_usd": doc.get("max_compute_budget_usd", self.max_compute_budget_usd),
+                        "reasoning_effort": doc.get("reasoning_effort"),
                         "description": doc.get("description"),
                     }
                     for tier, doc in self.approved_auto_research_models().items()

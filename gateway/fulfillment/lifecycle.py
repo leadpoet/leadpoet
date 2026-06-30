@@ -454,12 +454,16 @@ async def _lifecycle_tick_inner(supabase) -> None:
     already_in = {r["request_id"] for r in (scoring_requests.data or [])}
     missing_rids = [rid for rid in recent_scored_rids if rid not in already_in]
     if missing_rids:
-        extra_resp = supabase.table("fulfillment_requests") \
-            .select("request_id, reveal_window_end, icp_details, num_leads, internal_label, company, required_attributes, status, successor_request_id") \
-            .eq("status", "partially_fulfilled") \
-            .in_("request_id", missing_rids) \
-            .execute()
-        extras = extra_resp.data or []
+        # Chunk so the ``.in_()`` URL never overflows when many distinct
+        # requests were scored in the window (see _CHAIN_IN_CHUNK).
+        extras: list = []
+        for chunk in _chunked(missing_rids):
+            extra_resp = supabase.table("fulfillment_requests") \
+                .select("request_id, reveal_window_end, icp_details, num_leads, internal_label, company, required_attributes, status, successor_request_id") \
+                .eq("status", "partially_fulfilled") \
+                .in_("request_id", chunk) \
+                .execute()
+            extras.extend(extra_resp.data or [])
         if extras:
             scoring_requests.data = (scoring_requests.data or []) + extras
             print(
@@ -917,6 +921,24 @@ def _chain_held_state_for_recycle(supabase, request_id: str, current_num_leads: 
     }
 
 
+# Max request_ids per PostgREST ``.in_("request_id", …)`` filter. A long
+# recycle chain (observed: the "Daniel iMove 10" chain reached 628
+# generations) produces a predecessor list that, passed as a single
+# ``.in_()`` filter, builds a query URL of tens of KB — which PostgREST
+# rejects with a plain ``400 Bad Request`` (not a JSON error), throwing
+# inside consensus finalization and wedging the request in ``scoring``
+# forever. Splitting the filter into chunks of this size keeps every URL
+# comfortably under the server limit (~100 UUIDs ≈ 4 KB) regardless of how
+# long the chain grows.
+_CHAIN_IN_CHUNK = 100
+
+
+def _chunked(seq: list, size: int = _CHAIN_IN_CHUNK):
+    """Yield ``seq`` in successive lists of at most ``size`` items."""
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
 def _walk_chain_predecessors(supabase, request_id: str) -> list:
     """Return the list of all request_ids upstream of ``request_id`` in the
     recycle chain (oldest first), EXCLUDING ``request_id`` itself.
@@ -1006,20 +1028,23 @@ def _load_sibling_chain_held_companies(supabase, request_id: str) -> set:
         return set()
 
     held_rows: list = []
-    offset = 0
-    for _ in range(20):
-        page = supabase.table("fulfillment_score_consensus") \
-            .select("submission_id, lead_id") \
-            .in_("request_id", sibling_ids) \
-            .eq("is_chain_held", True) \
-            .range(offset, offset + 999) \
-            .execute()
-        if not page.data:
-            break
-        held_rows.extend(page.data)
-        if len(page.data) < 1000:
-            break
-        offset += 1000
+    # Chunk the sibling list so the ``.in_()`` URL never overflows (see
+    # _CHAIN_IN_CHUNK); each chunk is paginated independently.
+    for chunk in _chunked(sibling_ids):
+        offset = 0
+        for _ in range(20):
+            page = supabase.table("fulfillment_score_consensus") \
+                .select("submission_id, lead_id") \
+                .in_("request_id", chunk) \
+                .eq("is_chain_held", True) \
+                .range(offset, offset + 999) \
+                .execute()
+            if not page.data:
+                break
+            held_rows.extend(page.data)
+            if len(page.data) < 1000:
+                break
+            offset += 1000
     if not held_rows:
         return set()
 
@@ -1086,20 +1111,23 @@ def _load_chain_held_winners(supabase, request_id: str) -> list:
         "num_validators"
     )
     out: list = []
-    offset = 0
-    for _ in range(20):
-        page = supabase.table("fulfillment_score_consensus") \
-            .select(select_cols) \
-            .in_("request_id", chain_predecessors) \
-            .eq("is_chain_held", True) \
-            .range(offset, offset + 999) \
-            .execute()
-        if not page.data:
-            break
-        out.extend(page.data)
-        if len(page.data) < 1000:
-            break
-        offset += 1000
+    # Chunk the predecessor list so the ``.in_()`` URL never overflows on
+    # long chains (see _CHAIN_IN_CHUNK). Each chunk is paginated independently.
+    for chunk in _chunked(chain_predecessors):
+        offset = 0
+        for _ in range(20):
+            page = supabase.table("fulfillment_score_consensus") \
+                .select(select_cols) \
+                .in_("request_id", chunk) \
+                .eq("is_chain_held", True) \
+                .range(offset, offset + 999) \
+                .execute()
+            if not page.data:
+                break
+            out.extend(page.data)
+            if len(page.data) < 1000:
+                break
+            offset += 1000
     return out
 
 
@@ -1282,24 +1310,28 @@ async def _resolve_chain_topk(
     chain_request_ids = [request_id] + _walk_chain_predecessors(supabase, request_id)
 
     # 6a) Clear is_chain_held=FALSE on every chain row that's no longer in topk.
+    #     Chunk the chain id list so the ``.in_()`` URL never overflows on
+    #     long chains (see _CHAIN_IN_CHUNK).
     if topk_lead_ids:
-        try:
-            supabase.table("fulfillment_score_consensus").update({
-                "is_chain_held": False,
-            }).in_("request_id", chain_request_ids) \
-              .not_.in_("lead_id", list(topk_lead_ids)) \
-              .execute()
-        except Exception as e:
-            print(f"   ⚠️  Failed clearing is_chain_held for displaced rows: {e}")
+        for chunk in _chunked(chain_request_ids):
+            try:
+                supabase.table("fulfillment_score_consensus").update({
+                    "is_chain_held": False,
+                }).in_("request_id", chunk) \
+                  .not_.in_("lead_id", list(topk_lead_ids)) \
+                  .execute()
+            except Exception as e:
+                print(f"   ⚠️  Failed clearing is_chain_held for displaced rows: {e}")
     else:
         # Empty top-K — clear everyone in the chain.
-        try:
-            supabase.table("fulfillment_score_consensus").update({
-                "is_chain_held": False,
-            }).in_("request_id", chain_request_ids) \
-              .execute()
-        except Exception as e:
-            print(f"   ⚠️  Failed clearing all is_chain_held: {e}")
+        for chunk in _chunked(chain_request_ids):
+            try:
+                supabase.table("fulfillment_score_consensus").update({
+                    "is_chain_held": False,
+                }).in_("request_id", chunk) \
+                  .execute()
+            except Exception as e:
+                print(f"   ⚠️  Failed clearing all is_chain_held: {e}")
 
     # 6b) Set is_chain_held=TRUE on the new top-K.  Each (request_id,
     #     submission_id, lead_id) triple uniquely identifies a row, so

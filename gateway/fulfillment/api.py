@@ -148,22 +148,26 @@ def _load_in_flight_held_companies(
 
     held_keys: List[tuple] = []
     try:
-        offset = 0
-        for _ in range(20):
-            page = supabase.table("fulfillment_score_consensus") \
-                .select("submission_id,lead_id") \
-                .in_("request_id", other_chain_ids) \
-                .eq("is_chain_held", True) \
-                .range(offset, offset + 999) \
-                .execute()
-            if not page.data:
-                break
-            held_keys.extend(
-                (r["submission_id"], r["lead_id"]) for r in page.data
-            )
-            if len(page.data) < 1000:
-                break
-            offset += 1000
+        # Chunk the request_id filter so the ``.in_()`` URL never overflows
+        # when a client has many in-flight chains.
+        for ci in range(0, len(other_chain_ids), 100):
+            id_chunk = other_chain_ids[ci:ci + 100]
+            offset = 0
+            for _ in range(20):
+                page = supabase.table("fulfillment_score_consensus") \
+                    .select("submission_id,lead_id") \
+                    .in_("request_id", id_chunk) \
+                    .eq("is_chain_held", True) \
+                    .range(offset, offset + 999) \
+                    .execute()
+                if not page.data:
+                    break
+                held_keys.extend(
+                    (r["submission_id"], r["lead_id"]) for r in page.data
+                )
+                if len(page.data) < 1000:
+                    break
+                offset += 1000
     except Exception as e:
         logger.warning(
             f"_load_in_flight_held_companies: failed to fetch chain-held "

@@ -102,6 +102,17 @@ Leadpoet/api/
 # Local agent handoff transcripts
 .agent_handoffs/
 
+# Codex skills and internal pre-production Research Lab test harnesses.
+# Keep these local; do not commit them to main.
+loop-monitoring/
+scripts/verify_research_lab_credit_block.py
+scripts/verify_research_lab_credit_topup_resume.py
+scripts/verify_research_lab_event_seq_retry.py
+scripts/verify_research_lab_loop_reconciler.py
+scripts/verify_research_lab_public_status_derivation.py
+scripts/verify_research_lab_recovery_operators.py
+scripts/verify_research_lab_stuck_alerts.py
+
 # Cursor-era local instructions/transcripts. Do not commit or use as Codex rules.
 cursor_md_files/
 

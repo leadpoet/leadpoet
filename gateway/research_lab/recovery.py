@@ -247,6 +247,75 @@ async def resume_failed_runs_from_checkpoint(
     return result
 
 
+async def resume_credit_blocked_runs_for_miner(
+    miner_hotkey: str,
+    *,
+    run_ids: list[str] | None = None,
+    actor_ref: str | None = None,
+) -> dict[str, Any]:
+    """Re-queue a miner's credit-blocked (paused/blocked_for_credit) runs after a top-up.
+
+    Re-checks the miner's OpenRouter key; re-queues funded runs with reason
+    `credit_topup_resume` (the hosted worker's preflight is the final gate, so a
+    still-unfunded key just re-pauses). Never consumes another loop-start payment.
+    Used by the miner-facing gateway endpoint and available to operators. Fastapi-free
+    so it is unit-testable without the web stack.
+    """
+    config = ResearchLabGatewayConfig.from_env()
+    actor = actor_ref or f"miner:{str(miner_hotkey)[:12]}"
+    capacity_doc = autoresearch_queue_capacity_doc(config)
+    requested = set(run_ids or [])
+
+    blocked = await select_all(
+        "research_loop_run_queue_current",
+        columns="run_id,ticket_id,current_queue_status,current_reason,queue_priority",
+        filters=(("current_queue_status", "paused"), ("current_reason", "blocked_for_credit")),
+        max_rows=10000,
+    )
+    requeued = 0
+    still_blocked = 0
+    results: list[dict[str, Any]] = []
+
+    for row in blocked:
+        run_id = str(row.get("run_id") or "")
+        ticket_id = str(row.get("ticket_id") or "")
+        if requested and run_id not in requested:
+            continue
+        ticket = await select_one("research_loop_ticket_current", filters=(("ticket_id", ticket_id),))
+        if not ticket or str(ticket.get("miner_hotkey") or "") != str(miner_hotkey):
+            continue  # only this miner's runs
+
+        ready, detail = await _openrouter_credit_ready(config, ticket_id=ticket_id)
+        if not ready:
+            still_blocked += 1
+            results.append({"run_id": run_id, "status": "still_blocked_for_credit", "detail": detail})
+            continue
+        try:
+            await create_queue_event(
+                run_id=run_id,
+                ticket_id=ticket_id,
+                event_type="queued",
+                queue_priority=int(row.get("queue_priority") or 0),
+                worker_ref=actor,
+                reason="credit_topup_resume",
+                event_doc={
+                    "schema_version": "1.0",
+                    **capacity_doc,
+                    "resume_source": "miner_credit_topup_resume",
+                    "previous_queue_status": "paused",
+                    "previous_reason": "blocked_for_credit",
+                    "credit_check": detail,
+                },
+            )
+            requeued += 1
+            results.append({"run_id": run_id, "status": "requeued", "credit_check": detail})
+        except Exception as exc:  # noqa: BLE001
+            status = "requeue_capacity_conflict" if _is_queue_capacity_conflict(exc) else "requeue_failed"
+            results.append({"run_id": run_id, "status": status, "detail": str(exc)[:160]})
+
+    return {"requeued": requeued, "still_blocked": still_blocked, "results": results}
+
+
 # --------------------------------------------------------------------------- #
 # Operator 2: requeue baseline_not_ready candidates once the baseline is ready
 # --------------------------------------------------------------------------- #

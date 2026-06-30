@@ -2909,6 +2909,42 @@ def _run_research_lab_topup_flow(
     print(f"   Status: {topup_result.get('status')}")
     print(f"   Payment ref: {topup_result.get('payment_ref')}")
 
+
+def run_research_lab_resume_credit_blocked_flow(wallet, config, netuid: int) -> None:
+    """Resume this miner's credit-blocked (paused) auto-research loops after a top-up.
+
+    Does not re-charge a loop-start payment; the gateway re-checks the OpenRouter key
+    and re-queues funded runs (the hosted worker is the final credit gate)."""
+    import time
+
+    print("\n" + "=" * 80)
+    print(" RESEARCH LAB — RESUME CREDIT-BLOCKED LOOPS")
+    print("=" * 80)
+    print("\n  Top up your OpenRouter key first, then this resumes your paused")
+    print("  (blocked_for_credit) auto-research loops. No loop-start payment is re-charged.\n")
+
+    payload = _research_lab_signed_payload(
+        wallet,
+        {
+            "miner_hotkey": wallet.hotkey.ss58_address,
+            "timestamp": int(time.time()),
+            "idempotency_key": f"research-resume-credit:{wallet.hotkey.ss58_address}:{int(time.time())}",
+        },
+    )
+    result = _post_research_lab_json("/research-lab/resume-credit-blocked", payload, timeout=120)
+    if "error" in result:
+        print(f"❌ Resume failed: HTTP {result.get('status_code')}")
+        print(f"   {result['error']}")
+        return
+    print(
+        f"✅ Requeued {result.get('requeued', 0)} loop(s); "
+        f"{result.get('still_blocked', 0)} still credit-blocked (top up the key and retry)."
+    )
+    for item in (result.get("results") or [])[:20]:
+        extra = item.get("detail") or item.get("credit_check") or ""
+        print(f"   - {str(item.get('run_id', '?'))[:13]}: {item.get('status')}" + (f" ({extra})" if extra else ""))
+
+
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
     BaseMinerNeuron.add_args(parser)
@@ -3042,17 +3078,19 @@ def main():
     print("")
     print("  1. Auto Research  — Check hosted auto-research loop availability (default)")
     print("  2. Fulfillment    — Poll for client ICP requests and fulfill them")
+    print("  3. Resume Credit-Blocked — Resume paused auto-research loops after an OpenRouter top-up")
     print("")
     print("  You can run multiple active modes simultaneously in separate terminals.")
     print("")
 
-    mode_input = input("❓ Select mode (1/2) [default: 1]: ").strip()
-    if mode_input not in ("1", "2"):
+    mode_input = input("❓ Select mode (1/2/3) [default: 1]: ").strip()
+    if mode_input not in ("1", "2", "3"):
         mode_input = "1"
 
     miner_mode = {
         "1": "research_lab",
         "2": "fulfillment",
+        "3": "research_lab_resume_credit",
     }[mode_input]
     print(f"\n✅ Selected mode: {miner_mode.upper()}")
 
@@ -3063,6 +3101,18 @@ def main():
             run_research_lab_auto_research_flow(temp_wallet, config, config.netuid)
         except Exception as e:
             bt.logging.error(f"❌ Error during Research Lab mode: {e}")
+            import traceback
+            traceback.print_exc()
+        print("\n👋 Done. Run the miner again to select another mode.")
+        raise SystemExit(0)
+
+    if miner_mode == "research_lab_resume_credit":
+        try:
+            temp_wallet = bt.wallet(config=config)
+            print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
+            run_research_lab_resume_credit_blocked_flow(temp_wallet, config, config.netuid)
+        except Exception as e:
+            bt.logging.error(f"❌ Error during resume-credit-blocked mode: {e}")
             import traceback
             traceback.print_exc()
         print("\n👋 Done. Run the miner again to select another mode.")

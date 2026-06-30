@@ -18,6 +18,11 @@ from .maintenance import (
     set_autoresearch_maintenance_paused,
     wait_until_autoresearch_drained,
 )
+from .recovery import (
+    rebase_stale_parent_candidates,
+    requeue_baseline_not_ready_candidates,
+    resume_failed_runs_from_checkpoint,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,6 +72,51 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Skip the failed-state and not-completed safety checks",
+    )
+
+    # --- Lifecycle recovery operators (default dry-run; pass --apply to write) ---
+    resume_runs = sub.add_parser(
+        "resume-failed-runs",
+        help="Resume terminally failed hosted runs from their latest checkpoint",
+    )
+    resume_runs.add_argument(
+        "--run-id", action="append", dest="run_ids", help="run_id to resume (repeatable; omit for all failed)"
+    )
+    resume_runs.add_argument("--actor-ref", default=default_actor_ref())
+    resume_runs.add_argument(
+        "--apply", action="store_true", help="Apply the requeue (default is dry-run)"
+    )
+    resume_runs.add_argument(
+        "--no-require-openrouter-credit",
+        dest="require_openrouter_credit",
+        action="store_false",
+        help="Skip the OpenRouter credit re-check for credit-blocked failures",
+    )
+    resume_runs.set_defaults(require_openrouter_credit=True)
+
+    requeue_baseline = sub.add_parser(
+        "requeue-baseline-not-ready",
+        help="Requeue baseline_not_ready candidates whose baseline is now ready",
+    )
+    requeue_baseline.add_argument(
+        "--candidate-id", action="append", dest="candidate_ids", help="candidate_id (repeatable; omit for all)"
+    )
+    requeue_baseline.add_argument("--actor-ref", default=default_actor_ref())
+    requeue_baseline.add_argument(
+        "--apply", action="store_true", help="Apply the requeue (default is dry-run)"
+    )
+
+    rebase_stale = sub.add_parser(
+        "rebase-stale-parents",
+        help="Rebase stale_parent_needs_rescore candidates onto the current active parent",
+    )
+    rebase_stale.add_argument(
+        "--candidate-id", action="append", dest="candidate_ids", help="candidate_id (repeatable; omit for all)"
+    )
+    rebase_stale.add_argument("--max-batch-size", type=int, default=25)
+    rebase_stale.add_argument("--actor-ref", default=default_actor_ref())
+    rebase_stale.add_argument(
+        "--apply", action="store_true", help="Apply the rebase build+queue (default is dry-run)"
     )
 
     sub.add_parser("status", help="Print maintenance state and queue counts")
@@ -147,6 +197,26 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             actor_ref=args.actor_ref,
             dry_run=args.dry_run,
             force=args.force,
+        )
+    if args.command == "resume-failed-runs":
+        return await resume_failed_runs_from_checkpoint(
+            run_ids=args.run_ids,
+            dry_run=not args.apply,
+            require_openrouter_credit=args.require_openrouter_credit,
+            actor_ref=args.actor_ref,
+        )
+    if args.command == "requeue-baseline-not-ready":
+        return await requeue_baseline_not_ready_candidates(
+            candidate_ids=args.candidate_ids,
+            dry_run=not args.apply,
+            actor_ref=args.actor_ref,
+        )
+    if args.command == "rebase-stale-parents":
+        return await rebase_stale_parent_candidates(
+            candidate_ids=args.candidate_ids,
+            dry_run=not args.apply,
+            max_batch_size=args.max_batch_size,
+            actor_ref=args.actor_ref,
         )
     if args.command == "status":
         return {

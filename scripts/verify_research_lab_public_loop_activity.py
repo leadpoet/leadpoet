@@ -24,6 +24,7 @@ from gateway.research_lab.public_activity import (  # noqa: E402
 
 
 MIGRATION = ROOT / "scripts" / "40-research-lab-public-loop-activity.sql"
+STATUS_LABEL_MIGRATION = ROOT / "scripts" / "55-research-lab-public-loop-status-labels.sql"
 FORBIDDEN_GRANT_RE = re.compile(
     r"\bGRANT\b(?!\s+EXECUTE\b)[^;]*\b(?:anon|authenticated)\b",
     re.IGNORECASE | re.DOTALL,
@@ -32,6 +33,7 @@ FORBIDDEN_GRANT_RE = re.compile(
 
 def main() -> int:
     errors = verify_sql(MIGRATION.read_text(encoding="utf-8"))
+    errors.extend(verify_status_label_sql(STATUS_LABEL_MIGRATION.read_text(encoding="utf-8")))
     errors.extend(verify_projection_fixtures())
     if errors:
         for error in errors:
@@ -72,6 +74,28 @@ def verify_sql(sql: str) -> list[str]:
         errors.append("migration must not grant privileges to anon/authenticated")
     if re.search(r"GRANT\s+[^;]*(UPDATE|DELETE)[^;]*TO\s+service_role", sql, re.IGNORECASE):
         errors.append("append-only tables must not grant UPDATE/DELETE to service_role")
+    return errors
+
+
+def verify_status_label_sql(sql: str) -> list[str]:
+    errors: list[str] = []
+    lowered = sql.lower()
+    for marker in (
+        "begin;",
+        "commit;",
+        "research_lab_public_loop_card_events_event_type_check",
+        "research_lab_public_loop_card_events_outcome_label_check",
+        "research_lab_public_loop_card_events_outcome_band_check",
+        "waiting_for_baseline",
+        "needs_rescore",
+        "blocked_for_credit",
+        "not_started",
+        "'blocked'",
+    ):
+        if marker not in lowered:
+            errors.append(f"status label migration missing marker: {marker}")
+    if FORBIDDEN_GRANT_RE.search(sql):
+        errors.append("status label migration must not grant privileges to anon/authenticated")
     return errors
 
 
@@ -129,6 +153,65 @@ def verify_projection_fixtures() -> list[str]:
     )
     if failed.outcome_label != "failed" or failed.outcome_band != "failed":
         errors.append("failed fixture should be failed/failed")
+    blocked = derive_public_loop_outcome(
+        ticket={"ticket_id": "t", "current_ticket_status": "running", "created_at": "2026-01-01T00:00:00+00:00"},
+        queue_rows=[
+            {
+                "run_id": "r",
+                "current_queue_status": "paused",
+                "current_reason": "blocked_for_credit",
+                "current_status_at": "2026-01-01T00:01:00+00:00",
+            }
+        ],
+        receipt_rows=[],
+        candidate_rows=[],
+        score_bundle_rows=[],
+        promotion_event_rows=[],
+    )
+    if blocked.outcome_label != "blocked_for_credit" or blocked.outcome_band != "blocked":
+        errors.append("credit-blocked fixture should be blocked_for_credit/blocked")
+    waiting = derive_public_loop_outcome(
+        ticket={"ticket_id": "t", "current_ticket_status": "running", "created_at": "2026-01-01T00:00:00+00:00"},
+        queue_rows=[],
+        receipt_rows=[],
+        candidate_rows=[
+            {
+                "current_candidate_status": "queued",
+                "current_reason": "baseline_not_ready",
+                "current_status_at": "2026-01-01T00:01:00+00:00",
+            }
+        ],
+        score_bundle_rows=[],
+        promotion_event_rows=[],
+    )
+    if waiting.outcome_label != "waiting_for_baseline" or waiting.outcome_band != "pending":
+        errors.append("baseline wait fixture should be waiting_for_baseline/pending")
+    needs_rescore = derive_public_loop_outcome(
+        ticket={"ticket_id": "t", "current_ticket_status": "running", "created_at": "2026-01-01T00:00:00+00:00"},
+        queue_rows=[],
+        receipt_rows=[],
+        candidate_rows=[
+            {
+                "current_candidate_status": "rejected",
+                "current_reason": "stale_parent_needs_rescore",
+                "current_status_at": "2026-01-01T00:01:00+00:00",
+            }
+        ],
+        score_bundle_rows=[],
+        promotion_event_rows=[],
+    )
+    if needs_rescore.outcome_label != "needs_rescore" or needs_rescore.outcome_band != "blocked":
+        errors.append("stale-parent fixture should be needs_rescore/blocked")
+    not_started = derive_public_loop_outcome(
+        ticket={"ticket_id": "t", "current_ticket_status": "opened", "created_at": "2026-01-01T00:00:00+00:00"},
+        queue_rows=[],
+        receipt_rows=[],
+        candidate_rows=[],
+        score_bundle_rows=[],
+        promotion_event_rows=[],
+    )
+    if not_started.outcome_label != "not_started" or not_started.outcome_band != "pending":
+        errors.append("ticket-without-run fixture should be not_started/pending")
 
     row = {
         "card_id": "public_loop_card:00000000-0000-0000-0000-000000000000",

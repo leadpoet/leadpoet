@@ -12,9 +12,13 @@ from .maintenance import (
     dumps_status,
     get_autoresearch_maintenance_state,
     pause_pending_autoresearch_runs,
+    rebase_stale_parent_candidates,
+    reconcile_terminal_loop_projections,
+    repair_public_loop_cards,
     requeue_failed_candidate,
     requeue_failed_loop,
     requeue_paused_autoresearch_runs,
+    resume_credit_blocked_run,
     set_autoresearch_maintenance_paused,
     wait_until_autoresearch_drained,
 )
@@ -74,6 +78,48 @@ def build_parser() -> argparse.ArgumentParser:
     wait = sub.add_parser("wait-drained", help="Wait until no queued/started hosted runs remain")
     wait.add_argument("--timeout-seconds", type=int, default=1800)
     wait.add_argument("--poll-seconds", type=float, default=5.0)
+
+    reconcile = sub.add_parser(
+        "reconcile-loop-projections",
+        help="Repair terminal queue rows whose loop projection is still nonterminal",
+    )
+    reconcile.add_argument("--run-id")
+    reconcile.add_argument("--limit", type=int, default=50)
+    reconcile.add_argument("--reason", default="terminal_queue_reconciler")
+    reconcile.add_argument("--actor-ref", default=default_actor_ref())
+    reconcile.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
+    reconcile.add_argument("--write", dest="dry_run", action="store_false")
+
+    repair_cards = sub.add_parser(
+        "repair-public-cards",
+        help="Re-project sanitized public loop cards from current append-only state",
+    )
+    repair_cards.add_argument("--ticket-id")
+    repair_cards.add_argument("--limit", type=int, default=50)
+    repair_cards.add_argument("--reason", default="operator_public_card_repair")
+    repair_cards.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
+    repair_cards.add_argument("--write", dest="dry_run", action="store_false")
+
+    rebase = sub.add_parser(
+        "rebase-stale-candidates",
+        help="Queue derived candidates for historical stale-parent candidate rebase",
+    )
+    rebase.add_argument("--candidate-id")
+    rebase.add_argument("--limit", type=int, default=25)
+    rebase.add_argument("--max-batch-size", type=int, default=5)
+    rebase.add_argument("--actor-ref", default=default_actor_ref())
+    rebase.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
+    rebase.add_argument("--write", dest="dry_run", action="store_false")
+
+    resume_credit = sub.add_parser(
+        "resume-credit-blocked-run",
+        help="Explicitly resume a credit-blocked run only after OpenRouter key preflight passes",
+    )
+    resume_credit.add_argument("--run-id", required=True)
+    resume_credit.add_argument("--reason", default="credit_preflight_passed_resume")
+    resume_credit.add_argument("--actor-ref", default=default_actor_ref())
+    resume_credit.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
+    resume_credit.add_argument("--write", dest="dry_run", action="store_false")
 
     return parser
 
@@ -160,6 +206,36 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             poll_seconds=args.poll_seconds,
         )
         return {"ok": bool(result.get("drained")), **result}
+    if args.command == "reconcile-loop-projections":
+        return await reconcile_terminal_loop_projections(
+            run_id=args.run_id,
+            limit=args.limit,
+            reason=args.reason,
+            actor_ref=args.actor_ref,
+            dry_run=args.dry_run,
+        )
+    if args.command == "repair-public-cards":
+        return await repair_public_loop_cards(
+            ticket_id=args.ticket_id,
+            limit=args.limit,
+            reason=args.reason,
+            dry_run=args.dry_run,
+        )
+    if args.command == "rebase-stale-candidates":
+        return await rebase_stale_parent_candidates(
+            candidate_id=args.candidate_id,
+            limit=args.limit,
+            max_batch_size=args.max_batch_size,
+            actor_ref=args.actor_ref,
+            dry_run=args.dry_run,
+        )
+    if args.command == "resume-credit-blocked-run":
+        return await resume_credit_blocked_run(
+            run_id=args.run_id,
+            reason=args.reason,
+            actor_ref=args.actor_ref,
+            dry_run=args.dry_run,
+        )
     raise ValueError(f"unknown command: {args.command}")
 
 

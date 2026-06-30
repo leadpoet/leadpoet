@@ -11,7 +11,10 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
+from .key_vault import OpenRouterKeyVaultError, decrypt_openrouter_key, preflight_openrouter_key
+from .public_activity import derive_public_loop_outcome, safe_project_public_loop_activity
 from .store import (
+    create_auto_research_loop_event,
     create_candidate_evaluation_event,
     create_gateway_control_event,
     create_queue_event,
@@ -212,7 +215,10 @@ async def requeue_paused_autoresearch_runs(
     capacity_doc = autoresearch_queue_capacity_doc(config)
     rows = await select_all(
         "research_loop_run_queue_current",
-        columns="run_id,ticket_id,current_queue_status,queue_priority,current_event_hash,current_status_at",
+        columns=(
+            "run_id,ticket_id,current_queue_status,current_reason,queue_priority,"
+            "current_event_hash,current_status_at"
+        ),
         filters=(("current_queue_status", "paused"),),
         max_rows=10000,
     )
@@ -224,6 +230,16 @@ async def requeue_paused_autoresearch_runs(
         "blocked": [],
     }
     for row in rows:
+        if str(row.get("current_reason") or "") == "blocked_for_credit":
+            result["blocked"].append(
+                {
+                    "run_id": row.get("run_id"),
+                    "ticket_id": row.get("ticket_id"),
+                    "stage": "blocked_for_credit",
+                    "error": "explicit credit preflight resume required",
+                }
+            )
+            continue
         try:
             await create_queue_event(
                 run_id=str(row["run_id"]),
@@ -274,6 +290,199 @@ async def requeue_paused_autoresearch_runs(
                 error,
             )
     return result
+
+
+async def reconcile_terminal_loop_projections(
+    *,
+    run_id: str | None = None,
+    limit: int = 50,
+    reason: str = "terminal_queue_reconciler",
+    actor_ref: str | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    queue_rows = await select_all(
+        "research_loop_run_queue_current",
+        columns=(
+            "run_id,ticket_id,current_queue_status,current_reason,current_event_seq,"
+            "current_event_hash,current_status_at,worker_ref"
+        ),
+        filters=(("current_queue_status", "in", ["completed", "failed"]),),
+        order_by=(("current_status_at", True),),
+        max_rows=max(1, int(limit or 50) * 5),
+    )
+    planned: list[dict[str, Any]] = []
+    repaired: list[dict[str, Any]] = []
+    for qrow in queue_rows:
+        current_run_id = str(qrow.get("run_id") or "")
+        if run_id and current_run_id != str(run_id):
+            continue
+        loop = await select_one(
+            "research_lab_auto_research_loop_current",
+            columns=(
+                "run_id,ticket_id,receipt_id,current_loop_status,current_event_type,"
+                "current_event_seq,current_event_hash,current_status_at"
+            ),
+            filters=(("run_id", current_run_id),),
+        )
+        loop_status = str(loop.get("current_loop_status") or "") if loop else ""
+        if loop_status in {"completed", "failed"}:
+            continue
+        queue_status = str(qrow.get("current_queue_status") or "")
+        event_type = "loop_completed" if queue_status == "completed" else "loop_failed"
+        loop_status_target = "completed" if queue_status == "completed" else "failed"
+        plan = {
+            "run_id": current_run_id,
+            "ticket_id": str(qrow.get("ticket_id") or ""),
+            "queue_status": queue_status,
+            "loop_status": loop_status or None,
+            "event_type": event_type,
+            "loop_status_target": loop_status_target,
+            "queue_event_hash": qrow.get("current_event_hash"),
+            "loop_event_hash": loop.get("current_event_hash") if loop else None,
+        }
+        planned.append(plan)
+        if len(planned) >= max(1, int(limit or 50)):
+            break
+    if dry_run:
+        return {"ok": True, "dry_run": True, "action": "reconcile-loop-projections", "planned": planned}
+
+    for plan in planned:
+        event_doc = {
+            "schema_version": "1.0",
+            "source": "terminal_queue_reconciler",
+            "operator_reason": reason,
+            "actor_ref": actor_ref or default_actor_ref(),
+            "queue_status": plan["queue_status"],
+            "previous_loop_status": plan["loop_status"],
+            "queue_event_hash": plan["queue_event_hash"],
+            "previous_loop_event_hash": plan["loop_event_hash"],
+        }
+        event = await create_auto_research_loop_event(
+            run_id=str(plan["run_id"]),
+            ticket_id=str(plan["ticket_id"]),
+            receipt_id=None,
+            event_type=str(plan["event_type"]),
+            loop_status=str(plan["loop_status_target"]),
+            worker_ref=actor_ref or default_actor_ref(),
+            provider_usage=[],
+            event_doc=event_doc,
+        )
+        await safe_project_public_loop_activity(
+            str(plan["ticket_id"]),
+            source_ref=f"terminal_queue_reconciler:{plan['run_id']}",
+            reason=reason,
+            force=True,
+        )
+        repaired.append({**plan, "event_seq": event.get("seq"), "event_hash": event.get("anchored_hash")})
+    return {
+        "ok": True,
+        "dry_run": False,
+        "action": "reconcile-loop-projections",
+        "planned_count": len(planned),
+        "repaired_count": len(repaired),
+        "repaired": repaired,
+    }
+
+
+async def repair_public_loop_cards(
+    *,
+    ticket_id: str | None = None,
+    limit: int = 50,
+    reason: str = "operator_public_card_repair",
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    if ticket_id:
+        ticket_ids = [str(ticket_id)]
+    else:
+        tickets = await select_all(
+            "research_loop_ticket_current",
+            columns="ticket_id,current_status_at,created_at",
+            filters=(),
+            order_by=(("current_status_at", True), ("created_at", True)),
+            max_rows=max(1, int(limit or 50)),
+        )
+        ticket_ids = [str(row.get("ticket_id")) for row in tickets if row.get("ticket_id")]
+    planned: list[dict[str, Any]] = []
+    repaired: list[dict[str, Any]] = []
+    for current_ticket_id in ticket_ids[: max(1, int(limit or 50))]:
+        derived = await _derive_public_loop_outcome_for_ticket(current_ticket_id)
+        if not derived:
+            continue
+        planned.append(derived)
+        if dry_run:
+            continue
+        await safe_project_public_loop_activity(
+            current_ticket_id,
+            source_ref=f"operator_public_card_repair:{current_ticket_id}",
+            reason=reason,
+            force=True,
+        )
+        repaired.append(derived)
+    return {
+        "ok": True,
+        "dry_run": bool(dry_run),
+        "action": "repair-public-cards",
+        "planned": planned,
+        "repaired_count": len(repaired),
+    }
+
+
+async def _derive_public_loop_outcome_for_ticket(ticket_id: str) -> dict[str, Any] | None:
+    ticket = await select_one("research_loop_ticket_current", filters=(("ticket_id", ticket_id),))
+    if not ticket:
+        return None
+    queue_rows = await select_many(
+        "research_loop_run_queue_current",
+        filters=(("ticket_id", ticket_id),),
+        order_by=(("current_status_at", True),),
+        limit=1000,
+    )
+    receipt_rows = await select_many(
+        "research_loop_receipt_current",
+        filters=(("ticket_id", ticket_id),),
+        order_by=(("current_status_at", True),),
+        limit=1000,
+    )
+    candidate_rows = await select_many(
+        "research_lab_candidate_evaluation_current",
+        filters=(("ticket_id", ticket_id),),
+        order_by=(("current_status_at", True),),
+        limit=1000,
+    )
+    score_bundle_rows = await select_many(
+        "research_evaluation_score_bundle_current",
+        filters=(("ticket_id", ticket_id),),
+        order_by=(("current_status_at", True),),
+        limit=1000,
+    )
+    promotion_rows = []
+    candidate_ids = [str(row.get("candidate_id")) for row in candidate_rows if row.get("candidate_id")]
+    if candidate_ids:
+        promotion_rows = await select_many(
+            "research_lab_candidate_promotion_events",
+            filters=(("candidate_id", "in", candidate_ids)),
+            order_by=(("created_at", True),),
+            limit=1000,
+        )
+    outcome = derive_public_loop_outcome(
+        ticket=ticket,
+        queue_rows=queue_rows,
+        receipt_rows=receipt_rows,
+        candidate_rows=candidate_rows,
+        score_bundle_rows=score_bundle_rows,
+        promotion_event_rows=promotion_rows,
+        improvement_threshold_points=ResearchLabGatewayConfig.from_env().improvement_threshold_points,
+        improvement_min_delta_lcb=ResearchLabGatewayConfig.from_env().improvement_min_delta_lcb,
+    )
+    return {
+        "ticket_id": ticket_id,
+        "run_id": outcome.run_id,
+        "outcome_label": outcome.outcome_label,
+        "outcome_band": outcome.outcome_band,
+        "event_type": outcome.event_type,
+        "candidate_count": outcome.candidate_count,
+        "scored_candidate_count": outcome.scored_candidate_count,
+    }
 
 
 # A candidate is safe to requeue when it failed the baseline-readiness race: the
@@ -535,6 +744,197 @@ async def requeue_failed_loop(
         "requeued_event_id": event.get("event_id"),
         "requeued_event_seq": event.get("seq"),
         "requeued_event_hash": event.get("anchored_hash"),
+    }
+
+
+async def resume_credit_blocked_run(
+    *,
+    run_id: str,
+    reason: str = "credit_preflight_passed_resume",
+    actor_ref: str | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    qrow = await select_one(
+        "research_loop_run_queue_current",
+        columns=(
+            "run_id,ticket_id,current_queue_status,current_reason,queue_priority,"
+            "current_event_hash,current_status_at"
+        ),
+        filters=(("run_id", run_id),),
+    )
+    if not qrow:
+        return {"ok": False, "error": "loop_run_not_found", "run_id": run_id}
+    if str(qrow.get("current_queue_status") or "") != "paused" or str(qrow.get("current_reason") or "") != "blocked_for_credit":
+        return {
+            "ok": False,
+            "error": "run_not_blocked_for_credit",
+            "run_id": run_id,
+            "queue_status": qrow.get("current_queue_status"),
+            "reason": qrow.get("current_reason"),
+        }
+    key_doc = await _preflight_openrouter_key_for_run(str(qrow["ticket_id"]))
+    if not key_doc.get("ok"):
+        return {"ok": False, "run_id": run_id, **key_doc}
+    plan = {
+        "ok": True,
+        "action": "resume-credit-blocked-run",
+        "run_id": run_id,
+        "ticket_id": str(qrow["ticket_id"]),
+        "preflight": key_doc,
+    }
+    if dry_run:
+        return {**plan, "dry_run": True}
+    config = ResearchLabGatewayConfig.from_env()
+    event = await create_queue_event(
+        run_id=str(qrow["run_id"]),
+        ticket_id=str(qrow["ticket_id"]),
+        event_type="queued",
+        queue_priority=int(qrow.get("queue_priority") or 0),
+        worker_ref=actor_ref,
+        reason=reason,
+        event_doc={
+            "schema_version": "1.0",
+            **autoresearch_queue_capacity_doc(config),
+            "resume_source": "research_lab_credit_preflight_cli",
+            "previous_reason": qrow.get("current_reason"),
+            "previous_event_hash": qrow.get("current_event_hash"),
+            "previous_status_at": qrow.get("current_status_at"),
+            "actor_ref": actor_ref or default_actor_ref(),
+        },
+    )
+    return {**plan, "dry_run": False, "event_seq": event.get("seq"), "event_hash": event.get("anchored_hash")}
+
+
+async def _preflight_openrouter_key_for_run(ticket_id: str) -> dict[str, Any]:
+    ticket = await select_one(
+        "research_loop_ticket_current",
+        columns="ticket_id,miner_hotkey,miner_openrouter_key_ref,miner_openrouter_key_handling",
+        filters=(("ticket_id", ticket_id),),
+    )
+    if not ticket:
+        return {"ok": False, "error": "ticket_not_found", "ticket_id": ticket_id}
+    try:
+        raw_key = await _resolve_openrouter_key_for_ticket(ticket)
+        doc = await asyncio.to_thread(preflight_openrouter_key, raw_key)
+    except OpenRouterKeyVaultError as exc:
+        return {"ok": False, "error": "openrouter_preflight_failed", "detail": str(exc)[:240]}
+    remaining = doc.get("limit_remaining")
+    try:
+        remaining_value = float(remaining) if remaining is not None else None
+    except (TypeError, ValueError):
+        remaining_value = None
+    if remaining_value is not None and remaining_value <= 0:
+        return {"ok": False, "error": "openrouter_credit_still_blocked", "limit_remaining": remaining}
+    return {
+        "ok": True,
+        "key_hash": doc.get("key_hash"),
+        "limit": doc.get("limit"),
+        "limit_remaining": remaining,
+        "limit_reset": doc.get("limit_reset"),
+    }
+
+
+async def _resolve_openrouter_key_for_ticket(ticket: Mapping[str, Any]) -> str:
+    config = ResearchLabGatewayConfig.from_env()
+    key_ref = str(ticket.get("miner_openrouter_key_ref") or "")
+    miner_hotkey = str(ticket.get("miner_hotkey") or "")
+    if key_ref.startswith("encrypted_ref:openrouter:"):
+        row = await select_one(
+            "research_lab_openrouter_key_refs",
+            filters=(("key_ref", key_ref), ("miner_hotkey", miner_hotkey)),
+        )
+        if not row:
+            raise OpenRouterKeyVaultError("encrypted OpenRouter key ref was not found")
+        return await asyncio.to_thread(
+            decrypt_openrouter_key,
+            ciphertext_b64=str(row["encrypted_key_ciphertext"]),
+            miner_hotkey=miner_hotkey,
+            key_ref=key_ref,
+        )
+    env_name = str(config.miner_openrouter_key_env_var or "")
+    if config.miner_openrouter_key_ref_env_map_json:
+        try:
+            mapping = json.loads(config.miner_openrouter_key_ref_env_map_json)
+        except json.JSONDecodeError as exc:
+            raise OpenRouterKeyVaultError("OpenRouter key-ref env map is invalid") from exc
+        if isinstance(mapping, Mapping) and mapping.get(key_ref):
+            env_name = str(mapping[key_ref])
+    if not env_name:
+        raise OpenRouterKeyVaultError("no OpenRouter key env var configured for miner key ref")
+    value = os.getenv(env_name)
+    if not value:
+        raise OpenRouterKeyVaultError("configured OpenRouter key env var is empty")
+    return value
+
+
+async def rebase_stale_parent_candidates(
+    *,
+    candidate_id: str | None = None,
+    limit: int = 25,
+    max_batch_size: int = 5,
+    actor_ref: str | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    filters: tuple[tuple[Any, ...], ...]
+    if candidate_id:
+        filters = (("candidate_id", candidate_id),)
+        max_rows = 1
+    else:
+        filters = (("current_candidate_status", "rejected"), ("current_reason", "stale_parent_needs_rescore"))
+        max_rows = max(1, int(limit or 25))
+    candidates = await select_all(
+        "research_lab_candidate_evaluation_current",
+        columns="*",
+        filters=filters,
+        order_by=(("current_status_at", False),),
+        max_rows=max_rows,
+    )
+    candidates = candidates[: max(1, min(int(limit or 25), int(max_batch_size or 5)))]
+    planned: list[dict[str, Any]] = []
+    processed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for candidate in candidates:
+        cid = str(candidate.get("candidate_id") or "")
+        if not cid:
+            continue
+        existing_rebase = await select_many(
+            "research_lab_candidate_promotion_events",
+            columns="candidate_id,derived_candidate_id,event_type,promotion_status,created_at",
+            filters=(("candidate_id", cid), ("event_type", "rebase_queued")),
+            order_by=(("created_at", True),),
+            limit=1,
+        )
+        if existing_rebase:
+            skipped.append({"candidate_id": cid, "reason": "already_has_rebase_queued"})
+            continue
+        item = {
+            "candidate_id": cid,
+            "run_id": candidate.get("run_id"),
+            "ticket_id": candidate.get("ticket_id"),
+            "parent_artifact_hash": candidate.get("parent_artifact_hash"),
+        }
+        planned.append(item)
+        if dry_run:
+            continue
+        from .scoring_worker import ResearchLabGatewayScoringWorker
+
+        worker = ResearchLabGatewayScoringWorker(
+            ResearchLabGatewayConfig.from_env(),
+            worker_ref=actor_ref or default_actor_ref(),
+        )
+        result = await worker._maybe_rebase_stale_candidate_before_scoring(
+            candidate,
+            evaluation_epoch=0,
+            elapsed_seconds=lambda: 0.0,
+        )
+        processed.append({**item, "result": result})
+    return {
+        "ok": True,
+        "dry_run": bool(dry_run),
+        "action": "rebase-stale-candidates",
+        "planned": planned,
+        "processed": processed,
+        "skipped": skipped,
     }
 
 

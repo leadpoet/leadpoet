@@ -639,30 +639,48 @@ async def create_auto_research_loop_event(
     cost_ledger: dict[str, Any] | None = None,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    seq = await next_event_seq("research_lab_auto_research_loop_events", "run_id", run_id)
-    payload = {
-        "run_id": run_id,
-        "ticket_id": ticket_id,
-        "receipt_id": receipt_id,
-        "seq": seq,
-        "event_type": event_type,
-        "loop_status": loop_status,
-        "node_id": node_id,
-        "worker_ref": worker_ref,
-        "elapsed_seconds": round(float(elapsed_seconds), 3),
-        "candidate_artifact_hash": candidate_artifact_hash,
-        "candidate_patch_hash": candidate_patch_hash,
-        "provider_usage": provider_usage or [],
-        "cost_ledger": cost_ledger or {},
-        "event_doc": event_doc or {},
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_lab_auto_research_loop_events", row)
+    last_exc: BaseException | None = None
+    for _attempt in range(4):
+        seq = await next_event_seq("research_lab_auto_research_loop_events", "run_id", run_id)
+        payload = {
+            "run_id": run_id,
+            "ticket_id": ticket_id,
+            "receipt_id": receipt_id,
+            "seq": seq,
+            "event_type": event_type,
+            "loop_status": loop_status,
+            "node_id": node_id,
+            "worker_ref": worker_ref,
+            "elapsed_seconds": round(float(elapsed_seconds), 3),
+            "candidate_artifact_hash": candidate_artifact_hash,
+            "candidate_patch_hash": candidate_patch_hash,
+            "provider_usage": provider_usage or [],
+            "cost_ledger": cost_ledger or {},
+            "event_doc": event_doc or {},
+        }
+        row = {
+            "event_id": str(uuid4()),
+            "schema_version": "1.0",
+            **payload,
+            "anchored_hash": canonical_hash(payload),
+        }
+        try:
+            return await insert_row("research_lab_auto_research_loop_events", row)
+        except Exception as exc:
+            last_exc = exc
+            if not _is_loop_event_seq_conflict(exc):
+                raise
+            await asyncio.sleep(0.05 * (_attempt + 1))
+    raise RuntimeError("research_lab_auto_research_loop_events: seq conflict retry exhausted") from last_exc
+
+
+def _is_loop_event_seq_conflict(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return (
+        "research_lab_auto_research_loop_events_run_seq_key" in message
+        or ("duplicate key" in message and "research_lab_auto_research_loop_events" in message)
+        or ("unique constraint" in message and "research_lab_auto_research_loop_events" in message)
+    )
 
 
 async def latest_auto_research_checkpoint(run_id: str) -> dict[str, Any] | None:

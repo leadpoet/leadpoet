@@ -13,16 +13,159 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from gateway.research_lab.config import ResearchLabGatewayConfig
+from gateway.research_lab.admin import build_parser
+from gateway.research_lab import maintenance as maintenance_mod
 from gateway.research_lab import scoring_worker as scoring_mod
 from gateway.research_lab import worker as hosted_mod
 
 
 async def main() -> int:
+    _test_admin_command_parser()
+    await _test_maintenance_resume_skips_credit_blocked()
+    await _test_reconcile_terminal_loop_projection_dry_run()
+    await _test_rebase_stale_candidates_dry_run()
     await _test_terminal_loop_projection()
     await _test_candidate_claim_skips_retry_cooldowns()
     _test_failure_classification()
     print("Research Lab recovery controls verified")
     return 0
+
+
+def _test_admin_command_parser() -> None:
+    parser = build_parser()
+    cases = (
+        ("reconcile-loop-projections", ["reconcile-loop-projections", "--dry-run"]),
+        ("repair-public-cards", ["repair-public-cards", "--dry-run"]),
+        ("rebase-stale-candidates", ["rebase-stale-candidates", "--dry-run", "--limit", "1"]),
+        ("resume-credit-blocked-run", ["resume-credit-blocked-run", "--run-id", "run-a", "--dry-run"]),
+    )
+    for expected, argv in cases:
+        parsed = parser.parse_args(argv)
+        assert parsed.command == expected
+
+
+async def _test_maintenance_resume_skips_credit_blocked() -> None:
+    rows = [
+        {
+            "run_id": "run-credit",
+            "ticket_id": "ticket-credit",
+            "current_queue_status": "paused",
+            "current_reason": "blocked_for_credit",
+            "queue_priority": 0,
+            "current_event_hash": "sha256:" + "1" * 64,
+            "current_status_at": "2026-01-01T00:00:00+00:00",
+        },
+        {
+            "run_id": "run-maint",
+            "ticket_id": "ticket-maint",
+            "current_queue_status": "paused",
+            "current_reason": "maintenance_pause_queued",
+            "queue_priority": 0,
+            "current_event_hash": "sha256:" + "2" * 64,
+            "current_status_at": "2026-01-01T00:01:00+00:00",
+        },
+    ]
+    writes: list[dict[str, Any]] = []
+    original_select_all = maintenance_mod.select_all
+    original_create_queue_event = maintenance_mod.create_queue_event
+
+    async def fake_select_all(table: str, **kwargs: Any) -> list[dict[str, Any]]:
+        assert table == "research_loop_run_queue_current"
+        return [dict(row) for row in rows]
+
+    async def fake_create_queue_event(**kwargs: Any) -> dict[str, Any]:
+        writes.append(dict(kwargs))
+        return {"seq": 1, "anchored_hash": "sha256:" + "3" * 64}
+
+    try:
+        maintenance_mod.select_all = fake_select_all  # type: ignore[assignment]
+        maintenance_mod.create_queue_event = fake_create_queue_event  # type: ignore[assignment]
+        result = await maintenance_mod.requeue_paused_autoresearch_runs(actor_ref="test")
+        assert result["found_paused"] == 2
+        assert result["requeued"] == 1
+        assert result["blocked"][0]["run_id"] == "run-credit"
+        assert writes[0]["run_id"] == "run-maint"
+    finally:
+        maintenance_mod.select_all = original_select_all  # type: ignore[assignment]
+        maintenance_mod.create_queue_event = original_create_queue_event  # type: ignore[assignment]
+
+
+async def _test_reconcile_terminal_loop_projection_dry_run() -> None:
+    original_select_all = maintenance_mod.select_all
+    original_select_one = maintenance_mod.select_one
+
+    async def fake_select_all(table: str, **kwargs: Any) -> list[dict[str, Any]]:
+        assert table == "research_loop_run_queue_current"
+        return [
+            {
+                "run_id": "run-failed",
+                "ticket_id": "ticket-failed",
+                "current_queue_status": "failed",
+                "current_reason": "fixture",
+                "current_event_seq": 4,
+                "current_event_hash": "sha256:" + "4" * 64,
+                "current_status_at": "2026-01-01T00:01:00+00:00",
+                "worker_ref": "worker",
+            }
+        ]
+
+    async def fake_select_one(table: str, **kwargs: Any) -> dict[str, Any] | None:
+        assert table == "research_lab_auto_research_loop_current"
+        return {
+            "run_id": "run-failed",
+            "ticket_id": "ticket-failed",
+            "receipt_id": "receipt-failed",
+            "current_loop_status": "running",
+            "current_event_type": "checkpoint_saved",
+            "current_event_seq": 2,
+            "current_event_hash": "sha256:" + "5" * 64,
+            "current_status_at": "2026-01-01T00:00:00+00:00",
+        }
+
+    try:
+        maintenance_mod.select_all = fake_select_all  # type: ignore[assignment]
+        maintenance_mod.select_one = fake_select_one  # type: ignore[assignment]
+        result = await maintenance_mod.reconcile_terminal_loop_projections(dry_run=True)
+        assert result["ok"] is True
+        assert result["dry_run"] is True
+        assert result["planned"][0]["event_type"] == "loop_failed"
+    finally:
+        maintenance_mod.select_all = original_select_all  # type: ignore[assignment]
+        maintenance_mod.select_one = original_select_one  # type: ignore[assignment]
+
+
+async def _test_rebase_stale_candidates_dry_run() -> None:
+    original_select_all = maintenance_mod.select_all
+    original_select_many = maintenance_mod.select_many
+
+    async def fake_select_all(table: str, **kwargs: Any) -> list[dict[str, Any]]:
+        assert table == "research_lab_candidate_evaluation_current"
+        return [
+            {
+                "candidate_id": "candidate:" + "a" * 64,
+                "run_id": "run-stale",
+                "ticket_id": "ticket-stale",
+                "parent_artifact_hash": "sha256:" + "6" * 64,
+                "current_candidate_status": "rejected",
+                "current_reason": "stale_parent_needs_rescore",
+                "current_status_at": "2026-01-01T00:00:00+00:00",
+            }
+        ]
+
+    async def fake_select_many(table: str, **kwargs: Any) -> list[dict[str, Any]]:
+        assert table == "research_lab_candidate_promotion_events"
+        return []
+
+    try:
+        maintenance_mod.select_all = fake_select_all  # type: ignore[assignment]
+        maintenance_mod.select_many = fake_select_many  # type: ignore[assignment]
+        result = await maintenance_mod.rebase_stale_parent_candidates(dry_run=True, limit=1)
+        assert result["ok"] is True
+        assert result["planned"][0]["candidate_id"] == "candidate:" + "a" * 64
+        assert result["processed"] == []
+    finally:
+        maintenance_mod.select_all = original_select_all  # type: ignore[assignment]
+        maintenance_mod.select_many = original_select_many  # type: ignore[assignment]
 
 
 async def _test_terminal_loop_projection() -> None:

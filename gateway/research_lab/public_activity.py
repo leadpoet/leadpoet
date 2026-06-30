@@ -387,6 +387,7 @@ def derive_public_loop_outcome(
 
     event_doc = {
         "queue_status": str(latest_queue.get("current_queue_status") or "") if latest_queue else "",
+        "queue_reason": str(latest_queue.get("current_reason") or "") if latest_queue else "",
         "receipt_status": str(latest_receipt.get("current_receipt_status") or "") if latest_receipt else "",
         "candidate_status_counts": status_counts,
         "score_bundle_count": len(score_bundle_rows),
@@ -429,6 +430,51 @@ def derive_public_loop_outcome(
             "promotion_passed",
             "promotion_passed",
             "passed_threshold",
+            candidate_count,
+            scored_candidate_count,
+            best_summary,
+            run_id,
+            receipt_id,
+            last_activity_at,
+            event_doc,
+        )
+
+    queue_status = str(latest_queue.get("current_queue_status") or "") if latest_queue else ""
+    queue_reason = str(latest_queue.get("current_reason") or "") if latest_queue else ""
+    ticket_status = str(ticket.get("current_ticket_status") or ticket.get("ticket_status") or "")
+    if queue_status in {"paused", "failed"} and _is_credit_block_reason(queue_reason):
+        return PublicLoopOutcome(
+            "blocked_for_credit",
+            "blocked_for_credit",
+            "blocked",
+            candidate_count,
+            scored_candidate_count,
+            best_summary,
+            run_id,
+            receipt_id,
+            last_activity_at,
+            event_doc,
+        )
+    if _has_candidate_reason(candidate_rows, "stale_parent_needs_rescore"):
+        return PublicLoopOutcome(
+            "needs_rescore",
+            "needs_rescore",
+            "blocked",
+            candidate_count,
+            scored_candidate_count,
+            best_summary,
+            run_id,
+            receipt_id,
+            last_activity_at,
+            event_doc,
+        )
+    if _has_candidate_reason(candidate_rows, "baseline_not_ready") or (
+        queue_status == "queued" and queue_reason == "baseline_not_ready"
+    ):
+        return PublicLoopOutcome(
+            "waiting_for_baseline",
+            "waiting_for_baseline",
+            "pending",
             candidate_count,
             scored_candidate_count,
             best_summary,
@@ -505,12 +551,23 @@ def derive_public_loop_outcome(
             event_doc,
         )
 
-    queue_status = str(latest_queue.get("current_queue_status") or "") if latest_queue else ""
-    ticket_status = str(ticket.get("current_ticket_status") or ticket.get("ticket_status") or "")
     if candidate_count or queue_status == "completed":
         return PublicLoopOutcome(
             "candidate_generation_complete",
             "candidate_generation_complete",
+            "pending",
+            candidate_count,
+            scored_candidate_count,
+            best_summary,
+            run_id,
+            receipt_id,
+            last_activity_at,
+            event_doc,
+        )
+    if not queue_rows and not receipt_rows and not candidate_rows:
+        return PublicLoopOutcome(
+            "not_started",
+            "not_started",
             "pending",
             candidate_count,
             scored_candidate_count,
@@ -639,15 +696,24 @@ def topic_group_items(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]
         label = str(row.get("current_outcome_label") or "submitted")
         band = str(row.get("current_outcome_band") or "pending")
         group["total"] += 1
-        if label in {"queued", "running", "scoring"}:
+        if label in {"queued", "running", "scoring", "waiting_for_baseline"}:
             group["running"] += 1
-        if label in {"candidate_generation_complete", "scored_no_gain", "scored_promising", "promotion_passed", "promoted", "failed"}:
+        if label in {
+            "candidate_generation_complete",
+            "scored_no_gain",
+            "scored_promising",
+            "promotion_passed",
+            "promoted",
+            "failed",
+            "blocked_for_credit",
+            "needs_rescore",
+        }:
             group["completed"] += 1
         if label in {"scored_no_gain", "scored_promising", "promotion_passed", "promoted"}:
             group["scored"] += 1
         if band in {"small_gain", "passed_threshold", "promoted"}:
             group["promising_or_promoted"] += 1
-        if band in {"no_gain", "failed"}:
+        if band in {"no_gain", "failed", "blocked"}:
             group["no_gain_or_failed"] += 1
         activity = row.get("current_last_activity_at") or row.get("created_at")
         if activity and (not group["latest_activity_at"] or str(activity) > str(group["latest_activity_at"])):
@@ -766,6 +832,25 @@ def _status_counts(rows: Sequence[Mapping[str, Any]], field: str) -> dict[str, i
 
 def _has_active_candidate(status_counts: Mapping[str, int]) -> bool:
     return any(status_counts.get(status, 0) for status in ("assigned", "evaluating", "queued"))
+
+
+def _has_candidate_reason(rows: Sequence[Mapping[str, Any]], reason: str) -> bool:
+    return any(str(row.get("current_reason") or row.get("reason") or "") == reason for row in rows)
+
+
+def _is_credit_block_reason(reason: str) -> bool:
+    lowered = str(reason or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "blocked_for_credit",
+            "insufficient_credit",
+            "insufficient credits",
+            "insufficient balance",
+            "payment required",
+            "openrouter_credit_blocked",
+        )
+    )
 
 
 def _best_score_bundle(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:

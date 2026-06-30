@@ -530,6 +530,7 @@ class ResearchLabHostedWorker:
         self._require_enabled()
         if not self.config.hosted_worker_dry_run:
             await self._recover_stale_started_runs()
+            await self._reconcile_stale_loop_projections()
         if await is_autoresearch_maintenance_paused():
             return HostedWorkerOutcome(
                 processed=False,
@@ -1355,6 +1356,86 @@ class ResearchLabHostedWorker:
                 await asyncio.sleep(0.25 * attempt)
         raise RuntimeError(f"Research Lab store write failed after retries: {label}") from last_exc
 
+    async def _reconcile_stale_loop_projections(self, *, limit: int = 200) -> int:
+        """Finalize loop projections left ``running`` while their queue row is terminal.
+
+        The loop ``*_current`` view is just the latest loop event; nothing forces it
+        terminal when the run's queue row reaches completed/failed/cancelled. That
+        decoupling produces zombie ``running`` loops. This sweep appends the matching
+        terminal loop event so the projection reflects reality. Idempotent: once the
+        terminal loop event is appended the row is no longer ``running`` and re-runs
+        skip it.
+        """
+        loop_rows = await select_many(
+            "research_lab_auto_research_loop_current",
+            columns="run_id,ticket_id,current_loop_status",
+            filters=(("current_loop_status", "running"),),
+            limit=limit,
+        )
+        reconciled: list[str] = []
+        for row in loop_rows:
+            run_id = str(row.get("run_id") or "")
+            if not run_id:
+                continue
+            queue = await select_one(
+                "research_loop_run_queue_current",
+                columns="run_id,ticket_id,current_queue_status",
+                filters=(("run_id", run_id),),
+            )
+            if not queue:
+                continue
+            queue_status = str(queue.get("current_queue_status") or "")
+            if queue_status not in {"completed", "failed", "cancelled", "tombstoned"}:
+                continue
+            ticket_id = str(queue.get("ticket_id") or row.get("ticket_id") or "")
+            if not ticket_id:
+                continue
+            event_type = "loop_completed" if queue_status == "completed" else "loop_failed"
+            loop_status = "completed" if queue_status == "completed" else "failed"
+            try:
+                await self._store_write_with_retry(
+                    f"reconcile_loop_projection:{compact_ref(run_id)}",
+                    lambda rid=run_id, tid=ticket_id, et=event_type, ls=loop_status, qs=queue_status: create_auto_research_loop_event(
+                        run_id=rid,
+                        ticket_id=tid,
+                        event_type=et,
+                        loop_status=ls,
+                        worker_ref=self.worker_ref,
+                        event_doc={
+                            "schema_version": "1.0",
+                            "reason": "stale_loop_projection_reconciled",
+                            "source": "hosted_worker_loop_reconciler",
+                            "queue_terminal_status": qs,
+                            "previous_loop_status": "running",
+                        },
+                    ),
+                )
+                reconciled.append(run_id)
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_stale_loop_projection_reconcile_failed run_id=%s error=%s",
+                    compact_ref(run_id),
+                    str(exc)[:240],
+                )
+        if reconciled:
+            # Alert (Item 6): queue/projection mismatch detected + repaired.
+            logger.warning(
+                format_worker_block(
+                    "RESEARCH LAB STALE LOOP PROJECTIONS RECONCILED",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Count", len(reconciled)),
+                        ("Runs", ", ".join(compact_ref(r) for r in reconciled[:10])),
+                    ),
+                )
+            )
+            logger.warning(
+                "research_lab_stale_loop_projection_reconciled worker_ref=%s count=%s",
+                self.worker_ref,
+                len(reconciled),
+            )
+        return len(reconciled)
+
     async def _ensure_terminal_loop_projection(
         self,
         context: HostedRunContext,
@@ -1375,28 +1456,49 @@ class ResearchLabHostedWorker:
             provider_usage = self._provider_usage(context)
         except HostedResearchLabWorkerError:
             provider_usage = []
+        projection_event_doc = {
+            "schema_version": "1.0",
+            "reason": reason,
+            "source": "hosted_worker_terminal_queue_projection",
+            "previous_loop_status": current.get("current_loop_status") if current else None,
+            "previous_loop_event_type": current.get("current_event_type") if current else None,
+            "previous_loop_event_seq": current.get("current_event_seq") if current else None,
+            "previous_loop_event_hash": current.get("current_event_hash") if current else None,
+            **dict(event_doc or {}),
+        }
         try:
-            await create_auto_research_loop_event(
-                run_id=context.run_id,
-                ticket_id=context.ticket_id,
-                receipt_id=context.receipt_id,
-                event_type=event_type,
-                loop_status=loop_status,
-                worker_ref=self.worker_ref,
-                provider_usage=provider_usage,
-                event_doc={
-                    "schema_version": "1.0",
-                    "reason": reason,
-                    "source": "hosted_worker_terminal_queue_projection",
-                    "previous_loop_status": current.get("current_loop_status") if current else None,
-                    "previous_loop_event_type": current.get("current_event_type") if current else None,
-                    "previous_loop_event_seq": current.get("current_event_seq") if current else None,
-                    "previous_loop_event_hash": current.get("current_event_hash") if current else None,
-                    **dict(event_doc or {}),
-                },
+            # Retry transient store failures instead of silently dropping the terminal
+            # projection (a dropped append leaves the loop stuck `running` forever).
+            await self._store_write_with_retry(
+                f"terminal_loop_projection:{event_type}",
+                lambda: create_auto_research_loop_event(
+                    run_id=context.run_id,
+                    ticket_id=context.ticket_id,
+                    receipt_id=context.receipt_id,
+                    event_type=event_type,
+                    loop_status=loop_status,
+                    worker_ref=self.worker_ref,
+                    provider_usage=provider_usage,
+                    event_doc=projection_event_doc,
+                ),
             )
         except Exception as exc:
-            logger.warning(
+            # Alert loudly (error, not warning) on ultimate failure. We do NOT re-raise
+            # here — re-raising inside the failure/completion paths could mask the
+            # original outcome — the periodic loop-projection reconciler is the backstop
+            # that finalizes any loop left `running` against a terminal queue row.
+            logger.error(
+                format_worker_block(
+                    "RESEARCH LAB TERMINAL LOOP PROJECTION FAILED",
+                    (
+                        ("Run", compact_ref(context.run_id)),
+                        ("Event", event_type),
+                        ("Error", str(exc)[:300]),
+                        ("Note", "loop may be left running; reconciler will finalize"),
+                    ),
+                )
+            )
+            logger.error(
                 "research_lab_terminal_loop_projection_failed run_id=%s event_type=%s error=%s",
                 compact_ref(context.run_id),
                 event_type,

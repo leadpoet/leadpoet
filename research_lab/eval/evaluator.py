@@ -37,6 +37,7 @@ CompanyScorer = Callable[
     [Sequence[Mapping[str, Any]], Mapping[str, Any], bool],
     Union[Awaitable[list[float]], list[float]],
 ]
+ParentFreshnessCheck = Callable[[Mapping[str, Any]], Union[Awaitable[None], None]]
 
 
 class RealEvaluatorRequired(RuntimeError):
@@ -56,6 +57,7 @@ async def evaluate_private_model_pair(
     run_context: Mapping[str, Any],
     policy: Mapping[str, Any] | None = None,
     private_holdout_gate: Mapping[str, Any] | None = None,
+    parent_freshness_check: ParentFreshnessCheck | None = None,
 ) -> dict[str, Any]:
     """Run a real paired base-vs-candidate evaluation.
 
@@ -112,6 +114,7 @@ async def evaluate_private_model_pair(
             image_candidate=image_candidate,
             runtime_patch=runtime_patch,
             gate=private_holdout_gate,
+            parent_freshness_check=parent_freshness_check,
         )
         return build_score_bundle_from_scored_icps(
             artifact_manifest=artifact,
@@ -132,6 +135,7 @@ async def evaluate_private_model_pair(
         run_context=run_context,
         image_candidate=image_candidate,
         runtime_patch=runtime_patch,
+        parent_freshness_check=parent_freshness_check,
     )
     return build_score_bundle_from_scored_icps(
         artifact_manifest=artifact,
@@ -153,13 +157,24 @@ async def score_private_model_pair_items(
     run_context: Mapping[str, Any],
     image_candidate: bool,
     runtime_patch: CandidatePatchManifest | None = None,
+    parent_freshness_check: ParentFreshnessCheck | None = None,
 ) -> list[dict[str, Any]]:
     """Score a subset of private benchmark items without building a bundle."""
 
     scorer = company_scorer or QualificationStyleCompanyScorer()
     per_icp_results: list[dict[str, Any]] = []
     candidate_runtime_skip_reason = ""
-    for item in benchmark_items:
+    for item_index, item in enumerate(benchmark_items):
+        await _run_parent_freshness_check(
+            parent_freshness_check,
+            {
+                "phase": "before_icp",
+                "next_icp_index": item_index,
+                "completed_icp_count": len(per_icp_results),
+                "icp_ref": str(item.get("icp_ref") or item.get("icp_hash") or ""),
+                "icp_hash": str(item.get("icp_hash") or ""),
+            },
+        )
         icp = item.get("icp")
         if not isinstance(icp, Mapping):
             raise RealEvaluatorRequired("benchmark item is missing private ICP payload")
@@ -218,6 +233,16 @@ async def score_private_model_pair_items(
                 "failure_reason": ";".join(failure_reasons),
             }
         )
+        await _run_parent_freshness_check(
+            parent_freshness_check,
+            {
+                "phase": "after_icp",
+                "last_icp_index": item_index,
+                "completed_icp_count": len(per_icp_results),
+                "icp_ref": str(item.get("icp_ref") or item.get("icp_hash") or ""),
+                "icp_hash": str(item.get("icp_hash") or ""),
+            },
+        )
     return per_icp_results
 
 
@@ -231,6 +256,7 @@ async def _score_with_private_holdout_gate(
     image_candidate: bool,
     runtime_patch: CandidatePatchManifest | None,
     gate: Mapping[str, Any],
+    parent_freshness_check: ParentFreshnessCheck | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     public_refs = {
         str(item)
@@ -260,6 +286,7 @@ async def _score_with_private_holdout_gate(
         run_context=run_context,
         image_candidate=image_candidate,
         runtime_patch=runtime_patch,
+        parent_freshness_check=parent_freshness_check,
     )
     baseline_public_score = float(gate.get("baseline_public_score") or 0.0)
     candidate_public_score = _benchmark_style_score(public_results, "candidate_company_scores")
@@ -288,8 +315,20 @@ async def _score_with_private_holdout_gate(
         run_context=run_context,
         image_candidate=image_candidate,
         runtime_patch=runtime_patch,
+        parent_freshness_check=parent_freshness_check,
     )
     return [*public_results, *private_results], gate_result
+
+
+async def _run_parent_freshness_check(
+    callback: ParentFreshnessCheck | None,
+    progress: Mapping[str, Any],
+) -> None:
+    if callback is None:
+        return
+    result = callback(progress)
+    if inspect.isawaitable(result):
+        await result
 
 
 def _benchmark_style_score(

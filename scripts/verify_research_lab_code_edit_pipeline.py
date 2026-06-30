@@ -28,7 +28,11 @@ from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest  # noqa: E402
 from gateway.research_lab import scoring_worker as scoring_worker_module  # noqa: E402
 from gateway.research_lab.code_build import CodeEditPatchApplyError  # noqa: E402
-from gateway.research_lab.scoring_worker import ResearchLabGatewayScoringWorker, _load_candidate_source_diff  # noqa: E402
+from gateway.research_lab.scoring_worker import (  # noqa: E402
+    ResearchLabGatewayScoringWorker,
+    StaleParentDuringScoring,
+    _load_candidate_source_diff,
+)
 
 
 def _manifest(name: str) -> PrivateModelArtifactManifest:
@@ -515,6 +519,328 @@ async def test_stale_parent_rebase_routes_apply_failure_to_repair() -> None:
         assert captured["candidate_requests"][0]["candidate_patch_manifest"]["parent_artifact_hash"] == active_parent.model_artifact_hash
 
 
+async def test_evaluator_parent_freshness_abort_stops_before_bundle() -> None:
+    draft = test_code_edit_parser_accepts_safe_diff()
+    parent = _manifest("parent")
+    candidate = _manifest("candidate")
+    source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
+    compat_manifest = code_edit_candidate_manifest(
+        draft=draft,
+        parent_artifact_hash=parent.model_artifact_hash,
+        candidate_artifact_hash=candidate.model_artifact_hash,
+        candidate_model_manifest_hash=candidate.manifest_hash,
+        source_diff_hash=source_diff_hash,
+        build_doc_hash=sha256_json({"build": "test"}),
+    )
+    benchmark = SealedBenchmarkSet(
+        benchmark_id="benchmark:test",
+        icp_set_hash=sha256_json({"icp": "set"}),
+        split_ref="split:test",
+        item_refs=("icp:test:1", "icp:test:2"),
+        scoring_version="qualification-company-scorer:v1",
+        hidden_plaintext_available=True,
+    )
+    calls = {"base": 0, "candidate": 0, "checks": []}
+
+    async def parent_runner(_icp, _context):
+        calls["base"] += 1
+        return [{"company_name": "BaseCo", "company_website": "https://base.example"}]
+
+    async def candidate_runner(_icp, _context):
+        calls["candidate"] += 1
+        return [{"company_name": "BetterCo", "company_website": "https://better.example"}]
+
+    def scorer(companies, _icp, is_reference_model):
+        return [50.0 if is_reference_model else 75.0 for _ in companies]
+
+    class ParentChanged(RuntimeError):
+        pass
+
+    async def parent_check(progress):
+        calls["checks"].append(dict(progress))
+        if progress.get("phase") == "after_icp" and int(progress.get("completed_icp_count") or 0) == 1:
+            raise ParentChanged("parent changed")
+
+    try:
+        await evaluate_private_model_pair(
+            artifact_manifest=parent,
+            candidate_artifact_manifest=candidate,
+            benchmark=benchmark,
+            patch_manifest=compat_manifest,
+            benchmark_items=[
+                {"icp_ref": "icp:test:1", "icp_hash": sha256_json({"i": 1}), "icp": {"industry": "Software"}},
+                {"icp_ref": "icp:test:2", "icp_hash": sha256_json({"i": 2}), "icp": {"industry": "Software"}},
+            ],
+            base_runner=parent_runner,
+            candidate_runner=candidate_runner,
+            company_scorer=scorer,
+            run_context={
+                "run_id": "run-test",
+                "ticket_id": "ticket-test",
+                "miner_hotkey": "5EFakeMinerHotkey111111111111111111111111111",
+                "island": "generalist",
+                "evaluation_epoch": 1,
+                "evaluator_version": "test",
+                "evidence_bundle_refs": [],
+                "execution_trace_ref": "trace:test",
+                "cost_ledger_ref": "cost:test",
+                "candidate_source_diff_hash": source_diff_hash,
+                "candidate_build_ref": sha256_json({"build": "test"}),
+                "signature_ref": "pending",
+            },
+            policy={"min_delta": 1.0, "min_successful_icps": 1},
+            parent_freshness_check=parent_check,
+        )
+    except ParentChanged:
+        pass
+    else:
+        raise AssertionError("parent freshness callback should abort scoring")
+    assert calls["base"] == 1
+    assert calls["candidate"] == 1
+    assert calls["checks"][-1]["phase"] == "after_icp"
+
+
+async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
+    draft = test_code_edit_parser_accepts_safe_diff()
+    old_parent = _manifest("parent")
+    active_parent = _manifest("active-parent")
+    candidate_manifest = _manifest("candidate")
+    source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
+    candidate = {
+        "candidate_id": "candidate:" + "7" * 64,
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "ticket_id": "22222222-2222-4222-8222-222222222222",
+        "receipt_id": None,
+        "miner_hotkey": "5EFakeMinerHotkey111111111111111111111111111",
+        "island": "generalist",
+        "candidate_kind": "image_build",
+        "parent_artifact_hash": old_parent.model_artifact_hash,
+        "private_model_manifest_doc": old_parent.to_dict(),
+        "candidate_model_manifest_doc": candidate_manifest.to_dict(),
+        "candidate_source_diff_hash": source_diff_hash,
+        "candidate_build_doc": {"source_diff_hash": source_diff_hash},
+        "candidate_patch_manifest": code_edit_candidate_manifest(
+            draft=draft,
+            parent_artifact_hash=old_parent.model_artifact_hash,
+            candidate_artifact_hash=candidate_manifest.model_artifact_hash,
+            candidate_model_manifest_hash=candidate_manifest.manifest_hash,
+            source_diff_hash=source_diff_hash,
+            build_doc_hash=sha256_json({"build": "old"}),
+        ),
+        "hypothesis_doc": {},
+        "redacted_public_summary": "Stale during scoring.",
+    }
+    captured: dict[str, list[dict[str, object]]] = {
+        "dispatch_events": [],
+        "evaluation_events": [],
+        "rebase_calls": [],
+        "public_activity": [],
+        "score_bundles": [],
+    }
+
+    async def fake_resolve_epoch(self):
+        return 9
+
+    async def fake_load_active_private_model(_config, *, register_bootstrap=False):
+        return SimpleNamespace(artifact=old_parent, version_row=None)
+
+    async def fake_fetch_window(**_kwargs):
+        return SimpleNamespace(
+            benchmark_id="benchmark:test",
+            window_hash=sha256_json({"window": "test"}),
+            split_ref="split:test",
+            item_refs=("icp:test:1",),
+            benchmark_items=[{"icp_ref": "icp:test:1", "icp_hash": sha256_json({"i": 1}), "icp": {"industry": "Software"}}],
+        )
+
+    async def fake_create_rolling(_window):
+        return {}
+
+    async def fake_eval_event(**kwargs):
+        captured["evaluation_events"].append(kwargs)
+        return kwargs
+
+    async def fake_dispatch_event(**kwargs):
+        captured["dispatch_events"].append(kwargs)
+        return kwargs
+
+    async def fake_evaluate_pair(**_kwargs):
+        raise StaleParentDuringScoring(
+            active_artifact=active_parent,
+            candidate_parent=old_parent.model_artifact_hash,
+            progress={
+                "phase": "after_icp",
+                "completed_icp_count": 16,
+                "last_icp_index": 15,
+                "icp_ref": "icp:test:16",
+            },
+        )
+
+    async def fake_score_bundle(_request):
+        captured["score_bundles"].append({"called": True})
+        raise AssertionError("partial stale scoring must not create a score bundle")
+
+    class FakeDockerPrivateModelRunner:
+        def __init__(self, _spec):
+            self.spec = _spec
+
+        async def __call__(self, _icp, _context):
+            return []
+
+    async def fake_rebase(self, candidate_arg, *, active_artifact, candidate_parent, evaluation_epoch, elapsed_seconds, stage, stale_progress=None):
+        captured["rebase_calls"].append(
+            {
+                "candidate_id": candidate_arg["candidate_id"],
+                "active_parent": active_artifact.model_artifact_hash,
+                "candidate_parent": candidate_parent,
+                "evaluation_epoch": evaluation_epoch,
+                "stage": stage,
+                "stale_progress": dict(stale_progress or {}),
+            }
+        )
+        return {"status": "stale_parent_rebased_to_current", "derived_candidate_id": "candidate:" + "8" * 64}
+
+    async def fake_finalize(self, _candidate):
+        return None
+
+    async def fake_public_activity(ticket_id, *, source_ref, reason, config):
+        captured["public_activity"].append({"ticket_id": ticket_id, "source_ref": source_ref, "reason": reason})
+        return None
+
+    async def fake_write_audit(self, _epoch):
+        return None
+
+    async def fake_holdout_gate(self, *, artifact, window_hash):
+        return {}
+
+    original_resolve_epoch = ResearchLabGatewayScoringWorker._resolve_evaluation_epoch
+    original_load_active = scoring_worker_module.load_active_private_model
+    original_fetch_window = scoring_worker_module.fetch_rolling_icp_window
+    original_create_rolling = scoring_worker_module.create_rolling_icp_window
+    original_eval_event = scoring_worker_module.create_candidate_evaluation_event
+    original_dispatch_event = scoring_worker_module.create_scoring_dispatch_event
+    original_evaluate_pair = scoring_worker_module.evaluate_private_model_pair
+    original_score_bundle = scoring_worker_module.create_score_bundle
+    original_docker_runner = scoring_worker_module.DockerPrivateModelRunner
+    original_rebase = ResearchLabGatewayScoringWorker._queue_stale_parent_rebase
+    original_finalize = ResearchLabGatewayScoringWorker._maybe_finalize_candidate_receipt
+    original_public_activity = scoring_worker_module.safe_project_public_loop_activity
+    original_write_audit = ResearchLabGatewayScoringWorker._write_audit_bundle
+    original_holdout_gate = ResearchLabGatewayScoringWorker._candidate_private_holdout_gate
+    try:
+        ResearchLabGatewayScoringWorker._resolve_evaluation_epoch = fake_resolve_epoch
+        scoring_worker_module.load_active_private_model = fake_load_active_private_model
+        scoring_worker_module.fetch_rolling_icp_window = fake_fetch_window
+        scoring_worker_module.create_rolling_icp_window = fake_create_rolling
+        scoring_worker_module.create_candidate_evaluation_event = fake_eval_event
+        scoring_worker_module.create_scoring_dispatch_event = fake_dispatch_event
+        scoring_worker_module.evaluate_private_model_pair = fake_evaluate_pair
+        scoring_worker_module.create_score_bundle = fake_score_bundle
+        scoring_worker_module.DockerPrivateModelRunner = FakeDockerPrivateModelRunner
+        ResearchLabGatewayScoringWorker._queue_stale_parent_rebase = fake_rebase
+        ResearchLabGatewayScoringWorker._maybe_finalize_candidate_receipt = fake_finalize
+        scoring_worker_module.safe_project_public_loop_activity = fake_public_activity
+        ResearchLabGatewayScoringWorker._write_audit_bundle = fake_write_audit
+        ResearchLabGatewayScoringWorker._candidate_private_holdout_gate = fake_holdout_gate
+
+        worker = ResearchLabGatewayScoringWorker(ResearchLabGatewayConfig(), worker_ref="test-worker")
+        await worker._score_candidate(candidate)
+    finally:
+        ResearchLabGatewayScoringWorker._resolve_evaluation_epoch = original_resolve_epoch
+        scoring_worker_module.load_active_private_model = original_load_active
+        scoring_worker_module.fetch_rolling_icp_window = original_fetch_window
+        scoring_worker_module.create_rolling_icp_window = original_create_rolling
+        scoring_worker_module.create_candidate_evaluation_event = original_eval_event
+        scoring_worker_module.create_scoring_dispatch_event = original_dispatch_event
+        scoring_worker_module.evaluate_private_model_pair = original_evaluate_pair
+        scoring_worker_module.create_score_bundle = original_score_bundle
+        scoring_worker_module.DockerPrivateModelRunner = original_docker_runner
+        ResearchLabGatewayScoringWorker._queue_stale_parent_rebase = original_rebase
+        ResearchLabGatewayScoringWorker._maybe_finalize_candidate_receipt = original_finalize
+        scoring_worker_module.safe_project_public_loop_activity = original_public_activity
+        ResearchLabGatewayScoringWorker._write_audit_bundle = original_write_audit
+        ResearchLabGatewayScoringWorker._candidate_private_holdout_gate = original_holdout_gate
+
+    assert not captured["score_bundles"]
+    assert captured["rebase_calls"][0]["stage"] == "during_scoring_parent_changed"
+    assert captured["rebase_calls"][0]["active_parent"] == active_parent.model_artifact_hash
+    assert captured["rebase_calls"][0]["stale_progress"]["completed_icp_count"] == 16
+    assert captured["public_activity"][0]["reason"] == "stale_parent_rebased_to_current"
+
+
+async def test_stale_parent_rebase_depth_failure_preserves_reimbursement() -> None:
+    old_parent = _manifest("parent")
+    active_parent = _manifest("active-parent")
+    candidate = {
+        "candidate_id": "candidate:" + "9" * 64,
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "ticket_id": "22222222-2222-4222-8222-222222222222",
+        "receipt_id": None,
+        "miner_hotkey": "5EFakeMinerHotkey111111111111111111111111111",
+        "island": "generalist",
+        "candidate_kind": "image_build",
+        "parent_artifact_hash": old_parent.model_artifact_hash,
+        "candidate_build_doc": {
+            "stale_parent_rebase": {
+                "depth": 3,
+            }
+        },
+        "candidate_patch_manifest": {},
+        "hypothesis_doc": {},
+        "redacted_public_summary": "Depth cap candidate.",
+    }
+    captured: dict[str, list[dict[str, object]]] = {
+        "promotion_events": [],
+        "evaluation_events": [],
+        "dispatch_events": [],
+    }
+
+    async def fake_promotion_event(**kwargs):
+        captured["promotion_events"].append(kwargs)
+        return kwargs
+
+    async def fake_eval_event(**kwargs):
+        captured["evaluation_events"].append(kwargs)
+        return kwargs
+
+    async def fake_dispatch_event(**kwargs):
+        captured["dispatch_events"].append(kwargs)
+        return kwargs
+
+    original_promotion_event = scoring_worker_module.create_candidate_promotion_event
+    original_eval_event = scoring_worker_module.create_candidate_evaluation_event
+    original_dispatch_event = scoring_worker_module.create_scoring_dispatch_event
+    try:
+        scoring_worker_module.create_candidate_promotion_event = fake_promotion_event
+        scoring_worker_module.create_candidate_evaluation_event = fake_eval_event
+        scoring_worker_module.create_scoring_dispatch_event = fake_dispatch_event
+
+        worker = ResearchLabGatewayScoringWorker(
+            ResearchLabGatewayConfig(stale_parent_rebase_max_depth=3),
+            worker_ref="test-worker",
+        )
+        result = await worker._queue_stale_parent_rebase(
+            candidate,
+            active_artifact=active_parent,
+            candidate_parent=old_parent.model_artifact_hash,
+            evaluation_epoch=7,
+            elapsed_seconds=1.5,
+            stage="during_scoring_parent_changed",
+            stale_progress={"phase": "after_icp", "completed_icp_count": 16},
+        )
+    finally:
+        scoring_worker_module.create_candidate_promotion_event = original_promotion_event
+        scoring_worker_module.create_candidate_evaluation_event = original_eval_event
+        scoring_worker_module.create_scoring_dispatch_event = original_dispatch_event
+
+    assert result["status"] == "stale_parent_rebase_failed"
+    event_doc = captured["evaluation_events"][0]["event_doc"]
+    assert event_doc["failure_class"] == "stale_parent_rebase_depth_exceeded"
+    assert event_doc["reimbursement_preserved"] is True
+    assert event_doc["reimbursement_source"] == "hosted_loop_completion"
+    assert event_doc["stale_progress"]["completed_icp_count"] == 16
+
+
 async def test_image_build_score_bundle_contract(draft: CodeEditDraft) -> None:
     parent = _manifest("parent")
     candidate = _manifest("candidate")
@@ -596,6 +922,9 @@ def main() -> None:
     test_private_source_diff_artifact_loader()
     asyncio.run(test_stale_parent_rebase_queues_current_parent_candidate())
     asyncio.run(test_stale_parent_rebase_routes_apply_failure_to_repair())
+    asyncio.run(test_evaluator_parent_freshness_abort_stops_before_bundle())
+    asyncio.run(test_mid_scoring_stale_parent_requeues_without_score_bundle())
+    asyncio.run(test_stale_parent_rebase_depth_failure_preserves_reimbursement())
     asyncio.run(test_image_build_score_bundle_contract(draft))
     print("research_lab_code_edit_pipeline_verifier: ok")
 

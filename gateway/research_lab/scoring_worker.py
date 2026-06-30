@@ -85,6 +85,28 @@ PRIVATE_BASELINE_FAST_EMPTY_ABORT_AFTER = 6
 PRIVATE_BASELINE_FAST_EMPTY_ABORT_SECONDS = 90.0
 
 
+class StaleParentDuringScoring(RuntimeError):
+    """Raised at an ICP boundary when a candidate's parent is no longer current."""
+
+    def __init__(
+        self,
+        *,
+        active_artifact: PrivateModelArtifactManifest,
+        candidate_parent: str,
+        progress: Mapping[str, Any],
+    ) -> None:
+        self.active_artifact = active_artifact
+        self.candidate_parent = candidate_parent
+        self.progress = dict(progress)
+        completed = int(self.progress.get("completed_icp_count") or 0)
+        super().__init__(
+            "candidate parent changed during scoring: "
+            f"candidate_parent={compact_ref(candidate_parent)} "
+            f"active_parent={compact_ref(active_artifact.model_artifact_hash)} "
+            f"completed_icps={completed}"
+        )
+
+
 def _idle_log_seconds() -> float:
     try:
         return max(10.0, float(os.getenv("RESEARCH_LAB_WORKER_IDLE_LOG_SECONDS", "60")))
@@ -212,6 +234,37 @@ def _load_candidate_source_diff(candidate: Mapping[str, Any]) -> str:
             f"expected={compact_ref(expected_source_diff_hash)} actual={compact_ref(actual_source_diff_hash)}"
         )
     return unified_diff
+
+
+def _stale_parent_rebase_depth(candidate: Mapping[str, Any]) -> int:
+    build_doc = candidate.get("candidate_build_doc")
+    if not isinstance(build_doc, Mapping):
+        return 0
+    rebase_doc = build_doc.get("stale_parent_rebase")
+    if not isinstance(rebase_doc, Mapping):
+        return 0
+    try:
+        return max(1, int(rebase_doc.get("depth") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _stale_parent_progress_doc(progress: Mapping[str, Any]) -> dict[str, Any]:
+    doc: dict[str, Any] = {
+        "phase": str(progress.get("phase") or "")[:80],
+        "completed_icp_count": int(progress.get("completed_icp_count") or 0),
+    }
+    for key in ("next_icp_index", "last_icp_index"):
+        if key in progress:
+            try:
+                doc[key] = int(progress.get(key) or 0)
+            except (TypeError, ValueError):
+                pass
+    for key in ("icp_ref", "icp_hash"):
+        value = str(progress.get(key) or "").strip()
+        if value:
+            doc[key] = value[:160]
+    return doc
 
 
 def _load_private_json_artifact(uri: str) -> dict[str, Any]:
@@ -876,6 +929,28 @@ class ResearchLabGatewayScoringWorker:
                 window_hash=window.window_hash,
                 evaluation_epoch=evaluation_epoch,
             )
+            last_parent_check_at = 0.0
+
+            async def parent_freshness_check(progress: Mapping[str, Any]) -> None:
+                nonlocal last_parent_check_at
+                now = time.time()
+                phase = str(progress.get("phase") or "")
+                if (
+                    phase != "before_icp"
+                    and last_parent_check_at
+                    and now - last_parent_check_at < self.config.stale_parent_check_interval_seconds
+                ):
+                    return
+                last_parent_check_at = now
+                active = await load_active_private_model(self.config, register_bootstrap=True)
+                active_parent = active.artifact.model_artifact_hash
+                if active_parent != artifact.model_artifact_hash:
+                    raise StaleParentDuringScoring(
+                        active_artifact=active.artifact,
+                        candidate_parent=artifact.model_artifact_hash,
+                        progress=progress,
+                    )
+
             heartbeat_task = asyncio.create_task(
                 self._candidate_scoring_heartbeat(
                     candidate=candidate,
@@ -884,22 +959,59 @@ class ResearchLabGatewayScoringWorker:
                 )
             )
             try:
-                score_bundle = await evaluate_private_model_pair(
-                    artifact_manifest=artifact,
-                    benchmark=benchmark,
-                    patch_manifest=patch,
-                    candidate_artifact_manifest=candidate_artifact.to_dict(),
-                    benchmark_items=window.benchmark_items,
-                    base_runner=runner,
-                    candidate_runner=candidate_runner,
-                    run_context={**run_context, "signature_ref": "pending"},
-                    policy=self._evaluation_policy(),
-                    private_holdout_gate=private_holdout_gate,
+                try:
+                    score_bundle = await evaluate_private_model_pair(
+                        artifact_manifest=artifact,
+                        benchmark=benchmark,
+                        patch_manifest=patch,
+                        candidate_artifact_manifest=candidate_artifact.to_dict(),
+                        benchmark_items=window.benchmark_items,
+                        base_runner=runner,
+                        candidate_runner=candidate_runner,
+                        run_context={**run_context, "signature_ref": "pending"},
+                        policy=self._evaluation_policy(),
+                        private_holdout_gate=private_holdout_gate,
+                        parent_freshness_check=parent_freshness_check,
+                    )
+                finally:
+                    heartbeat_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await heartbeat_task
+            except StaleParentDuringScoring as stale_exc:
+                stale_result = await self._queue_stale_parent_rebase(
+                    candidate,
+                    active_artifact=stale_exc.active_artifact,
+                    candidate_parent=stale_exc.candidate_parent,
+                    evaluation_epoch=evaluation_epoch,
+                    elapsed_seconds=round(time.time() - start, 3),
+                    stage="during_scoring_parent_changed",
+                    stale_progress=stale_exc.progress,
                 )
-            finally:
-                heartbeat_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await heartbeat_task
+                await self._maybe_finalize_candidate_receipt(candidate)
+                await safe_project_public_loop_activity(
+                    str(candidate["ticket_id"]),
+                    source_ref=f"candidate_stale_parent_during_scoring:{candidate_id}",
+                    reason=str(stale_result.get("status") or "stale_parent_during_scoring"),
+                    config=self.config,
+                )
+                try:
+                    await self._write_audit_bundle(evaluation_epoch)
+                except Exception:
+                    logger.exception("Research Lab audit bundle write failed after stale parent during scoring")
+                logger.info(
+                    format_worker_block(
+                        "RESEARCH LAB CANDIDATE STALE DURING SCORING",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("Candidate", compact_ref(candidate_id)),
+                            ("Status", stale_result.get("status")),
+                            ("Derived candidate", compact_ref(stale_result.get("derived_candidate_id"))),
+                            ("Completed ICPs", stale_exc.progress.get("completed_icp_count", 0)),
+                            ("Elapsed", f"{time.time() - start:.1f}s"),
+                        ),
+                    )
+                )
+                return
             gate_result = score_bundle.get("private_holdout_gate")
             private_holdout_rejected = (
                 isinstance(gate_result, Mapping)
@@ -1263,18 +1375,27 @@ class ResearchLabGatewayScoringWorker:
         evaluation_epoch: int,
         elapsed_seconds: float,
         stage: str,
+        stale_progress: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         active_parent = active_artifact.model_artifact_hash
         candidate_id = str(candidate["candidate_id"])
+        rebase_depth = _stale_parent_rebase_depth(candidate)
+        next_rebase_depth = rebase_depth + 1
         base_event_doc = {
-            "action": "image_build_candidate_parent_changed_before_scoring",
+            "action": "image_build_candidate_parent_changed",
             "active_parent_artifact_hash": active_parent,
             "candidate_parent_artifact_hash": candidate_parent,
             "evaluation_epoch": int(evaluation_epoch),
             "worker_ref": self.worker_ref,
             "proxy_ref_hash": self.proxy_ref_hash,
             "stage": stage,
+            "rebase_depth": rebase_depth,
+            "next_rebase_depth": next_rebase_depth,
+            "reimbursement_preserved": True,
+            "reimbursement_source": "hosted_loop_completion",
         }
+        if stale_progress:
+            base_event_doc["stale_progress"] = _stale_parent_progress_doc(stale_progress)
         if not self.config.stale_parent_rebase_enabled:
             await self._reject_stale_parent_candidate(
                 candidate,
@@ -1283,6 +1404,21 @@ class ResearchLabGatewayScoringWorker:
                 elapsed_seconds=elapsed_seconds,
             )
             return {"status": "stale_parent_needs_rescore"}
+        if rebase_depth >= self.config.stale_parent_rebase_max_depth:
+            await self._reject_stale_parent_candidate(
+                candidate,
+                base_event_doc={
+                    **base_event_doc,
+                    "failure_class": "stale_parent_rebase_depth_exceeded",
+                    "max_rebase_depth": self.config.stale_parent_rebase_max_depth,
+                },
+                reason="stale_parent_rebase_failed",
+                elapsed_seconds=elapsed_seconds,
+            )
+            return {
+                "status": "stale_parent_rebase_failed",
+                "error": "stale_parent_rebase_depth_exceeded",
+            }
 
         try:
             draft = await asyncio.to_thread(self._draft_from_stale_candidate, candidate)
@@ -1339,6 +1475,8 @@ class ResearchLabGatewayScoringWorker:
                 "rebased_parent_artifact_hash": active_parent,
                 "repair_used": repair_used,
                 "stage": stage,
+                "depth": next_rebase_depth,
+                "max_depth": self.config.stale_parent_rebase_max_depth,
             },
         }
         request = ResearchLabCandidateArtifactCreateRequest(
@@ -1420,6 +1558,11 @@ class ResearchLabGatewayScoringWorker:
         candidate_id = str(candidate["candidate_id"])
         active_parent = str(base_event_doc.get("active_parent_artifact_hash") or "")
         candidate_parent = str(base_event_doc.get("candidate_parent_artifact_hash") or "")
+        event_doc = {
+            "reimbursement_preserved": True,
+            "reimbursement_source": "hosted_loop_completion",
+            **dict(base_event_doc),
+        }
         await create_candidate_promotion_event(
             candidate_id=candidate_id,
             event_type="stale_parent_detected",
@@ -1427,7 +1570,7 @@ class ResearchLabGatewayScoringWorker:
             active_parent_artifact_hash=active_parent,
             candidate_parent_artifact_hash=candidate_parent,
             worker_ref=self.worker_ref,
-            event_doc=dict(base_event_doc),
+            event_doc=event_doc,
         )
         await create_candidate_evaluation_event(
             candidate_id=candidate_id,
@@ -1437,7 +1580,7 @@ class ResearchLabGatewayScoringWorker:
             candidate_status="rejected",
             evaluator_ref=self.worker_ref,
             reason=reason,
-            event_doc={**dict(base_event_doc), "elapsed_seconds": elapsed_seconds},
+            event_doc={**event_doc, "elapsed_seconds": elapsed_seconds},
         )
         await create_scoring_dispatch_event(
             dispatch_type="candidate_scoring",
@@ -1447,7 +1590,7 @@ class ResearchLabGatewayScoringWorker:
             candidate_id=candidate_id,
             run_id=str(candidate["run_id"]),
             ticket_id=str(candidate["ticket_id"]),
-            event_doc={**dict(base_event_doc), "reason": reason},
+            event_doc={**event_doc, "reason": reason},
         )
 
     def _draft_from_stale_candidate(self, candidate: Mapping[str, Any]) -> CodeEditDraft:

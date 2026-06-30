@@ -352,6 +352,8 @@ class ResearchLabGatewayConfig:
     stale_parent_rebase_repair_enabled: bool = True
     stale_parent_rebase_repair_model: str = "anthropic/claude-sonnet-4.6"
     stale_parent_rebase_repair_timeout_seconds: int = 120
+    stale_parent_check_interval_seconds: int = 30
+    stale_parent_rebase_max_depth: int = 3
     score_bundle_kms_key_id: str = "alias/leadpoet-research-lab-artifact-signing"
     score_bundle_signature_uri_prefix: str = ""
     auto_research_model: str = ""
@@ -646,6 +648,14 @@ class ResearchLabGatewayConfig:
             stale_parent_rebase_repair_timeout_seconds=max(
                 30,
                 _int("RESEARCH_LAB_STALE_PARENT_REBASE_REPAIR_TIMEOUT_SECONDS", 120),
+            ),
+            stale_parent_check_interval_seconds=max(
+                1,
+                _int("RESEARCH_LAB_STALE_PARENT_CHECK_INTERVAL_SECONDS", 30),
+            ),
+            stale_parent_rebase_max_depth=max(
+                0,
+                _int("RESEARCH_LAB_STALE_PARENT_REBASE_MAX_DEPTH", 3),
             ),
             score_bundle_kms_key_id=os.getenv(
                 "RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID",
@@ -967,6 +977,8 @@ class ResearchLabGatewayConfig:
                     "enabled": self.stale_parent_rebase_enabled,
                     "repair_enabled": self.stale_parent_rebase_repair_enabled,
                     "repair_model_configured": bool(self.stale_parent_rebase_repair_model),
+                    "check_interval_seconds": self.stale_parent_check_interval_seconds,
+                    "max_depth": self.stale_parent_rebase_max_depth,
                     "repair_operator_key_configured": bool(
                         os.getenv("RESEARCH_LAB_STALE_PARENT_REBASE_OPENROUTER_API_KEY")
                         or os.getenv("OPENROUTER_API_KEY")

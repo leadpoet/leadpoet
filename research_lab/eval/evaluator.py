@@ -335,20 +335,14 @@ def _benchmark_style_score(
     per_icp_results: Sequence[Mapping[str, Any]],
     score_field: str,
 ) -> float:
-    # Exclude ICPs whose sourcing failed on a PROVIDER error (ScrapingDog/Exa/etc.):
-    # a 0 caused by an external provider outage does not reflect the model's quality and
-    # would otherwise drag the benchmark down. The same rows are excluded for both the
-    # base and candidate calls (callers pass the same per_icp_results), so base vs
-    # candidate stays apples-to-apples on the ICPs that were actually sourceable. If
-    # *every* ICP errored, fall back to all rows so the score stays defined (and equal
-    # to the old behavior for that degenerate case).
-    scoreable = [
-        row for row in per_icp_results
-        if "provider_error" not in str(row.get("failure_reason") or "")
-    ]
-    rows = scoreable if scoreable else list(per_icp_results)
+    # Each ICP contributes the mean of its company scores; an ICP that produced no
+    # scoreable company counts as 0. That is intentional: if every company the model
+    # returned for an ICP failed (bad/false URLs included), the model did not source
+    # that ICP and should score 0 for it. Per-company resilience lives upstream in the
+    # model (one failed company is skipped, not fatal), so this 0 only happens when the
+    # whole ICP yielded nothing.
     per_icp_scores: list[float] = []
-    for row in rows:
+    for row in per_icp_results:
         scores = row.get(score_field)
         if not isinstance(scores, Sequence) or isinstance(scores, (str, bytes, bytearray)):
             per_icp_scores.append(0.0)

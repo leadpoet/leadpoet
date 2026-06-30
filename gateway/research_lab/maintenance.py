@@ -460,7 +460,7 @@ async def _derive_public_loop_outcome_for_ticket(ticket_id: str) -> dict[str, An
     if candidate_ids:
         promotion_rows = await select_many(
             "research_lab_candidate_promotion_events",
-            filters=(("candidate_id", "in", candidate_ids)),
+            filters=(("candidate_id", "in", candidate_ids),),
             order_by=(("created_at", True),),
             limit=1000,
         )

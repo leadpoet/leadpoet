@@ -24,6 +24,7 @@ async def main() -> int:
     await _test_maintenance_resume_skips_credit_blocked()
     await _test_reconcile_terminal_loop_projection_dry_run()
     await _test_rebase_stale_candidates_dry_run()
+    await _test_repair_public_cards_dry_run_with_candidate_promotions()
     await _test_terminal_loop_projection()
     await _test_candidate_claim_skips_retry_cooldowns()
     _test_failure_classification()
@@ -165,6 +166,85 @@ async def _test_rebase_stale_candidates_dry_run() -> None:
         assert result["processed"] == []
     finally:
         maintenance_mod.select_all = original_select_all  # type: ignore[assignment]
+        maintenance_mod.select_many = original_select_many  # type: ignore[assignment]
+
+
+async def _test_repair_public_cards_dry_run_with_candidate_promotions() -> None:
+    original_select_one = maintenance_mod.select_one
+    original_select_many = maintenance_mod.select_many
+
+    observed_filters: list[tuple[Any, ...]] = []
+
+    async def fake_select_one(table: str, **kwargs: Any) -> dict[str, Any] | None:
+        assert table == "research_loop_ticket_current"
+        return {
+            "ticket_id": "ticket-repair",
+            "current_ticket_status": "accepted",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+
+    async def fake_select_many(table: str, **kwargs: Any) -> list[dict[str, Any]]:
+        filters = tuple(kwargs.get("filters") or ())
+        if table == "research_lab_candidate_promotion_events":
+            observed_filters.extend(filters)
+            assert filters == (("candidate_id", "in", ["candidate:" + "b" * 64]),)
+            return [
+                {
+                    "candidate_id": "candidate:" + "b" * 64,
+                    "event_type": "below_threshold",
+                    "promotion_status": "rejected",
+                    "created_at": "2026-01-01T00:04:00+00:00",
+                }
+            ]
+        if table == "research_loop_run_queue_current":
+            return [
+                {
+                    "run_id": "run-repair",
+                    "ticket_id": "ticket-repair",
+                    "current_queue_status": "completed",
+                    "current_reason": "candidate_generation_completed_evaluation_queued",
+                    "current_status_at": "2026-01-01T00:01:00+00:00",
+                }
+            ]
+        if table == "research_loop_receipt_current":
+            return []
+        if table == "research_lab_candidate_evaluation_current":
+            return [
+                {
+                    "candidate_id": "candidate:" + "b" * 64,
+                    "run_id": "run-repair",
+                    "ticket_id": "ticket-repair",
+                    "current_candidate_status": "scored",
+                    "current_reason": "gateway_qualification_worker_scored_candidate",
+                    "current_status_at": "2026-01-01T00:03:00+00:00",
+                    "redacted_public_summary": "fixture",
+                }
+            ]
+        if table == "research_evaluation_score_bundle_current":
+            return [
+                {
+                    "score_bundle_id": "score_bundle:" + "c" * 64,
+                    "ticket_id": "ticket-repair",
+                    "current_status_at": "2026-01-01T00:03:30+00:00",
+                    "score_bundle_doc": {"aggregates": {"mean_delta": 0.0, "delta_lcb": -1.0}},
+                }
+            ]
+        raise AssertionError(f"unexpected table {table}")
+
+    try:
+        maintenance_mod.select_one = fake_select_one  # type: ignore[assignment]
+        maintenance_mod.select_many = fake_select_many  # type: ignore[assignment]
+        result = await maintenance_mod.repair_public_loop_cards(
+            ticket_id="ticket-repair",
+            dry_run=True,
+            limit=1,
+        )
+        assert result["ok"] is True
+        assert result["dry_run"] is True
+        assert result["planned"][0]["ticket_id"] == "ticket-repair"
+        assert observed_filters == [("candidate_id", "in", ["candidate:" + "b" * 64])]
+    finally:
+        maintenance_mod.select_one = original_select_one  # type: ignore[assignment]
         maintenance_mod.select_many = original_select_many  # type: ignore[assignment]
 
 

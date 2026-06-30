@@ -247,11 +247,11 @@ class ResearchLabGatewayConfig:
     shadow_bundles_enabled: bool = False
     shadow_weights_enabled: bool = False
     shadow_reimbursements_enabled: bool = False
-    crowning_enabled: bool = False
+    crowning_enabled: bool = True
     reimbursements_enabled: bool = False
     weight_mutation_enabled: bool = False
     fulfillment_mutation_enabled: bool = False
-    auto_promotion_enabled: bool = False
+    auto_promotion_enabled: bool = True
     auto_commit_enabled: bool = False
     miner_openrouter_key_required: bool = True
     max_open_tickets_per_hotkey: int = 3
@@ -407,11 +407,11 @@ class ResearchLabGatewayConfig:
             shadow_bundles_enabled=_truthy("RESEARCH_LAB_SHADOW_BUNDLES_ENABLED", prod_on),
             shadow_weights_enabled=_truthy("RESEARCH_LAB_SHADOW_WEIGHTS_ENABLED", prod_on),
             shadow_reimbursements_enabled=_truthy("RESEARCH_LAB_SHADOW_REIMBURSEMENTS_ENABLED"),
-            crowning_enabled=_truthy("RESEARCH_LAB_CROWNING_ENABLED"),
+            crowning_enabled=_truthy("RESEARCH_LAB_CROWNING_ENABLED", "true"),
             reimbursements_enabled=_truthy("RESEARCH_LAB_REIMBURSEMENTS_ENABLED"),
             weight_mutation_enabled=_truthy("RESEARCH_LAB_WEIGHT_MUTATION_ENABLED"),
             fulfillment_mutation_enabled=_truthy("RESEARCH_LAB_FULFILLMENT_MUTATION_ENABLED"),
-            auto_promotion_enabled=_truthy("RESEARCH_LAB_AUTO_PROMOTION_ENABLED"),
+            auto_promotion_enabled=_truthy("RESEARCH_LAB_AUTO_PROMOTION_ENABLED", "true"),
             auto_commit_enabled=_truthy("RESEARCH_LAB_AUTO_COMMIT_ENABLED"),
             miner_openrouter_key_required=_truthy("RESEARCH_LAB_MINER_OPENROUTER_KEY_REQUIRED", "true"),
             max_open_tickets_per_hotkey=max(

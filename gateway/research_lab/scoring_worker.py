@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import tempfile
 import time
 from typing import Any, Mapping
@@ -83,6 +84,10 @@ from research_lab.eval.evaluator import QualificationStyleCompanyScorer
 logger = logging.getLogger(__name__)
 PRIVATE_BASELINE_FAST_EMPTY_ABORT_AFTER = 6
 PRIVATE_BASELINE_FAST_EMPTY_ABORT_SECONDS = 90.0
+_POSTGREST_TIMESTAMP_RE = re.compile(
+    r"^(?P<prefix>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
+    r"\.(?P<fraction>\d{1,9})(?P<suffix>Z|[+-]\d{2}:\d{2})?$"
+)
 
 
 class StaleParentDuringScoring(RuntimeError):
@@ -359,10 +364,21 @@ async def _call_operator_openrouter_json(
 def _status_age_seconds(raw_status_at: object) -> float | None:
     if not raw_status_at:
         return None
+    text = str(raw_status_at).strip().replace("Z", "+00:00")
     try:
-        status_at = datetime.fromisoformat(str(raw_status_at).replace("Z", "+00:00"))
+        status_at = datetime.fromisoformat(text)
     except ValueError:
-        return None
+        match = _POSTGREST_TIMESTAMP_RE.match(text)
+        if not match:
+            return None
+        suffix = match.group("suffix") or ""
+        if suffix == "Z":
+            suffix = "+00:00"
+        fraction = (match.group("fraction") + "000000")[:6]
+        try:
+            status_at = datetime.fromisoformat(f"{match.group('prefix')}.{fraction}{suffix}")
+        except ValueError:
+            return None
     if status_at.tzinfo is None:
         status_at = status_at.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - status_at.astimezone(timezone.utc)).total_seconds()

@@ -32,6 +32,7 @@ from gateway.research_lab.scoring_worker import (  # noqa: E402
     ResearchLabGatewayScoringWorker,
     StaleParentDuringScoring,
     _load_candidate_source_diff,
+    _status_age_seconds,
 )
 
 
@@ -218,6 +219,11 @@ def test_private_source_diff_artifact_loader() -> None:
             assert "hash mismatch" in str(exc)
         else:
             raise AssertionError("source diff artifact hash mismatch should fail")
+
+
+def test_postgrest_variable_fraction_timestamp_parses() -> None:
+    parsed = _status_age_seconds("2026-06-30T00:22:44.47389+00:00")
+    assert parsed is not None
 
 
 async def test_stale_parent_rebase_queues_current_parent_candidate() -> None:
@@ -920,6 +926,7 @@ def main() -> None:
     test_code_edit_parser_rejects_dependency_edit()
     test_candidate_artifact_contract_requires_image_build()
     test_private_source_diff_artifact_loader()
+    test_postgrest_variable_fraction_timestamp_parses()
     asyncio.run(test_stale_parent_rebase_queues_current_parent_candidate())
     asyncio.run(test_stale_parent_rebase_routes_apply_failure_to_repair())
     asyncio.run(test_evaluator_parent_freshness_abort_stops_before_bundle())

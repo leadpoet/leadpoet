@@ -22,7 +22,11 @@ from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.code_build import CodeEditCandidateBuilder
 from gateway.research_lab.code_loop_engine import CodeEditLoopEngine
 from gateway.research_lab.config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
-from gateway.research_lab.key_vault import OpenRouterKeyVaultError, decrypt_openrouter_key
+from gateway.research_lab.key_vault import (
+    OpenRouterKeyVaultError,
+    decrypt_openrouter_key,
+    preflight_openrouter_key,
+)
 from gateway.research_lab.logging_utils import compact_ref, format_worker_block, format_worker_line
 from gateway.research_lab.loop_engine import (
     AutoResearchLoopEvent,
@@ -116,6 +120,13 @@ class HostedResearchLabBuilderNotReady(RetryableHostedResearchLabWorkerError):
 
 class HostedResearchLabClaimLost(HostedResearchLabWorkerError):
     """Raised when another worker safely claimed the queued run first."""
+
+
+class CreditBlockedHostedRunError(HostedResearchLabWorkerError):
+    """Raised when a hosted run cannot proceed because the miner's OpenRouter key has
+    insufficient credits (HTTP 402 / insufficient balance). The run is paused as
+    blocked_for_credit (resumable after top-up), never terminally failed, and is NOT
+    retried in a tight loop — only revived by the top-up resume path."""
 
 
 _RETRYABLE_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -266,6 +277,31 @@ def _is_retryable_worker_exception(exc: BaseException) -> bool:
     return any(marker in message for marker in _RETRYABLE_ERROR_MARKERS)
 
 
+# OpenRouter HTTP 402 / insufficient-credit signatures. A run hitting these is paused
+# as blocked_for_credit (resumable after top-up), not terminally failed.
+_OPENROUTER_CREDIT_MARKERS = (
+    "insufficient credits",
+    "insufficient balance",
+    "payment required",
+    "more credits",
+    "requires more credits",
+)
+
+
+def _is_openrouter_credit_block(decoded: object, message: str) -> bool:
+    lowered = str(message or "").lower()
+    if isinstance(decoded, Mapping):
+        raw_error = decoded.get("error")
+        if isinstance(raw_error, Mapping):
+            code = str(raw_error.get("code") or raw_error.get("status") or "").lower()
+            if code == "402":
+                return True
+            lowered += " " + str(raw_error.get("message") or raw_error.get("type") or "").lower()
+        elif raw_error:
+            lowered += " " + str(raw_error).lower()
+    return any(marker in lowered for marker in _OPENROUTER_CREDIT_MARKERS)
+
+
 def _raise_openrouter_generation_response_error(
     decoded: object,
     *,
@@ -274,6 +310,8 @@ def _raise_openrouter_generation_response_error(
 ) -> None:
     summary = _openrouter_response_summary(decoded)
     error = f"OpenRouter candidate generation failed: {failure}: {summary}"
+    if _is_openrouter_credit_block(decoded, error):
+        raise CreditBlockedHostedRunError(error)
     if _openrouter_generation_response_is_retryable(
         decoded,
         error,
@@ -610,6 +648,19 @@ class ResearchLabHostedWorker:
                 status="claim_lost",
                 error=str(exc)[:500],
             )
+        except CreditBlockedHostedRunError as exc:
+            logger.warning(
+                format_worker_block(
+                    "RESEARCH LAB AUTO-RESEARCH BLOCKED FOR CREDIT",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Run", compact_ref(run_id)),
+                        ("Ticket", compact_ref(ticket_id)),
+                        ("Reason", str(exc)[:300]),
+                    ),
+                )
+            )
+            return await self._mark_blocked_for_credit(context, str(exc))
         except HostedResearchLabBuilderNotReady as exc:
             logger.warning(
                 format_worker_block(
@@ -948,6 +999,8 @@ class ResearchLabHostedWorker:
         )
         provider_env = dict(resolved_openrouter_env)
         context.provider_env = provider_env
+        # Credit gate before any expensive OpenRouter generation (covers start + resume).
+        await self._preflight_openrouter_credit(context, provider_env)
         docker_provider_env = _private_model_docker_env(
             self.config,
             {
@@ -964,6 +1017,9 @@ class ResearchLabHostedWorker:
 
         active_start = await load_active_private_model(self.config, register_bootstrap=True)
         artifact = active_start.artifact
+        # If the active model changed since this run was paused, the checkpoint is stale —
+        # restart from scratch against the current model rather than resuming a stale parent.
+        resume_state = self._validate_resume_state_freshness(resume_state, artifact, context.run_id)
 
         def _load_runtime_metadata() -> Mapping[str, Any]:
             runner = DockerPrivateModelRunner(
@@ -1741,6 +1797,156 @@ class ResearchLabHostedWorker:
             receipt_id=receipt_id,
         )
 
+    async def _mark_blocked_for_credit(self, context: HostedRunContext, error: str) -> HostedWorkerOutcome:
+        """Pause a run that hit OpenRouter insufficient-credits as `blocked_for_credit`.
+
+        Resumable (not terminal): receipt stays `queued`, queue gets a `paused` event
+        with reason `blocked_for_credit`, ticket stays `running`. No loop-start payment
+        is re-consumed; the run is revived only by the top-up resume path. Mirrors
+        `_mark_paused` but carries the provider error + resume instructions.
+        """
+        receipt_id = context.receipt_id or await self._ensure_queued_receipt(context)
+        context.receipt_id = receipt_id
+        checkpoint_doc = await latest_auto_research_checkpoint(context.run_id)
+        checkpoint_ref = checkpoint_doc.get("checkpoint_hash") if isinstance(checkpoint_doc, Mapping) else None
+        model_id: str | None = None
+        try:
+            budget_context = self._run_budget_context(context)
+            _tier, model_id, _doc = self.config.resolve_auto_research_model(
+                str(budget_context.get("research_model_tier") or "")
+            )
+        except Exception:  # noqa: BLE001 - model id is best-effort metadata
+            model_id = None
+        miner_hotkey = ""
+        if isinstance(context.ticket, Mapping):
+            miner_hotkey = str(context.ticket.get("miner_hotkey") or "")
+        event_doc = {
+            "schema_version": "1.0",
+            "run_id": context.run_id,
+            "worker_ref": self.worker_ref,
+            "receipt_id": receipt_id,
+            "pause_reason": "blocked_for_credit",
+            "blocked_for_credit": True,
+            "provider_error": _redact_openrouter_diagnostic(error, limit=400),
+            "checkpoint_hash": checkpoint_ref,
+            "miner_hotkey": miner_hotkey,
+            "model": model_id,
+            "max_tokens": 1800,
+            "resume_mode": "resume_from_checkpoint" if checkpoint_ref else "restart_from_scratch",
+            "resume_instructions": (
+                "Top up the miner OpenRouter key, then resume via the miner CLI "
+                "(/research-lab/resume-credit-blocked) or the operator "
+                "resume_failed_runs_from_checkpoint; resume appends a queued event with "
+                "reason credit_topup_resume. No loop-start payment is re-consumed."
+            ),
+        }
+        await create_receipt_event(
+            receipt_id=receipt_id,
+            ticket_id=context.ticket_id,
+            event_type="queued",
+            receipt_status="queued",
+            event_doc=event_doc,
+        )
+        await create_queue_event(
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            event_type="paused",
+            queue_priority=int(context.queue_row.get("queue_priority") or 0),
+            worker_ref=self.worker_ref,
+            reason="blocked_for_credit",
+            event_doc=event_doc,
+        )
+        await create_ticket_event(
+            ticket_id=context.ticket_id,
+            event_type="running",
+            actor_hotkey=None,
+            reason="blocked_for_credit",
+            event_doc=event_doc,
+        )
+        await safe_project_public_loop_activity(
+            context.ticket_id,
+            source_ref=f"hosted_worker_blocked_for_credit:{context.run_id}",
+            reason="blocked_for_credit",
+            config=self.config,
+        )
+        logger.warning(
+            "research_lab_run_blocked_for_credit run_id=%s ticket=%s checkpoint=%s",
+            compact_ref(context.run_id),
+            compact_ref(context.ticket_id),
+            "yes" if checkpoint_ref else "no",
+        )
+        return HostedWorkerOutcome(
+            processed=True,
+            dry_run=False,
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            status="blocked_for_credit",
+            receipt_id=receipt_id,
+        )
+
+    async def _preflight_openrouter_credit(
+        self, context: HostedRunContext, provider_env: Mapping[str, str]
+    ) -> None:
+        """Best-effort credit gate before any expensive OpenRouter generation.
+
+        Raises CreditBlockedHostedRunError when the resolved key reports
+        `limit_remaining <= 0`. Preflight transport/auth errors are NOT treated as
+        credit blocks (a real auth error surfaces during the call and fails normally);
+        they're logged and skipped so a preflight blip never blocks a funded run.
+        """
+        raw_key = str(provider_env.get("OPENROUTER_API_KEY") or "")
+        if not raw_key:
+            return
+        try:
+            info = await asyncio.to_thread(preflight_openrouter_key, raw_key)
+        except Exception as exc:  # noqa: BLE001 - preflight is best-effort
+            logger.warning(
+                "research_lab_openrouter_credit_preflight_skipped run_id=%s error=%s",
+                compact_ref(context.run_id),
+                str(exc)[:160],
+            )
+            return
+        remaining = info.get("limit_remaining")
+        if remaining is None:
+            return
+        try:
+            depleted = float(remaining) <= 0.0
+        except (TypeError, ValueError):
+            return
+        if depleted:
+            raise CreditBlockedHostedRunError(
+                f"OpenRouter key insufficient credits before generation (limit_remaining={remaining})"
+            )
+
+    def _validate_resume_state_freshness(
+        self, resume_state: Any, artifact: Any, run_id: str
+    ) -> Any:
+        """Discard a checkpoint whose model no longer matches the active parent.
+
+        A credit-blocked (or otherwise paused) run that resumes after the active model
+        changed would resume against a stale parent. Per CTO policy, null the checkpoint
+        so the run restarts from scratch against the current model (no payment re-consumed).
+        """
+        if not isinstance(resume_state, Mapping):
+            return resume_state
+        ckpt_artifact = str(resume_state.get("artifact_hash") or "")
+        ckpt_manifest = str(resume_state.get("manifest_hash") or "")
+        active_artifact = str(getattr(artifact, "model_artifact_hash", "") or "")
+        active_manifest = str(getattr(artifact, "manifest_hash", "") or "")
+        mismatch = (
+            (ckpt_artifact and active_artifact and ckpt_artifact != active_artifact)
+            or (ckpt_manifest and active_manifest and ckpt_manifest != active_manifest)
+        )
+        if mismatch:
+            logger.warning(
+                "research_lab_resume_checkpoint_stale_restart run_id=%s ckpt_artifact=%s active_artifact=%s",
+                compact_ref(run_id),
+                compact_ref(ckpt_artifact),
+                compact_ref(active_artifact),
+            )
+            return None
+        return resume_state
+
     async def _maybe_create_reimbursement_decision(
         self,
         *,
@@ -2361,6 +2567,8 @@ class ResearchLabHostedWorker:
             except HTTPError as exc:
                 message = exc.read().decode("utf-8", errors="replace")[:500]
                 error = f"OpenRouter candidate generation failed: HTTP {exc.code}: {message}"
+                if int(exc.code) == 402 or _is_openrouter_credit_block(None, error):
+                    raise CreditBlockedHostedRunError(error) from exc
                 if int(exc.code) in _RETRYABLE_HTTP_CODES:
                     raise RetryableHostedResearchLabWorkerError(error) from exc
                 raise HostedResearchLabWorkerError(error) from exc

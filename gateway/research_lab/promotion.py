@@ -178,11 +178,6 @@ class ResearchLabPromotionController:
         score_bundle_row: Mapping[str, Any],
         score_bundle: Mapping[str, Any],
     ) -> dict[str, Any]:
-        if not self.config.auto_promotion_enabled:
-            return {"status": "disabled"}
-
-        active = await load_active_private_model(self.config, register_bootstrap=True)
-        active_parent = active.artifact.model_artifact_hash
         candidate_parent = str(candidate.get("parent_artifact_hash") or score_bundle.get("parent_artifact_hash") or "")
         candidate_kind = str(candidate.get("candidate_kind") or "patch")
         improvement_points = float((score_bundle.get("aggregates") or {}).get("mean_delta") or 0.0)
@@ -190,6 +185,48 @@ class ResearchLabPromotionController:
         threshold = float(self.config.improvement_threshold_points)
         rolling_window_hash = str(score_bundle.get("icp_set_hash") or "")
         score_bundle_id = str(score_bundle_row.get("score_bundle_id") or "")
+
+        if not self.config.auto_promotion_enabled:
+            await create_candidate_promotion_event(
+                candidate_id=str(candidate["candidate_id"]),
+                source_score_bundle_id=score_bundle_id,
+                event_type="promotion_checked",
+                promotion_status="checked",
+                active_parent_artifact_hash=candidate_parent,
+                candidate_parent_artifact_hash=candidate_parent,
+                rolling_window_hash=rolling_window_hash,
+                improvement_points=improvement_points,
+                threshold_points=threshold,
+                worker_ref=self.worker_ref,
+                event_doc={
+                    "delta_lcb": round(delta_lcb, 6),
+                    "auto_commit_enabled": self.config.auto_commit_enabled,
+                    "candidate_kind": candidate_kind,
+                    "auto_promotion_enabled": False,
+                },
+            )
+            await create_candidate_promotion_event(
+                candidate_id=str(candidate["candidate_id"]),
+                source_score_bundle_id=score_bundle_id,
+                event_type="promotion_disabled",
+                promotion_status="disabled",
+                active_parent_artifact_hash=candidate_parent,
+                candidate_parent_artifact_hash=candidate_parent,
+                rolling_window_hash=rolling_window_hash,
+                improvement_points=improvement_points,
+                threshold_points=threshold,
+                worker_ref=self.worker_ref,
+                event_doc={
+                    "auto_promotion_enabled": False,
+                    "auto_commit_enabled": self.config.auto_commit_enabled,
+                    "candidate_kind": candidate_kind,
+                    "delta_lcb": round(delta_lcb, 6),
+                },
+            )
+            return {"status": "disabled"}
+
+        active = await load_active_private_model(self.config, register_bootstrap=True)
+        active_parent = active.artifact.model_artifact_hash
 
         await create_candidate_promotion_event(
             candidate_id=str(candidate["candidate_id"]),

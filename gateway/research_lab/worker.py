@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -1002,6 +1003,9 @@ class ResearchLabHostedWorker:
 
         active_start = await load_active_private_model(self.config, register_bootstrap=True)
         artifact = active_start.artifact
+        outcome_memory = await self._active_parent_outcome_memory(artifact)
+        if outcome_memory:
+            budget_context["active_parent_outcome_memory"] = outcome_memory
 
         def _load_runtime_metadata() -> Mapping[str, Any]:
             runner = DockerPrivateModelRunner(
@@ -2505,6 +2509,134 @@ class ResearchLabHostedWorker:
         budget_limited = max(1, min(configured, int(max(1.0, budget // max(1.0, self.config.min_compute_budget_usd)))))
         return max(1, min(self.config.hosted_worker_max_candidates, budget_limited))
 
+    async def _active_parent_outcome_memory(
+        self,
+        artifact: Any,
+        *,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        parent_hash = str(getattr(artifact, "model_artifact_hash", "") or "")
+        if not parent_hash:
+            return {}
+        try:
+            candidates = await select_many(
+                "research_lab_candidate_evaluation_current",
+                columns=(
+                    "candidate_id,run_id,parent_artifact_hash,current_candidate_status,current_reason,"
+                    "current_score_bundle_id,candidate_patch_manifest,redacted_public_summary,created_at,current_status_at"
+                ),
+                filters=(("parent_artifact_hash", parent_hash),),
+                order_by=(("created_at", True),),
+                limit=max(1, min(limit, 200)),
+            )
+            score_bundles = await select_many(
+                "research_evaluation_score_bundle_current",
+                columns="score_bundle_id,candidate_artifact_hash,parent_artifact_hash,score_bundle_doc,created_at",
+                filters=(("parent_artifact_hash", parent_hash),),
+                order_by=(("created_at", True),),
+                limit=max(1, min(limit, 200)),
+            )
+            promotion_events = await select_many(
+                "research_lab_candidate_promotion_events",
+                columns="candidate_id,event_type,promotion_status,event_doc,created_at",
+                order_by=(("created_at", True),),
+                limit=max(1, min(limit * 2, 400)),
+            )
+        except Exception as exc:
+            logger.warning("research_lab_active_parent_outcome_memory_unavailable: %s", str(exc)[:200])
+            return {}
+
+        candidate_ids = {str(row.get("candidate_id") or "") for row in candidates}
+        candidate_ids.discard("")
+        lane_counts: Counter[str] = Counter()
+        target_file_counts: Counter[str] = Counter()
+        status_counts: Counter[str] = Counter()
+        reason_counts: Counter[str] = Counter()
+        failure_class_counts: Counter[str] = Counter()
+        for row in candidates:
+            status = str(row.get("current_candidate_status") or "unknown")
+            reason = str(row.get("current_reason") or "")
+            status_counts[status] += 1
+            if reason:
+                reason_counts[reason] += 1
+            lane, files = _candidate_lane_and_files(row.get("candidate_patch_manifest"))
+            lane_counts[lane] += 1
+            for path in files:
+                target_file_counts[path] += 1
+            failure_class = _candidate_failure_class_for_memory(row)
+            if failure_class:
+                failure_class_counts[failure_class] += 1
+
+        promotion_counts: Counter[str] = Counter()
+        public_holdout_rejected = 0
+        for row in promotion_events:
+            candidate_id = str(row.get("candidate_id") or "")
+            if candidate_id and candidate_id not in candidate_ids:
+                continue
+            event_type = str(row.get("event_type") or "")
+            if event_type:
+                promotion_counts[event_type] += 1
+            if event_type == "public_holdout_rejected":
+                public_holdout_rejected += 1
+
+        scored_count = 0
+        positive_delta_count = 0
+        nonpositive_delta_count = 0
+        best_mean_delta: float | None = None
+        worst_mean_delta: float | None = None
+        best_delta_lcb: float | None = None
+        score_health_counts: Counter[str] = Counter()
+        for row in score_bundles:
+            doc = row.get("score_bundle_doc") if isinstance(row.get("score_bundle_doc"), Mapping) else {}
+            aggregates = doc.get("aggregates") if isinstance(doc.get("aggregates"), Mapping) else {}
+            if not aggregates:
+                continue
+            scored_count += 1
+            mean_delta = _safe_float_for_memory(aggregates.get("mean_delta"))
+            delta_lcb = _safe_float_for_memory(aggregates.get("delta_lcb"))
+            if mean_delta > 0:
+                positive_delta_count += 1
+            else:
+                nonpositive_delta_count += 1
+            best_mean_delta = mean_delta if best_mean_delta is None else max(best_mean_delta, mean_delta)
+            worst_mean_delta = mean_delta if worst_mean_delta is None else min(worst_mean_delta, mean_delta)
+            best_delta_lcb = delta_lcb if best_delta_lcb is None else max(best_delta_lcb, delta_lcb)
+            health = doc.get("scoring_health") if isinstance(doc.get("scoring_health"), Mapping) else {}
+            score_health_counts[str(health.get("health_status") or "unknown")] += 1
+
+        guidance: list[str] = []
+        if failure_class_counts:
+            guidance.append("Avoid repeating recently failed provider/runtime failure modes.")
+        if public_holdout_rejected:
+            guidance.append("Public holdout rejected recent candidates; prefer changes likely to improve public-visible ICP quality before private holdout.")
+        if nonpositive_delta_count >= positive_delta_count and scored_count:
+            guidance.append("Recent scored candidates had weak or negative deltas; prefer narrow, testable code edits over broad prompt rewrites.")
+
+        return {
+            "schema_version": "1.0",
+            "source": "active_parent_recent_outcome_memory",
+            "active_parent_artifact_hash": parent_hash,
+            "sampled_candidate_count": len(candidates),
+            "sampled_score_bundle_count": scored_count,
+            "candidate_status_counts": _top_counter(status_counts, limit=8),
+            "candidate_reason_counts": _top_counter(reason_counts, limit=8),
+            "promotion_decision_counts": _top_counter(promotion_counts, limit=8),
+            "public_holdout_rejected_count": public_holdout_rejected,
+            "lane_counts": _top_counter(lane_counts, limit=8),
+            "target_file_counts": _top_counter(target_file_counts, limit=8),
+            "failure_class_counts": _top_counter(failure_class_counts, limit=8),
+            "score_bundle_health_counts": _top_counter(score_health_counts, limit=8),
+            "scored_delta_summary": {
+                "count": scored_count,
+                "positive_count": positive_delta_count,
+                "negative_or_zero_count": nonpositive_delta_count,
+                "best_mean_delta": round(best_mean_delta, 6) if best_mean_delta is not None else None,
+                "worst_mean_delta": round(worst_mean_delta, 6) if worst_mean_delta is not None else None,
+                "best_delta_lcb": round(best_delta_lcb, 6) if best_delta_lcb is not None else None,
+            },
+            "guidance": guidance[:4],
+        }
+
 
 def _miner_openrouter_key_ref(context: HostedRunContext) -> str:
     for event in (*context.queue_events, *context.ticket_events):
@@ -2632,6 +2764,59 @@ def _redacted_budget_context(value: Mapping[str, Any]) -> dict[str, Any]:
         "topup_reason",
     }
     return {key: value[key] for key in allowed if key in value}
+
+
+def _candidate_lane_and_files(value: Any) -> tuple[str, tuple[str, ...]]:
+    manifest = value if isinstance(value, Mapping) else {}
+    patch_doc = manifest.get("patch_doc") if isinstance(manifest.get("patch_doc"), Mapping) else {}
+    code_edit = patch_doc.get("code_edit") if isinstance(patch_doc.get("code_edit"), Mapping) else {}
+    lane = str(code_edit.get("lane") or patch_doc.get("lane") or "unknown").strip() or "unknown"
+    raw_files = code_edit.get("target_files") or patch_doc.get("target_files") or ()
+    files: list[str] = []
+    if isinstance(raw_files, Sequence) and not isinstance(raw_files, (str, bytes, bytearray)):
+        for item in raw_files:
+            path = str(item or "").strip()
+            if path and not _looks_secret_like(path):
+                files.append(path[:160])
+    return lane[:80], tuple(files[:12])
+
+
+def _candidate_failure_class_for_memory(row: Mapping[str, Any]) -> str:
+    reason = str(row.get("current_reason") or "")
+    if reason:
+        return reason[:120]
+    status = str(row.get("current_candidate_status") or "")
+    return status[:120] if status in {"failed", "rejected"} else ""
+
+
+def _top_counter(counter: Counter[str], *, limit: int) -> dict[str, int]:
+    return {
+        str(key)[:160]: int(value)
+        for key, value in counter.most_common(max(0, limit))
+        if key
+    }
+
+
+def _safe_float_for_memory(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _looks_secret_like(value: str) -> bool:
+    lowered = value.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "sk-or-",
+            "service_role",
+            "api_key",
+            "secret",
+            "proxy",
+            "://",
+        )
+    )
 
 
 def _validator_evaluation_summary() -> dict[str, Any]:

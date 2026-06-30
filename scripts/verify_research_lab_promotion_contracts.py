@@ -114,6 +114,10 @@ def main() -> int:
         asyncio.run(_test_stale_scored_candidate_requires_rebase())
     except Exception as exc:
         errors.append(f"stale scored candidate promotion contract failed: {exc}")
+    try:
+        asyncio.run(_test_disabled_auto_promotion_writes_terminal_decision())
+    except Exception as exc:
+        errors.append(f"disabled auto-promotion decision contract failed: {exc}")
 
     if errors:
         for error in errors:
@@ -273,6 +277,54 @@ async def _test_stale_scored_candidate_requires_rebase() -> None:
         raise AssertionError(f"stale parent event used invalid status: {stale_events[0]}")
     if any(event.get("event_type") == "active_version_created" for event in events):
         raise AssertionError("stale scored candidate must not create an active version directly")
+
+
+async def _test_disabled_auto_promotion_writes_terminal_decision() -> None:
+    parent = _manifest("parent")
+    candidate = {
+        "candidate_id": "candidate:" + "4" * 64,
+        "candidate_kind": "image_build",
+        "parent_artifact_hash": parent.model_artifact_hash,
+        "miner_hotkey": "5EFakeMinerHotkey111111111111111111111111111",
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "ticket_id": "22222222-2222-4222-8222-222222222222",
+        "island": "generalist",
+    }
+    score_bundle_row = {"score_bundle_id": "score_bundle:" + "5" * 64}
+    score_bundle = {
+        "parent_artifact_hash": parent.model_artifact_hash,
+        "icp_set_hash": "sha256:" + "6" * 64,
+        "aggregates": {
+            "mean_delta": 3.0,
+            "delta_lcb": 2.5,
+        },
+    }
+    events: list[dict[str, object]] = []
+
+    async def fake_create_candidate_promotion_event(**kwargs):
+        events.append(kwargs)
+        return kwargs
+
+    original_promotion_event = promotion_module.create_candidate_promotion_event
+    try:
+        promotion_module.create_candidate_promotion_event = fake_create_candidate_promotion_event
+        result = await ResearchLabPromotionController(
+            ResearchLabGatewayConfig(auto_promotion_enabled=False),
+            worker_ref="test-worker",
+        ).process_scored_candidate(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            score_bundle=score_bundle,
+        )
+    finally:
+        promotion_module.create_candidate_promotion_event = original_promotion_event
+
+    if result.get("status") != "disabled":
+        raise AssertionError(f"expected disabled, got {result}")
+    if [event.get("event_type") for event in events] != ["promotion_checked", "promotion_disabled"]:
+        raise AssertionError(f"disabled promotion did not write checked+terminal events: {events}")
+    if events[1].get("promotion_status") != "disabled":
+        raise AssertionError(f"disabled promotion event used invalid status: {events[1]}")
 
 
 if __name__ == "__main__":

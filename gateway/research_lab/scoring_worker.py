@@ -130,6 +130,14 @@ def _short_error(exc: BaseException) -> str:
     return f"{exc.__class__.__name__}: {str(exc)[:300]}"
 
 
+def _safe_event_error_text(exc: BaseException) -> str:
+    text = f"{exc.__class__.__name__}: {str(exc)}"
+    for marker in ("sk-or-", "sb_secret", "service_role", "openrouter_api_key", "raw_secret"):
+        text = re.sub(re.escape(marker), "[redacted]", text, flags=re.IGNORECASE)
+    text = re.sub(r"https?://[^/\s:]+:[^@\s]+@", "https://[redacted]@", text)
+    return text[:500]
+
+
 def _runtime_error_diagnostics(error_text: str) -> dict[str, Any]:
     """Return DB-safe runtime diagnostics without provider URLs or request text."""
 
@@ -1033,6 +1041,7 @@ class ResearchLabGatewayScoringWorker:
                 isinstance(gate_result, Mapping)
                 and str(gate_result.get("decision") or "") == "rejected_before_private_holdout"
             )
+            scoring_health_gate = self._scoring_health_gate_result(score_bundle)
             unsigned_hash = str(score_bundle["score_bundle_hash"])
             signature_ref = await asyncio.to_thread(
                 sign_digest_with_kms,
@@ -1064,6 +1073,7 @@ class ResearchLabGatewayScoringWorker:
                     "worker_ref": self.worker_ref,
                     "proxy_ref_hash": self.proxy_ref_hash,
                     "private_holdout_gate": _candidate_gate_event_doc(gate_result),
+                    "scoring_health_gate": scoring_health_gate,
                 },
             )
             scored_event_written = True
@@ -1080,17 +1090,29 @@ class ResearchLabGatewayScoringWorker:
                 event_doc={
                     "elapsed_seconds": round(time.time() - start, 3),
                     "private_holdout_gate": _candidate_gate_event_doc(gate_result),
+                    "scoring_health_gate": scoring_health_gate,
                 },
             )
-            promotion_result = (
-                {"status": "rejected_public_holdout_gate"}
-                if private_holdout_rejected
-                else await self._maybe_promote_scored_candidate(
+            if private_holdout_rejected:
+                promotion_result = await self._record_public_holdout_rejected(
+                    candidate=candidate,
+                    score_bundle_row=bundle,
+                    score_bundle=score_bundle,
+                    gate_result=gate_result,
+                )
+            elif scoring_health_gate.get("decision") == "quarantined":
+                promotion_result = await self._record_scoring_health_quarantined(
+                    candidate=candidate,
+                    score_bundle_row=bundle,
+                    score_bundle=score_bundle,
+                    scoring_health_gate=scoring_health_gate,
+                )
+            else:
+                promotion_result = await self._maybe_promote_scored_candidate(
                     candidate=candidate,
                     score_bundle_row=bundle,
                     score_bundle=score_bundle,
                 )
-            )
             if promotion_result.get("status") == "stale_parent_needs_rescore":
                 promotion_result = await self._queue_stale_parent_rebase(
                     candidate,
@@ -1264,13 +1286,29 @@ class ResearchLabGatewayScoringWorker:
         elapsed_seconds: float,
     ) -> None:
         event_doc = {
-            "error": str(error)[:500],
+            "error": _safe_event_error_text(error),
             "elapsed_seconds": elapsed_seconds,
             "worker_ref": self.worker_ref,
             "proxy_ref_hash": self.proxy_ref_hash,
             "score_bundle_id": score_bundle_id,
             "candidate_status_preserved": "scored",
         }
+        try:
+            await create_candidate_promotion_event(
+                candidate_id=candidate_id,
+                source_score_bundle_id=score_bundle_id or None,
+                event_type="promotion_failed",
+                promotion_status="failed",
+                active_parent_artifact_hash=str(candidate.get("parent_artifact_hash") or ""),
+                candidate_parent_artifact_hash=str(candidate.get("parent_artifact_hash") or ""),
+                worker_ref=self.worker_ref,
+                event_doc={
+                    **event_doc,
+                    "reason": "post_score_side_effect_failed",
+                },
+            )
+        except Exception:
+            logger.exception("research_lab_promotion_failed_event_write_failed")
         try:
             await create_scoring_dispatch_event(
                 dispatch_type="candidate_scoring_side_effect",
@@ -1298,6 +1336,154 @@ class ResearchLabGatewayScoringWorker:
                 ),
             )
         )
+
+    async def _record_public_holdout_rejected(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_row: Mapping[str, Any],
+        score_bundle: Mapping[str, Any],
+        gate_result: Any,
+    ) -> dict[str, Any]:
+        aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
+        improvement_points = float(aggregates.get("mean_delta") or 0.0)
+        delta_lcb = float(aggregates.get("delta_lcb") or 0.0)
+        candidate_parent = str(candidate.get("parent_artifact_hash") or score_bundle.get("parent_artifact_hash") or "")
+        await create_candidate_promotion_event(
+            candidate_id=str(candidate["candidate_id"]),
+            source_score_bundle_id=str(score_bundle_row.get("score_bundle_id") or ""),
+            event_type="promotion_checked",
+            promotion_status="checked",
+            active_parent_artifact_hash=candidate_parent,
+            candidate_parent_artifact_hash=candidate_parent,
+            rolling_window_hash=str(score_bundle.get("icp_set_hash") or ""),
+            improvement_points=improvement_points,
+            threshold_points=float(self.config.improvement_threshold_points),
+            worker_ref=self.worker_ref,
+            event_doc={
+                "delta_lcb": round(delta_lcb, 6),
+                "auto_commit_enabled": self.config.auto_commit_enabled,
+                "candidate_kind": str(candidate.get("candidate_kind") or ""),
+                "decision_path": "public_holdout_rejected",
+            },
+        )
+        await create_candidate_promotion_event(
+            candidate_id=str(candidate["candidate_id"]),
+            source_score_bundle_id=str(score_bundle_row.get("score_bundle_id") or ""),
+            event_type="public_holdout_rejected",
+            promotion_status="rejected",
+            active_parent_artifact_hash=candidate_parent,
+            candidate_parent_artifact_hash=candidate_parent,
+            rolling_window_hash=str(score_bundle.get("icp_set_hash") or ""),
+            improvement_points=improvement_points,
+            threshold_points=float(self.config.improvement_threshold_points),
+            worker_ref=self.worker_ref,
+            event_doc={
+                "reason": "rejected_before_private_holdout",
+                "private_holdout_gate": _candidate_gate_event_doc(gate_result),
+                "mean_delta": round(improvement_points, 6),
+                "delta_lcb": round(delta_lcb, 6),
+                "candidate_kind": str(candidate.get("candidate_kind") or ""),
+            },
+        )
+        return {"status": "rejected_public_holdout_gate"}
+
+    async def _record_scoring_health_quarantined(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_row: Mapping[str, Any],
+        score_bundle: Mapping[str, Any],
+        scoring_health_gate: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
+        improvement_points = float(aggregates.get("mean_delta") or 0.0)
+        delta_lcb = float(aggregates.get("delta_lcb") or 0.0)
+        candidate_parent = str(candidate.get("parent_artifact_hash") or score_bundle.get("parent_artifact_hash") or "")
+        await create_candidate_promotion_event(
+            candidate_id=str(candidate["candidate_id"]),
+            source_score_bundle_id=str(score_bundle_row.get("score_bundle_id") or ""),
+            event_type="promotion_checked",
+            promotion_status="checked",
+            active_parent_artifact_hash=candidate_parent,
+            candidate_parent_artifact_hash=candidate_parent,
+            rolling_window_hash=str(score_bundle.get("icp_set_hash") or ""),
+            improvement_points=improvement_points,
+            threshold_points=float(self.config.improvement_threshold_points),
+            worker_ref=self.worker_ref,
+            event_doc={
+                "delta_lcb": round(delta_lcb, 6),
+                "auto_commit_enabled": self.config.auto_commit_enabled,
+                "candidate_kind": str(candidate.get("candidate_kind") or ""),
+                "decision_path": "scoring_health_quarantined",
+            },
+        )
+        await create_candidate_promotion_event(
+            candidate_id=str(candidate["candidate_id"]),
+            source_score_bundle_id=str(score_bundle_row.get("score_bundle_id") or ""),
+            event_type="scoring_health_quarantined",
+            promotion_status="rejected",
+            active_parent_artifact_hash=candidate_parent,
+            candidate_parent_artifact_hash=candidate_parent,
+            rolling_window_hash=str(score_bundle.get("icp_set_hash") or ""),
+            improvement_points=improvement_points,
+            threshold_points=float(self.config.improvement_threshold_points),
+            worker_ref=self.worker_ref,
+            event_doc={
+                "reason": "scoring_health_gate_enabled_and_failed",
+                "scoring_health_gate": dict(scoring_health_gate),
+                "scoring_health": _compact_scoring_health_doc(score_bundle.get("scoring_health")),
+                "mean_delta": round(improvement_points, 6),
+                "delta_lcb": round(delta_lcb, 6),
+                "candidate_kind": str(candidate.get("candidate_kind") or ""),
+            },
+        )
+        return {"status": "scoring_health_quarantined"}
+
+    def _scoring_health_gate_result(self, score_bundle: Mapping[str, Any]) -> dict[str, Any]:
+        health = score_bundle.get("scoring_health") if isinstance(score_bundle.get("scoring_health"), Mapping) else {}
+        thresholds = {
+            "reference_runtime_failure_rate": self.config.scoring_health_max_reference_runtime_failure_rate,
+            "candidate_runtime_failure_rate": self.config.scoring_health_max_candidate_runtime_failure_rate,
+            "reference_zero_company_rate": self.config.scoring_health_max_reference_zero_company_rate,
+            "candidate_zero_company_rate": self.config.scoring_health_max_candidate_zero_company_rate,
+            "provider_error_rate": self.config.scoring_health_max_provider_error_rate,
+            "timeout_rate": self.config.scoring_health_max_timeout_rate,
+        }
+        observed = {
+            "reference_runtime_failure_rate": _failure_rate_from_success(
+                health.get("reference_runtime_success_rate")
+            ),
+            "candidate_runtime_failure_rate": _failure_rate_from_success(
+                health.get("candidate_runtime_success_rate")
+            ),
+            "reference_zero_company_rate": _safe_float(health.get("reference_zero_company_rate")),
+            "candidate_zero_company_rate": _safe_float(health.get("candidate_zero_company_rate")),
+            "provider_error_rate": _safe_float(health.get("provider_error_rate")),
+            "timeout_rate": _safe_float(health.get("timeout_rate")),
+        }
+        violations: list[dict[str, Any]] = []
+        for metric, threshold in thresholds.items():
+            value = float(observed.get(metric, 0.0))
+            if value <= float(threshold):
+                continue
+            violations.append(
+                {
+                    "metric": metric,
+                    "observed": round(value, 6),
+                    "threshold": round(float(threshold), 6),
+                }
+            )
+        enabled = bool(self.config.scoring_health_gate_enabled)
+        return {
+            "schema_version": "1.0",
+            "enabled": enabled,
+            "decision": "quarantined" if enabled and violations else ("passed" if enabled else "observe_only"),
+            "would_quarantine": bool(violations),
+            "violations": violations,
+            "thresholds": {key: round(float(value), 6) for key, value in thresholds.items()},
+            "observed": {key: round(float(value), 6) for key, value in observed.items()},
+        }
 
     async def _maybe_promote_scored_candidate(
         self,
@@ -2515,7 +2701,33 @@ def _candidate_gate_event_doc(value: Any) -> dict[str, Any]:
     }
 
 
-def _safe_float(value: Any, *, default: float) -> float:
+def _compact_scoring_health_doc(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    allowed = {
+        "schema_version",
+        "health_status",
+        "icp_count",
+        "reference_runtime_success_rate",
+        "candidate_runtime_success_rate",
+        "reference_zero_company_rate",
+        "candidate_zero_company_rate",
+        "provider_error_rate",
+        "timeout_rate",
+        "invalid_output_rate",
+        "skipped_candidate_rate",
+        "public_holdout_decision",
+        "baseline_bundle_id",
+        "baseline_bundle_hash",
+    }
+    return {key: value[key] for key in allowed if key in value}
+
+
+def _failure_rate_from_success(value: Any) -> float:
+    return max(0.0, min(1.0, 1.0 - _safe_float(value, default=1.0)))
+
+
+def _safe_float(value: Any, *, default: float = 0.0) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):

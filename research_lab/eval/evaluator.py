@@ -426,16 +426,138 @@ def build_score_bundle_from_scored_icps(
         policy=policy or {},
         signature_ref=str(run_context.get("signature_ref") or ""),
     )
-    if not extra_bundle_fields:
-        return bundle
+    extra_fields = dict(extra_bundle_fields or {})
+    scoring_health = build_scoring_health_doc(
+        per_icp_results,
+        private_holdout_gate=extra_fields.get("private_holdout_gate"),
+    )
     enriched = {
         **bundle,
-        **dict(extra_bundle_fields),
+        **extra_fields,
+        "scoring_health": scoring_health,
         "score_bundle_hash": "",
         "anchored_hash": "",
     }
     enriched_hash = score_bundle_hash(enriched)
     return {**enriched, "score_bundle_hash": enriched_hash, "anchored_hash": enriched_hash}
+
+
+def build_scoring_health_doc(
+    per_icp_results: Sequence[Mapping[str, Any]],
+    *,
+    private_holdout_gate: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build deterministic scoring-health evidence from per-ICP outcomes."""
+
+    total = len(per_icp_results)
+    counts = {
+        "reference_runtime_failure_count": 0,
+        "candidate_runtime_failure_count": 0,
+        "reference_zero_company_count": 0,
+        "candidate_zero_company_count": 0,
+        "provider_error_count": 0,
+        "timeout_count": 0,
+        "invalid_output_count": 0,
+        "skipped_candidate_count": 0,
+    }
+    failure_classes: dict[str, int] = {}
+    for row in per_icp_results:
+        reasons = _failure_reason_tokens(row.get("failure_reason"))
+        active_failures = tuple(
+            reason
+            for reason in reasons
+            if not reason.startswith("candidate_model_runtime_skipped_after_")
+        )
+        for reason in reasons:
+            failure_classes[reason] = failure_classes.get(reason, 0) + 1
+        if any(reason.startswith("reference_model_runtime_") for reason in reasons):
+            counts["reference_runtime_failure_count"] += 1
+        if any(
+            reason.startswith("candidate_model_runtime_")
+            and not reason.startswith("candidate_model_runtime_skipped_after_")
+            for reason in reasons
+        ):
+            counts["candidate_runtime_failure_count"] += 1
+        if "reference_model_zero_companies" in reasons:
+            counts["reference_zero_company_count"] += 1
+        if "candidate_model_zero_companies" in reasons:
+            counts["candidate_zero_company_count"] += 1
+        if any("provider_error" in reason for reason in reasons):
+            counts["provider_error_count"] += 1
+        if any("timeout" in reason for reason in active_failures):
+            counts["timeout_count"] += 1
+        if any(
+            marker in reason
+            for reason in active_failures
+            for marker in ("invalid_json", "invalid_output", "adapter_failed")
+        ):
+            counts["invalid_output_count"] += 1
+        if any(reason.startswith("candidate_model_runtime_skipped_after_") for reason in reasons):
+            counts["skipped_candidate_count"] += 1
+
+    rates = {
+        "reference_runtime_success_rate": _health_success_rate(total, counts["reference_runtime_failure_count"]),
+        "candidate_runtime_success_rate": _health_success_rate(total, counts["candidate_runtime_failure_count"]),
+        "reference_zero_company_rate": _health_rate(total, counts["reference_zero_company_count"]),
+        "candidate_zero_company_rate": _health_rate(total, counts["candidate_zero_company_count"]),
+        "provider_error_rate": _health_rate(total, counts["provider_error_count"]),
+        "timeout_rate": _health_rate(total, counts["timeout_count"]),
+        "invalid_output_rate": _health_rate(total, counts["invalid_output_count"]),
+        "skipped_candidate_rate": _health_rate(total, counts["skipped_candidate_count"]),
+    }
+    holdout_doc = _scoring_health_holdout_doc(private_holdout_gate)
+    degraded = any(value > 0 for value in counts.values())
+    return {
+        "schema_version": "1.0",
+        "health_status": "degraded" if degraded else "healthy",
+        "icp_count": total,
+        **counts,
+        **rates,
+        "failure_class_counts": dict(sorted(failure_classes.items())),
+        "public_holdout_decision": holdout_doc.get("decision", "not_applicable"),
+        "baseline_bundle_id": holdout_doc.get("baseline_benchmark_bundle_id", ""),
+        "baseline_bundle_hash": holdout_doc.get("baseline_benchmark_hash", ""),
+        "private_holdout_gate": holdout_doc,
+    }
+
+
+def _failure_reason_tokens(value: Any) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return tuple(
+        token.strip()
+        for token in str(value).split(";")
+        if token.strip()
+    )
+
+
+def _health_rate(total: int, count: int) -> float:
+    return round(float(count) / float(total), 6) if total else 0.0
+
+
+def _health_success_rate(total: int, failure_count: int) -> float:
+    return round(1.0 - _health_rate(total, failure_count), 6) if total else 0.0
+
+
+def _scoring_health_holdout_doc(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {
+            "decision": "not_applicable",
+            "private_holdout_evaluated": False,
+            "public_icp_count": 0,
+            "private_holdout_icp_count": 0,
+        }
+    return {
+        "decision": str(value.get("decision") or ""),
+        "baseline_benchmark_bundle_id": str(value.get("baseline_benchmark_bundle_id") or ""),
+        "baseline_benchmark_hash": str(value.get("baseline_benchmark_hash") or ""),
+        "baseline_public_score": value.get("baseline_public_score"),
+        "candidate_public_score": value.get("candidate_public_score"),
+        "paired_base_public_score": value.get("paired_base_public_score"),
+        "public_icp_count": int(value.get("public_icp_count") or 0),
+        "private_holdout_icp_count": int(value.get("private_holdout_icp_count") or 0),
+        "private_holdout_evaluated": bool(value.get("private_holdout_evaluated")),
+    }
 
 
 class QualificationStyleCompanyScorer:

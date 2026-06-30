@@ -847,6 +847,84 @@ async def test_stale_parent_rebase_depth_failure_preserves_reimbursement() -> No
     assert event_doc["stale_progress"]["completed_icp_count"] == 16
 
 
+async def test_scoring_worker_terminal_decision_events() -> None:
+    candidate = {
+        "candidate_id": "candidate:" + "a" * 64,
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "ticket_id": "22222222-2222-4222-8222-222222222222",
+        "candidate_kind": "image_build",
+        "parent_artifact_hash": "sha256:" + "1" * 64,
+    }
+    score_bundle_row = {"score_bundle_id": "score_bundle:" + "b" * 64}
+    score_bundle = {
+        "parent_artifact_hash": candidate["parent_artifact_hash"],
+        "icp_set_hash": "sha256:" + "c" * 64,
+        "aggregates": {"mean_delta": 2.0, "delta_lcb": 1.0},
+        "scoring_health": {
+            "schema_version": "1.0",
+            "health_status": "degraded",
+            "reference_runtime_success_rate": 0.2,
+            "candidate_runtime_success_rate": 0.9,
+            "reference_zero_company_rate": 0.8,
+            "candidate_zero_company_rate": 0.0,
+            "provider_error_rate": 0.4,
+            "timeout_rate": 0.0,
+        },
+    }
+    captured: list[dict[str, object]] = []
+
+    async def fake_promotion_event(**kwargs):
+        captured.append(kwargs)
+        return kwargs
+
+    original_promotion_event = scoring_worker_module.create_candidate_promotion_event
+    try:
+        scoring_worker_module.create_candidate_promotion_event = fake_promotion_event
+        worker = ResearchLabGatewayScoringWorker(
+            ResearchLabGatewayConfig(scoring_health_gate_enabled=True),
+            worker_ref="test-worker",
+        )
+        gate_result = worker._scoring_health_gate_result(score_bundle)
+        assert gate_result["decision"] == "quarantined"
+        assert gate_result["would_quarantine"] is True
+
+        public_result = await worker._record_public_holdout_rejected(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            score_bundle=score_bundle,
+            gate_result={
+                "gate_type": "public_score_before_private_holdout",
+                "decision": "rejected_before_private_holdout",
+                "baseline_benchmark_bundle_id": "baseline:test",
+                "baseline_public_score": 80.0,
+                "candidate_public_score": 60.0,
+                "paired_base_public_score": 80.0,
+                "public_icp_count": 2,
+                "private_holdout_icp_count": 18,
+                "private_holdout_evaluated": False,
+            },
+        )
+        health_result = await worker._record_scoring_health_quarantined(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            score_bundle=score_bundle,
+            scoring_health_gate=gate_result,
+        )
+    finally:
+        scoring_worker_module.create_candidate_promotion_event = original_promotion_event
+
+    assert public_result["status"] == "rejected_public_holdout_gate"
+    assert health_result["status"] == "scoring_health_quarantined"
+    assert [event["event_type"] for event in captured] == [
+        "promotion_checked",
+        "public_holdout_rejected",
+        "promotion_checked",
+        "scoring_health_quarantined",
+    ]
+    assert captured[1]["promotion_status"] == "rejected"
+    assert captured[3]["event_doc"]["scoring_health_gate"]["decision"] == "quarantined"
+
+
 async def test_image_build_score_bundle_contract(draft: CodeEditDraft) -> None:
     parent = _manifest("parent")
     candidate = _manifest("candidate")
@@ -932,6 +1010,7 @@ def main() -> None:
     asyncio.run(test_evaluator_parent_freshness_abort_stops_before_bundle())
     asyncio.run(test_mid_scoring_stale_parent_requeues_without_score_bundle())
     asyncio.run(test_stale_parent_rebase_depth_failure_preserves_reimbursement())
+    asyncio.run(test_scoring_worker_terminal_decision_events())
     asyncio.run(test_image_build_score_bundle_contract(draft))
     print("research_lab_code_edit_pipeline_verifier: ok")
 

@@ -66,6 +66,11 @@ def main() -> int:
         verification = verify_research_evaluation_score_bundle(score_bundle, policy=_policy())
         if not verification["passed"]:
             errors.append("valid score bundle failed verification: " + "; ".join(verification["errors"]))
+        health = score_bundle.get("scoring_health") if isinstance(score_bundle.get("scoring_health"), dict) else {}
+        if health.get("schema_version") != "1.0":
+            errors.append("score bundle did not include deterministic scoring_health")
+        if health.get("health_status") != "healthy":
+            errors.append(f"clean score bundle health was not healthy: {health}")
         if verification["on_chain_submission_allowed"]:
             errors.append("score-bundle verification must not allow direct on-chain submission")
 
@@ -238,6 +243,19 @@ def main() -> int:
             errors.append("candidate timeout did not reject before private holdout")
         if int((timeout_bundle.get("aggregates") or {}).get("icp_count") or 0) != 2:
             errors.append("candidate timeout should only score public gate ICPs before rejection")
+        timeout_health = timeout_bundle.get("scoring_health") if isinstance(timeout_bundle.get("scoring_health"), dict) else {}
+        if timeout_health.get("timeout_count") != 1:
+            errors.append(f"candidate timeout health did not count one timeout: {timeout_health}")
+        if timeout_health.get("skipped_candidate_count") != 1:
+            errors.append(f"candidate timeout health did not count one skipped candidate ICP: {timeout_health}")
+        if timeout_health.get("public_holdout_decision") != "rejected_before_private_holdout":
+            errors.append("candidate timeout health did not preserve public holdout decision")
+        timeout_health_verification = verify_research_evaluation_score_bundle(
+            timeout_bundle,
+            policy={**_policy(), "min_delta": -100.0, "min_delta_lcb": -100.0, "min_candidate_score": 0.0},
+        )
+        if not timeout_health_verification["passed"]:
+            errors.append("scoring_health enriched timeout bundle failed verification")
 
         async def _timeout_base_runner(_icp: dict[str, object], _context: dict[str, object]) -> list[dict[str, object]]:
             raise PrivateModelRuntimeError("docker private model adapter timed out")

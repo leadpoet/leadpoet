@@ -285,6 +285,13 @@ class ResearchLabGatewayConfig:
     scoring_worker_retryable_failure_retry_seconds: int = 300
     private_model_docker_global_proxy_enabled: bool = False
     scoring_worker_allow_partial_icp_window: bool = False
+    scoring_health_gate_enabled: bool = False
+    scoring_health_max_reference_runtime_failure_rate: float = 0.25
+    scoring_health_max_candidate_runtime_failure_rate: float = 0.25
+    scoring_health_max_reference_zero_company_rate: float = 0.50
+    scoring_health_max_candidate_zero_company_rate: float = 0.50
+    scoring_health_max_provider_error_rate: float = 0.25
+    scoring_health_max_timeout_rate: float = 0.10
     private_baseline_rebenchmark_enabled: bool = False
     auto_research_min_seconds: int = 600
     auto_research_max_seconds: int = 2700
@@ -473,6 +480,31 @@ class ResearchLabGatewayConfig:
             scoring_worker_allow_partial_icp_window=_truthy(
                 "RESEARCH_LAB_SCORING_ALLOW_PARTIAL_ICP_WINDOW",
                 "false",
+            ),
+            scoring_health_gate_enabled=_truthy("RESEARCH_LAB_SCORING_HEALTH_GATE_ENABLED", "false"),
+            scoring_health_max_reference_runtime_failure_rate=min(
+                1.0,
+                max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_REFERENCE_RUNTIME_FAILURE_RATE", 0.25)),
+            ),
+            scoring_health_max_candidate_runtime_failure_rate=min(
+                1.0,
+                max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_CANDIDATE_RUNTIME_FAILURE_RATE", 0.25)),
+            ),
+            scoring_health_max_reference_zero_company_rate=min(
+                1.0,
+                max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_REFERENCE_ZERO_COMPANY_RATE", 0.50)),
+            ),
+            scoring_health_max_candidate_zero_company_rate=min(
+                1.0,
+                max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_CANDIDATE_ZERO_COMPANY_RATE", 0.50)),
+            ),
+            scoring_health_max_provider_error_rate=min(
+                1.0,
+                max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_PROVIDER_ERROR_RATE", 0.25)),
+            ),
+            scoring_health_max_timeout_rate=min(
+                1.0,
+                max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_TIMEOUT_RATE", 0.10)),
             ),
             private_baseline_rebenchmark_enabled=_truthy(
                 "RESEARCH_LAB_PRIVATE_BASELINE_REBENCHMARK_ENABLED",
@@ -957,6 +989,15 @@ class ResearchLabGatewayConfig:
                 ),
                 "private_model_docker_global_proxy_enabled": self.private_model_docker_global_proxy_enabled,
                 "scoring_worker_allow_partial_icp_window": self.scoring_worker_allow_partial_icp_window,
+                "scoring_health_gate": {
+                    "enabled": self.scoring_health_gate_enabled,
+                    "max_reference_runtime_failure_rate": self.scoring_health_max_reference_runtime_failure_rate,
+                    "max_candidate_runtime_failure_rate": self.scoring_health_max_candidate_runtime_failure_rate,
+                    "max_reference_zero_company_rate": self.scoring_health_max_reference_zero_company_rate,
+                    "max_candidate_zero_company_rate": self.scoring_health_max_candidate_zero_company_rate,
+                    "max_provider_error_rate": self.scoring_health_max_provider_error_rate,
+                    "max_timeout_rate": self.scoring_health_max_timeout_rate,
+                },
                 "private_baseline_rebenchmark_enabled": self.private_baseline_rebenchmark_enabled,
                 "auto_promotion_enabled": self.auto_promotion_enabled,
                 "auto_commit_enabled": self.auto_commit_enabled,

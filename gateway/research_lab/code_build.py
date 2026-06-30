@@ -411,6 +411,15 @@ class CodeEditCandidateBuilder:
                 "build_command_hash": canonical_hash({"cmd": self.config.private_build_cmd}),
                 "build_validation": "passed",
             }
+            build_doc.update(
+                _write_private_code_edit_diff_artifact(
+                    parent_artifact=parent_artifact,
+                    run_id=run_id,
+                    candidate_index=candidate_index,
+                    draft=draft,
+                    source_diff_hash=source_diff_hash,
+                )
+            )
             build_doc_hash = sha256_json(build_doc)
             code_manifest = code_edit_candidate_manifest(
                 draft=draft,
@@ -956,6 +965,69 @@ def _py_compile_changed_files(repo_dir: Path, changed_files: list[str]) -> None:
     if not py_files:
         return
     _run(["python3", "-m", "py_compile", *py_files], cwd=repo_dir, timeout_seconds=240)
+
+
+def _write_private_code_edit_diff_artifact(
+    *,
+    parent_artifact: PrivateModelArtifactManifest,
+    run_id: str,
+    candidate_index: int,
+    draft: CodeEditDraft,
+    source_diff_hash: str,
+) -> dict[str, Any]:
+    """Persist the successful raw diff privately for stale-parent rebase."""
+
+    manifest_uri = str(parent_artifact.manifest_uri or "")
+    if not manifest_uri.startswith("s3://"):
+        return {"source_diff_artifact_skipped": "parent_manifest_uri_not_s3"}
+    try:
+        bucket, key = _parse_s3_uri(manifest_uri)
+    except ValueError as exc:
+        return {"source_diff_artifact_error": str(exc)[:200]}
+    base_prefix = key.rsplit("/", 1)[0] if "/" in key else "research-lab/sourcing-model"
+    object_key = f"{base_prefix}/candidates/{run_id}/{int(candidate_index)}/source_diff.json"
+    payload = {
+        "schema_version": "1.0",
+        "artifact_type": "research_lab_code_edit_source_diff",
+        "run_id": str(run_id),
+        "candidate_index": int(candidate_index),
+        "parent_artifact_hash": parent_artifact.model_artifact_hash,
+        "parent_manifest_hash": parent_artifact.manifest_hash,
+        "source_diff_hash": source_diff_hash,
+        "target_files": list(draft.target_files),
+        "unified_diff": draft.unified_diff,
+        "draft_hash": sha256_json(draft.to_dict()),
+    }
+    artifact_hash = sha256_json(payload)
+    try:
+        import boto3  # type: ignore
+
+        boto3.client("s3").put_object(
+            Bucket=bucket,
+            Key=object_key,
+            Body=json.dumps({**payload, "artifact_hash": artifact_hash}, sort_keys=True).encode("utf-8"),
+            ContentType="application/json",
+        )
+    except Exception as exc:
+        return {
+            "source_diff_artifact_hash": artifact_hash,
+            "source_diff_artifact_error": str(exc)[:300],
+        }
+    return {
+        "source_diff_artifact_uri": f"s3://{bucket}/{object_key}",
+        "source_diff_artifact_hash": artifact_hash,
+    }
+
+
+def _parse_s3_uri(uri: str) -> tuple[str, str]:
+    raw = str(uri or "")
+    if not raw.startswith("s3://"):
+        raise ValueError("expected s3:// URI")
+    without_scheme = raw[5:]
+    bucket, sep, key = without_scheme.partition("/")
+    if not bucket or not sep or not key:
+        raise ValueError("invalid s3 URI")
+    return bucket, key
 
 
 def _run(cmd: list[str], *, cwd: Path, timeout_seconds: int) -> str:

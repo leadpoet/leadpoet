@@ -253,7 +253,7 @@ class ResearchLabPromotionController:
                 candidate_id=str(candidate["candidate_id"]),
                 source_score_bundle_id=score_bundle_id,
                 event_type="stale_parent_detected",
-                promotion_status="stale_parent_needs_rescore",
+                promotion_status="rebase_required",
                 active_parent_artifact_hash=active_parent,
                 candidate_parent_artifact_hash=candidate_parent,
                 rolling_window_hash=rolling_window_hash,

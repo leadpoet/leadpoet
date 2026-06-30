@@ -348,6 +348,10 @@ class ResearchLabGatewayConfig:
     code_edit_source_inspection_total_bytes: int = 120_000
     code_edit_source_inspection_search_matches: int = 30
     code_edit_patch_repair_attempts: int = 2
+    stale_parent_rebase_enabled: bool = True
+    stale_parent_rebase_repair_enabled: bool = True
+    stale_parent_rebase_repair_model: str = "anthropic/claude-sonnet-4.6"
+    stale_parent_rebase_repair_timeout_seconds: int = 120
     score_bundle_kms_key_id: str = "alias/leadpoet-research-lab-artifact-signing"
     score_bundle_signature_uri_prefix: str = ""
     auto_research_model: str = ""
@@ -632,6 +636,16 @@ class ResearchLabGatewayConfig:
             code_edit_patch_repair_attempts=max(
                 0,
                 _int("RESEARCH_LAB_CODE_EDIT_PATCH_REPAIR_ATTEMPTS", 2),
+            ),
+            stale_parent_rebase_enabled=_truthy("RESEARCH_LAB_STALE_PARENT_REBASE_ENABLED", "true"),
+            stale_parent_rebase_repair_enabled=_truthy("RESEARCH_LAB_STALE_PARENT_REBASE_REPAIR_ENABLED", "true"),
+            stale_parent_rebase_repair_model=os.getenv(
+                "RESEARCH_LAB_STALE_PARENT_REBASE_REPAIR_MODEL",
+                "anthropic/claude-sonnet-4.6",
+            ),
+            stale_parent_rebase_repair_timeout_seconds=max(
+                30,
+                _int("RESEARCH_LAB_STALE_PARENT_REBASE_REPAIR_TIMEOUT_SECONDS", 120),
             ),
             score_bundle_kms_key_id=os.getenv(
                 "RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID",
@@ -949,6 +963,15 @@ class ResearchLabGatewayConfig:
                     "search_matches": self.code_edit_source_inspection_search_matches,
                 },
                 "code_edit_patch_repair_attempts": self.code_edit_patch_repair_attempts,
+                "stale_parent_rebase": {
+                    "enabled": self.stale_parent_rebase_enabled,
+                    "repair_enabled": self.stale_parent_rebase_repair_enabled,
+                    "repair_model_configured": bool(self.stale_parent_rebase_repair_model),
+                    "repair_operator_key_configured": bool(
+                        os.getenv("RESEARCH_LAB_STALE_PARENT_REBASE_OPENROUTER_API_KEY")
+                        or os.getenv("OPENROUTER_API_KEY")
+                    ),
+                },
                 "auto_research_model_configured": bool(self.auto_research_model),
                 "approved_model_tiers": {
                     tier: {

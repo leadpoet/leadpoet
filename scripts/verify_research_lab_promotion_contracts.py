@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,8 +15,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway.research_lab.public_benchmarks import build_public_benchmark_report, sanitize_benchmark_item_summary
-from gateway.research_lab.promotion import _daily_counts_from_score_bundle
+from gateway.research_lab.config import ResearchLabGatewayConfig
+from gateway.research_lab import promotion as promotion_module
+from gateway.research_lab.promotion import ResearchLabPromotionController, _daily_counts_from_score_bundle
 from leadpoet_verifier.economics import build_champion_reward_obligation
+from research_lab.canonical import sha256_json
+from research_lab.eval import PrivateModelArtifactManifest
 
 
 def main() -> int:
@@ -104,6 +110,11 @@ def main() -> int:
     if float(obligation["threshold_points"]) != 1.0:
         errors.append("champion obligation did not use the 1-point threshold")
 
+    try:
+        asyncio.run(_test_stale_scored_candidate_requires_rebase())
+    except Exception as exc:
+        errors.append(f"stale scored candidate promotion contract failed: {exc}")
+
     if errors:
         for error in errors:
             print(f"ERROR: {error}")
@@ -185,6 +196,83 @@ def _score_bundle() -> dict[str, object]:
                 }
             )
     return {"aggregates": {"per_icp_results": per_icp_results}}
+
+
+def _manifest(name: str) -> PrivateModelArtifactManifest:
+    payload = {
+        "model_artifact_hash": sha256_json({"model": name}),
+        "git_commit_sha": "abcdef1234567890",
+        "image_digest": f"493765492819.dkr.ecr.us-east-1.amazonaws.com/research-lab/{name}@sha256:"
+        + ("a" if name == "parent" else "b") * 64,
+        "config_hash": sha256_json({"config": name}),
+        "component_registry_version": "components:v1",
+        "scoring_adapter_version": "adapter:v1",
+        "manifest_uri": f"s3://leadpoet-private-model-artifacts-493765492819/research-lab/test/{name}.json",
+        "signature_ref": f"kms://test/{name}",
+        "build_id": f"build-{name}",
+    }
+    payload["manifest_hash"] = sha256_json(payload)
+    return PrivateModelArtifactManifest.from_mapping(payload)
+
+
+async def _test_stale_scored_candidate_requires_rebase() -> None:
+    old_parent = _manifest("parent")
+    active_parent = _manifest("active-parent")
+    candidate = {
+        "candidate_id": "candidate:" + "1" * 64,
+        "candidate_kind": "image_build",
+        "parent_artifact_hash": old_parent.model_artifact_hash,
+        "candidate_model_manifest_doc": _manifest("candidate").to_dict(),
+        "candidate_source_diff_hash": sha256_json({"diff": "miner"}),
+        "miner_hotkey": "5EFakeMinerHotkey111111111111111111111111111",
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "ticket_id": "22222222-2222-4222-8222-222222222222",
+        "island": "generalist",
+    }
+    score_bundle_row = {"score_bundle_id": "score_bundle:" + "2" * 64}
+    score_bundle = {
+        "parent_artifact_hash": old_parent.model_artifact_hash,
+        "icp_set_hash": "sha256:" + "3" * 64,
+        "aggregates": {
+            "mean_delta": 2.0,
+            "delta_lcb": 1.2,
+        },
+    }
+    events: list[dict[str, object]] = []
+
+    async def fake_load_active_private_model(_config, *, register_bootstrap=False):
+        return SimpleNamespace(artifact=active_parent, version_row=None)
+
+    async def fake_create_candidate_promotion_event(**kwargs):
+        events.append(kwargs)
+        return kwargs
+
+    original_load_active = promotion_module.load_active_private_model
+    original_promotion_event = promotion_module.create_candidate_promotion_event
+    try:
+        promotion_module.load_active_private_model = fake_load_active_private_model
+        promotion_module.create_candidate_promotion_event = fake_create_candidate_promotion_event
+        result = await ResearchLabPromotionController(
+            ResearchLabGatewayConfig(auto_promotion_enabled=True),
+            worker_ref="test-worker",
+        ).process_scored_candidate(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            score_bundle=score_bundle,
+        )
+    finally:
+        promotion_module.load_active_private_model = original_load_active
+        promotion_module.create_candidate_promotion_event = original_promotion_event
+
+    if result.get("status") != "stale_parent_needs_rescore":
+        raise AssertionError(f"expected stale_parent_needs_rescore, got {result}")
+    stale_events = [event for event in events if event.get("event_type") == "stale_parent_detected"]
+    if not stale_events:
+        raise AssertionError("stale parent event was not written")
+    if stale_events[0].get("promotion_status") != "rebase_required":
+        raise AssertionError(f"stale parent event used invalid status: {stale_events[0]}")
+    if any(event.get("event_type") == "active_version_created" for event in events):
+        raise AssertionError("stale scored candidate must not create an active version directly")
 
 
 if __name__ == "__main__":

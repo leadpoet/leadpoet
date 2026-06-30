@@ -385,13 +385,31 @@ def derive_public_loop_outcome(
         promotion_event_rows,
     )
 
+    queue_status = str(latest_queue.get("current_queue_status") or "") if latest_queue else ""
+    queue_reason = str(latest_queue.get("current_reason") or "") if latest_queue else ""
+
     event_doc = {
-        "queue_status": str(latest_queue.get("current_queue_status") or "") if latest_queue else "",
+        "queue_status": queue_status,
+        "queue_reason": queue_reason,
         "receipt_status": str(latest_receipt.get("current_receipt_status") or "") if latest_receipt else "",
         "candidate_status_counts": status_counts,
         "score_bundle_count": len(score_bundle_rows),
         "promotion_event_count": len(promotion_event_rows),
     }
+
+    def _result(event_type: str, outcome_label: str, outcome_band: str) -> PublicLoopOutcome:
+        return PublicLoopOutcome(
+            event_type,
+            outcome_label,
+            outcome_band,
+            candidate_count,
+            scored_candidate_count,
+            best_summary,
+            run_id,
+            receipt_id,
+            last_activity_at,
+            event_doc,
+        )
 
     promotion_status = str(latest_promotion.get("promotion_status") or "") if latest_promotion else ""
     promotion_type = str(latest_promotion.get("event_type") or "") if latest_promotion else ""
@@ -438,6 +456,11 @@ def derive_public_loop_outcome(
             event_doc,
         )
 
+    # Credit-blocked pause (OpenRouter 402) -> resumable, surfaced as waiting_for_credits
+    # (not a generic failure / running).
+    if queue_status == "paused" and queue_reason == "blocked_for_credit":
+        return _result("waiting_for_credits", "waiting_for_credits", "pending")
+
     if status_counts.get("failed", 0) and not _has_active_candidate(status_counts):
         return PublicLoopOutcome(
             "failed",
@@ -452,18 +475,15 @@ def derive_public_loop_outcome(
             event_doc,
         )
     if _has_active_candidate(status_counts):
-        return PublicLoopOutcome(
-            "scoring",
-            "scoring",
-            "pending",
-            candidate_count,
-            scored_candidate_count,
-            best_summary,
-            run_id,
-            receipt_id,
-            last_activity_at,
-            event_doc,
+        # Distinguish "waiting on the private baseline" from genuinely-scoring.
+        baseline_waiting = any(
+            str(row.get("current_candidate_status") or "") in {"queued", "assigned", "evaluating"}
+            and str(row.get("current_reason") or "") == "baseline_not_ready"
+            for row in candidate_rows
         )
+        if baseline_waiting and scored_candidate_count == 0:
+            return _result("waiting_for_baseline", "waiting_for_baseline", "pending")
+        return _result("scoring", "scoring", "pending")
     if scored_candidate_count:
         mean_delta, delta_lcb = _score_bundle_delta(best_bundle)
         if mean_delta >= float(improvement_threshold_points) and delta_lcb >= float(improvement_min_delta_lcb):
@@ -505,8 +525,18 @@ def derive_public_loop_outcome(
             event_doc,
         )
 
-    queue_status = str(latest_queue.get("current_queue_status") or "") if latest_queue else ""
+    # Stale-parent candidates need a rebase/rescore, not "complete".
+    if not scored_candidate_count and any(
+        str(row.get("current_candidate_status") or "") == "rejected"
+        and str(row.get("current_reason") or "") == "stale_parent_needs_rescore"
+        for row in candidate_rows
+    ):
+        return _result("needs_rescore", "needs_rescore", "pending")
+
     ticket_status = str(ticket.get("current_ticket_status") or ticket.get("ticket_status") or "")
+    if queue_status == "completed" and candidate_count == 0:
+        # Queue completed but produced no candidate -> ops/investigate, NOT a success.
+        return _result("completed_no_candidate", "completed_no_candidate", "pending")
     if candidate_count or queue_status == "completed":
         return PublicLoopOutcome(
             "candidate_generation_complete",

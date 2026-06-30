@@ -478,10 +478,14 @@ def derive_public_loop_outcome(
     if _has_candidate_reason(candidate_rows, "stale_parent_needs_rescore"):
         return _result("needs_rescore", "needs_rescore", "blocked")
     if (
-        _has_any_candidate_reason(candidate_rows, _TERMINAL_UNRECOVERABLE_REJECTION_REASONS)
+        queue_status not in {"queued", "started", "running"}
+        and _has_any_candidate_reason(candidate_rows, _TERMINAL_UNRECOVERABLE_REJECTION_REASONS)
         and not _has_active_candidate(status_counts)
         and scored_candidate_count == 0
     ):
+        # The loop is over (no run still active) and its only candidates are terminally
+        # rejected for an unrecoverable reason. A fresh re-run, if any, would make the
+        # latest queue status active and take precedence over this terminal outcome.
         return _result("failed", "failed", "failed")
     if _has_candidate_reason(candidate_rows, "baseline_not_ready") or (
         queue_status == "queued" and queue_reason == "baseline_not_ready"

@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any, Mapping
+from uuid import uuid4
 
 from .config import ResearchLabGatewayConfig
 from .icp_window import RollingIcpWindowUnavailable, fetch_rolling_icp_window
@@ -554,4 +555,218 @@ async def rebase_stale_parent_candidates(
 
     if result["failed"]:
         result["ok"] = result["rebased"] > 0 or dry_run
+    return result
+
+
+# Fields the hosted worker needs on a run's queue event to do real work: the miner's
+# OpenRouter key reference (so the loop can call the model) and the compute budget. They
+# live on the run's first `queued` event, written at loop-start. A regeneration run copies
+# them so the fresh loop runs identically, while preserving the original loop-start payment
+# (no second charge) the same way the stale-parent rebase path does.
+_REGENERATION_COPY_KEYS = (
+    "payment_id",
+    "payment_ref",
+    "payment_kind",
+    "loop_start_credit_id",
+    "miner_openrouter_key_ref",
+    "miner_openrouter_key_handling",
+    "research_model_tier",
+    "requested_compute_budget_usd",
+    "max_compute_budget_usd",
+)
+
+
+async def _first_queued_event_doc(run_id: str) -> dict[str, Any]:
+    rows = await select_many(
+        "research_loop_run_queue_events",
+        columns="run_id,seq,event_type,reason,event_doc",
+        filters=(("run_id", run_id), ("event_type", "queued")),
+        order_by=(("seq", False),),
+        limit=1,
+    )
+    if not rows:
+        return {}
+    doc = rows[0].get("event_doc")
+    return dict(doc) if isinstance(doc, Mapping) else {}
+
+
+async def _existing_regeneration_run(ticket_id: str, source_candidate_id: str) -> str | None:
+    rows = await select_many(
+        "research_loop_run_queue_events",
+        columns="run_id,event_doc",
+        filters=(("ticket_id", ticket_id), ("reason", "regenerate_after_rebase_unavailable")),
+        limit=200,
+    )
+    for row in rows:
+        doc = row.get("event_doc")
+        if isinstance(doc, Mapping) and str(doc.get("regenerated_from_candidate_id") or "") == source_candidate_id:
+            return str(row.get("run_id") or "")
+    return None
+
+
+async def recover_rebase_failed_candidates(
+    *,
+    candidate_ids: list[str] | None = None,
+    dry_run: bool = True,
+    max_batch_size: int = 25,
+    regenerate: bool = True,
+    actor_ref: str | None = None,
+) -> dict[str, Any]:
+    """Recover candidates terminally stuck at ``stale_parent_rebase_failed``.
+
+    These are loops whose candidate could not be re-fit to the advanced live model
+    (e.g. a legacy ``image_build`` whose stored build doc has no source-diff artifact to
+    re-apply). The stale-parent rebase path cannot help them, so they sit terminally
+    rejected while still looking unfinished on the public dashboard.
+
+    For each such candidate this:
+      1. Marks the old candidate explicitly terminal with reason
+         ``stale_parent_rebase_unavailable`` (so the public projection reads it as a
+         finished, failed loop rather than an in-progress one), and
+      2. when ``regenerate`` is set, spawns a fresh run under the same ticket so the loop
+         re-drafts a new candidate against the current parent. The fresh run copies the
+         original loop-start payment and OpenRouter key reference, so the miner is not
+         charged a second time (reimbursement preserved, exactly as the rebase path does).
+
+    Append-only and idempotent: a candidate that already carries
+    ``stale_parent_rebase_unavailable`` or already has a regeneration run is skipped.
+    ``dry_run`` (default) reports the plan without writing.
+    """
+    config = ResearchLabGatewayConfig.from_env()
+    actor = actor_ref or default_actor_ref()
+
+    if candidate_ids:
+        rows: list[Mapping[str, Any]] = []
+        for candidate_id in candidate_ids:
+            row = await select_one(
+                "research_lab_candidate_evaluation_current", filters=(("candidate_id", candidate_id),)
+            )
+            if row:
+                rows.append(row)
+    else:
+        rows = await select_all(
+            "research_lab_candidate_evaluation_current",
+            filters=(
+                ("current_candidate_status", "rejected"),
+                ("current_reason", "stale_parent_rebase_failed"),
+            ),
+            max_rows=10000,
+        )
+
+    if max_batch_size and len(rows) > int(max_batch_size):
+        rows = rows[: int(max_batch_size)]
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "action": "recover-rebase-failed",
+        "dry_run": dry_run,
+        "regenerate": regenerate,
+        "found": 0,
+        "recovered": 0,
+        "regenerated": 0,
+        "skipped": [],
+        "already_recovered": [],
+        "failed": [],
+        "plans": [],
+    }
+
+    for row in rows:
+        candidate_id = str(row.get("candidate_id") or "")
+        status = str(row.get("current_candidate_status") or "")
+        reason = str(row.get("current_reason") or "")
+        run_id = str(row.get("run_id") or "")
+        ticket_id = str(row.get("ticket_id") or "")
+        if reason == "stale_parent_rebase_unavailable":
+            result["already_recovered"].append({"candidate_id": candidate_id})
+            continue
+        if status != "rejected" or reason != "stale_parent_rebase_failed":
+            result["skipped"].append({"candidate_id": candidate_id, "status": status, "reason": reason})
+            continue
+        if not run_id or not ticket_id:
+            result["skipped"].append({"candidate_id": candidate_id, "reason": "missing_run_or_ticket"})
+            continue
+        result["found"] += 1
+
+        existing_regen = await _existing_regeneration_run(ticket_id, candidate_id)
+        if existing_regen:
+            result["already_recovered"].append(
+                {"candidate_id": candidate_id, "regenerated_run_id": existing_regen}
+            )
+            continue
+
+        plan: dict[str, Any] = {
+            "candidate_id": candidate_id,
+            "ticket_id": ticket_id,
+            "source_run_id": run_id,
+            "candidate_kind": str(row.get("candidate_kind") or ""),
+            "regenerate": regenerate,
+        }
+
+        source_doc = await _first_queued_event_doc(run_id) if regenerate else {}
+        if regenerate and not source_doc.get("miner_openrouter_key_ref"):
+            # Without the miner's key reference the fresh loop cannot call the model;
+            # do not spawn a run that is guaranteed to fail. Mark terminal only.
+            plan["regenerate"] = False
+            plan["regenerate_skipped_reason"] = "source_run_missing_openrouter_key_ref"
+
+        if dry_run:
+            result["plans"].append({**plan, "dry_run": True})
+            continue
+
+        new_run_id = str(uuid4()) if plan["regenerate"] else None
+        try:
+            if plan["regenerate"]:
+                regen_doc: dict[str, Any] = {
+                    key: source_doc[key] for key in _REGENERATION_COPY_KEYS if key in source_doc
+                }
+                regen_doc.update(autoresearch_queue_capacity_doc(config))
+                regen_doc.update(
+                    {
+                        "requested_loop_count": 1,
+                        "regenerated_from_candidate_id": candidate_id,
+                        "regenerated_from_run_id": run_id,
+                        "resume_source": "recover_rebase_failed_candidates",
+                        "recovered_from": "stale_parent_rebase_unavailable",
+                        "reimbursement_preserved": True,
+                        "reimbursement_source": "original_loop_start_payment",
+                        "operator_ref": actor,
+                    }
+                )
+                await create_queue_event(
+                    run_id=new_run_id,
+                    ticket_id=ticket_id,
+                    event_type="queued",
+                    queue_priority=0,
+                    reason="regenerate_after_rebase_unavailable",
+                    worker_ref=actor,
+                    event_doc=regen_doc,
+                )
+
+            await create_candidate_evaluation_event(
+                candidate_id=candidate_id,
+                run_id=run_id,
+                ticket_id=ticket_id,
+                event_type="rejected",
+                candidate_status="rejected",
+                reason="stale_parent_rebase_unavailable",
+                evaluator_ref=actor,
+                event_doc={
+                    "action": "rebase_failed_candidate_recovered",
+                    "prior_reason": "stale_parent_rebase_failed",
+                    "regenerated_run_id": new_run_id,
+                    "regenerated": bool(plan["regenerate"]),
+                    "operator_ref": actor,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            result["failed"].append({"candidate_id": candidate_id, "error": str(exc)[:200]})
+            continue
+
+        result["recovered"] += 1
+        if plan["regenerate"]:
+            result["regenerated"] += 1
+        result["plans"].append({**plan, "regenerated_run_id": new_run_id})
+
+    if result["failed"]:
+        result["ok"] = result["recovered"] > 0 or dry_run
     return result

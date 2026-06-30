@@ -24,6 +24,7 @@ from .maintenance import (
 )
 from .recovery import (
     rebase_stale_parent_candidates as recovery_rebase_stale_parent_candidates,
+    recover_rebase_failed_candidates,
     requeue_baseline_not_ready_candidates,
     resume_failed_runs_from_checkpoint,
 )
@@ -121,6 +122,25 @@ def build_parser() -> argparse.ArgumentParser:
     rebase_stale.add_argument("--actor-ref", default=default_actor_ref())
     rebase_stale.add_argument(
         "--apply", action="store_true", help="Apply the rebase build+queue (default is dry-run)"
+    )
+
+    recover_rebase_failed = sub.add_parser(
+        "recover-rebase-failed",
+        help="Recover candidates terminally stuck at stale_parent_rebase_failed "
+        "(mark terminal + spawn a no-charge regeneration run under the same ticket)",
+    )
+    recover_rebase_failed.add_argument(
+        "--candidate-id", action="append", dest="candidate_ids", help="candidate_id (repeatable; omit for all)"
+    )
+    recover_rebase_failed.add_argument("--max-batch-size", type=int, default=25)
+    recover_rebase_failed.add_argument("--actor-ref", default=default_actor_ref())
+    recover_rebase_failed.add_argument(
+        "--no-regenerate",
+        action="store_true",
+        help="Only mark candidates terminal; do not spawn a regeneration run",
+    )
+    recover_rebase_failed.add_argument(
+        "--apply", action="store_true", help="Apply the recovery (default is dry-run)"
     )
 
     sub.add_parser("status", help="Print maintenance state and queue counts")
@@ -262,6 +282,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             candidate_ids=args.candidate_ids,
             dry_run=not args.apply,
             max_batch_size=args.max_batch_size,
+            actor_ref=args.actor_ref,
+        )
+    if args.command == "recover-rebase-failed":
+        return await recover_rebase_failed_candidates(
+            candidate_ids=args.candidate_ids,
+            dry_run=not args.apply,
+            max_batch_size=args.max_batch_size,
+            regenerate=not args.no_regenerate,
             actor_ref=args.actor_ref,
         )
     if args.command == "status":

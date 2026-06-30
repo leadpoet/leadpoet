@@ -345,6 +345,22 @@ async def project_public_loop_activity(
     return {"card": card, "event": event}
 
 
+# Candidate rejection reasons that are terminal and not recoverable by any operator
+# or worker retry: the loop is done and produced no scoreable result. A loop whose
+# only candidates carry one of these (none scored, none still active) must surface as
+# a terminal `failed` outcome, not the in-progress-looking `candidate_generation_complete`.
+# `stale_parent_rebase_failed`: the live model advanced and the candidate could not be
+# re-fit to it (e.g. a legacy image_build with no stored source diff to re-apply).
+# `stale_gateway_scoring_retry_limit_exceeded`: scoring exhausted its retries.
+_TERMINAL_UNRECOVERABLE_REJECTION_REASONS = frozenset(
+    {
+        "stale_parent_rebase_failed",
+        "stale_parent_rebase_unavailable",
+        "stale_gateway_scoring_retry_limit_exceeded",
+    }
+)
+
+
 def derive_public_loop_outcome(
     *,
     ticket: Mapping[str, Any],
@@ -461,6 +477,12 @@ def derive_public_loop_outcome(
         return _result("blocked_for_credit", "blocked_for_credit", "blocked")
     if _has_candidate_reason(candidate_rows, "stale_parent_needs_rescore"):
         return _result("needs_rescore", "needs_rescore", "blocked")
+    if (
+        _has_any_candidate_reason(candidate_rows, _TERMINAL_UNRECOVERABLE_REJECTION_REASONS)
+        and not _has_active_candidate(status_counts)
+        and scored_candidate_count == 0
+    ):
+        return _result("failed", "failed", "failed")
     if _has_candidate_reason(candidate_rows, "baseline_not_ready") or (
         queue_status == "queued" and queue_reason == "baseline_not_ready"
     ):
@@ -819,6 +841,10 @@ def _has_active_candidate(status_counts: Mapping[str, int]) -> bool:
 
 def _has_candidate_reason(rows: Sequence[Mapping[str, Any]], reason: str) -> bool:
     return any(str(row.get("current_reason") or row.get("reason") or "") == reason for row in rows)
+
+
+def _has_any_candidate_reason(rows: Sequence[Mapping[str, Any]], reasons: frozenset[str]) -> bool:
+    return any(str(row.get("current_reason") or row.get("reason") or "") in reasons for row in rows)
 
 
 def _is_credit_block_reason(reason: str) -> bool:

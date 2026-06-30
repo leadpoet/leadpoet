@@ -9,11 +9,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SQL_PATH = ROOT / "scripts" / "43-research-lab-queue-capacity-guard.sql"
+RESUME_SQL_PATH = ROOT / "scripts" / "54-research-lab-resume-requeue-hotkey-guard.sql"
 API_PATH = ROOT / "gateway" / "research_lab" / "api.py"
 
 
 def main() -> int:
     sql = SQL_PATH.read_text(encoding="utf-8")
+    resume_sql = RESUME_SQL_PATH.read_text(encoding="utf-8")
     api = API_PATH.read_text(encoding="utf-8")
     required_sql = {
         "guard_research_lab_queue_capacity",
@@ -40,6 +42,36 @@ def main() -> int:
         "research_lab_queue_hotkey_conflict",
     }
     missing = [f"sql:{marker}" for marker in sorted(required_sql) if marker not in sql]
+    required_resume_sql = {
+        "maintenance requeues ignore paused rows",
+        "same_hotkey_count",
+        "is_existing_run_requeue",
+        "q.current_queue_status IN ('queued', 'started')",
+        "NOT is_existing_run_requeue",
+        "q.current_queue_status IN ('queued', 'started', 'paused')",
+        "research_lab_queue_hotkey_conflict",
+        "research_lab_queue_capacity_conflict",
+    }
+    missing.extend(
+        f"resume_sql:{marker}" for marker in sorted(required_resume_sql) if marker not in resume_sql
+    )
+    same_hotkey_match = re.search(
+        r"SELECT COUNT\(\*\)\s+INTO same_hotkey_count(?P<body>.*?)IF same_hotkey_count > 0",
+        resume_sql,
+        flags=re.S,
+    )
+    if not same_hotkey_match:
+        missing.append("resume_sql:same_hotkey_count query block")
+    else:
+        same_hotkey_body = same_hotkey_match.group("body")
+        for marker in (
+            "is_existing_run_requeue",
+            "q.current_queue_status IN ('queued', 'started')",
+            "NOT is_existing_run_requeue",
+            "q.current_queue_status IN ('queued', 'started', 'paused')",
+        ):
+            if marker not in same_hotkey_body:
+                missing.append(f"resume_sql:same_hotkey:{marker}")
     missing.extend(f"api:{marker}" for marker in sorted(required_api) if marker not in api)
     if missing:
         for marker in missing:

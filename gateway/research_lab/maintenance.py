@@ -205,7 +205,9 @@ async def pause_pending_autoresearch_runs(
     return result
 
 
-async def requeue_paused_autoresearch_runs(*, actor_ref: str | None = None, reason: str = "maintenance_resume") -> int:
+async def requeue_paused_autoresearch_runs(
+    *, actor_ref: str | None = None, reason: str = "maintenance_resume"
+) -> dict[str, Any]:
     config = ResearchLabGatewayConfig.from_env()
     capacity_doc = autoresearch_queue_capacity_doc(config)
     rows = await select_all(
@@ -214,7 +216,13 @@ async def requeue_paused_autoresearch_runs(*, actor_ref: str | None = None, reas
         filters=(("current_queue_status", "paused"),),
         max_rows=10000,
     )
-    requeued = 0
+    result: dict[str, Any] = {
+        "found_paused": len(rows),
+        "requeued": 0,
+        "capacity_limited": 0,
+        "failed": 0,
+        "blocked": [],
+    }
     for row in rows:
         try:
             await create_queue_event(
@@ -232,21 +240,40 @@ async def requeue_paused_autoresearch_runs(*, actor_ref: str | None = None, reas
                     "previous_status_at": row.get("current_status_at"),
                 },
             )
-            requeued += 1
+            result["requeued"] += 1
         except Exception as exc:
+            error = str(exc)[:240]
             if _is_queue_capacity_conflict(exc):
+                result["capacity_limited"] += 1
+                result["blocked"].append(
+                    {
+                        "run_id": row.get("run_id"),
+                        "ticket_id": row.get("ticket_id"),
+                        "stage": "capacity_guard",
+                        "error": error,
+                    }
+                )
                 logger.info(
                     "research_lab_maintenance_resume_capacity_limited run_id=%s error=%s",
                     row.get("run_id"),
-                    str(exc)[:240],
+                    error,
                 )
                 continue
+            result["failed"] += 1
+            result["blocked"].append(
+                {
+                    "run_id": row.get("run_id"),
+                    "ticket_id": row.get("ticket_id"),
+                    "stage": "queue_event_insert",
+                    "error": error,
+                }
+            )
             logger.warning(
                 "research_lab_maintenance_resume_row_failed run_id=%s error=%s",
                 row.get("run_id"),
-                str(exc)[:240],
+                error,
             )
-    return requeued
+    return result
 
 
 # A candidate is safe to requeue when it failed the baseline-readiness race: the

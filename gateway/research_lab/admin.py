@@ -107,18 +107,29 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             actor_ref=args.actor_ref,
             event_doc={"operator_action": "resume-autoresearch"},
         )
-        requeued = 0
+        resume_requeue: dict[str, Any] = {
+            "found_paused": 0,
+            "requeued": 0,
+            "capacity_limited": 0,
+            "failed": 0,
+            "blocked": [],
+        }
         if not args.no_requeue:
-            requeued = await requeue_paused_autoresearch_runs(actor_ref=args.actor_ref)
+            resume_requeue = await requeue_paused_autoresearch_runs(actor_ref=args.actor_ref)
+        queue_counts = await autoresearch_queue_status_counts()
+        remaining_paused = int(queue_counts.get("paused") or 0)
+        ok = bool(args.no_requeue or remaining_paused == 0)
         return {
-            "ok": True,
+            "ok": ok,
             "action": "resume-autoresearch",
             "event_id": event.get("event_id"),
             "event_seq": event.get("seq"),
             "event_hash": event.get("anchored_hash"),
-            "requeued_paused_runs": requeued,
+            "requeued_paused_runs": int(resume_requeue.get("requeued") or 0),
+            "remaining_paused_runs": remaining_paused,
+            "resume_requeue": resume_requeue,
             "state": await get_autoresearch_maintenance_state(),
-            "queue_counts": await autoresearch_queue_status_counts(),
+            "queue_counts": queue_counts,
         }
     if args.command == "requeue-candidate":
         return await requeue_failed_candidate(

@@ -45,6 +45,7 @@ ALTER TABLE public.research_lab_candidate_promotion_events
             'rejected',
             'rebase_required',
             'rebenchmarking',
+            'stale_parent_needs_rescore',
             'disabled',
             'failed',
             'passed',

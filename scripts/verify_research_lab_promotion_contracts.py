@@ -118,6 +118,9 @@ def main() -> int:
         asyncio.run(_test_disabled_auto_promotion_writes_terminal_decision())
     except Exception as exc:
         errors.append(f"disabled auto-promotion decision contract failed: {exc}")
+    migration_56 = (ROOT / "scripts" / "56-research-lab-promotion-decision-events.sql").read_text(encoding="utf-8")
+    if "stale_parent_needs_rescore" not in migration_56:
+        errors.append("script 56 must preserve existing stale_parent_needs_rescore promotion_status rows")
 
     if errors:
         for error in errors:

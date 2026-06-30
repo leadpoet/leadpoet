@@ -52,6 +52,8 @@ from .models import (
     ResearchLabProbeRequest,
     ResearchLabReceiptCreateRequest,
     ResearchLabReceiptResponse,
+    ResearchLabResumeCreditBlockedRequest,
+    ResearchLabResumeCreditBlockedResponse,
     ResearchLabScoreBundleCreateRequest,
     ResearchLabScoreBundleResponse,
     ResearchLabTicketCreateRequest,
@@ -266,6 +268,25 @@ async def register_research_lab_openrouter_key(payload: ResearchLabOpenRouterKey
         limit_remaining=preflight_doc.get("limit_remaining"),
         limit_reset=preflight_doc.get("limit_reset"),
     )
+
+
+@router.post("/resume-credit-blocked", response_model=ResearchLabResumeCreditBlockedResponse)
+async def resume_research_lab_credit_blocked(payload: ResearchLabResumeCreditBlockedRequest):
+    """Miner self-service: after topping up their OpenRouter key, re-queue their
+    credit-blocked (paused/blocked_for_credit) runs. Resumes from checkpoint (or
+    restarts if stale) without consuming another loop-start payment. The hosted
+    worker's credit preflight is the final gate, so a still-unfunded key just re-pauses.
+    Core logic lives in recovery.resume_credit_blocked_runs_for_miner (fastapi-free)."""
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
+    _require_enabled(config.miner_submissions_enabled, "Research Lab miner submissions are disabled")
+    await _verify_signed_miner(payload)
+
+    from .recovery import resume_credit_blocked_runs_for_miner
+
+    result = await resume_credit_blocked_runs_for_miner(payload.miner_hotkey, run_ids=payload.run_ids)
+    return ResearchLabResumeCreditBlockedResponse(**result)
 
 
 @router.post("/loop-start", response_model=ResearchLabLoopStartResponse)

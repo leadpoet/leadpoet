@@ -501,6 +501,7 @@ class ResearchLabGatewayScoringWorker:
             self._private_scoring_env_not_ready_logged = False
 
         await self._recover_stale_candidate_claims()
+        await self._alert_stuck_candidates()
 
         baseline_result = None
         if self.config.private_baseline_rebenchmark_enabled and self._is_private_baseline_owner():
@@ -637,6 +638,99 @@ class ResearchLabGatewayScoringWorker:
             )
         )
         return candidate
+
+    # SLA after which a stale-parent candidate with no rebase should be alerted on.
+    _STALE_PARENT_REBASE_SLA_SECONDS = 3600
+
+    async def _alert_stuck_candidates(self) -> None:
+        """Observability alerts (structured logs) for candidates stuck beyond their
+        expected windows. Read-only; never mutates. Best-effort (swallows query errors).
+        """
+        try:
+            try:
+                retry_seconds = int(self.config.scoring_worker_baseline_not_ready_retry_seconds or 900)
+            except (TypeError, ValueError):
+                retry_seconds = 900
+            baseline_alert_after = max(300, retry_seconds * 4)
+            baseline_rows = await select_many(
+                "research_lab_candidate_evaluation_current",
+                columns="candidate_id,current_status_at,current_reason,current_candidate_status",
+                filters=(
+                    ("current_candidate_status", "queued"),
+                    ("current_reason", "baseline_not_ready"),
+                ),
+                limit=200,
+            )
+            stuck_baseline = [
+                str(r.get("candidate_id") or "")
+                for r in baseline_rows
+                if _status_is_stale(r.get("current_status_at"), baseline_alert_after)
+            ]
+            if stuck_baseline:
+                logger.warning(
+                    format_worker_block(
+                        "RESEARCH LAB CANDIDATES STUCK WAITING FOR BASELINE",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("Count", len(stuck_baseline)),
+                            ("Beyond", f"{baseline_alert_after}s"),
+                            ("Candidates", ", ".join(compact_ref(c) for c in stuck_baseline[:10])),
+                        ),
+                    )
+                )
+                logger.warning(
+                    "research_lab_candidates_stuck_baseline_not_ready count=%s threshold_seconds=%s",
+                    len(stuck_baseline),
+                    baseline_alert_after,
+                )
+
+            sla_seconds = int(
+                getattr(self.config, "stale_parent_rebase_sla_seconds", None)
+                or self._STALE_PARENT_REBASE_SLA_SECONDS
+            )
+            stale_parent_rows = await select_many(
+                "research_lab_candidate_evaluation_current",
+                columns="candidate_id,current_status_at",
+                filters=(
+                    ("current_candidate_status", "rejected"),
+                    ("current_reason", "stale_parent_needs_rescore"),
+                ),
+                limit=200,
+            )
+            overdue: list[str] = []
+            for row in stale_parent_rows:
+                if not _status_is_stale(row.get("current_status_at"), sla_seconds):
+                    continue
+                candidate_id = str(row.get("candidate_id") or "")
+                if not candidate_id:
+                    continue
+                existing = await select_many(
+                    "research_lab_candidate_promotion_events",
+                    columns="promotion_event_id",
+                    filters=(("candidate_id", candidate_id), ("event_type", "rebase_queued")),
+                    limit=1,
+                )
+                if not existing:
+                    overdue.append(candidate_id)
+            if overdue:
+                logger.warning(
+                    format_worker_block(
+                        "RESEARCH LAB STALE-PARENT CANDIDATES NOT REBASED WITHIN SLA",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("Count", len(overdue)),
+                            ("SLA", f"{sla_seconds}s"),
+                            ("Candidates", ", ".join(compact_ref(c) for c in overdue[:10])),
+                        ),
+                    )
+                )
+                logger.warning(
+                    "research_lab_stale_parent_candidates_overdue count=%s sla_seconds=%s",
+                    len(overdue),
+                    sla_seconds,
+                )
+        except Exception as exc:  # noqa: BLE001 - alerting must never break the worker pass
+            logger.warning("research_lab_stuck_candidate_alert_failed error=%s", str(exc)[:200])
 
     async def _recover_stale_candidate_claims(self) -> int:
         stale_after_seconds = max(120, int(self.config.scoring_worker_model_timeout_seconds or 900) + 60)

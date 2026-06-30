@@ -92,6 +92,12 @@ class ResearchLabOpenRouterKeyRegisterRequest(SignedResearchLabRequest):
         return value
 
 
+class ResearchLabResumeCreditBlockedRequest(SignedResearchLabRequest):
+    # Optional explicit run_ids; when omitted, all of this miner's blocked_for_credit
+    # runs are considered.
+    run_ids: Optional[list[str]] = Field(default=None)
+
+
 class ResearchLabLoopStartRequest(SignedResearchLabRequest):
     ticket_id: UUID
     payment_block_hash: Optional[str] = Field(default=None, min_length=8, max_length=160)
@@ -289,6 +295,12 @@ class ResearchLabOpenRouterKeyRegisterResponse(BaseModel):
     key_hash: str
     limit_remaining: Optional[Any] = None
     limit_reset: Optional[str] = None
+
+
+class ResearchLabResumeCreditBlockedResponse(BaseModel):
+    requeued: int
+    still_blocked: int
+    results: list[dict[str, Any]]
 
 
 class ResearchLabReceiptResponse(BaseModel):

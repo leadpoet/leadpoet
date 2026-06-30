@@ -160,6 +160,53 @@ async def next_event_seq(table: str, key_field: str, key_value: Any) -> int:
     return int(data[0]["seq"]) + 1 if data else 0
 
 
+def _is_seq_conflict(exc: BaseException) -> bool:
+    """True for a UNIQUE(key, seq) violation — the signature of a concurrent event-seq
+    race. Other unique violations (e.g. content-addressed hashes) are NOT retried, since
+    they indicate a genuine duplicate rather than a seq race."""
+    message = str(exc).lower()
+    is_unique = "duplicate key" in message or "unique constraint" in message or "23505" in message
+    return is_unique and "seq" in message
+
+
+async def append_event_with_seq(
+    table: str,
+    key_field: str,
+    key_value: Any,
+    build_payload: Any,
+    *,
+    attempts: int = 5,
+) -> dict[str, Any]:
+    """Allocate the next event seq and insert atomically against concurrent appends.
+
+    ``next_event_seq`` is read-max-then-insert, so two concurrent appends for the same
+    key can pick the same seq; the DB ``UNIQUE(key, seq)`` constraint rejects the loser.
+    This retries the loser (re-read seq, rebuild payload, re-insert) so both appends land
+    instead of one crashing. The row is built identically to the legacy inline form
+    (``event_id`` + ``schema_version`` + payload + ``anchored_hash`` over the payload),
+    so audit hashes are unchanged. ``build_payload(seq)`` returns the payload dict.
+    """
+    last_exc: BaseException | None = None
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        seq = await next_event_seq(table, key_field, key_value)
+        payload = build_payload(seq)
+        row = {
+            "event_id": str(uuid4()),
+            "schema_version": "1.0",
+            **payload,
+            "anchored_hash": canonical_hash(payload),
+        }
+        try:
+            return await insert_row(table, row)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if _is_seq_conflict(exc) and attempt < int(attempts):
+                continue
+            raise
+    assert last_exc is not None  # pragma: no cover - loop always returns or raises
+    raise last_exc
+
+
 async def payment_ref_exists(block_hash: str, extrinsic_index: int) -> bool:
     row = await select_one(
         "research_loop_start_payments",
@@ -301,22 +348,19 @@ async def create_ticket_event(
     reason: str,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    seq = await next_event_seq("research_loop_ticket_events", "ticket_id", ticket_id)
-    payload = {
-        "ticket_id": ticket_id,
-        "seq": seq,
-        "event_type": event_type,
-        "actor_hotkey": actor_hotkey,
-        "reason": reason,
-        "event_doc": event_doc or {},
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_loop_ticket_events", row)
+    return await append_event_with_seq(
+        "research_loop_ticket_events",
+        "ticket_id",
+        ticket_id,
+        lambda seq: {
+            "ticket_id": ticket_id,
+            "seq": seq,
+            "event_type": event_type,
+            "actor_hotkey": actor_hotkey,
+            "reason": reason,
+            "event_doc": event_doc or {},
+        },
+    )
 
 
 async def create_credit_event(
@@ -332,27 +376,24 @@ async def create_credit_event(
     consumed_by_loop_id: str | None = None,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    seq = await next_event_seq("research_loop_start_credit_events", "credit_id", credit_id)
-    payload = {
-        "credit_id": credit_id,
-        "ticket_id": ticket_id,
-        "payment_id": payment_id,
-        "payment_ref": payment_ref,
-        "miner_hotkey": miner_hotkey,
-        "seq": seq,
-        "event_type": event_type,
-        "credit_status": credit_status,
-        "reason": reason,
-        "consumed_by_loop_id": consumed_by_loop_id,
-        "event_doc": event_doc or {},
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_loop_start_credit_events", row)
+    return await append_event_with_seq(
+        "research_loop_start_credit_events",
+        "credit_id",
+        credit_id,
+        lambda seq: {
+            "credit_id": credit_id,
+            "ticket_id": ticket_id,
+            "payment_id": payment_id,
+            "payment_ref": payment_ref,
+            "miner_hotkey": miner_hotkey,
+            "seq": seq,
+            "event_type": event_type,
+            "credit_status": credit_status,
+            "reason": reason,
+            "consumed_by_loop_id": consumed_by_loop_id,
+            "event_doc": event_doc or {},
+        },
+    )
 
 
 async def create_queue_event(
@@ -365,24 +406,21 @@ async def create_queue_event(
     worker_ref: str | None = None,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    seq = await next_event_seq("research_loop_run_queue_events", "run_id", run_id)
-    payload = {
-        "run_id": run_id,
-        "ticket_id": ticket_id,
-        "seq": seq,
-        "event_type": event_type,
-        "queue_priority": queue_priority,
-        "worker_ref": worker_ref,
-        "reason": reason,
-        "event_doc": event_doc or {},
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_loop_run_queue_events", row)
+    return await append_event_with_seq(
+        "research_loop_run_queue_events",
+        "run_id",
+        run_id,
+        lambda seq: {
+            "run_id": run_id,
+            "ticket_id": ticket_id,
+            "seq": seq,
+            "event_type": event_type,
+            "queue_priority": queue_priority,
+            "worker_ref": worker_ref,
+            "reason": reason,
+            "event_doc": event_doc or {},
+        },
+    )
 
 
 async def create_gateway_control_event(
@@ -394,23 +432,20 @@ async def create_gateway_control_event(
     actor_ref: str | None = None,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    seq = await next_event_seq("research_lab_gateway_control_events", "control_key", control_key)
-    payload = {
-        "control_key": control_key,
-        "seq": seq,
-        "event_type": event_type,
-        "control_status": control_status,
-        "actor_ref": actor_ref,
-        "reason": reason,
-        "event_doc": event_doc or {},
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_lab_gateway_control_events", row)
+    return await append_event_with_seq(
+        "research_lab_gateway_control_events",
+        "control_key",
+        control_key,
+        lambda seq: {
+            "control_key": control_key,
+            "seq": seq,
+            "event_type": event_type,
+            "control_status": control_status,
+            "actor_ref": actor_ref,
+            "reason": reason,
+            "event_doc": event_doc or {},
+        },
+    )
 
 
 async def create_loop_start_payment(
@@ -517,22 +552,19 @@ async def create_receipt_event(
     receipt_status: str,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    seq = await next_event_seq("research_loop_receipt_events", "receipt_id", receipt_id)
-    payload = {
-        "receipt_id": receipt_id,
-        "ticket_id": ticket_id,
-        "seq": seq,
-        "event_type": event_type,
-        "receipt_status": receipt_status,
-        "event_doc": event_doc or {},
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_loop_receipt_events", row)
+    return await append_event_with_seq(
+        "research_loop_receipt_events",
+        "receipt_id",
+        receipt_id,
+        lambda seq: {
+            "receipt_id": receipt_id,
+            "ticket_id": ticket_id,
+            "seq": seq,
+            "event_type": event_type,
+            "receipt_status": receipt_status,
+            "event_doc": event_doc or {},
+        },
+    )
 
 
 async def create_candidate_artifact(request: Any) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -639,10 +671,11 @@ async def create_auto_research_loop_event(
     cost_ledger: dict[str, Any] | None = None,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    last_exc: BaseException | None = None
-    for _attempt in range(4):
-        seq = await next_event_seq("research_lab_auto_research_loop_events", "run_id", run_id)
-        payload = {
+    return await append_event_with_seq(
+        "research_lab_auto_research_loop_events",
+        "run_id",
+        run_id,
+        lambda seq: {
             "run_id": run_id,
             "ticket_id": ticket_id,
             "receipt_id": receipt_id,
@@ -657,29 +690,7 @@ async def create_auto_research_loop_event(
             "provider_usage": provider_usage or [],
             "cost_ledger": cost_ledger or {},
             "event_doc": event_doc or {},
-        }
-        row = {
-            "event_id": str(uuid4()),
-            "schema_version": "1.0",
-            **payload,
-            "anchored_hash": canonical_hash(payload),
-        }
-        try:
-            return await insert_row("research_lab_auto_research_loop_events", row)
-        except Exception as exc:
-            last_exc = exc
-            if not _is_loop_event_seq_conflict(exc):
-                raise
-            await asyncio.sleep(0.05 * (_attempt + 1))
-    raise RuntimeError("research_lab_auto_research_loop_events: seq conflict retry exhausted") from last_exc
-
-
-def _is_loop_event_seq_conflict(exc: BaseException) -> bool:
-    message = str(exc).lower()
-    return (
-        "research_lab_auto_research_loop_events_run_seq_key" in message
-        or ("duplicate key" in message and "research_lab_auto_research_loop_events" in message)
-        or ("unique constraint" in message and "research_lab_auto_research_loop_events" in message)
+        },
     )
 
 
@@ -839,21 +850,18 @@ async def create_private_model_benchmark_event(
     benchmark_status: str,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    seq = await next_event_seq("research_lab_private_model_benchmark_events", "benchmark_bundle_id", benchmark_bundle_id)
-    payload = {
-        "benchmark_bundle_id": benchmark_bundle_id,
-        "seq": seq,
-        "event_type": event_type,
-        "benchmark_status": benchmark_status,
-        "event_doc": event_doc or {},
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_lab_private_model_benchmark_events", row)
+    return await append_event_with_seq(
+        "research_lab_private_model_benchmark_events",
+        "benchmark_bundle_id",
+        benchmark_bundle_id,
+        lambda seq: {
+            "benchmark_bundle_id": benchmark_bundle_id,
+            "seq": seq,
+            "event_type": event_type,
+            "benchmark_status": benchmark_status,
+            "event_doc": event_doc or {},
+        },
+    )
 
 
 async def create_private_model_version(
@@ -923,26 +931,19 @@ async def create_private_model_version_event(
     reason: str | None = None,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    seq = await next_event_seq(
+    return await append_event_with_seq(
         "research_lab_private_model_version_events",
         "private_model_version_id",
         private_model_version_id,
+        lambda seq: {
+            "private_model_version_id": private_model_version_id,
+            "seq": seq,
+            "event_type": event_type,
+            "version_status": version_status,
+            "reason": reason,
+            "event_doc": event_doc or {},
+        },
     )
-    payload = {
-        "private_model_version_id": private_model_version_id,
-        "seq": seq,
-        "event_type": event_type,
-        "version_status": version_status,
-        "reason": reason,
-        "event_doc": event_doc or {},
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_lab_private_model_version_events", row)
 
 
 async def create_candidate_promotion_event(
@@ -1049,32 +1050,29 @@ async def create_public_loop_card_event(
     )
     if existing:
         return existing
-    seq = await next_event_seq("research_lab_public_loop_card_events", "card_id", card_id)
-    payload = {
-        "event_ref": event_ref,
-        "card_id": card_id,
-        "ticket_id": ticket_id,
-        "run_id": run_id,
-        "receipt_id": receipt_id,
-        "seq": seq,
-        "event_type": event_type,
-        "outcome_label": outcome_label,
-        "outcome_band": outcome_band,
-        "topic_tags": topic_tags,
-        "topic_signature_hash": topic_signature_hash,
-        "candidate_count": int(candidate_count),
-        "scored_candidate_count": int(scored_candidate_count),
-        "best_candidate_public_summary": best_candidate_public_summary,
-        "last_activity_at": last_activity_at or now_iso(),
-        "event_doc": event_doc or {},
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_lab_public_loop_card_events", row)
+    return await append_event_with_seq(
+        "research_lab_public_loop_card_events",
+        "card_id",
+        card_id,
+        lambda seq: {
+            "event_ref": event_ref,
+            "card_id": card_id,
+            "ticket_id": ticket_id,
+            "run_id": run_id,
+            "receipt_id": receipt_id,
+            "seq": seq,
+            "event_type": event_type,
+            "outcome_label": outcome_label,
+            "outcome_band": outcome_band,
+            "topic_tags": topic_tags,
+            "topic_signature_hash": topic_signature_hash,
+            "candidate_count": int(candidate_count),
+            "scored_candidate_count": int(scored_candidate_count),
+            "best_candidate_public_summary": best_candidate_public_summary,
+            "last_activity_at": last_activity_at or now_iso(),
+            "event_doc": event_doc or {},
+        },
+    )
 
 
 async def create_private_repo_commit_event(
@@ -1173,21 +1171,18 @@ async def create_public_benchmark_report_event(
     report_status: str,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    seq = await next_event_seq("research_lab_public_benchmark_report_events", "report_id", report_id)
-    payload = {
-        "report_id": report_id,
-        "seq": seq,
-        "event_type": event_type,
-        "report_status": report_status,
-        "event_doc": event_doc or {},
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_lab_public_benchmark_report_events", row)
+    return await append_event_with_seq(
+        "research_lab_public_benchmark_report_events",
+        "report_id",
+        report_id,
+        lambda seq: {
+            "report_id": report_id,
+            "seq": seq,
+            "event_type": event_type,
+            "report_status": report_status,
+            "event_doc": event_doc or {},
+        },
+    )
 
 
 async def create_champion_reward_obligation(
@@ -1258,22 +1253,19 @@ async def create_champion_reward_event(
     reason: str | None = None,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    seq = await next_event_seq("research_lab_champion_reward_events", "champion_reward_id", champion_reward_id)
-    payload = {
-        "champion_reward_id": champion_reward_id,
-        "seq": seq,
-        "event_type": event_type,
-        "reward_status": reward_status,
-        "reason": reason,
-        "event_doc": event_doc or {},
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_lab_champion_reward_events", row)
+    return await append_event_with_seq(
+        "research_lab_champion_reward_events",
+        "champion_reward_id",
+        champion_reward_id,
+        lambda seq: {
+            "champion_reward_id": champion_reward_id,
+            "seq": seq,
+            "event_type": event_type,
+            "reward_status": reward_status,
+            "reason": reason,
+            "event_doc": event_doc or {},
+        },
+    )
 
 
 async def create_research_lab_emission_allocation_snapshot(
@@ -1365,21 +1357,18 @@ async def create_signed_audit_bundle_event(
     audit_status: str,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    seq = await next_event_seq("research_lab_signed_audit_bundle_events", "audit_bundle_id", audit_bundle_id)
-    payload = {
-        "audit_bundle_id": audit_bundle_id,
-        "seq": seq,
-        "event_type": event_type,
-        "audit_status": audit_status,
-        "event_doc": event_doc or {},
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_lab_signed_audit_bundle_events", row)
+    return await append_event_with_seq(
+        "research_lab_signed_audit_bundle_events",
+        "audit_bundle_id",
+        audit_bundle_id,
+        lambda seq: {
+            "audit_bundle_id": audit_bundle_id,
+            "seq": seq,
+            "event_type": event_type,
+            "audit_status": audit_status,
+            "event_doc": event_doc or {},
+        },
+    )
 
 
 async def create_arweave_epoch_audit_anchor(
@@ -1473,31 +1462,28 @@ async def create_arweave_epoch_audit_anchor_event(
     arweave_tx_id: str | None = None,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    seq = await next_event_seq("research_lab_arweave_epoch_audit_anchor_events", "anchor_id", anchor_id)
     doc = event_doc or {}
-    payload = {
-        "anchor_id": anchor_id,
-        "seq": seq,
-        "event_type": event_type,
-        "anchor_status": anchor_status,
-        "transparency_event_hash": transparency_event_hash or doc.get("transparency_event_hash") or doc.get("event_hash"),
-        "tee_sequence": tee_sequence if tee_sequence is not None else doc.get("tee_sequence"),
-        "checkpoint_number": (
-            checkpoint_number
-            if checkpoint_number is not None
-            else doc.get("checkpoint_number")
-        ),
-        "checkpoint_merkle_root": checkpoint_merkle_root or doc.get("checkpoint_merkle_root"),
-        "arweave_tx_id": arweave_tx_id or doc.get("arweave_tx_id"),
-        "event_doc": doc,
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_lab_arweave_epoch_audit_anchor_events", row)
+    return await append_event_with_seq(
+        "research_lab_arweave_epoch_audit_anchor_events",
+        "anchor_id",
+        anchor_id,
+        lambda seq: {
+            "anchor_id": anchor_id,
+            "seq": seq,
+            "event_type": event_type,
+            "anchor_status": anchor_status,
+            "transparency_event_hash": transparency_event_hash or doc.get("transparency_event_hash") or doc.get("event_hash"),
+            "tee_sequence": tee_sequence if tee_sequence is not None else doc.get("tee_sequence"),
+            "checkpoint_number": (
+                checkpoint_number
+                if checkpoint_number is not None
+                else doc.get("checkpoint_number")
+            ),
+            "checkpoint_merkle_root": checkpoint_merkle_root or doc.get("checkpoint_merkle_root"),
+            "arweave_tx_id": arweave_tx_id or doc.get("arweave_tx_id"),
+            "event_doc": doc,
+        },
+    )
 
 
 async def create_participation_snapshot(
@@ -1612,21 +1598,18 @@ async def create_reimbursement_award_event(
     award_status: str,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    seq = await next_event_seq("research_reimbursement_award_events", "award_id", award_id)
-    payload = {
-        "award_id": award_id,
-        "seq": seq,
-        "event_type": event_type,
-        "award_status": award_status,
-        "event_doc": event_doc or {},
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_reimbursement_award_events", row)
+    return await append_event_with_seq(
+        "research_reimbursement_award_events",
+        "award_id",
+        award_id,
+        lambda seq: {
+            "award_id": award_id,
+            "seq": seq,
+            "event_type": event_type,
+            "award_status": award_status,
+            "event_doc": event_doc or {},
+        },
+    )
 
 
 async def create_reimbursement_schedule(
@@ -1665,26 +1648,23 @@ async def create_candidate_evaluation_event(
     score_bundle_id: str | None = None,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    seq = await next_event_seq("research_lab_candidate_evaluation_events", "candidate_id", candidate_id)
-    payload = {
-        "candidate_id": candidate_id,
-        "run_id": run_id,
-        "ticket_id": ticket_id,
-        "seq": seq,
-        "event_type": event_type,
-        "candidate_status": candidate_status,
-        "evaluator_ref": evaluator_ref,
-        "reason": reason,
-        "score_bundle_id": score_bundle_id,
-        "event_doc": event_doc or {},
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_lab_candidate_evaluation_events", row)
+    return await append_event_with_seq(
+        "research_lab_candidate_evaluation_events",
+        "candidate_id",
+        candidate_id,
+        lambda seq: {
+            "candidate_id": candidate_id,
+            "run_id": run_id,
+            "ticket_id": ticket_id,
+            "seq": seq,
+            "event_type": event_type,
+            "candidate_status": candidate_status,
+            "evaluator_ref": evaluator_ref,
+            "reason": reason,
+            "score_bundle_id": score_bundle_id,
+            "event_doc": event_doc or {},
+        },
+    )
 
 
 async def create_score_bundle(request: Any) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1751,19 +1731,16 @@ async def create_score_bundle_event(
     reason: str,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    seq = await next_event_seq("research_evaluation_score_bundle_events", "score_bundle_id", score_bundle_id)
-    payload = {
-        "score_bundle_id": score_bundle_id,
-        "seq": seq,
-        "event_type": event_type,
-        "event_status": event_status,
-        "reason": reason,
-        "event_doc": event_doc or {},
-    }
-    row = {
-        "event_id": str(uuid4()),
-        "schema_version": "1.0",
-        **payload,
-        "anchored_hash": canonical_hash(payload),
-    }
-    return await insert_row("research_evaluation_score_bundle_events", row)
+    return await append_event_with_seq(
+        "research_evaluation_score_bundle_events",
+        "score_bundle_id",
+        score_bundle_id,
+        lambda seq: {
+            "score_bundle_id": score_bundle_id,
+            "seq": seq,
+            "event_type": event_type,
+            "event_status": event_status,
+            "reason": reason,
+            "event_doc": event_doc or {},
+        },
+    )

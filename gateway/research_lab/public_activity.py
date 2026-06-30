@@ -385,14 +385,31 @@ def derive_public_loop_outcome(
         promotion_event_rows,
     )
 
+    queue_status = str(latest_queue.get("current_queue_status") or "") if latest_queue else ""
+    queue_reason = str(latest_queue.get("current_reason") or "") if latest_queue else ""
+
     event_doc = {
-        "queue_status": str(latest_queue.get("current_queue_status") or "") if latest_queue else "",
-        "queue_reason": str(latest_queue.get("current_reason") or "") if latest_queue else "",
+        "queue_status": queue_status,
+        "queue_reason": queue_reason,
         "receipt_status": str(latest_receipt.get("current_receipt_status") or "") if latest_receipt else "",
         "candidate_status_counts": status_counts,
         "score_bundle_count": len(score_bundle_rows),
         "promotion_event_count": len(promotion_event_rows),
     }
+
+    def _result(event_type: str, outcome_label: str, outcome_band: str) -> PublicLoopOutcome:
+        return PublicLoopOutcome(
+            event_type,
+            outcome_label,
+            outcome_band,
+            candidate_count,
+            scored_candidate_count,
+            best_summary,
+            run_id,
+            receipt_id,
+            last_activity_at,
+            event_doc,
+        )
 
     promotion_status = str(latest_promotion.get("promotion_status") or "") if latest_promotion else ""
     promotion_type = str(latest_promotion.get("event_type") or "") if latest_promotion else ""
@@ -439,50 +456,15 @@ def derive_public_loop_outcome(
             event_doc,
         )
 
-    queue_status = str(latest_queue.get("current_queue_status") or "") if latest_queue else ""
-    queue_reason = str(latest_queue.get("current_reason") or "") if latest_queue else ""
     ticket_status = str(ticket.get("current_ticket_status") or ticket.get("ticket_status") or "")
     if queue_status in {"paused", "failed"} and _is_credit_block_reason(queue_reason):
-        return PublicLoopOutcome(
-            "blocked_for_credit",
-            "blocked_for_credit",
-            "blocked",
-            candidate_count,
-            scored_candidate_count,
-            best_summary,
-            run_id,
-            receipt_id,
-            last_activity_at,
-            event_doc,
-        )
+        return _result("blocked_for_credit", "blocked_for_credit", "blocked")
     if _has_candidate_reason(candidate_rows, "stale_parent_needs_rescore"):
-        return PublicLoopOutcome(
-            "needs_rescore",
-            "needs_rescore",
-            "blocked",
-            candidate_count,
-            scored_candidate_count,
-            best_summary,
-            run_id,
-            receipt_id,
-            last_activity_at,
-            event_doc,
-        )
+        return _result("needs_rescore", "needs_rescore", "blocked")
     if _has_candidate_reason(candidate_rows, "baseline_not_ready") or (
         queue_status == "queued" and queue_reason == "baseline_not_ready"
     ):
-        return PublicLoopOutcome(
-            "waiting_for_baseline",
-            "waiting_for_baseline",
-            "pending",
-            candidate_count,
-            scored_candidate_count,
-            best_summary,
-            run_id,
-            receipt_id,
-            last_activity_at,
-            event_doc,
-        )
+        return _result("waiting_for_baseline", "waiting_for_baseline", "pending")
 
     if status_counts.get("failed", 0) and not _has_active_candidate(status_counts):
         return PublicLoopOutcome(
@@ -498,18 +480,15 @@ def derive_public_loop_outcome(
             event_doc,
         )
     if _has_active_candidate(status_counts):
-        return PublicLoopOutcome(
-            "scoring",
-            "scoring",
-            "pending",
-            candidate_count,
-            scored_candidate_count,
-            best_summary,
-            run_id,
-            receipt_id,
-            last_activity_at,
-            event_doc,
+        # Distinguish "waiting on the private baseline" from genuinely-scoring.
+        baseline_waiting = any(
+            str(row.get("current_candidate_status") or "") in {"queued", "assigned", "evaluating"}
+            and str(row.get("current_reason") or "") == "baseline_not_ready"
+            for row in candidate_rows
         )
+        if baseline_waiting and scored_candidate_count == 0:
+            return _result("waiting_for_baseline", "waiting_for_baseline", "pending")
+        return _result("scoring", "scoring", "pending")
     if scored_candidate_count:
         mean_delta, delta_lcb = _score_bundle_delta(best_bundle)
         if mean_delta >= float(improvement_threshold_points) and delta_lcb >= float(improvement_min_delta_lcb):
@@ -551,6 +530,10 @@ def derive_public_loop_outcome(
             event_doc,
         )
 
+    if queue_status == "completed" and candidate_count == 0:
+        # Queue completed but produced no candidate: ops should investigate,
+        # and the public card must not show a successful candidate generation.
+        return _result("completed_no_candidate", "completed_no_candidate", "pending")
     if candidate_count or queue_status == "completed":
         return PublicLoopOutcome(
             "candidate_generation_complete",

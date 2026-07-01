@@ -580,10 +580,29 @@ def derive_public_loop_outcome(
         # `paid_loop_queued` queue event. Surface this as its own stage so the
         # dashboard distinguishes "miner has not paid to launch" from a run the
         # platform simply has not picked up yet.
-        outcome_label = "awaiting_payment" if ticket_status == "opened" else "not_started"
+        if ticket_status == "opened":
+            # Emit the canonical lifecycle fields the dashboard consumes
+            # (public_status / payment_state) so it renders the "Awaiting payment"
+            # stage from the canonical path rather than inferring it from the legacy
+            # outcome label. `no_payment` is what maps to Awaiting payment downstream.
+            awaiting_event_doc = dict(event_doc)
+            awaiting_event_doc["public_status"] = "awaiting_payment"
+            awaiting_event_doc["payment_state"] = "no_payment"
+            return PublicLoopOutcome(
+                "awaiting_payment",
+                "awaiting_payment",
+                "pending",
+                candidate_count,
+                scored_candidate_count,
+                best_summary,
+                run_id,
+                receipt_id,
+                last_activity_at,
+                awaiting_event_doc,
+            )
         return PublicLoopOutcome(
-            outcome_label,
-            outcome_label,
+            "not_started",
+            "not_started",
             "pending",
             candidate_count,
             scored_candidate_count,

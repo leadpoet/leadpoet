@@ -335,7 +335,7 @@ class ResearchLabGatewayConfig:
     auto_research_max_iterations: int = 6
     auto_research_draft_timeout_seconds: int = 90
     auto_research_reflection_timeout_seconds: int = 90
-    auto_research_max_tokens: int = 8000
+    auto_research_max_tokens: int = 12000
     auto_research_estimated_iteration_cost_usd: float = 0.5
     reimbursement_policy_id: str = "alpha-reimbursement-production-v1"
     reimbursement_min_rebate_rate: float = 0.25
@@ -576,7 +576,7 @@ class ResearchLabGatewayConfig:
             ),
             auto_research_max_tokens=max(
                 700,
-                _int("RESEARCH_LAB_AUTO_RESEARCH_MAX_TOKENS", 8000),
+                _int("RESEARCH_LAB_AUTO_RESEARCH_MAX_TOKENS", 12000),
             ),
             auto_research_estimated_iteration_cost_usd=max(
                 0.01,

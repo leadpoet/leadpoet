@@ -129,6 +129,10 @@ class RetryableHostedResearchLabWorkerError(HostedResearchLabWorkerError):
     """Raised when a paid hosted run should be requeued instead of terminally failed."""
 
 
+class OpenRouterLengthRetryableError(RetryableHostedResearchLabWorkerError):
+    """Raised when OpenRouter stopped generation at the output token ceiling."""
+
+
 class HostedResearchLabBuilderNotReady(RetryableHostedResearchLabWorkerError):
     """Raised when image-build candidate infrastructure is not ready yet."""
 
@@ -334,6 +338,8 @@ def _raise_openrouter_generation_response_error(
     error = f"OpenRouter candidate generation failed: {failure}: {summary}"
     if _is_openrouter_credit_block(decoded, error):
         raise CreditBlockedHostedRunError(error)
+    if _openrouter_generation_stopped_for_length(decoded):
+        raise OpenRouterLengthRetryableError(error)
     if _openrouter_generation_response_is_retryable(
         decoded,
         error,
@@ -341,6 +347,26 @@ def _raise_openrouter_generation_response_error(
     ):
         raise RetryableHostedResearchLabWorkerError(error)
     raise HostedResearchLabWorkerError(error)
+
+
+def _openrouter_generation_stopped_for_length(decoded: object) -> bool:
+    if not isinstance(decoded, Mapping):
+        return False
+    choices = decoded.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
+        return False
+    finish_reason = str(choices[0].get("finish_reason") or "").strip().lower()
+    native_finish_reason = str(choices[0].get("native_finish_reason") or "").strip().lower()
+    return finish_reason in {"length", "max_tokens"} or native_finish_reason in {"length", "max_tokens"}
+
+
+def _openrouter_generation_retry_max_tokens(base_max_tokens: int, length_failures: int) -> int:
+    base = max(1, int(base_max_tokens or 0))
+    if length_failures <= 0:
+        return base
+    if length_failures == 1:
+        return min(24_000, max(base + 4_000, int(base * 1.5)))
+    return min(24_000, max(base + 8_000, base * 2))
 
 
 def _openrouter_generation_response_is_retryable(
@@ -2639,21 +2665,27 @@ class ResearchLabHostedWorker:
             raise HostedResearchLabWorkerError("OpenRouter key is required for hosted auto-research")
         if not model_id:
             raise HostedResearchLabWorkerError("OpenRouter auto-research model is required")
-        body = {
-            "model": model_id,
-            "messages": list(messages),
-            "temperature": 0.2,
-            "max_tokens": int(max_tokens),
-            "response_format": {"type": "json_object"},
-            "provider": {
-                "data_collection": "deny",
-                "zdr": True,
-            },
-        }
-        if str(reasoning_effort or "").strip():
-            body["reasoning_effort"] = str(reasoning_effort).strip()
+        base_max_tokens = max(1, int(max_tokens or 0))
+        requested_reasoning_effort = str(reasoning_effort or "").strip()
 
-        def _call_once() -> OpenRouterCallResult:
+        def _request_body(effective_max_tokens: int) -> dict[str, Any]:
+            body = {
+                "model": model_id,
+                "messages": list(messages),
+                "temperature": 0.2,
+                "max_tokens": int(effective_max_tokens),
+                "response_format": {"type": "json_object"},
+                "provider": {
+                    "data_collection": "deny",
+                    "zdr": True,
+                },
+            }
+            if requested_reasoning_effort:
+                body["reasoning_effort"] = requested_reasoning_effort
+            return body
+
+        def _call_once(*, effective_max_tokens: int) -> OpenRouterCallResult:
+            body = _request_body(effective_max_tokens)
             req = urlrequest.Request(
                 "https://openrouter.ai/api/v1/chat/completions",
                 data=json.dumps(body).encode("utf-8"),
@@ -2711,20 +2743,37 @@ class ResearchLabHostedWorker:
         def _call() -> OpenRouterCallResult:
             attempts = _openrouter_generation_attempts()
             last_exc: RetryableHostedResearchLabWorkerError | None = None
+            length_failures = 0
             for attempt in range(1, attempts + 1):
+                effective_max_tokens = _openrouter_generation_retry_max_tokens(
+                    base_max_tokens,
+                    length_failures,
+                )
                 try:
-                    return _call_once()
+                    return _call_once(effective_max_tokens=effective_max_tokens)
                 except CreditBlockedHostedRunError:
                     raise
                 except RetryableHostedResearchLabWorkerError as exc:
                     last_exc = exc
+                    if isinstance(exc, OpenRouterLengthRetryableError):
+                        length_failures += 1
                     if attempt >= attempts:
                         raise
+                    next_max_tokens = _openrouter_generation_retry_max_tokens(
+                        base_max_tokens,
+                        length_failures,
+                    )
                     logger.warning(
-                        "research_lab_openrouter_generation_retrying model=%s attempt=%s attempts=%s error_hash=%s",
+                        (
+                            "research_lab_openrouter_generation_retrying model=%s attempt=%s attempts=%s "
+                            "max_tokens=%s next_max_tokens=%s length_retry=%s error_hash=%s"
+                        ),
                         compact_ref(model_id),
                         attempt,
                         attempts,
+                        effective_max_tokens,
+                        next_max_tokens,
+                        isinstance(exc, OpenRouterLengthRetryableError),
                         sha256_json({"error": str(exc)}),
                     )
                     time.sleep(min(2.0, 0.25 * attempt))

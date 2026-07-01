@@ -3215,11 +3215,15 @@ def _build_openrouter_provider_usage(
 ) -> tuple[dict[str, Any], int]:
     usage_cost_microusd = _usd_to_microusd(_usage_cost_usd(usage))
     response_id = str(decoded.get("id") or "")
+    choices = decoded.get("choices")
+    first_choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else {}
     provider_usage: dict[str, Any] = {
         "provider": "openrouter",
         "key_source": "miner_key_ref",
         "response_id": response_id,
         "model": str(decoded.get("model") or model_id),
+        "finish_reason": str(first_choice.get("finish_reason") or "")[:120],
+        "native_finish_reason": str(first_choice.get("native_finish_reason") or "")[:120],
         "prompt_tokens": _int_or_none(usage.get("prompt_tokens")),
         "completion_tokens": _int_or_none(usage.get("completion_tokens")),
         "total_tokens": _int_or_none(usage.get("total_tokens")),

@@ -257,7 +257,7 @@ def main() -> int:
     if tier_model != "z-ai/glm-5.2" or tier_doc.get("reasoning_effort") != "xhigh":
         errors.append("approved auto-research model tier did not preserve reasoning_effort")
     provider_usage, reconciled_cost = _build_openrouter_provider_usage(
-        decoded={"id": "gen-test-1", "model": "test/model"},
+        decoded={"id": "gen-test-1", "model": "test/model", "choices": [{"finish_reason": "stop"}]},
         usage={"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost": 0.000111},
         model_id="fallback/model",
         api_key="test-openrouter-api-key",
@@ -284,6 +284,8 @@ def main() -> int:
         errors.append("OpenRouter provider usage did not preserve usage-vs-generation cost delta")
     if not isinstance(provider_usage.get("generation_stats"), dict) or provider_usage["generation_stats"].get("provider_name") != "test-provider":
         errors.append("OpenRouter provider usage did not store sanitized generation stats")
+    if provider_usage.get("finish_reason") != "stop":
+        errors.append("OpenRouter provider usage did not preserve finish_reason")
 
     artifact = _artifact()
     registry = coerce_component_registry(_metadata())

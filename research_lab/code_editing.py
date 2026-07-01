@@ -372,42 +372,55 @@ def parse_code_edit_source_inspection_response(
 
 
 def parse_code_edit_response(raw_text: str, *, max_candidates: int = 1) -> list[CodeEditDraft]:
-    decoded = json.loads(_extract_json_object(raw_text))
-    if not isinstance(decoded, Mapping):
-        raise ValueError("code-edit response must be a JSON object")
+    """Parse first-pass code-edit output from different LLM families.
+
+    The builder still treats parsed drafts as untrusted: every returned draft
+    must pass ``validate_code_edit_draft`` and later source-context/git-apply
+    checks. This parser is intentionally tolerant of equivalent wrapper shapes
+    so Claude/GPT/GLM style formatting drift does not throw away a valid diff.
+    """
+
+    try:
+        decoded = _decode_json_value(raw_text)
+    except ValueError:
+        draft = _draft_from_diff_only_response(raw_text)
+        if draft is None:
+            raise
+        return [draft]
+
+    if isinstance(decoded, str):
+        try:
+            return parse_code_edit_response(decoded, max_candidates=max_candidates)
+        except ValueError:
+            draft = _draft_from_diff_only_response(decoded)
+            if draft is not None:
+                return [draft]
+            raise ValueError("code-edit response string did not contain a parseable candidate")
+
+    if not isinstance(decoded, (Mapping, list)):
+        raise ValueError("code-edit response must be a JSON object or candidate array")
     if _contains_forbidden_material(decoded):
         raise ValueError("code-edit response contains forbidden private or secret material")
-    candidates = decoded.get("candidates")
-    if not isinstance(candidates, list) or not candidates:
-        raise ValueError("code-edit response requires a non-empty candidates array")
+
+    candidates = _code_edit_candidate_items(decoded)
+    if not candidates:
+        raise ValueError("code-edit response requires a non-empty candidates array or equivalent code_edit object")
 
     drafts: list[CodeEditDraft] = []
-    for item in candidates[: max(1, int(max_candidates))]:
-        if not isinstance(item, Mapping):
-            raise ValueError("candidate must be an object")
-        hypothesis = item.get("hypothesis")
-        code_edit = item.get("code_edit")
-        if not isinstance(hypothesis, Mapping) or not isinstance(code_edit, Mapping):
-            raise ValueError("candidate requires hypothesis and code_edit objects")
-        target_files = tuple(_normalize_repo_path(path) for path in code_edit.get("target_files") or ())
-        unified_diff = normalize_unified_diff_text(str(code_edit.get("unified_diff") or ""))
-        if not unified_diff.strip():
-            raise ValueError("code_edit.unified_diff is required")
-        draft = CodeEditDraft(
-            failure_mode=str(hypothesis.get("failure_mode") or "")[:700],
-            mechanism=str(hypothesis.get("mechanism") or "")[:1000],
-            expected_improvement=str(hypothesis.get("expected_improvement") or "")[:1000],
-            risk=str(hypothesis.get("risk") or "")[:700],
-            lane=str(item.get("lane") or "")[:80],
-            target_files=target_files,
-            unified_diff=unified_diff,
-            redacted_summary=str(code_edit.get("redacted_summary") or "")[:1200],
-            test_plan=str(code_edit.get("test_plan") or "")[:1200],
-            rollback_plan=str(code_edit.get("rollback_plan") or "")[:1200],
-            predicted_delta=float(hypothesis.get("predicted_delta") or 1.0),
-        )
-        validate_code_edit_draft(draft)
+    parse_errors: list[str] = []
+    for item in candidates:
+        if len(drafts) >= max(1, int(max_candidates)):
+            break
+        try:
+            draft = _draft_from_code_edit_candidate(item)
+            validate_code_edit_draft(draft)
+        except Exception as exc:
+            parse_errors.append(str(exc)[:200])
+            continue
         drafts.append(draft)
+    if not drafts:
+        joined = "; ".join(parse_errors[:3])
+        raise ValueError("code-edit response contained no valid code-edit drafts" + (f": {joined}" if joined else ""))
     return drafts
 
 
@@ -425,7 +438,7 @@ def parse_code_edit_repair_response(
     otherwise valid fixed diff.
     """
 
-    decoded = json.loads(_extract_json_object(raw_text))
+    decoded = _decode_json_value(raw_text)
     if not isinstance(decoded, Mapping):
         raise ValueError("code-edit repair response must be a JSON object")
     if _contains_forbidden_material(decoded):
@@ -486,6 +499,278 @@ def parse_code_edit_repair_response(
         validate_code_edit_draft(draft)
         drafts.append(draft)
     return drafts
+
+
+def _code_edit_candidate_items(decoded: Any, *, _depth: int = 0) -> list[Mapping[str, Any]]:
+    if _depth > 4:
+        return []
+    if isinstance(decoded, list):
+        return [item for item in (_candidate_item_from_any(item) for item in decoded) if item is not None]
+    if not isinstance(decoded, Mapping):
+        return []
+
+    candidate_keys = (
+        "candidates",
+        "candidate",
+        "code_edits",
+        "code_edit_candidates",
+        "edits",
+        "patches",
+        "diffs",
+        "changes",
+        "change",
+        "modifications",
+        "file_changes",
+        "fileChanges",
+    )
+    for key in candidate_keys:
+        value = decoded.get(key)
+        if isinstance(value, list):
+            return [item for item in (_candidate_item_from_any(item) for item in value) if item is not None]
+        if isinstance(value, Mapping):
+            return [value]
+        if isinstance(value, str) and normalize_unified_diff_text(value).lstrip().startswith("diff --git "):
+            return [{"unified_diff": value}]
+
+    if _looks_like_code_edit_candidate(decoded):
+        return [decoded]
+
+    wrapper_keys = ("result", "response", "output", "data", "message", "content", "json", "final", "answer", "text")
+    for key in wrapper_keys:
+        value = decoded.get(key)
+        if isinstance(value, (Mapping, list)):
+            nested = _code_edit_candidate_items(value, _depth=_depth + 1)
+            if nested:
+                return nested
+        if isinstance(value, str):
+            try:
+                nested_decoded = _decode_json_value(value)
+            except ValueError:
+                if normalize_unified_diff_text(value).lstrip().startswith("diff --git "):
+                    return [{"unified_diff": value}]
+                continue
+            nested = _code_edit_candidate_items(nested_decoded, _depth=_depth + 1)
+            if nested:
+                return nested
+    return []
+
+
+def _candidate_item_from_any(value: Any) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str) and normalize_unified_diff_text(value).lstrip().startswith("diff --git "):
+        return {"unified_diff": value}
+    return None
+
+
+def _looks_like_code_edit_candidate(value: Mapping[str, Any]) -> bool:
+    if isinstance(value.get("code_edit"), Mapping):
+        return True
+    if isinstance(value.get("codeEdit"), Mapping):
+        return True
+    if isinstance(value.get("edit"), Mapping):
+        return True
+    if isinstance(value.get("patch"), Mapping):
+        return True
+    return _mapping_has_diff(value)
+
+
+def _mapping_has_diff(value: Mapping[str, Any]) -> bool:
+    if any(_get_first_present(value, keys) is not None for keys in (
+        ("unified_diff", "unifiedDiff", "git_diff", "gitDiff"),
+        ("diff", "patch_text", "patchText"),
+    )):
+        return True
+    files = value.get("files") or value.get("file_changes") or value.get("fileChanges")
+    if isinstance(files, list):
+        return any(isinstance(item, Mapping) and _mapping_has_diff(item) for item in files)
+    return False
+
+
+def _draft_from_code_edit_candidate(item: Mapping[str, Any]) -> CodeEditDraft:
+    hypothesis = item.get("hypothesis")
+    if not isinstance(hypothesis, Mapping):
+        hypothesis = item.get("rationale") if isinstance(item.get("rationale"), Mapping) else {}
+    code_edit = _candidate_code_edit_mapping(item)
+    unified_diff = normalize_unified_diff_text(_string_value(_candidate_unified_diff(item, code_edit)))
+    if not unified_diff.strip():
+        raise ValueError("code_edit.unified_diff is required")
+    target_files = _coerce_target_files(
+        _get_first_present(
+            code_edit,
+            ("target_files", "targetFiles", "targets", "files", "paths", "target_file", "targetFile", "file", "path"),
+        )
+        or _get_first_present(
+            item,
+            ("target_files", "targetFiles", "targets", "files", "paths", "target_file", "targetFile", "file", "path"),
+        )
+    )
+    if not target_files:
+        target_files = tuple(sorted(extract_unified_diff_paths(unified_diff)))
+    lane = _string_value(_get_first_present(item, ("lane", "improvement_lane", "improvementLane", "category")))
+    return CodeEditDraft(
+        failure_mode=_string_value(
+            _get_first_present(hypothesis, ("failure_mode", "failureMode", "problem", "issue", "why"))
+            or _get_first_present(item, ("failure_mode", "failureMode", "problem", "issue"))
+        )[:700],
+        mechanism=_string_value(
+            _get_first_present(hypothesis, ("mechanism", "approach", "change", "solution"))
+            or _get_first_present(item, ("mechanism", "approach", "change", "solution"))
+        )[:1000],
+        expected_improvement=_string_value(
+            _get_first_present(hypothesis, ("expected_improvement", "expectedImprovement", "impact", "benefit"))
+            or _get_first_present(item, ("expected_improvement", "expectedImprovement", "impact", "benefit"))
+        )[:1000],
+        risk=_string_value(
+            _get_first_present(hypothesis, ("risk", "risks", "tradeoff", "tradeoffs"))
+            or _get_first_present(item, ("risk", "risks", "tradeoff", "tradeoffs"))
+        )[:700],
+        lane=lane[:80],
+        target_files=target_files,
+        unified_diff=unified_diff,
+        redacted_summary=_string_value(
+            _get_first_present(code_edit, ("redacted_summary", "redactedSummary", "summary", "description"))
+            or _get_first_present(item, ("redacted_summary", "redactedSummary", "summary", "description"))
+        )[:1200],
+        test_plan=_string_value(
+            _get_first_present(code_edit, ("test_plan", "testPlan", "tests", "verification"))
+            or _get_first_present(item, ("test_plan", "testPlan", "tests", "verification"))
+        )[:1200],
+        rollback_plan=_string_value(
+            _get_first_present(code_edit, ("rollback_plan", "rollbackPlan", "rollback", "revert_plan", "revertPlan"))
+            or _get_first_present(item, ("rollback_plan", "rollbackPlan", "rollback", "revert_plan", "revertPlan"))
+        )[:1200],
+        predicted_delta=_float_value(
+            _get_first_present(hypothesis, ("predicted_delta", "predictedDelta", "delta", "expected_delta", "expectedDelta")),
+            default=1.0,
+        ),
+    )
+
+
+def _candidate_code_edit_mapping(item: Mapping[str, Any]) -> Mapping[str, Any]:
+    for key in ("code_edit", "codeEdit", "edit"):
+        value = item.get(key)
+        if isinstance(value, Mapping):
+            return value
+    patch = item.get("patch")
+    if isinstance(patch, Mapping):
+        return patch
+    return item
+
+
+def _candidate_unified_diff(item: Mapping[str, Any], code_edit: Mapping[str, Any]) -> Any:
+    for source in (code_edit, item):
+        value = _get_first_present(
+            source,
+            ("unified_diff", "unifiedDiff", "git_diff", "gitDiff", "diff", "patch_text", "patchText"),
+        )
+        if value is not None:
+            return value
+        patch = source.get("patch")
+        if isinstance(patch, str):
+            return patch
+        if isinstance(patch, Mapping):
+            nested = _get_first_present(
+                patch,
+                ("unified_diff", "unifiedDiff", "git_diff", "gitDiff", "diff", "patch_text", "patchText"),
+            )
+            if nested is not None:
+                return nested
+        file_diffs = _diff_from_file_changes(source)
+        if file_diffs:
+            return file_diffs
+    return ""
+
+
+def _diff_from_file_changes(source: Mapping[str, Any]) -> str:
+    files = source.get("files") or source.get("file_changes") or source.get("fileChanges")
+    if not isinstance(files, list):
+        return ""
+    diffs: list[str] = []
+    for item in files:
+        if not isinstance(item, Mapping):
+            continue
+        diff = _get_first_present(
+            item,
+            ("unified_diff", "unifiedDiff", "git_diff", "gitDiff", "diff", "patch_text", "patchText"),
+        )
+        normalized = normalize_unified_diff_text(_string_value(diff))
+        if normalized.lstrip().startswith("diff --git "):
+            diffs.append(normalized.rstrip())
+    return "\n".join(diffs) + ("\n" if diffs else "")
+
+
+def _draft_from_diff_only_response(raw_text: str) -> CodeEditDraft | None:
+    unified_diff = normalize_unified_diff_text(raw_text)
+    if not unified_diff.lstrip().startswith("diff --git "):
+        return None
+    paths = tuple(sorted(extract_unified_diff_paths(unified_diff)))
+    if not paths:
+        return None
+    draft = CodeEditDraft(
+        failure_mode="",
+        mechanism="",
+        expected_improvement="",
+        risk="",
+        lane="",
+        target_files=paths,
+        unified_diff=unified_diff,
+        redacted_summary="Direct git diff emitted without candidate wrapper.",
+        test_plan="Run Research Lab candidate build and validation.",
+        rollback_plan="Reject candidate or revert the emitted diff.",
+        predicted_delta=1.0,
+    )
+    validate_code_edit_draft(draft)
+    return draft
+
+
+def _coerce_target_files(value: Any) -> tuple[str, ...]:
+    raw_items: list[Any]
+    if value is None:
+        raw_items = []
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+    paths: list[str] = []
+    for item in raw_items:
+        if isinstance(item, Mapping):
+            item = _get_first_present(item, ("path", "file", "target_file", "targetFile", "name"))
+        if item is None:
+            continue
+        path = _normalize_repo_path(item)
+        if path and path not in paths:
+            paths.append(path)
+    return tuple(paths)
+
+
+def _get_first_present(mapping: Mapping[str, Any], keys: Sequence[str]) -> Any:
+    for key in keys:
+        if key in mapping and mapping.get(key) is not None:
+            return mapping.get(key)
+    return None
+
+
+def _string_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return "; ".join(_string_value(item) for item in value if item is not None)
+    if isinstance(value, Mapping):
+        try:
+            return json.dumps(value, sort_keys=True, separators=(",", ":"))
+        except TypeError:
+            return str(value)
+    return str(value)
+
+
+def _float_value(value: Any, *, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def normalize_unified_diff_text(value: str) -> str:
@@ -691,20 +976,33 @@ def _redacted_source_context(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _extract_json_object(raw_text: str) -> str:
-    text = raw_text.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if "\n" in text:
-            text = text.split("\n", 1)[1].strip()
-    start = text.find("{")
-    if start < 0:
+    decoded = _decode_json_value(raw_text)
+    if not isinstance(decoded, Mapping):
         raise ValueError("response did not contain a JSON object")
+    return json.dumps(decoded)
+
+
+def _decode_json_value(raw_text: str) -> Any:
+    text = str(raw_text or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].lstrip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    starts = [index for index in (text.find("{"), text.find("[")) if index >= 0]
+    if not starts:
+        raise ValueError("response did not contain a JSON object or array")
+    start = min(starts)
+    if start < 0:
+        raise ValueError("response did not contain a JSON object or array")
     decoder = json.JSONDecoder()
     try:
-        _obj, end = decoder.raw_decode(text[start:])
+        obj, _end = decoder.raw_decode(text[start:])
     except json.JSONDecodeError as exc:
         raise ValueError(str(exc)) from exc
-    return text[start : start + end]
+    return obj
 
 
 def _example_target_file(editable_files: Any, file_previews: Any) -> str:

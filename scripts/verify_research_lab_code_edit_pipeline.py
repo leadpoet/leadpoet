@@ -106,6 +106,96 @@ def test_code_edit_parser_normalizes_markdown_wrapped_diff() -> None:
     assert normalize_unified_diff_text("```diff\ndiff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n```").startswith("diff --git ")
 
 
+def test_code_edit_parser_accepts_common_llm_wrapper_shapes() -> None:
+    payload = json.loads(_valid_response())
+    candidate = payload["candidates"][0]
+    code_edit = candidate["code_edit"]
+    diff = code_edit["unified_diff"]
+
+    array_root = json.dumps(
+        [
+            {
+                "lane": "query_construction",
+                "hypothesis": candidate["hypothesis"],
+                "edit": {
+                    "target_file": "sourcing_model/query_builder.py",
+                    "diff": diff,
+                    "summary": "Array-root output with edit/diff aliases.",
+                    "tests": "Run py_compile.",
+                    "rollback": "Revert patch.",
+                },
+            }
+        ]
+    )
+    array_drafts = parse_code_edit_response(array_root, max_candidates=1)
+    assert array_drafts[0].target_files == ("sourcing_model/query_builder.py",)
+    assert array_drafts[0].unified_diff.startswith("diff --git ")
+
+    nested_content = json.dumps(
+        {
+            "message": {
+                "content": json.dumps(
+                    {
+                        "candidate": {
+                            "category": "provider_fallback",
+                            "problem": "Fallback query logic is too narrow.",
+                            "solution": "Use broader fallback evidence terms.",
+                            "codeEdit": {
+                                "files": [{"path": "sourcing_model/query_builder.py"}],
+                                "gitDiff": diff,
+                                "description": "Nested content string output.",
+                                "testPlan": "Run public ICP smoke.",
+                                "rollbackPlan": "Revert patch.",
+                            },
+                        }
+                    }
+                )
+            }
+        }
+    )
+    nested_drafts = parse_code_edit_response(nested_content, max_candidates=1)
+    assert nested_drafts[0].lane == "provider_fallback"
+    assert nested_drafts[0].target_files == ("sourcing_model/query_builder.py",)
+
+    root_code_edit = json.dumps(
+        {
+            "codeEdit": {
+                "targetFiles": ["sourcing_model/query_builder.py"],
+                "unifiedDiff": diff,
+                "summary": "Root codeEdit output.",
+            }
+        }
+    )
+    root_drafts = parse_code_edit_response(root_code_edit, max_candidates=1)
+    assert root_drafts[0].target_files == ("sourcing_model/query_builder.py",)
+
+    file_changes = json.dumps(
+        {
+            "final": {
+                "changes": [
+                    {
+                        "path": "sourcing_model/query_builder.py",
+                        "gitDiff": diff,
+                        "summary": "File-change array output.",
+                    }
+                ]
+            }
+        }
+    )
+    file_change_drafts = parse_code_edit_response(file_changes, max_candidates=1)
+    assert file_change_drafts[0].target_files == ("sourcing_model/query_builder.py",)
+    assert file_change_drafts[0].unified_diff.startswith("diff --git ")
+
+    nested_direct_diff = json.dumps({"message": {"content": "```diff\n" + diff + "```\n"}})
+    nested_direct_drafts = parse_code_edit_response(nested_direct_diff, max_candidates=1)
+    assert nested_direct_drafts[0].target_files == ("sourcing_model/query_builder.py",)
+
+    direct_diff = "The JSON encoder failed, but here is the exact patch:\n```diff\n" + diff + "```\n"
+    diff_drafts = parse_code_edit_response(direct_diff, max_candidates=1)
+    assert diff_drafts[0].target_files == ("sourcing_model/query_builder.py",)
+    assert diff_drafts[0].redacted_summary.startswith("Direct git diff")
+
+
 def test_code_edit_repair_parser_accepts_direct_code_edit() -> None:
     original = test_code_edit_parser_accepts_safe_diff()
     repaired_raw = json.dumps(
@@ -999,6 +1089,7 @@ async def test_image_build_score_bundle_contract(draft: CodeEditDraft) -> None:
 def main() -> None:
     draft = test_code_edit_parser_accepts_safe_diff()
     test_code_edit_parser_normalizes_markdown_wrapped_diff()
+    test_code_edit_parser_accepts_common_llm_wrapper_shapes()
     test_code_edit_repair_parser_accepts_direct_code_edit()
     test_code_edit_parser_rejects_apply_patch_format()
     test_code_edit_parser_rejects_dependency_edit()

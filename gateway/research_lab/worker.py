@@ -1147,13 +1147,17 @@ class ResearchLabHostedWorker:
                 timeout_seconds: int,
                 max_tokens: int,
             ) -> str:
+                effective_max_tokens = self._auto_research_max_tokens_for_call(
+                    requested_max_tokens=max_tokens,
+                    model_doc=model_doc,
+                )
                 return await self._call_openrouter(
                     messages=messages,
                     api_key=context.provider_env["OPENROUTER_API_KEY"],
                     model_id=model_id,
                     reasoning_effort=str(model_doc.get("reasoning_effort") or ""),
                     timeout_seconds=timeout_seconds,
-                    max_tokens=max_tokens,
+                    max_tokens=effective_max_tokens,
                 )
 
             loop_settings = AutoResearchLoopSettings(
@@ -1871,7 +1875,7 @@ class ResearchLabHostedWorker:
             "checkpoint_hash": checkpoint_ref,
             "miner_hotkey": miner_hotkey,
             "model": model_id,
-            "max_tokens": 1800,
+            "max_tokens": self.config.auto_research_max_tokens,
             "resume_mode": "resume_from_checkpoint" if checkpoint_ref else "restart_from_scratch",
             "resume_instructions": (
                 "Top up the miner OpenRouter key, then resume via the miner CLI "
@@ -2751,6 +2755,21 @@ class ResearchLabHostedWorker:
         budget = float(budget_context.get("requested_compute_budget_usd") or self.config.default_compute_budget_usd)
         budget_limited = max(1, min(configured, int(max(1.0, budget // max(1.0, self.config.min_compute_budget_usd)))))
         return max(1, min(self.config.hosted_worker_max_candidates, budget_limited))
+
+    def _auto_research_max_tokens_for_call(
+        self,
+        *,
+        requested_max_tokens: int,
+        model_doc: Mapping[str, Any],
+    ) -> int:
+        configured = model_doc.get("max_tokens")
+        try:
+            configured_tokens = int(configured) if configured not in (None, "") else 0
+        except (TypeError, ValueError):
+            configured_tokens = 0
+        if configured_tokens <= 0:
+            configured_tokens = int(self.config.auto_research_max_tokens)
+        return max(1, max(int(requested_max_tokens or 0), configured_tokens))
 
     async def _active_parent_outcome_memory(
         self,

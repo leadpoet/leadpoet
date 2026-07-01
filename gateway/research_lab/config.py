@@ -335,6 +335,7 @@ class ResearchLabGatewayConfig:
     auto_research_max_iterations: int = 6
     auto_research_draft_timeout_seconds: int = 90
     auto_research_reflection_timeout_seconds: int = 90
+    auto_research_max_tokens: int = 8000
     auto_research_estimated_iteration_cost_usd: float = 0.5
     reimbursement_policy_id: str = "alpha-reimbursement-production-v1"
     reimbursement_min_rebate_rate: float = 0.25
@@ -573,6 +574,10 @@ class ResearchLabGatewayConfig:
                 10,
                 _int("RESEARCH_LAB_AUTO_RESEARCH_REFLECTION_TIMEOUT_SECONDS", 90),
             ),
+            auto_research_max_tokens=max(
+                700,
+                _int("RESEARCH_LAB_AUTO_RESEARCH_MAX_TOKENS", 8000),
+            ),
             auto_research_estimated_iteration_cost_usd=max(
                 0.01,
                 _float("RESEARCH_LAB_AUTO_RESEARCH_ESTIMATED_ITERATION_COST_USD", 0.5),
@@ -770,6 +775,7 @@ class ResearchLabGatewayConfig:
         default_doc = {
             "model": self.auto_research_model,
             "max_candidates": self.hosted_worker_max_candidates,
+            "max_tokens": self.auto_research_max_tokens,
             "description": "Default hosted auto-research model",
         }
         reasoning_effort = _normalize_auto_research_reasoning_effort(self.auto_research_reasoning_effort)
@@ -786,6 +792,7 @@ class ResearchLabGatewayConfig:
                 return self.default_auto_research_model_tier, self.auto_research_model, {
                     "model": self.auto_research_model,
                     "max_candidates": self.hosted_worker_max_candidates,
+                    "max_tokens": self.auto_research_max_tokens,
                 }
             raise ValueError("no hosted auto-research model is configured")
         effective_tier = str(tier or self.default_auto_research_model_tier or "default")
@@ -835,7 +842,15 @@ class ResearchLabGatewayConfig:
             tiers[str(name)] = {
                 key: item
                 for key, item in dict(value).items()
-                if key in {"model", "max_candidates", "max_compute_budget_usd", "description", "reasoning_effort"}
+                if key
+                in {
+                    "model",
+                    "max_candidates",
+                    "max_compute_budget_usd",
+                    "max_tokens",
+                    "description",
+                    "reasoning_effort",
+                }
             }
             reasoning_effort = _normalize_auto_research_reasoning_effort(tiers[str(name)].get("reasoning_effort"))
             if reasoning_effort:
@@ -1035,6 +1050,7 @@ class ResearchLabGatewayConfig:
                 "auto_research_max_iterations": self.auto_research_max_iterations,
                 "auto_research_draft_timeout_seconds": self.auto_research_draft_timeout_seconds,
                 "auto_research_reflection_timeout_seconds": self.auto_research_reflection_timeout_seconds,
+                "auto_research_max_tokens": self.auto_research_max_tokens,
                 "auto_research_estimated_iteration_cost_usd": self.auto_research_estimated_iteration_cost_usd,
                 "private_model_manifest_uri_configured": bool(self.private_model_manifest_uri),
                 "scoring_owner": "gateway_qualification_workers",
@@ -1099,6 +1115,7 @@ class ResearchLabGatewayConfig:
                         "model_configured": bool(doc.get("model")),
                         "max_candidates": doc.get("max_candidates", self.hosted_worker_max_candidates),
                         "max_compute_budget_usd": doc.get("max_compute_budget_usd", self.max_compute_budget_usd),
+                        "max_tokens": doc.get("max_tokens", self.auto_research_max_tokens),
                         "reasoning_effort": doc.get("reasoning_effort"),
                         "description": doc.get("description"),
                     }

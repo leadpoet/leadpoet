@@ -132,6 +132,17 @@ class RetryableHostedResearchLabWorkerError(HostedResearchLabWorkerError):
 class OpenRouterLengthRetryableError(RetryableHostedResearchLabWorkerError):
     """Raised when OpenRouter stopped generation at the output token ceiling."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_usage: Mapping[str, Any] | None = None,
+        cost_microusd: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.provider_usage = dict(provider_usage or {})
+        self.cost_microusd = max(0, int(cost_microusd or 0))
+
 
 class HostedResearchLabBuilderNotReady(RetryableHostedResearchLabWorkerError):
     """Raised when image-build candidate infrastructure is not ready yet."""
@@ -333,13 +344,19 @@ def _raise_openrouter_generation_response_error(
     *,
     failure: str,
     default_retryable: bool,
+    provider_usage: Mapping[str, Any] | None = None,
+    cost_microusd: int = 0,
 ) -> None:
     summary = _openrouter_response_summary(decoded)
     error = f"OpenRouter candidate generation failed: {failure}: {summary}"
     if _is_openrouter_credit_block(decoded, error):
         raise CreditBlockedHostedRunError(error)
     if _openrouter_generation_stopped_for_length(decoded):
-        raise OpenRouterLengthRetryableError(error)
+        raise OpenRouterLengthRetryableError(
+            error,
+            provider_usage=provider_usage,
+            cost_microusd=cost_microusd,
+        )
     if _openrouter_generation_response_is_retryable(
         decoded,
         error,
@@ -2721,12 +2738,6 @@ class ResearchLabHostedWorker:
             first_choice = choices[0] if isinstance(choices[0], Mapping) else {}
             message = first_choice.get("message") if isinstance(first_choice.get("message"), Mapping) else {}
             content = message.get("content")
-            if not content:
-                _raise_openrouter_generation_response_error(
-                    decoded,
-                    failure="empty candidate-generation content",
-                    default_retryable=True,
-                )
             usage = decoded.get("usage") if isinstance(decoded.get("usage"), Mapping) else {}
             provider_usage, cost_microusd = _build_openrouter_provider_usage(
                 decoded=decoded,
@@ -2734,6 +2745,14 @@ class ResearchLabHostedWorker:
                 model_id=model_id,
                 api_key=api_key,
             )
+            if not content:
+                _raise_openrouter_generation_response_error(
+                    decoded,
+                    failure="empty candidate-generation content",
+                    default_retryable=True,
+                    provider_usage=provider_usage,
+                    cost_microusd=cost_microusd,
+                )
             return OpenRouterCallResult(
                 content=str(content),
                 provider_usage=provider_usage,
@@ -2744,20 +2763,50 @@ class ResearchLabHostedWorker:
             attempts = _openrouter_generation_attempts()
             last_exc: RetryableHostedResearchLabWorkerError | None = None
             length_failures = 0
+            retry_provider_usage: list[dict[str, Any]] = []
+            retry_cost_microusd = 0
             for attempt in range(1, attempts + 1):
                 effective_max_tokens = _openrouter_generation_retry_max_tokens(
                     base_max_tokens,
                     length_failures,
                 )
                 try:
-                    return _call_once(effective_max_tokens=effective_max_tokens)
+                    result = _call_once(effective_max_tokens=effective_max_tokens)
+                    if retry_cost_microusd <= 0 and not retry_provider_usage:
+                        return result
+                    provider_usage = dict(result.provider_usage or {})
+                    provider_usage["retry_attempt_count"] = len(retry_provider_usage)
+                    provider_usage["retry_cost_microusd"] = retry_cost_microusd
+                    provider_usage["retry_cost_usd"] = round(retry_cost_microusd / 1_000_000, 6)
+                    provider_usage["retry_attempts"] = retry_provider_usage
+                    aggregate_cost_microusd = max(0, int(result.cost_microusd)) + retry_cost_microusd
+                    provider_usage["aggregate_cost_microusd"] = aggregate_cost_microusd
+                    provider_usage["aggregate_cost_usd"] = round(aggregate_cost_microusd / 1_000_000, 6)
+                    return OpenRouterCallResult(
+                        content=result.content,
+                        provider_usage=provider_usage,
+                        cost_microusd=aggregate_cost_microusd,
+                    )
                 except CreditBlockedHostedRunError:
                     raise
                 except RetryableHostedResearchLabWorkerError as exc:
                     last_exc = exc
                     if isinstance(exc, OpenRouterLengthRetryableError):
                         length_failures += 1
+                        if exc.provider_usage:
+                            retry_provider_usage.append(
+                                {
+                                    **exc.provider_usage,
+                                    "retry_attempt": attempt,
+                                    "retry_reason": "finish_reason_length",
+                                }
+                            )
+                        retry_cost_microusd += max(0, int(exc.cost_microusd))
                     if attempt >= attempts:
+                        if isinstance(exc, OpenRouterLengthRetryableError):
+                            raise HostedResearchLabWorkerError(
+                                "OpenRouter candidate generation exceeded output token cap after length retries"
+                            ) from exc
                         raise
                     next_max_tokens = _openrouter_generation_retry_max_tokens(
                         base_max_tokens,

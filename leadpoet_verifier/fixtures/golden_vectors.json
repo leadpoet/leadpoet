@@ -1759,7 +1759,6 @@
       "kind": "verify_research_evaluation_score_bundle",
       "policy": {
         "min_delta": 2.0,
-        "min_delta_lcb": 2.0,
         "min_successful_icps": 3,
         "max_hard_failures": 0,
         "min_candidate_score": 15.0,
@@ -1823,7 +1822,6 @@
         "benchmark_split_ref": "sealed_benchmark:qualification:intent:v1",
         "policy": {
           "min_delta": 2.0,
-          "min_delta_lcb": 2.0,
           "min_successful_icps": 3,
           "max_hard_failures": 0,
           "min_candidate_score": 15.0,
@@ -1834,7 +1832,7 @@
       "expected": {
         "passed": true,
         "errors": [],
-        "score_bundle_hash": "sha256:779e35ca12253b2ffa2d1cb37e8a51277c2d162dc7be39d445e64b4e11844296",
+        "score_bundle_hash": "sha256:494065bf4f2c6ba28390dab0edd60f0a361b7262b7ca6b573dbcf2a418bba06f",
         "eligible_for_probation": true,
         "on_chain_submission_allowed": false
       }

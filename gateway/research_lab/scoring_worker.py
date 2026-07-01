@@ -2636,12 +2636,6 @@ class ResearchLabGatewayScoringWorker:
                     str(self.config.improvement_threshold_points),
                 )
             ),
-            "min_delta_lcb": float(
-                os.environ.get(
-                    "RESEARCH_LAB_MIN_DELTA_LCB",
-                    str(self.config.improvement_min_delta_lcb),
-                )
-            ),
             "min_successful_icps": int(
                 os.environ.get(
                     "RESEARCH_LAB_MIN_SUCCESSFUL_ICPS",

@@ -314,7 +314,6 @@ async def project_public_loop_activity(
         score_bundle_rows=score_bundle_rows,
         promotion_event_rows=promotion_event_rows,
         improvement_threshold_points=effective_config.improvement_threshold_points,
-        improvement_min_delta_lcb=effective_config.improvement_min_delta_lcb,
     )
     event_ref = public_loop_card_event_ref(ticket_id, source_ref, outcome.outcome_label, outcome.last_activity_at)
     event = await create_public_loop_card_event(
@@ -370,7 +369,6 @@ def derive_public_loop_outcome(
     score_bundle_rows: Sequence[Mapping[str, Any]],
     promotion_event_rows: Sequence[Mapping[str, Any]],
     improvement_threshold_points: float = 1.0,
-    improvement_min_delta_lcb: float = 0.0,
 ) -> PublicLoopOutcome:
     candidate_count = len(candidate_rows)
     status_counts = _status_counts(candidate_rows, "current_candidate_status")
@@ -516,8 +514,8 @@ def derive_public_loop_outcome(
             return _result("waiting_for_baseline", "waiting_for_baseline", "pending")
         return _result("scoring", "scoring", "pending")
     if scored_candidate_count:
-        mean_delta, delta_lcb = _score_bundle_delta(best_bundle)
-        if mean_delta >= float(improvement_threshold_points) and delta_lcb >= float(improvement_min_delta_lcb):
+        mean_delta, _delta_lcb = _score_bundle_delta(best_bundle)
+        if mean_delta >= float(improvement_threshold_points):
             return PublicLoopOutcome(
                 "scored",
                 "scored_promising",

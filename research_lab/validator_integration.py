@@ -699,7 +699,6 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
         benchmark_split_ref="sealed_benchmark:qualification:intent:v1",
         policy={
             "min_delta": 2.0,
-            "min_delta_lcb": 2.0,
             "min_successful_icps": 1,
             "min_candidate_score": 15.0,
             "observed_cost_usd": 1.25,

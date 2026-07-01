@@ -384,7 +384,6 @@ class ResearchLabGatewayConfig:
     public_benchmark_public_total_icps: Optional[int] = None
     public_benchmark_public_weak_total: Optional[int] = None
     improvement_threshold_points: float = 1.0
-    improvement_min_delta_lcb: float = 0.0
     private_model_manifest_uri: str = (
         "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json"
     )
@@ -723,7 +722,6 @@ class ResearchLabGatewayConfig:
                 0.0,
                 _float("RESEARCH_LAB_IMPROVEMENT_THRESHOLD_POINTS", 1.0),
             ),
-            improvement_min_delta_lcb=_float("RESEARCH_LAB_IMPROVEMENT_MIN_DELTA_LCB", 0.0),
             private_model_manifest_uri=os.getenv(
                 "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI",
                 "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json",
@@ -1069,7 +1067,6 @@ class ResearchLabGatewayConfig:
                 "public_benchmark_public_total_icps": self.public_benchmark_public_total_icps,
                 "public_benchmark_public_weak_total": self.public_benchmark_public_weak_total,
                 "improvement_threshold_points": self.improvement_threshold_points,
-                "improvement_min_delta_lcb": self.improvement_min_delta_lcb,
             },
             "arweave_audit": {
                 "enabled": self.arweave_audit_enabled,

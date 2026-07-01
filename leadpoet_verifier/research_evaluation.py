@@ -113,7 +113,6 @@ def evaluate_improvement_gate(
     """Evaluate deterministic Research Lab improvement eligibility."""
     policy = policy or {}
     min_delta = float(policy.get("min_delta", 0.0))
-    min_delta_lcb = float(policy.get("min_delta_lcb", min_delta))
     min_successful_icps = int(policy.get("min_successful_icps", 1))
     max_hard_failures = int(policy.get("max_hard_failures", 0))
     min_candidate_score = float(policy.get("min_candidate_score", 0.0))
@@ -123,8 +122,6 @@ def evaluate_improvement_gate(
     blockers: list[str] = []
     if float(aggregates["mean_delta"]) < min_delta:
         blockers.append("delta_below_minimum")
-    if float(aggregates["delta_lcb"]) < min_delta_lcb:
-        blockers.append("delta_lcb_below_minimum")
     if int(aggregates["successful_icp_count"]) < min_successful_icps:
         blockers.append("insufficient_successful_icps")
     if int(aggregates["hard_failure_count"]) > max_hard_failures:
@@ -140,7 +137,6 @@ def evaluate_improvement_gate(
         "blockers": blockers,
         "policy": {
             "min_delta": min_delta,
-            "min_delta_lcb": min_delta_lcb,
             "min_successful_icps": min_successful_icps,
             "max_hard_failures": max_hard_failures,
             "min_candidate_score": min_candidate_score,

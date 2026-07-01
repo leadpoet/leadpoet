@@ -472,7 +472,6 @@ async def _derive_public_loop_outcome_for_ticket(ticket_id: str) -> dict[str, An
         score_bundle_rows=score_bundle_rows,
         promotion_event_rows=promotion_rows,
         improvement_threshold_points=ResearchLabGatewayConfig.from_env().improvement_threshold_points,
-        improvement_min_delta_lcb=ResearchLabGatewayConfig.from_env().improvement_min_delta_lcb,
     )
     return {
         "ticket_id": ticket_id,

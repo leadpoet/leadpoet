@@ -265,7 +265,7 @@ class ResearchLabPromotionController:
             )
             return {"status": "rejected_legacy_patch_candidate"}
 
-        if improvement_points < threshold or delta_lcb < float(self.config.improvement_min_delta_lcb):
+        if improvement_points < threshold:
             await create_candidate_promotion_event(
                 candidate_id=str(candidate["candidate_id"]),
                 source_score_bundle_id=score_bundle_id,
@@ -280,7 +280,6 @@ class ResearchLabPromotionController:
                 event_doc={
                     "mean_delta": round(improvement_points, 6),
                     "delta_lcb": round(delta_lcb, 6),
-                    "min_delta_lcb": self.config.improvement_min_delta_lcb,
                 },
             )
             return {"status": "rejected_below_threshold"}

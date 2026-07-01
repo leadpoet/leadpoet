@@ -214,6 +214,64 @@ def main() -> int:
         finally:
             worker_module.urlrequest.urlopen = original_urlopen
 
+        reasoning_fallback_bodies: list[dict[str, object]] = []
+
+        class _FakeOpenRouterErrorBody:
+            def __init__(self, body: dict[str, object]):
+                self._body = body
+
+            def read(self) -> bytes:
+                return json.dumps(self._body).encode("utf-8")
+
+            def close(self) -> None:
+                return None
+
+        def _fake_reasoning_unsupported_then_success(_request, timeout: int):
+            body = json.loads((_request.data or b"{}").decode("utf-8"))
+            reasoning_fallback_bodies.append(body)
+            if body.get("reasoning_effort"):
+                raise worker_module.HTTPError(
+                    _request.full_url,
+                    400,
+                    "Bad Request",
+                    {},
+                    _FakeOpenRouterErrorBody(
+                        {
+                            "error": {
+                                "message": "reasoning_effort is not supported by this model",
+                            }
+                        }
+                    ),
+                )
+            return _FakeOpenRouterResponse(
+                {
+                    "model": "provider/plain-model",
+                    "choices": [{"message": {"content": '{"candidates":[]}'}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                }
+            )
+
+        worker_module.urlrequest.urlopen = _fake_reasoning_unsupported_then_success
+        try:
+            result = await hosted_worker._call_openrouter(
+                messages=[{"role": "user", "content": '{"task":"test"}'}],
+                api_key=fake_key,
+                model_id="provider/plain-model",
+                reasoning_effort="high",
+                timeout_seconds=7,
+                max_tokens=16,
+            )
+            if len(reasoning_fallback_bodies) != 2:
+                errors.append("OpenRouter reasoning_effort fallback did not retry exactly once")
+            elif "reasoning_effort" not in reasoning_fallback_bodies[0] or "reasoning_effort" in reasoning_fallback_bodies[1]:
+                errors.append("OpenRouter reasoning_effort fallback did not drop unsupported field")
+            if not result.provider_usage.get("reasoning_effort_dropped"):
+                errors.append("OpenRouter reasoning_effort fallback did not annotate provider usage")
+        except Exception as exc:
+            errors.append(f"OpenRouter reasoning_effort unsupported fallback failed: {exc}")
+        finally:
+            worker_module.urlrequest.urlopen = original_urlopen
+
         def _fake_permanent_error(_request, timeout: int):
             return _FakeOpenRouterResponse(
                 {"error": {"code": 401, "message": "invalid api key " + fake_key}}

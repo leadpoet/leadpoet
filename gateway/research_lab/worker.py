@@ -101,6 +101,27 @@ def _openrouter_generation_attempts() -> int:
         return 3
 
 
+def _is_openrouter_reasoning_effort_unsupported(status_code: int, message: str) -> bool:
+    text = str(message or "").lower()
+    if int(status_code) not in {400, 404, 422}:
+        return False
+    if "reasoning_effort" not in text and "reasoning effort" not in text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "unsupported",
+            "not supported",
+            "unrecognized",
+            "unknown",
+            "invalid",
+            "not allowed",
+            "extra inputs are not permitted",
+            "unexpected",
+        )
+    )
+
+
 def _status_age_seconds(raw_status_at: object) -> float | None:
     if not raw_status_at:
         return None
@@ -142,6 +163,10 @@ class OpenRouterLengthRetryableError(RetryableHostedResearchLabWorkerError):
         super().__init__(message)
         self.provider_usage = dict(provider_usage or {})
         self.cost_microusd = max(0, int(cost_microusd or 0))
+
+
+class OpenRouterReasoningEffortUnsupportedError(HostedResearchLabWorkerError):
+    """Raised internally when a model rejects the optional reasoning_effort field."""
 
 
 class HostedResearchLabBuilderNotReady(RetryableHostedResearchLabWorkerError):
@@ -2774,7 +2799,7 @@ class ResearchLabHostedWorker:
             ),
         )
 
-        def _request_body(effective_max_tokens: int) -> dict[str, Any]:
+        def _request_body(effective_max_tokens: int, *, include_reasoning_effort: bool) -> dict[str, Any]:
             body = {
                 "model": model_id,
                 "messages": list(messages),
@@ -2786,12 +2811,15 @@ class ResearchLabHostedWorker:
                     "zdr": True,
                 },
             }
-            if requested_reasoning_effort:
+            if requested_reasoning_effort and include_reasoning_effort:
                 body["reasoning_effort"] = requested_reasoning_effort
             return body
 
-        def _call_once(*, effective_max_tokens: int) -> OpenRouterCallResult:
-            body = _request_body(effective_max_tokens)
+        def _call_once(*, effective_max_tokens: int, include_reasoning_effort: bool) -> OpenRouterCallResult:
+            body = _request_body(
+                effective_max_tokens,
+                include_reasoning_effort=include_reasoning_effort,
+            )
             req = urlrequest.Request(
                 "https://openrouter.ai/api/v1/chat/completions",
                 data=json.dumps(body).encode("utf-8"),
@@ -2808,6 +2836,8 @@ class ResearchLabHostedWorker:
             except HTTPError as exc:
                 message = exc.read().decode("utf-8", errors="replace")[:500]
                 error = f"OpenRouter candidate generation failed: HTTP {exc.code}: {message}"
+                if include_reasoning_effort and requested_reasoning_effort and _is_openrouter_reasoning_effort_unsupported(int(exc.code), message):
+                    raise OpenRouterReasoningEffortUnsupportedError(error) from exc
                 if int(exc.code) == 402 or _is_openrouter_credit_block(None, error):
                     raise CreditBlockedHostedRunError(error) from exc
                 if int(exc.code) in _RETRYABLE_HTTP_CODES:
@@ -2854,13 +2884,48 @@ class ResearchLabHostedWorker:
             length_failures = 0
             retry_provider_usage: list[dict[str, Any]] = []
             retry_cost_microusd = 0
+            include_reasoning_effort = bool(requested_reasoning_effort)
+            reasoning_effort_drop_error_hash = ""
             for attempt in range(1, attempts + 1):
                 effective_max_tokens = _openrouter_generation_retry_max_tokens(
                     base_max_tokens,
                     length_failures,
                 )
                 try:
-                    result = _call_once(effective_max_tokens=effective_max_tokens)
+                    try:
+                        result = _call_once(
+                            effective_max_tokens=effective_max_tokens,
+                            include_reasoning_effort=include_reasoning_effort,
+                        )
+                    except OpenRouterReasoningEffortUnsupportedError as exc:
+                        if not include_reasoning_effort:
+                            raise
+                        include_reasoning_effort = False
+                        reasoning_effort_drop_error_hash = sha256_json({"error": str(exc)})
+                        logger.warning(
+                            (
+                                "research_lab_openrouter_reasoning_effort_unsupported "
+                                "model=%s effort=%s attempt=%s error_hash=%s; retrying_without_reasoning_effort"
+                            ),
+                            compact_ref(model_id),
+                            requested_reasoning_effort,
+                            attempt,
+                            reasoning_effort_drop_error_hash,
+                        )
+                        result = _call_once(
+                            effective_max_tokens=effective_max_tokens,
+                            include_reasoning_effort=False,
+                        )
+                    if reasoning_effort_drop_error_hash:
+                        provider_usage = dict(result.provider_usage or {})
+                        provider_usage["reasoning_effort_dropped"] = True
+                        provider_usage["requested_reasoning_effort"] = requested_reasoning_effort
+                        provider_usage["reasoning_effort_drop_error_hash"] = reasoning_effort_drop_error_hash
+                        result = OpenRouterCallResult(
+                            content=result.content,
+                            provider_usage=provider_usage,
+                            cost_microusd=result.cost_microusd,
+                        )
                     if retry_cost_microusd <= 0 and not retry_provider_usage:
                         return result
                     provider_usage = dict(result.provider_usage or {})

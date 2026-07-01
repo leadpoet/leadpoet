@@ -86,8 +86,8 @@ def build_research_lab_worker_autostart_plan(
     auto_start_enabled = _truthy_env(env, "RESEARCH_LAB_AUTO_START_WORKERS", "true")
     hosted_proxies = _configured_proxies(env, HOSTED_PROXY_PREFIXES)
     scoring_proxies = _configured_proxies(env, SCORING_PROXY_PREFIXES)
-    hosted_count_override = _int_env(env, "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT", 0)
-    scoring_count_override = _int_env(env, "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT", 0)
+    hosted_legacy_count = _int_env(env, "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT", 0)
+    scoring_legacy_count = _int_env(env, "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT", 0)
 
     hosted_enabled = (
         auto_start_enabled
@@ -96,7 +96,7 @@ def build_research_lab_worker_autostart_plan(
             _truthy_env(env, "RESEARCH_LAB_HOSTED_RUNS_ENABLED")
             or _truthy_env(env, "RESEARCH_LAB_HOSTED_WORKER_ENABLED")
         )
-        and (hosted_count_override > 0 or bool(hosted_proxies))
+        and (hosted_legacy_count > 0 or bool(hosted_proxies))
     )
     scoring_enabled = (
         auto_start_enabled
@@ -105,7 +105,7 @@ def build_research_lab_worker_autostart_plan(
             _truthy_env(env, "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED")
             or _truthy_env(env, "RESEARCH_LAB_SCORING_WORKER_ENABLED")
         )
-        and (scoring_count_override > 0 or bool(scoring_proxies))
+        and (scoring_legacy_count > 0 or bool(scoring_proxies))
     )
 
     hosted_reason = ""
@@ -113,7 +113,7 @@ def build_research_lab_worker_autostart_plan(
         hosted_reason = "auto_start_disabled"
     elif not (_truthy_env(env, "RESEARCH_LAB_HOSTED_RUNS_ENABLED") or _truthy_env(env, "RESEARCH_LAB_HOSTED_WORKER_ENABLED")):
         hosted_reason = "hosted_runs_disabled"
-    elif hosted_count_override <= 0 and not hosted_proxies:
+    elif hosted_legacy_count <= 0 and not hosted_proxies:
         hosted_reason = "no_auto_research_proxies"
 
     scoring_reason = ""
@@ -121,11 +121,11 @@ def build_research_lab_worker_autostart_plan(
         scoring_reason = "auto_start_disabled"
     elif not (_truthy_env(env, "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED") or _truthy_env(env, "RESEARCH_LAB_SCORING_WORKER_ENABLED")):
         scoring_reason = "evaluation_bundles_disabled"
-    elif scoring_count_override <= 0 and not scoring_proxies:
+    elif scoring_legacy_count <= 0 and not scoring_proxies:
         scoring_reason = "no_qualification_proxies"
 
-    hosted_count = max(0, hosted_count_override or len(hosted_proxies))
-    scoring_count = max(0, scoring_count_override or len(scoring_proxies))
+    hosted_count = len(hosted_proxies) if hosted_proxies else max(0, hosted_legacy_count)
+    scoring_count = len(scoring_proxies) if scoring_proxies else max(0, scoring_legacy_count)
     return ResearchLabWorkerAutoStartPlan(
         auto_start_enabled=auto_start_enabled,
         hosted=ResearchLabWorkerFleetPlan(

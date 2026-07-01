@@ -197,6 +197,31 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _count_configured_proxy_values(prefixes: tuple[str, ...]) -> int:
+    seen: set[str] = set()
+    count = 0
+    for index in range(1, 501):
+        for prefix in prefixes:
+            value = os.getenv(f"{prefix}_{index}", "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                count += 1
+                break
+    return count
+
+
+def _worker_total_from_proxy_count(
+    *,
+    prefixes: tuple[str, ...],
+    legacy_total_env: str,
+    default: int = 1,
+) -> int:
+    proxy_count = _count_configured_proxy_values(prefixes)
+    if proxy_count > 0:
+        return proxy_count
+    return max(1, _int(legacy_total_env, default))
+
+
 def _optional_int(name: str) -> Optional[int]:
     value = os.getenv(name)
     if value is None or not value.strip():
@@ -392,13 +417,27 @@ class ResearchLabGatewayConfig:
     @classmethod
     def from_env(cls) -> "ResearchLabGatewayConfig":
         prod_on = _prod_default(True)
-        total_workers = max(1, _int("RESEARCH_LAB_HOSTED_WORKER_TOTAL_WORKERS", 1))
+        total_workers = _worker_total_from_proxy_count(
+            prefixes=(
+                "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY",
+                "RESEARCH_LAB_WORKER_PROXY",
+                "RESEARCH_LAB_WORKER_HTTPS_PROXY",
+            ),
+            legacy_total_env="RESEARCH_LAB_HOSTED_WORKER_TOTAL_WORKERS",
+        )
         worker_index = _int("RESEARCH_LAB_HOSTED_WORKER_INDEX", 0)
         if worker_index < 0:
             worker_index = 0
         if worker_index >= total_workers:
             worker_index = worker_index % total_workers
-        scoring_total_workers = max(1, _int("RESEARCH_LAB_SCORING_WORKER_TOTAL_WORKERS", 1))
+        scoring_total_workers = _worker_total_from_proxy_count(
+            prefixes=(
+                "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY",
+                "QUALIFICATION_WEBSHARE_PROXY",
+                "RESEARCH_LAB_SCORING_WORKER_PROXY",
+            ),
+            legacy_total_env="RESEARCH_LAB_SCORING_WORKER_TOTAL_WORKERS",
+        )
         scoring_worker_index = _int("RESEARCH_LAB_SCORING_WORKER_INDEX", 0)
         if scoring_worker_index < 0:
             scoring_worker_index = 0

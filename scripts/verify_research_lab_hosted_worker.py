@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from leadpoet_verifier.research_evaluation import build_research_evaluation_score_bundle  # noqa: E402
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
+from gateway.research_lab.worker_autostart import build_research_lab_worker_autostart_plan  # noqa: E402
 from gateway.research_lab.code_build import (  # noqa: E402
     CodeEditBuildError,
     CodeEditCandidateBuilder,
@@ -429,6 +430,40 @@ def main() -> int:
     selected = preferred_worker._select_preferred_queued_row(rows)
     if not selected or _row_partition(selected, 4) != 2:
         errors.append("worker did not prefer its assigned queue partition")
+    auto_worker_env = {
+        "RESEARCH_LAB_AUTO_START_WORKERS": "true",
+        "RESEARCH_LAB_AUTO_START_HOSTED_WORKERS": "true",
+        "RESEARCH_LAB_AUTO_START_SCORING_WORKERS": "true",
+        "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
+        "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
+        "RESEARCH_LAB_HOSTED_WORKER_PROCESS_COUNT": "2",
+        "RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT": "3",
+        "RESEARCH_LAB_HOSTED_WORKER_TOTAL_WORKERS": "2",
+        "RESEARCH_LAB_SCORING_WORKER_TOTAL_WORKERS": "3",
+        "RESEARCH_LAB_HOSTED_WORKER_INDEX": "5",
+        "RESEARCH_LAB_SCORING_WORKER_INDEX": "7",
+    }
+    for idx in range(1, 5):
+        auto_worker_env[f"RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_{idx}"] = f"http://auto-proxy-{idx}"
+    for idx in range(1, 7):
+        auto_worker_env[f"RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_{idx}"] = f"http://score-proxy-{idx}"
+    auto_plan = build_research_lab_worker_autostart_plan(auto_worker_env)
+    if auto_plan.hosted.worker_count != 4 or len(auto_plan.hosted.proxy_refs) != 4:
+        errors.append("hosted autostart worker count did not follow auto-research proxy count")
+    if auto_plan.scoring.worker_count != 6 or len(auto_plan.scoring.proxy_refs) != 6:
+        errors.append("scoring autostart worker count did not follow qualification proxy count")
+    old_environ = dict(os.environ)
+    try:
+        os.environ.clear()
+        os.environ.update(auto_worker_env)
+        auto_cfg = ResearchLabGatewayConfig.from_env()
+    finally:
+        os.environ.clear()
+        os.environ.update(old_environ)
+    if auto_cfg.hosted_worker_total_workers != 4 or auto_cfg.hosted_worker_index != 1:
+        errors.append("hosted config did not derive total/index from auto-research proxy count")
+    if auto_cfg.scoring_worker_total_workers != 6 or auto_cfg.scoring_worker_index != 1:
+        errors.append("scoring config did not derive total/index from qualification proxy count")
     if not _is_claim_race_error(Exception("duplicate key violates research_loop_run_queue_events_run_seq_key")):
         errors.append("worker claim-race detector missed queue event duplicate-key errors")
     ready_worker = ResearchLabHostedWorker(ResearchLabGatewayConfig(), worker_ref="test-worker-ready")

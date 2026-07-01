@@ -486,6 +486,11 @@ def _redact_openrouter_diagnostic(value: str, *, limit: int) -> str:
         "aws_secret_access_key",
         "service_role_key",
         "proxy password",
+        "judge_prompt",
+        "hidden_icp",
+        "icp_plaintext",
+        "private_repo",
+        "proxy_url",
     )
     if any(marker in lowered for marker in secret_markers):
         return "[redacted secret-like diagnostic text]"
@@ -1223,37 +1228,18 @@ class ResearchLabHostedWorker:
                 max_tokens: int,
                 call_stage: str = "code_edit_draft",
             ) -> str:
-                stage = str(call_stage or "code_edit_draft")
-                stage_model_id = model_id
-                stage_reasoning_effort = str(model_doc.get("reasoning_effort") or "")
-                stage_temperature = self.config.auto_research_temperature
-                stage_max_tokens = max_tokens
-                if stage == "loop_planner":
-                    stage_model_id = self.config.loop_planner_model or model_id
-                    stage_reasoning_effort = (
-                        self.config.loop_planner_reasoning_effort
-                        or stage_reasoning_effort
-                    )
-                    stage_temperature = self.config.loop_planner_temperature
-                    stage_max_tokens = max(max_tokens, self.config.loop_planner_max_tokens)
-                elif stage == "plan_alignment_judge":
-                    stage_model_id = (
-                        self.config.loop_alignment_judge_model
-                        or self.config.loop_executor_model
-                        or model_id
-                    )
-                    stage_reasoning_effort = (
-                        self.config.loop_alignment_judge_reasoning_effort
-                        or stage_reasoning_effort
-                    )
-                    stage_temperature = self.config.loop_alignment_judge_temperature
-                    stage_max_tokens = max(max_tokens, self.config.loop_alignment_judge_max_tokens)
-                else:
-                    stage_model_id = self.config.loop_executor_model or model_id
-                    stage_reasoning_effort = (
-                        self.config.loop_executor_reasoning_effort
-                        or stage_reasoning_effort
-                    )
+                stage_options = _resolve_code_edit_loop_stage_model_request(
+                    self.config,
+                    stage=call_stage,
+                    model_id=model_id,
+                    model_doc=model_doc,
+                    requested_max_tokens=max_tokens,
+                )
+                stage = stage_options["stage"]
+                stage_model_id = str(stage_options["model_id"])
+                stage_reasoning_effort = str(stage_options["reasoning_effort"])
+                stage_temperature = float(stage_options["temperature"])
+                stage_max_tokens = int(stage_options["max_tokens"])
                 if stage in {"loop_planner", "plan_alignment_judge"}:
                     effective_max_tokens = max(1, int(stage_max_tokens or 0))
                 else:
@@ -3358,6 +3344,41 @@ def _candidate_attempt_memory(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _resolve_code_edit_loop_stage_model_request(
+    config: ResearchLabGatewayConfig,
+    *,
+    stage: str,
+    model_id: str,
+    model_doc: Mapping[str, Any],
+    requested_max_tokens: int,
+) -> dict[str, Any]:
+    normalized_stage = str(stage or "code_edit_draft")
+    base_reasoning_effort = str(model_doc.get("reasoning_effort") or "")
+    if normalized_stage == "loop_planner":
+        return {
+            "stage": normalized_stage,
+            "model_id": config.loop_planner_model or model_id,
+            "reasoning_effort": config.loop_planner_reasoning_effort or base_reasoning_effort,
+            "temperature": config.loop_planner_temperature,
+            "max_tokens": max(int(requested_max_tokens or 0), config.loop_planner_max_tokens),
+        }
+    if normalized_stage == "plan_alignment_judge":
+        return {
+            "stage": normalized_stage,
+            "model_id": config.loop_alignment_judge_model or config.loop_executor_model or model_id,
+            "reasoning_effort": config.loop_alignment_judge_reasoning_effort,
+            "temperature": config.loop_alignment_judge_temperature,
+            "max_tokens": max(int(requested_max_tokens or 0), config.loop_alignment_judge_max_tokens),
+        }
+    return {
+        "stage": normalized_stage,
+        "model_id": config.loop_executor_model or model_id,
+        "reasoning_effort": config.loop_executor_reasoning_effort,
+        "temperature": config.auto_research_temperature,
+        "max_tokens": int(requested_max_tokens or 0),
+    }
+
+
 def _candidate_failure_class_for_memory(row: Mapping[str, Any]) -> str:
     reason = str(row.get("current_reason") or "")
     if reason:
@@ -3550,6 +3571,9 @@ def _build_openrouter_provider_usage(
         "cost_reconciliation_status": "pending_generation_stats",
         "cost_details": _safe_cost_details(usage.get("cost_details")),
     }
+    reasoning_logs = _safe_openrouter_reasoning_logs(decoded)
+    if reasoning_logs:
+        provider_usage["reasoning_logs"] = reasoning_logs
     if not response_id:
         provider_usage["cost_reconciliation_status"] = "missing_response_id"
         return provider_usage, usage_cost_microusd
@@ -3664,6 +3688,28 @@ def _safe_cost_details(value: Any) -> dict[str, Any]:
         if isinstance(item, (str, int, float, bool)) or item is None:
             allowed[key] = item
     return allowed
+
+
+def _safe_openrouter_reasoning_logs(decoded: Mapping[str, Any]) -> dict[str, Any]:
+    choices = decoded.get("choices")
+    first_choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else {}
+    message = first_choice.get("message") if isinstance(first_choice.get("message"), Mapping) else {}
+    if not message:
+        return {}
+    logs: dict[str, Any] = {}
+    reasoning = message.get("reasoning")
+    if isinstance(reasoning, str) and reasoning.strip():
+        logs["reasoning"] = _redact_openrouter_diagnostic(reasoning, limit=20000)
+        logs["reasoning_hash"] = sha256_json({"reasoning": reasoning})
+    reasoning_details = message.get("reasoning_details")
+    if reasoning_details:
+        encoded = json.dumps(reasoning_details, sort_keys=True, default=str)
+        logs["reasoning_details"] = _redact_openrouter_diagnostic(encoded, limit=20000)
+        logs["reasoning_details_hash"] = sha256_json({"reasoning_details": reasoning_details})
+    if logs:
+        logs["storage_policy"] = "redacted_bounded_openrouter_message_reasoning"
+        logs["schema_version"] = "1.0"
+    return logs
 
 
 def _safe_generation_stats(value: Mapping[str, Any]) -> dict[str, Any]:

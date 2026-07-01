@@ -42,6 +42,7 @@ from gateway.research_lab.worker import (  # noqa: E402
     _build_openrouter_provider_usage,
     _is_claim_race_error,
     _is_retryable_worker_exception,
+    _resolve_code_edit_loop_stage_model_request,
     _row_partition,
     _worker_proxy_env,
 )
@@ -356,8 +357,65 @@ def main() -> int:
     _tier, tier_model, tier_doc = tier_reasoning_config.resolve_auto_research_model(None)
     if tier_model != "z-ai/glm-5.2" or tier_doc.get("reasoning_effort") != "xhigh":
         errors.append("approved auto-research model tier did not preserve reasoning_effort")
+    split_stage_config = ResearchLabGatewayConfig(
+        auto_research_model="openai/gpt-5.5",
+        auto_research_reasoning_effort="high",
+        loop_planner_model="anthropic/claude-opus-4.8",
+    )
+    planner_stage = _resolve_code_edit_loop_stage_model_request(
+        split_stage_config,
+        stage="loop_planner",
+        model_id="openai/gpt-5.5",
+        model_doc={"reasoning_effort": "high"},
+        requested_max_tokens=3000,
+    )
+    executor_stage = _resolve_code_edit_loop_stage_model_request(
+        split_stage_config,
+        stage="code_edit_draft",
+        model_id="openai/gpt-5.5",
+        model_doc={"reasoning_effort": "high"},
+        requested_max_tokens=3000,
+    )
+    judge_stage = _resolve_code_edit_loop_stage_model_request(
+        split_stage_config,
+        stage="plan_alignment_judge",
+        model_id="openai/gpt-5.5",
+        model_doc={"reasoning_effort": "high"},
+        requested_max_tokens=3000,
+    )
+    if planner_stage.get("model_id") != "anthropic/claude-opus-4.8" or planner_stage.get("reasoning_effort") != "high":
+        errors.append("planner stage did not inherit auto-research reasoning effort")
+    if executor_stage.get("model_id") != "openai/gpt-5.5" or executor_stage.get("reasoning_effort"):
+        errors.append("executor stage unexpectedly inherited auto-research reasoning effort")
+    if judge_stage.get("reasoning_effort"):
+        errors.append("alignment judge unexpectedly inherited auto-research reasoning effort")
+    explicit_executor_stage = _resolve_code_edit_loop_stage_model_request(
+        ResearchLabGatewayConfig(
+            auto_research_model="openai/gpt-5.5",
+            auto_research_reasoning_effort="high",
+            loop_executor_reasoning_effort="low",
+        ),
+        stage="code_edit_draft",
+        model_id="openai/gpt-5.5",
+        model_doc={"reasoning_effort": "high"},
+        requested_max_tokens=3000,
+    )
+    if explicit_executor_stage.get("reasoning_effort") != "low":
+        errors.append("explicit executor reasoning effort override was not honored")
     provider_usage, reconciled_cost = _build_openrouter_provider_usage(
-        decoded={"id": "gen-test-1", "model": "test/model", "choices": [{"finish_reason": "stop"}]},
+        decoded={
+            "id": "gen-test-1",
+            "model": "test/model",
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "reasoning": "Plan: inspect provider fallback and retry code.",
+                        "reasoning_details": [{"type": "summary", "text": "checked fallback path"}],
+                    },
+                }
+            ],
+        },
         usage={"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost": 0.000111},
         model_id="fallback/model",
         api_key="test-openrouter-api-key",
@@ -386,6 +444,11 @@ def main() -> int:
         errors.append("OpenRouter provider usage did not store sanitized generation stats")
     if provider_usage.get("finish_reason") != "stop":
         errors.append("OpenRouter provider usage did not preserve finish_reason")
+    reasoning_logs = provider_usage.get("reasoning_logs")
+    if not isinstance(reasoning_logs, dict) or "provider fallback" not in str(reasoning_logs.get("reasoning") or ""):
+        errors.append("OpenRouter provider usage did not preserve returned reasoning logs")
+    if not reasoning_logs or not reasoning_logs.get("reasoning_details_hash"):
+        errors.append("OpenRouter provider usage did not hash returned reasoning_details")
 
     artifact = _artifact()
     registry = coerce_component_registry(_metadata())

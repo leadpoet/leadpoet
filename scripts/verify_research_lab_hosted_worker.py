@@ -1024,35 +1024,65 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
         os.environ["FAKE_DOCKER_LOG"] = str(docker_log)
         inspection_call_count = 0
         repair_call_count = 0
+        judge_call_count = 0
 
-        async def _call_model(messages, timeout_seconds: int, max_tokens: int) -> OpenRouterCallResult:
-            nonlocal inspection_call_count, repair_call_count
+        async def _call_model(messages, timeout_seconds: int, max_tokens: int, call_stage: str = "code_edit_draft") -> OpenRouterCallResult:
+            nonlocal inspection_call_count, repair_call_count, judge_call_count
             content = "\n".join(str(message.get("content") or "") for message in messages)
-            is_source_inspection = "runtime_source_index" in content
-            is_repair = "failed_patch" in content and "git_apply_error" in content
+            is_source_inspection = call_stage == "source_inspection"
+            is_repair = call_stage == "code_edit_repair"
+            is_planner = call_stage == "loop_planner"
+            is_judge = call_stage == "plan_alignment_judge"
             if is_source_inspection:
                 inspection_call_count += 1
             if is_repair:
                 repair_call_count += 1
+            if is_judge:
+                judge_call_count += 1
             calls.append(
                 {
-                    "stage": (
-                        "source_inspection"
-                        if is_source_inspection
-                        else "code_edit_repair"
-                        if is_repair
-                        else "code_edit_draft"
-                    ),
+                    "stage": call_stage,
                     "timeout_seconds": timeout_seconds,
                     "max_tokens": max_tokens,
                     "has_runtime_source_context": "runtime_source_context" in content,
                     "has_runtime_source_index": "runtime_source_index" in content,
                     "has_source_inspection_context": "source_inspection_context" in content,
+                    "has_loop_direction_plan": "loop_direction_plan" in content,
                     "has_real_file": "sourcing_model/__init__.py" in content,
                     "has_source_excerpt": "VALUE" in content and "def qualify" in content,
                     "has_bad_example": "sourcing_model/example.py" in content,
                 }
             )
+            if is_planner:
+                return OpenRouterCallResult(
+                    content=json.dumps(
+                        {
+                            "schema_version": "1.0",
+                            "miner_focus_interpretation": "Edit the extracted source file for a source-context grounded test.",
+                            "loop_goal": "Make a narrow query construction improvement.",
+                            "required_lane": "query_construction",
+                            "required_mechanism": "Edit the visible query construction constant.",
+                            "target_behavior": ["source-context grounded query edit"],
+                            "must_inspect": ["sourcing_model/__init__.py"],
+                            "allowed_lanes": ["query_construction"],
+                            "disallowed_lanes": ["provider_fallback"],
+                            "must_not_try": ["Do not edit unrelated provider fallback code."],
+                            "success_criteria": ["Diff touches the inspected extracted source file."],
+                            "novelty_requirements": ["Do not repeat exact source diff hashes."],
+                            "ranked_paths": [
+                                {
+                                    "path_id": "source_context_query_constant",
+                                    "lane": "query_construction",
+                                    "mechanism": "Update a visible query construction constant.",
+                                }
+                            ],
+                            "selected_path_id": "source_context_query_constant",
+                        },
+                        sort_keys=True,
+                    ),
+                    provider_usage={"provider": "openrouter", "response_id": "loop-planner", "cost_microusd": 1000},
+                    cost_microusd=1000,
+                )
             if is_source_inspection:
                 if inspection_call_count == 1:
                     return OpenRouterCallResult(
@@ -1107,6 +1137,7 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                             "code_edit": {
                                 "target_files": ["sourcing_model/__init__.py"],
                                 "unified_diff": _allowed_runtime_patch_draft().unified_diff,
+                                "plan_path_id": "source_context_query_constant",
                                 "redacted_summary": "repair existing extracted file edit",
                                 "test_plan": "py_compile changed file",
                                 "rollback_plan": "revert patch",
@@ -1117,12 +1148,36 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                     provider_usage={"provider": "openrouter", "response_id": "code-edit-repair-draft", "cost_microusd": 1000},
                     cost_microusd=1000,
                 )
+            if is_judge:
+                return OpenRouterCallResult(
+                    content=json.dumps(
+                        {
+                            "schema_version": "1.0",
+                            "verdict": "pass",
+                            "reason": "The repaired diff directly edits the selected source-context path.",
+                            "detected_lane": "query_construction",
+                            "detected_mechanism": "source_context_query_constant",
+                            "novel": True,
+                            "blocking_issue": "",
+                            "confidence": 0.95,
+                        },
+                        sort_keys=True,
+                    ),
+                    provider_usage={"provider": "openrouter", "response_id": f"plan-alignment-{judge_call_count}", "cost_microusd": 1000},
+                    cost_microusd=1000,
+                )
             return OpenRouterCallResult(
                 content=json.dumps(
                     {
                         "candidates": [
                             {
                                 "lane": "query_construction",
+                                "plan_path_id": "source_context_query_constant",
+                                "plan_alignment": {
+                                    "implements_required_mechanism": True,
+                                    "alignment_summary": "Edits the selected visible source constant.",
+                                    "success_criteria_addressed": ["Diff touches the inspected extracted source file."],
+                                },
                                 "hypothesis": {
                                     "failure_mode": "stale query constant",
                                     "mechanism": "small source edit against extracted file",
@@ -1197,17 +1252,29 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
             )
             if not result.selected_candidates:
                 errors.append("code-edit loop did not build a candidate from extracted source context")
-            if not calls or calls[0].get("stage") != "source_inspection":
-                errors.append("code-edit loop did not inspect source before drafting")
-            if not calls or not calls[0].get("has_runtime_source_index"):
+            planner_calls = [call for call in calls if call.get("stage") == "loop_planner"]
+            source_calls = [call for call in calls if call.get("stage") == "source_inspection"]
+            if not planner_calls:
+                errors.append("code-edit loop did not call loop planner before source inspection")
+            if not source_calls:
+                errors.append("code-edit loop did not inspect source after planning")
+            elif planner_calls and calls.index(planner_calls[0]) > calls.index(source_calls[0]):
+                errors.append("code-edit loop planner ran after source inspection")
+            if not planner_calls or not planner_calls[0].get("has_runtime_source_index"):
+                errors.append("loop planner prompt did not include runtime_source_index")
+            if not source_calls or not source_calls[0].get("has_loop_direction_plan"):
+                errors.append("source inspection prompt did not include loop_direction_plan")
+            if source_calls and not source_calls[0].get("has_runtime_source_index"):
                 errors.append("source inspection prompt did not include runtime_source_index")
-            if calls and calls[0].get("has_source_excerpt"):
+            if source_calls and source_calls[0].get("has_source_excerpt"):
                 errors.append("source inspection prompt included raw source before read_file")
             draft_calls = [call for call in calls if call.get("stage") == "code_edit_draft"]
             if not draft_calls or not draft_calls[0].get("has_runtime_source_context"):
                 errors.append("code-edit draft prompt did not include runtime_source_context")
             if not draft_calls or not draft_calls[0].get("has_source_inspection_context"):
                 errors.append("code-edit draft prompt did not include source_inspection_context")
+            if not draft_calls or not draft_calls[0].get("has_loop_direction_plan"):
+                errors.append("code-edit draft prompt did not include loop_direction_plan")
             if not draft_calls or not draft_calls[0].get("has_real_file"):
                 errors.append("code-edit draft prompt did not include real extracted editable file paths")
             if not draft_calls or not draft_calls[0].get("has_source_excerpt"):
@@ -1215,6 +1282,8 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
             if calls and any(call.get("has_bad_example") for call in calls):
                 errors.append("code-edit draft prompt still suggests nonexistent sourcing_model/example.py")
             event_types = [event.event_type for event in events]
+            if "loop_direction_planned" not in event_types:
+                errors.append("code-edit loop did not record loop_direction_planned")
             if "source_inspection_requested" not in event_types:
                 errors.append("code-edit loop did not record source_inspection_requested")
             if "source_inspection_resolved" not in event_types:
@@ -1234,6 +1303,8 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                 errors.append("code-edit loop did not record repaired patch draft")
             if "candidate_build_passed" not in event_types:
                 errors.append("code-edit loop did not record candidate_build_passed")
+            if "plan_alignment_judged" not in event_types:
+                errors.append("code-edit loop did not record plan_alignment_judged")
             elif (
                 "code_edit_repair_drafted" in event_types
                 and event_types.index("code_edit_repair_drafted") > event_types.index("candidate_build_passed")

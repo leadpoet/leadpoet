@@ -1196,18 +1196,54 @@ class ResearchLabHostedWorker:
                 messages: Sequence[Mapping[str, str]],
                 timeout_seconds: int,
                 max_tokens: int,
+                call_stage: str = "code_edit_draft",
             ) -> str:
-                effective_max_tokens = self._auto_research_max_tokens_for_call(
-                    requested_max_tokens=max_tokens,
-                    model_doc=model_doc,
-                )
+                stage = str(call_stage or "code_edit_draft")
+                stage_model_id = model_id
+                stage_reasoning_effort = str(model_doc.get("reasoning_effort") or "")
+                stage_temperature = self.config.auto_research_temperature
+                stage_max_tokens = max_tokens
+                if stage == "loop_planner":
+                    stage_model_id = self.config.loop_planner_model or model_id
+                    stage_reasoning_effort = (
+                        self.config.loop_planner_reasoning_effort
+                        or stage_reasoning_effort
+                    )
+                    stage_temperature = self.config.loop_planner_temperature
+                    stage_max_tokens = max(max_tokens, self.config.loop_planner_max_tokens)
+                elif stage == "plan_alignment_judge":
+                    stage_model_id = (
+                        self.config.loop_alignment_judge_model
+                        or self.config.loop_executor_model
+                        or model_id
+                    )
+                    stage_reasoning_effort = (
+                        self.config.loop_alignment_judge_reasoning_effort
+                        or stage_reasoning_effort
+                    )
+                    stage_temperature = self.config.loop_alignment_judge_temperature
+                    stage_max_tokens = max(max_tokens, self.config.loop_alignment_judge_max_tokens)
+                else:
+                    stage_model_id = self.config.loop_executor_model or model_id
+                    stage_reasoning_effort = (
+                        self.config.loop_executor_reasoning_effort
+                        or stage_reasoning_effort
+                    )
+                if stage in {"loop_planner", "plan_alignment_judge"}:
+                    effective_max_tokens = max(1, int(stage_max_tokens or 0))
+                else:
+                    effective_max_tokens = self._auto_research_max_tokens_for_call(
+                        requested_max_tokens=stage_max_tokens,
+                        model_doc=model_doc,
+                    )
                 return await self._call_openrouter(
                     messages=messages,
                     api_key=context.provider_env["OPENROUTER_API_KEY"],
-                    model_id=model_id,
-                    reasoning_effort=str(model_doc.get("reasoning_effort") or ""),
+                    model_id=stage_model_id,
+                    reasoning_effort=stage_reasoning_effort,
                     timeout_seconds=timeout_seconds,
                     max_tokens=effective_max_tokens,
+                    temperature=stage_temperature,
                 )
 
             loop_settings = AutoResearchLoopSettings(
@@ -1262,19 +1298,32 @@ class ResearchLabHostedWorker:
                     "candidate_patch_manifest": candidate.build.code_edit_manifest,
                     "candidate_model_manifest": candidate.build.candidate_model_manifest.to_dict(),
                     "candidate_source_diff_hash": candidate.build.source_diff_hash,
-                    "candidate_build_doc": candidate.build.build_doc,
+                    "candidate_build_doc": {
+                        **candidate.build.build_doc,
+                        "loop_direction_plan_hash": (
+                            candidate.draft.plan_alignment.get("loop_direction_plan_hash")
+                            if isinstance(candidate.draft.plan_alignment, Mapping)
+                            else None
+                        ),
+                        "selected_path_id": candidate.draft.plan_path_id,
+                        "plan_alignment": dict(candidate.draft.plan_alignment or {}),
+                    },
                     "hypothesis_doc": {
                         "failure_mode": candidate.draft.failure_mode,
                         "mechanism": candidate.draft.mechanism,
                         "expected_improvement": candidate.draft.expected_improvement,
                         "risk": candidate.draft.risk,
                         "focus_alignment": f"code_edit_lane:{candidate.draft.lane}",
+                        "plan_path_id": candidate.draft.plan_path_id,
+                        "plan_alignment": dict(candidate.draft.plan_alignment or {}),
                         "predicted_delta": candidate.draft.predicted_delta,
                         "falsifier": "official_scoring",
                     },
                     "patch_doc": {
                         "code_edit": {
                             "lane": candidate.draft.lane,
+                            "plan_path_id": candidate.draft.plan_path_id,
+                            "plan_alignment": dict(candidate.draft.plan_alignment or {}),
                             "target_files": list(candidate.draft.target_files),
                             "unified_diff_hash": sha256_json({"unified_diff": candidate.draft.unified_diff}),
                             "redacted_summary": candidate.draft.redacted_summary,
@@ -1320,6 +1369,37 @@ class ResearchLabHostedWorker:
                 "candidate_artifact_create",
                 lambda request=request: create_candidate_artifact(request),
             )
+            duplicate_existing_candidate = bool(
+                str(candidate_row.get("run_id") or "") and str(candidate_row.get("run_id") or "") != context.run_id
+            )
+            if duplicate_existing_candidate:
+                await self._store_write_with_retry(
+                    "duplicate_candidate_reused_loop_event",
+                    lambda candidate_row=candidate_row, finalist=finalist: create_auto_research_loop_event(
+                        run_id=context.run_id,
+                        ticket_id=context.ticket_id,
+                        receipt_id=context.receipt_id,
+                        event_type="duplicate_candidate_reused",
+                        loop_status="completed",
+                        worker_ref=self.worker_ref,
+                        node_id=str(finalist.get("node_id") or ""),
+                        candidate_artifact_hash=candidate_artifact_hash,
+                        candidate_patch_hash=candidate_patch_hash,
+                        provider_usage=list(loop_result.provider_usage) or self._provider_usage(context),
+                        cost_ledger=loop_result.cost_ledger(),
+                        event_doc={
+                            "candidate_id": str(candidate_row.get("candidate_id") or ""),
+                            "existing_run_id": str(candidate_row.get("run_id") or ""),
+                            "existing_ticket_id": str(candidate_row.get("ticket_id") or ""),
+                            "current_run_id": context.run_id,
+                            "current_ticket_id": context.ticket_id,
+                            "candidate_artifact_hash": candidate_artifact_hash,
+                            "candidate_patch_hash": candidate_patch_hash,
+                            "candidate_source_diff_hash": finalist.get("candidate_source_diff_hash"),
+                            "reimbursement_preserved": True,
+                        },
+                    ),
+                )
             candidate_ids.append(str(candidate_row["candidate_id"]))
             candidate_summaries.append(
                 {
@@ -1336,6 +1416,7 @@ class ResearchLabHostedWorker:
                         else None
                     ),
                     "candidate_source_diff_hash": finalist.get("candidate_source_diff_hash"),
+                    "duplicate_candidate_reused": duplicate_existing_candidate,
                     "hypothesis": hypothesis_doc,
                     "patch": patch_doc,
                     "parent_artifact_hash": final_artifact.model_artifact_hash,
@@ -2677,6 +2758,7 @@ class ResearchLabHostedWorker:
         reasoning_effort: str = "",
         timeout_seconds: int = 90,
         max_tokens: int = 1800,
+        temperature: float | None = None,
     ) -> OpenRouterCallResult:
         if not api_key:
             raise HostedResearchLabWorkerError("OpenRouter key is required for hosted auto-research")
@@ -2684,12 +2766,19 @@ class ResearchLabHostedWorker:
             raise HostedResearchLabWorkerError("OpenRouter auto-research model is required")
         base_max_tokens = max(1, int(max_tokens or 0))
         requested_reasoning_effort = str(reasoning_effort or "").strip()
+        request_temperature = min(
+            2.0,
+            max(
+                0.0,
+                float(self.config.auto_research_temperature if temperature is None else temperature),
+            ),
+        )
 
         def _request_body(effective_max_tokens: int) -> dict[str, Any]:
             body = {
                 "model": model_id,
                 "messages": list(messages),
-                "temperature": 0.2,
+                "temperature": request_temperature,
                 "max_tokens": int(effective_max_tokens),
                 "response_format": {"type": "json_object"},
                 "provider": {
@@ -2944,6 +3033,7 @@ class ResearchLabHostedWorker:
         status_counts: Counter[str] = Counter()
         reason_counts: Counter[str] = Counter()
         failure_class_counts: Counter[str] = Counter()
+        recent_attempts: list[dict[str, Any]] = []
         for row in candidates:
             status = str(row.get("current_candidate_status") or "unknown")
             reason = str(row.get("current_reason") or "")
@@ -2957,6 +3047,9 @@ class ResearchLabHostedWorker:
             failure_class = _candidate_failure_class_for_memory(row)
             if failure_class:
                 failure_class_counts[failure_class] += 1
+            attempt = _candidate_attempt_memory(row)
+            if attempt:
+                recent_attempts.append(attempt)
 
         promotion_counts: Counter[str] = Counter()
         public_holdout_rejected = 0
@@ -3025,6 +3118,7 @@ class ResearchLabHostedWorker:
                 "worst_mean_delta": round(worst_mean_delta, 6) if worst_mean_delta is not None else None,
                 "best_delta_lcb": round(best_delta_lcb, 6) if best_delta_lcb is not None else None,
             },
+            "recent_attempts": recent_attempts[:25],
             "guidance": guidance[:4],
         }
 
@@ -3170,6 +3264,33 @@ def _candidate_lane_and_files(value: Any) -> tuple[str, tuple[str, ...]]:
             if path and not _looks_secret_like(path):
                 files.append(path[:160])
     return lane[:80], tuple(files[:12])
+
+
+def _candidate_attempt_memory(row: Mapping[str, Any]) -> dict[str, Any]:
+    manifest = row.get("candidate_patch_manifest") if isinstance(row.get("candidate_patch_manifest"), Mapping) else {}
+    patch_doc = manifest.get("patch_doc") if isinstance(manifest.get("patch_doc"), Mapping) else {}
+    code_edit = patch_doc.get("code_edit") if isinstance(patch_doc.get("code_edit"), Mapping) else {}
+    lane, files = _candidate_lane_and_files(manifest)
+    summary = str(row.get("redacted_public_summary") or manifest.get("redacted_summary") or "")[:500]
+    if not summary:
+        summary = str(code_edit.get("expected_improvement") or code_edit.get("test_plan") or "")[:500]
+    return {
+        "candidate_id": str(row.get("candidate_id") or "")[:120],
+        "run_id": str(row.get("run_id") or "")[:120],
+        "lane": lane,
+        "plan_path_id": str(code_edit.get("plan_path_id") or patch_doc.get("plan_path_id") or "")[:120],
+        "target_files": list(files),
+        "unified_diff_hash": str(code_edit.get("unified_diff_hash") or patch_doc.get("unified_diff_hash") or "")[:120],
+        "candidate_source_diff_hash": str(
+            row.get("candidate_source_diff_hash")
+            or manifest.get("candidate_source_diff_hash")
+            or manifest.get("patch_payload_hash")
+            or ""
+        )[:120],
+        "semantic_edit_summary": summary,
+        "status": str(row.get("current_candidate_status") or "")[:120],
+        "reason": str(row.get("current_reason") or "")[:240],
+    }
 
 
 def _candidate_failure_class_for_memory(row: Mapping[str, Any]) -> str:

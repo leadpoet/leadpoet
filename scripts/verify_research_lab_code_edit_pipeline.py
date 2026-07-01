@@ -17,11 +17,18 @@ if str(ROOT) not in sys.path:
 from research_lab.canonical import sha256_json  # noqa: E402
 from research_lab.code_editing import (  # noqa: E402
     CodeEditDraft,
+    build_loop_direction_planner_messages,
+    build_plan_alignment_judge_messages,
+    code_edit_no_viable_patch_reason,
     code_edit_candidate_manifest,
+    code_edit_plan_alignment_errors,
+    loop_direction_plan_from_mapping,
     normalize_unified_diff_text,
     parse_code_edit_repair_response,
     parse_code_edit_response,
     parse_code_edit_source_inspection_response,
+    parse_loop_direction_plan_response,
+    parse_plan_alignment_judge_response,
 )
 from research_lab.eval import PrivateModelArtifactManifest, SealedBenchmarkSet  # noqa: E402
 from research_lab.eval.evaluator import evaluate_private_model_pair  # noqa: E402
@@ -94,6 +101,131 @@ def test_code_edit_parser_accepts_safe_diff() -> CodeEditDraft:
     assert draft.target_files == ("sourcing_model/query_builder.py",)
     assert "buying intent evidence" in draft.unified_diff
     return draft
+
+
+def _provider_fallback_plan() -> dict[str, object]:
+    return loop_direction_plan_from_mapping(
+        {
+            "schema_version": "1.0",
+            "miner_focus_interpretation": "Reduce zero-company and HTTP provider failures.",
+            "loop_goal": "Improve provider fallback without weakening ICP filters.",
+            "required_lane": "provider_fallback",
+            "required_mechanism": "Add bounded retry/backoff or secondary-provider fallback for zero-result/provider-error cases.",
+            "target_behavior": ["Retry transient provider failures.", "Fallback when primary provider returns zero usable companies."],
+            "must_inspect": ["provider error handling", "zero-result routing"],
+            "allowed_lanes": ["provider_fallback"],
+            "disallowed_lanes": ["query_construction", "output_ranking"],
+            "must_not_try": ["Do not remove LinkedIn employee-count clauses from Exa search queries."],
+            "success_criteria": ["Diff touches fallback, retry, provider error handling, or zero-result routing code."],
+            "novelty_requirements": ["Do not repeat exact source diff hashes."],
+            "ranked_paths": [
+                {
+                    "path_id": "provider_retry_backoff",
+                    "lane": "provider_fallback",
+                    "mechanism": "Classify retryable provider errors and add bounded retry/backoff.",
+                }
+            ],
+            "selected_path_id": "provider_retry_backoff",
+        }
+    ).to_dict()
+
+
+def test_loop_direction_plan_parser_and_prompt_contract() -> None:
+    raw = json.dumps({"message": {"content": json.dumps(_provider_fallback_plan())}})
+    plan = parse_loop_direction_plan_response(raw)
+    assert plan.required_lane == "provider_fallback"
+    assert plan.selected_path_id == "provider_retry_backoff"
+    assert plan.to_dict()["plan_hash"].startswith("sha256:")
+
+    messages = build_loop_direction_planner_messages(
+        ticket={"brief_public_summary": "provider fallback: zero companies and HTTP 4xx failures"},
+        artifact_manifest={"manifest_hash": "sha256:test"},
+        component_registry={},
+        benchmark_public_summary={"public_icp_count": 10},
+        runtime_source_index={"editable_files": ["sourcing_model/providers.py"]},
+        budget_context={"requested_compute_budget_usd": 5.0},
+        prior_attempts=[{"lane": "query_construction", "semantic_edit_summary": "Removed employee count clause."}],
+    )
+    content = "\n".join(message["content"] for message in messages)
+    assert "ticket.brief_public_summary" in content
+    assert "prior_attempts" in content
+
+
+def test_plan_alignment_judge_parser_and_prompt_contract() -> None:
+    draft = test_code_edit_parser_accepts_safe_diff()
+    judge_messages = build_plan_alignment_judge_messages(
+        loop_direction_plan=_provider_fallback_plan(),
+        draft=draft,
+        prior_attempts=[],
+    )
+    content = "\n".join(message["content"] for message in judge_messages)
+    assert "LoopDirectionPlan" in content
+    assert "unified_diff_hash" in content
+
+    verdict = parse_plan_alignment_judge_response(
+        json.dumps({"response": {"verdict": "pass", "reason": "aligned", "novel": True, "confidence": 0.9}})
+    )
+    assert verdict.verdict == "pass"
+    assert verdict.novel is True
+    try:
+        parse_plan_alignment_judge_response(
+            json.dumps({"verdict": "fail", "reason": "mentions hidden_icp material"})
+        )
+    except ValueError as exc:
+        assert "forbidden" in str(exc)
+    else:
+        raise AssertionError("judge parser accepted forbidden event material")
+
+
+def test_provider_fallback_plan_rejects_employee_count_query_only_diff() -> None:
+    payload = {
+        "candidates": [
+            {
+                "lane": "provider_fallback",
+                "plan_path_id": "provider_retry_backoff",
+                "plan_alignment": {"implements_required_mechanism": True},
+                "hypothesis": {
+                    "failure_mode": "Primary provider returns zero companies.",
+                    "mechanism": "Claimed provider fallback.",
+                    "expected_improvement": "Better recall.",
+                    "risk": "May overfit.",
+                    "predicted_delta": 1.0,
+                },
+                "code_edit": {
+                    "target_files": ["sourcing_model/query_builder.py"],
+                    "unified_diff": (
+                        "diff --git a/sourcing_model/query_builder.py b/sourcing_model/query_builder.py\n"
+                        "--- a/sourcing_model/query_builder.py\n"
+                        "+++ b/sourcing_model/query_builder.py\n"
+                        "@@ -1,2 +1,2 @@\n"
+                        "-QUERY = \"site:linkedin.com/company employee count 51-200\"\n"
+                        "+QUERY = \"site:linkedin.com/company\"\n"
+                    ),
+                    "redacted_summary": "Remove LinkedIn employee count clause from the query.",
+                    "test_plan": "Run public ICP smoke.",
+                    "rollback_plan": "Revert query change.",
+                },
+            }
+        ]
+    }
+    draft = parse_code_edit_response(json.dumps(payload), max_candidates=1)[0]
+    errors = code_edit_plan_alignment_errors(
+        draft,
+        loop_direction_plan=_provider_fallback_plan(),
+        prior_attempts=[],
+        strict=True,
+    )
+    assert "provider_fallback_plan_but_employee_count_query_edit" in errors
+
+
+def test_code_edit_parser_carries_plan_fields_and_detects_no_viable_patch() -> None:
+    payload = json.loads(_valid_response())
+    payload["candidates"][0]["plan_path_id"] = "query_intent_terms"
+    payload["candidates"][0]["plan_alignment"] = {"implements_required_mechanism": True}
+    draft = parse_code_edit_response(json.dumps(payload), max_candidates=1)[0]
+    assert draft.plan_path_id == "query_intent_terms"
+    assert draft.plan_alignment["implements_required_mechanism"] is True
+    assert code_edit_no_viable_patch_reason(json.dumps({"no_viable_patch": True, "reason": "no safe source path"})) == "no safe source path"
 
 
 def test_code_edit_parser_normalizes_markdown_wrapped_diff() -> None:
@@ -1131,6 +1263,10 @@ async def test_image_build_score_bundle_contract(draft: CodeEditDraft) -> None:
 
 def main() -> None:
     draft = test_code_edit_parser_accepts_safe_diff()
+    test_loop_direction_plan_parser_and_prompt_contract()
+    test_plan_alignment_judge_parser_and_prompt_contract()
+    test_provider_fallback_plan_rejects_employee_count_query_only_diff()
+    test_code_edit_parser_carries_plan_fields_and_detects_no_viable_patch()
     test_code_edit_parser_normalizes_markdown_wrapped_diff()
     test_code_edit_parser_accepts_common_llm_wrapper_shapes()
     test_source_inspection_parser_accepts_common_llm_shapes()

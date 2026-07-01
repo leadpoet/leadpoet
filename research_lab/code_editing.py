@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 import json
 import posixpath
 import re
@@ -70,6 +70,8 @@ class CodeEditDraft:
     test_plan: str
     rollback_plan: str
     predicted_delta: float = 1.0
+    plan_path_id: str = ""
+    plan_alignment: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -98,6 +100,116 @@ class CodeEditSourceInspectionRequest:
         return {key: value for key, value in payload.items() if value not in {"", None}}
 
 
+@dataclass(frozen=True)
+class LoopDirectionPlan:
+    schema_version: str
+    miner_focus_interpretation: str
+    loop_goal: str
+    required_lane: str
+    required_mechanism: str
+    target_behavior: tuple[str, ...]
+    must_inspect: tuple[str, ...]
+    allowed_lanes: tuple[str, ...]
+    disallowed_lanes: tuple[str, ...]
+    must_not_try: tuple[str, ...]
+    success_criteria: tuple[str, ...]
+    novelty_requirements: tuple[str, ...]
+    ranked_paths: tuple[dict[str, Any], ...]
+    selected_path_id: str
+    no_new_safe_path: bool = False
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        for key in (
+            "target_behavior",
+            "must_inspect",
+            "allowed_lanes",
+            "disallowed_lanes",
+            "must_not_try",
+            "success_criteria",
+            "novelty_requirements",
+            "ranked_paths",
+        ):
+            payload[key] = list(payload[key])
+        payload["plan_hash"] = sha256_json({key: value for key, value in payload.items() if key != "plan_hash"})
+        return payload
+
+
+@dataclass(frozen=True)
+class PlanAlignmentVerdict:
+    schema_version: str
+    verdict: str
+    reason: str
+    detected_lane: str = ""
+    detected_mechanism: str = ""
+    novel: bool = True
+    blocking_issue: str = ""
+    confidence: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def build_loop_direction_planner_messages(
+    *,
+    ticket: Mapping[str, Any],
+    artifact_manifest: Mapping[str, Any],
+    component_registry: Mapping[str, Any],
+    benchmark_public_summary: Mapping[str, Any],
+    runtime_source_index: Mapping[str, Any],
+    budget_context: Mapping[str, Any] | None,
+    prior_attempts: Sequence[Mapping[str, Any]] | None = None,
+) -> list[dict[str, str]]:
+    context = {
+        "ticket": _redacted_mapping(ticket),
+        "artifact_manifest": _redacted_mapping(artifact_manifest),
+        "component_registry": _redacted_mapping(component_registry),
+        "benchmark_public_summary": _redacted_mapping(benchmark_public_summary),
+        "runtime_source_index": _redacted_source_context(runtime_source_index),
+        "budget_context": _redacted_mapping(budget_context or {}),
+        "prior_attempts": _redacted_mapping({"attempts": list(prior_attempts or [])}).get("attempts", []),
+        "allowed_lanes": [
+            "icp_normalization",
+            "query_construction",
+            "provider_fallback",
+            "intent_evidence_quality",
+            "company_fit_filtering",
+            "openrouter_model_selection",
+            "output_ranking",
+        ],
+    }
+    system = (
+        "You are Leadpoet Research Lab's loop-direction planner. Convert a miner's "
+        "public research focus into a binding, auditable code-edit plan for a later "
+        "executor model. You do not write code. Choose one safe, generalizable path "
+        "that directly addresses the miner focus and avoids repeating prior attempts."
+    )
+    user = (
+        "Return strict JSON only, no markdown.\n\n"
+        "Rules:\n"
+        "- Treat ticket.brief_public_summary as the miner research focus.\n"
+        "- If the miner focus is blank or broad, narrow it to one testable mechanism using benchmark and outcome context.\n"
+        "- If prior_attempts show an already-tried path, choose a meaningfully different selected_path_id.\n"
+        "- Do not select paths that weaken ICP fit, remove constraints as the primary mechanism, or merely clean up code.\n"
+        "- Do not request, reveal, or store secrets, hidden ICP plaintext, judge prompts, provider keys, private repo URLs, or raw private data.\n"
+        "- If no safe new path exists, return no_new_safe_path=true with a clear reason.\n\n"
+        "Required output shape:\n"
+        "{\"schema_version\":\"1.0\",\"miner_focus_interpretation\":\"...\",\"loop_goal\":\"...\","
+        "\"required_lane\":\"provider_fallback\",\"required_mechanism\":\"...\","
+        "\"target_behavior\":[\"...\"],\"must_inspect\":[\"...\"],"
+        "\"allowed_lanes\":[\"provider_fallback\"],\"disallowed_lanes\":[\"query_construction\"],"
+        "\"must_not_try\":[\"Do not remove LinkedIn employee-count clauses from Exa search queries.\"],"
+        "\"success_criteria\":[\"...\"],\"novelty_requirements\":[\"...\"],"
+        "\"ranked_paths\":[{\"path_id\":\"provider_retry_backoff\",\"lane\":\"provider_fallback\","
+        "\"mechanism\":\"Classify retryable provider errors and add bounded retry/backoff.\"}],"
+        "\"selected_path_id\":\"provider_retry_backoff\"}\n\n"
+        "Context JSON:\n"
+        + json.dumps(context, sort_keys=True, separators=(",", ":"))
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
 def build_code_edit_source_inspection_messages(
     *,
     ticket: Mapping[str, Any],
@@ -107,6 +219,7 @@ def build_code_edit_source_inspection_messages(
     runtime_source_index: Mapping[str, Any],
     source_inspection_context: Mapping[str, Any] | None,
     budget_context: Mapping[str, Any] | None,
+    loop_direction_plan: Mapping[str, Any] | None = None,
     max_requests: int = 4,
 ) -> list[dict[str, str]]:
     """Ask the model which extracted source files it needs before drafting."""
@@ -119,6 +232,7 @@ def build_code_edit_source_inspection_messages(
         "runtime_source_index": _redacted_source_context(runtime_source_index),
         "source_inspection_context": _redacted_source_context(source_inspection_context or {}),
         "budget_context": _redacted_mapping(budget_context or {}),
+        "loop_direction_plan": _redacted_mapping(loop_direction_plan or {}),
         "max_requests": max(1, int(max_requests)),
         "allowed_operations": ["search", "read_file", "finish"],
     }
@@ -144,6 +258,10 @@ def build_code_edit_source_inspection_messages(
         "- Do not request Dockerfile, dependency files, lockfiles, env files, CI, credentials, or new files.\n"
         "- Stop with finish once you have enough exact file content to draft a narrow patch.\n"
         "- Prefer source related to query construction, ICP normalization, provider fallback, intent evidence, ranking, and adapter output.\n\n"
+        "LoopDirectionPlan binding:\n"
+        "- If loop_direction_plan is present, request source context needed to implement selected_path_id only.\n"
+        "- Do not inspect files solely for disallowed_lanes or must_not_try mechanisms.\n"
+        "- If the plan cannot be inspected safely from editable files, return finish with rationale 'no safe source path'.\n\n"
         "Context JSON:\n"
         + json.dumps(context, sort_keys=True, separators=(",", ":"))
     )
@@ -159,6 +277,7 @@ def build_code_edit_auto_research_messages(
     runtime_source_context: Mapping[str, Any] | None = None,
     source_inspection_context: Mapping[str, Any] | None = None,
     budget_context: Mapping[str, Any] | None,
+    loop_direction_plan: Mapping[str, Any] | None = None,
     max_candidates: int,
 ) -> list[dict[str, str]]:
     """Build the code-edit candidate prompt.
@@ -180,6 +299,7 @@ def build_code_edit_auto_research_messages(
         "runtime_source_context": source_context,
         "source_inspection_context": inspection_context,
         "budget_context": _redacted_mapping(budget_context or {}),
+        "loop_direction_plan": _redacted_mapping(loop_direction_plan or {}),
         "max_candidates": max(1, int(max_candidates)),
         "source_mode": "parent_image_extract",
         "allowed_runtime_roots": [
@@ -245,13 +365,72 @@ def build_code_edit_auto_research_messages(
         "- Keep the change testable and reversible.\n"
         "- Prefer one narrow code path over broad rewrites.\n"
         "- Do not overfit to one public ICP; the improvement must generalize.\n\n"
+        "LoopDirectionPlan binding:\n"
+        "- If loop_direction_plan is present, it is binding.\n"
+        "- Only emit candidates that directly implement loop_direction_plan.required_lane, required_mechanism, and selected_path_id.\n"
+        "- If no safe patch can directly implement the plan from read source files, return {\"no_viable_patch\":true,\"reason\":\"...\"}.\n"
+        "- Do not emit a plausible unrelated cleanup or switch lanes.\n"
+        "- Do not claim alignment in prose while the diff implements another change.\n\n"
         "Expected output shape:\n"
-        "{\"candidates\":[{\"lane\":\"query_construction\",\"hypothesis\":{\"failure_mode\":\"...\","
+        "{\"candidates\":[{\"lane\":\"query_construction\",\"plan_path_id\":\"selected_path_id\","
+        "\"plan_alignment\":{\"implements_required_mechanism\":true,\"alignment_summary\":\"...\","
+        "\"success_criteria_addressed\":[\"...\"]},\"hypothesis\":{\"failure_mode\":\"...\","
         "\"mechanism\":\"...\",\"expected_improvement\":\"...\",\"risk\":\"...\","
         "\"predicted_delta\":1.0},\"code_edit\":{\"target_files\":[\"" + example_target + "\"],"
         "\"unified_diff\":\"diff --git a/" + example_target + " b/" + example_target + "\\n--- a/" + example_target + "\\n+++ b/" + example_target + "\\n@@ ...\","
         "\"redacted_summary\":\"...\","
         "\"test_plan\":\"...\",\"rollback_plan\":\"...\"}}]}\n\n"
+        "Context JSON:\n"
+        + json.dumps(context, sort_keys=True, separators=(",", ":"))
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def build_plan_alignment_judge_messages(
+    *,
+    loop_direction_plan: Mapping[str, Any],
+    draft: CodeEditDraft,
+    prior_attempts: Sequence[Mapping[str, Any]] | None = None,
+) -> list[dict[str, str]]:
+    context = {
+        "loop_direction_plan": _redacted_mapping(loop_direction_plan),
+        "candidate": {
+            "lane": draft.lane,
+            "plan_path_id": draft.plan_path_id,
+            "target_files": list(draft.target_files),
+            "unified_diff": draft.unified_diff,
+            "unified_diff_hash": sha256_json({"unified_diff": draft.unified_diff}),
+            "hypothesis": {
+                "failure_mode": draft.failure_mode,
+                "mechanism": draft.mechanism,
+                "expected_improvement": draft.expected_improvement,
+                "risk": draft.risk,
+                "predicted_delta": draft.predicted_delta,
+            },
+            "redacted_summary": draft.redacted_summary,
+            "test_plan": draft.test_plan,
+            "rollback_plan": draft.rollback_plan,
+        },
+        "prior_attempts": _redacted_mapping({"attempts": list(prior_attempts or [])}).get("attempts", []),
+    }
+    system = (
+        "You are a strict Research Lab plan-alignment judge. Decide whether the "
+        "candidate diff directly implements the selected LoopDirectionPlan path. "
+        "Reject unrelated cleanups, lane swaps, repeated mechanisms, and edits that "
+        "weaken ICP constraints when the plan requires preserving them."
+    )
+    user = (
+        "Return strict JSON only, no markdown.\n\n"
+        "Fail if:\n"
+        "- The diff implements a different lane than the plan.\n"
+        "- The diff only changes query wording when the plan requires provider fallback, retry, or error handling.\n"
+        "- The diff repeats a prior target/mechanism or exact diff.\n"
+        "- The hypothesis claims alignment but the code does not.\n"
+        "- The patch weakens ICP constraints when the plan requires preserving them.\n\n"
+        "Required output shape:\n"
+        "{\"schema_version\":\"1.0\",\"verdict\":\"pass|fail\",\"reason\":\"...\","
+        "\"detected_lane\":\"...\",\"detected_mechanism\":\"...\",\"novel\":true,"
+        "\"blocking_issue\":\"\",\"confidence\":0.0}\n\n"
         "Context JSON:\n"
         + json.dumps(context, sort_keys=True, separators=(",", ":"))
     )
@@ -324,6 +503,223 @@ def build_code_edit_repair_messages(
         + json.dumps(context, sort_keys=True, separators=(",", ":"))
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def parse_loop_direction_plan_response(raw_text: str) -> LoopDirectionPlan:
+    decoded = _decode_json_value(raw_text)
+    if not isinstance(decoded, Mapping):
+        raise ValueError("loop direction plan response must be a JSON object")
+    plan_mapping = _mapping_with_any_keys(
+        decoded,
+        (
+            "loop_direction_plan",
+            "loopDirectionPlan",
+            "schema_version",
+            "required_lane",
+            "requiredLane",
+            "selected_path_id",
+            "selectedPathId",
+            "no_new_safe_path",
+            "noNewSafePath",
+        ),
+    )
+    if not isinstance(plan_mapping, Mapping):
+        raise ValueError("loop direction plan response did not contain a plan object")
+    if isinstance(plan_mapping.get("loop_direction_plan"), Mapping):
+        plan_mapping = plan_mapping["loop_direction_plan"]
+    elif isinstance(plan_mapping.get("loopDirectionPlan"), Mapping):
+        plan_mapping = plan_mapping["loopDirectionPlan"]
+    return loop_direction_plan_from_mapping(plan_mapping)
+
+
+def loop_direction_plan_from_mapping(value: Mapping[str, Any]) -> LoopDirectionPlan:
+    if _contains_forbidden_material(value):
+        raise ValueError("loop direction plan contains forbidden private or secret material")
+    no_new_safe_path = bool(_get_first_present(value, ("no_new_safe_path", "noNewSafePath", "no_viable_path", "noViablePath")) or False)
+    required_lane = _string_value(_get_first_present(value, ("required_lane", "requiredLane", "lane"))).strip()[:80]
+    selected_path_id = _string_value(
+        _get_first_present(value, ("selected_path_id", "selectedPathId", "path_id", "pathId"))
+    ).strip()[:120]
+    ranked_paths = tuple(
+        _compact_mapping(item, max_string=500)
+        for item in _coerce_mapping_list(_get_first_present(value, ("ranked_paths", "rankedPaths", "paths")))
+    )
+    if not no_new_safe_path:
+        if not required_lane:
+            raise ValueError("loop direction plan requires required_lane")
+        if not _string_value(_get_first_present(value, ("required_mechanism", "requiredMechanism", "mechanism"))).strip():
+            raise ValueError("loop direction plan requires required_mechanism")
+        if not selected_path_id:
+            if len(ranked_paths) == 1:
+                selected_path_id = _string_value(_get_first_present(ranked_paths[0], ("path_id", "pathId", "id"))).strip()[:120]
+            if not selected_path_id:
+                raise ValueError("loop direction plan requires selected_path_id")
+    allowed_lanes = _coerce_string_tuple(_get_first_present(value, ("allowed_lanes", "allowedLanes")), max_items=10)
+    if required_lane and required_lane not in allowed_lanes:
+        allowed_lanes = (required_lane, *tuple(item for item in allowed_lanes if item != required_lane))
+    return LoopDirectionPlan(
+        schema_version=_string_value(value.get("schema_version") or value.get("schemaVersion") or "1.0")[:20],
+        miner_focus_interpretation=_string_value(
+            _get_first_present(value, ("miner_focus_interpretation", "minerFocusInterpretation", "focus_interpretation"))
+        )[:1200],
+        loop_goal=_string_value(_get_first_present(value, ("loop_goal", "loopGoal", "goal")))[:1200],
+        required_lane=required_lane,
+        required_mechanism=_string_value(
+            _get_first_present(value, ("required_mechanism", "requiredMechanism", "mechanism"))
+        )[:1200],
+        target_behavior=_coerce_string_tuple(_get_first_present(value, ("target_behavior", "targetBehavior")), max_items=12),
+        must_inspect=_coerce_string_tuple(_get_first_present(value, ("must_inspect", "mustInspect")), max_items=12),
+        allowed_lanes=allowed_lanes,
+        disallowed_lanes=_coerce_string_tuple(_get_first_present(value, ("disallowed_lanes", "disallowedLanes")), max_items=12),
+        must_not_try=_coerce_string_tuple(_get_first_present(value, ("must_not_try", "mustNotTry")), max_items=16),
+        success_criteria=_coerce_string_tuple(_get_first_present(value, ("success_criteria", "successCriteria")), max_items=16),
+        novelty_requirements=_coerce_string_tuple(
+            _get_first_present(value, ("novelty_requirements", "noveltyRequirements")),
+            max_items=16,
+        ),
+        ranked_paths=ranked_paths,
+        selected_path_id=selected_path_id,
+        no_new_safe_path=no_new_safe_path,
+        reason=_string_value(_get_first_present(value, ("reason", "rationale", "why")))[:1000],
+    )
+
+
+def parse_plan_alignment_judge_response(raw_text: str) -> PlanAlignmentVerdict:
+    decoded = _decode_json_value(raw_text)
+    if not isinstance(decoded, Mapping):
+        raise ValueError("plan alignment judge response must be a JSON object")
+    if _contains_forbidden_material(decoded):
+        raise ValueError("plan alignment judge response contains forbidden private or secret material")
+    verdict_mapping = _mapping_with_any_keys(
+        decoded,
+        ("verdict", "passes", "pass", "plan_alignment", "planAlignment", "blocking_issue", "blockingIssue"),
+    )
+    if not isinstance(verdict_mapping, Mapping):
+        raise ValueError("plan alignment judge response did not contain a verdict object")
+    if isinstance(verdict_mapping.get("plan_alignment"), Mapping):
+        verdict_mapping = verdict_mapping["plan_alignment"]
+    elif isinstance(verdict_mapping.get("planAlignment"), Mapping):
+        verdict_mapping = verdict_mapping["planAlignment"]
+    verdict_raw = _string_value(_get_first_present(verdict_mapping, ("verdict", "decision", "status"))).strip().lower()
+    if not verdict_raw:
+        if verdict_mapping.get("passes") is True or verdict_mapping.get("pass") is True:
+            verdict_raw = "pass"
+        elif verdict_mapping.get("passes") is False or verdict_mapping.get("pass") is False:
+            verdict_raw = "fail"
+    verdict = "pass" if verdict_raw in {"pass", "passed", "accept", "accepted", "true"} else "fail"
+    return PlanAlignmentVerdict(
+        schema_version=_string_value(verdict_mapping.get("schema_version") or verdict_mapping.get("schemaVersion") or "1.0")[:20],
+        verdict=verdict,
+        reason=_string_value(_get_first_present(verdict_mapping, ("reason", "rationale", "summary")))[:1200],
+        detected_lane=_string_value(_get_first_present(verdict_mapping, ("detected_lane", "detectedLane", "lane")))[:120],
+        detected_mechanism=_string_value(
+            _get_first_present(verdict_mapping, ("detected_mechanism", "detectedMechanism", "mechanism"))
+        )[:1200],
+        novel=bool(_get_first_present(verdict_mapping, ("novel", "is_novel", "isNovel")) is not False),
+        blocking_issue=_string_value(_get_first_present(verdict_mapping, ("blocking_issue", "blockingIssue", "issue")))[:700],
+        confidence=_float_value(_get_first_present(verdict_mapping, ("confidence", "score")), default=0.0),
+    )
+
+
+def code_edit_no_viable_patch_reason(raw_text: str) -> str:
+    try:
+        decoded = _decode_json_value(raw_text)
+    except ValueError:
+        return ""
+    if not isinstance(decoded, Mapping):
+        return ""
+    item = _mapping_with_any_keys(
+        decoded,
+        ("no_viable_patch", "noViablePatch", "no_safe_patch", "noSafePatch", "no_new_safe_path", "noNewSafePath"),
+    )
+    if not isinstance(item, Mapping):
+        return ""
+    if any(item.get(key) is True for key in ("no_viable_patch", "noViablePatch", "no_safe_patch", "noSafePatch", "no_new_safe_path", "noNewSafePath")):
+        return _string_value(_get_first_present(item, ("reason", "rationale", "why", "message")))[:700] or "no viable patch"
+    return ""
+
+
+def code_edit_plan_alignment_errors(
+    draft: CodeEditDraft,
+    *,
+    loop_direction_plan: Mapping[str, Any] | None,
+    prior_attempts: Sequence[Mapping[str, Any]] | None = None,
+    strict: bool = True,
+) -> list[str]:
+    if not loop_direction_plan:
+        return []
+    try:
+        plan = loop_direction_plan_from_mapping(loop_direction_plan)
+    except Exception as exc:
+        return [f"loop_direction_plan_invalid:{str(exc)[:120]}"]
+    if plan.no_new_safe_path:
+        return ["loop_direction_plan_no_new_safe_path"]
+    errors: list[str] = []
+    required_lane = plan.required_lane.strip().lower()
+    declared_lane = str(draft.lane or "").strip().lower()
+    if required_lane:
+        if declared_lane and declared_lane != required_lane:
+            errors.append(f"declared_lane_mismatch:{declared_lane}!={required_lane}")
+        elif strict and not declared_lane:
+            errors.append("declared_lane_missing")
+    selected_path_id = plan.selected_path_id.strip()
+    if selected_path_id:
+        if draft.plan_path_id and draft.plan_path_id != selected_path_id:
+            errors.append(f"plan_path_id_mismatch:{draft.plan_path_id}!={selected_path_id}")
+        elif strict and not draft.plan_path_id:
+            errors.append("plan_path_id_missing")
+
+    diff_hash = sha256_json({"unified_diff": draft.unified_diff})
+    target_files = set(draft.target_files)
+    semantic_summary = _semantic_summary_key(draft)
+    for attempt in prior_attempts or ():
+        if not isinstance(attempt, Mapping):
+            continue
+        if diff_hash and diff_hash == str(attempt.get("unified_diff_hash") or ""):
+            errors.append("duplicate_unified_diff_hash")
+            break
+        previous_files = set(_coerce_string_tuple(attempt.get("target_files"), max_items=20))
+        previous_summary = _normalize_semantic_summary(
+            _string_value(
+                attempt.get("semantic_edit_summary")
+                or attempt.get("redacted_summary")
+                or attempt.get("mechanism")
+                or attempt.get("summary")
+            )
+        )
+        if strict and previous_files and target_files == previous_files and semantic_summary and semantic_summary == previous_summary:
+            errors.append("duplicate_target_files_and_semantic_summary")
+            break
+
+    combined = " ".join(
+        [
+            draft.lane,
+            draft.plan_path_id,
+            " ".join(draft.target_files),
+            draft.failure_mode,
+            draft.mechanism,
+            draft.expected_improvement,
+            draft.redacted_summary,
+            draft.unified_diff,
+        ]
+    ).lower()
+    implementation_text = " ".join(
+        [
+            " ".join(draft.target_files),
+            draft.redacted_summary,
+            draft.unified_diff,
+        ]
+    ).lower()
+    if required_lane == "provider_fallback":
+        fallback_terms = ("fallback", "retry", "backoff", "provider", "http", "4xx", "5xx", "zero result", "zero-result", "timeout", "error handling")
+        employee_query_terms = ("employee count", "employee-count", "linkedin employee", "linkedin", "headcount")
+        if any(term in implementation_text for term in employee_query_terms) and not any(term in implementation_text for term in fallback_terms):
+            errors.append("provider_fallback_plan_but_employee_count_query_edit")
+    if required_lane == "intent_evidence_quality":
+        intent_terms = ("intent", "evidence", "citation", "source", "freshness", "signal")
+        if strict and not any(term in combined for term in intent_terms):
+            errors.append("intent_evidence_plan_without_intent_evidence_terms")
+    return errors
 
 
 def parse_code_edit_source_inspection_response(
@@ -521,6 +917,22 @@ def parse_code_edit_repair_response(
                 code_edit.get("rollback_plan") or item.get("rollback_plan") or original_draft.rollback_plan
             )[:1200],
             predicted_delta=float(hypothesis.get("predicted_delta") or original_draft.predicted_delta or 1.0),
+            plan_path_id=str(
+                item.get("plan_path_id")
+                or item.get("planPathId")
+                or code_edit.get("plan_path_id")
+                or code_edit.get("planPathId")
+                or original_draft.plan_path_id
+            )[:120],
+            plan_alignment=dict(
+                item.get("plan_alignment")
+                if isinstance(item.get("plan_alignment"), Mapping)
+                else (
+                    item.get("planAlignment")
+                    if isinstance(item.get("planAlignment"), Mapping)
+                    else original_draft.plan_alignment
+                )
+            ),
         )
         validate_code_edit_draft(draft)
         drafts.append(draft)
@@ -759,6 +1171,15 @@ def _draft_from_code_edit_candidate(item: Mapping[str, Any]) -> CodeEditDraft:
             _get_first_present(hypothesis, ("predicted_delta", "predictedDelta", "delta", "expected_delta", "expectedDelta")),
             default=1.0,
         ),
+        plan_path_id=_string_value(
+            _get_first_present(item, ("plan_path_id", "planPathId", "selected_path_id", "selectedPathId"))
+            or _get_first_present(code_edit, ("plan_path_id", "planPathId", "selected_path_id", "selectedPathId"))
+        )[:120],
+        plan_alignment=dict(
+            item.get("plan_alignment")
+            if isinstance(item.get("plan_alignment"), Mapping)
+            else (item.get("planAlignment") if isinstance(item.get("planAlignment"), Mapping) else {})
+        ),
     )
 
 
@@ -866,6 +1287,71 @@ def _get_first_present(mapping: Mapping[str, Any], keys: Sequence[str]) -> Any:
     return None
 
 
+def _mapping_with_any_keys(decoded: Mapping[str, Any], keys: Sequence[str], *, _depth: int = 0) -> Mapping[str, Any] | None:
+    if _depth > 4:
+        return None
+    if any(key in decoded for key in keys):
+        return decoded
+    for key in ("result", "response", "output", "data", "message", "content", "json", "final", "answer", "text"):
+        value = decoded.get(key)
+        if isinstance(value, Mapping):
+            nested = _mapping_with_any_keys(value, keys, _depth=_depth + 1)
+            if nested is not None:
+                return nested
+        elif isinstance(value, str):
+            try:
+                nested_decoded = _decode_json_value(value)
+            except ValueError:
+                continue
+            if isinstance(nested_decoded, Mapping):
+                nested = _mapping_with_any_keys(nested_decoded, keys, _depth=_depth + 1)
+                if nested is not None:
+                    return nested
+    return None
+
+
+def _coerce_string_tuple(value: Any, *, max_items: int) -> tuple[str, ...]:
+    if value is None:
+        raw_items: list[Any] = []
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+    items: list[str] = []
+    for item in raw_items:
+        text = _string_value(item).strip()
+        if text and text not in items:
+            items.append(text[:1200])
+        if len(items) >= max(1, int(max_items)):
+            break
+    return tuple(items)
+
+
+def _coerce_mapping_list(value: Any) -> list[Mapping[str, Any]]:
+    if value is None:
+        return []
+    raw_items = value if isinstance(value, list) else [value]
+    return [item for item in raw_items if isinstance(item, Mapping)]
+
+
+def _compact_mapping(value: Mapping[str, Any], *, max_string: int) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, item in value.items():
+        clean_key = str(key)[:80]
+        if isinstance(item, Mapping):
+            payload[clean_key] = _compact_mapping(item, max_string=max_string)
+        elif isinstance(item, list):
+            payload[clean_key] = [
+                _compact_mapping(child, max_string=max_string) if isinstance(child, Mapping) else _string_value(child)[:max_string]
+                for child in item[:20]
+            ]
+        elif isinstance(item, (str, int, float, bool)) or item is None:
+            payload[clean_key] = item[:max_string] if isinstance(item, str) else item
+        else:
+            payload[clean_key] = _string_value(item)[:max_string]
+    return payload
+
+
 def _string_value(value: Any) -> str:
     if value is None:
         return ""
@@ -886,6 +1372,26 @@ def _float_value(value: Any, *, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _normalize_semantic_summary(value: str) -> str:
+    text = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+    return re.sub(r"\s+", " ", text)[:240]
+
+
+def _semantic_summary_key(draft: CodeEditDraft) -> str:
+    return _normalize_semantic_summary(
+        " ".join(
+            item
+            for item in (
+                draft.lane,
+                draft.plan_path_id,
+                draft.mechanism,
+                draft.redacted_summary,
+            )
+            if item
+        )
+    )
 
 
 def normalize_unified_diff_text(value: str) -> str:
@@ -984,6 +1490,8 @@ def code_edit_candidate_manifest(
         "patch_doc": {
             "edit_contract": "code_edit_image_build:v1",
             "lane": draft.lane,
+            "plan_path_id": draft.plan_path_id,
+            "plan_alignment": dict(draft.plan_alignment or {}),
             "target_files": list(draft.target_files),
             "unified_diff_hash": sha256_json({"unified_diff": draft.unified_diff}),
             "expected_improvement": draft.expected_improvement,

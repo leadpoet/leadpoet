@@ -336,7 +336,21 @@ class ResearchLabGatewayConfig:
     auto_research_draft_timeout_seconds: int = 90
     auto_research_reflection_timeout_seconds: int = 90
     auto_research_max_tokens: int = 12000
+    auto_research_temperature: float = 0.35
     auto_research_estimated_iteration_cost_usd: float = 0.5
+    loop_planner_enabled: bool = True
+    loop_alignment_judge_enabled: bool = True
+    loop_novelty_strict: bool = True
+    loop_planner_model: str = ""
+    loop_planner_reasoning_effort: str = ""
+    loop_planner_max_tokens: int = 2400
+    loop_planner_temperature: float = 0.20
+    loop_executor_model: str = ""
+    loop_executor_reasoning_effort: str = ""
+    loop_alignment_judge_model: str = ""
+    loop_alignment_judge_reasoning_effort: str = ""
+    loop_alignment_judge_max_tokens: int = 1600
+    loop_alignment_judge_temperature: float = 0.0
     reimbursement_policy_id: str = "alpha-reimbursement-production-v1"
     reimbursement_min_rebate_rate: float = 0.25
     reimbursement_base_rebate_rate: float = 0.50
@@ -578,9 +592,38 @@ class ResearchLabGatewayConfig:
                 700,
                 _int("RESEARCH_LAB_AUTO_RESEARCH_MAX_TOKENS", 12000),
             ),
+            auto_research_temperature=min(
+                2.0,
+                max(0.0, _float("RESEARCH_LAB_AUTO_RESEARCH_TEMPERATURE", 0.35)),
+            ),
             auto_research_estimated_iteration_cost_usd=max(
                 0.01,
                 _float("RESEARCH_LAB_AUTO_RESEARCH_ESTIMATED_ITERATION_COST_USD", 0.5),
+            ),
+            loop_planner_enabled=_truthy("RESEARCH_LAB_LOOP_PLANNER_ENABLED", "true"),
+            loop_alignment_judge_enabled=_truthy("RESEARCH_LAB_LOOP_ALIGNMENT_JUDGE_ENABLED", "true"),
+            loop_novelty_strict=_truthy("RESEARCH_LAB_LOOP_NOVELTY_STRICT", "true"),
+            loop_planner_model=os.getenv("RESEARCH_LAB_LOOP_PLANNER_MODEL", ""),
+            loop_planner_reasoning_effort=os.getenv("RESEARCH_LAB_LOOP_PLANNER_REASONING_EFFORT", ""),
+            loop_planner_max_tokens=max(
+                512,
+                _int("RESEARCH_LAB_LOOP_PLANNER_MAX_TOKENS", 2400),
+            ),
+            loop_planner_temperature=min(
+                2.0,
+                max(0.0, _float("RESEARCH_LAB_LOOP_PLANNER_TEMPERATURE", 0.20)),
+            ),
+            loop_executor_model=os.getenv("RESEARCH_LAB_LOOP_EXECUTOR_MODEL", ""),
+            loop_executor_reasoning_effort=os.getenv("RESEARCH_LAB_LOOP_EXECUTOR_REASONING_EFFORT", ""),
+            loop_alignment_judge_model=os.getenv("RESEARCH_LAB_LOOP_ALIGNMENT_JUDGE_MODEL", ""),
+            loop_alignment_judge_reasoning_effort=os.getenv("RESEARCH_LAB_LOOP_ALIGNMENT_JUDGE_REASONING_EFFORT", ""),
+            loop_alignment_judge_max_tokens=max(
+                256,
+                _int("RESEARCH_LAB_LOOP_ALIGNMENT_JUDGE_MAX_TOKENS", 1600),
+            ),
+            loop_alignment_judge_temperature=min(
+                2.0,
+                max(0.0, _float("RESEARCH_LAB_LOOP_ALIGNMENT_JUDGE_TEMPERATURE", 0.0)),
             ),
             reimbursement_policy_id=os.getenv(
                 "RESEARCH_LAB_REIMBURSEMENT_POLICY_ID",
@@ -1051,7 +1094,33 @@ class ResearchLabGatewayConfig:
                 "auto_research_draft_timeout_seconds": self.auto_research_draft_timeout_seconds,
                 "auto_research_reflection_timeout_seconds": self.auto_research_reflection_timeout_seconds,
                 "auto_research_max_tokens": self.auto_research_max_tokens,
+                "auto_research_temperature": self.auto_research_temperature,
                 "auto_research_estimated_iteration_cost_usd": self.auto_research_estimated_iteration_cost_usd,
+                "loop_planner": {
+                    "enabled": self.loop_planner_enabled,
+                    "model_configured": bool(self.loop_planner_model),
+                    "reasoning_effort": _normalize_auto_research_reasoning_effort(
+                        self.loop_planner_reasoning_effort
+                    ),
+                    "max_tokens": self.loop_planner_max_tokens,
+                    "temperature": self.loop_planner_temperature,
+                },
+                "loop_executor": {
+                    "model_configured": bool(self.loop_executor_model),
+                    "reasoning_effort": _normalize_auto_research_reasoning_effort(
+                        self.loop_executor_reasoning_effort
+                    ),
+                },
+                "loop_alignment_judge": {
+                    "enabled": self.loop_alignment_judge_enabled,
+                    "novelty_strict": self.loop_novelty_strict,
+                    "model_configured": bool(self.loop_alignment_judge_model),
+                    "reasoning_effort": _normalize_auto_research_reasoning_effort(
+                        self.loop_alignment_judge_reasoning_effort
+                    ),
+                    "max_tokens": self.loop_alignment_judge_max_tokens,
+                    "temperature": self.loop_alignment_judge_temperature,
+                },
                 "private_model_manifest_uri_configured": bool(self.private_model_manifest_uri),
                 "scoring_owner": "gateway_qualification_workers",
                 "scoring_worker_enabled": self.scoring_worker_enabled,

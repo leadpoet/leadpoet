@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
 import re
 import tempfile
 import time
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Sequence, Union
 
 from gateway.research_lab.code_build import (
     CodeEditBuildError,
@@ -24,7 +24,7 @@ from gateway.research_lab.loop_engine import (
     AutoResearchLoopEvent,
     AutoResearchLoopResult,
     AutoResearchLoopSettings,
-    OpenRouterCaller,
+    OpenRouterCallResult,
     _budget_limit_microusd,
     _coerce_call_result,
     _estimated_call_microusd,
@@ -39,11 +39,24 @@ from research_lab.code_editing import (
     build_code_edit_auto_research_messages,
     build_code_edit_repair_messages,
     build_code_edit_source_inspection_messages,
+    build_loop_direction_planner_messages,
+    build_plan_alignment_judge_messages,
+    code_edit_no_viable_patch_reason,
+    code_edit_plan_alignment_errors,
+    loop_direction_plan_from_mapping,
+    parse_loop_direction_plan_response,
+    parse_plan_alignment_judge_response,
     parse_code_edit_repair_response,
     parse_code_edit_response,
     parse_code_edit_source_inspection_response,
 )
 from research_lab.eval import PrivateModelArtifactManifest
+
+
+CodeEditOpenRouterCaller = Callable[
+    [Sequence[Mapping[str, str]], int, int, str],
+    Awaitable[Union[str, OpenRouterCallResult]],
+]
 
 
 @dataclass(frozen=True)
@@ -85,7 +98,7 @@ class CodeEditLoopResult:
 @dataclass
 class CodeEditLoopEngine:
     settings: AutoResearchLoopSettings
-    call_openrouter: OpenRouterCaller
+    call_openrouter: CodeEditOpenRouterCaller
     event_sink: Any
     builder: CodeEditCandidateBuilder
 
@@ -284,9 +297,155 @@ class CodeEditLoopEngine:
             )
         )
 
+        prior_attempts = _prior_attempts_from_budget_context(budget_context)
+        loop_direction_plan_doc: dict[str, Any] | None = None
+        if isinstance(resume.get("loop_direction_plan"), Mapping):
+            try:
+                loop_direction_plan_doc = loop_direction_plan_from_mapping(
+                    resume["loop_direction_plan"]
+                ).to_dict()
+            except Exception as exc:
+                await self.event_sink(
+                    AutoResearchLoopEvent(
+                        event_type="code_edit_validation_failed",
+                        loop_status="running",
+                        elapsed_seconds=elapsed(),
+                        cost_ledger=_running_cost_ledger(
+                            openrouter_calls,
+                            estimated_cost,
+                            actual_cost_microusd,
+                            "resume_loop_direction_plan_parse_failed",
+                        ),
+                        event_doc={
+                            "stage": "resume_loop_direction_plan_parse",
+                            "error": str(exc)[:500],
+                            "checkpoint_hash": resume.get("checkpoint_hash"),
+                        },
+                    )
+                )
+                loop_direction_plan_doc = None
+        planner_terminal_without_candidate = False
         last_checkpoint: dict[str, Any] | None = None
         stop_reason = "max_iterations"
+        if self.builder.config.loop_planner_enabled and loop_direction_plan_doc is None:
+            if _would_exceed_budget(
+                actual_cost_microusd,
+                _estimated_call_microusd(settings.estimated_iteration_cost_usd),
+                budget_limit_microusd,
+            ):
+                stop_reason = "compute_budget_exhausted_before_loop_planner"
+                planner_terminal_without_candidate = True
+            else:
+                remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
+                raw_plan = ""
+                planner_result = _coerce_call_result(
+                    await self.call_openrouter(
+                        build_loop_direction_planner_messages(
+                            ticket={
+                                "ticket_id": str(ticket.get("ticket_id") or ""),
+                                "run_id": run_id,
+                                "miner_hotkey": ticket.get("miner_hotkey"),
+                                "island": ticket.get("island"),
+                                "brief_sanitized_ref": ticket.get("brief_sanitized_ref"),
+                                "brief_public_summary": _ticket_doc_value(ticket, "brief_public_summary"),
+                                "requested_loop_count": requested_loop_count,
+                                "focus_signature_hash": _focus_signature_hash(ticket),
+                            },
+                            artifact_manifest=artifact.to_dict(),
+                            component_registry=dict(component_registry),
+                            benchmark_public_summary=benchmark_public_summary,
+                            runtime_source_index=source_context.inspection_index(),
+                            budget_context={
+                                **dict(budget_context),
+                                "candidate_kind": "image_build",
+                                "focus_signature_hash": _focus_signature_hash(ticket),
+                            },
+                            prior_attempts=prior_attempts,
+                        ),
+                        min(settings.draft_timeout_seconds, remaining_call_seconds),
+                        self.builder.config.loop_planner_max_tokens,
+                        "loop_planner",
+                    )
+                )
+                raw_plan = planner_result.content
+                openrouter_calls += 1
+                estimated_cost += settings.estimated_iteration_cost_usd
+                actual_cost_microusd += max(0, int(planner_result.cost_microusd))
+                if planner_result.provider_usage:
+                    provider_usage.append({**planner_result.provider_usage, "call_stage": "loop_planner"})
+                try:
+                    loop_plan = parse_loop_direction_plan_response(raw_plan)
+                    loop_direction_plan_doc = loop_plan.to_dict()
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="loop_direction_planned",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            provider_usage=([provider_usage[-1]] if provider_usage else []),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "loop_direction_planned",
+                            ),
+                            event_doc={
+                                "focus_signature_hash": _focus_signature_hash(ticket),
+                                "loop_direction_plan": loop_direction_plan_doc,
+                                "prior_attempt_count": len(prior_attempts),
+                                "source_tree_hash": source_context.source_tree_hash,
+                            },
+                        )
+                    )
+                    if loop_plan.no_new_safe_path:
+                        stop_reason = "loop_direction_no_new_safe_path"
+                        planner_terminal_without_candidate = True
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type="no_viable_patch",
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                provider_usage=([provider_usage[-1]] if provider_usage else []),
+                                cost_ledger=_running_cost_ledger(
+                                    openrouter_calls,
+                                    estimated_cost,
+                                    actual_cost_microusd,
+                                    "no_viable_patch",
+                                ),
+                                event_doc={
+                                    "reason": loop_plan.reason or "planner returned no_new_safe_path",
+                                    "loop_direction_plan_hash": loop_direction_plan_doc.get("plan_hash"),
+                                    "focus_signature_hash": _focus_signature_hash(ticket),
+                                },
+                            )
+                        )
+                except Exception as exc:
+                    stop_reason = "loop_direction_plan_parse_failed"
+                    planner_terminal_without_candidate = True
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="code_edit_validation_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            provider_usage=([provider_usage[-1]] if provider_usage else []),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "loop_direction_plan_parse_failed",
+                            ),
+                            event_doc={
+                                "stage": "loop_direction_planner",
+                                "error": str(exc)[:500],
+                                "raw_response_hash": sha256_json({"raw_response": raw_plan}),
+                                "focus_signature_hash": _focus_signature_hash(ticket),
+                            },
+                        )
+                    )
+        elif not self.builder.config.loop_planner_enabled:
+            loop_direction_plan_doc = None
         while iteration < settings.max_iterations:
+            if planner_terminal_without_candidate:
+                break
             if elapsed() >= settings.max_seconds:
                 stop_reason = "max_seconds"
                 break
@@ -319,6 +478,7 @@ class CodeEditLoopEngine:
                     estimated_cost=estimated_cost,
                     actual_cost_microusd=actual_cost_microusd,
                     stage="pause_before_next_code_edit",
+                    loop_direction_plan=loop_direction_plan_doc,
                 )
                 _cleanup_source_tmp()
                 return self._result(
@@ -378,16 +538,23 @@ class CodeEditLoopEngine:
                             benchmark_public_summary=benchmark_public_summary,
                             runtime_source_index=source_context.inspection_index(),
                             source_inspection_context=source_inspection_context,
+                            loop_direction_plan=loop_direction_plan_doc,
                             budget_context={
                                 **dict(budget_context),
                                 "loop_iteration": iteration,
                                 "inspection_round": inspection_round,
                                 "candidate_kind": "image_build",
+                                "loop_direction_plan_hash": (
+                                    (loop_direction_plan_doc or {}).get("plan_hash")
+                                    if isinstance(loop_direction_plan_doc, Mapping)
+                                    else None
+                                ),
                             },
                             max_requests=4,
                         ),
                         min(settings.draft_timeout_seconds, remaining_call_seconds),
                         3000,
+                        "source_inspection",
                     )
                 )
                 raw_inspection = inspection_result.content
@@ -569,15 +736,22 @@ class CodeEditLoopEngine:
                             benchmark_public_summary=benchmark_public_summary,
                             runtime_source_context=source_context.prompt_context(),
                             source_inspection_context=source_inspection_context,
+                            loop_direction_plan=loop_direction_plan_doc,
                             budget_context={
                                 **dict(budget_context),
                                 "loop_iteration": iteration,
                                 "candidate_kind": "image_build",
+                                "loop_direction_plan_hash": (
+                                    (loop_direction_plan_doc or {}).get("plan_hash")
+                                    if isinstance(loop_direction_plan_doc, Mapping)
+                                    else None
+                                ),
                             },
                             max_candidates=settings.max_candidates,
                         ),
                         min(settings.draft_timeout_seconds, remaining_call_seconds),
                         3000,
+                        "code_edit_draft",
                     )
                 )
                 raw = draft_result.content
@@ -592,19 +766,45 @@ class CodeEditLoopEngine:
                 try:
                     drafts = parse_code_edit_response(raw, max_candidates=settings.max_candidates)
                 except Exception as exc:
-                    await self.event_sink(
-                        AutoResearchLoopEvent(
-                            event_type="code_edit_validation_failed",
-                            loop_status="running",
-                            elapsed_seconds=elapsed(),
-                            cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "code_edit_parse_failed"),
-                            event_doc={
-                                "iteration": iteration,
-                                "error": str(exc)[:500],
-                                "raw_response_hash": sha256_json({"raw_response": raw}),
-                            },
+                    no_viable_reason = code_edit_no_viable_patch_reason(raw)
+                    if no_viable_reason:
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type="no_viable_patch",
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                cost_ledger=_running_cost_ledger(
+                                    openrouter_calls,
+                                    estimated_cost,
+                                    actual_cost_microusd,
+                                    "no_viable_patch",
+                                ),
+                                event_doc={
+                                    "iteration": iteration,
+                                    "reason": no_viable_reason,
+                                    "raw_response_hash": sha256_json({"raw_response": raw}),
+                                    "loop_direction_plan_hash": (
+                                        (loop_direction_plan_doc or {}).get("plan_hash")
+                                        if isinstance(loop_direction_plan_doc, Mapping)
+                                        else None
+                                    ),
+                                },
+                            )
                         )
-                    )
+                    else:
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type="code_edit_validation_failed",
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "code_edit_parse_failed"),
+                                event_doc={
+                                    "iteration": iteration,
+                                    "error": str(exc)[:500],
+                                    "raw_response_hash": sha256_json({"raw_response": raw}),
+                                },
+                            )
+                        )
                     drafts = []
             for draft_index, draft in enumerate(drafts):
                 node_id = _node_id(run_id, iteration, draft_index, draft)
@@ -648,6 +848,12 @@ class CodeEditLoopEngine:
                         event_doc={
                             "iteration": iteration,
                             "lane": draft.lane,
+                            "plan_path_id": draft.plan_path_id,
+                            "loop_direction_plan_hash": (
+                                (loop_direction_plan_doc or {}).get("plan_hash")
+                                if isinstance(loop_direction_plan_doc, Mapping)
+                                else None
+                            ),
                             "target_files": list(draft.target_files),
                             "unified_diff_hash": sha256_json({"unified_diff": draft.unified_diff}),
                             "hypothesis": {
@@ -689,6 +895,32 @@ class CodeEditLoopEngine:
                     continue
                 if candidate_draft is None:
                     continue
+                (
+                    alignment_ok,
+                    candidate_draft,
+                    openrouter_calls,
+                    estimated_cost,
+                    actual_cost_microusd,
+                    alignment_budget_exhausted,
+                ) = await self._judge_plan_alignment(
+                    draft=candidate_draft,
+                    loop_direction_plan=loop_direction_plan_doc,
+                    prior_attempts=prior_attempts,
+                    node_id=node_id,
+                    iteration=iteration,
+                    settings=settings,
+                    budget_limit_microusd=budget_limit_microusd,
+                    elapsed=elapsed,
+                    openrouter_calls=openrouter_calls,
+                    estimated_cost=estimated_cost,
+                    actual_cost_microusd=actual_cost_microusd,
+                    provider_usage=provider_usage,
+                )
+                if alignment_budget_exhausted:
+                    budget_exhausted_after_call = True
+                    continue
+                if not alignment_ok:
+                    continue
                 try:
                     await self.event_sink(
                         AutoResearchLoopEvent(
@@ -700,6 +932,12 @@ class CodeEditLoopEngine:
                             event_doc={
                                 "iteration": iteration,
                                 "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
+                                "loop_direction_plan_hash": (
+                                    (loop_direction_plan_doc or {}).get("plan_hash")
+                                    if isinstance(loop_direction_plan_doc, Mapping)
+                                    else None
+                                ),
+                                "plan_alignment": dict(candidate_draft.plan_alignment or {}),
                             },
                         )
                     )
@@ -726,6 +964,12 @@ class CodeEditLoopEngine:
                                 "candidate_model_manifest_hash": build.candidate_model_manifest.manifest_hash,
                                 "candidate_source_diff_hash": build.source_diff_hash,
                                 "build_doc_hash": build.build_doc.get("build_doc_hash"),
+                                "loop_direction_plan_hash": (
+                                    (loop_direction_plan_doc or {}).get("plan_hash")
+                                    if isinstance(loop_direction_plan_doc, Mapping)
+                                    else None
+                                ),
+                                "plan_alignment": dict(candidate_draft.plan_alignment or {}),
                             },
                         )
                     )
@@ -789,6 +1033,7 @@ class CodeEditLoopEngine:
                 estimated_cost=estimated_cost,
                 actual_cost_microusd=actual_cost_microusd,
                 stage="code_edit_iteration_completed",
+                loop_direction_plan=loop_direction_plan_doc,
             )
             if should_pause and await should_pause():
                 _cleanup_source_tmp()
@@ -835,6 +1080,7 @@ class CodeEditLoopEngine:
                     estimated_cost=estimated_cost,
                     actual_cost_microusd=actual_cost_microusd,
                     stage="pause_after_code_edit_minimum_runtime",
+                    loop_direction_plan=loop_direction_plan_doc,
                 )
                 _cleanup_source_tmp()
                 return self._result(
@@ -869,6 +1115,17 @@ class CodeEditLoopEngine:
                         "candidate_model_manifest_hash": candidate.build.candidate_model_manifest.manifest_hash,
                         "candidate_source_diff_hash": candidate.build.source_diff_hash,
                         "redacted_summary": candidate.draft.redacted_summary,
+                        "loop_direction_plan_hash": (
+                            (loop_direction_plan_doc or {}).get("plan_hash")
+                            if isinstance(loop_direction_plan_doc, Mapping)
+                            else None
+                        ),
+                        "selected_path_id": (
+                            (loop_direction_plan_doc or {}).get("selected_path_id")
+                            if isinstance(loop_direction_plan_doc, Mapping)
+                            else candidate.draft.plan_path_id
+                        ),
+                        "plan_alignment": dict(candidate.draft.plan_alignment or {}),
                     },
                 )
             )
@@ -897,6 +1154,16 @@ class CodeEditLoopEngine:
                     "iterations_completed": result.iterations_completed,
                     "selected_candidate_count": len(selected),
                     "stop_reason": result.stop_reason,
+                    "loop_direction_plan_hash": (
+                        (loop_direction_plan_doc or {}).get("plan_hash")
+                        if isinstance(loop_direction_plan_doc, Mapping)
+                        else None
+                    ),
+                    "selected_path_id": (
+                        (loop_direction_plan_doc or {}).get("selected_path_id")
+                        if isinstance(loop_direction_plan_doc, Mapping)
+                        else None
+                    ),
                     "gateway_scoring_queue_visible_after_this_event": bool(selected),
                 },
             )
@@ -920,6 +1187,7 @@ class CodeEditLoopEngine:
         estimated_cost: float,
         actual_cost_microusd: int,
         stage: str,
+        loop_direction_plan: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = {
             "schema_version": "1.0",
@@ -946,6 +1214,12 @@ class CodeEditLoopEngine:
                 }
                 for candidate in selected
             ],
+            "loop_direction_plan": dict(loop_direction_plan or {}),
+            "loop_direction_plan_hash": (
+                (loop_direction_plan or {}).get("plan_hash")
+                if isinstance(loop_direction_plan, Mapping)
+                else None
+            ),
             "openrouter_call_count": int(openrouter_calls),
             "estimated_cost_usd": round(float(estimated_cost), 6),
             "actual_openrouter_cost_usd": round(int(actual_cost_microusd) / 1_000_000, 6),
@@ -991,6 +1265,244 @@ class CodeEditLoopEngine:
             provider_usage=tuple(dict(item) for item in provider_usage if isinstance(item, Mapping)),
             status=status,
             checkpoint_doc=checkpoint,
+        )
+
+    async def _judge_plan_alignment(
+        self,
+        *,
+        draft: CodeEditDraft,
+        loop_direction_plan: Mapping[str, Any] | None,
+        prior_attempts: Sequence[Mapping[str, Any]],
+        node_id: str,
+        iteration: int,
+        settings: AutoResearchLoopSettings,
+        budget_limit_microusd: int,
+        elapsed: Callable[[], float],
+        openrouter_calls: int,
+        estimated_cost: float,
+        actual_cost_microusd: int,
+        provider_usage: list[dict[str, Any]],
+    ) -> tuple[bool, CodeEditDraft, int, float, int, bool]:
+        if not loop_direction_plan:
+            return True, draft, openrouter_calls, estimated_cost, actual_cost_microusd, False
+        heuristic_errors = code_edit_plan_alignment_errors(
+            draft,
+            loop_direction_plan=loop_direction_plan,
+            prior_attempts=prior_attempts,
+            strict=bool(self.builder.config.loop_novelty_strict),
+        )
+        if heuristic_errors:
+            verdict_doc = {
+                "schema_version": "1.0",
+                "verdict": "fail",
+                "source": "local_heuristic",
+                "reason": "; ".join(heuristic_errors)[:700],
+                "detected_lane": draft.lane,
+                "detected_mechanism": draft.mechanism,
+                "novel": not any("duplicate" in error for error in heuristic_errors),
+                "blocking_issue": heuristic_errors[0],
+                "confidence": 1.0,
+                "loop_direction_plan_hash": loop_direction_plan.get("plan_hash"),
+                "selected_path_id": loop_direction_plan.get("selected_path_id"),
+            }
+            await self.event_sink(
+                AutoResearchLoopEvent(
+                    event_type="plan_alignment_judged",
+                    loop_status="running",
+                    elapsed_seconds=elapsed(),
+                    node_id=node_id,
+                    provider_usage=([provider_usage[-1]] if provider_usage else []),
+                    cost_ledger=_running_cost_ledger(
+                        openrouter_calls,
+                        estimated_cost,
+                        actual_cost_microusd,
+                        "plan_alignment_judged",
+                    ),
+                    event_doc={
+                        "iteration": iteration,
+                        "loop_direction_plan_hash": loop_direction_plan.get("plan_hash"),
+                        "selected_path_id": loop_direction_plan.get("selected_path_id"),
+                        "source_diff_hash": sha256_json({"unified_diff": draft.unified_diff}),
+                        "verdict": verdict_doc,
+                    },
+                )
+            )
+            await self._emit_alignment_rejection(
+                draft=draft,
+                node_id=node_id,
+                iteration=iteration,
+                verdict_doc=verdict_doc,
+                loop_direction_plan=loop_direction_plan,
+                elapsed=elapsed,
+                openrouter_calls=openrouter_calls,
+                estimated_cost=estimated_cost,
+                actual_cost_microusd=actual_cost_microusd,
+                provider_usage=provider_usage,
+            )
+            return False, replace(draft, plan_alignment=verdict_doc), openrouter_calls, estimated_cost, actual_cost_microusd, False
+
+        if not self.builder.config.loop_alignment_judge_enabled:
+            verdict_doc = {
+                "schema_version": "1.0",
+                "verdict": "pass",
+                "source": "local_heuristic",
+                "reason": "alignment judge disabled; local heuristic passed",
+                "detected_lane": draft.lane,
+                "detected_mechanism": draft.mechanism,
+                "novel": True,
+                "blocking_issue": "",
+                "confidence": 0.5,
+                "loop_direction_plan_hash": loop_direction_plan.get("plan_hash"),
+                "selected_path_id": loop_direction_plan.get("selected_path_id"),
+            }
+            return True, replace(draft, plan_alignment=verdict_doc), openrouter_calls, estimated_cost, actual_cost_microusd, False
+
+        if elapsed() >= settings.max_seconds:
+            return False, draft, openrouter_calls, estimated_cost, actual_cost_microusd, False
+        if _would_exceed_budget(
+            actual_cost_microusd,
+            _estimated_call_microusd(settings.estimated_iteration_cost_usd),
+            budget_limit_microusd,
+        ):
+            await self._emit_alignment_rejection(
+                draft=draft,
+                node_id=node_id,
+                iteration=iteration,
+                verdict_doc={
+                    "schema_version": "1.0",
+                    "verdict": "fail",
+                    "source": "budget_guard",
+                    "reason": "compute budget exhausted before plan alignment judge",
+                    "blocking_issue": "compute_budget_exhausted_before_plan_alignment_judge",
+                    "novel": True,
+                    "loop_direction_plan_hash": loop_direction_plan.get("plan_hash"),
+                    "selected_path_id": loop_direction_plan.get("selected_path_id"),
+                },
+                loop_direction_plan=loop_direction_plan,
+                elapsed=elapsed,
+                openrouter_calls=openrouter_calls,
+                estimated_cost=estimated_cost,
+                actual_cost_microusd=actual_cost_microusd,
+                provider_usage=provider_usage,
+            )
+            return False, draft, openrouter_calls, estimated_cost, actual_cost_microusd, True
+
+        remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
+        raw_judge = ""
+        judge_result = _coerce_call_result(
+            await self.call_openrouter(
+                build_plan_alignment_judge_messages(
+                    loop_direction_plan=loop_direction_plan,
+                    draft=draft,
+                    prior_attempts=prior_attempts,
+                ),
+                min(settings.draft_timeout_seconds, remaining_call_seconds),
+                self.builder.config.loop_alignment_judge_max_tokens,
+                "plan_alignment_judge",
+            )
+        )
+        raw_judge = judge_result.content
+        openrouter_calls += 1
+        estimated_cost += settings.estimated_iteration_cost_usd
+        actual_cost_microusd += max(0, int(judge_result.cost_microusd))
+        if judge_result.provider_usage:
+            provider_usage.append({**judge_result.provider_usage, "loop_iteration": iteration, "call_stage": "plan_alignment_judge"})
+        try:
+            verdict = parse_plan_alignment_judge_response(raw_judge)
+            verdict_doc = {**verdict.to_dict(), "source": "model_judge"}
+        except Exception as exc:
+            verdict_doc = {
+                "schema_version": "1.0",
+                "verdict": "fail",
+                "source": "model_judge_parse_failed",
+                "reason": str(exc)[:700],
+                "detected_lane": "",
+                "detected_mechanism": "",
+                "novel": False,
+                "blocking_issue": "plan_alignment_judge_parse_failed",
+                "confidence": 1.0,
+                "raw_response_hash": sha256_json({"raw_response": raw_judge}),
+            }
+        verdict_doc["loop_direction_plan_hash"] = loop_direction_plan.get("plan_hash")
+        verdict_doc["selected_path_id"] = loop_direction_plan.get("selected_path_id")
+        await self.event_sink(
+            AutoResearchLoopEvent(
+                event_type="plan_alignment_judged",
+                loop_status="running",
+                elapsed_seconds=elapsed(),
+                node_id=node_id,
+                provider_usage=([provider_usage[-1]] if provider_usage else []),
+                cost_ledger=_running_cost_ledger(
+                    openrouter_calls,
+                    estimated_cost,
+                    actual_cost_microusd,
+                    "plan_alignment_judged",
+                ),
+                event_doc={
+                    "iteration": iteration,
+                    "loop_direction_plan_hash": loop_direction_plan.get("plan_hash"),
+                    "selected_path_id": loop_direction_plan.get("selected_path_id"),
+                    "source_diff_hash": sha256_json({"unified_diff": draft.unified_diff}),
+                    "verdict": verdict_doc,
+                },
+            )
+        )
+        accepted = verdict_doc.get("verdict") == "pass" and verdict_doc.get("novel") is not False
+        judged_draft = replace(draft, plan_alignment=verdict_doc)
+        if accepted:
+            return True, judged_draft, openrouter_calls, estimated_cost, actual_cost_microusd, False
+        await self._emit_alignment_rejection(
+            draft=judged_draft,
+            node_id=node_id,
+            iteration=iteration,
+            verdict_doc=verdict_doc,
+            loop_direction_plan=loop_direction_plan,
+            elapsed=elapsed,
+            openrouter_calls=openrouter_calls,
+            estimated_cost=estimated_cost,
+            actual_cost_microusd=actual_cost_microusd,
+            provider_usage=provider_usage,
+        )
+        return False, judged_draft, openrouter_calls, estimated_cost, actual_cost_microusd, False
+
+    async def _emit_alignment_rejection(
+        self,
+        *,
+        draft: CodeEditDraft,
+        node_id: str,
+        iteration: int,
+        verdict_doc: Mapping[str, Any],
+        loop_direction_plan: Mapping[str, Any],
+        elapsed: Callable[[], float],
+        openrouter_calls: int,
+        estimated_cost: float,
+        actual_cost_microusd: int,
+        provider_usage: Sequence[Mapping[str, Any]],
+    ) -> None:
+        await self.event_sink(
+            AutoResearchLoopEvent(
+                event_type="code_edit_alignment_rejected",
+                loop_status="running",
+                elapsed_seconds=elapsed(),
+                node_id=node_id,
+                provider_usage=([dict(provider_usage[-1])] if provider_usage else []),
+                cost_ledger=_running_cost_ledger(
+                    openrouter_calls,
+                    estimated_cost,
+                    actual_cost_microusd,
+                    "code_edit_alignment_rejected",
+                ),
+                event_doc={
+                    "iteration": iteration,
+                    "lane": draft.lane,
+                    "plan_path_id": draft.plan_path_id,
+                    "target_files": list(draft.target_files),
+                    "source_diff_hash": sha256_json({"unified_diff": draft.unified_diff}),
+                    "loop_direction_plan_hash": loop_direction_plan.get("plan_hash"),
+                    "selected_path_id": loop_direction_plan.get("selected_path_id"),
+                    "verdict": dict(verdict_doc),
+                },
+            )
         )
 
     async def _ensure_patch_applies_or_repair(
@@ -1156,6 +1668,7 @@ class CodeEditLoopEngine:
                         ),
                         min(settings.draft_timeout_seconds, remaining_call_seconds),
                         3000,
+                        "code_edit_repair",
                     )
                 )
                 openrouter_calls += 1
@@ -1375,6 +1888,8 @@ def _redacted_draft_doc(draft: CodeEditDraft) -> dict[str, Any]:
         "expected_improvement": draft.expected_improvement,
         "risk": draft.risk,
         "lane": draft.lane,
+        "plan_path_id": draft.plan_path_id,
+        "plan_alignment": dict(draft.plan_alignment or {}),
         "target_files": list(draft.target_files),
         "unified_diff_hash": sha256_json({"unified_diff": draft.unified_diff}),
         "redacted_summary": draft.redacted_summary,
@@ -1382,6 +1897,44 @@ def _redacted_draft_doc(draft: CodeEditDraft) -> dict[str, Any]:
         "rollback_plan": draft.rollback_plan,
         "predicted_delta": draft.predicted_delta,
     }
+
+
+def _focus_signature_hash(ticket: Mapping[str, Any]) -> str:
+    focus = _ticket_doc_value(ticket, "brief_public_summary")
+    normalized = re.sub(r"\s+", " ", str(focus or "").strip().lower())[:2000]
+    return sha256_json({"focus": normalized})
+
+
+def _prior_attempts_from_budget_context(budget_context: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    memory = budget_context.get("active_parent_outcome_memory")
+    if not isinstance(memory, Mapping):
+        return ()
+    attempts = memory.get("recent_attempts")
+    if not isinstance(attempts, list):
+        return ()
+    cleaned: list[dict[str, Any]] = []
+    for item in attempts[:100]:
+        if not isinstance(item, Mapping):
+            continue
+        cleaned.append(
+            {
+                "candidate_id": str(item.get("candidate_id") or "")[:120],
+                "run_id": str(item.get("run_id") or "")[:120],
+                "lane": str(item.get("lane") or "")[:120],
+                "plan_path_id": str(item.get("plan_path_id") or "")[:120],
+                "target_files": [
+                    str(path)[:240]
+                    for path in (item.get("target_files") or [])
+                    if isinstance(path, str)
+                ][:20],
+                "unified_diff_hash": str(item.get("unified_diff_hash") or "")[:120],
+                "candidate_source_diff_hash": str(item.get("candidate_source_diff_hash") or "")[:120],
+                "semantic_edit_summary": str(item.get("semantic_edit_summary") or "")[:500],
+                "status": str(item.get("status") or "")[:120],
+                "reason": str(item.get("reason") or "")[:240],
+            }
+        )
+    return tuple(cleaned)
 
 
 def _merge_source_inspection_context(

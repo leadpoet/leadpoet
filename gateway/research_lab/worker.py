@@ -94,6 +94,13 @@ def _error_backoff_seconds() -> float:
         return 60.0
 
 
+def _openrouter_generation_attempts() -> int:
+    try:
+        return max(1, min(5, int(os.getenv("RESEARCH_LAB_OPENROUTER_GENERATION_ATTEMPTS", "3"))))
+    except ValueError:
+        return 3
+
+
 def _status_age_seconds(raw_status_at: object) -> float | None:
     if not raw_status_at:
         return None
@@ -2646,7 +2653,7 @@ class ResearchLabHostedWorker:
         if str(reasoning_effort or "").strip():
             body["reasoning_effort"] = str(reasoning_effort).strip()
 
-        def _call() -> OpenRouterCallResult:
+        def _call_once() -> OpenRouterCallResult:
             req = urlrequest.Request(
                 "https://openrouter.ai/api/v1/chat/completions",
                 data=json.dumps(body).encode("utf-8"),
@@ -2700,6 +2707,30 @@ class ResearchLabHostedWorker:
                 provider_usage=provider_usage,
                 cost_microusd=cost_microusd,
             )
+
+        def _call() -> OpenRouterCallResult:
+            attempts = _openrouter_generation_attempts()
+            last_exc: RetryableHostedResearchLabWorkerError | None = None
+            for attempt in range(1, attempts + 1):
+                try:
+                    return _call_once()
+                except CreditBlockedHostedRunError:
+                    raise
+                except RetryableHostedResearchLabWorkerError as exc:
+                    last_exc = exc
+                    if attempt >= attempts:
+                        raise
+                    logger.warning(
+                        "research_lab_openrouter_generation_retrying model=%s attempt=%s attempts=%s error_hash=%s",
+                        compact_ref(model_id),
+                        attempt,
+                        attempts,
+                        sha256_json({"error": str(exc)}),
+                    )
+                    time.sleep(min(2.0, 0.25 * attempt))
+            if last_exc is not None:
+                raise last_exc
+            raise RetryableHostedResearchLabWorkerError("OpenRouter candidate generation failed without response")
 
         return await asyncio.to_thread(_call)
 

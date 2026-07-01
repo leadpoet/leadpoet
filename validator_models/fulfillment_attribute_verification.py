@@ -327,14 +327,34 @@ PROMPT-INJECTION DEFENSE (only when MINER-CITED EVIDENCE is present above):
 
 _NEGATIVE_PATTERNS = [
     r"^does not\b", r"^doesn'?t\b",
+    r"^do not\b",   r"^don'?t\b",
     r"^is not\b",   r"^isn'?t\b",
+    r"^are not\b",  r"^aren'?t\b",
     r"^has not\b",  r"^hasn'?t\b",
     r"^have not\b", r"^haven'?t\b",
     r"^no\s+\w+",          # "No tax-free retirement vehicle..."
     r"^lack[s]?\b",
     r"^without\b",
 ]
-_EXCLUSION_PREFIX = re.compile(r"^not\s+(in|a\s|an\s)\b")
+_EXCLUSION_PREFIX = re.compile(
+    r"^(?:(?:is|are|was|were|be|being|been)\s+)?not\s+(in|a\s|an\s)\b"
+)
+
+# Optional leading subject that precedes the predicate in a full-sentence
+# attribute (e.g. "The company does not build foundational models").  The
+# negative patterns above are start-anchored, so without stripping the subject
+# they never fire on real ICP attributes — which always lead with a subject —
+# and a negative like "the company does not build its own foundational model"
+# gets mis-routed to the POSITIVE path.  There Sonar hunts for explicit public
+# proof the company states it does NOT build one (which no company publishes),
+# so the lead is wrongly rejected instead of going down the proxy path (search
+# for the positive opposite; reject only if found).
+_LEADING_SUBJECT = re.compile(
+    r"^(?:the\s+|this\s+|that\s+)?(?:target\s+)?"
+    r"(?:company|companies|business|businesses|organization|organisation|org|"
+    r"firm|vendor|account|employer|startup|enterprise|brand|provider|supplier|"
+    r"team|it|they)\s+"
+)
 
 
 def is_negative_attribute(text: str) -> bool:
@@ -346,6 +366,12 @@ def is_negative_attribute(text: str) -> bool:
     by observing the company's actual industry / chain affiliation.
     """
     t = (text or "").strip().lower()
+    if not t:
+        return False
+    # Strip an optional leading subject so a full-sentence attribute is
+    # recognized the same as its bare predicate ("The company does not build
+    # foundational models" → "does not build foundational models").
+    t = _LEADING_SUBJECT.sub("", t, count=1).strip()
     if not t:
         return False
     if _EXCLUSION_PREFIX.match(t):

@@ -331,12 +331,28 @@ def parse_code_edit_source_inspection_response(
     *,
     max_requests: int = 4,
 ) -> list[CodeEditSourceInspectionRequest]:
-    decoded = json.loads(_extract_json_object(raw_text))
+    try:
+        decoded = _decode_json_value(raw_text)
+    except ValueError:
+        parsed = _source_inspection_requests_from_text(raw_text, max_requests=max_requests)
+        if parsed:
+            return parsed
+        raise
+    if isinstance(decoded, str):
+        try:
+            return parse_code_edit_source_inspection_response(decoded, max_requests=max_requests)
+        except ValueError:
+            parsed = _source_inspection_requests_from_text(decoded, max_requests=max_requests)
+            if parsed:
+                return parsed
+            raise
+    if isinstance(decoded, list):
+        decoded = {"requests": decoded}
     if not isinstance(decoded, Mapping):
-        raise ValueError("source-inspection response must be a JSON object")
+        raise ValueError("source-inspection response must be a JSON object or request array")
     if _contains_forbidden_material(decoded):
         raise ValueError("source-inspection response contains forbidden private or secret material")
-    requests = decoded.get("requests")
+    requests = _source_inspection_request_items(decoded)
     if decoded.get("finish") is True and not requests:
         return [CodeEditSourceInspectionRequest(operation="finish", rationale=str(decoded.get("rationale") or "")[:500])]
     if not isinstance(requests, list) or not requests:
@@ -345,14 +361,24 @@ def parse_code_edit_source_inspection_response(
     for item in requests[: max(1, int(max_requests))]:
         if not isinstance(item, Mapping):
             raise ValueError("source-inspection request must be an object")
-        operation = str(item.get("operation") or "").strip().lower()
+        operation = str(_get_first_present(item, ("operation", "op", "action", "type", "request_type", "requestType")) or "").strip().lower()
+        operation = {
+            "read": "read_file",
+            "readfile": "read_file",
+            "file": "read_file",
+            "grep": "search",
+            "find": "search",
+            "done": "finish",
+            "stop": "finish",
+        }.get(operation, operation)
         if operation not in {"search", "read_file", "finish"}:
             raise ValueError(f"unsupported source-inspection operation:{operation}")
-        query = str(item.get("query") or "")[:500]
+        query = str(_get_first_present(item, ("query", "search", "pattern", "term")) or "")[:500]
         path = ""
-        if item.get("path") is not None:
-            path = _normalize_repo_path(item.get("path"))
-        rationale = str(item.get("rationale") or "")[:700]
+        raw_path = _get_first_present(item, ("path", "file", "filepath", "file_path", "target", "target_file", "targetFile"))
+        if raw_path is not None:
+            path = _normalize_repo_path(raw_path)
+        rationale = str(_get_first_present(item, ("rationale", "reason", "why", "description")) or "")[:700]
         if operation == "search" and not query.strip():
             raise ValueError("source-inspection search requires query")
         if operation == "read_file" and not path:
@@ -553,6 +579,95 @@ def _code_edit_candidate_items(decoded: Any, *, _depth: int = 0) -> list[Mapping
             if nested:
                 return nested
     return []
+
+
+def _source_inspection_request_items(decoded: Mapping[str, Any], *, _depth: int = 0) -> list[Any] | None:
+    if _depth > 4:
+        return None
+    for key in (
+        "requests",
+        "request",
+        "source_requests",
+        "sourceRequests",
+        "inspection_requests",
+        "inspectionRequests",
+        "operations",
+        "actions",
+    ):
+        value = decoded.get(key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, Mapping):
+            return [value]
+    wrapper_keys = ("result", "response", "output", "data", "message", "content", "json", "final", "answer", "text")
+    for key in wrapper_keys:
+        value = decoded.get(key)
+        if isinstance(value, Mapping):
+            nested = _source_inspection_request_items(value, _depth=_depth + 1)
+            if nested:
+                return nested
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                nested_decoded = _decode_json_value(value)
+            except ValueError:
+                parsed = _source_inspection_requests_from_text(value, max_requests=4)
+                if parsed:
+                    return [
+                        {
+                            "operation": item.operation,
+                            "query": item.query,
+                            "path": item.path,
+                            "rationale": item.rationale,
+                        }
+                        for item in parsed
+                    ]
+                continue
+            if isinstance(nested_decoded, list):
+                return nested_decoded
+            if isinstance(nested_decoded, Mapping):
+                nested = _source_inspection_request_items(nested_decoded, _depth=_depth + 1)
+                if nested:
+                    return nested
+    return None
+
+
+def _source_inspection_requests_from_text(raw_text: str, *, max_requests: int) -> list[CodeEditSourceInspectionRequest]:
+    text = str(raw_text or "")
+    parsed: list[CodeEditSourceInspectionRequest] = []
+    seen: set[tuple[str, str, str]] = set()
+    path_pattern = r"([A-Za-z0-9_./-]+(?:\.py|\.json|\.ya?ml|\.toml|\.txt|\.md))"
+    for pattern in (
+        r"(?:read_file|read file|read|file|path)\s*[:=\-]?\s*[`'\"]?" + path_pattern,
+        r"[`'\"]path[`'\"]\s*:\s*[`'\"]" + path_pattern,
+        r"[`'\"]file[`'\"]\s*:\s*[`'\"]" + path_pattern,
+    ):
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            path = _normalize_repo_path(match.group(1))
+            key = ("read_file", "", path)
+            if key in seen:
+                continue
+            seen.add(key)
+            parsed.append(CodeEditSourceInspectionRequest(operation="read_file", path=path, rationale="parsed from text fallback"))
+            if len(parsed) >= max(1, int(max_requests)):
+                return parsed
+    for pattern in (
+        r"(?:search|grep|find)\s*[:=\-]?\s*[`'\"]([^`'\"\n]{2,200})[`'\"]?",
+        r"[`'\"]query[`'\"]\s*:\s*[`'\"]([^`'\"\n]{2,200})[`'\"]",
+    ):
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            query = str(match.group(1) or "").strip()[:500]
+            key = ("search", query, "")
+            if not query or key in seen:
+                continue
+            seen.add(key)
+            parsed.append(CodeEditSourceInspectionRequest(operation="search", query=query, rationale="parsed from text fallback"))
+            if len(parsed) >= max(1, int(max_requests)):
+                return parsed
+    if re.search(r"\b(finish|done|stop)\b", text, flags=re.IGNORECASE):
+        parsed.append(CodeEditSourceInspectionRequest(operation="finish", rationale="parsed from text fallback"))
+    return parsed[: max(1, int(max_requests))]
 
 
 def _candidate_item_from_any(value: Any) -> Mapping[str, Any] | None:

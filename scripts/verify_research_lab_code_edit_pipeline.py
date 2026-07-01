@@ -21,6 +21,7 @@ from research_lab.code_editing import (  # noqa: E402
     normalize_unified_diff_text,
     parse_code_edit_repair_response,
     parse_code_edit_response,
+    parse_code_edit_source_inspection_response,
 )
 from research_lab.eval import PrivateModelArtifactManifest, SealedBenchmarkSet  # noqa: E402
 from research_lab.eval.evaluator import evaluate_private_model_pair  # noqa: E402
@@ -194,6 +195,48 @@ def test_code_edit_parser_accepts_common_llm_wrapper_shapes() -> None:
     diff_drafts = parse_code_edit_response(direct_diff, max_candidates=1)
     assert diff_drafts[0].target_files == ("sourcing_model/query_builder.py",)
     assert diff_drafts[0].redacted_summary.startswith("Direct git diff")
+
+
+def test_source_inspection_parser_accepts_common_llm_shapes() -> None:
+    canonical = parse_code_edit_source_inspection_response(
+        json.dumps({"requests": [{"operation": "read_file", "path": "sourcing_model/query_builder.py", "rationale": "inspect query builder"}]}),
+        max_requests=4,
+    )
+    assert canonical[0].operation == "read_file"
+    assert canonical[0].path == "sourcing_model/query_builder.py"
+
+    array_root = parse_code_edit_source_inspection_response(
+        json.dumps([{"action": "read", "file": "sourcing_model/query_builder.py", "reason": "inspect query builder"}]),
+        max_requests=4,
+    )
+    assert array_root[0].operation == "read_file"
+    assert array_root[0].path == "sourcing_model/query_builder.py"
+
+    nested = parse_code_edit_source_inspection_response(
+        json.dumps(
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "sourceRequests": [
+                                {"type": "search", "query": "build_query", "why": "locate query construction"}
+                            ]
+                        }
+                    )
+                }
+            }
+        ),
+        max_requests=4,
+    )
+    assert nested[0].operation == "search"
+    assert nested[0].query == "build_query"
+
+    text_fallback = parse_code_edit_source_inspection_response(
+        "Please read_file: sourcing_model/query_builder.py before drafting.",
+        max_requests=4,
+    )
+    assert text_fallback[0].operation == "read_file"
+    assert text_fallback[0].path == "sourcing_model/query_builder.py"
 
 
 def test_code_edit_repair_parser_accepts_direct_code_edit() -> None:
@@ -1090,6 +1133,7 @@ def main() -> None:
     draft = test_code_edit_parser_accepts_safe_diff()
     test_code_edit_parser_normalizes_markdown_wrapped_diff()
     test_code_edit_parser_accepts_common_llm_wrapper_shapes()
+    test_source_inspection_parser_accepts_common_llm_shapes()
     test_code_edit_repair_parser_accepts_direct_code_edit()
     test_code_edit_parser_rejects_apply_patch_format()
     test_code_edit_parser_rejects_dependency_edit()

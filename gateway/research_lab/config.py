@@ -344,7 +344,7 @@ class ResearchLabGatewayConfig:
     loop_planner_model: str = ""
     loop_planner_reasoning_effort: str = ""
     loop_planner_max_tokens: int = 2400
-    loop_planner_temperature: float = 0.20
+    loop_planner_temperature: float = 0.40
     loop_executor_model: str = ""
     loop_executor_reasoning_effort: str = ""
     loop_alignment_judge_model: str = ""
@@ -611,7 +611,7 @@ class ResearchLabGatewayConfig:
             ),
             loop_planner_temperature=min(
                 2.0,
-                max(0.0, _float("RESEARCH_LAB_LOOP_PLANNER_TEMPERATURE", 0.20)),
+                max(0.0, _float("RESEARCH_LAB_LOOP_PLANNER_TEMPERATURE", 0.40)),
             ),
             loop_executor_model=os.getenv("RESEARCH_LAB_LOOP_EXECUTOR_MODEL", ""),
             loop_executor_reasoning_effort=os.getenv("RESEARCH_LAB_LOOP_EXECUTOR_REASONING_EFFORT", ""),

@@ -200,8 +200,19 @@ def build_parser() -> argparse.ArgumentParser:
     failed_reimbursements.add_argument("--limit", type=int, default=50)
     failed_reimbursements.add_argument("--reason", default="operator_failed_run_reimbursement_backfill")
     failed_reimbursements.add_argument("--actor-ref", default=default_actor_ref())
-    failed_reimbursements.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
-    failed_reimbursements.add_argument("--write", dest="dry_run", action="store_false")
+    failed_reimbursements.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=False,
+        help="Report planned awards without writing; default writes awards/schedules",
+    )
+    failed_reimbursements.add_argument(
+        "--write",
+        dest="dry_run",
+        action="store_false",
+        help="Write awards/schedules; retained for compatibility and is the default",
+    )
 
     return parser
 

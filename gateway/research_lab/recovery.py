@@ -131,13 +131,13 @@ async def award_failed_run_reimbursements(
     *,
     run_id: str | None = None,
     limit: int = 50,
-    dry_run: bool = True,
+    dry_run: bool = False,
     reason: str = "operator_failed_run_reimbursement_backfill",
     actor_ref: str | None = None,
 ) -> dict[str, Any]:
     """Award reimbursement for terminal failed runs with trusted positive spend.
 
-    The operator is idempotent and dry-run by default. It never resumes work or
+    The operator is idempotent and writes by default. It never resumes work or
     mutates queues; it only creates the standard reimbursement award/schedule via
     the same formula used for completed runs.
     """

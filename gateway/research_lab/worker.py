@@ -38,6 +38,13 @@ from gateway.research_lab.maintenance import autoresearch_queue_capacity_doc, is
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabReceiptCreateRequest
 from gateway.research_lab.promotion import latest_public_benchmark_summary, load_active_private_model
 from gateway.research_lab.public_activity import safe_project_public_loop_activity
+from gateway.research_lab.reimbursement_awards import (
+    cost_evidence_cost_ledger,
+    cost_evidence_from_loop_result,
+    cost_evidence_provider_usage,
+    create_reimbursement_decision,
+    latest_reimbursable_loop_cost_evidence,
+)
 from gateway.research_lab.store import (
     canonical_hash,
     create_auto_research_loop_event,
@@ -1187,7 +1194,12 @@ class ResearchLabHostedWorker:
                     reason="maintenance_pause_checkpointed",
                 )
             if not loop_result.selected_candidates:
-                raise HostedResearchLabWorkerError("auto-research loop completed without valid image-build finalists")
+                return await self._mark_failed(
+                    context,
+                    "auto-research loop completed without valid image-build finalists",
+                    loop_result=loop_result,
+                    reason="no_valid_image_build_finalists",
+                )
             final_artifact = artifact
             finalists = [
                 {
@@ -1980,100 +1992,59 @@ class ResearchLabHostedWorker:
         *,
         context: HostedRunContext,
         budget_context: Mapping[str, Any],
-        loop_result: Any,
+        loop_result: Any | None = None,
+        cost_evidence: Mapping[str, Any] | None = None,
+        source: str = "hosted_auto_research_loop_completion",
+        failed_run_reimbursement: bool = False,
+        failure_reason: str | None = None,
+        queue_terminal_status: str | None = None,
+        require_positive_cost: bool = False,
+        skip_ineligible_prereqs: bool = False,
     ) -> dict[str, Any] | None:
         if not (self.config.reimbursements_enabled or self.config.shadow_reimbursements_enabled):
             return None
-        policy = self.config.reimbursement_policy_doc(
-            enabled=self.config.reimbursements_enabled or self.config.shadow_reimbursements_enabled
-        )
-        snapshot_doc, snapshot_row = await self._create_participation_snapshot(context, policy)
-        cap_usage = await self._reimbursement_cap_usage(context, run_day=_utc_day())
-        run_cost = {
-            "run_id": context.run_id,
-            "miner_hotkey": str(context.ticket["miner_hotkey"]),
-            "island": str(context.ticket["island"] or self.config.reimbursement_default_island),
-            "run_day": _utc_day(),
-            "funded_compute_budget_usd": float(budget_context.get("requested_compute_budget_usd") or 0.0),
-            "actual_openrouter_cost_usd": float(loop_result.actual_openrouter_cost_usd),
-            "loop_start_tao_fee_usd": float(self.config.loop_start_fee_usd),
-            "paid_research_loop": True,
-            "valid_receipt": bool(context.receipt_id),
-            "verified_loop_start_payment": bool(context.payment),
-            "preserved_loop_start_credit": False,
-            "miner_openrouter_key_present": True,
-            "trusted_cost_ledger": True,
-            "passed_abuse_checks": True,
-            "refunded": False,
-            "voided": False,
-            "duplicate": False,
-            "novelty_rejected": False,
-            "self_cancelled_before_minimum_work": False,
-            "banned_hotkey": False,
-        }
-        award_obj = compute_reimbursement_award(run_cost, snapshot_doc, policy, ReimbursementCapUsage.from_mapping(cap_usage))
-        award = award_obj.to_dict()
-        evaluation_epoch, _block, _source = await resolve_research_lab_evaluation_epoch(self.config.evaluation_epoch)
-        schedule = build_reimbursement_schedule(
-            award,
-            start_epoch=max(0, int(evaluation_epoch) + 1),
-        ).to_dict()
-        shadow_only = not self.config.reimbursements_enabled
-        award_doc = {
-            "schema_version": "1.0",
-            "award": award,
-            "run_cost": _redacted_reimbursement_run_cost(run_cost),
-            "policy": policy,
-            "participation_snapshot": snapshot_doc,
-            "cap_usage": cap_usage,
-            "shadow_only": shadow_only,
-            "submission_allowed": self.config.reimbursements_enabled,
-            "source": "hosted_auto_research_loop_completion",
-            "evaluation_epoch": int(evaluation_epoch),
-        }
-        schedule_doc = {
-            "schema_version": "1.0",
-            "schedule": schedule,
-            "shadow_only": shadow_only,
-            "submission_allowed": self.config.reimbursements_enabled,
-            "source": "hosted_auto_research_loop_completion",
-            "evaluation_epoch": int(evaluation_epoch),
-        }
-        award_row, _award_event = await create_reimbursement_award(
-            award=award,
+        evidence = dict(cost_evidence or {})
+        if not evidence and loop_result is not None:
+            evidence = cost_evidence_from_loop_result(loop_result)
+        miner_key_ref = ""
+        try:
+            miner_key_ref = _miner_openrouter_key_ref(context)
+        except HostedResearchLabWorkerError:
+            miner_key_ref = ""
+        decision = await create_reimbursement_decision(
+            self.config,
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            ticket=context.ticket,
+            payment=context.payment,
             receipt_id=context.receipt_id,
-            participation_snapshot_id=str(snapshot_row["participation_snapshot_id"]),
-            policy_id=str(policy["policy_id"]),
-            award_doc=award_doc,
+            budget_context=budget_context,
+            cost_evidence=evidence,
+            source=source,
+            failed_run_reimbursement=failed_run_reimbursement,
+            failure_reason=failure_reason,
+            queue_terminal_status=queue_terminal_status,
+            actor_ref=self.worker_ref,
+            miner_openrouter_key_ref=miner_key_ref,
+            preserved_loop_start_credit=bool(_loop_start_credit_id_from_queue_events(context.queue_events)),
+            require_positive_cost=require_positive_cost,
+            skip_ineligible_prereqs=skip_ineligible_prereqs,
         )
-        if str(award_row["award_id"]) != str(schedule["award_id"]):
-            schedule = build_reimbursement_schedule(
-                {**award, "award_id": str(award_row["award_id"])},
-                start_epoch=max(0, int(evaluation_epoch) + 1),
-            ).to_dict()
-            schedule_doc = {**schedule_doc, "schedule": schedule}
-        schedule_row = await create_reimbursement_schedule(schedule=schedule, schedule_doc=schedule_doc)
-        logger.info(
-            format_worker_block(
-                "RESEARCH LAB REIMBURSEMENT DECISION",
-                (
-                    ("Run", compact_ref(context.run_id)),
-                    ("Status", award["status"]),
-                    ("Target USD", f"{float(award['target_reimbursement_usd']):.6f}"),
-                    ("OpenRouter USD", f"{float(loop_result.actual_openrouter_cost_usd):.6f}"),
-                    ("Shadow only", shadow_only),
-                ),
+        if decision and "award_id" in decision:
+            logger.info(
+                format_worker_block(
+                    "RESEARCH LAB REIMBURSEMENT DECISION",
+                    (
+                        ("Run", compact_ref(context.run_id)),
+                        ("Status", decision.get("status")),
+                        ("Target USD", f"{float(decision.get('target_reimbursement_usd') or 0.0):.6f}"),
+                        ("OpenRouter USD", f"{float(decision.get('actual_openrouter_cost_usd') or 0.0):.6f}"),
+                        ("Source", source),
+                        ("Shadow only", decision.get("shadow_only")),
+                    ),
+                )
             )
-        )
-        return {
-            "status": award["status"],
-            "award_id": str(award_row["award_id"]),
-            "schedule_id": str(schedule_row["schedule_id"]),
-            "target_reimbursement_usd": award["target_reimbursement_usd"],
-            "rebate_rate": award["rebate_rate"],
-            "actual_openrouter_cost_usd": round(float(loop_result.actual_openrouter_cost_usd), 6),
-            "shadow_only": shadow_only,
-        }
+        return decision
 
     async def _create_participation_snapshot(
         self,
@@ -2286,10 +2257,76 @@ class ResearchLabHostedWorker:
             )
         return await task
 
-    async def _mark_failed(self, context: HostedRunContext, error: str) -> HostedWorkerOutcome:
-        event_doc = {"run_id": context.run_id, "worker_ref": self.worker_ref, "error": error[:500]}
+    async def _mark_failed(
+        self,
+        context: HostedRunContext,
+        error: str,
+        *,
+        loop_result: Any | None = None,
+        reason: str = "hosted_research_lab_run_failed",
+    ) -> HostedWorkerOutcome:
+        if loop_result is not None:
+            cost_evidence = cost_evidence_from_loop_result(loop_result)
+        else:
+            try:
+                cost_evidence = await latest_reimbursable_loop_cost_evidence(context.run_id)
+            except Exception as exc:  # noqa: BLE001 - terminal failure must still project
+                logger.warning(
+                    "research_lab_failed_run_cost_evidence_read_failed run_id=%s error=%s",
+                    compact_ref(context.run_id),
+                    str(exc)[:240],
+                )
+                cost_evidence = {}
+        cost_ledger = cost_evidence_cost_ledger(cost_evidence)
+        provider_usage = cost_evidence_provider_usage(cost_evidence)
         receipt_id = context.receipt_id
-        if receipt_id:
+        if not receipt_id:
+            receipt, _event = await create_receipt(
+                self._failed_receipt_request(context, error, cost_evidence=cost_evidence)
+            )
+            receipt_id = str(receipt["receipt_id"])
+        context.receipt_id = context.receipt_id or receipt_id
+
+        budget_context = self._run_budget_context(context)
+        try:
+            reimbursement_decision = await self._maybe_create_reimbursement_decision(
+                context=context,
+                budget_context=budget_context,
+                cost_evidence=cost_evidence,
+                source="hosted_auto_research_loop_failed",
+                failed_run_reimbursement=True,
+                failure_reason=error,
+                queue_terminal_status="failed",
+                require_positive_cost=True,
+                skip_ineligible_prereqs=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - terminal failure must not get stuck
+            reimbursement_decision = {
+                "status": "reimbursement_write_failed",
+                "error": str(exc)[:300],
+                "failed_run_reimbursement": True,
+                "source": "hosted_auto_research_loop_failed",
+            }
+            logger.warning(
+                "research_lab_failed_run_reimbursement_write_failed run_id=%s error=%s",
+                compact_ref(context.run_id),
+                str(exc)[:240],
+            )
+
+        event_doc = {
+            "schema_version": "1.0",
+            "run_id": context.run_id,
+            "worker_ref": self.worker_ref,
+            "error": error[:500],
+            "failure_reason": reason,
+            "receipt_id": receipt_id,
+            "reimbursement": reimbursement_decision or {"status": "not_written"},
+        }
+        if cost_ledger:
+            event_doc["final_cost_ledger"] = cost_ledger
+        if provider_usage:
+            event_doc["provider_usage"] = provider_usage
+        try:
             await create_receipt_event(
                 receipt_id=receipt_id,
                 ticket_id=context.ticket_id,
@@ -2297,37 +2334,40 @@ class ResearchLabHostedWorker:
                 receipt_status="failed",
                 event_doc=event_doc,
             )
-        else:
-            receipt, _event = await create_receipt(self._failed_receipt_request(context, error))
-            receipt_id = str(receipt["receipt_id"])
+        except Exception as exc:
+            logger.warning(
+                "research_lab_failed_receipt_event_projection_failed run_id=%s receipt_id=%s error=%s",
+                compact_ref(context.run_id),
+                compact_ref(receipt_id),
+                str(exc)[:240],
+            )
         await create_queue_event(
             run_id=context.run_id,
             ticket_id=context.ticket_id,
             event_type="failed",
             queue_priority=int(context.queue_row.get("queue_priority") or 0),
             worker_ref=self.worker_ref,
-            reason="hosted_research_lab_run_failed",
-            event_doc={**event_doc, "receipt_id": receipt_id},
+            reason=reason,
+            event_doc=event_doc,
         )
-        context.receipt_id = context.receipt_id or receipt_id
         await self._ensure_terminal_loop_projection(
             context,
             event_type="loop_failed",
             loop_status="failed",
-            reason="hosted_research_lab_run_failed",
-            event_doc={**event_doc, "receipt_id": receipt_id},
+            reason=reason,
+            event_doc=event_doc,
         )
         await create_ticket_event(
             ticket_id=context.ticket_id,
             event_type="cancelled",
             actor_hotkey=None,
-            reason="hosted_research_lab_run_failed",
-            event_doc={**event_doc, "receipt_id": receipt_id},
+            reason=reason,
+            event_doc=event_doc,
         )
         await safe_project_public_loop_activity(
             context.ticket_id,
             source_ref=f"hosted_worker_failed:{context.run_id}",
-            reason="hosted_research_lab_run_failed",
+            reason=reason,
             config=self.config,
         )
         return HostedWorkerOutcome(
@@ -2511,8 +2551,30 @@ class ResearchLabHostedWorker:
             },
         )
 
-    def _failed_receipt_request(self, context: HostedRunContext, error: str) -> ResearchLabReceiptCreateRequest:
+    def _failed_receipt_request(
+        self,
+        context: HostedRunContext,
+        error: str,
+        *,
+        cost_evidence: Mapping[str, Any] | None = None,
+    ) -> ResearchLabReceiptCreateRequest:
         budget_context = self._run_budget_context(context)
+        cost_ledger = cost_evidence_cost_ledger(cost_evidence)
+        if not cost_ledger:
+            cost_ledger = {
+                "schema_version": "1.0",
+                "status": "failed",
+                "total_usd": 0.0,
+                "budget_context": _redacted_budget_context(budget_context),
+            }
+        try:
+            key_ref = _miner_openrouter_key_ref(context)
+        except HostedResearchLabWorkerError:
+            key_ref = None
+        try:
+            provider_usage = cost_evidence_provider_usage(cost_evidence) or self._provider_usage(context)
+        except HostedResearchLabWorkerError:
+            provider_usage = cost_evidence_provider_usage(cost_evidence)
         return ResearchLabReceiptCreateRequest(
             internal_run_ref=f"research_lab_hosted_worker:{context.run_id}",
             ticket_id=context.ticket_id,
@@ -2523,20 +2585,19 @@ class ResearchLabHostedWorker:
             receipt_status="failed",
             loop_count=int(context.ticket.get("requested_loop_count") or 1),
             loop_start_credit_id=_loop_start_credit_id_from_queue_events(context.queue_events),
-            miner_openrouter_key_ref=_miner_openrouter_key_ref(context),
-            provider_usage=self._provider_usage(context),
-            cost_ledger={
-                "schema_version": "1.0",
-                "status": "failed",
-                "total_usd": 0.0,
-                "budget_context": _redacted_budget_context(budget_context),
-            },
+            miner_openrouter_key_ref=key_ref,
+            provider_usage=provider_usage,
+            cost_ledger=cost_ledger,
             receipt_doc={
                 "schema_version": "1.0",
                 "run_id": context.run_id,
                 "worker_ref": self.worker_ref,
                 "failure_reason": error[:500],
                 "budget_context": _redacted_budget_context(budget_context),
+                "reimbursement": {
+                    "status": "pending_failed_run_reimbursement_decision",
+                    "failed_run_reimbursement": True,
+                },
             },
         )
 

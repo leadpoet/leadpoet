@@ -23,6 +23,7 @@ from .maintenance import (
     wait_until_autoresearch_drained,
 )
 from .recovery import (
+    award_failed_run_reimbursements,
     rebase_stale_parent_candidates as recovery_rebase_stale_parent_candidates,
     recover_rebase_failed_candidates,
     requeue_baseline_not_ready_candidates,
@@ -191,6 +192,17 @@ def build_parser() -> argparse.ArgumentParser:
     resume_credit.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
     resume_credit.add_argument("--write", dest="dry_run", action="store_false")
 
+    failed_reimbursements = sub.add_parser(
+        "award-failed-run-reimbursements",
+        help="Backfill reimbursement awards for terminal failed auto-research runs with verified spend",
+    )
+    failed_reimbursements.add_argument("--run-id")
+    failed_reimbursements.add_argument("--limit", type=int, default=50)
+    failed_reimbursements.add_argument("--reason", default="operator_failed_run_reimbursement_backfill")
+    failed_reimbursements.add_argument("--actor-ref", default=default_actor_ref())
+    failed_reimbursements.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
+    failed_reimbursements.add_argument("--write", dest="dry_run", action="store_false")
+
     return parser
 
 
@@ -333,6 +345,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             reason=args.reason,
             actor_ref=args.actor_ref,
             dry_run=args.dry_run,
+        )
+    if args.command == "award-failed-run-reimbursements":
+        return await award_failed_run_reimbursements(
+            run_id=args.run_id,
+            limit=args.limit,
+            dry_run=args.dry_run,
+            reason=args.reason,
+            actor_ref=args.actor_ref,
         )
     raise ValueError(f"unknown command: {args.command}")
 

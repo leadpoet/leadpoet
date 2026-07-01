@@ -83,6 +83,72 @@ def _run_simulations() -> None:
             raise AssertionError(f"{name}: schedule missing alpha conversion")
         schedules.append({**schedule, "uid": len(schedules) + 1})
 
+    completed_award = compute_reimbursement_award(
+        _run("run-completed", "generalist", 10, 8),
+        generalist,
+        policy,
+        no_usage,
+    )
+    failed_same_spend = {
+        **_run("run-failed", "generalist", 10, 8),
+        "valid_receipt": True,
+        "verified_loop_start_payment": True,
+        "miner_openrouter_key_present": True,
+        "trusted_cost_ledger": True,
+        "passed_abuse_checks": True,
+    }
+    failed_award = compute_reimbursement_award(failed_same_spend, generalist, policy, no_usage)
+    if failed_award.target_reimbursement_microusd != completed_award.target_reimbursement_microusd:
+        raise AssertionError("failed run with same trusted spend must use the same reimbursement formula")
+
+    failed_partial = compute_reimbursement_award(
+        {
+            **_run("run-failed-partial", "generalist", 10, 2),
+            "valid_receipt": True,
+            "verified_loop_start_payment": True,
+            "miner_openrouter_key_present": True,
+            "trusted_cost_ledger": True,
+            "passed_abuse_checks": True,
+        },
+        generalist,
+        policy,
+        no_usage,
+    )
+    if int(failed_partial.target_reimbursement_microusd) != 1_000_000:
+        raise AssertionError("failed partial-spend run should reimburse from actual spend below material threshold")
+
+    failed_zero = compute_reimbursement_award(
+        {
+            **_run("run-failed-zero", "generalist", 10, 0),
+            "valid_receipt": True,
+            "verified_loop_start_payment": True,
+            "miner_openrouter_key_present": True,
+            "trusted_cost_ledger": True,
+            "passed_abuse_checks": True,
+        },
+        generalist,
+        policy,
+        no_usage,
+    )
+    if int(failed_zero.target_reimbursement_microusd) != 0 or failed_zero.status != "ineligible":
+        raise AssertionError("zero-cost failed run must not create a payable award")
+
+    failed_untrusted = compute_reimbursement_award(
+        {
+            **_run("run-failed-untrusted", "generalist", 10, 8),
+            "valid_receipt": True,
+            "verified_loop_start_payment": True,
+            "miner_openrouter_key_present": True,
+            "trusted_cost_ledger": False,
+            "passed_abuse_checks": True,
+        },
+        generalist,
+        policy,
+        no_usage,
+    )
+    if int(failed_untrusted.target_reimbursement_microusd) != 0 or failed_untrusted.status != "ineligible":
+        raise AssertionError("untrusted failed-run ledger must remain non-payable")
+
     capped = cap_reimbursement_schedules_by_epoch(
         schedules[:2],
         max_alpha_percent_per_epoch=0.20,

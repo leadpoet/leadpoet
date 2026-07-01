@@ -22,6 +22,7 @@ re-implementing baseline/diff/build machinery.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
 from typing import Any, Mapping
 from uuid import uuid4
@@ -35,6 +36,11 @@ from .maintenance import (
     default_actor_ref,
 )
 from .promotion import load_active_private_model
+from .reimbursement_awards import (
+    cost_evidence_actual_microusd,
+    create_reimbursement_decision,
+    latest_reimbursable_loop_cost_evidence,
+)
 from .scoring_worker import CandidateBaselineNotReady, ResearchLabGatewayScoringWorker
 from .store import (
     create_candidate_evaluation_event,
@@ -116,6 +122,175 @@ async def _openrouter_credit_ready(
         return (float(remaining) > 0.0), f"limit_remaining={remaining}"
     except (TypeError, ValueError):
         return True, f"limit_remaining_unparsed={remaining}"
+
+
+# --------------------------------------------------------------------------- #
+# Operator 0: backfill failed-run reimbursement awards
+# --------------------------------------------------------------------------- #
+async def award_failed_run_reimbursements(
+    *,
+    run_id: str | None = None,
+    limit: int = 50,
+    dry_run: bool = True,
+    reason: str = "operator_failed_run_reimbursement_backfill",
+    actor_ref: str | None = None,
+) -> dict[str, Any]:
+    """Award reimbursement for terminal failed runs with trusted positive spend.
+
+    The operator is idempotent and dry-run by default. It never resumes work or
+    mutates queues; it only creates the standard reimbursement award/schedule via
+    the same formula used for completed runs.
+    """
+    config = ResearchLabGatewayConfig.from_env()
+    actor = actor_ref or default_actor_ref()
+    if run_id:
+        row = await select_one(
+            "research_loop_run_queue_current",
+            columns=(
+                "run_id,ticket_id,current_queue_status,current_reason,current_status_at,"
+                "current_event_hash,current_event_seq,queue_priority"
+            ),
+            filters=(("run_id", run_id),),
+        )
+        rows = [row] if row else []
+    else:
+        rows = await select_many(
+            "research_loop_run_queue_current",
+            columns=(
+                "run_id,ticket_id,current_queue_status,current_reason,current_status_at,"
+                "current_event_hash,current_event_seq,queue_priority"
+            ),
+            filters=(("current_queue_status", "failed"),),
+            order_by=(("current_status_at", False),),
+            limit=max(1, int(limit or 50)),
+        )
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "action": "award-failed-run-reimbursements",
+        "dry_run": dry_run,
+        "found": 0,
+        "planned": [],
+        "awarded": [],
+        "skipped": [],
+        "failed": [],
+    }
+
+    for row in rows:
+        if not row:
+            continue
+        current_status = str(row.get("current_queue_status") or "")
+        rid = str(row.get("run_id") or "")
+        ticket_id = str(row.get("ticket_id") or "")
+        if not rid or not ticket_id:
+            result["skipped"].append({"run_id": rid, "reason": "missing_run_or_ticket"})
+            continue
+        if current_status != "failed":
+            result["skipped"].append({"run_id": rid, "reason": "not_failed", "status": current_status})
+            continue
+        result["found"] += 1
+
+        existing_award = await select_one(
+            "research_reimbursement_award_current",
+            columns="award_id,run_id,current_award_status,target_reimbursement_microusd",
+            filters=(("run_id", rid),),
+        )
+        if existing_award:
+            result["skipped"].append(
+                {
+                    "run_id": rid,
+                    "reason": "already_awarded",
+                    "award_id": existing_award.get("award_id"),
+                    "status": existing_award.get("current_award_status"),
+                }
+            )
+            continue
+
+        ticket = await select_one("research_loop_ticket_current", filters=(("ticket_id", ticket_id),))
+        if not ticket:
+            result["skipped"].append({"run_id": rid, "reason": "ticket_not_found"})
+            continue
+
+        receipt_id = await _latest_receipt_id_for_run(rid)
+        if not receipt_id:
+            result["skipped"].append({"run_id": rid, "reason": "missing_receipt"})
+            continue
+
+        queue_events = await select_many(
+            "research_loop_run_queue_events",
+            columns="seq,reason,event_doc,created_at",
+            filters=(("run_id", rid),),
+            order_by=(("seq", True),),
+            limit=50,
+        )
+        payment = await _latest_payment_for_ticket(ticket_id)
+        loop_start_credit_id = _loop_start_credit_id_from_queue_events(queue_events)
+        if not payment and not loop_start_credit_id:
+            result["skipped"].append({"run_id": rid, "reason": "missing_loop_start_payment_or_credit"})
+            continue
+
+        miner_key_ref = _openrouter_key_ref_from_ticket_or_events(ticket, queue_events)
+        if not miner_key_ref:
+            result["skipped"].append({"run_id": rid, "reason": "missing_miner_openrouter_key"})
+            continue
+
+        evidence = await latest_reimbursable_loop_cost_evidence(rid)
+        actual_microusd = cost_evidence_actual_microusd(evidence)
+        actual_usd = round(actual_microusd / 1_000_000, 6)
+        if actual_microusd <= 0:
+            result["skipped"].append(
+                {"run_id": rid, "reason": "no_reimbursable_compute", "actual_openrouter_cost_usd": actual_usd}
+            )
+            continue
+
+        failure_reason = await _latest_queue_event_error(rid)
+        if not failure_reason:
+            failure_reason = str(row.get("current_reason") or "failed")
+        budget_context = _run_budget_context_for_backfill(config, ticket, payment, queue_events)
+        plan = {
+            "run_id": rid,
+            "ticket_id": ticket_id,
+            "receipt_id": receipt_id,
+            "actual_openrouter_cost_usd": actual_usd,
+            "failure_reason": failure_reason[:200],
+            "run_day": _day_from_status_at(row.get("current_status_at")),
+        }
+        if dry_run:
+            result["planned"].append({**plan, "dry_run": True})
+            continue
+
+        try:
+            decision = await create_reimbursement_decision(
+                config,
+                run_id=rid,
+                ticket_id=ticket_id,
+                ticket=ticket,
+                payment=payment,
+                receipt_id=receipt_id,
+                budget_context=budget_context,
+                cost_evidence=evidence,
+                source="operator_failed_run_reimbursement_backfill",
+                failed_run_reimbursement=True,
+                failure_reason=failure_reason,
+                queue_terminal_status="failed",
+                actor_ref=actor,
+                run_day=plan["run_day"],
+                miner_openrouter_key_ref=miner_key_ref,
+                preserved_loop_start_credit=bool(loop_start_credit_id),
+                require_positive_cost=True,
+                skip_ineligible_prereqs=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            result["failed"].append({"run_id": rid, "error": str(exc)[:300]})
+            continue
+
+        if not decision or "award_id" not in decision:
+            result["skipped"].append({**plan, "reason": (decision or {}).get("status", "not_awarded")})
+            continue
+        result["awarded"].append({**plan, **decision, "reason": reason})
+
+    result["ok"] = not result["failed"]
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -770,3 +945,111 @@ async def recover_rebase_failed_candidates(
     if result["failed"]:
         result["ok"] = result["recovered"] > 0 or dry_run
     return result
+
+
+async def _latest_receipt_id_for_run(run_id: str) -> str | None:
+    rows = await select_many(
+        "research_loop_receipt_current",
+        columns="receipt_id,current_receipt_status,current_status_at",
+        filters=(("run_id", run_id),),
+        order_by=(("current_status_at", True),),
+        limit=1,
+    )
+    return str(rows[0].get("receipt_id") or "") if rows else None
+
+
+async def _latest_payment_for_ticket(ticket_id: str) -> Mapping[str, Any] | None:
+    rows = await select_many(
+        "research_loop_start_payments",
+        filters=(("ticket_id", ticket_id),),
+        order_by=(("verified_at", True),),
+        limit=1,
+    )
+    return rows[0] if rows else None
+
+
+def _loop_start_credit_id_from_queue_events(events: list[Mapping[str, Any]]) -> str | None:
+    for event in events:
+        doc = event.get("event_doc")
+        if isinstance(doc, Mapping) and doc.get("loop_start_credit_id"):
+            return str(doc["loop_start_credit_id"])
+    return None
+
+
+def _openrouter_key_ref_from_ticket_or_events(
+    ticket: Mapping[str, Any],
+    events: list[Mapping[str, Any]],
+) -> str:
+    direct = str(ticket.get("miner_openrouter_key_ref") or "").strip()
+    if direct:
+        return direct
+    for event in events:
+        doc = event.get("event_doc")
+        if isinstance(doc, Mapping) and doc.get("miner_openrouter_key_ref"):
+            return str(doc["miner_openrouter_key_ref"]).strip()
+    return ""
+
+
+def _run_budget_context_for_backfill(
+    config: ResearchLabGatewayConfig,
+    ticket: Mapping[str, Any],
+    payment: Mapping[str, Any] | None,
+    queue_events: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    ticket_doc = ticket.get("ticket_doc") if isinstance(ticket.get("ticket_doc"), Mapping) else {}
+    queue_doc = _latest_event_doc(queue_events)
+    payment_doc = (
+        payment.get("verification_doc")
+        if payment and isinstance(payment.get("verification_doc"), Mapping)
+        else {}
+    )
+    tier = (
+        queue_doc.get("research_model_tier")
+        or payment_doc.get("research_model_tier")
+        or ticket_doc.get("research_model_tier")
+        or config.default_auto_research_model_tier
+    )
+    requested_budget = (
+        queue_doc.get("requested_compute_budget_usd")
+        or payment_doc.get("compute_budget_usd")
+        or payment_doc.get("requested_compute_budget_usd")
+        or ticket_doc.get("requested_compute_budget_usd")
+        or config.default_compute_budget_usd
+    )
+    max_budget = (
+        queue_doc.get("max_compute_budget_usd")
+        or payment_doc.get("max_compute_budget_usd")
+        or ticket_doc.get("max_compute_budget_usd")
+        or config.max_compute_budget_usd
+    )
+    return {
+        "schema_version": "1.0",
+        "research_model_tier": str(tier),
+        "requested_compute_budget_usd": config.clamp_compute_budget_usd(requested_budget),
+        "max_compute_budget_usd": config.clamp_compute_budget_usd(max_budget),
+        "payment_kind": str(queue_doc.get("payment_kind") or payment_doc.get("payment_kind") or "loop_start"),
+        "budget_policy_version": "research-lab-budget:v1",
+    }
+
+
+def _latest_event_doc(events: list[Mapping[str, Any]]) -> dict[str, Any]:
+    for event in events:
+        doc = event.get("event_doc")
+        if isinstance(doc, Mapping):
+            return dict(doc)
+    return {}
+
+
+def _day_from_status_at(value: Any) -> str:
+    if not value:
+        return datetime.now(timezone.utc).date().isoformat()
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return datetime.now(timezone.utc).date().isoformat()
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).date().isoformat()

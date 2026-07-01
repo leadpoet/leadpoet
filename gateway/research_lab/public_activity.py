@@ -574,9 +574,16 @@ def derive_public_loop_outcome(
             event_doc,
         )
     if not queue_rows and not receipt_rows and not candidate_rows:
+        # A ticket in `opened` with no run/queue/receipt/candidate never had its
+        # loop-start payment: opening a ticket only declares intent; the loop is
+        # launched by a separate paid loop-start call that writes the first
+        # `paid_loop_queued` queue event. Surface this as its own stage so the
+        # dashboard distinguishes "miner has not paid to launch" from a run the
+        # platform simply has not picked up yet.
+        outcome_label = "awaiting_payment" if ticket_status == "opened" else "not_started"
         return PublicLoopOutcome(
-            "not_started",
-            "not_started",
+            outcome_label,
+            outcome_label,
             "pending",
             candidate_count,
             scored_candidate_count,

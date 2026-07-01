@@ -342,9 +342,11 @@ class ResearchLabGatewayConfig:
     loop_alignment_judge_enabled: bool = True
     loop_novelty_strict: bool = True
     loop_planner_model: str = ""
+    loop_planner_fallback_models: tuple[str, ...] = ()
     loop_planner_reasoning_effort: str = ""
     loop_planner_max_tokens: int = 2400
     loop_planner_temperature: float = 0.40
+    loop_planner_allow_non_zdr: bool = False
     loop_executor_model: str = ""
     loop_executor_reasoning_effort: str = ""
     loop_alignment_judge_model: str = ""
@@ -603,15 +605,20 @@ class ResearchLabGatewayConfig:
             loop_alignment_judge_enabled=_truthy("RESEARCH_LAB_LOOP_ALIGNMENT_JUDGE_ENABLED", "true"),
             loop_novelty_strict=_truthy("RESEARCH_LAB_LOOP_NOVELTY_STRICT", "true"),
             loop_planner_model=os.getenv("RESEARCH_LAB_LOOP_PLANNER_MODEL", ""),
+            loop_planner_fallback_models=_tuple_from_json_or_csv(
+                os.getenv("RESEARCH_LAB_LOOP_PLANNER_FALLBACK_MODELS", ""),
+                (),
+            ),
             loop_planner_reasoning_effort=os.getenv("RESEARCH_LAB_LOOP_PLANNER_REASONING_EFFORT", ""),
             loop_planner_max_tokens=max(
                 512,
-                _int("RESEARCH_LAB_LOOP_PLANNER_MAX_TOKENS", 2400),
+                _int("RESEARCH_LAB_LOOP_PLANNER_MAX_TOKENS", 12000),
             ),
             loop_planner_temperature=min(
                 2.0,
                 max(0.0, _float("RESEARCH_LAB_LOOP_PLANNER_TEMPERATURE", 0.40)),
             ),
+            loop_planner_allow_non_zdr=_truthy("RESEARCH_LAB_LOOP_PLANNER_ALLOW_NON_ZDR"),
             loop_executor_model=os.getenv("RESEARCH_LAB_LOOP_EXECUTOR_MODEL", ""),
             loop_executor_reasoning_effort=os.getenv("RESEARCH_LAB_LOOP_EXECUTOR_REASONING_EFFORT", ""),
             loop_alignment_judge_model=os.getenv("RESEARCH_LAB_LOOP_ALIGNMENT_JUDGE_MODEL", ""),
@@ -1096,11 +1103,13 @@ class ResearchLabGatewayConfig:
                 "loop_planner": {
                     "enabled": self.loop_planner_enabled,
                     "model_configured": bool(self.loop_planner_model),
+                    "fallback_model_count": len(self.loop_planner_fallback_models),
                     "reasoning_effort": _normalize_auto_research_reasoning_effort(
                         self.loop_planner_reasoning_effort
                     ),
                     "max_tokens": self.loop_planner_max_tokens,
                     "temperature": self.loop_planner_temperature,
+                    "allow_non_zdr": self.loop_planner_allow_non_zdr,
                 },
                 "loop_executor": {
                     "model_configured": bool(self.loop_executor_model),

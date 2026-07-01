@@ -1240,6 +1240,10 @@ class ResearchLabHostedWorker:
                 stage_reasoning_effort = str(stage_options["reasoning_effort"])
                 stage_temperature = float(stage_options["temperature"])
                 stage_max_tokens = int(stage_options["max_tokens"])
+                stage_model_ids = tuple(str(item) for item in stage_options.get("model_ids", ()) if str(item).strip())
+                if not stage_model_ids:
+                    stage_model_ids = (stage_model_id,)
+                allow_non_zdr = bool(stage_options.get("allow_non_zdr"))
                 if stage in {"loop_planner", "plan_alignment_judge"}:
                     effective_max_tokens = max(1, int(stage_max_tokens or 0))
                 else:
@@ -1247,15 +1251,54 @@ class ResearchLabHostedWorker:
                         requested_max_tokens=stage_max_tokens,
                         model_doc=model_doc,
                     )
-                return await self._call_openrouter(
-                    messages=messages,
-                    api_key=context.provider_env["OPENROUTER_API_KEY"],
-                    model_id=stage_model_id,
-                    reasoning_effort=stage_reasoning_effort,
-                    timeout_seconds=timeout_seconds,
-                    max_tokens=effective_max_tokens,
-                    temperature=stage_temperature,
-                )
+                last_exc: Exception | None = None
+                fallback_usage: list[dict[str, Any]] = []
+                for model_attempt_index, attempt_model_id in enumerate(stage_model_ids):
+                    try:
+                        result = await self._call_openrouter(
+                            messages=messages,
+                            api_key=context.provider_env["OPENROUTER_API_KEY"],
+                            model_id=attempt_model_id,
+                            reasoning_effort=stage_reasoning_effort,
+                            timeout_seconds=timeout_seconds,
+                            max_tokens=effective_max_tokens,
+                            temperature=stage_temperature,
+                            allow_non_zdr=allow_non_zdr,
+                        )
+                        if fallback_usage:
+                            provider_usage = dict(result.provider_usage or {})
+                            provider_usage["model_fallback_attempts"] = fallback_usage
+                            provider_usage["model_fallback_attempt_count"] = len(fallback_usage)
+                            result = OpenRouterCallResult(
+                                content=result.content,
+                                provider_usage=provider_usage,
+                                cost_microusd=result.cost_microusd,
+                            )
+                        return result
+                    except CreditBlockedHostedRunError:
+                        raise
+                    except HostedResearchLabWorkerError as exc:
+                        last_exc = exc
+                        if model_attempt_index >= len(stage_model_ids) - 1:
+                            raise
+                        fallback_usage.append(
+                            {
+                                "stage": stage,
+                                "model_ref": compact_ref(attempt_model_id),
+                                "error_hash": sha256_json({"error": str(exc)}),
+                                "next_model_ref": compact_ref(stage_model_ids[model_attempt_index + 1]),
+                            }
+                        )
+                        logger.warning(
+                            "research_lab_openrouter_stage_model_fallback stage=%s model=%s next_model=%s error_hash=%s",
+                            stage,
+                            compact_ref(attempt_model_id),
+                            compact_ref(stage_model_ids[model_attempt_index + 1]),
+                            fallback_usage[-1]["error_hash"],
+                        )
+                if last_exc is not None:
+                    raise last_exc
+                raise HostedResearchLabWorkerError("OpenRouter stage model resolution failed")
 
             loop_settings = AutoResearchLoopSettings(
                 min_seconds=self.config.auto_research_min_seconds,
@@ -2770,6 +2813,7 @@ class ResearchLabHostedWorker:
         timeout_seconds: int = 90,
         max_tokens: int = 1800,
         temperature: float | None = None,
+        allow_non_zdr: bool = False,
     ) -> OpenRouterCallResult:
         if not api_key:
             raise HostedResearchLabWorkerError("OpenRouter key is required for hosted auto-research")
@@ -2792,13 +2836,16 @@ class ResearchLabHostedWorker:
                 "temperature": request_temperature,
                 "max_tokens": int(effective_max_tokens),
                 "response_format": {"type": "json_object"},
-                "provider": {
+            }
+            if not allow_non_zdr:
+                body["provider"] = {
                     "data_collection": "deny",
                     "zdr": True,
-                },
-            }
+                }
             if requested_reasoning_effort and include_reasoning_effort:
                 body["reasoning_effort"] = requested_reasoning_effort
+                body["reasoning"] = {"effort": requested_reasoning_effort}
+                body["include_reasoning"] = True
             return body
 
         def _call_once(*, effective_max_tokens: int, include_reasoning_effort: bool) -> OpenRouterCallResult:
@@ -2855,6 +2902,12 @@ class ResearchLabHostedWorker:
                     decoded,
                     failure="empty candidate-generation content",
                     default_retryable=True,
+                    provider_usage=provider_usage,
+                    cost_microusd=cost_microusd,
+                )
+            if _openrouter_generation_stopped_for_length(decoded):
+                raise OpenRouterLengthRetryableError(
+                    f"OpenRouter candidate generation stopped at output token cap: {_openrouter_response_summary(decoded)}",
                     provider_usage=provider_usage,
                     cost_microusd=cost_microusd,
                 )
@@ -3355,12 +3408,22 @@ def _resolve_code_edit_loop_stage_model_request(
     normalized_stage = str(stage or "code_edit_draft")
     base_reasoning_effort = str(model_doc.get("reasoning_effort") or "")
     if normalized_stage == "loop_planner":
+        model_ids = tuple(
+            item
+            for item in (
+                config.loop_planner_model or model_id,
+                *config.loop_planner_fallback_models,
+            )
+            if str(item or "").strip()
+        )
         return {
             "stage": normalized_stage,
-            "model_id": config.loop_planner_model or model_id,
+            "model_id": model_ids[0] if model_ids else model_id,
+            "model_ids": model_ids or (model_id,),
             "reasoning_effort": config.loop_planner_reasoning_effort or base_reasoning_effort,
             "temperature": config.loop_planner_temperature,
             "max_tokens": max(int(requested_max_tokens or 0), config.loop_planner_max_tokens),
+            "allow_non_zdr": config.loop_planner_allow_non_zdr,
         }
     if normalized_stage == "plan_alignment_judge":
         return {

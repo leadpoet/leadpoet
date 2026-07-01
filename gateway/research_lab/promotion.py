@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+import json
 import logging
+import os
 import re
-from typing import Any, Mapping
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.store import (
@@ -14,6 +21,7 @@ from gateway.research_lab.store import (
     create_champion_reward_obligation,
     create_private_model_version,
     create_private_model_version_event,
+    create_private_repo_commit_event,
     select_many,
 )
 from leadpoet_verifier.economics import build_champion_reward_obligation
@@ -351,6 +359,20 @@ class ResearchLabPromotionController:
             raise RuntimeError("candidate image manifest failed validation: " + "; ".join(errors))
         if str(score_bundle.get("candidate_artifact_hash") or "") != new_artifact.model_artifact_hash:
             raise RuntimeError("score bundle candidate artifact does not match built image manifest")
+        private_repo_result = await self._maybe_push_private_repo_candidate(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            score_bundle=score_bundle,
+            active=active,
+            new_artifact=new_artifact,
+            active_parent=active_parent,
+            candidate_parent=candidate_parent,
+            rolling_window_hash=rolling_window_hash,
+            improvement_points=improvement_points,
+            threshold=threshold,
+        )
+        if private_repo_result.get("status") == "failed":
+            return private_repo_result
         if active.version_row:
             await create_private_model_version_event(
                 private_model_version_id=str(active.version_row["private_model_version_id"]),
@@ -405,6 +427,118 @@ class ResearchLabPromotionController:
             "private_model_version_id": str(version_row["private_model_version_id"]),
             **reward_status,
         }
+
+    async def _maybe_push_private_repo_candidate(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_row: Mapping[str, Any],
+        score_bundle: Mapping[str, Any],
+        active: ActivePrivateModel,
+        new_artifact: PrivateModelArtifactManifest,
+        active_parent: str,
+        candidate_parent: str,
+        rolling_window_hash: str,
+        improvement_points: float,
+        threshold: float,
+    ) -> dict[str, Any]:
+        if not self.config.auto_commit_enabled:
+            return {"status": "skipped_auto_commit_disabled"}
+        if not self.config.private_repo_url:
+            return {"status": "skipped_private_source_repo_not_configured"}
+
+        candidate_id = str(candidate["candidate_id"])
+        score_bundle_id = str(score_bundle_row["score_bundle_id"])
+        branch_name = str(self.config.private_repo_branch or "main")
+        repo_ref_hash = canonical_hash(
+            {
+                "repo_url": self.config.private_repo_url,
+                "branch_name": branch_name,
+            }
+        )
+        event_base = {
+            "source": "research_lab_source_push",
+            "candidate_kind": "image_build",
+            "candidate_model_artifact_hash": new_artifact.model_artifact_hash,
+            "candidate_source_diff_hash": candidate.get("candidate_source_diff_hash"),
+            "active_parent_artifact_hash": active_parent,
+            "candidate_parent_artifact_hash": candidate_parent,
+        }
+        await create_private_repo_commit_event(
+            commit_status="started",
+            branch_name=branch_name,
+            candidate_id=candidate_id,
+            score_bundle_id=score_bundle_id,
+            private_repo_ref_hash=repo_ref_hash,
+            event_doc={**event_base, "stage": "started"},
+        )
+        try:
+            result = await asyncio.to_thread(
+                _push_candidate_source_diff_to_repo,
+                repo_url=self.config.private_repo_url,
+                branch_name=branch_name,
+                active_git_commit_sha=active.artifact.git_commit_sha,
+                candidate_id=candidate_id,
+                score_bundle_id=score_bundle_id,
+                candidate_build_doc=candidate.get("candidate_build_doc"),
+                candidate_model_manifest_doc=candidate.get("candidate_model_manifest_doc"),
+            )
+        except Exception as exc:
+            error_hash = canonical_hash({"error": str(exc)})
+            await create_private_repo_commit_event(
+                commit_status="failed",
+                branch_name=branch_name,
+                candidate_id=candidate_id,
+                score_bundle_id=score_bundle_id,
+                private_repo_ref_hash=repo_ref_hash,
+                event_doc={
+                    **event_base,
+                    "stage": "failed",
+                    "error_hash": error_hash,
+                    "error_class": type(exc).__name__,
+                },
+            )
+            await create_candidate_promotion_event(
+                candidate_id=candidate_id,
+                source_score_bundle_id=score_bundle_id,
+                event_type="promotion_failed",
+                promotion_status="failed",
+                active_parent_artifact_hash=active_parent,
+                candidate_parent_artifact_hash=candidate_parent,
+                rolling_window_hash=rolling_window_hash,
+                improvement_points=improvement_points,
+                threshold_points=threshold,
+                worker_ref=self.worker_ref,
+                event_doc={
+                    "reason": "private_source_push_failed",
+                    "error_hash": error_hash,
+                    "error_class": type(exc).__name__,
+                    "candidate_status_preserved": "scored",
+                },
+            )
+            logger.warning(
+                "research_lab_private_source_push_failed candidate=%s score_bundle=%s error_hash=%s",
+                _short_ref(candidate_id),
+                _short_ref(score_bundle_id),
+                error_hash,
+            )
+            return {"status": "failed", "reason": "private_source_push_failed", "error_hash": error_hash}
+
+        await create_private_repo_commit_event(
+            commit_status="pushed" if result.get("status") == "pushed" else "committed",
+            branch_name=branch_name,
+            candidate_id=candidate_id,
+            score_bundle_id=score_bundle_id,
+            git_commit_sha=str(result.get("git_commit_sha") or "") or None,
+            private_repo_ref_hash=repo_ref_hash,
+            event_doc={
+                **event_base,
+                "stage": str(result.get("status") or "pushed"),
+                "target_files": list(result.get("target_files") or []),
+                "source_diff_hash": str(result.get("source_diff_hash") or ""),
+            },
+        )
+        return {"status": "private_source_pushed", **result}
 
     async def _maybe_create_champion_reward(
         self,
@@ -502,6 +636,156 @@ def _daily_counts_from_score_bundle(score_bundle: Mapping[str, Any]) -> dict[str
         if day:
             counts[day] = counts.get(day, 0) + 1
     return counts
+
+
+def _push_candidate_source_diff_to_repo(
+    *,
+    repo_url: str,
+    branch_name: str,
+    active_git_commit_sha: str,
+    candidate_id: str,
+    score_bundle_id: str,
+    candidate_build_doc: Any,
+    candidate_model_manifest_doc: Any,
+) -> dict[str, Any]:
+    if not isinstance(candidate_build_doc, Mapping):
+        raise RuntimeError("image-build candidate missing candidate_build_doc")
+    if not isinstance(candidate_model_manifest_doc, Mapping):
+        raise RuntimeError("image-build candidate missing candidate_model_manifest_doc")
+    source_diff_uri = str(candidate_build_doc.get("source_diff_artifact_uri") or "")
+    if not source_diff_uri.startswith("s3://"):
+        raise RuntimeError("candidate source diff artifact is missing or unsupported")
+    source_diff_text = _run_command(
+        ["aws", "s3", "cp", source_diff_uri, "-"],
+        cwd=None,
+        timeout_seconds=30,
+        redact=True,
+    )
+    try:
+        source_diff_doc = json.loads(source_diff_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("candidate source diff artifact is not valid JSON") from exc
+    unified_diff = str(source_diff_doc.get("unified_diff") or "")
+    if not unified_diff.startswith("diff --git "):
+        raise RuntimeError("candidate source diff artifact does not contain a git unified diff")
+    target_files = _safe_target_files(source_diff_doc.get("target_files"))
+    if not target_files:
+        raise RuntimeError("candidate source diff artifact has no target files")
+    source_diff_hash = str(source_diff_doc.get("source_diff_hash") or candidate_build_doc.get("source_diff_hash") or "")
+    candidate_manifest_sha = str(candidate_model_manifest_doc.get("git_commit_sha") or "")
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="research-lab-private-source-push-"))
+    try:
+        worktree = tmp_dir / "repo"
+        _run_command(
+            ["git", "clone", "--branch", branch_name, "--single-branch", repo_url, str(worktree)],
+            cwd=None,
+            timeout_seconds=120,
+            redact=True,
+        )
+        head = _run_command(["git", "rev-parse", "HEAD"], cwd=worktree, timeout_seconds=10).strip()
+        active_sha = str(active_git_commit_sha or "").strip()
+        if active_sha and head[: len(active_sha)] != active_sha:
+            raise RuntimeError("private source branch head does not match active model commit")
+
+        patch_path = tmp_dir / "candidate.patch"
+        patch_path.write_text(unified_diff, encoding="utf-8")
+        check = _run_command_result(["git", "apply", "--check", str(patch_path)], cwd=worktree, timeout_seconds=30)
+        if check.returncode != 0:
+            reverse = _run_command_result(
+                ["git", "apply", "--reverse", "--check", str(patch_path)],
+                cwd=worktree,
+                timeout_seconds=30,
+            )
+            if reverse.returncode == 0:
+                return {
+                    "status": "already_applied",
+                    "git_commit_sha": head,
+                    "candidate_manifest_git_commit_sha": candidate_manifest_sha,
+                    "target_files": target_files,
+                    "source_diff_hash": source_diff_hash,
+                }
+            raise RuntimeError("candidate source diff does not apply to private source branch")
+
+        _run_command(["git", "apply", str(patch_path)], cwd=worktree, timeout_seconds=30)
+        status = _run_command(["git", "status", "--porcelain"], cwd=worktree, timeout_seconds=10)
+        if not status.strip():
+            return {
+                "status": "already_applied",
+                "git_commit_sha": head,
+                "candidate_manifest_git_commit_sha": candidate_manifest_sha,
+                "target_files": target_files,
+                "source_diff_hash": source_diff_hash,
+            }
+        _run_command(["git", "config", "user.name", os.getenv("RESEARCH_LAB_PRIVATE_REPO_GIT_AUTHOR_NAME", "Leadpoet Research Lab")], cwd=worktree, timeout_seconds=10)
+        _run_command(["git", "config", "user.email", os.getenv("RESEARCH_LAB_PRIVATE_REPO_GIT_AUTHOR_EMAIL", "research-lab@leadpoet.ai")], cwd=worktree, timeout_seconds=10)
+        _run_command(["git", "add", "--", *target_files], cwd=worktree, timeout_seconds=10)
+        short_candidate = _short_ref(candidate_id).replace(":", "-")
+        commit_message = (
+            f"Promote Research Lab candidate {short_candidate}\n\n"
+            f"Candidate: {_short_ref(candidate_id)}\n"
+            f"Score bundle: {_short_ref(score_bundle_id)}\n"
+            f"Source diff: {_short_ref(source_diff_hash)}\n"
+        )
+        _run_command(["git", "commit", "-m", commit_message], cwd=worktree, timeout_seconds=30)
+        new_head = _run_command(["git", "rev-parse", "HEAD"], cwd=worktree, timeout_seconds=10).strip()
+        _run_command(["git", "push", "origin", f"HEAD:{branch_name}"], cwd=worktree, timeout_seconds=120, redact=True)
+        return {
+            "status": "pushed",
+            "git_commit_sha": new_head,
+            "candidate_manifest_git_commit_sha": candidate_manifest_sha,
+            "target_files": target_files,
+            "source_diff_hash": source_diff_hash,
+        }
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _safe_target_files(value: Any) -> list[str]:
+    files: list[str] = []
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            text = str(item or "").strip()
+            if not text or text.startswith("/") or ".." in Path(text).parts:
+                continue
+            if re.search(r"(^|/)(\.git|\.github|\.env|Dockerfile|requirements[^/]*\.txt|poetry\.lock|uv\.lock)$", text):
+                continue
+            files.append(text)
+    return files[:20]
+
+
+def _run_command(
+    cmd: Sequence[str],
+    *,
+    cwd: Path | None,
+    timeout_seconds: int,
+    redact: bool = False,
+) -> str:
+    result = _run_command_result(cmd, cwd=cwd, timeout_seconds=timeout_seconds)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        if redact:
+            detail = _safe_text(detail)
+        raise RuntimeError(f"command failed: {cmd[0]} {cmd[1] if len(cmd) > 1 else ''}: {detail[:500]}")
+    return result.stdout
+
+
+def _run_command_result(
+    cmd: Sequence[str],
+    *,
+    cwd: Path | None,
+    timeout_seconds: int,
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    return subprocess.run(
+        list(cmd),
+        cwd=str(cwd) if cwd else None,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=max(1, int(timeout_seconds)),
+        check=False,
+    )
 
 
 def _safe_text(value: str) -> str:

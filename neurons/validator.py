@@ -4876,8 +4876,30 @@ class Validator(BaseValidatorNeuron):
 # ─────────────────────────────────────────────────────────
 #  NEW: handle buyer curation requests coming via Cloud Run
 # ─────────────────────────────────────────────────────────
+    # Throttle for the buyer-curation poll. The main validator loop spins
+    # quickly, so polling the curation Cloud Run service on every tick floods
+    # the logs and hammers the endpoint — badly when the service is
+    # unavailable (observed 2026-07-01: repeated "fetch_curation_requests
+    # failed: 503 Service Unavailable"). Poll at most once per healthy
+    # interval, and back off hard when a request fails so a down service can't
+    # be tight-looped.
+    _CURATION_POLL_INTERVAL_S = 30.0
+    _CURATION_FAILURE_BACKOFF_S = 300.0
+
     def process_curation_requests_continuous(self):
+        now = time.time()
+        if now < getattr(self, "_curation_next_poll_at", 0.0):
+            return
+
         req = fetch_curation_requests()
+        # ``fetch_curation_requests`` returns None on transport failure (e.g.
+        # the curation service returning 503). Back off longer on failure so
+        # we neither hammer a down service nor flood the logs; resume the
+        # normal cadence automatically once it recovers.
+        self._curation_next_poll_at = now + (
+            self._CURATION_FAILURE_BACKOFF_S if req is None
+            else self._CURATION_POLL_INTERVAL_S
+        )
         if not req:
             return
 

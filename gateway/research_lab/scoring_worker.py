@@ -34,6 +34,7 @@ from gateway.research_lab.models import ResearchLabCandidateArtifactCreateReques
 from gateway.research_lab.promotion import (
     ResearchLabPromotionController,
     load_active_private_model,
+    promotion_improvement_metric,
 )
 from gateway.research_lab.public_activity import safe_project_public_loop_activity
 from gateway.research_lab.public_benchmarks import (
@@ -1026,14 +1027,6 @@ class ResearchLabGatewayScoringWorker:
                 artifact=artifact,
                 window_hash=window.window_hash,
             )
-            runner = DockerPrivateModelRunner(
-                DockerPrivateModelSpec(
-                    image_digest=artifact.image_digest,
-                    timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
-                    env_passthrough=self._private_model_env_passthrough(),
-                    extra_env=self._private_scoring_env(),
-                )
-            )
             candidate_runner = DockerPrivateModelRunner(
                 DockerPrivateModelSpec(
                     image_digest=candidate_artifact.image_digest,
@@ -1084,7 +1077,7 @@ class ResearchLabGatewayScoringWorker:
                         patch_manifest=patch,
                         candidate_artifact_manifest=candidate_artifact.to_dict(),
                         benchmark_items=window.benchmark_items,
-                        base_runner=runner,
+                        base_runner=None,
                         candidate_runner=candidate_runner,
                         run_context={**run_context, "signature_ref": "pending"},
                         policy=self._evaluation_policy(),
@@ -1440,7 +1433,8 @@ class ResearchLabGatewayScoringWorker:
         gate_result: Any,
     ) -> dict[str, Any]:
         aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
-        improvement_points = float(aggregates.get("mean_delta") or 0.0)
+        metric = promotion_improvement_metric(score_bundle)
+        improvement_points = float(metric.improvement_points)
         delta_lcb = float(aggregates.get("delta_lcb") or 0.0)
         candidate_parent = str(candidate.get("parent_artifact_hash") or score_bundle.get("parent_artifact_hash") or "")
         await create_candidate_promotion_event(
@@ -1459,6 +1453,7 @@ class ResearchLabGatewayScoringWorker:
                 "auto_commit_enabled": self.config.auto_commit_enabled,
                 "candidate_kind": str(candidate.get("candidate_kind") or ""),
                 "decision_path": "public_holdout_rejected",
+                "promotion_metric": metric.event_doc(),
             },
         )
         await create_candidate_promotion_event(
@@ -1478,6 +1473,7 @@ class ResearchLabGatewayScoringWorker:
                 "mean_delta": round(improvement_points, 6),
                 "delta_lcb": round(delta_lcb, 6),
                 "candidate_kind": str(candidate.get("candidate_kind") or ""),
+                "promotion_metric": metric.event_doc(),
             },
         )
         return {"status": "rejected_public_holdout_gate"}
@@ -1491,7 +1487,8 @@ class ResearchLabGatewayScoringWorker:
         scoring_health_gate: Mapping[str, Any],
     ) -> dict[str, Any]:
         aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
-        improvement_points = float(aggregates.get("mean_delta") or 0.0)
+        metric = promotion_improvement_metric(score_bundle)
+        improvement_points = float(metric.improvement_points)
         delta_lcb = float(aggregates.get("delta_lcb") or 0.0)
         candidate_parent = str(candidate.get("parent_artifact_hash") or score_bundle.get("parent_artifact_hash") or "")
         await create_candidate_promotion_event(
@@ -1510,6 +1507,7 @@ class ResearchLabGatewayScoringWorker:
                 "auto_commit_enabled": self.config.auto_commit_enabled,
                 "candidate_kind": str(candidate.get("candidate_kind") or ""),
                 "decision_path": "scoring_health_quarantined",
+                "promotion_metric": metric.event_doc(),
             },
         )
         await create_candidate_promotion_event(
@@ -1530,6 +1528,7 @@ class ResearchLabGatewayScoringWorker:
                 "mean_delta": round(improvement_points, 6),
                 "delta_lcb": round(delta_lcb, 6),
                 "candidate_kind": str(candidate.get("candidate_kind") or ""),
+                "promotion_metric": metric.event_doc(),
             },
         )
         return {"status": "scoring_health_quarantined"}
@@ -2760,11 +2759,28 @@ def _private_holdout_gate_from_baseline_row(row: Mapping[str, Any]) -> dict[str,
     if not public_refs or private_count <= 0:
         return None
     public_scores = [_safe_float(item.get("score"), default=0.0) for item in public_items]
+    private_scores = [
+        _safe_float(item.get("score"), default=0.0)
+        for item in items
+        if isinstance(item, Mapping) and str(item.get("visibility") or "") == "private"
+    ]
+    all_scores = [
+        _safe_float(item.get("score"), default=0.0)
+        for item in items
+        if isinstance(item, Mapping)
+    ]
+    baseline_aggregate_score = _safe_float(
+        doc.get("aggregate_score"),
+        default=_average(all_scores),
+    )
     return {
         "schema_version": "1.0",
         "gate_type": "public_score_before_private_holdout",
         "baseline_benchmark_bundle_id": str(row.get("benchmark_bundle_id") or ""),
+        "baseline_benchmark_hash": canonical_hash(doc) if doc else "",
+        "baseline_aggregate_score": baseline_aggregate_score,
         "baseline_public_score": _average(public_scores),
+        "baseline_private_score": _average(private_scores),
         "baseline_public_icp_count": len(public_refs),
         "baseline_private_holdout_icp_count": private_count,
         "rolling_window_hash": str(row.get("rolling_window_hash") or ""),
@@ -2780,9 +2796,19 @@ def _candidate_gate_event_doc(value: Any) -> dict[str, Any]:
         "gate_type": str(value.get("gate_type") or ""),
         "decision": str(value.get("decision") or ""),
         "baseline_benchmark_bundle_id": str(value.get("baseline_benchmark_bundle_id") or ""),
+        "baseline_benchmark_hash": str(value.get("baseline_benchmark_hash") or ""),
+        "baseline_aggregate_score": _safe_float(value.get("baseline_aggregate_score"), default=0.0),
         "baseline_public_score": _safe_float(value.get("baseline_public_score"), default=0.0),
+        "baseline_private_score": _safe_float(value.get("baseline_private_score"), default=0.0),
         "candidate_public_score": _safe_float(value.get("candidate_public_score"), default=0.0),
         "paired_base_public_score": _safe_float(value.get("paired_base_public_score"), default=0.0),
+        "candidate_total_score": _safe_float(value.get("candidate_total_score"), default=0.0),
+        "paired_base_total_score": _safe_float(value.get("paired_base_total_score"), default=0.0),
+        "candidate_delta_vs_daily_baseline": _safe_float(
+            value.get("candidate_delta_vs_daily_baseline"),
+            default=0.0,
+        ),
+        "reference_evaluation_mode": str(value.get("reference_evaluation_mode") or ""),
         "public_icp_count": _safe_int(value.get("public_icp_count"), default=0),
         "private_holdout_icp_count": _safe_int(value.get("private_holdout_icp_count"), default=0),
         "private_holdout_evaluated": bool(value.get("private_holdout_evaluated")),

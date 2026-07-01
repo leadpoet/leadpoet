@@ -23,7 +23,7 @@ from .maintenance import (
     set_autoresearch_maintenance_paused,
     wait_until_autoresearch_drained,
 )
-from .promotion import ResearchLabPromotionController
+from .promotion import ResearchLabPromotionController, promotion_improvement_metric
 from .recovery import (
     award_failed_run_reimbursements,
     rebase_stale_parent_candidates as recovery_rebase_stale_parent_candidates,
@@ -325,6 +325,7 @@ async def _promote_scored_candidate(
         }
 
     aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
+    metric = promotion_improvement_metric(score_bundle)
     planned = {
         "candidate_id": candidate_id,
         "score_bundle_id": bundle_row.get("score_bundle_id"),
@@ -334,6 +335,8 @@ async def _promote_scored_candidate(
         "parent_artifact_hash": candidate.get("parent_artifact_hash"),
         "candidate_artifact_hash": bundle_row.get("candidate_artifact_hash"),
         "mean_delta": aggregates.get("mean_delta"),
+        "promotion_improvement_points": metric.improvement_points,
+        "promotion_metric": metric.event_doc(),
         "threshold_points": ResearchLabGatewayConfig.from_env().improvement_threshold_points,
         "reason": reason,
     }

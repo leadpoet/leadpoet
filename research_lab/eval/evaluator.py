@@ -97,8 +97,10 @@ async def evaluate_private_model_pair(
         errors.extend(validate_candidate_patch_manifest(patch, expected_parent_artifact_hash=artifact.model_artifact_hash))
     if errors:
         raise ValueError("; ".join(errors))
-    if base_runner is None or candidate_runner is None:
-        raise RealEvaluatorRequired("private base_runner and candidate_runner are required")
+    if candidate_runner is None:
+        raise RealEvaluatorRequired("private candidate_runner is required")
+    if private_holdout_gate is None and base_runner is None:
+        raise RealEvaluatorRequired("private base_runner is required for paired evaluation")
     if not benchmark_items:
         raise RealEvaluatorRequired("sealed benchmark items are required")
 
@@ -107,7 +109,7 @@ async def evaluate_private_model_pair(
     if private_holdout_gate:
         per_icp_results, gate_result = await _score_with_private_holdout_gate(
             benchmark_items=benchmark_items,
-            base_runner=base_runner,
+            base_runner=None,
             candidate_runner=candidate_runner,
             scorer=scorer,
             run_context=run_context,
@@ -151,7 +153,7 @@ async def evaluate_private_model_pair(
 async def score_private_model_pair_items(
     *,
     benchmark_items: Sequence[Mapping[str, Any]],
-    base_runner: ModelRunner,
+    base_runner: ModelRunner | None,
     candidate_runner: ModelRunner,
     company_scorer: CompanyScorer | None = None,
     run_context: Mapping[str, Any],
@@ -179,17 +181,20 @@ async def score_private_model_pair_items(
         if not isinstance(icp, Mapping):
             raise RealEvaluatorRequired("benchmark item is missing private ICP payload")
         failure_reasons: list[str] = []
-        try:
-            base_outputs = ensure_private_model_outputs(
-                await _call_model_runner(base_runner, icp, run_context),
-                context_label=f"reference model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
-                require_non_empty=False,
-            )
-        except PrivateModelRuntimeError as exc:
-            if not _is_provider_backed_sourcing_error(exc):
-                raise
+        if base_runner is None:
             base_outputs = []
-            failure_reasons.append("reference_model_runtime_provider_error")
+        else:
+            try:
+                base_outputs = ensure_private_model_outputs(
+                    await _call_model_runner(base_runner, icp, run_context),
+                    context_label=f"reference model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
+                    require_non_empty=False,
+                )
+            except PrivateModelRuntimeError as exc:
+                if not _is_provider_backed_sourcing_error(exc):
+                    raise
+                base_outputs = []
+                failure_reasons.append("reference_model_runtime_provider_error")
         candidate_context = dict(run_context)
         if not image_candidate:
             if runtime_patch is None:
@@ -212,11 +217,11 @@ async def score_private_model_pair_items(
                 candidate_outputs = []
                 failure_reasons.append(candidate_failure_reason)
                 candidate_runtime_skip_reason = _candidate_runtime_skip_reason(candidate_failure_reason)
-        base_scores = await _maybe_await(scorer(base_outputs, icp, True))
+        base_scores = await _maybe_await(scorer(base_outputs, icp, True)) if base_runner is not None else []
         candidate_scores = await _maybe_await(scorer(candidate_outputs, icp, False))
-        if not base_outputs:
+        if base_runner is not None and not base_outputs:
             failure_reasons.append("reference_model_zero_companies")
-        elif not base_scores:
+        elif base_runner is not None and not base_scores:
             failure_reasons.append("reference_model_zero_scoreable_companies")
         if not candidate_outputs:
             failure_reasons.append("candidate_model_zero_companies")
@@ -249,7 +254,7 @@ async def score_private_model_pair_items(
 async def _score_with_private_holdout_gate(
     *,
     benchmark_items: Sequence[Mapping[str, Any]],
-    base_runner: ModelRunner,
+    base_runner: ModelRunner | None,
     candidate_runner: ModelRunner,
     scorer: CompanyScorer,
     run_context: Mapping[str, Any],
@@ -289,17 +294,22 @@ async def _score_with_private_holdout_gate(
         parent_freshness_check=parent_freshness_check,
     )
     baseline_public_score = float(gate.get("baseline_public_score") or 0.0)
+    baseline_aggregate_score = _optional_float(gate.get("baseline_aggregate_score"))
+    baseline_private_score = _optional_float(gate.get("baseline_private_score"))
     candidate_public_score = _benchmark_style_score(public_results, "candidate_company_scores")
-    base_public_score = _benchmark_style_score(public_results, "base_company_scores")
     passed_public_gate = candidate_public_score + 1e-9 >= baseline_public_score
     gate_result = {
         "schema_version": "1.0",
         "gate_type": "public_score_before_private_holdout",
         "decision": "private_holdout_approved" if passed_public_gate else "rejected_before_private_holdout",
         "baseline_benchmark_bundle_id": str(gate.get("baseline_benchmark_bundle_id") or ""),
+        "baseline_benchmark_hash": str(gate.get("baseline_benchmark_hash") or ""),
+        "baseline_aggregate_score": round(baseline_aggregate_score, 6) if baseline_aggregate_score is not None else None,
         "baseline_public_score": round(baseline_public_score, 6),
+        "baseline_private_score": round(baseline_private_score, 6) if baseline_private_score is not None else None,
         "candidate_public_score": round(candidate_public_score, 6),
-        "paired_base_public_score": round(base_public_score, 6),
+        "paired_base_public_score": None,
+        "reference_evaluation_mode": "stored_daily_baseline",
         "public_icp_count": len(public_items),
         "private_holdout_icp_count": len(private_items),
         "private_holdout_evaluated": bool(passed_public_gate),
@@ -317,7 +327,20 @@ async def _score_with_private_holdout_gate(
         runtime_patch=runtime_patch,
         parent_freshness_check=parent_freshness_check,
     )
-    return [*public_results, *private_results], gate_result
+    all_results = [*public_results, *private_results]
+    candidate_total_score = _benchmark_style_score(all_results, "candidate_company_scores")
+    daily_delta = (
+        candidate_total_score - baseline_aggregate_score
+        if baseline_aggregate_score is not None
+        else None
+    )
+    gate_result = {
+        **gate_result,
+        "candidate_total_score": round(candidate_total_score, 6),
+        "paired_base_total_score": None,
+        "candidate_delta_vs_daily_baseline": round(daily_delta, 6) if daily_delta is not None else None,
+    }
+    return all_results, gate_result
 
 
 async def _run_parent_freshness_check(
@@ -350,6 +373,15 @@ def _benchmark_style_score(
         values = [float(item or 0.0) for item in scores]
         per_icp_scores.append(float(sum(values) / len(values)) if values else 0.0)
     return float(sum(per_icp_scores) / len(per_icp_scores)) if per_icp_scores else 0.0
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def build_score_bundle_from_scored_icps(
@@ -557,9 +589,14 @@ def _scoring_health_holdout_doc(value: Mapping[str, Any] | None) -> dict[str, An
         "decision": str(value.get("decision") or ""),
         "baseline_benchmark_bundle_id": str(value.get("baseline_benchmark_bundle_id") or ""),
         "baseline_benchmark_hash": str(value.get("baseline_benchmark_hash") or ""),
+        "baseline_aggregate_score": value.get("baseline_aggregate_score"),
         "baseline_public_score": value.get("baseline_public_score"),
+        "baseline_private_score": value.get("baseline_private_score"),
         "candidate_public_score": value.get("candidate_public_score"),
         "paired_base_public_score": value.get("paired_base_public_score"),
+        "candidate_total_score": value.get("candidate_total_score"),
+        "paired_base_total_score": value.get("paired_base_total_score"),
+        "candidate_delta_vs_daily_baseline": value.get("candidate_delta_vs_daily_baseline"),
         "public_icp_count": int(value.get("public_icp_count") or 0),
         "private_holdout_icp_count": int(value.get("private_holdout_icp_count") or 0),
         "private_holdout_evaluated": bool(value.get("private_holdout_evaluated")),

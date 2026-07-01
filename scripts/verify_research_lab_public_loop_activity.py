@@ -210,8 +210,8 @@ def verify_projection_fixtures() -> list[str]:
         score_bundle_rows=[],
         promotion_event_rows=[],
     )
-    if not_started.outcome_label != "not_started" or not_started.outcome_band != "pending":
-        errors.append("ticket-without-run fixture should be not_started/pending")
+    if not_started.outcome_label != "awaiting_payment" or not_started.outcome_band != "pending":
+        errors.append("ticket-without-run fixture should be awaiting_payment/pending")
 
     row = {
         "card_id": "public_loop_card:00000000-0000-0000-0000-000000000000",

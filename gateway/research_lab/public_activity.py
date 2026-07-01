@@ -919,6 +919,9 @@ def _score_bundle_delta(row: Mapping[str, Any] | None) -> tuple[float, float]:
     gate = doc.get("private_holdout_gate") if isinstance(doc.get("private_holdout_gate"), Mapping) else {}
     if str(gate.get("decision") or "") == "rejected_before_private_holdout":
         return 0.0, 0.0
+    daily_delta = gate.get("candidate_delta_vs_daily_baseline")
+    if daily_delta is not None:
+        return _float(daily_delta), 0.0
     aggregates = doc.get("aggregates") if isinstance(doc.get("aggregates"), Mapping) else {}
     return _float(aggregates.get("mean_delta")), _float(aggregates.get("delta_lcb"))
 

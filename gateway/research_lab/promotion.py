@@ -41,6 +41,74 @@ class ActivePrivateModel:
     version_row: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class PromotionImprovementMetric:
+    improvement_points: float
+    basis: str
+    daily_baseline_available: bool
+    baseline_aggregate_score: float | None = None
+    candidate_total_score: float | None = None
+    candidate_delta_vs_daily_baseline: float | None = None
+
+    def event_doc(self) -> dict[str, Any]:
+        return {
+            "improvement_basis": self.basis,
+            "daily_baseline_available": self.daily_baseline_available,
+            "baseline_aggregate_score": self.baseline_aggregate_score,
+            "candidate_total_score": self.candidate_total_score,
+            "candidate_delta_vs_daily_baseline": self.candidate_delta_vs_daily_baseline,
+        }
+
+
+def promotion_improvement_metric(score_bundle: Mapping[str, Any]) -> PromotionImprovementMetric:
+    """Return the promotion metric without re-running the active parent model.
+
+    Candidate score bundles emitted by the private-holdout path are judged
+    against the stored daily baseline aggregate. Older non-holdout bundles keep
+    their legacy paired mean-delta path for compatibility with historical tests
+    and tooling, but any bundle that carries a holdout gate must provide the
+    stored-baseline final delta to be promotable.
+    """
+
+    aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
+    gate = score_bundle.get("private_holdout_gate")
+    if isinstance(gate, Mapping):
+        decision = str(gate.get("decision") or "")
+        baseline_aggregate = _optional_float(gate.get("baseline_aggregate_score"))
+        candidate_total = _optional_float(gate.get("candidate_total_score"))
+        daily_delta = _optional_float(gate.get("candidate_delta_vs_daily_baseline"))
+        if daily_delta is None and baseline_aggregate is not None and candidate_total is not None:
+            daily_delta = candidate_total - baseline_aggregate
+        if (
+            decision == "private_holdout_approved"
+            and bool(gate.get("private_holdout_evaluated"))
+            and daily_delta is not None
+        ):
+            return PromotionImprovementMetric(
+                improvement_points=float(daily_delta),
+                basis="stored_daily_baseline_total_delta",
+                daily_baseline_available=True,
+                baseline_aggregate_score=baseline_aggregate,
+                candidate_total_score=candidate_total,
+                candidate_delta_vs_daily_baseline=float(daily_delta),
+            )
+        return PromotionImprovementMetric(
+            improvement_points=0.0,
+            basis=f"stored_daily_baseline_unavailable:{decision or 'missing_decision'}",
+            daily_baseline_available=False,
+            baseline_aggregate_score=baseline_aggregate,
+            candidate_total_score=candidate_total,
+            candidate_delta_vs_daily_baseline=daily_delta,
+        )
+
+    legacy_delta = _optional_float(aggregates.get("mean_delta")) or 0.0
+    return PromotionImprovementMetric(
+        improvement_points=float(legacy_delta),
+        basis="legacy_paired_mean_delta_no_holdout_gate",
+        daily_baseline_available=False,
+    )
+
+
 async def load_active_private_model(
     config: ResearchLabGatewayConfig,
     *,
@@ -188,7 +256,8 @@ class ResearchLabPromotionController:
     ) -> dict[str, Any]:
         candidate_parent = str(candidate.get("parent_artifact_hash") or score_bundle.get("parent_artifact_hash") or "")
         candidate_kind = str(candidate.get("candidate_kind") or "patch")
-        improvement_points = float((score_bundle.get("aggregates") or {}).get("mean_delta") or 0.0)
+        metric = promotion_improvement_metric(score_bundle)
+        improvement_points = float(metric.improvement_points)
         delta_lcb = float((score_bundle.get("aggregates") or {}).get("delta_lcb") or 0.0)
         threshold = float(self.config.improvement_threshold_points)
         rolling_window_hash = str(score_bundle.get("icp_set_hash") or "")
@@ -211,6 +280,7 @@ class ResearchLabPromotionController:
                     "auto_commit_enabled": self.config.auto_commit_enabled,
                     "candidate_kind": candidate_kind,
                     "auto_promotion_enabled": False,
+                    "promotion_metric": metric.event_doc(),
                 },
             )
             await create_candidate_promotion_event(
@@ -229,6 +299,7 @@ class ResearchLabPromotionController:
                     "auto_commit_enabled": self.config.auto_commit_enabled,
                     "candidate_kind": candidate_kind,
                     "delta_lcb": round(delta_lcb, 6),
+                    "promotion_metric": metric.event_doc(),
                 },
             )
             return {"status": "disabled"}
@@ -251,6 +322,7 @@ class ResearchLabPromotionController:
                 "delta_lcb": round(delta_lcb, 6),
                 "auto_commit_enabled": self.config.auto_commit_enabled,
                 "candidate_kind": candidate_kind,
+                "promotion_metric": metric.event_doc(),
             },
         )
 
@@ -269,6 +341,7 @@ class ResearchLabPromotionController:
                 event_doc={
                     "candidate_kind": candidate_kind,
                     "reason": "patch_candidates_are_legacy_read_only",
+                    "promotion_metric": metric.event_doc(),
                 },
             )
             return {"status": "rejected_legacy_patch_candidate"}
@@ -288,6 +361,7 @@ class ResearchLabPromotionController:
                 event_doc={
                     "mean_delta": round(improvement_points, 6),
                     "delta_lcb": round(delta_lcb, 6),
+                    "promotion_metric": metric.event_doc(),
                 },
             )
             return {"status": "rejected_below_threshold"}
@@ -307,6 +381,7 @@ class ResearchLabPromotionController:
                 event_doc={
                     "candidate_kind": "image_build",
                     "action": "rescore_candidate_image_against_current_parent",
+                    "promotion_metric": metric.event_doc(),
                 },
             )
             return {"status": "stale_parent_needs_rescore"}
@@ -322,7 +397,10 @@ class ResearchLabPromotionController:
             improvement_points=improvement_points,
             threshold_points=threshold,
             worker_ref=self.worker_ref,
-            event_doc={"auto_commit_enabled": self.config.auto_commit_enabled},
+            event_doc={
+                "auto_commit_enabled": self.config.auto_commit_enabled,
+                "promotion_metric": metric.event_doc(),
+            },
         )
 
         return await self._promote_built_image_candidate(
@@ -752,6 +830,15 @@ def _safe_target_files(value: Any) -> list[str]:
                 continue
             files.append(text)
     return files[:20]
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _run_command(

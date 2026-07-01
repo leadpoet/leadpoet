@@ -118,6 +118,10 @@ def main() -> int:
         asyncio.run(_test_disabled_auto_promotion_writes_terminal_decision())
     except Exception as exc:
         errors.append(f"disabled auto-promotion decision contract failed: {exc}")
+    try:
+        asyncio.run(_test_daily_baseline_delta_overrides_legacy_mean_delta())
+    except Exception as exc:
+        errors.append(f"daily-baseline promotion gate contract failed: {exc}")
     migration_56 = (ROOT / "scripts" / "56-research-lab-promotion-decision-events.sql").read_text(encoding="utf-8")
     if "stale_parent_needs_rescore" not in migration_56:
         errors.append("script 56 must preserve existing stale_parent_needs_rescore promotion_status rows")
@@ -328,6 +332,74 @@ async def _test_disabled_auto_promotion_writes_terminal_decision() -> None:
         raise AssertionError(f"disabled promotion did not write checked+terminal events: {events}")
     if events[1].get("promotion_status") != "disabled":
         raise AssertionError(f"disabled promotion event used invalid status: {events[1]}")
+
+
+async def _test_daily_baseline_delta_overrides_legacy_mean_delta() -> None:
+    parent = _manifest("parent")
+    candidate = {
+        "candidate_id": "candidate:" + "7" * 64,
+        "candidate_kind": "image_build",
+        "parent_artifact_hash": parent.model_artifact_hash,
+        "candidate_model_manifest_doc": _manifest("candidate").to_dict(),
+        "miner_hotkey": "5EFakeMinerHotkey111111111111111111111111111",
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "ticket_id": "22222222-2222-4222-8222-222222222222",
+        "island": "generalist",
+    }
+    score_bundle_row = {"score_bundle_id": "score_bundle:" + "8" * 64}
+    score_bundle = {
+        "parent_artifact_hash": parent.model_artifact_hash,
+        "icp_set_hash": "sha256:" + "9" * 64,
+        "candidate_artifact_hash": _manifest("candidate").model_artifact_hash,
+        "aggregates": {
+            "mean_delta": 2.0,
+            "delta_lcb": 1.5,
+        },
+        "private_holdout_gate": {
+            "decision": "private_holdout_approved",
+            "private_holdout_evaluated": True,
+            "baseline_aggregate_score": 16.46,
+            "candidate_total_score": 9.70,
+            "candidate_delta_vs_daily_baseline": -6.76,
+            "reference_evaluation_mode": "stored_daily_baseline",
+        },
+    }
+    events: list[dict[str, object]] = []
+
+    async def fake_load_active_private_model(_config, *, register_bootstrap=False):
+        return SimpleNamespace(artifact=parent, version_row=None)
+
+    async def fake_create_candidate_promotion_event(**kwargs):
+        events.append(kwargs)
+        return kwargs
+
+    original_load_active = promotion_module.load_active_private_model
+    original_promotion_event = promotion_module.create_candidate_promotion_event
+    try:
+        promotion_module.load_active_private_model = fake_load_active_private_model
+        promotion_module.create_candidate_promotion_event = fake_create_candidate_promotion_event
+        result = await ResearchLabPromotionController(
+            ResearchLabGatewayConfig(auto_promotion_enabled=True),
+            worker_ref="test-worker",
+        ).process_scored_candidate(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            score_bundle=score_bundle,
+        )
+    finally:
+        promotion_module.load_active_private_model = original_load_active
+        promotion_module.create_candidate_promotion_event = original_promotion_event
+
+    if result.get("status") != "rejected_below_threshold":
+        raise AssertionError(f"expected daily-baseline rejection, got {result}")
+    terminal = events[-1]
+    if terminal.get("event_type") != "below_threshold":
+        raise AssertionError(f"expected below_threshold event, got {terminal}")
+    if terminal.get("improvement_points") != -6.76:
+        raise AssertionError(f"promotion used legacy mean_delta instead of daily baseline delta: {terminal}")
+    metric = ((terminal.get("event_doc") or {}).get("promotion_metric") or {})
+    if metric.get("improvement_basis") != "stored_daily_baseline_total_delta":
+        raise AssertionError(f"promotion metric did not record daily-baseline basis: {metric}")
 
 
 if __name__ == "__main__":

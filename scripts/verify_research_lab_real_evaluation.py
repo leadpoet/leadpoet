@@ -176,6 +176,7 @@ def main() -> int:
                 policy={**_policy(), "min_successful_icps": 2},
                 private_holdout_gate={
                     "baseline_benchmark_bundle_id": "private_benchmark:test",
+                    "baseline_aggregate_score": 82.0,
                     "baseline_public_score": 80.0,
                     "public_icp_refs": ["icp:a"],
                 },
@@ -188,6 +189,8 @@ def main() -> int:
             errors.append("private holdout gate evaluated private ICPs after rejection")
         if any(call[1] == "private" for call in rejected_calls):
             errors.append("private ICP runner was called despite public gate rejection")
+        if any(call[0] == "base" for call in rejected_calls):
+            errors.append("stored-baseline public gate should not call reference/base runner")
         rejected_verification = verify_research_evaluation_score_bundle(
             rejected_gate_bundle,
             policy={**_policy(), "min_successful_icps": 2},
@@ -257,34 +260,38 @@ def main() -> int:
         if not timeout_health_verification["passed"]:
             errors.append("scoring_health enriched timeout bundle failed verification")
 
-        async def _timeout_base_runner(_icp: dict[str, object], _context: dict[str, object]) -> list[dict[str, object]]:
+        base_timeout_calls: list[str] = []
+
+        async def _timeout_base_runner(icp: dict[str, object], _context: dict[str, object]) -> list[dict[str, object]]:
+            base_timeout_calls.append(str(icp.get("id")))
             raise PrivateModelRuntimeError("docker private model adapter timed out")
 
-        try:
-            asyncio.run(
-                evaluate_private_model_pair(
-                    artifact_manifest=artifact,
-                    benchmark=benchmark,
-                    patch_manifest=patch,
-                    benchmark_items=[
-                        {"icp_ref": "icp:a", "icp_hash": "sha256:" + "a" * 64, "icp": {"id": "public"}},
-                        {"icp_ref": "icp:b", "icp_hash": "sha256:" + "b" * 64, "icp": {"id": "private"}},
-                    ],
-                    base_runner=_timeout_base_runner,
-                    candidate_runner=_gated_reject_candidate_runner,
-                    company_scorer=_score_marker_company_scorer,
-                    run_context=run_context,
-                    policy={**_policy(), "min_successful_icps": 2},
-                    private_holdout_gate={
-                        "baseline_benchmark_bundle_id": "private_benchmark:test",
-                        "baseline_public_score": 1.0,
-                        "public_icp_refs": ["icp:a"],
-                    },
-                )
+        base_ignored_bundle = asyncio.run(
+            evaluate_private_model_pair(
+                artifact_manifest=artifact,
+                benchmark=benchmark,
+                patch_manifest=patch,
+                benchmark_items=[
+                    {"icp_ref": "icp:a", "icp_hash": "sha256:" + "a" * 64, "icp": {"id": "public"}},
+                    {"icp_ref": "icp:b", "icp_hash": "sha256:" + "b" * 64, "icp": {"id": "private"}},
+                ],
+                base_runner=_timeout_base_runner,
+                candidate_runner=_gated_reject_candidate_runner,
+                company_scorer=_score_marker_company_scorer,
+                run_context=run_context,
+                policy={**_policy(), "min_successful_icps": 2},
+                private_holdout_gate={
+                    "baseline_benchmark_bundle_id": "private_benchmark:test",
+                    "baseline_aggregate_score": 82.0,
+                    "baseline_public_score": 80.0,
+                    "public_icp_refs": ["icp:a"],
+                },
             )
-            errors.append("reference model timeout did not fail closed")
-        except PrivateModelRuntimeError:
-            pass
+        )
+        if base_timeout_calls:
+            errors.append(f"stored-baseline gate called reference/base runner: {base_timeout_calls}")
+        if (base_ignored_bundle.get("private_holdout_gate") or {}).get("decision") != "rejected_before_private_holdout":
+            errors.append("stored-baseline gate did not keep evaluating candidate after ignoring reference runner")
 
         passed_calls: list[tuple[str, str]] = []
 
@@ -312,6 +319,7 @@ def main() -> int:
                 policy={**_policy(), "min_successful_icps": 2},
                 private_holdout_gate={
                     "baseline_benchmark_bundle_id": "private_benchmark:test",
+                    "baseline_aggregate_score": 82.0,
                     "baseline_public_score": 80.0,
                     "public_icp_refs": ["icp:a"],
                 },
@@ -324,6 +332,12 @@ def main() -> int:
             errors.append("private holdout gate did not mark private holdout as evaluated")
         if not any(call[1] == "private" for call in passed_calls):
             errors.append("private ICP runner was not called after public gate pass")
+        if any(call[0] == "base" for call in passed_calls):
+            errors.append("stored-baseline private holdout should not call reference/base runner")
+        if passed_gate.get("candidate_delta_vs_daily_baseline") != 3.0:
+            errors.append(f"stored daily-baseline delta was not recorded correctly: {passed_gate}")
+        if passed_gate.get("reference_evaluation_mode") != "stored_daily_baseline":
+            errors.append(f"stored-baseline evaluation mode missing from gate: {passed_gate}")
         if int((passed_gate_bundle.get("aggregates") or {}).get("icp_count") or 0) != 2:
             errors.append("public-gate passed score bundle did not include public and private ICPs")
     except Exception as exc:

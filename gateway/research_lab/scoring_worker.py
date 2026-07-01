@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 from datetime import datetime, timezone
+import functools
 import json
 import logging
 import os
@@ -170,6 +172,51 @@ def _runtime_error_diagnostics(error_text: str) -> dict[str, Any]:
         "status": status,
         "category": category,
     }
+
+
+def _baseline_error_is_retryable(error_text: str) -> bool:
+    """Transient provider/infra failures are retryable; model code bugs and
+    auth/request errors are not.
+
+    Must receive the full exception text: ``_short_error`` truncates to 300
+    chars and can drop the status marker. Note ``_runtime_error_diagnostics``
+    buckets 429 into ``provider_http_4xx`` — a plain 4xx check would mark the
+    rate-limit error this classifier exists to catch as permanent, so 429 is
+    matched explicitly before the 4xx rejection branch.
+    """
+    lowered = error_text.lower()
+    diagnostics = _runtime_error_diagnostics(error_text)
+    status = int(diagnostics.get("status") or 0)
+    if status in (408, 429) or status >= 500:
+        return True
+    if status in (400, 401, 403, 404, 409):
+        return False
+    if any(
+        marker in lowered
+        for marker in (
+            "too many requests",
+            "rate limit",
+            "timed out",
+            "timeout",
+            "connection reset",
+            "connection refused",
+            "temporarily unavailable",
+        )
+    ):
+        return True
+    if any(
+        marker in lowered
+        for marker in (
+            "exit status 137",
+            "killed",
+            "docker daemon",
+            "no space left on device",
+        )
+    ):
+        # Infra pressure (OOM-kill, daemon wedge) clears when the retry rounds
+        # run fewer containers at once.
+        return True
+    return False
 
 
 class CandidateBaselineNotReady(RuntimeError):
@@ -2106,6 +2153,9 @@ class ResearchLabGatewayScoringWorker:
                     ("Selected sets", len(window.set_ids)),
                     ("Selected ICPs", len(window.item_refs)),
                     ("Private model", compact_ref(artifact.model_artifact_hash)),
+                    ("Concurrency", self.config.private_baseline_concurrency),
+                    ("Benchmark Exa key", "dedicated" if self.config.benchmark_exa_api_key else "inherited"),
+                    ("Exa RPS per container", self.config.benchmark_exa_max_rps or "inherited"),
                 ),
             )
         )
@@ -2114,7 +2164,7 @@ class ResearchLabGatewayScoringWorker:
                 image_digest=artifact.image_digest,
                 timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
                 env_passthrough=self._private_model_env_passthrough(),
-                extra_env=self._private_scoring_env(),
+                extra_env=self._private_baseline_scoring_env(),
             )
         )
         scorer = QualificationStyleCompanyScorer()
@@ -2134,7 +2184,33 @@ class ResearchLabGatewayScoringWorker:
                 },
             )
             total_icps = len(window.benchmark_items)
-            for item_index, item in enumerate(window.benchmark_items, start=1):
+            parallel_mode = self.config.private_baseline_concurrency > 1
+            if parallel_mode:
+                retry_runner = DockerPrivateModelRunner(
+                    DockerPrivateModelSpec(
+                        image_digest=artifact.image_digest,
+                        timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
+                        env_passthrough=self._private_model_env_passthrough(),
+                        extra_env=self._private_baseline_retry_scoring_env(),
+                        # The first-pass runner already pulled this digest.
+                        pull_before_run=False,
+                    )
+                )
+                batch_summaries = await self._run_baseline_batch(
+                    runner=runner,
+                    retry_runner=retry_runner,
+                    scorer=scorer,
+                    window=window,
+                    run_start=start,
+                )
+                for item_summary in batch_summaries:
+                    if item_summary.pop("_nonempty", False):
+                        nonempty_output_count += 1
+                    item_summary.pop("_item_index", None)
+                    item_summary.pop("_retryable", None)
+                    item_summary.pop("_runtime_error", None)
+                    per_icp_summaries.append(item_summary)
+            for item_index, item in enumerate([] if parallel_mode else window.benchmark_items, start=1):
                 item_start = time.time()
                 label = str(item.get("icp_ref") or item.get("icp_hash") or "unknown_icp")
                 logger.info(
@@ -2379,6 +2455,259 @@ class ResearchLabGatewayScoringWorker:
             "public_report_id": str(public_report["report_id"]),
             "rolling_window_hash": window.window_hash,
         }
+
+    async def _run_baseline_icp(
+        self,
+        *,
+        runner: DockerPrivateModelRunner,
+        scorer: QualificationStyleCompanyScorer,
+        item: Mapping[str, Any],
+        item_index: int,
+        total_icps: int,
+        run_start: float,
+        executor: concurrent.futures.Executor,
+    ) -> dict[str, Any]:
+        """Run one benchmark ICP (docker sourcing + scoring) and build its summary.
+
+        Mirrors the serial baseline loop body, minus the fast-empty guard (its
+        sequential-completion assumption does not hold under concurrency). The
+        blocking docker wait runs on the dedicated baseline executor instead of
+        asyncio.to_thread so many concurrent ~10-minute subprocess waits cannot
+        starve the loop's default executor (which the KMS signing call uses).
+
+        The returned summary carries underscore-prefixed orchestration fields
+        (_item_index, _retryable, _nonempty, _runtime_error) that MUST be popped
+        before the summary enters score_summary_doc.
+        """
+        loop = asyncio.get_running_loop()
+        item_start = time.time()
+        label = str(item.get("icp_ref") or item.get("icp_hash") or "unknown_icp")
+        logger.info(
+            format_worker_block(
+                "RESEARCH LAB PRIVATE BASELINE ICP STARTED",
+                (
+                    ("Worker", self.worker_ref),
+                    ("ICP", f"{item_index}/{total_icps}"),
+                    ("ICP ref", compact_ref(label)),
+                    ("ICP hash", compact_ref(item.get("icp_hash"))),
+                    ("Set", item.get("set_id")),
+                    ("Day", item.get("day_index")),
+                    ("Day rank", item.get("day_rank")),
+                ),
+            )
+        )
+        runtime_error = ""
+        retryable = False
+        try:
+            outputs = ensure_private_model_outputs(
+                await loop.run_in_executor(
+                    executor,
+                    functools.partial(runner, item["icp"], {"mode": "private_baseline"}),
+                ),
+                context_label=f"private baseline for {label}",
+                require_non_empty=False,
+            )
+        except PrivateModelRuntimeError as exc:
+            outputs = []
+            runtime_error = _short_error(exc)
+            # Classify from the full exception text: _short_error truncates to
+            # 300 chars and can drop the status marker the classifier needs.
+            retryable = _baseline_error_is_retryable(str(exc))
+            logger.warning(
+                format_worker_block(
+                    "RESEARCH LAB PRIVATE BASELINE ICP RUNTIME ERROR",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("ICP", f"{item_index}/{total_icps}"),
+                        ("ICP ref", compact_ref(label)),
+                        ("ICP hash", compact_ref(item.get("icp_hash"))),
+                        ("Retryable", retryable),
+                        ("Error", runtime_error),
+                    ),
+                )
+            )
+        item_elapsed = time.time() - item_start
+        score_breakdowns = (
+            await scorer.score_with_breakdowns(outputs, item["icp"], True)
+            if outputs
+            else []
+        )
+        scores = [float(row.get("final_score", 0.0) or 0.0) for row in score_breakdowns]
+        icp_score = _average(scores)
+        logger.info(
+            format_worker_block(
+                "RESEARCH LAB PRIVATE BASELINE ICP SCORED",
+                (
+                    ("Worker", self.worker_ref),
+                    ("ICP", f"{item_index}/{total_icps}"),
+                    ("ICP ref", compact_ref(label)),
+                    ("ICP hash", compact_ref(item.get("icp_hash"))),
+                    ("Set", item.get("set_id")),
+                    ("Day", item.get("day_index")),
+                    ("Day rank", item.get("day_rank")),
+                    ("Score", f"{icp_score:.4f}"),
+                    ("Companies", len(scores)),
+                    ("Non-empty output", bool(outputs)),
+                    ("Runtime error", runtime_error or "-"),
+                    ("ICP runtime", f"{item_elapsed:.1f}s"),
+                    ("Elapsed", f"{time.time() - run_start:.1f}s"),
+                ),
+            )
+        )
+        item_summary = sanitize_benchmark_item_summary(
+            item=item,
+            score=icp_score,
+            company_count=len(scores),
+            score_breakdowns=score_breakdowns,
+            # Model output count BEFORE the scorer's employee-bucket
+            # pre-filter, so the funnel's first stage is the true
+            # "companies discovered" number.
+            sourced_count=len(outputs),
+        )
+        if runtime_error:
+            diagnostics = dict(item_summary.get("diagnostics") or {})
+            runtime_diagnostics = _runtime_error_diagnostics(runtime_error)
+            categories = set(diagnostics.get("failure_categories") or [])
+            categories.add("runtime_provider_error")
+            categories.add(str(runtime_diagnostics["category"]))
+            diagnostics["failure_categories"] = sorted(categories)
+            diagnostics["runtime_error"] = runtime_diagnostics
+            item_summary["diagnostics"] = diagnostics
+        item_summary["_item_index"] = item_index
+        item_summary["_retryable"] = retryable
+        item_summary["_nonempty"] = bool(outputs)
+        item_summary["_runtime_error"] = runtime_error
+        return item_summary
+
+    async def _run_baseline_batch(
+        self,
+        *,
+        runner: DockerPrivateModelRunner,
+        retry_runner: DockerPrivateModelRunner,
+        scorer: QualificationStyleCompanyScorer,
+        window: Any,
+        run_start: float,
+    ) -> list[dict[str, Any]]:
+        """Run all benchmark ICPs concurrently, then retry transient failures.
+
+        First pass fans out at private_baseline_concurrency. Provider/infra
+        errors classified retryable are re-run for up to
+        private_baseline_provider_retry_rounds at the lower retry concurrency
+        (with the aggregate Exa budget re-spread by the retry runner env), so a
+        transient 429 never leaves a valid ICP scored 0. ICPs that still fail
+        keep their error and score 0 — aggregate semantics are unchanged.
+
+        Results are reassembled in benchmark_items order: score_summary_doc is
+        canonically hashed and the promotion gate consumes that hash, so
+        ordering must be deterministic regardless of completion order.
+        """
+        concurrency = self.config.private_baseline_concurrency
+        items = list(enumerate(window.benchmark_items, start=1))
+        total_icps = len(items)
+        executor = concurrent.futures.ThreadPoolExecutor(
+            # Retry rounds reuse this pool — size for whichever phase is wider.
+            max_workers=max(concurrency, self.config.private_baseline_retry_concurrency),
+            thread_name_prefix="baseline-icp",
+        )
+        try:
+            semaphore = asyncio.Semaphore(concurrency)
+
+            async def run_one(item_index: int, item: Mapping[str, Any]) -> dict[str, Any]:
+                async with semaphore:
+                    return await self._run_baseline_icp(
+                        runner=runner,
+                        scorer=scorer,
+                        item=item,
+                        item_index=item_index,
+                        total_icps=total_icps,
+                        run_start=run_start,
+                        executor=executor,
+                    )
+
+            # Settle-then-raise: blocking docker waits cannot be cancelled, so a
+            # fail-fast gather would leave containers racing the failure path.
+            # Wait for every task to finish (bounded by the per-container
+            # timeout), then surface the first fatal error.
+            settled = await asyncio.gather(
+                *(run_one(item_index, item) for item_index, item in items),
+                return_exceptions=True,
+            )
+            fatal = [entry for entry in settled if isinstance(entry, BaseException)]
+            if fatal:
+                raise fatal[0]
+            results: dict[int, dict[str, Any]] = {entry["_item_index"]: entry for entry in settled}
+
+            retried_total = 0
+            recovered_total = 0
+            for round_no in range(1, self.config.private_baseline_provider_retry_rounds + 1):
+                pending = sorted(
+                    item_index for item_index, entry in results.items() if entry.get("_retryable")
+                )
+                if not pending:
+                    break
+                logger.info(
+                    format_worker_block(
+                        "RESEARCH LAB PRIVATE BASELINE RETRY ROUND",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("Round", f"{round_no}/{self.config.private_baseline_provider_retry_rounds}"),
+                            ("Retrying ICPs", len(pending)),
+                            ("ICP indexes", ", ".join(str(item_index) for item_index in pending)),
+                            ("Retry concurrency", self.config.private_baseline_retry_concurrency),
+                        ),
+                    )
+                )
+                retry_semaphore = asyncio.Semaphore(self.config.private_baseline_retry_concurrency)
+
+                async def retry_one(item_index: int) -> dict[str, Any]:
+                    async with retry_semaphore:
+                        return await self._run_baseline_icp(
+                            runner=retry_runner,
+                            scorer=scorer,
+                            item=window.benchmark_items[item_index - 1],
+                            item_index=item_index,
+                            total_icps=total_icps,
+                            run_start=run_start,
+                            executor=executor,
+                        )
+
+                retried = await asyncio.gather(
+                    *(retry_one(item_index) for item_index in pending),
+                    return_exceptions=True,
+                )
+                fatal = [entry for entry in retried if isinstance(entry, BaseException)]
+                if fatal:
+                    raise fatal[0]
+                recovered = 0
+                for entry in retried:
+                    if not entry.get("_runtime_error"):
+                        recovered += 1
+                    # Replace on success AND on repeat failure: the fresher
+                    # attempt carries the more current diagnostics.
+                    results[entry["_item_index"]] = entry
+                retried_total += len(pending)
+                recovered_total += recovered
+            unresolved = sorted(
+                item_index for item_index, entry in results.items() if entry.get("_runtime_error")
+            )
+            logger.info(
+                format_worker_block(
+                    "RESEARCH LAB PRIVATE BASELINE PARALLEL SUMMARY",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("ICPs", total_icps),
+                        ("Concurrency", concurrency),
+                        ("Retried", retried_total),
+                        ("Recovered", recovered_total),
+                        ("Unresolved provider errors", len(unresolved)),
+                        ("Unresolved ICP indexes", ", ".join(str(item_index) for item_index in unresolved) or "-"),
+                        ("Elapsed", f"{time.time() - run_start:.1f}s"),
+                    ),
+                )
+            )
+            return [results[item_index] for item_index in sorted(results)]
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _is_private_baseline_owner(self) -> bool:
         return self.config.scoring_worker_index == 0
@@ -2673,6 +3002,33 @@ class ResearchLabGatewayScoringWorker:
         if no_proxy:
             env["NO_PROXY"] = no_proxy
             env["no_proxy"] = no_proxy
+        return env
+
+    def _private_baseline_scoring_env(self) -> dict[str, str]:
+        """Candidate scoring env with the benchmark's dedicated Exa budget.
+
+        The daily baseline can run many model containers at once; EXA_MAX_RPS is
+        enforced per container, so the aggregate burst must be isolated from the
+        prod Exa key and split across the concurrent containers. Both overrides
+        are opt-in — unset config falls back to the prod values.
+        """
+        env = self._private_scoring_env()
+        if self.config.benchmark_exa_api_key:
+            env["EXA_API_KEY"] = self.config.benchmark_exa_api_key
+        if self.config.benchmark_exa_max_rps > 0:
+            env["EXA_MAX_RPS"] = str(self.config.benchmark_exa_max_rps)
+        return env
+
+    def _private_baseline_retry_scoring_env(self) -> dict[str, str]:
+        # Retry rounds run fewer containers; re-spread the SAME aggregate Exa
+        # budget across them so retried ICPs finish faster instead of idling at
+        # the first-pass per-container rate.
+        env = self._private_baseline_scoring_env()
+        if self.config.benchmark_exa_max_rps > 0:
+            aggregate = self.config.benchmark_exa_max_rps * self.config.private_baseline_concurrency
+            env["EXA_MAX_RPS"] = str(
+                round(aggregate / max(1, self.config.private_baseline_retry_concurrency), 3)
+            )
         return env
 
     def _missing_private_scoring_env(self) -> tuple[str, ...]:

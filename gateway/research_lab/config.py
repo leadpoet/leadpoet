@@ -329,6 +329,11 @@ class ResearchLabGatewayConfig:
     scoring_health_max_provider_error_rate: float = 0.25
     scoring_health_max_timeout_rate: float = 0.10
     private_baseline_rebenchmark_enabled: bool = False
+    private_baseline_concurrency: int = 1
+    private_baseline_retry_concurrency: int = 2
+    private_baseline_provider_retry_rounds: int = 2
+    benchmark_exa_api_key: str = ""
+    benchmark_exa_max_rps: float = 0.0
     auto_research_min_seconds: int = 600
     auto_research_max_seconds: int = 2700
     auto_research_min_iterations: int = 3
@@ -576,6 +581,23 @@ class ResearchLabGatewayConfig:
             private_baseline_rebenchmark_enabled=_truthy(
                 "RESEARCH_LAB_PRIVATE_BASELINE_REBENCHMARK_ENABLED",
                 prod_on,
+            ),
+            private_baseline_concurrency=max(
+                1,
+                _int("RESEARCH_LAB_BENCHMARK_CONCURRENCY", 1),
+            ),
+            private_baseline_retry_concurrency=max(
+                1,
+                _int("RESEARCH_LAB_BENCHMARK_RETRY_CONCURRENCY", 2),
+            ),
+            private_baseline_provider_retry_rounds=max(
+                0,
+                _int("RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS", 2),
+            ),
+            benchmark_exa_api_key=os.getenv("RESEARCH_LAB_BENCHMARK_EXA_API_KEY", ""),
+            benchmark_exa_max_rps=max(
+                0.0,
+                _float("RESEARCH_LAB_BENCHMARK_EXA_MAX_RPS", 0.0),
             ),
             auto_research_min_seconds=max(0, _int("RESEARCH_LAB_AUTO_RESEARCH_MIN_SECONDS", 600)),
             auto_research_max_seconds=max(1, _int("RESEARCH_LAB_AUTO_RESEARCH_MAX_SECONDS", 2700)),
@@ -1155,6 +1177,11 @@ class ResearchLabGatewayConfig:
                     "max_timeout_rate": self.scoring_health_max_timeout_rate,
                 },
                 "private_baseline_rebenchmark_enabled": self.private_baseline_rebenchmark_enabled,
+                "private_baseline_concurrency": self.private_baseline_concurrency,
+                "private_baseline_retry_concurrency": self.private_baseline_retry_concurrency,
+                "private_baseline_provider_retry_rounds": self.private_baseline_provider_retry_rounds,
+                "benchmark_exa_key_configured": bool(self.benchmark_exa_api_key),
+                "benchmark_exa_max_rps": self.benchmark_exa_max_rps,
                 "auto_promotion_enabled": self.auto_promotion_enabled,
                 "auto_commit_enabled": self.auto_commit_enabled,
                 "private_repo_configured": bool(self.private_repo_url),

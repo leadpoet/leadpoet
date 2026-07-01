@@ -362,11 +362,16 @@ def main() -> int:
     if args.concurrency < 1 or args.icp_count < 1:
         print("ERROR: --concurrency and --icp-count must be >= 1")
         return 2
-    missing = [
-        name
-        for name in ("SCRAPINGDOG_API_KEY", "OPENROUTER_API_KEY")
-        if not os.getenv(name)
-    ]
+    # Same variant acceptance as the worker's _missing_private_scoring_env.
+    missing = []
+    if not (os.getenv("SCRAPINGDOG_API_KEY") or os.getenv("QUALIFICATION_SCRAPINGDOG_API_KEY")):
+        missing.append("SCRAPINGDOG_API_KEY or QUALIFICATION_SCRAPINGDOG_API_KEY")
+    if not (
+        os.getenv("OPENROUTER_API_KEY")
+        or os.getenv("QUALIFICATION_OPENROUTER_API_KEY")
+        or os.getenv("OPENROUTER_KEY")
+    ):
+        missing.append("OPENROUTER_API_KEY or QUALIFICATION_OPENROUTER_API_KEY or OPENROUTER_KEY")
     if not (args.exa_api_key or os.getenv("EXA_API_KEY")):
         missing.append("EXA_API_KEY (or --exa-api-key / RESEARCH_LAB_BENCHMARK_EXA_API_KEY)")
     if missing:

@@ -949,6 +949,42 @@ class ResearchLabPromotionController:
         active = await load_active_private_model(self.config, register_bootstrap=True)
         active_parent = active.artifact.model_artifact_hash
 
+        # Re-drive idempotency: a candidate that already merged must never
+        # merge again, and replay must not insert duplicate promotion_checked
+        # events. Checked before the stale-parent branch because a merged
+        # candidate's own merge makes its parent stale.
+        merged_event = await candidate_already_promoted(str(candidate["candidate_id"]))
+        if merged_event is not None:
+            logger.info(
+                "research_lab_promotion_already_promoted candidate=%s promotion_event=%s",
+                _short_ref(candidate["candidate_id"]),
+                _short_ref(merged_event.get("promotion_event_id")),
+            )
+            private_source_status = await self._maybe_finalize_missing_private_source_push(
+                candidate=candidate,
+                score_bundle_row=score_bundle_row,
+                score_bundle=score_bundle,
+                active=active,
+                candidate_parent=candidate_parent,
+                rolling_window_hash=rolling_window_hash,
+                improvement_points=improvement_points,
+                threshold=threshold,
+            )
+            reward_status = await self._maybe_finalize_missing_champion_reward(
+                candidate=candidate,
+                score_bundle_row=score_bundle_row,
+                score_bundle=score_bundle,
+                improvement_points=improvement_points,
+                threshold=threshold,
+            )
+            return {
+                "status": "already_promoted",
+                "promotion_event_id": str(merged_event.get("promotion_event_id") or ""),
+                "private_model_version_id": str(merged_event.get("private_model_version_id") or ""),
+                "private_source_status": private_source_status,
+                **reward_status,
+            }
+
         await create_candidate_promotion_event(
             candidate_id=str(candidate["candidate_id"]),
             source_score_bundle_id=score_bundle_id,
@@ -1028,41 +1064,6 @@ class ResearchLabPromotionController:
                 },
             )
             return {"status": "rejected_below_threshold"}
-
-        # Re-drive idempotency: a candidate that already merged must never
-        # merge again. Checked before the stale-parent branch because a merged
-        # candidate's own merge makes its parent stale.
-        merged_event = await candidate_already_promoted(str(candidate["candidate_id"]))
-        if merged_event is not None:
-            logger.info(
-                "research_lab_promotion_already_promoted candidate=%s promotion_event=%s",
-                _short_ref(candidate["candidate_id"]),
-                _short_ref(merged_event.get("promotion_event_id")),
-            )
-            private_source_status = await self._maybe_finalize_missing_private_source_push(
-                candidate=candidate,
-                score_bundle_row=score_bundle_row,
-                score_bundle=score_bundle,
-                active=active,
-                candidate_parent=candidate_parent,
-                rolling_window_hash=rolling_window_hash,
-                improvement_points=improvement_points,
-                threshold=threshold,
-            )
-            reward_status = await self._maybe_finalize_missing_champion_reward(
-                candidate=candidate,
-                score_bundle_row=score_bundle_row,
-                score_bundle=score_bundle,
-                improvement_points=improvement_points,
-                threshold=threshold,
-            )
-            return {
-                "status": "already_promoted",
-                "promotion_event_id": str(merged_event.get("promotion_event_id") or ""),
-                "private_model_version_id": str(merged_event.get("private_model_version_id") or ""),
-                "private_source_status": private_source_status,
-                **reward_status,
-            }
 
         if candidate_parent != active_parent:
             await create_candidate_promotion_event(

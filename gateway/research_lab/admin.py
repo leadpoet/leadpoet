@@ -456,8 +456,14 @@ async def _promote_scored_candidate(
         score_bundle=dict(score_bundle),
         bypass_gates=bypass_gates,
     )
+    ok = result.get("status") == "merged"
+    if result.get("status") == "already_promoted":
+        private_source = result.get("private_source_status")
+        private_status = private_source.get("status") if isinstance(private_source, Mapping) else ""
+        reward_status = str(result.get("champion_reward_status") or "")
+        ok = private_status != "failed" and reward_status in {"created", "already_created"}
     return {
-        "ok": result.get("status") == "merged",
+        "ok": ok,
         "action": "promote-scored-candidate",
         "dry_run": False,
         "planned": planned,

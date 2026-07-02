@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Single code-level default for the Research Lab loop-start fee. Operators can
 # still override it at runtime with RESEARCH_LAB_LOOP_START_FEE_USD.
-DEFAULT_LOOP_START_FEE_USD = 0.2
+DEFAULT_LOOP_START_FEE_USD = 2.0
 DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS = 300
 DEFAULT_HOSTED_WORKER_RETRYABLE_FAILURE_LIMIT = 3
 DEFAULT_PRIVATE_REPO_URL = ""

@@ -322,7 +322,7 @@ def _run(run_id: str, island: str, funded_usd: float, actual_usd: float) -> dict
         "run_day": "2026-06-20",
         "funded_compute_budget_usd": funded_usd,
         "actual_openrouter_cost_usd": actual_usd,
-        "loop_start_tao_fee_usd": 0.2,
+        "loop_start_tao_fee_usd": 2.0,
         "paid_research_loop": True,
         "valid_receipt": True,
         "verified_loop_start_payment": True,

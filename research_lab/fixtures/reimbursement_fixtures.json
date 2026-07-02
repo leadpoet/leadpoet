@@ -99,7 +99,7 @@
       "run_day": "2026-06-20",
       "funded_compute_budget_usd": 10,
       "actual_openrouter_cost_usd": 8,
-      "loop_start_tao_fee_usd": 0.2,
+      "loop_start_tao_fee_usd": 2.0,
       "paid_research_loop": true,
       "valid_receipt": true,
       "verified_loop_start_payment": true,
@@ -121,7 +121,7 @@
       "run_day": "2026-06-20",
       "funded_compute_budget_usd": 10,
       "actual_openrouter_cost_usd": 8,
-      "loop_start_tao_fee_usd": 0.2,
+      "loop_start_tao_fee_usd": 2.0,
       "paid_research_loop": true,
       "valid_receipt": true,
       "verified_loop_start_payment": true,
@@ -143,7 +143,7 @@
       "run_day": "2026-06-20",
       "funded_compute_budget_usd": 5,
       "actual_openrouter_cost_usd": 4,
-      "loop_start_tao_fee_usd": 0.2,
+      "loop_start_tao_fee_usd": 2.0,
       "paid_research_loop": true,
       "valid_receipt": true,
       "verified_loop_start_payment": true,
@@ -158,7 +158,7 @@
       "run_day": "2026-06-20",
       "funded_compute_budget_usd": 10,
       "actual_openrouter_cost_usd": 2,
-      "loop_start_tao_fee_usd": 0.2,
+      "loop_start_tao_fee_usd": 2.0,
       "paid_research_loop": true,
       "valid_receipt": true,
       "verified_loop_start_payment": true,
@@ -173,7 +173,7 @@
       "run_day": "2026-06-20",
       "funded_compute_budget_usd": 10,
       "actual_openrouter_cost_usd": 0,
-      "loop_start_tao_fee_usd": 0.2,
+      "loop_start_tao_fee_usd": 2.0,
       "paid_research_loop": true,
       "valid_receipt": true,
       "verified_loop_start_payment": true,
@@ -188,7 +188,7 @@
       "run_day": "2026-06-20",
       "funded_compute_budget_usd": 100,
       "actual_openrouter_cost_usd": 100,
-      "loop_start_tao_fee_usd": 0.2,
+      "loop_start_tao_fee_usd": 2.0,
       "paid_research_loop": true,
       "valid_receipt": true,
       "verified_loop_start_payment": true,
@@ -203,7 +203,7 @@
       "run_day": "2026-06-20",
       "funded_compute_budget_usd": 10,
       "actual_openrouter_cost_usd": 8,
-      "loop_start_tao_fee_usd": 0.2,
+      "loop_start_tao_fee_usd": 2.0,
       "paid_research_loop": false,
       "valid_receipt": false,
       "verified_loop_start_payment": false,
@@ -225,7 +225,7 @@
       "run_day": "2026-06-20",
       "funded_compute_budget_usd": 10,
       "actual_openrouter_cost_usd": 8,
-      "loop_start_tao_fee_usd": 0.2,
+      "loop_start_tao_fee_usd": 2.0,
       "voided": true
     },
     "duplicate": {
@@ -235,7 +235,7 @@
       "run_day": "2026-06-20",
       "funded_compute_budget_usd": 10,
       "actual_openrouter_cost_usd": 8,
-      "loop_start_tao_fee_usd": 0.2,
+      "loop_start_tao_fee_usd": 2.0,
       "duplicate": true
     },
     "novelty_rejected": {
@@ -245,7 +245,7 @@
       "run_day": "2026-06-20",
       "funded_compute_budget_usd": 10,
       "actual_openrouter_cost_usd": 8,
-      "loop_start_tao_fee_usd": 0.2,
+      "loop_start_tao_fee_usd": 2.0,
       "novelty_rejected": true
     },
     "self_cancelled": {
@@ -255,7 +255,7 @@
       "run_day": "2026-06-20",
       "funded_compute_budget_usd": 10,
       "actual_openrouter_cost_usd": 8,
-      "loop_start_tao_fee_usd": 0.2,
+      "loop_start_tao_fee_usd": 2.0,
       "self_cancelled_before_minimum_work": true
     },
     "banned": {
@@ -265,7 +265,7 @@
       "run_day": "2026-06-20",
       "funded_compute_budget_usd": 10,
       "actual_openrouter_cost_usd": 8,
-      "loop_start_tao_fee_usd": 0.2,
+      "loop_start_tao_fee_usd": 2.0,
       "banned_hotkey": true
     }
   },

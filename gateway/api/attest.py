@@ -12,11 +12,10 @@ Anyone (miners, validators, auditors) can call this endpoint to verify:
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import Any, Optional
 from datetime import datetime
-import os
-import subprocess
 
+from gateway.build_info import get_build_info
 from gateway.utils.tee_client import tee_client
 
 
@@ -33,36 +32,21 @@ class AttestationResponse(BaseModel):
     pcr1: Optional[str]  # Linux kernel measurement (hex)
     pcr2: Optional[str]  # Application measurement (hex)
     timestamp: str  # When attestation was retrieved
+    build_info: Optional[dict[str, Any]] = None
 
 
 def get_github_commit() -> Optional[str]:
     """
-    Get current GitHub commit hash.
-    
-    Tries:
-    1. GIT_COMMIT_HASH environment variable (set during deployment)
-    2. git rev-parse HEAD (if running in git repo)
-    
+    Get the current GitHub commit hash from gateway.build_info.
+
     Returns:
         Git commit hash or None if not available
     """
-    # Try environment variable first
-    commit = os.getenv("GIT_COMMIT_HASH")
-    if commit:
+    build_info = get_build_info()
+    commit = str(build_info.get("git_commit") or "").strip()
+    if build_info.get("is_commit_known") and commit:
         return commit
-    
-    # Try git command
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5
-        )
-        return result.stdout.strip()
-    except Exception:
-        return None
+    return None
 
 
 @router.get("/attest", response_model=AttestationResponse)
@@ -103,7 +87,8 @@ async def get_attestation():
         # Get attestation from TEE
         attestation_data = await tee_client.get_attestation()
         
-        # Get GitHub commit hash
+        # Get GitHub commit hash from the same source used by /build-info.
+        build_info = get_build_info()
         github_commit = get_github_commit()
         
         # Build response
@@ -115,7 +100,8 @@ async def get_attestation():
             pcr0=attestation_data.get("pcr0"),
             pcr1=attestation_data.get("pcr1"),
             pcr2=attestation_data.get("pcr2"),
-            timestamp=datetime.utcnow().isoformat() + "Z"
+            timestamp=datetime.utcnow().isoformat() + "Z",
+            build_info=build_info,
         )
         
         return response
@@ -171,4 +157,3 @@ async def attestation_health():
             "attestation_valid": False,
             "message": f"TEE unavailable: {str(e)}"
         }
-

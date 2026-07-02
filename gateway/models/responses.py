@@ -68,6 +68,7 @@ class HealthResponse(BaseModel):
     build_id: str
     github_commit: str
     timestamp: str
+    build_info: Optional[Dict[str, Any]] = None
 
 
 class ValidationResultResponse(BaseModel):
@@ -113,4 +114,3 @@ class ManifestResponse(BaseModel):
     status: str
     epoch_id: int
     manifest_root: str
-

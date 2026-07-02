@@ -74,8 +74,12 @@ if os.getenv("AWS_PROFILE") and os.getenv("LEADPOET_AWS_PROFILE_OVERRIDES_ENV_KE
 # ============================================================
 # Gateway Build Info (for reproducible builds)
 # ============================================================
-BUILD_ID = os.getenv("BUILD_ID", "dev-local")
-GITHUB_COMMIT = os.getenv("GITHUB_SHA", "unknown")
+# Import after dotenv/fallback env loading so env-provided build metadata wins.
+from gateway.build_info import get_build_info
+
+BUILD_INFO = get_build_info()
+BUILD_ID = str(BUILD_INFO.get("build_id") or "unknown")
+GITHUB_COMMIT = str(BUILD_INFO.get("git_commit") or "unknown")
 
 # ============================================================
 # Supabase PostgreSQL (Private DB + Transparency Log)
@@ -206,6 +210,8 @@ def print_config_summary():
     print("=" * 60)
     print(f"Build ID: {BUILD_ID}")
     print(f"GitHub Commit: {GITHUB_COMMIT}")
+    print(f"Build Info Source: {BUILD_INFO.get('commit_source')}")
+    print(f"Build Info File: {BUILD_INFO.get('build_info_path') or 'not found'}")
     print(f"Supabase URL: {SUPABASE_URL}")
     print(f"AWS S3 Bucket: {AWS_S3_BUCKET} ({AWS_S3_REGION})")
     print(f"Arweave Gateway: {ARWEAVE_GATEWAY_URL}")

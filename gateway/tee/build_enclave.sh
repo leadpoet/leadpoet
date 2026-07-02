@@ -18,9 +18,37 @@ echo "   Build context: ~/gateway/ (gateway root)"
 echo "   Dockerfile: ~/tee/Dockerfile.enclave"
 echo "   Attested runtime: ~/gateway/_attested_runtime"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GATEWAY_ROOT="${GATEWAY_ROOT:-$HOME/gateway}"
+BUILD_INFO_PATH="$GATEWAY_ROOT/BUILD_INFO.json"
+BUILD_INFO_SCRIPT="$SCRIPT_DIR/../../scripts/write_gateway_build_info.py"
+
+if [ ! -f "$BUILD_INFO_PATH" ] && [ -f "$BUILD_INFO_SCRIPT" ]; then
+  echo ""
+  echo "🧾 Generating gateway build info..."
+  REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+  python3 "$BUILD_INFO_SCRIPT" \
+    --repo-root "$REPO_ROOT" \
+    --output "$BUILD_INFO_PATH" \
+    --require-git-commit
+fi
+
+if [ -f "$BUILD_INFO_PATH" ]; then
+  echo ""
+  echo "🧾 Gateway build info:"
+  echo "   File: $BUILD_INFO_PATH"
+  grep -E '"(build_id|git_commit|git_branch|git_dirty|build_time_utc)"' "$BUILD_INFO_PATH" || true
+else
+  echo ""
+  echo "⚠️  WARNING: $BUILD_INFO_PATH is missing; live commit will be reported as unknown."
+  if [ "${GATEWAY_REQUIRE_KNOWN_BUILD_INFO:-false}" = "true" ]; then
+    echo "ERROR: GATEWAY_REQUIRE_KNOWN_BUILD_INFO=true and no BUILD_INFO.json was found" >&2
+    exit 1
+  fi
+fi
+
 # Stage top-level runtime packages into the gateway build context so both PCR0
 # and the gateway TEE code_hash cover the code actually imported at runtime.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bash "$SCRIPT_DIR/stage_attested_runtime.sh"
 
 # Force fresh build (no cache) to ensure latest code is included

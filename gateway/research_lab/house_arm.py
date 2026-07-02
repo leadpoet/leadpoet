@@ -43,8 +43,27 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+# When admin/house-arm commands are launched from /home/ec2-user/gateway, the
+# gateway package directory shadows the shared top-level research_lab package.
+_GATEWAY_ROOT = Path(__file__).resolve().parents[1]
+_PACKAGE_PARENT = Path(__file__).resolve().parents[2]
+_package_parent_str = str(_PACKAGE_PARENT)
+if _package_parent_str in sys.path:
+    sys.path.remove(_package_parent_str)
+sys.path.insert(0, _package_parent_str)
+_existing_research_lab = sys.modules.get("research_lab")
+_existing_file = str(getattr(_existing_research_lab, "__file__", "") or "")
+if _existing_file:
+    try:
+        if os.path.commonpath([str(Path(_existing_file).resolve()), str(_GATEWAY_ROOT)]) == str(_GATEWAY_ROOT):
+            sys.modules.pop("research_lab", None)
+    except (OSError, ValueError):
+        pass
 
 from research_lab.baseline_arm_ops import (
     BASELINE_DAILY_BUDGET_MAX_CENTS,

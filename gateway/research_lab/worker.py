@@ -3756,6 +3756,7 @@ class ResearchLabHostedWorker:
             promotion_events = await select_many(
                 "research_lab_candidate_promotion_events",
                 columns="candidate_id,event_type,promotion_status,event_doc,created_at",
+                filters=(),
                 order_by=(("created_at", True),),
                 limit=max(1, min(limit * 2, 400)),
             )

@@ -1452,8 +1452,17 @@ class ResearchLabPromotionController:
                 "branch_name": branch_name,
             }
         )
+        existing_attempt_events = await select_many(
+            "research_lab_private_repo_commit_events",
+            columns="commit_event_id,commit_status,created_at",
+            filters=(("candidate_id", candidate_id), ("score_bundle_id", score_bundle_id)),
+            order_by=(("created_at", True),),
+            limit=100,
+        )
+        source_push_attempt = len(existing_attempt_events) + 1
         event_base = {
             "source": "research_lab_source_push",
+            "source_push_attempt": source_push_attempt,
             "candidate_kind": "image_build",
             "candidate_model_artifact_hash": new_artifact.model_artifact_hash,
             "candidate_source_diff_hash": candidate.get("candidate_source_diff_hash"),
@@ -1521,6 +1530,7 @@ class ResearchLabPromotionController:
                     "error_hash": error_hash,
                     "error_class": type(exc).__name__,
                     "candidate_status_preserved": "scored",
+                    "source_push_attempt": source_push_attempt,
                     **failure_detail,
                 },
             )

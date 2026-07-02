@@ -409,7 +409,10 @@ class ResearchLabGatewayConfig:
     lab_champion_max_alpha_percent: float = 5.0
     lab_champion_placeholder_alpha_percent: float = 0.0001
     lab_champion_queue_trigger_ratio: float = 0.50
-    lab_champion_threshold_points: float = 2.0
+    # Deprecated compatibility field in public policy docs. The reward bar must
+    # mirror the merge bar (`improvement_threshold_points`) so a candidate cannot
+    # merge without earning the same champion reward eligibility threshold.
+    lab_champion_threshold_points: float = 1.0
     lab_champion_eval_days: int = 10
     # 2 matches the from_env default (fableanalysis bug #32); §6.4 recommends
     # raising to 4-6 only after benchmark-concurrency parity is verified.
@@ -502,6 +505,15 @@ class ResearchLabGatewayConfig:
             scoring_worker_index = 0
         if scoring_worker_index >= scoring_total_workers:
             scoring_worker_index = scoring_worker_index % scoring_total_workers
+        improvement_threshold_points = _improvement_threshold_points()
+        legacy_champion_threshold = os.getenv("RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS")
+        if legacy_champion_threshold not in (None, "", str(improvement_threshold_points)):
+            logger.warning(
+                "Ignoring deprecated RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS=%s; "
+                "champion reward threshold mirrors RESEARCH_LAB_IMPROVEMENT_THRESHOLD_POINTS=%s.",
+                legacy_champion_threshold,
+                improvement_threshold_points,
+            )
         return cls(
             api_enabled=_truthy("RESEARCH_LAB_GATEWAY_API_ENABLED", prod_on),
             production_writes_enabled=_truthy("RESEARCH_LAB_PRODUCTION_WRITES_ENABLED", prod_on),
@@ -764,7 +776,7 @@ class ResearchLabGatewayConfig:
                 1.0,
                 max(0.0, _float("RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO", 0.50)),
             ),
-            lab_champion_threshold_points=max(0.0, _float("RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS", 2.0)),
+            lab_champion_threshold_points=improvement_threshold_points,
             lab_champion_eval_days=max(1, _int("RESEARCH_LAB_CHAMPION_EVAL_DAYS", 10)),
             lab_champion_icps_per_day=max(1, _int("RESEARCH_LAB_CHAMPION_ICPS_PER_DAY", 2)),
             public_benchmark_public_icps_per_day=max(
@@ -790,7 +802,7 @@ class ResearchLabGatewayConfig:
                 if (value := _optional_int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_TOTAL")) is not None
                 else 4
             ),
-            improvement_threshold_points=_improvement_threshold_points(),
+            improvement_threshold_points=improvement_threshold_points,
             private_model_manifest_uri=os.getenv(
                 "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI",
                 "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json",

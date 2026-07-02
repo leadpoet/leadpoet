@@ -1921,8 +1921,21 @@ def _push_candidate_source_diff_to_repo(
                 raise RepoHeadMismatchError(head=head, expected_sha=active_sha)
 
         patch_path = tmp_dir / "candidate.patch"
-        patch_path.write_text(unified_diff, encoding="utf-8")
+        patch_text = unified_diff
+        patch_normalized = False
+        patch_path.write_text(patch_text, encoding="utf-8")
         check = _run_command_result(["git", "apply", "--check", str(patch_path)], cwd=worktree, timeout_seconds=30)
+        if check.returncode != 0 and "corrupt patch" in ((check.stderr or "") + (check.stdout or "")):
+            normalized = _normalize_unified_diff_hunk_headers(patch_text)
+            if normalized != patch_text:
+                patch_text = normalized
+                patch_normalized = True
+                patch_path.write_text(patch_text, encoding="utf-8")
+                check = _run_command_result(
+                    ["git", "apply", "--check", str(patch_path)],
+                    cwd=worktree,
+                    timeout_seconds=30,
+                )
         if check.returncode != 0:
             reverse = _run_command_result(
                 ["git", "apply", "--reverse", "--check", str(patch_path)],
@@ -1936,6 +1949,7 @@ def _push_candidate_source_diff_to_repo(
                     "candidate_manifest_git_commit_sha": candidate_manifest_sha,
                     "target_files": target_files,
                     "source_diff_hash": source_diff_hash,
+                    "patch_normalized": patch_normalized,
                 }
             raise RuntimeError("candidate source diff does not apply to private source branch")
 
@@ -1948,6 +1962,7 @@ def _push_candidate_source_diff_to_repo(
                 "candidate_manifest_git_commit_sha": candidate_manifest_sha,
                 "target_files": target_files,
                 "source_diff_hash": source_diff_hash,
+                "patch_normalized": patch_normalized,
             }
         _run_command(["git", "config", "user.name", os.getenv("RESEARCH_LAB_PRIVATE_REPO_GIT_AUTHOR_NAME", "Leadpoet Research Lab")], cwd=worktree, timeout_seconds=10)
         _run_command(["git", "config", "user.email", os.getenv("RESEARCH_LAB_PRIVATE_REPO_GIT_AUTHOR_EMAIL", "research-lab@leadpoet.ai")], cwd=worktree, timeout_seconds=10)
@@ -1968,9 +1983,47 @@ def _push_candidate_source_diff_to_repo(
             "candidate_manifest_git_commit_sha": candidate_manifest_sha,
             "target_files": target_files,
             "source_diff_hash": source_diff_hash,
+            "patch_normalized": patch_normalized,
         }
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _normalize_unified_diff_hunk_headers(unified_diff: str) -> str:
+    """Repair incorrect hunk line counts while preserving diff contents."""
+    lines = unified_diff.splitlines()
+    hunk_header = re.compile(
+        r"^@@ -(?P<old_start>\d+)(?:,\d+)? \+(?P<new_start>\d+)(?:,\d+)? @@(?P<suffix>.*)$"
+    )
+    out = list(lines)
+    index = 0
+    while index < len(lines):
+        match = hunk_header.match(lines[index])
+        if not match:
+            index += 1
+            continue
+        old_count = 0
+        new_count = 0
+        cursor = index + 1
+        while cursor < len(lines) and not lines[cursor].startswith("diff --git ") and not lines[cursor].startswith("@@ "):
+            line = lines[cursor]
+            if line.startswith("\\"):
+                cursor += 1
+                continue
+            if line.startswith("+"):
+                new_count += 1
+            elif line.startswith("-"):
+                old_count += 1
+            else:
+                old_count += 1
+                new_count += 1
+            cursor += 1
+        out[index] = (
+            f"@@ -{match.group('old_start')},{old_count} "
+            f"+{match.group('new_start')},{new_count} @@{match.group('suffix')}"
+        )
+        index = cursor
+    return "\n".join(out) + ("\n" if unified_diff.endswith("\n") else "")
 
 
 def _safe_target_files(value: Any) -> list[str]:

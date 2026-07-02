@@ -13,7 +13,8 @@ import json
 import os
 from pathlib import Path
 import sys
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from leadpoet_verifier.golden_vectors import run_golden_vectors
@@ -217,6 +218,90 @@ def fetch_research_lab_evaluation_bundle_page(
     )
     with urlopen(request, timeout=timeout_seconds) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_research_lab_score_bundle(
+    gateway_url: str,
+    score_bundle_id: str,
+    *,
+    timeout_seconds: int = 20,
+) -> dict[str, Any]:
+    """Fetch one official Research Lab evaluation score bundle by id."""
+    base = gateway_url.rstrip("/")
+    safe_score_bundle_id = quote(str(score_bundle_id), safe="")
+    request = Request(
+        f"{base}/research-lab/evaluations/score-bundles/{safe_score_bundle_id}",
+        headers=_request_headers(include_internal_key=True),
+        method="GET",
+    )
+    with urlopen(request, timeout=timeout_seconds) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def allocation_referenced_score_bundle_ids(allocation_bundle: Mapping[str, Any] | None) -> list[str]:
+    """Return score bundles that are evidence for live allocation obligations."""
+    if not isinstance(allocation_bundle, Mapping):
+        return []
+    source_state = allocation_bundle.get("source_state")
+    if not isinstance(source_state, Mapping):
+        return []
+
+    seen: set[str] = set()
+    score_bundle_ids: list[str] = []
+    for section in ("champion_obligations", "queued_champion_obligations"):
+        rows = source_state.get(section) or []
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            for key in ("score_bundle_id", "source_score_bundle_id", "derived_score_bundle_id"):
+                value = str(row.get(key) or "").strip()
+                if value.startswith("score_bundle:") and value not in seen:
+                    seen.add(value)
+                    score_bundle_ids.append(value)
+    return score_bundle_ids
+
+
+def merge_research_lab_evaluation_bundle_page(
+    page: Mapping[str, Any],
+    referenced_rows: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Append explicitly referenced score-bundle rows to an evaluation page."""
+    merged = dict(page)
+    current_rows = merged.get("score_bundles", [])
+    if not isinstance(current_rows, list):
+        return merged
+
+    rows = list(current_rows)
+    row_index_by_id: dict[str, int] = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            continue
+        bundle = row.get("score_bundle_doc") if isinstance(row.get("score_bundle_doc"), Mapping) else {}
+        score_bundle_id = str(row.get("score_bundle_id") or bundle.get("score_bundle_id") or "").strip()
+        if score_bundle_id:
+            row_index_by_id[score_bundle_id] = index
+
+    added = 0
+    for row in referenced_rows:
+        if not isinstance(row, Mapping):
+            continue
+        bundle = row.get("score_bundle_doc") if isinstance(row.get("score_bundle_doc"), Mapping) else {}
+        score_bundle_id = str(row.get("score_bundle_id") or bundle.get("score_bundle_id") or "").strip()
+        if score_bundle_id and score_bundle_id in row_index_by_id:
+            rows[row_index_by_id[score_bundle_id]] = dict(row)
+            continue
+        rows.append(dict(row))
+        added += 1
+        if score_bundle_id:
+            row_index_by_id[score_bundle_id] = len(rows) - 1
+
+    merged["score_bundles"] = rows
+    merged["count"] = len(rows)
+    if added:
+        merged["referenced_score_bundle_count"] = added
+    return merged
 
 
 def fetch_research_lab_audit_bundle(
@@ -436,6 +521,7 @@ def verify_research_lab_evaluation_bundle_page(
     page: Mapping[str, Any],
     *,
     flags: ResearchLabValidatorFlags | Mapping[str, Any] | None = None,
+    required_score_bundle_ids: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     validator_flags = flags if isinstance(flags, ResearchLabValidatorFlags) else ResearchLabValidatorFlags.from_mapping(flags)
     errors: list[str] = []
@@ -456,6 +542,7 @@ def verify_research_lab_evaluation_bundle_page(
 
     verified_inputs: list[dict[str, Any]] = []
     bundle_results: list[dict[str, Any]] = []
+    verified_score_bundle_ids: set[str] = set()
     ignored_bundle_count = 0
     for row in rows:
         if not isinstance(row, Mapping):
@@ -473,10 +560,39 @@ def verify_research_lab_evaluation_bundle_page(
         if not verification["passed"]:
             errors.extend(f"score_bundle:{verification.get('score_bundle_hash')}:{error}" for error in verification["errors"])
             continue
+        score_bundle_hash = str(verification.get("score_bundle_hash") or bundle.get("score_bundle_hash") or "")
+        canonical_score_bundle_id = (
+            "score_bundle:" + score_bundle_hash.split(":", 1)[1]
+            if score_bundle_hash.startswith("sha256:")
+            else ""
+        )
+        row_score_bundle_id = str(row.get("score_bundle_id") or bundle.get("score_bundle_id") or "").strip()
+        if row_score_bundle_id and canonical_score_bundle_id and row_score_bundle_id != canonical_score_bundle_id:
+            errors.append(f"score_bundle_id_hash_mismatch:{row_score_bundle_id}")
+            continue
+        if canonical_score_bundle_id:
+            verified_score_bundle_ids.add(canonical_score_bundle_id)
         try:
             verified_inputs.append(score_bundle_to_weight_input(bundle))
         except Exception as exc:
             errors.append(f"score_bundle_weight_input_failed:{str(exc)[:120]}")
+
+    required_ids = []
+    seen_required: set[str] = set()
+    for value in required_score_bundle_ids or ():
+        score_bundle_id = str(value or "").strip()
+        if score_bundle_id.startswith("score_bundle:") and score_bundle_id not in seen_required:
+            seen_required.add(score_bundle_id)
+            required_ids.append(score_bundle_id)
+    missing_required = [
+        score_bundle_id
+        for score_bundle_id in required_ids
+        if score_bundle_id not in verified_score_bundle_ids
+    ]
+    errors.extend(
+        f"missing_required_evaluation_score_bundle:{score_bundle_id}"
+        for score_bundle_id in missing_required
+    )
 
     if validator_flags.require_evaluation_verification_before_submit and not verified_inputs:
         errors.append("no_verified_evaluation_score_bundles")
@@ -488,6 +604,9 @@ def verify_research_lab_evaluation_bundle_page(
         "bundle_count": len(rows),
         "ignored_bundle_count": ignored_bundle_count,
         "verified_bundle_count": len(verified_inputs),
+        "verified_score_bundle_ids": sorted(verified_score_bundle_ids),
+        "required_score_bundle_ids": required_ids,
+        "missing_required_score_bundle_ids": missing_required,
         "verified_weight_inputs": verified_inputs,
         "bundle_results": bundle_results,
         "on_chain_submission_allowed": False,
@@ -767,6 +886,7 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
             "target_reimbursement_microusd": 3_240_000,
         }
     ]
+    eval_score_bundle_id = "score_bundle:" + eval_bundle["score_bundle_hash"].split(":", 1)[1]
     champion_obligations = [
         {
             "uid": 4,
@@ -774,7 +894,7 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
             "source_id": "champion_reward:test",
             "champion_reward_id": "champion_reward:test",
             "candidate_id": "candidate:" + "9" * 64,
-            "score_bundle_id": "score_bundle:" + eval_bundle["score_bundle_hash"].split(":", 1)[1],
+            "score_bundle_id": eval_score_bundle_id,
             "run_id": "44444444-4444-4444-8444-444444444444",
             "island": "generalist",
             "status": "active",
@@ -829,6 +949,103 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
         raise AssertionError("live allocation did not include reimbursement alpha")
     if float(allocation_component["allocation_doc"].get("champion_alpha_percent") or 0.0) <= 0:
         raise AssertionError("live allocation did not include champion alpha")
+    required_score_bundle_ids = allocation_referenced_score_bundle_ids(allocation_bundle)
+    if required_score_bundle_ids != [eval_score_bundle_id]:
+        raise AssertionError(f"allocation referenced score bundle ids diverged: {required_score_bundle_ids}")
+
+    empty_current_epoch_page = {
+        "schema_version": "1.0",
+        "bundle_type": "research_lab_evaluation_score_bundle_page",
+        "epoch": int(bundle["epoch"]),
+        "score_bundles": [],
+        "on_chain_submission_allowed": False,
+    }
+    missing_required_verification = verify_research_lab_evaluation_bundle_page(
+        empty_current_epoch_page,
+        flags={**fixture["validator_flags"], "RESEARCH_LAB_VALIDATOR_EVALUATION_VERIFY_ENABLED": True},
+        required_score_bundle_ids=required_score_bundle_ids,
+    )
+    if missing_required_verification["passed"] or eval_score_bundle_id not in missing_required_verification["missing_required_score_bundle_ids"]:
+        raise AssertionError("missing allocation-referenced score bundle was not rejected")
+
+    referenced_page = merge_research_lab_evaluation_bundle_page(
+        empty_current_epoch_page,
+        [
+            {
+                "score_bundle_id": eval_score_bundle_id,
+                "bundle_status": "scored",
+                "current_event_status": "scored",
+                "score_bundle_doc": eval_bundle,
+            }
+        ],
+    )
+    referenced_verification = verify_research_lab_evaluation_bundle_page(
+        referenced_page,
+        flags={**fixture["validator_flags"], "RESEARCH_LAB_VALIDATOR_EVALUATION_VERIFY_ENABLED": True},
+        required_score_bundle_ids=required_score_bundle_ids,
+    )
+    if not referenced_verification["passed"]:
+        raise AssertionError(
+            "allocation-referenced score bundle page did not verify: "
+            + "; ".join(referenced_verification["errors"])
+        )
+    if referenced_verification["verified_score_bundle_ids"] != [eval_score_bundle_id]:
+        raise AssertionError("allocation-referenced score bundle id was not verified")
+    replacement_page = merge_research_lab_evaluation_bundle_page(
+        {
+            **empty_current_epoch_page,
+            "score_bundles": [
+                {
+                    "score_bundle_id": eval_score_bundle_id,
+                    "bundle_status": "scored",
+                    "current_event_status": "scored",
+                    "score_bundle_doc": {
+                        **eval_bundle,
+                        "aggregates": {**eval_bundle["aggregates"], "candidate_score": 999.0},
+                    },
+                }
+            ],
+        },
+        [
+            {
+                "score_bundle_id": eval_score_bundle_id,
+                "bundle_status": "scored",
+                "current_event_status": "scored",
+                "score_bundle_doc": eval_bundle,
+            }
+        ],
+    )
+    replacement_verification = verify_research_lab_evaluation_bundle_page(
+        replacement_page,
+        flags={**fixture["validator_flags"], "RESEARCH_LAB_VALIDATOR_EVALUATION_VERIFY_ENABLED": True},
+        required_score_bundle_ids=required_score_bundle_ids,
+    )
+    if not replacement_verification["passed"]:
+        raise AssertionError(
+            "allocation-referenced score bundle replacement did not verify: "
+            + "; ".join(replacement_verification["errors"])
+        )
+    mismatched_row_id_page = merge_research_lab_evaluation_bundle_page(
+        empty_current_epoch_page,
+        [
+            {
+                "score_bundle_id": "score_bundle:" + "0" * 64,
+                "bundle_status": "scored",
+                "current_event_status": "scored",
+                "score_bundle_doc": eval_bundle,
+            }
+        ],
+    )
+    mismatched_row_id_verification = verify_research_lab_evaluation_bundle_page(
+        mismatched_row_id_page,
+        flags={**fixture["validator_flags"], "RESEARCH_LAB_VALIDATOR_EVALUATION_VERIFY_ENABLED": True},
+        required_score_bundle_ids=required_score_bundle_ids,
+    )
+    if mismatched_row_id_verification["passed"] or not any(
+        str(error).startswith("score_bundle_id_hash_mismatch:")
+        for error in mismatched_row_id_verification["errors"]
+    ):
+        raise AssertionError("mismatched score bundle row id was not rejected")
 
     tampered_allocation = {
         **allocation_bundle,

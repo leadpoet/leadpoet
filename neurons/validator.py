@@ -3421,11 +3421,14 @@ class Validator(BaseValidatorNeuron):
         try:
             from research_lab.validator_integration import (
                 ResearchLabValidatorFlags,
+                allocation_referenced_score_bundle_ids,
                 build_research_lab_allocation_component,
                 fetch_research_lab_evaluation_bundle_page,
+                fetch_research_lab_score_bundle,
                 build_research_lab_weight_component,
                 fetch_research_lab_allocation_bundle,
                 fetch_research_lab_shadow_bundle,
+                merge_research_lab_evaluation_bundle_page,
                 verify_research_lab_allocation_bundle,
                 verify_research_lab_evaluation_bundle_page,
                 verify_research_lab_shadow_bundle,
@@ -3490,6 +3493,7 @@ class Validator(BaseValidatorNeuron):
 
             print(f"   ✅ Research Lab shadow bundle verified: {verification.get('weight_vector_hash')}")
             allocation_component = None
+            allocation_bundle = None
             allocation_verification = None
             if flags.live_allocation_enabled():
                 print(f"   Fetching Research Lab live allocation for epoch {current_epoch}")
@@ -3528,7 +3532,36 @@ class Validator(BaseValidatorNeuron):
             if flags.evaluation_verify_enabled:
                 print(f"   Fetching Research Lab evaluation bundles for epoch {current_epoch}")
                 evaluation_page = await asyncio.to_thread(fetch_research_lab_evaluation_bundle_page, gateway_url, current_epoch)
-                evaluation_verification = verify_research_lab_evaluation_bundle_page(evaluation_page, flags=shadow_verify_flags)
+                required_score_bundle_ids = allocation_referenced_score_bundle_ids(allocation_bundle)
+                if required_score_bundle_ids:
+                    print(
+                        "   Fetching Research Lab allocation-referenced score bundles: "
+                        f"{len(required_score_bundle_ids)}"
+                    )
+                    referenced_rows = []
+                    for score_bundle_id in required_score_bundle_ids:
+                        try:
+                            referenced_rows.append(
+                                await asyncio.to_thread(
+                                    fetch_research_lab_score_bundle,
+                                    gateway_url,
+                                    score_bundle_id,
+                                )
+                            )
+                        except Exception as exc:
+                            print(
+                                "   ⚠️ Research Lab referenced score bundle fetch failed "
+                                f"({score_bundle_id}): {str(exc)[:160]}"
+                            )
+                    evaluation_page = merge_research_lab_evaluation_bundle_page(
+                        evaluation_page,
+                        referenced_rows,
+                    )
+                evaluation_verification = verify_research_lab_evaluation_bundle_page(
+                    evaluation_page,
+                    flags=shadow_verify_flags,
+                    required_score_bundle_ids=required_score_bundle_ids,
+                )
                 eval_artifact_path = write_research_lab_validator_artifact(
                     output_dir=Path("validator_weights"),
                     epoch=current_epoch,

@@ -14,15 +14,19 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from gateway.research_lab.bundles import contains_secret_material, sha256_json
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.config import ResearchLabGatewayConfig
+from gateway.research_lab.public_benchmarks import build_public_benchmark_report
 from gateway.research_lab.store import (
     canonical_hash,
     create_candidate_promotion_event,
     create_champion_reward_obligation,
+    create_private_model_benchmark_bundle,
     create_private_model_version,
     create_private_model_version_event,
     create_private_repo_commit_event,
+    create_public_benchmark_report,
     select_many,
     select_one,
 )
@@ -30,6 +34,7 @@ from leadpoet_verifier.economics import build_champion_reward_obligation
 from research_lab.eval import (
     PrivateModelArtifactManifest,
     load_private_artifact_manifest,
+    sign_digest_with_kms,
     validate_private_model_artifact_manifest,
 )
 
@@ -971,6 +976,21 @@ class ResearchLabPromotionController:
                 improvement_points=improvement_points,
                 threshold=threshold,
             )
+            benchmark_bridge_status: dict[str, Any] = {"status": "not_attempted"}
+            if not (
+                isinstance(private_source_status, Mapping)
+                and str(private_source_status.get("status") or "") == "failed"
+            ):
+                benchmark_bridge_status = await self._maybe_finalize_missing_promoted_benchmark_bridge(
+                    candidate=candidate,
+                    score_bundle_row=score_bundle_row,
+                    score_bundle=score_bundle,
+                    active=active,
+                    candidate_parent=candidate_parent,
+                    rolling_window_hash=rolling_window_hash,
+                    improvement_points=improvement_points,
+                    threshold=threshold,
+                )
             reward_status = await self._maybe_finalize_missing_champion_reward(
                 candidate=candidate,
                 score_bundle_row=score_bundle_row,
@@ -983,6 +1003,7 @@ class ResearchLabPromotionController:
                 "promotion_event_id": str(merged_event.get("promotion_event_id") or ""),
                 "private_model_version_id": str(merged_event.get("private_model_version_id") or ""),
                 "private_source_status": private_source_status,
+                "benchmark_bridge_status": benchmark_bridge_status,
                 **reward_status,
             }
 
@@ -1344,6 +1365,20 @@ class ResearchLabPromotionController:
         )
         if private_repo_result.get("status") == "failed":
             return private_repo_result
+        benchmark_bridge = await self._create_promoted_candidate_benchmark_bridge(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            score_bundle=score_bundle,
+            new_artifact=new_artifact,
+            rolling_window_hash=rolling_window_hash,
+            improvement_points=improvement_points,
+            threshold=threshold,
+        )
+        source_benchmark_bundle_id = (
+            str(benchmark_bridge.get("benchmark_bundle_id") or "")
+            if isinstance(benchmark_bridge, Mapping)
+            else ""
+        ) or None
         # Bug #3 design note: the one-active DB guard (scripts/60) enforces at
         # most one version whose latest event is 'active', so the order here
         # must stay supersede -> create (create-first would conflict with the
@@ -1366,6 +1401,7 @@ class ResearchLabPromotionController:
                 manifest_uri=new_artifact.manifest_uri,
                 source_candidate_id=str(candidate["candidate_id"]),
                 source_score_bundle_id=str(score_bundle_row["score_bundle_id"]),
+                source_benchmark_bundle_id=source_benchmark_bundle_id,
                 redacted_version_doc={
                     "source": "gateway_code_edit_image_build",
                     "model_artifact_hash": new_artifact.model_artifact_hash,
@@ -1374,6 +1410,7 @@ class ResearchLabPromotionController:
                     "component_registry_version": new_artifact.component_registry_version,
                     "scoring_adapter_version": new_artifact.scoring_adapter_version,
                     "candidate_source_diff_hash": candidate.get("candidate_source_diff_hash"),
+                    "source_benchmark_bundle_id": source_benchmark_bundle_id,
                 },
                 version_status="active",
                 reason="research_lab_image_build_candidate_promoted",
@@ -1410,6 +1447,13 @@ class ResearchLabPromotionController:
             event_doc={
                 "new_model_artifact_hash": new_artifact.model_artifact_hash,
                 "candidate_kind": "image_build",
+                "derived_benchmark_bundle_id": source_benchmark_bundle_id,
+                "derived_public_report_id": (
+                    str(benchmark_bridge.get("public_report_id") or "")
+                    if isinstance(benchmark_bridge, Mapping)
+                    else ""
+                ),
+                "source_score_bundle_id": str(score_bundle_row["score_bundle_id"]),
             },
         )
         reward_status = await self._maybe_create_champion_reward(
@@ -1422,8 +1466,270 @@ class ResearchLabPromotionController:
         return {
             "status": "merged",
             "private_model_version_id": str(version_row["private_model_version_id"]),
+            "benchmark_bridge_status": benchmark_bridge,
             **reward_status,
         }
+
+    async def _create_promoted_candidate_benchmark_bridge(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_row: Mapping[str, Any],
+        score_bundle: Mapping[str, Any],
+        new_artifact: PrivateModelArtifactManifest,
+        rolling_window_hash: str,
+        improvement_points: float,
+        threshold: float,
+    ) -> dict[str, Any]:
+        gate = (
+            score_bundle.get("private_holdout_gate")
+            if isinstance(score_bundle.get("private_holdout_gate"), Mapping)
+            else None
+        )
+        if not isinstance(gate, Mapping):
+            return {"status": "skipped_no_private_holdout_gate"}
+        if str(gate.get("decision") or "") != "private_holdout_approved" or not bool(
+            gate.get("private_holdout_evaluated")
+        ):
+            return {"status": "skipped_private_holdout_not_approved"}
+        if str(score_bundle.get("candidate_artifact_hash") or "") != new_artifact.model_artifact_hash:
+            raise RuntimeError("promoted benchmark bridge candidate artifact mismatch")
+
+        baseline_bundle_id = str(gate.get("baseline_benchmark_bundle_id") or "")
+        if not baseline_bundle_id:
+            raise RuntimeError("promoted benchmark bridge missing source baseline benchmark bundle id")
+        baseline_row = await select_one(
+            "research_lab_private_model_benchmark_current",
+            columns=(
+                "benchmark_bundle_id,benchmark_date,private_model_artifact_hash,"
+                "private_model_manifest_hash,rolling_window_hash,evaluation_epoch,"
+                "benchmark_attempt,benchmark_quality,aggregate_score,score_summary_doc,"
+                "current_benchmark_status,created_at"
+            ),
+            filters=(("benchmark_bundle_id", baseline_bundle_id),),
+        )
+        if not isinstance(baseline_row, Mapping):
+            raise RuntimeError(f"promoted benchmark bridge source baseline not found: {baseline_bundle_id}")
+        if str(baseline_row.get("current_benchmark_status") or "") != "completed":
+            raise RuntimeError(
+                "promoted benchmark bridge source baseline is not completed: "
+                f"{baseline_bundle_id}"
+            )
+        baseline_doc = (
+            baseline_row.get("score_summary_doc")
+            if isinstance(baseline_row.get("score_summary_doc"), Mapping)
+            else None
+        )
+        if not isinstance(baseline_doc, Mapping):
+            raise RuntimeError("promoted benchmark bridge source baseline summary missing")
+        source_window = str(baseline_row.get("rolling_window_hash") or "")
+        if source_window and rolling_window_hash and source_window != rolling_window_hash:
+            raise RuntimeError("promoted benchmark bridge rolling window mismatch")
+
+        candidate_total = _optional_float(gate.get("candidate_total_score"))
+        if candidate_total is None:
+            raise RuntimeError("promoted benchmark bridge missing candidate total score")
+        benchmark_date = str(baseline_row.get("benchmark_date") or "")
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", benchmark_date):
+            raise RuntimeError("promoted benchmark bridge source benchmark date missing")
+
+        benchmark_attempt = 0
+        existing_benchmark = await self._existing_promoted_benchmark_row(
+            benchmark_date=benchmark_date,
+            private_model_manifest_hash=new_artifact.manifest_hash,
+            rolling_window_hash=rolling_window_hash,
+            benchmark_attempt=benchmark_attempt,
+        )
+        per_icp_summaries = _candidate_per_icp_summaries_from_score_bundle(
+            score_bundle=score_bundle,
+            baseline_score_summary_doc=baseline_doc,
+        )
+        if not per_icp_summaries:
+            raise RuntimeError("promoted benchmark bridge score bundle has no per-ICP results")
+        visibility_split = _candidate_visibility_split_from_baseline(
+            baseline_score_summary_doc=baseline_doc,
+            per_icp_summaries=per_icp_summaries,
+            rolling_window_hash=rolling_window_hash,
+        )
+        promotion_metric = promotion_improvement_metric(score_bundle).event_doc()
+        source_score_bundle_id = str(score_bundle_row.get("score_bundle_id") or "")
+        score_summary_doc = {
+            "schema_version": "1.0",
+            "benchmark_quality": "passed",
+            "benchmark_attempt": benchmark_attempt,
+            "rolling_window_hash": rolling_window_hash,
+            "per_icp_summaries": per_icp_summaries,
+            "visibility_split": visibility_split,
+            "aggregate_score": round(float(candidate_total), 6),
+            "source": "promoted_candidate_score_bundle",
+            "derived_from_candidate_score": True,
+            "source_score_bundle_id": source_score_bundle_id,
+            "source_candidate_id": str(candidate["candidate_id"]),
+            "source_baseline_benchmark_bundle_id": baseline_bundle_id,
+            "source_baseline_score_summary_hash": canonical_hash(baseline_doc),
+            "reimbursement_preserved": True,
+            "supersedes_until_daily_rebenchmark": True,
+            "promotion_metric": promotion_metric,
+        }
+
+        if existing_benchmark is not None:
+            benchmark = existing_benchmark
+            benchmark_status = "already_exists"
+        else:
+            summary_hash = canonical_hash(score_summary_doc)
+            signature_ref = await asyncio.to_thread(
+                sign_digest_with_kms,
+                key_id=self.config.score_bundle_kms_key_id,
+                digest_hash=summary_hash,
+                signature_uri_prefix=self.config.score_bundle_signature_uri_prefix,
+            )
+            benchmark, _benchmark_event = await create_private_model_benchmark_bundle(
+                benchmark_date=benchmark_date,
+                private_model_artifact_hash=new_artifact.model_artifact_hash,
+                private_model_manifest_hash=new_artifact.manifest_hash,
+                rolling_window_hash=rolling_window_hash,
+                evaluation_epoch=int(
+                    score_bundle.get("evaluation_epoch")
+                    or baseline_row.get("evaluation_epoch")
+                    or self.config.evaluation_epoch
+                    or 0
+                ),
+                benchmark_attempt=benchmark_attempt,
+                benchmark_quality="passed",
+                aggregate_score=float(candidate_total),
+                scoring_worker_ref=self.worker_ref,
+                proxy_ref_hash=None,
+                signature_ref=signature_ref,
+                score_summary_doc=score_summary_doc,
+            )
+            benchmark_status = "created"
+
+        public_report = await self._create_or_reuse_promoted_public_report(
+            benchmark_date=benchmark_date,
+            benchmark_bundle_id=str(benchmark["benchmark_bundle_id"]),
+            new_artifact=new_artifact,
+            rolling_window_hash=rolling_window_hash,
+            aggregate_score=float(candidate_total),
+            benchmark_attempt=benchmark_attempt,
+            per_icp_summaries=per_icp_summaries,
+            visibility_split=visibility_split,
+            baseline_bundle_id=baseline_bundle_id,
+            source_score_bundle_id=source_score_bundle_id,
+            source_candidate_id=str(candidate["candidate_id"]),
+            promotion_metric=promotion_metric,
+        )
+        return {
+            "status": benchmark_status,
+            "benchmark_bundle_id": str(benchmark["benchmark_bundle_id"]),
+            "public_report_id": str(public_report.get("report_id") or ""),
+            "source_score_bundle_id": source_score_bundle_id,
+            "source_baseline_benchmark_bundle_id": baseline_bundle_id,
+            "aggregate_score": round(float(candidate_total), 6),
+        }
+
+    async def _existing_promoted_benchmark_row(
+        self,
+        *,
+        benchmark_date: str,
+        private_model_manifest_hash: str,
+        rolling_window_hash: str,
+        benchmark_attempt: int,
+    ) -> dict[str, Any] | None:
+        rows = await select_many(
+            "research_lab_private_model_benchmark_current",
+            columns=(
+                "benchmark_bundle_id,benchmark_date,private_model_manifest_hash,"
+                "rolling_window_hash,benchmark_attempt,current_benchmark_status,aggregate_score"
+            ),
+            filters=(
+                ("benchmark_date", benchmark_date),
+                ("private_model_manifest_hash", private_model_manifest_hash),
+                ("rolling_window_hash", rolling_window_hash),
+                ("benchmark_attempt", benchmark_attempt),
+            ),
+            order_by=(("created_at", True),),
+            limit=1,
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        if str(row.get("current_benchmark_status") or "") != "completed":
+            raise RuntimeError("promoted benchmark bridge found non-completed existing benchmark row")
+        return row
+
+    async def _create_or_reuse_promoted_public_report(
+        self,
+        *,
+        benchmark_date: str,
+        benchmark_bundle_id: str,
+        new_artifact: PrivateModelArtifactManifest,
+        rolling_window_hash: str,
+        aggregate_score: float,
+        benchmark_attempt: int,
+        per_icp_summaries: Sequence[Mapping[str, Any]],
+        visibility_split: Mapping[str, Any],
+        baseline_bundle_id: str,
+        source_score_bundle_id: str,
+        source_candidate_id: str,
+        promotion_metric: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        existing_reports = await select_many(
+            "research_lab_public_benchmark_report_current",
+            columns=(
+                "report_id,benchmark_bundle_id,benchmark_date,private_model_manifest_hash,"
+                "rolling_window_hash,benchmark_attempt,current_report_status,aggregate_score"
+            ),
+            filters=(
+                ("benchmark_date", benchmark_date),
+                ("private_model_manifest_hash", new_artifact.manifest_hash),
+                ("rolling_window_hash", rolling_window_hash),
+                ("benchmark_attempt", benchmark_attempt),
+            ),
+            order_by=(("created_at", True),),
+            limit=1,
+        )
+        if existing_reports:
+            row = existing_reports[0]
+            if str(row.get("current_report_status") or "") != "published":
+                raise RuntimeError("promoted benchmark bridge found non-published existing public report row")
+            return row
+
+        source_public_doc: dict[str, Any] | None = None
+        source_reports = await select_many(
+            "research_lab_public_benchmark_report_current",
+            columns="report_id,benchmark_bundle_id,report_doc,current_report_status,created_at",
+            filters=(("benchmark_bundle_id", baseline_bundle_id), ("current_report_status", "published")),
+            order_by=(("created_at", True),),
+            limit=1,
+        )
+        if source_reports:
+            raw_doc = source_reports[0].get("report_doc")
+            if isinstance(raw_doc, Mapping):
+                source_public_doc = dict(raw_doc)
+        report_doc = _build_promoted_public_benchmark_report_doc(
+            benchmark_date=benchmark_date,
+            rolling_window_hash=rolling_window_hash,
+            aggregate_score=aggregate_score,
+            per_icp_summaries=per_icp_summaries,
+            visibility_split=visibility_split,
+            source_public_report_doc=source_public_doc,
+            source_score_bundle_id=source_score_bundle_id,
+            source_candidate_id=source_candidate_id,
+            source_baseline_benchmark_bundle_id=baseline_bundle_id,
+            promotion_metric=promotion_metric,
+        )
+        report, _report_event = await create_public_benchmark_report(
+            benchmark_date=benchmark_date,
+            benchmark_bundle_id=benchmark_bundle_id,
+            private_model_artifact_hash=new_artifact.model_artifact_hash,
+            private_model_manifest_hash=new_artifact.manifest_hash,
+            rolling_window_hash=rolling_window_hash,
+            aggregate_score=aggregate_score,
+            benchmark_attempt=benchmark_attempt,
+            benchmark_quality="passed",
+            report_doc=report_doc,
+        )
+        return report
 
     async def _maybe_push_private_repo_candidate(
         self,
@@ -1704,6 +2010,104 @@ class ResearchLabPromotionController:
             threshold=threshold,
         )
 
+    async def _maybe_finalize_missing_promoted_benchmark_bridge(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_row: Mapping[str, Any],
+        score_bundle: Mapping[str, Any],
+        active: ActivePrivateModel,
+        candidate_parent: str,
+        rolling_window_hash: str,
+        improvement_points: float,
+        threshold: float,
+    ) -> dict[str, Any]:
+        manifest_doc = candidate.get("candidate_model_manifest_doc")
+        if not isinstance(manifest_doc, Mapping):
+            return {"status": "skipped_candidate_manifest_missing"}
+        try:
+            new_artifact = PrivateModelArtifactManifest.from_mapping(manifest_doc)
+            errors = validate_private_model_artifact_manifest(new_artifact)
+            if errors:
+                return {"status": "skipped_candidate_manifest_invalid", "errors": errors[:5]}
+        except Exception as exc:
+            return {"status": "skipped_candidate_manifest_invalid", "error": type(exc).__name__}
+        bridge = await self._create_promoted_candidate_benchmark_bridge(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            score_bundle=score_bundle,
+            new_artifact=new_artifact,
+            rolling_window_hash=rolling_window_hash,
+            improvement_points=improvement_points,
+            threshold=threshold,
+        )
+        await self._record_promoted_benchmark_bridge_event(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            active=active,
+            candidate_parent=candidate_parent,
+            rolling_window_hash=rolling_window_hash,
+            improvement_points=improvement_points,
+            threshold=threshold,
+            bridge=bridge,
+        )
+        return bridge
+
+    async def _record_promoted_benchmark_bridge_event(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_row: Mapping[str, Any],
+        active: ActivePrivateModel,
+        candidate_parent: str,
+        rolling_window_hash: str,
+        improvement_points: float,
+        threshold: float,
+        bridge: Mapping[str, Any],
+    ) -> None:
+        reason = "promoted_candidate_benchmark_bridge_completed"
+        existing_events = await select_many(
+            "research_lab_candidate_promotion_events",
+            columns="promotion_event_id,event_doc,created_at",
+            filters=(
+                ("candidate_id", str(candidate["candidate_id"])),
+                ("source_score_bundle_id", str(score_bundle_row["score_bundle_id"])),
+                ("event_type", "promotion_checked"),
+            ),
+            order_by=(("created_at", True),),
+            limit=100,
+        )
+        for event in existing_events:
+            doc = event.get("event_doc") if isinstance(event.get("event_doc"), Mapping) else {}
+            if (
+                str(doc.get("reason") or "") == reason
+                and str(doc.get("derived_benchmark_bundle_id") or "")
+                == str(bridge.get("benchmark_bundle_id") or "")
+            ):
+                return
+        await create_candidate_promotion_event(
+            candidate_id=str(candidate["candidate_id"]),
+            source_score_bundle_id=str(score_bundle_row["score_bundle_id"]),
+            event_type="promotion_checked",
+            promotion_status="checked",
+            active_parent_artifact_hash=active.artifact.model_artifact_hash,
+            candidate_parent_artifact_hash=candidate_parent,
+            rolling_window_hash=rolling_window_hash,
+            improvement_points=improvement_points,
+            threshold_points=threshold,
+            worker_ref=self.worker_ref,
+            event_doc={
+                "reason": reason,
+                "derived_benchmark_bundle_id": str(bridge.get("benchmark_bundle_id") or ""),
+                "derived_public_report_id": str(bridge.get("public_report_id") or ""),
+                "source_score_bundle_id": str(score_bundle_row["score_bundle_id"]),
+                "source_baseline_benchmark_bundle_id": str(
+                    bridge.get("source_baseline_benchmark_bundle_id") or ""
+                ),
+                "bridge_status": str(bridge.get("status") or ""),
+            },
+        )
+
     async def _maybe_finalize_missing_champion_reward(
         self,
         *,
@@ -1882,6 +2286,406 @@ def _daily_counts_from_score_bundle(score_bundle: Mapping[str, Any]) -> dict[str
         if day:
             counts[day] = counts.get(day, 0) + 1
     return counts
+
+
+def _candidate_per_icp_summaries_from_score_bundle(
+    *,
+    score_bundle: Mapping[str, Any],
+    baseline_score_summary_doc: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
+    raw_results = aggregates.get("per_icp_results")
+    if not isinstance(raw_results, Sequence) or isinstance(raw_results, (str, bytes, bytearray)):
+        return []
+    results_by_ref: dict[str, Mapping[str, Any]] = {}
+    for item in raw_results:
+        if not isinstance(item, Mapping):
+            continue
+        ref = str(item.get("icp_ref") or item.get("icp_hash") or "").strip()
+        if ref and ref not in results_by_ref:
+            results_by_ref[ref] = item
+    if not results_by_ref:
+        return []
+
+    baseline_by_ref = _baseline_summary_by_ref(baseline_score_summary_doc)
+    ordered_refs = _baseline_visibility_refs(baseline_score_summary_doc)
+    for ref in baseline_by_ref:
+        if ref not in ordered_refs:
+            ordered_refs.append(ref)
+    for ref in results_by_ref:
+        if ref not in ordered_refs:
+            ordered_refs.append(ref)
+
+    summaries: list[dict[str, Any]] = []
+    for ref in ordered_refs:
+        result = results_by_ref.get(ref)
+        if result is None:
+            continue
+        baseline = baseline_by_ref.get(ref, {})
+        scores = _candidate_score_values(result)
+        diagnostics = _candidate_result_diagnostics(result, scores=scores)
+        summaries.append(
+            {
+                "icp_ref": ref,
+                "icp_hash": str(result.get("icp_hash") or baseline.get("icp_hash") or ""),
+                "score": round(_candidate_icp_score(scores), 6),
+                "company_count": len(scores),
+                "industry": _summary_bucket_value(baseline, "industry"),
+                "sub_industry": _summary_bucket_value(baseline, "sub_industry"),
+                "country": _summary_bucket_value(baseline, "country"),
+                "geography_bucket": _summary_bucket_value(baseline, "geography_bucket"),
+                "company_size_bucket": _summary_bucket_value(baseline, "company_size_bucket"),
+                "intent_category_bucket": _summary_bucket_value(baseline, "intent_category_bucket"),
+                "diagnostics": diagnostics,
+            }
+        )
+    return summaries
+
+
+def _baseline_summary_by_ref(doc: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    rows: dict[str, Mapping[str, Any]] = {}
+    summaries = doc.get("per_icp_summaries")
+    if isinstance(summaries, Sequence) and not isinstance(summaries, (str, bytes, bytearray)):
+        for item in summaries:
+            if not isinstance(item, Mapping):
+                continue
+            ref = str(item.get("icp_ref") or "").strip()
+            if ref and ref not in rows:
+                rows[ref] = item
+    return rows
+
+
+def _baseline_visibility_refs(doc: Mapping[str, Any]) -> list[str]:
+    split = doc.get("visibility_split") if isinstance(doc.get("visibility_split"), Mapping) else {}
+    items = split.get("items") if isinstance(split.get("items"), Sequence) else []
+    refs: list[str] = []
+    if isinstance(items, Sequence) and not isinstance(items, (str, bytes, bytearray)):
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            ref = str(item.get("icp_ref") or "").strip()
+            if ref and ref not in refs:
+                refs.append(ref)
+    return refs
+
+
+def _summary_bucket_value(summary: Mapping[str, Any], key: str) -> str:
+    value = summary.get(key)
+    if value is None and key == "country":
+        value = summary.get("geography_bucket")
+    if value is None and key == "geography_bucket":
+        value = summary.get("country")
+    text = str(value or "").strip()
+    return text or "unspecified"
+
+
+def _candidate_score_values(result: Mapping[str, Any]) -> list[float]:
+    scores = result.get("candidate_company_scores")
+    if not isinstance(scores, Sequence) or isinstance(scores, (str, bytes, bytearray)):
+        return []
+    values: list[float] = []
+    for item in scores:
+        try:
+            values.append(float(item or 0.0))
+        except (TypeError, ValueError):
+            values.append(0.0)
+    return values
+
+
+def _candidate_icp_score(scores: Sequence[float]) -> float:
+    return float(sum(float(item or 0.0) for item in scores) / len(scores)) if scores else 0.0
+
+
+def _candidate_result_diagnostics(result: Mapping[str, Any], *, scores: Sequence[float]) -> dict[str, Any]:
+    failure_categories = _candidate_failure_categories(
+        str(result.get("failure_reason") or ""),
+        provider_excluded=bool(result.get("provider_excluded")),
+        score_count=len(scores),
+    )
+    scored = len(scores)
+    sourcing_failed = scored <= 0 or bool(result.get("provider_excluded"))
+    return {
+        "failure_categories": failure_categories,
+        "avg_icp_fit": 0.0,
+        "avg_intent_signal_final": 0.0,
+        "sourcing_failed": sourcing_failed,
+        "funnel": {
+            "sourced": scored,
+            "fit_pass": scored,
+            "verified": scored,
+            "intent_valid": scored,
+            "scored": scored,
+        },
+        "per_signal": {},
+        "evidence_types": {},
+        "rejection_reasons": {},
+    }
+
+
+def _candidate_failure_categories(
+    reason: str,
+    *,
+    provider_excluded: bool,
+    score_count: int,
+) -> list[str]:
+    categories: set[str] = set()
+    if provider_excluded:
+        categories.add("runtime_provider_error")
+    for token in [item.strip().lower() for item in str(reason or "").split(";") if item.strip()]:
+        if "provider" in token or "http_4" in token or "http_5" in token:
+            categories.add("runtime_provider_error")
+        elif "timeout" in token:
+            categories.add("runtime_timeout")
+        elif "zero_scoreable" in token:
+            categories.add("zero_scoreable_companies")
+        elif "zero_companies" in token:
+            categories.add("zero_company_results")
+        elif "parse" in token or "json" in token:
+            categories.add("parser_error")
+        elif "runtime" in token or "adapter" in token:
+            categories.add("model_runtime_error")
+        else:
+            categories.add("other_scoring_failure")
+    if score_count <= 0:
+        categories.add("zero_company_results")
+    return sorted(categories)
+
+
+def _candidate_visibility_split_from_baseline(
+    *,
+    baseline_score_summary_doc: Mapping[str, Any],
+    per_icp_summaries: Sequence[Mapping[str, Any]],
+    rolling_window_hash: str,
+) -> dict[str, Any]:
+    score_by_ref = {
+        str(item.get("icp_ref") or ""): float(item.get("score") or 0.0)
+        for item in per_icp_summaries
+        if str(item.get("icp_ref") or "").strip()
+    }
+    split = (
+        baseline_score_summary_doc.get("visibility_split")
+        if isinstance(baseline_score_summary_doc.get("visibility_split"), Mapping)
+        else {}
+    )
+    raw_items = split.get("items") if isinstance(split.get("items"), Sequence) else []
+    items: list[dict[str, Any]] = []
+    if isinstance(raw_items, Sequence) and not isinstance(raw_items, (str, bytes, bytearray)):
+        for index, item in enumerate(raw_items, start=1):
+            if not isinstance(item, Mapping):
+                continue
+            ref = str(item.get("icp_ref") or "")
+            updated = dict(item)
+            updated["item_rank"] = int(item.get("item_rank") or index)
+            updated["score"] = round(float(score_by_ref.get(ref, item.get("score") or 0.0)), 6)
+            items.append(updated)
+    if not items:
+        for index, summary in enumerate(per_icp_summaries, start=1):
+            items.append(
+                {
+                    "icp_ref": str(summary.get("icp_ref") or ""),
+                    "icp_hash": str(summary.get("icp_hash") or ""),
+                    "set_id": 0,
+                    "day_index": 0,
+                    "day_rank": index,
+                    "item_rank": index,
+                    "score": round(float(summary.get("score") or 0.0), 6),
+                    "visibility": "summary_only",
+                    "strength_label": "unknown",
+                }
+            )
+    public_count = sum(1 for item in items if str(item.get("visibility") or "") == "public")
+    private_count = sum(1 for item in items if str(item.get("visibility") or "") == "private")
+    return {
+        "schema_version": str(split.get("schema_version") or "1.0"),
+        "split_policy": str(split.get("split_policy") or "source_baseline_visibility_split"),
+        "rolling_window_hash": rolling_window_hash,
+        "public_count": public_count,
+        "private_count": private_count,
+        "public_strength_counts": dict(split.get("public_strength_counts") or {}),
+        "private_strength_counts": dict(split.get("private_strength_counts") or {}),
+        "items": items,
+    }
+
+
+def _build_promoted_public_benchmark_report_doc(
+    *,
+    benchmark_date: str,
+    rolling_window_hash: str,
+    aggregate_score: float,
+    per_icp_summaries: Sequence[Mapping[str, Any]],
+    visibility_split: Mapping[str, Any],
+    source_public_report_doc: Mapping[str, Any] | None,
+    source_score_bundle_id: str,
+    source_candidate_id: str,
+    source_baseline_benchmark_bundle_id: str,
+    promotion_metric: Mapping[str, Any],
+) -> dict[str, Any]:
+    report = build_public_benchmark_report(
+        benchmark_date=benchmark_date,
+        rolling_window_hash=rolling_window_hash,
+        aggregate_score=aggregate_score,
+        per_icp_summaries=per_icp_summaries,
+        benchmark_items=(),
+    )
+    summary_by_ref = {
+        str(item.get("icp_ref") or ""): item
+        for item in per_icp_summaries
+        if str(item.get("icp_ref") or "").strip()
+    }
+    public_icps = _promoted_public_icps_from_source(
+        source_public_report_doc=source_public_report_doc,
+        summary_by_ref=summary_by_ref,
+    )
+    public_count = int(visibility_split.get("public_count") or len(public_icps))
+    private_count = int(visibility_split.get("private_count") or 0)
+    report.update(
+        {
+            "source": "promoted_candidate_score_bundle",
+            "derived_from_candidate_score": True,
+            "source_score_bundle_id": source_score_bundle_id,
+            "source_candidate_id": source_candidate_id,
+            "source_baseline_benchmark_bundle_id": source_baseline_benchmark_bundle_id,
+            "supersedes_until_daily_rebenchmark": True,
+            "promotion_metric": dict(promotion_metric),
+            "public_icps": public_icps,
+            "public_icp_count": public_count,
+            "private_holdout_icp_count": private_count,
+            "visibility_split": _public_visibility_split_from_private(visibility_split),
+            "icp_buckets": _promoted_public_bucket_rows(
+                per_icp_summaries=per_icp_summaries,
+                visibility_split=visibility_split,
+            ),
+        }
+    )
+    report.pop("report_public_hash", None)
+    if contains_secret_material(report):
+        raise ValueError("promoted candidate public benchmark report contains forbidden material")
+    report["report_public_hash"] = sha256_json(report)
+    return report
+
+
+def _promoted_public_icps_from_source(
+    *,
+    source_public_report_doc: Mapping[str, Any] | None,
+    summary_by_ref: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if not isinstance(source_public_report_doc, Mapping):
+        return []
+    raw_public_icps = source_public_report_doc.get("public_icps")
+    if not isinstance(raw_public_icps, Sequence) or isinstance(raw_public_icps, (str, bytes, bytearray)):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in raw_public_icps:
+        if not isinstance(item, Mapping):
+            continue
+        ref = str(item.get("icp_ref") or "")
+        summary = summary_by_ref.get(ref)
+        updated = dict(item)
+        if summary:
+            diagnostics = summary.get("diagnostics") if isinstance(summary.get("diagnostics"), Mapping) else {}
+            updated["score"] = round(float(summary.get("score") or 0.0), 6)
+            updated["company_count"] = int(summary.get("company_count") or 0)
+            updated["diagnostics"] = {
+                **dict(updated.get("diagnostics") or {}),
+                "failure_categories": list(diagnostics.get("failure_categories") or []),
+                "avg_icp_fit": float(diagnostics.get("avg_icp_fit") or 0.0),
+                "avg_intent_signal_final": float(diagnostics.get("avg_intent_signal_final") or 0.0),
+            }
+        rows.append(updated)
+    return sorted(rows, key=lambda row: int(row.get("item_rank") or 0))
+
+
+def _public_visibility_split_from_private(visibility_split: Mapping[str, Any]) -> dict[str, Any]:
+    items = visibility_split.get("items") if isinstance(visibility_split.get("items"), Sequence) else []
+    safe_items: list[dict[str, Any]] = []
+    if isinstance(items, Sequence) and not isinstance(items, (str, bytes, bytearray)):
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            safe_items.append(
+                {
+                    "item_rank": int(item.get("item_rank") or len(safe_items) + 1),
+                    "icp_ref": str(item.get("icp_ref") or ""),
+                    "icp_hash": str(item.get("icp_hash") or ""),
+                    "set_id": int(item.get("set_id") or 0),
+                    "day_index": int(item.get("day_index") or 0),
+                    "day_rank": int(item.get("day_rank") or 0),
+                    "score": round(float(item.get("score") or 0.0), 6),
+                    "visibility": str(item.get("visibility") or "summary_only"),
+                    "strength_label": str(item.get("strength_label") or "unknown"),
+                }
+            )
+    return {
+        "schema_version": str(visibility_split.get("schema_version") or "1.0"),
+        "split_policy": str(visibility_split.get("split_policy") or ""),
+        "rolling_window_hash": str(visibility_split.get("rolling_window_hash") or ""),
+        "public_count": int(visibility_split.get("public_count") or 0),
+        "private_count": int(visibility_split.get("private_count") or 0),
+        "public_strength_counts": dict(visibility_split.get("public_strength_counts") or {}),
+        "private_strength_counts": dict(visibility_split.get("private_strength_counts") or {}),
+        "items": safe_items,
+    }
+
+
+def _promoted_public_bucket_rows(
+    *,
+    per_icp_summaries: Sequence[Mapping[str, Any]],
+    visibility_split: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    split_by_ref: dict[str, Mapping[str, Any]] = {}
+    raw_items = visibility_split.get("items") if isinstance(visibility_split.get("items"), Sequence) else []
+    if isinstance(raw_items, Sequence) and not isinstance(raw_items, (str, bytes, bytearray)):
+        for item in raw_items:
+            if isinstance(item, Mapping):
+                split_by_ref[str(item.get("icp_ref") or "")] = item
+    rows: list[dict[str, Any]] = []
+    for index, summary in enumerate(per_icp_summaries, start=1):
+        ref = str(summary.get("icp_ref") or "")
+        split = split_by_ref.get(ref, {})
+        diagnostics = summary.get("diagnostics") if isinstance(summary.get("diagnostics"), Mapping) else {}
+        score = float(summary.get("score") or 0.0)
+        company_count = int(summary.get("company_count") or 0)
+        rows.append(
+            {
+                "item_rank": int(split.get("item_rank") or index),
+                "icp_ref": ref,
+                "visibility": str(split.get("visibility") or "summary_only"),
+                "strength_label": str(split.get("strength_label") or "unknown"),
+                "industry_bucket": _summary_bucket_value(summary, "industry"),
+                "sub_industry_bucket": _summary_bucket_value(summary, "sub_industry"),
+                "geography_bucket": _summary_bucket_value(summary, "geography_bucket"),
+                "company_size_bucket": _summary_bucket_value(summary, "company_size_bucket"),
+                "intent_category_bucket": _summary_bucket_value(summary, "intent_category_bucket"),
+                "score_band": _score_band(score),
+                "company_count_band": _count_band(company_count),
+                "failure_categories": list(diagnostics.get("failure_categories") or [])
+                if str(split.get("visibility") or "") == "public"
+                else [],
+            }
+        )
+    return sorted(rows, key=lambda row: int(row.get("item_rank") or 0))
+
+
+def _score_band(score: float) -> str:
+    if score >= 80:
+        return "80_plus"
+    if score >= 60:
+        return "60_79"
+    if score >= 40:
+        return "40_59"
+    if score > 0:
+        return "1_39"
+    return "zero"
+
+
+def _count_band(count: int) -> str:
+    if count <= 0:
+        return "zero"
+    if count <= 2:
+        return "1_2"
+    if count <= 5:
+        return "3_5"
+    return "6_plus"
 
 
 def _push_candidate_source_diff_to_repo(

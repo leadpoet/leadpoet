@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.store import (
     canonical_hash,
@@ -1591,6 +1592,24 @@ class ResearchLabPromotionController:
             "champion_threshold_points": threshold,
             "reward_epochs": self.config.lab_reward_epochs,
         }
+        # The reward window starts at reward-creation (merge) time, never at the
+        # bundle's scoring epoch: a candidate scored at epoch N but merged at
+        # N+15 would otherwise have ~75% of its window expired on creation (the
+        # 2026-07-02 incident paid ~2.5h of a ~24h window). The bundle epoch is
+        # kept for provenance; start_epoch comes from the live chain epoch.
+        evaluation_epoch = int(score_bundle.get("evaluation_epoch") or self.config.evaluation_epoch or 0)
+        try:
+            current_epoch, _block, _epoch_source = await resolve_research_lab_evaluation_epoch(
+                self.config.evaluation_epoch
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_champion_reward_epoch_resolution_failed_using_bundle_epoch "
+                "candidate=%s error=%s",
+                _short_ref(candidate["candidate_id"]),
+                str(exc)[:200],
+            )
+            current_epoch = evaluation_epoch
         obligation_input = {
             "uid": uid,
             "miner_uid": uid,
@@ -1599,8 +1618,8 @@ class ResearchLabPromotionController:
             "candidate_id": str(candidate["candidate_id"]),
             "score_bundle_id": str(score_bundle_row["score_bundle_id"]),
             "run_id": str(candidate["run_id"]),
-            "evaluation_epoch": int(score_bundle.get("evaluation_epoch") or self.config.evaluation_epoch or 0),
-            "start_epoch": int(score_bundle.get("evaluation_epoch") or self.config.evaluation_epoch or 0) + 1,
+            "evaluation_epoch": evaluation_epoch,
+            "start_epoch": max(current_epoch, evaluation_epoch) + 1,
             "improvement_points": improvement_points,
             "threshold_points": threshold,
             "daily_icp_counts": _daily_counts_from_score_bundle(score_bundle),

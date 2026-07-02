@@ -1,0 +1,646 @@
+"""Tests for hosted Research Lab worker fixes (fableanalysis bugs 1, 26, 27, 28).
+
+Covers:
+  * Bug #1  — scripts/59 same-worker heartbeat allowance in the run claim guard
+              (pure-Python re-implementation of the predicate + SQL markers) and
+              the worker-side heartbeat claim-lost abort.
+  * Bug #26 — loop-start credit ref resolved past the 20-event context window.
+  * Bug #27 — stale-paused reaper no longer revives blocked_for_credit runs.
+  * Bug #28 — requeue capacity/hotkey conflicts park the run as recoverable
+              `paused` instead of leaving it wedged `started`.
+  * P2      — oldest-first stale-recovery scans, generation-stats mode flag,
+              worker proxy opener for worker LLM traffic.
+
+The guard predicate tests mirror only the allow/reject decision of
+scripts/59-research-lab-heartbeat-claim-guard.sql; real trigger behavior
+(advisory-lock serialization, seq/created_at ordering, ERRCODE) must be
+verified against a staging database before production rollout.
+"""
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.error import URLError
+
+import pytest
+
+import gateway.research_lab.worker as worker_mod
+from gateway.research_lab.config import ResearchLabGatewayConfig
+
+
+ROOT = Path(__file__).resolve().parents[1]
+GUARD_SQL_PATH = ROOT / "scripts" / "59-research-lab-heartbeat-claim-guard.sql"
+
+RUN_ID = "33333333-3333-4333-8333-333333333333"
+TICKET_ID = "44444444-4444-4444-8444-444444444444"
+MINER_HOTKEY = "5F3sa2TJAWMqDhXG6jhV4N8ko9SxwGy8TpaNS1repo5EYjQX"
+
+
+@pytest.fixture
+def hosted_worker():
+    return worker_mod.ResearchLabHostedWorker(ResearchLabGatewayConfig(), worker_ref="worker-a")
+
+
+def _make_context(queue_events=(), receipt_id=None):
+    queue_row = {
+        "run_id": RUN_ID,
+        "ticket_id": TICKET_ID,
+        "queue_priority": 0,
+        "current_event_hash": "sha256:" + "a" * 64,
+        "current_status_at": "2026-07-01T00:00:00+00:00",
+    }
+    ticket = {
+        "miner_hotkey": MINER_HOTKEY,
+        "island": "generalist",
+        "requested_loop_count": 1,
+        "ticket_doc": {},
+    }
+    return worker_mod.HostedRunContext(
+        queue_row=queue_row,
+        ticket=ticket,
+        payment=None,
+        queue_events=tuple(queue_events),
+        receipt_id=receipt_id,
+    )
+
+
+def _queue_event(seq, event_type, event_doc):
+    return {"run_id": RUN_ID, "seq": seq, "event_type": event_type, "event_doc": event_doc}
+
+
+def _own_started_row():
+    return {
+        "run_id": RUN_ID,
+        "current_queue_status": "started",
+        "worker_ref": "worker-a",
+        "current_event_hash": "sha256:" + "b" * 64,
+        "current_event_seq": 5,
+        "queue_priority": 0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Bug #1 — scripts/59 claim guard predicate (heartbeat allowance)
+# ---------------------------------------------------------------------------
+
+
+def _guard_allows(*, new_event_type, new_worker_ref, latest_status, latest_worker_ref):
+    """Pure-Python re-implementation of the scripts/59 guard decision.
+
+    Mirrors public.guard_research_lab_run_claim after the heartbeat fix:
+    non-`started` inserts pass; `started` passes when the latest event is
+    `queued` (`IS DISTINCT FROM 'queued'` false), or when the latest event is
+    `started` with the same non-null worker_ref (same-worker heartbeat).
+    Everything else conflicts, exactly as in scripts/42.
+    """
+    if new_event_type != "started":
+        return True
+    if latest_status == "queued":
+        return True
+    if (
+        latest_status == "started"
+        and new_worker_ref is not None
+        and latest_worker_ref is not None
+        and new_worker_ref == latest_worker_ref
+    ):
+        return True
+    return False
+
+
+@pytest.mark.parametrize(
+    ("new_event_type", "new_worker_ref", "latest_status", "latest_worker_ref", "allowed"),
+    (
+        # Non-claim inserts are never guarded (unchanged).
+        ("queued", None, "started", "worker-a", True),
+        ("paused", "worker-a", "started", "worker-a", True),
+        ("failed", "worker-a", "started", "worker-a", True),
+        # Fresh claim: latest is queued (unchanged).
+        ("started", "worker-a", "queued", None, True),
+        ("started", "worker-a", "queued", "worker-z", True),
+        # First event of a run cannot be started (unchanged: NULL latest conflicts).
+        ("started", "worker-a", None, None, False),
+        # NEW: same-worker heartbeat while started is latest.
+        ("started", "worker-a", "started", "worker-a", True),
+        # Cross-worker fencing preserved: after another worker re-claims, the
+        # superseded worker's heartbeat still conflicts.
+        ("started", "worker-a", "started", "worker-b", False),
+        # A worker_ref-less event never grants heartbeat rights (NULL <> NULL).
+        ("started", None, "started", None, False),
+        ("started", "worker-a", "started", None, False),
+        ("started", None, "started", "worker-a", False),
+        # Every other latest status still conflicts (unchanged).
+        ("started", "worker-a", "paused", "worker-a", False),
+        ("started", "worker-a", "completed", "worker-a", False),
+        ("started", "worker-a", "failed", "worker-a", False),
+        ("started", "worker-a", "cancelled", "worker-a", False),
+    ),
+)
+def test_guard_predicate(new_event_type, new_worker_ref, latest_status, latest_worker_ref, allowed):
+    assert (
+        _guard_allows(
+            new_event_type=new_event_type,
+            new_worker_ref=new_worker_ref,
+            latest_status=latest_status,
+            latest_worker_ref=latest_worker_ref,
+        )
+        is allowed
+    )
+
+
+def test_guard_sql_contains_same_worker_allowance_and_keeps_rejections():
+    sql = GUARD_SQL_PATH.read_text(encoding="utf-8")
+    # The migration must redefine the run claim guard only.
+    assert "CREATE OR REPLACE FUNCTION public.guard_research_lab_run_claim()" in sql
+    assert "guard_research_lab_candidate_claim" not in sql
+    assert "guard_research_lab_credit_consume" not in sql
+    # Same-worker heartbeat allowance.
+    assert "latest_status = 'started'" in sql
+    assert "NEW.worker_ref = latest_worker_ref" in sql
+    assert "NEW.worker_ref IS NOT NULL" in sql
+    assert "latest_worker_ref IS NOT NULL" in sql
+    # Every other rejection is unchanged.
+    assert "IF latest_status IS DISTINCT FROM 'queued' THEN" in sql
+    assert "research_lab_run_claim_conflict" in sql
+    assert "USING ERRCODE = '23505'" in sql
+    assert "pg_advisory_xact_lock" in sql
+    assert "IF NEW.event_type <> 'started' THEN" in sql
+
+
+# ---------------------------------------------------------------------------
+# Bug #1 — worker-side heartbeat claim-lost abort
+# ---------------------------------------------------------------------------
+
+
+async def test_heartbeat_success_appends_started_event(hosted_worker, monkeypatch):
+    context = _make_context()
+
+    async def fake_select_one(table, **kwargs):
+        return _own_started_row()
+
+    inserts = []
+
+    async def fake_create_queue_event(**kwargs):
+        inserts.append(kwargs)
+        return {"seq": 6, "anchored_hash": "sha256:" + "c" * 64}
+
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+    monkeypatch.setattr(worker_mod, "create_queue_event", fake_create_queue_event)
+
+    assert await hosted_worker._append_queue_heartbeat(
+        context, source_event_type="build", source_event_seq=None, source_event_hash=None
+    )
+    assert len(inserts) == 1
+    # The heartbeat is a `started` event with our worker_ref; the queue view's
+    # current_status_at derives from the latest event's created_at
+    # (scripts/29 research_loop_run_queue_current), so a landed heartbeat
+    # refreshes it — and scripts/54 capacity counting — automatically.
+    assert inserts[0]["event_type"] == "started"
+    assert inserts[0]["reason"] == "hosted_worker_heartbeat"
+    assert inserts[0]["worker_ref"] == "worker-a"
+    assert context.claim_lost is False
+
+
+async def test_heartbeat_foreign_started_owner_raises_claim_lost(hosted_worker, monkeypatch):
+    context = _make_context()
+
+    async def fake_select_one(table, **kwargs):
+        return {**_own_started_row(), "worker_ref": "worker-b"}
+
+    inserts = []
+
+    async def fake_create_queue_event(**kwargs):
+        inserts.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+    monkeypatch.setattr(worker_mod, "create_queue_event", fake_create_queue_event)
+
+    with pytest.raises(worker_mod.HostedResearchLabClaimLost):
+        await hosted_worker._append_queue_heartbeat(
+            context, source_event_type="build", source_event_seq=None, source_event_hash=None
+        )
+    assert context.claim_lost is True
+    # Clean local abort: no heartbeat insert, no terminal event write — the new
+    # claimant owns the run now.
+    assert inserts == []
+
+
+async def test_heartbeat_non_started_status_still_skips_quietly(hosted_worker, monkeypatch):
+    context = _make_context()
+
+    async def fake_select_one(table, **kwargs):
+        return {**_own_started_row(), "current_queue_status": "paused"}
+
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+
+    assert not await hosted_worker._append_queue_heartbeat(
+        context, source_event_type="build", source_event_seq=None, source_event_hash=None
+    )
+    assert context.claim_lost is False
+
+
+async def test_heartbeat_guard_conflict_claim_lost_when_enabled(hosted_worker, monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_HEARTBEAT_CONFLICT_CLAIM_LOST_ENABLED", "true")
+    context = _make_context()
+
+    async def fake_select_one(table, **kwargs):
+        return _own_started_row()
+
+    async def fake_create_queue_event(**kwargs):
+        raise RuntimeError(
+            "research_lab_run_claim_conflict: run "
+            f"{RUN_ID} latest status started"
+        )
+
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+    monkeypatch.setattr(worker_mod, "create_queue_event", fake_create_queue_event)
+
+    with pytest.raises(worker_mod.HostedResearchLabClaimLost):
+        await hosted_worker._append_queue_heartbeat(
+            context, source_event_type="build", source_event_seq=None, source_event_hash=None
+        )
+    assert context.claim_lost is True
+
+
+async def test_heartbeat_guard_conflict_default_keeps_current_behavior(hosted_worker, monkeypatch):
+    monkeypatch.delenv("RESEARCH_LAB_HEARTBEAT_CONFLICT_CLAIM_LOST_ENABLED", raising=False)
+    context = _make_context()
+
+    async def fake_select_one(table, **kwargs):
+        return _own_started_row()
+
+    async def fake_create_queue_event(**kwargs):
+        raise RuntimeError("research_lab_run_claim_conflict: run x latest status started")
+
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+    monkeypatch.setattr(worker_mod, "create_queue_event", fake_create_queue_event)
+
+    assert not await hosted_worker._append_queue_heartbeat(
+        context, source_event_type="build", source_event_seq=None, source_event_hash=None
+    )
+    assert context.claim_lost is False
+
+
+async def test_heartbeat_non_conflict_insert_error_still_warns_and_skips(hosted_worker, monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_HEARTBEAT_CONFLICT_CLAIM_LOST_ENABLED", "true")
+    context = _make_context()
+
+    async def fake_select_one(table, **kwargs):
+        return _own_started_row()
+
+    async def fake_create_queue_event(**kwargs):
+        raise RuntimeError("connection reset by peer")
+
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+    monkeypatch.setattr(worker_mod, "create_queue_event", fake_create_queue_event)
+
+    assert not await hosted_worker._append_queue_heartbeat(
+        context, source_event_type="build", source_event_seq=None, source_event_hash=None
+    )
+    assert context.claim_lost is False
+
+
+async def test_to_thread_heartbeat_claim_lost_aborts_before_running_phase(hosted_worker, monkeypatch):
+    context = _make_context()
+
+    async def raising_heartbeat(ctx, **kwargs):
+        ctx.claim_lost = True
+        raise worker_mod.HostedResearchLabClaimLost("run stolen")
+
+    monkeypatch.setattr(hosted_worker, "_append_queue_heartbeat", raising_heartbeat)
+    ran = []
+
+    def phase():
+        ran.append(1)
+        return "done"
+
+    with pytest.raises(worker_mod.HostedResearchLabClaimLost):
+        await hosted_worker._to_thread_with_queue_heartbeat(
+            context, heartbeat_label="private_runtime_metadata", func=phase
+        )
+    assert ran == []
+    assert context.claim_lost is True
+
+
+# ---------------------------------------------------------------------------
+# Bug #27 — stale-paused reaper must not revive blocked_for_credit
+# ---------------------------------------------------------------------------
+
+
+async def test_stale_paused_reaper_skips_blocked_for_credit(hosted_worker, monkeypatch):
+    stale_at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+
+    def _paused_row(run_id, reason):
+        return {
+            "run_id": run_id,
+            "ticket_id": TICKET_ID,
+            "current_queue_status": "paused",
+            "current_reason": reason,
+            "current_status_at": stale_at,
+            "current_event_hash": "sha256:" + "d" * 64,
+            "queue_priority": 0,
+            "worker_ref": "worker-z",
+        }
+
+    rows = [
+        _paused_row("11111111-aaaa-4aaa-8aaa-111111111111", "blocked_for_credit"),
+        _paused_row("22222222-bbbb-4bbb-8bbb-222222222222", "maintenance_pause_stale_started"),
+    ]
+    captured = {}
+
+    async def fake_select_many(table, **kwargs):
+        captured["table"] = table
+        captured.update(kwargs)
+        return rows
+
+    async def fake_blocks(run_id, stale_after_seconds):
+        return False
+
+    requeued = []
+
+    async def fake_create_queue_event(**kwargs):
+        requeued.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(worker_mod, "select_many", fake_select_many)
+    monkeypatch.setattr(hosted_worker, "_loop_activity_blocks_stale_requeue", fake_blocks)
+    monkeypatch.setattr(worker_mod, "create_queue_event", fake_create_queue_event)
+
+    recovered = await hosted_worker._recover_stale_paused_runs()
+    assert recovered == 1
+    assert [event["run_id"] for event in requeued] == ["22222222-bbbb-4bbb-8bbb-222222222222"]
+    # The reaper must also fetch current_reason to make the exclusion decision.
+    assert "current_reason" in captured["columns"]
+    # P2: oldest-first so the stalest rows are seen under backlog.
+    assert captured["order_by"] == (("current_status_at", False),)
+
+
+async def test_stale_started_reaper_scans_oldest_first(hosted_worker, monkeypatch):
+    captured = {}
+
+    async def fake_select_many(table, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(worker_mod, "select_many", fake_select_many)
+    assert await hosted_worker._recover_stale_started_runs() == 0
+    assert captured["order_by"] == (("current_status_at", False),)
+
+
+def test_blocked_for_credit_is_the_only_reaper_exclusion():
+    # requeue_capacity_conflict_parked (bug #28) must stay revivable by the
+    # reaper — it is that run's recovery path.
+    assert worker_mod._STALE_PAUSED_REAPER_EXCLUDED_REASONS == frozenset({"blocked_for_credit"})
+
+
+# ---------------------------------------------------------------------------
+# Bug #28 — requeue capacity/hotkey conflict parks the run as paused
+# ---------------------------------------------------------------------------
+
+
+def _wire_parking_fakes(monkeypatch, events, conflict_message):
+    async def fake_create_queue_event(**kwargs):
+        events.append(kwargs)
+        if kwargs["event_type"] == "queued":
+            raise RuntimeError(conflict_message)
+        return {}
+
+    ticket_events = []
+
+    async def fake_create_ticket_event(**kwargs):
+        ticket_events.append(kwargs)
+        return {}
+
+    projections = []
+
+    async def fake_project(ticket_id, **kwargs):
+        projections.append(ticket_id)
+        return None
+
+    monkeypatch.setattr(worker_mod, "create_queue_event", fake_create_queue_event)
+    monkeypatch.setattr(worker_mod, "create_ticket_event", fake_create_ticket_event)
+    monkeypatch.setattr(worker_mod, "safe_project_public_loop_activity", fake_project)
+    return ticket_events, projections
+
+
+async def test_mark_retryable_hotkey_conflict_parks_run(hosted_worker, monkeypatch):
+    events = []
+    ticket_events, projections = _wire_parking_fakes(
+        monkeypatch,
+        events,
+        f"research_lab_queue_hotkey_conflict: miner {MINER_HOTKEY} already has active run",
+    )
+    context = _make_context()
+
+    outcome = await hosted_worker._mark_retryable(context, "transient boom", retry_count=1)
+    assert outcome.status == "requeue_capacity_conflict_parked"
+    assert outcome.processed is True
+
+    paused = [event for event in events if event["event_type"] == "paused"]
+    assert len(paused) == 1
+    assert paused[0]["reason"] == "requeue_capacity_conflict_parked"
+    assert paused[0]["event_doc"]["requeue_conflict_reason"] == "transient_worker_error_requeued"
+    assert "research_lab_queue_hotkey_conflict" in paused[0]["event_doc"]["requeue_conflict_error"]
+    # Explanatory ticket event + public projection still happen.
+    assert [event["reason"] for event in ticket_events] == ["requeue_capacity_conflict_parked"]
+    assert projections == [TICKET_ID]
+
+
+async def test_mark_builder_not_ready_capacity_conflict_parks_run(hosted_worker, monkeypatch):
+    events = []
+    _wire_parking_fakes(
+        monkeypatch,
+        events,
+        "research_lab_queue_capacity_conflict: active 3 capacity 3",
+    )
+    context = _make_context()
+
+    outcome = await hosted_worker._mark_builder_not_ready(context, "builder not ready")
+    assert outcome.status == "requeue_capacity_conflict_parked"
+    paused = [event for event in events if event["event_type"] == "paused"]
+    assert len(paused) == 1
+    assert paused[0]["event_doc"]["requeue_conflict_reason"] == "code_edit_builder_not_ready_requeued"
+
+
+async def test_mark_retryable_non_conflict_error_still_raises(hosted_worker, monkeypatch):
+    events = []
+    _wire_parking_fakes(monkeypatch, events, "connection reset by peer")
+    context = _make_context()
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        await hosted_worker._mark_retryable(context, "transient boom", retry_count=1)
+    # No parking event was written for a non-conflict failure.
+    assert [event["event_type"] for event in events] == ["queued"]
+
+
+# ---------------------------------------------------------------------------
+# Bug #26 — credit ref resolved past the 20-event context window
+# ---------------------------------------------------------------------------
+
+
+def _full_window_without_credit():
+    # A much-requeued run: the newest 20 queue events carry no credit ref.
+    return tuple(
+        _queue_event(seq, "started", {"worker_ref": "worker-a"})
+        for seq in range(40, 40 - worker_mod._RUN_CONTEXT_QUEUE_EVENT_LIMIT, -1)
+    )
+
+
+async def test_credit_ref_full_history_fallback(hosted_worker, monkeypatch):
+    context = _make_context(queue_events=_full_window_without_credit())
+    captured = {}
+    calls = []
+
+    async def fake_select_many(table, **kwargs):
+        calls.append(table)
+        captured["table"] = table
+        captured.update(kwargs)
+        return [
+            _queue_event(1, "queued", {"loop_start_credit_id": "credit-123", "payment_id": "p-1"}),
+            _queue_event(7, "queued", {"resume_source": "hosted_worker_stale_paused_reaper"}),
+        ]
+
+    monkeypatch.setattr(worker_mod, "select_many", fake_select_many)
+
+    assert await hosted_worker._resolve_loop_start_credit_id(context) == "credit-123"
+    assert captured["table"] == "research_loop_run_queue_events"
+    # Targeted fetch: this run's queued events only, earliest first.
+    assert captured["filters"] == (("run_id", context.run_id), ("event_type", "queued"))
+    assert captured["order_by"] == (("seq", False),)
+    # Sync receipt builders see the resolved value.
+    assert worker_mod._context_loop_start_credit_id(context) == "credit-123"
+    # Resolution is cached: no second fetch.
+    assert await hosted_worker._resolve_loop_start_credit_id(context) == "credit-123"
+    assert len(calls) == 1
+
+
+async def test_credit_ref_in_window_short_circuits(hosted_worker, monkeypatch):
+    events = (_queue_event(1, "queued", {"loop_start_credit_id": "credit-9"}),)
+    context = _make_context(queue_events=events)
+
+    async def fail_select_many(table, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("full-history fetch should not run when the ref is in-window")
+
+    monkeypatch.setattr(worker_mod, "select_many", fail_select_many)
+    assert await hosted_worker._resolve_loop_start_credit_id(context) == "credit-9"
+    assert worker_mod._context_loop_start_credit_id(context) == "credit-9"
+
+
+async def test_credit_ref_absent_small_history_skips_fetch(hosted_worker, monkeypatch):
+    # Fewer events than the window: full history already visible, ref truly absent.
+    events = tuple(_queue_event(seq, "queued", {"payment_id": "p"}) for seq in (3, 2, 1))
+    context = _make_context(queue_events=events)
+
+    async def fail_select_many(table, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("no fetch needed when history fits the window")
+
+    monkeypatch.setattr(worker_mod, "select_many", fail_select_many)
+    assert await hosted_worker._resolve_loop_start_credit_id(context) is None
+    assert context.loop_start_credit_id_resolved is True
+
+
+async def test_credit_ref_fetch_failure_is_not_cached(hosted_worker, monkeypatch):
+    context = _make_context(queue_events=_full_window_without_credit())
+    attempts = []
+
+    async def flaky_select_many(table, **kwargs):
+        attempts.append(table)
+        if len(attempts) == 1:
+            raise RuntimeError("postgrest connection reset")
+        return [_queue_event(1, "queued", {"loop_start_credit_id": "credit-77"})]
+
+    monkeypatch.setattr(worker_mod, "select_many", flaky_select_many)
+    # Transient failure: deny nothing permanently — stay unresolved.
+    assert await hosted_worker._resolve_loop_start_credit_id(context) is None
+    assert context.loop_start_credit_id_resolved is False
+    # A later call retries and finds the ref.
+    assert await hosted_worker._resolve_loop_start_credit_id(context) == "credit-77"
+
+
+# ---------------------------------------------------------------------------
+# P2 — generation-stats mode flag (default preserves current behavior)
+# ---------------------------------------------------------------------------
+
+
+def test_generation_stats_mode_defaults_to_full(monkeypatch):
+    monkeypatch.delenv("RESEARCH_LAB_GENERATION_STATS_MODE", raising=False)
+    assert worker_mod._generation_stats_mode() == "full"
+    monkeypatch.setenv("RESEARCH_LAB_GENERATION_STATS_MODE", "bogus")
+    assert worker_mod._generation_stats_mode() == "full"
+    monkeypatch.setenv("RESEARCH_LAB_GENERATION_STATS_MODE", "OFF")
+    assert worker_mod._generation_stats_mode() == "off"
+    monkeypatch.setenv("RESEARCH_LAB_GENERATION_STATS_MODE", "best_effort_once")
+    assert worker_mod._generation_stats_mode() == "best_effort_once"
+
+
+def test_generation_stats_off_skips_fetch(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_GENERATION_STATS_MODE", "off")
+    calls = []
+
+    def opener(req, timeout):  # pragma: no cover - must not run
+        calls.append(req)
+        raise AssertionError("generation stats fetch must be skipped when off")
+
+    stats, status = worker_mod._fetch_openrouter_generation_stats(
+        api_key="key", response_id="gen-1", opener=opener
+    )
+    assert stats is None
+    assert status == "disabled"
+    assert calls == []
+
+
+def test_generation_stats_best_effort_once_single_attempt_no_sleep(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_GENERATION_STATS_MODE", "best_effort_once")
+    calls = []
+
+    def opener(req, timeout):
+        calls.append(1)
+        raise URLError("connection refused")
+
+    def no_sleep(seconds):  # pragma: no cover - must not run
+        raise AssertionError("best_effort_once must not sleep between retries")
+
+    monkeypatch.setattr(worker_mod.time, "sleep", no_sleep)
+    stats, status = worker_mod._fetch_openrouter_generation_stats(
+        api_key="key", response_id="gen-1", opener=opener
+    )
+    assert stats is None
+    assert status.startswith("url_error")
+    assert len(calls) == 1
+
+
+def test_generation_stats_full_mode_retries_preserved(monkeypatch):
+    monkeypatch.delenv("RESEARCH_LAB_GENERATION_STATS_MODE", raising=False)
+    calls = []
+    sleeps = []
+
+    def opener(req, timeout):
+        calls.append(1)
+        raise URLError("connection refused")
+
+    monkeypatch.setattr(worker_mod.time, "sleep", sleeps.append)
+    stats, _status = worker_mod._fetch_openrouter_generation_stats(
+        api_key="key", response_id="gen-1", opener=opener
+    )
+    assert stats is None
+    assert len(calls) == worker_mod._OPENROUTER_GENERATION_STATS_ATTEMPTS
+    assert len(sleeps) == worker_mod._OPENROUTER_GENERATION_STATS_ATTEMPTS - 1
+
+
+# ---------------------------------------------------------------------------
+# P2 — worker proxy opener for worker LLM traffic (default off)
+# ---------------------------------------------------------------------------
+
+
+def test_worker_llm_proxy_opener_default_off(monkeypatch):
+    monkeypatch.delenv("RESEARCH_LAB_WORKER_PROXY_APPLY_TO_LLM", raising=False)
+    config = ResearchLabGatewayConfig(hosted_worker_proxy_url="http://proxy.internal:3128")
+    assert worker_mod._worker_llm_proxy_opener(config) is None
+
+
+def test_worker_llm_proxy_opener_enabled_requires_proxy_url(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_WORKER_PROXY_APPLY_TO_LLM", "true")
+    config = ResearchLabGatewayConfig(hosted_worker_proxy_url="http://proxy.internal:3128")
+    opener = worker_mod._worker_llm_proxy_opener(config)
+    assert opener is not None
+    assert hasattr(opener, "open")
+    assert worker_mod._worker_llm_proxy_opener(ResearchLabGatewayConfig()) is None

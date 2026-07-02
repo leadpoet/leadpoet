@@ -1,0 +1,147 @@
+"""Tests for the fableanalysis.md config fixes (bug #32, §6.4, §8.3 clamp).
+
+These tests construct the Research Lab gateway config from a clean environment
+so they exercise the same defaults prod gets when an env var is unset.
+"""
+
+import dataclasses
+import logging
+import os
+
+import pytest
+
+from gateway.research_lab.config import (
+    MIN_IMPROVEMENT_THRESHOLD_POINTS,
+    ResearchLabGatewayConfig,
+)
+
+
+# Every env var the config reads is either RESEARCH_LAB_*-prefixed, a
+# QUALIFICATION_WEBSHARE_PROXY_<n> proxy slot, or one of the subnet selectors.
+_ENV_PREFIXES = ("RESEARCH_LAB_", "QUALIFICATION_WEBSHARE_PROXY")
+_ENV_EXACT = {"BITTENSOR_NETWORK", "SUBTENSOR_NETWORK", "BITTENSOR_NETUID", "NETUID"}
+
+
+@pytest.fixture
+def clean_env(monkeypatch):
+    for key in list(os.environ):
+        if key.startswith(_ENV_PREFIXES) or key in _ENV_EXACT:
+            monkeypatch.delenv(key, raising=False)
+    return monkeypatch
+
+
+def test_dataclass_defaults_match_env_parsing_defaults(clean_env):
+    """Bug #32: every dataclass field default must equal its env-parsing default.
+
+    Prod behavior for an unset env var is the from_env default; direct
+    dataclass constructions (tests, verify scripts) must exercise the same
+    values. This comparison is programmatic so any future divergence on any
+    field fails loudly.
+    """
+    from_env = ResearchLabGatewayConfig.from_env()
+    declared = ResearchLabGatewayConfig()
+    mismatches = {}
+    for field in dataclasses.fields(ResearchLabGatewayConfig):
+        env_value = getattr(from_env, field.name)
+        default_value = getattr(declared, field.name)
+        if env_value != default_value:
+            mismatches[field.name] = {"dataclass": default_value, "from_env": env_value}
+    assert not mismatches, f"dataclass defaults diverge from env-parsing defaults: {mismatches}"
+
+
+def test_bug_32_reconciled_contradictions(clean_env):
+    """The specific contradictions called out in fableanalysis bug #32."""
+    from_env = ResearchLabGatewayConfig.from_env()
+    declared = ResearchLabGatewayConfig()
+    # icps_per_day: was 6 (dataclass) vs 2 (env default); env default wins —
+    # the §6.4 raise to 4-6 is deliberately held until parity is verified.
+    assert declared.lab_champion_icps_per_day == 2
+    assert from_env.lab_champion_icps_per_day == 2
+    # planner tokens: was 2400 (dataclass) vs 12000 (env default).
+    assert declared.loop_planner_max_tokens == 12000
+    assert from_env.loop_planner_max_tokens == 12000
+    # public split totals: were None (dataclass) vs 10/7 (env defaults), and 10
+    # exposed half the 20-ICP private window; both sides now 6/4.
+    assert declared.public_benchmark_public_total_icps == from_env.public_benchmark_public_total_icps
+    assert declared.public_benchmark_public_weak_total == from_env.public_benchmark_public_weak_total
+
+
+def test_section_6_4_recommended_defaults(clean_env):
+    config = ResearchLabGatewayConfig.from_env()
+    # Score-only promotion (2026-07-02, commit 3aaee73c): scoring health is
+    # audit metadata only — the gate defaults OFF so provider/runtime health
+    # never vetoes champions. The tightened error-rate telemetry remains.
+    assert config.scoring_health_gate_enabled is False
+    assert config.scoring_health_max_provider_error_rate == pytest.approx(0.10)
+    # Draft timeout: 12k-token diffs exceed 90s.
+    assert config.auto_research_draft_timeout_seconds == 180
+    # Build timeout includes the cold docker pull.
+    assert config.code_edit_build_timeout_seconds == 1800
+    # Source inspection budget.
+    assert config.code_edit_source_inspection_max_files == 12
+
+
+def test_public_split_ratio_rule(clean_env):
+    """§6.4: the default public split exposes at most 1/3 of the private window."""
+    config = ResearchLabGatewayConfig.from_env()
+    window = config.lab_champion_eval_days * config.lab_champion_icps_per_day
+    assert window == 20
+    assert config.public_benchmark_public_total_icps == 6
+    assert config.public_benchmark_public_total_icps * 3 <= window
+    assert config.public_benchmark_public_weak_total == 4
+    assert config.public_benchmark_public_weak_total <= config.public_benchmark_public_total_icps
+    # The default configuration must satisfy its own split validation.
+    config.validate_public_benchmark_split()
+
+
+def test_public_split_env_overrides_still_respected(clean_env):
+    clean_env.setenv("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_TOTAL_ICPS", "8")
+    clean_env.setenv("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_TOTAL", "5")
+    config = ResearchLabGatewayConfig.from_env()
+    assert config.public_benchmark_public_total_icps == 8
+    assert config.public_benchmark_public_weak_total == 5
+
+
+def test_deliberately_unchanged_defaults(clean_env):
+    """Knobs the audit says NOT to change in this pass (§6.4 / §8.3)."""
+    config = ResearchLabGatewayConfig.from_env()
+    # Never 0; default stays 1.0 (§8.3).
+    assert config.improvement_threshold_points == pytest.approx(1.0)
+    # Serial benchmark default; prod sets concurrency explicitly (§8.3: no >1
+    # without dedicated Exa key + parity check).
+    assert config.private_baseline_concurrency == 1
+    # Raise only after scoring parallelism lands.
+    assert config.hosted_worker_max_candidates == 1
+    # Auto-commit stays opt-in at the code level (§8.3; prod sets it itself).
+    assert config.auto_commit_enabled is False
+    assert config.crowning_enabled is True
+    assert config.auto_promotion_enabled is True
+
+
+@pytest.mark.parametrize("raw", ["0", "0.0", "-2.5", "0.05"])
+def test_improvement_threshold_clamps_low_values_with_warning(clean_env, caplog, raw):
+    clean_env.setenv("RESEARCH_LAB_IMPROVEMENT_THRESHOLD_POINTS", raw)
+    with caplog.at_level(logging.WARNING, logger="gateway.research_lab.config"):
+        config = ResearchLabGatewayConfig.from_env()
+    assert config.improvement_threshold_points == pytest.approx(MIN_IMPROVEMENT_THRESHOLD_POINTS)
+    assert config.improvement_threshold_points > 0
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+        and "RESEARCH_LAB_IMPROVEMENT_THRESHOLD_POINTS" in record.getMessage()
+    ]
+    assert warnings, "expected a warning log when clamping the improvement threshold"
+
+
+def test_improvement_threshold_accepts_values_at_or_above_minimum(clean_env, caplog):
+    clean_env.setenv("RESEARCH_LAB_IMPROVEMENT_THRESHOLD_POINTS", "0.5")
+    with caplog.at_level(logging.WARNING, logger="gateway.research_lab.config"):
+        config = ResearchLabGatewayConfig.from_env()
+    assert config.improvement_threshold_points == pytest.approx(0.5)
+    warnings = [
+        record
+        for record in caplog.records
+        if "RESEARCH_LAB_IMPROVEMENT_THRESHOLD_POINTS" in record.getMessage()
+    ]
+    assert not warnings

@@ -139,6 +139,10 @@ neurons/burn.py
 # Test files (contain credentials - DO NOT COMMIT)
 test_*.py
 test_*.sh
+# Exception: the tracked pytest suite in tests/ is credential-free (fake
+# stores + monkeypatched env only — scan before committing additions). The
+# global ignore above still catches ad-hoc test_*.py scripts elsewhere.
+!tests/test_*.py
 
 # Temporary test output files
 test-*.json

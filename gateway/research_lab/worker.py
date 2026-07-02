@@ -1270,6 +1270,7 @@ class ResearchLabHostedWorker:
             )
         try:
             from gateway.research_lab.trajectory_projector import (
+                backfill_corpus_trace_rows,
                 project_completed_runs,
                 projector_enabled,
             )
@@ -1278,6 +1279,11 @@ class ResearchLabHostedWorker:
             # RESEARCH_LAB_TRAJECTORY_PROJECTOR_ENABLED=true.
             if projector_enabled():
                 await project_completed_runs(dry_run=False)
+                await backfill_corpus_trace_rows(
+                    batch_size=10,
+                    dry_run=False,
+                    max_candidates=250,
+                )
         except Exception as exc:
             logger.warning(
                 "research_lab_periodic_trajectory_projection_failed worker_ref=%s error=%s",

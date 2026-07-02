@@ -11,9 +11,11 @@ into the v5 corpus tables created by ``scripts/27-research-lab-v5-schemas.sql``:
 * ``execution_traces``             -- pointer aggregation rows: one "engine"
   row per run (non-node-attributed raw LLM trace pointers) plus one row per
   node with node-scoped pointers (draft-stage raw traces, in-container
-  sourcing-model trace refs) -- fablefollowup.md item 5.5
-* ``evidence_bundles``             -- one row per scored candidate node
-  pointing at its score bundle + per-ICP evidence summary (numbers/refs only)
+  sourcing-model trace refs), plus score-bundle fallback rows for scored
+  bundles that are not linked to a node -- fablefollowup.md item 5.5
+* ``evidence_bundles``             -- one row per scored candidate node (or
+  score-bundle fallback) pointing at its score bundle + per-ICP evidence
+  summary (numbers/refs only)
 
 Design facts this module encodes (verified against the code/schemas):
 
@@ -277,10 +279,24 @@ def execution_trace_id_for_node(run_id: str, node_id: str) -> str:
     return _deterministic_uuid("execution_trace", str(run_id), "node", str(node_id))
 
 
+def execution_trace_id_for_score_bundle(run_id: str, score_bundle_id: str) -> str:
+    """Deterministic trace row for a score bundle with no node linkage."""
+    return _deterministic_uuid(
+        "execution_trace", str(run_id), "score_bundle", str(score_bundle_id)
+    )
+
+
 def evidence_bundle_id_for_node(run_id: str, node_id: str, score_bundle_id: str) -> str:
     """Deterministic ``evidence_bundles.bundle_id`` for a scored node."""
     return _deterministic_uuid(
         "evidence_bundle", str(run_id), str(node_id), str(score_bundle_id)
+    )
+
+
+def evidence_bundle_id_for_score_bundle(run_id: str, score_bundle_id: str) -> str:
+    """Deterministic evidence row for a score bundle with no node linkage."""
+    return _deterministic_uuid(
+        "evidence_bundle", str(run_id), "score_bundle", str(score_bundle_id)
     )
 
 
@@ -794,6 +810,55 @@ def _eval_version_doc(bundle_row: Mapping[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+def _score_bundle_artifact_hash(
+    bundle_row: Mapping[str, Any] | None, score_bundle_id: str
+) -> str:
+    """Best available artifact hash for a score-bundle-only trace row."""
+    doc = _bundle_doc(bundle_row)
+    row = bundle_row if isinstance(bundle_row, Mapping) else {}
+    for key in (
+        "candidate_artifact_hash",
+        "private_model_manifest_hash",
+        "candidate_patch_hash",
+        "score_bundle_hash",
+    ):
+        value = row.get(key) or doc.get(key)
+        if value:
+            return str(value)
+    return sha256_json({"score_bundle_artifact_unavailable": str(score_bundle_id)})
+
+
+def _score_bundle_execution_status(bundle_row: Mapping[str, Any] | None) -> str:
+    """Map score-bundle lifecycle states onto execution_traces statuses."""
+    if not isinstance(bundle_row, Mapping):
+        return "timeout"
+    status = str(
+        bundle_row.get("bundle_status")
+        or bundle_row.get("current_event_status")
+        or bundle_row.get("current_event_type")
+        or ""
+    ).lower()
+    if status in {"failed", "rejected", "tombstoned"}:
+        return "crash"
+    if status in {"scored", "verified"}:
+        return "completed"
+    doc = _bundle_doc(bundle_row)
+    if bundle_row.get("score_bundle_hash") or doc.get("score_bundle_hash"):
+        return "completed"
+    return "timeout"
+
+
+def _score_bundle_total_cost_usd(bundle_row: Mapping[str, Any] | None) -> float:
+    summary = _aggregates_summary(bundle_row)
+    if summary.get("total_cost_usd") is not None:
+        return _f(summary.get("total_cost_usd"))
+    doc = _bundle_doc(bundle_row)
+    for holder in (doc.get("aggregates"), doc, bundle_row):
+        if isinstance(holder, Mapping) and holder.get("total_cost_usd") is not None:
+            return _f(holder.get("total_cost_usd"))
+    return 0.0
+
+
 def _node_execution_status(state: "_NodeState") -> str:
     """Map node lifecycle onto execution_traces' completed/crash/timeout CHECK."""
     if state.build_failed_row is not None and state.build_passed_row is None:
@@ -839,7 +904,11 @@ def _build_corpus_trace_rows(
       exists) OR node-attributed trace pointers exist;
     * evidence row -- written iff the node was scored; ``snapshots`` falls
       back to a single score-bundle summary entry when the bundle doc carries
-      no per-ICP rows (scripts/27 CHECKs snapshots non-empty).
+      no per-ICP rows (scripts/27 CHECKs snapshots non-empty);
+    * score-bundle fallback row -- written iff a score bundle exists for the
+      run but no scored node claimed it.  This covers late/reused/manual
+      scoring paths whose rich bundle data would otherwise be present in the
+      source table but absent from the v5 corpus pointer tables.
     """
     execution_trace_rows: list[dict[str, Any]] = []
     evidence_bundle_rows: list[dict[str, Any]] = []
@@ -855,6 +924,7 @@ def _build_corpus_trace_rows(
         "",
     ) or sha256_json({"icp_set_hash_unavailable_for_run": run_id})
     first_bundle_id = next(iter(bundles_by_id), "")
+    used_score_bundle_ids: set[str] = set()
 
     for node_id in node_order:
         state = nodes[node_id]
@@ -882,6 +952,7 @@ def _build_corpus_trace_rows(
         )
 
         if state.score_bundle_id:
+            used_score_bundle_ids.add(state.score_bundle_id)
             score_bundle_ref = _score_bundle_ref(state.score_bundle_id)
             outputs_ref = score_bundle_ref
             evidence_id = evidence_bundle_id_for_node(
@@ -1025,6 +1096,152 @@ def _build_corpus_trace_rows(
                 "cost_ledger": {
                     "cost_ledger_ref": cost_ledger_ref,
                     "node_cost_usd": round(max(0.0, state.cost_usd), 6),
+                },
+                "attestation_ref": None,
+                "trace_doc": trace_doc,
+                "created_at": created_at,
+            }
+        )
+
+    for score_bundle_id, bundle_row in bundles_by_id.items():
+        if not score_bundle_id or score_bundle_id == "None":
+            continue
+        if score_bundle_id in used_score_bundle_ids:
+            continue
+
+        score_bundle_ref = _score_bundle_ref(score_bundle_id)
+        trace_id = execution_trace_id_for_score_bundle(run_id, score_bundle_id)
+        evidence_id = evidence_bundle_id_for_score_bundle(run_id, score_bundle_id)
+        evidence_ref = f"evidence_bundle:{evidence_id}"
+        bundle_doc = _bundle_doc(bundle_row)
+        score_bundle_hash = str(
+            bundle_row.get("score_bundle_hash")
+            or bundle_doc.get("score_bundle_hash")
+            or ""
+        )
+        artifact_hash = _score_bundle_artifact_hash(bundle_row, score_bundle_id)
+        node_icp_set_hash = (
+            str(bundle_row.get("icp_set_hash") or bundle_doc.get("icp_set_hash") or "")
+            or default_icp_set_hash
+        )
+        created_at = _ts(bundle_row.get("created_at"), fallback_ts)
+        incontainer_calls = _collect_incontainer_calls(bundle_row)
+        per_icp_rows = _bundle_per_icp_rows(bundle_row)
+        raw_bundle_gate = bundle_doc.get("private_holdout_gate")
+        gate = raw_bundle_gate if isinstance(raw_bundle_gate, Mapping) else {}
+        gate_summary = _holdout_gate_summary(gate)
+        aggregates_summary = _aggregates_summary(bundle_row)
+        if per_icp_rows:
+            snapshots = _cap_pointer_entries(
+                [_per_icp_snapshot(row) for row in per_icp_rows],
+                _EVIDENCE_SNAPSHOT_CAP,
+                "per_icp_truncation_marker",
+            )
+        else:
+            snapshots = [
+                {
+                    "snapshot_kind": "score_bundle_summary",
+                    "score_bundle_ref": score_bundle_ref,
+                    "score_bundle_hash": score_bundle_hash,
+                    "icp_count": _i(aggregates_summary.get("icp_count"))
+                    or (
+                        gate_summary.get("public_icp_count", 0)
+                        + gate_summary.get("private_holdout_icp_count", 0)
+                    ),
+                    "per_icp_rows_available": False,
+                }
+            ]
+        evidence_doc = sanitize_capture_payload(
+            {
+                "evidence_kind": "score_bundle_evidence",
+                "source": "score_bundle_fallback",
+                "fallback_reason": "score_bundle_not_linked_to_node",
+                "lab_run_ref": run_ref,
+                "trajectory_ref": trajectory_ref,
+                "execution_trace_ref": f"execution_trace:{trace_id}",
+                "score_bundle_ref": score_bundle_ref,
+                "score_bundle_hash": score_bundle_hash,
+                "score_bundle_status": bundle_row.get("bundle_status")
+                or bundle_row.get("current_event_status")
+                or bundle_row.get("current_event_type"),
+                "candidate_artifact_hash": artifact_hash,
+                "evaluation_epoch": (
+                    _i(bundle_row.get("evaluation_epoch"))
+                    if bundle_row.get("evaluation_epoch") is not None
+                    else None
+                ),
+                "icp_set_hash": node_icp_set_hash,
+                "holdout_gate": gate_summary or None,
+                "aggregates": aggregates_summary or None,
+                "per_icp_snapshot_count": len(snapshots),
+                "incontainer_trace_count": len(incontainer_calls),
+                "incontainer_call_count_total": sum(
+                    max(0, _i(call.get("call_count"))) for call in incontainer_calls
+                ),
+            }
+        )
+        snapshots = sanitize_capture_payload(snapshots)
+        evidence_bundle_rows.append(
+            {
+                "bundle_id": evidence_id,
+                "schema_version": "1.0",
+                "run_id": _coerce_uuid(run_id),
+                "artifact_hash": artifact_hash,
+                "retention_class": "live_verification",
+                "verification_state": "active",
+                "bundle_hash": sha256_json(
+                    {
+                        "evidence_bundle_id": evidence_id,
+                        "snapshots": snapshots,
+                        "bundle_doc": evidence_doc,
+                    }
+                ),
+                "merkle_anchor_ref": None,
+                "deletion_request_ref": None,
+                "snapshots": snapshots,
+                "bundle_doc": evidence_doc,
+                "created_at": created_at,
+            }
+        )
+        trace_doc = sanitize_capture_payload(
+            {
+                "trace_kind": "score_bundle_only",
+                "source": "score_bundle_fallback",
+                "fallback_reason": "score_bundle_not_linked_to_node",
+                "lab_run_ref": run_ref,
+                "trajectory_ref": trajectory_ref,
+                "score_bundle_ref": score_bundle_ref,
+                "score_bundle_hash": score_bundle_hash,
+                "candidate_artifact_hash": artifact_hash,
+                "incontainer_trace_count": len(incontainer_calls),
+                "per_icp_snapshot_count": len(snapshots),
+            }
+        )
+        execution_trace_rows.append(
+            {
+                "run_id": trace_id,
+                "schema_version": "1.0",
+                "artifact_hash": artifact_hash,
+                "role": "candidate",
+                "rung": "L0",
+                "status": _score_bundle_execution_status(bundle_row),
+                "lane_id": None,
+                "icp_set_hash": node_icp_set_hash,
+                "eval_version": _eval_version_doc(bundle_row),
+                "calls": _cap_pointer_entries(
+                    incontainer_calls,
+                    _EXECUTION_TRACE_CALL_CAP,
+                    "call_truncation_marker",
+                ),
+                "evidence_bundles": [evidence_ref],
+                "judge_verdicts": [],
+                "outputs_ref": score_bundle_ref,
+                "score_bundle_ref": score_bundle_ref,
+                "cost_ledger": {
+                    "cost_ledger_ref": cost_ledger_ref,
+                    "score_bundle_cost_usd": round(
+                        max(0.0, _score_bundle_total_cost_usd(bundle_row)), 6
+                    ),
                 },
                 "attestation_ref": None,
                 "trace_doc": trace_doc,

@@ -38,6 +38,7 @@ from gateway.research_lab.promotion import (
     reconcile_active_private_model_lineage,
     reconcile_pending_champion_rewards,
 )
+from research_lab.canonical import sha256_json
 
 
 @dataclass
@@ -46,6 +47,7 @@ class FakeArtifact:
     manifest_hash: str = "sha256:" + "b" * 64
     manifest_uri: str = "s3://bucket/manifest.json"
     git_commit_sha: str = "c" * 40
+    image_digest: str = "493765492819.dkr.ecr.us-east-1.amazonaws.com/research-lab/test@sha256:" + "a" * 64
     component_registry_version: str = "1.0"
     scoring_adapter_version: str = "1.0"
 
@@ -55,12 +57,21 @@ class FakeArtifact:
             "manifest_hash": self.manifest_hash,
             "manifest_uri": self.manifest_uri,
             "git_commit_sha": self.git_commit_sha,
+            "image_digest": self.image_digest,
             "config_hash": "sha256:" + "d" * 64,
             "component_registry_version": self.component_registry_version,
             "scoring_adapter_version": self.scoring_adapter_version,
             "signature_ref": "sig",
-            "build_id": None,
+            "build_id": "",
         }
+
+
+def _valid_fake_artifact(**overrides: Any) -> FakeArtifact:
+    artifact = FakeArtifact(**overrides)
+    payload = artifact.to_dict()
+    payload.pop("manifest_hash", None)
+    artifact.manifest_hash = sha256_json(payload)
+    return artifact
 
 
 @dataclass
@@ -74,6 +85,8 @@ class FakeStore:
     version_event_writes: list[dict[str, Any]] = field(default_factory=list)
     promotion_event_writes: list[dict[str, Any]] = field(default_factory=list)
     reward_obligation_writes: list[dict[str, Any]] = field(default_factory=list)
+    private_benchmark_writes: list[dict[str, Any]] = field(default_factory=list)
+    public_report_writes: list[dict[str, Any]] = field(default_factory=list)
 
     async def select_many(self, table: str, **kwargs: Any) -> list[dict[str, Any]]:
         self.select_many_calls.append((table, tuple(kwargs.get("filters") or ())))
@@ -122,6 +135,28 @@ class FakeStore:
         self.reward_obligation_writes.append(kwargs)
         return {"champion_reward_id": "cr-1"}, {"event_type": "active"}
 
+    async def create_private_model_benchmark_bundle(self, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        self.private_benchmark_writes.append(kwargs)
+        return (
+            {
+                "benchmark_bundle_id": "private_benchmark:" + "8" * 64,
+                "current_benchmark_status": "completed",
+                **kwargs,
+            },
+            {"event_type": "completed"},
+        )
+
+    async def create_public_benchmark_report(self, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        self.public_report_writes.append(kwargs)
+        return (
+            {
+                "report_id": "public_benchmark:sha256:" + "9" * 64,
+                "current_report_status": "published",
+                **kwargs,
+            },
+            {"event_type": "published"},
+        )
+
 
 @pytest.fixture
 def store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
@@ -132,6 +167,9 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
     monkeypatch.setattr(promotion, "create_private_model_version_event", fake.create_private_model_version_event)
     monkeypatch.setattr(promotion, "create_candidate_promotion_event", fake.create_candidate_promotion_event)
     monkeypatch.setattr(promotion, "create_champion_reward_obligation", fake.create_champion_reward_obligation)
+    monkeypatch.setattr(promotion, "create_private_model_benchmark_bundle", fake.create_private_model_benchmark_bundle)
+    monkeypatch.setattr(promotion, "create_public_benchmark_report", fake.create_public_benchmark_report)
+    monkeypatch.setattr(promotion, "sign_digest_with_kms", lambda **kwargs: "kms-signature:test")
     monkeypatch.delenv(promotion.ALLOW_BOOTSTRAP_REGISTER_ENV, raising=False)
     monkeypatch.delenv(promotion.AUTO_COMMIT_HEAD_MISMATCH_RECOVER_ENV, raising=False)
     return fake
@@ -439,6 +477,8 @@ def _controller_config(**overrides: Any) -> Any:
         "auto_commit_enabled": False,
         "improvement_threshold_points": 1.0,
         "private_model_manifest_uri": "s3://bucket/bootstrap-manifest.json",
+        "score_bundle_kms_key_id": "arn:aws:kms:us-east-1:123456789012:alias/test",
+        "score_bundle_signature_uri_prefix": "s3://bucket/signatures",
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -460,6 +500,141 @@ def _score_bundle(gate: Mapping[str, Any], aggregates: Mapping[str, Any] | None 
         "private_holdout_gate": dict(gate),
         "aggregates": dict(aggregates or {}),
         "icp_set_hash": "sha256:" + "3" * 64,
+    }
+
+
+def _bridge_baseline_row(window_hash: str, baseline_bundle_id: str) -> dict[str, Any]:
+    return {
+        "benchmark_bundle_id": baseline_bundle_id,
+        "benchmark_date": "2026-07-02",
+        "rolling_window_hash": window_hash,
+        "evaluation_epoch": 23697,
+        "benchmark_attempt": 0,
+        "benchmark_quality": "passed",
+        "aggregate_score": 16.353333,
+        "current_benchmark_status": "completed",
+        "score_summary_doc": {
+            "schema_version": "1.0",
+            "aggregate_score": 16.353333,
+            "per_icp_summaries": [
+                {
+                    "icp_ref": "icp:a",
+                    "icp_hash": "sha256:" + "a" * 64,
+                    "score": 10.0,
+                    "company_count": 1,
+                    "industry": "Software",
+                    "sub_industry": "Sales Software",
+                    "country": "United States",
+                    "company_size_bucket": "51-200",
+                    "intent_category_bucket": "vendor_replacement",
+                    "diagnostics": {"failure_categories": []},
+                },
+                {
+                    "icp_ref": "icp:b",
+                    "icp_hash": "sha256:" + "b" * 64,
+                    "score": 22.706666,
+                    "company_count": 1,
+                    "industry": "Healthcare",
+                    "sub_industry": "Clinics",
+                    "country": "United States",
+                    "company_size_bucket": "201-500",
+                    "intent_category_bucket": "growth",
+                    "diagnostics": {"failure_categories": []},
+                },
+            ],
+            "visibility_split": {
+                "schema_version": "1.0",
+                "split_policy": "test_split",
+                "rolling_window_hash": window_hash,
+                "public_count": 1,
+                "private_count": 1,
+                "public_strength_counts": {"weak": 1},
+                "private_strength_counts": {"strong": 1},
+                "items": [
+                    {
+                        "item_rank": 1,
+                        "icp_ref": "icp:a",
+                        "icp_hash": "sha256:" + "a" * 64,
+                        "set_id": 1,
+                        "day_index": 1,
+                        "day_rank": 1,
+                        "score": 10.0,
+                        "visibility": "public",
+                        "strength_label": "weak",
+                    },
+                    {
+                        "item_rank": 2,
+                        "icp_ref": "icp:b",
+                        "icp_hash": "sha256:" + "b" * 64,
+                        "set_id": 1,
+                        "day_index": 1,
+                        "day_rank": 2,
+                        "score": 22.706666,
+                        "visibility": "private",
+                        "strength_label": "strong",
+                    },
+                ],
+            },
+        },
+    }
+
+
+def _bridge_public_report_row(baseline_bundle_id: str) -> dict[str, Any]:
+    return {
+        "report_id": "public_benchmark:sha256:" + "6" * 64,
+        "benchmark_bundle_id": baseline_bundle_id,
+        "current_report_status": "published",
+        "report_doc": {
+            "public_icps": [
+                {
+                    "item_rank": 1,
+                    "icp_ref": "icp:a",
+                    "icp_hash": "sha256:" + "a" * 64,
+                    "set_id": 1,
+                    "day_index": 1,
+                    "day_rank": 1,
+                    "score": 10.0,
+                    "company_count": 1,
+                    "strength_label": "weak",
+                    "icp": {"industry": "Software"},
+                    "diagnostics": {"failure_categories": []},
+                }
+            ],
+        },
+    }
+
+
+def _bridge_score_bundle(candidate_artifact: FakeArtifact, window_hash: str, baseline_bundle_id: str) -> dict[str, Any]:
+    return {
+        "candidate_artifact_hash": candidate_artifact.model_artifact_hash,
+        "parent_artifact_hash": "sha256:" + "a" * 64,
+        "private_model_manifest_hash": "sha256:" + "b" * 64,
+        "icp_set_hash": window_hash,
+        "evaluation_epoch": 23697,
+        "score_bundle_hash": "sha256:" + "5" * 64,
+        "aggregates": {
+            "per_icp_results": [
+                {
+                    "icp_ref": "icp:a",
+                    "icp_hash": "sha256:" + "a" * 64,
+                    "candidate_company_scores": [30.0, 20.0],
+                    "failure_reason": "",
+                },
+                {
+                    "icp_ref": "icp:b",
+                    "icp_hash": "sha256:" + "b" * 64,
+                    "candidate_company_scores": [35.945454, 28.945454],
+                    "failure_reason": "",
+                },
+            ],
+        },
+        "private_holdout_gate": _approved_gate(
+            baseline_benchmark_bundle_id=baseline_bundle_id,
+            baseline_aggregate_score=16.353333,
+            candidate_total_score=28.472727,
+            candidate_delta_vs_daily_baseline=12.119394,
+            reference_evaluation_mode="stored_daily_baseline",
+        ),
     }
 
 
@@ -624,6 +799,146 @@ async def test_basis_unavailable_rejected_on_merge_path(controller_env):
     assert len(rejected) == 1
     assert rejected[0]["event_type"] == "below_threshold"
     assert rejected[0]["promotion_status"] == "rejected"
+
+
+# ---------------------------------------------------------------------------
+# Promoted candidate benchmark bridge
+# ---------------------------------------------------------------------------
+
+
+async def test_promoted_candidate_writes_derived_benchmark_and_links_active_version(store, monkeypatch):
+    parent = FakeArtifact()
+    candidate_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "c" * 64,
+        git_commit_sha="d" * 40,
+    )
+    window_hash = "sha256:" + "3" * 64
+    baseline_bundle_id = "private_benchmark:" + "6" * 64
+    store.select_one_results["research_lab_private_model_benchmark_current"] = _bridge_baseline_row(
+        window_hash,
+        baseline_bundle_id,
+    )
+
+    def _public_report_rows(kwargs: Mapping[str, Any]) -> list[dict[str, Any]]:
+        filters = {item[0]: item[1] for item in kwargs.get("filters") or () if len(item) == 2}
+        if filters.get("benchmark_bundle_id") == baseline_bundle_id:
+            return [_bridge_public_report_row(baseline_bundle_id)]
+        return []
+
+    store.select_many_results["research_lab_public_benchmark_report_current"] = _public_report_rows
+
+    async def _fake_push(self: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"status": "private_source_pushed", "git_commit_sha": "e" * 40}
+
+    async def _fake_reward(self: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"champion_reward_status": "created", "champion_reward_id": "cr-1"}
+
+    monkeypatch.setattr(ResearchLabPromotionController, "_maybe_push_private_repo_candidate", _fake_push)
+    monkeypatch.setattr(ResearchLabPromotionController, "_maybe_create_champion_reward", _fake_reward)
+
+    controller = ResearchLabPromotionController(_controller_config(auto_commit_enabled=True), worker_ref="test-worker")
+    candidate = {
+        "candidate_id": "candidate:" + "1" * 64,
+        "parent_artifact_hash": parent.model_artifact_hash,
+        "candidate_kind": "image_build",
+        "candidate_model_manifest_doc": candidate_artifact.to_dict(),
+        "candidate_source_diff_hash": "sha256:" + "2" * 64,
+        "miner_hotkey": "hk-1",
+        "ticket_id": "ticket-1",
+        "run_id": "run-1",
+    }
+    score_bundle = _bridge_score_bundle(candidate_artifact, window_hash, baseline_bundle_id)
+    result = await controller._promote_built_image_candidate(
+        candidate=candidate,
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle=score_bundle,
+        active=ActivePrivateModel(artifact=parent, version_row=_active_row(parent)),
+        active_parent=parent.model_artifact_hash,
+        candidate_parent=parent.model_artifact_hash,
+        rolling_window_hash=window_hash,
+        improvement_points=12.119394,
+        threshold=1.0,
+    )
+    assert result["status"] == "merged"
+    assert len(store.private_benchmark_writes) == 1
+    benchmark_write = store.private_benchmark_writes[0]
+    assert benchmark_write["private_model_artifact_hash"] == candidate_artifact.model_artifact_hash
+    assert benchmark_write["private_model_manifest_hash"] == candidate_artifact.manifest_hash
+    assert benchmark_write["aggregate_score"] == pytest.approx(28.472727)
+    assert benchmark_write["benchmark_quality"] == "passed"
+    summary_doc = benchmark_write["score_summary_doc"]
+    assert summary_doc["source"] == "promoted_candidate_score_bundle"
+    assert summary_doc["derived_from_candidate_score"] is True
+    assert summary_doc["source_score_bundle_id"] == "score_bundle:" + "7" * 64
+    assert len(store.public_report_writes) == 1
+    report_doc = store.public_report_writes[0]["report_doc"]
+    assert report_doc["aggregate_score"] == pytest.approx(28.472727)
+    assert report_doc["source"] == "promoted_candidate_score_bundle"
+    assert report_doc["public_icps"][0]["score"] == pytest.approx(25.0)
+    assert len(store.version_writes) == 1
+    assert store.version_writes[0]["source_benchmark_bundle_id"] == "private_benchmark:" + "8" * 64
+    active_events = [event for event in store.promotion_event_writes if event["event_type"] == "active_version_created"]
+    assert active_events[0]["event_doc"]["derived_benchmark_bundle_id"] == "private_benchmark:" + "8" * 64
+
+
+async def test_promoted_candidate_bridge_reuses_existing_rows_without_duplicate_writes(store):
+    candidate_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "c" * 64,
+        git_commit_sha="d" * 40,
+    )
+    window_hash = "sha256:" + "3" * 64
+    baseline_bundle_id = "private_benchmark:" + "6" * 64
+    existing_benchmark_id = "private_benchmark:" + "8" * 64
+    existing_report_id = "public_benchmark:sha256:" + "9" * 64
+    store.select_one_results["research_lab_private_model_benchmark_current"] = _bridge_baseline_row(
+        window_hash,
+        baseline_bundle_id,
+    )
+
+    def _private_rows(kwargs: Mapping[str, Any]) -> list[dict[str, Any]]:
+        filters = {item[0]: item[1] for item in kwargs.get("filters") or () if len(item) == 2}
+        if filters.get("private_model_manifest_hash") == candidate_artifact.manifest_hash:
+            return [
+                {
+                    "benchmark_bundle_id": existing_benchmark_id,
+                    "current_benchmark_status": "completed",
+                    "aggregate_score": 28.472727,
+                }
+            ]
+        return []
+
+    def _public_rows(kwargs: Mapping[str, Any]) -> list[dict[str, Any]]:
+        filters = {item[0]: item[1] for item in kwargs.get("filters") or () if len(item) == 2}
+        if filters.get("private_model_manifest_hash") == candidate_artifact.manifest_hash:
+            return [
+                {
+                    "report_id": existing_report_id,
+                    "benchmark_bundle_id": existing_benchmark_id,
+                    "current_report_status": "published",
+                    "aggregate_score": 28.472727,
+                }
+            ]
+        if filters.get("benchmark_bundle_id") == baseline_bundle_id:
+            return [_bridge_public_report_row(baseline_bundle_id)]
+        return []
+
+    store.select_many_results["research_lab_private_model_benchmark_current"] = _private_rows
+    store.select_many_results["research_lab_public_benchmark_report_current"] = _public_rows
+    controller = ResearchLabPromotionController(_controller_config(), worker_ref="test-worker")
+    bridge = await controller._create_promoted_candidate_benchmark_bridge(
+        candidate={"candidate_id": "candidate:" + "1" * 64},
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle=_bridge_score_bundle(candidate_artifact, window_hash, baseline_bundle_id),
+        new_artifact=candidate_artifact,
+        rolling_window_hash=window_hash,
+        improvement_points=12.119394,
+        threshold=1.0,
+    )
+    assert bridge["status"] == "already_exists"
+    assert bridge["benchmark_bundle_id"] == existing_benchmark_id
+    assert bridge["public_report_id"] == existing_report_id
+    assert store.private_benchmark_writes == []
+    assert store.public_report_writes == []
 
 
 # ---------------------------------------------------------------------------

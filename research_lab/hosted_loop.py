@@ -717,7 +717,6 @@ def run_sandboxed_engine_v1(
     return HostedSandboxResult(
         run_id=run_id,
         sandbox_job=sandbox_job,
-        parent_metrics=parent_metrics,
         patch_runs=tuple(patch_runs),
         evidence_bundle=evidence_bundle,
         execution_trace=trace,

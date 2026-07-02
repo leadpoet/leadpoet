@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
+import os
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -26,6 +28,37 @@ logger = logging.getLogger(__name__)
 PUBLIC_ACTIVITY_SCHEMA_VERSION = "1.0"
 TOPIC_POLICY_ID = "research_lab_public_activity_topics:v1"
 OUTCOME_POLICY_ID = "research_lab_public_activity_outcomes:v1"
+
+# A projection write is small and idempotent (event_ref dedup), so one bounded retry
+# recovers transient DB blips without hammering; a second failure escalates loudly so
+# a stuck card is visible in ops logs instead of silently freezing (bug 34b).
+PROJECTION_RETRY_ATTEMPTS = 1
+PROJECTION_RETRY_BACKOFF_SECONDS = 0.5
+
+# Reprojection sweep + list-cap knobs are read straight from the environment so ops can
+# flip them without a config-module redeploy. Defaults preserve current behavior except
+# the sweep itself, which is on by default because it only reuses the existing
+# idempotent projection path (see reproject_stale_public_cards).
+PUBLIC_REPROJECTION_SWEEP_ENABLED_ENV = "RESEARCH_LAB_PUBLIC_REPROJECTION_SWEEP_ENABLED"
+PUBLIC_REPROJECTION_LOG_ONLY_ENV = "RESEARCH_LAB_PUBLIC_REPROJECTION_LOG_ONLY"
+PUBLIC_LOOP_LIST_MAX_CARDS_ENV = "RESEARCH_LAB_PUBLIC_LOOP_LIST_MAX_CARDS"
+DEFAULT_PUBLIC_LOOP_LIST_MAX_CARDS = 1000
+DEFAULT_REPROJECTION_SWEEP_BATCH_SIZE = 25
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 TOPIC_TAGS = (
     "intent_quality",
@@ -226,35 +259,45 @@ async def safe_project_public_loop_activity(
         and effective_config.public_activity_enabled
     ):
         return None
-    try:
-        return await project_public_loop_activity(
-            ticket_id,
-            source_ref=source_ref,
-            reason=reason,
-            config=effective_config,
-        )
-    except Exception as exc:
-        logger.warning(
-            "research_lab_public_activity_projection_failed ticket_id=%s reason=%s error=%s",
-            ticket_id,
-            reason,
-            str(exc)[:300],
-        )
-        return None
+    last_exc: Exception | None = None
+    for attempt in range(1 + max(0, int(PROJECTION_RETRY_ATTEMPTS))):
+        try:
+            return await project_public_loop_activity(
+                ticket_id,
+                source_ref=source_ref,
+                reason=reason,
+                config=effective_config,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if attempt < PROJECTION_RETRY_ATTEMPTS:
+                logger.warning(
+                    "research_lab_public_activity_projection_failed_retrying ticket_id=%s reason=%s attempt=%s error=%s",
+                    ticket_id,
+                    reason,
+                    attempt + 1,
+                    str(exc)[:300],
+                )
+                await asyncio.sleep(PROJECTION_RETRY_BACKOFF_SECONDS)
+    # Escalated: the retry also failed, so this card's public status is now stale
+    # until the reprojection sweep (or a later lifecycle event) repairs it.
+    logger.error(
+        "research_lab_public_activity_projection_failed_after_retry ticket_id=%s reason=%s attempts=%s error=%s",
+        ticket_id,
+        reason,
+        PROJECTION_RETRY_ATTEMPTS + 1,
+        str(last_exc)[:300],
+    )
+    return None
 
 
-async def project_public_loop_activity(
-    ticket_id: str,
-    *,
-    source_ref: str,
-    reason: str,
-    config: ResearchLabGatewayConfig | None = None,
-) -> dict[str, Any]:
-    effective_config = config or ResearchLabGatewayConfig.from_env()
+async def _fetch_projection_inputs(ticket_id: str) -> dict[str, Any] | None:
+    """Fetch the row groups the public outcome is derived from, or None if the
+    ticket does not exist. Shared by the projection and the reprojection sweep so
+    both always derive from identical inputs."""
     ticket = await select_one("research_loop_ticket_current", filters=(("ticket_id", ticket_id),))
     if not ticket:
-        raise ValueError(f"Research Lab ticket not found: {ticket_id}")
-
+        return None
     queue_rows = await select_many(
         "research_loop_run_queue_current",
         filters=(("ticket_id", ticket_id),),
@@ -280,6 +323,29 @@ async def project_public_loop_activity(
         limit=1000,
     )
     promotion_event_rows = await _promotion_events_for_candidates(candidate_rows)
+    return {
+        "ticket": ticket,
+        "queue_rows": queue_rows,
+        "receipt_rows": receipt_rows,
+        "candidate_rows": candidate_rows,
+        "score_bundle_rows": score_bundle_rows,
+        "promotion_event_rows": promotion_event_rows,
+    }
+
+
+async def project_public_loop_activity(
+    ticket_id: str,
+    *,
+    source_ref: str,
+    reason: str,
+    config: ResearchLabGatewayConfig | None = None,
+) -> dict[str, Any]:
+    effective_config = config or ResearchLabGatewayConfig.from_env()
+    inputs = await _fetch_projection_inputs(ticket_id)
+    if inputs is None:
+        raise ValueError(f"Research Lab ticket not found: {ticket_id}")
+    ticket = inputs["ticket"]
+    candidate_rows = inputs["candidate_rows"]
 
     research_area = normalize_research_area(ticket.get("island"))
     ticket_doc = ticket.get("ticket_doc") if isinstance(ticket.get("ticket_doc"), Mapping) else {}
@@ -309,11 +375,11 @@ async def project_public_loop_activity(
 
     outcome = derive_public_loop_outcome(
         ticket=ticket,
-        queue_rows=queue_rows,
-        receipt_rows=receipt_rows,
+        queue_rows=inputs["queue_rows"],
+        receipt_rows=inputs["receipt_rows"],
         candidate_rows=candidate_rows,
-        score_bundle_rows=score_bundle_rows,
-        promotion_event_rows=promotion_event_rows,
+        score_bundle_rows=inputs["score_bundle_rows"],
+        promotion_event_rows=inputs["promotion_event_rows"],
         improvement_threshold_points=effective_config.improvement_threshold_points,
     )
     event_ref = public_loop_card_event_ref(ticket_id, source_ref, outcome.outcome_label, outcome.last_activity_at)
@@ -345,20 +411,63 @@ async def project_public_loop_activity(
     return {"card": card, "event": event}
 
 
-# Candidate rejection reasons that are terminal and not recoverable by any operator
-# or worker retry: the loop is done and produced no scoreable result. A loop whose
-# only candidates carry one of these (none scored, none still active) must surface as
-# a terminal `failed` outcome, not the in-progress-looking `candidate_generation_complete`.
-# `stale_parent_rebase_failed`: the live model advanced and the candidate could not be
-# re-fit to it (e.g. a legacy image_build with no stored source diff to re-apply).
-# `stale_gateway_scoring_retry_limit_exceeded`: scoring exhausted its retries.
-_TERMINAL_UNRECOVERABLE_REJECTION_REASONS = frozenset(
+# Candidate statuses that are terminal: the candidate can never score without a new
+# event moving it back into the queue. A loop whose only candidates are terminal (none
+# scored, none still active, queue not running) is over and must surface as a terminal
+# `failed` outcome, not the in-progress-looking `candidate_generation_complete` — no
+# matter which rejection reason it died with (bug 33d replaced the old 3-reason
+# allowlist, which let all-rejected loops keep showing as complete). Recoverable
+# rejections (`stale_parent_needs_rescore`) are surfaced earlier as `needs_rescore`.
+_TERMINAL_CANDIDATE_STATUSES = frozenset({"failed", "rejected", "tombstoned"})
+
+# Promotion evidence that the candidate actually merged (or merged and is waiting on /
+# received its champion reward). Scanned across the FULL promotion history, not just
+# the latest event, so a later `champion_reward_pending_uid` (or any bookkeeping event)
+# can never regress a merged champion back to `scored_promising` (bug 33c).
+_MERGED_PROMOTION_STATUSES = frozenset({"merged", "reward_pending_uid", "reward_created"})
+_MERGED_PROMOTION_EVENT_TYPES = frozenset(
     {
-        "stale_parent_rebase_failed",
-        "stale_parent_rebase_unavailable",
-        "stale_gateway_scoring_retry_limit_exceeded",
+        "active_version_created",
+        "champion_reward_pending_uid",
+        "champion_reward_created",
     }
 )
+
+# Post-score side-effect failures (audit bundle, receipt finalize, projection) record
+# that everything scoring-relevant succeeded but a bookkeeping step crashed. The
+# scoring worker writes them as promotion_status/event_type
+# `post_score_side_effect_failed` (legacy rows: status `failed` with
+# event_doc.reason/`candidate_status_preserved` markers). They must never change the
+# public status of a scored candidate (bug 33b / Chain B item 3).
+_POST_SCORE_SIDE_EFFECT_MARKER = "post_score_side_effect_failed"
+
+
+def _is_post_score_side_effect_event(row: Mapping[str, Any]) -> bool:
+    if str(row.get("promotion_status") or "") == _POST_SCORE_SIDE_EFFECT_MARKER:
+        return True
+    if str(row.get("event_type") or "") == _POST_SCORE_SIDE_EFFECT_MARKER:
+        return True
+    doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
+    if str(doc.get("reason") or "") == _POST_SCORE_SIDE_EFFECT_MARKER:
+        return True
+    return str(doc.get("candidate_status_preserved") or "") == "scored"
+
+
+def _has_merged_promotion(rows: Sequence[Mapping[str, Any]]) -> bool:
+    return any(
+        str(row.get("promotion_status") or "") in _MERGED_PROMOTION_STATUSES
+        or str(row.get("event_type") or "") in _MERGED_PROMOTION_EVENT_TYPES
+        for row in rows
+    )
+
+
+def _all_candidates_terminal(candidate_rows: Sequence[Mapping[str, Any]]) -> bool:
+    if not candidate_rows:
+        return False
+    return all(
+        str(row.get("current_candidate_status") or "") in _TERMINAL_CANDIDATE_STATUSES
+        for row in candidate_rows
+    )
 
 
 def derive_public_loop_outcome(
@@ -377,7 +486,12 @@ def derive_public_loop_outcome(
     latest_queue = _latest_row(queue_rows, "current_status_at")
     latest_receipt = _latest_row(receipt_rows, "current_status_at")
     latest_candidate = _latest_row(candidate_rows, "current_status_at")
-    latest_promotion = _latest_row(promotion_event_rows, "created_at")
+    # Post-score side-effect failures are bookkeeping noise, not promotion outcomes;
+    # they must not become the "latest" promotion event that drives the status.
+    effective_promotion_rows = [
+        row for row in promotion_event_rows if not _is_post_score_side_effect_event(row)
+    ]
+    latest_promotion = _latest_row(effective_promotion_rows, "created_at")
     latest_score = _latest_row(score_bundle_rows, "current_status_at")
 
     run_id = _first_non_empty(
@@ -428,10 +542,9 @@ def derive_public_loop_outcome(
 
     promotion_status = str(latest_promotion.get("promotion_status") or "") if latest_promotion else ""
     promotion_type = str(latest_promotion.get("event_type") or "") if latest_promotion else ""
-    if promotion_status in {"merged", "reward_created"} or promotion_type in {
-        "active_version_created",
-        "champion_reward_created",
-    }:
+    # A merge anywhere in the promotion history wins: later bookkeeping events
+    # (champion_reward_pending_uid, reward retries) must not regress the champion.
+    if _has_merged_promotion(effective_promotion_rows):
         return PublicLoopOutcome(
             "promoted",
             "promoted",
@@ -444,7 +557,12 @@ def derive_public_loop_outcome(
             last_activity_at,
             event_doc,
         )
-    if promotion_status == "failed" or promotion_type == "promotion_failed":
+    # A promotion failure only makes the whole loop `failed` when nothing scored:
+    # a genuinely scored candidate whose promotion step failed still surfaces its
+    # scored outcome below (the failure stays visible in promotion_event_count).
+    if (
+        promotion_status == "failed" or promotion_type == "promotion_failed"
+    ) and scored_candidate_count == 0:
         return PublicLoopOutcome(
             "failed",
             "failed",
@@ -474,24 +592,40 @@ def derive_public_loop_outcome(
     ticket_status = str(ticket.get("current_ticket_status") or ticket.get("ticket_status") or "")
     if queue_status in {"paused", "failed"} and _is_credit_block_reason(queue_reason):
         return _result("blocked_for_credit", "blocked_for_credit", "blocked")
-    if _has_candidate_reason(candidate_rows, "stale_parent_needs_rescore"):
-        return _result("needs_rescore", "needs_rescore", "blocked")
     if (
-        queue_status not in {"queued", "started", "running"}
-        and _has_any_candidate_reason(candidate_rows, _TERMINAL_UNRECOVERABLE_REJECTION_REASONS)
+        _has_candidate_reason(candidate_rows, "stale_parent_needs_rescore")
         and not _has_active_candidate(status_counts)
         and scored_candidate_count == 0
     ):
-        # The loop is over (no run still active) and its only candidates are terminally
-        # rejected for an unrecoverable reason. A fresh re-run, if any, would make the
-        # latest queue status active and take precedence over this terminal outcome.
+        # Only surface needs_rescore while nothing else is progressing: once a derived
+        # (rebased) candidate is actively scoring or has scored, the stale original —
+        # which keeps its rejected/stale_parent_needs_rescore row forever — must not
+        # mask the live outcome.
+        return _result("needs_rescore", "needs_rescore", "blocked")
+    if (
+        queue_status not in {"queued", "started", "running"}
+        and _all_candidates_terminal(candidate_rows)
+        and scored_candidate_count == 0
+    ):
+        # The loop is over (no run still active) and every candidate reached a terminal
+        # status (failed/rejected/tombstoned) without a score. A fresh re-run, if any,
+        # would make the latest queue status active and take precedence over this
+        # terminal outcome.
         return _result("failed", "failed", "failed")
     if _has_candidate_reason(candidate_rows, "baseline_not_ready") or (
         queue_status == "queued" and queue_reason == "baseline_not_ready"
     ):
         return _result("waiting_for_baseline", "waiting_for_baseline", "pending")
 
-    if status_counts.get("failed", 0) and not _has_active_candidate(status_counts):
+    if (
+        queue_status not in {"queued", "started", "running"}
+        and status_counts.get("failed", 0)
+        and not _has_active_candidate(status_counts)
+        and not scored_candidate_count
+    ):
+        # A failed sibling never outranks scored history (with any scored candidate
+        # the loop reports its scored outcome below) nor an actively re-queued run
+        # (which surfaces as queued/running further down).
         return PublicLoopOutcome(
             "failed",
             "failed",
@@ -555,6 +689,12 @@ def derive_public_loop_outcome(
             event_doc,
         )
 
+    if queue_status in {"started", "running"}:
+        # A re-queued/re-started run is live again: it must not fall through to the
+        # completed outcomes below just because earlier candidates exist.
+        return _result("running", "running", "pending")
+    if queue_status == "queued":
+        return _result("queued", "queued", "pending")
     if queue_status == "completed" and candidate_count == 0:
         # Queue completed but produced no candidate: ops should investigate,
         # and the public card must not show a successful candidate generation.
@@ -768,7 +908,10 @@ async def fetch_public_loop_rows(
         "research_lab_public_loop_card_current",
         filters=(),
         order_by=(("current_last_activity_at", True), ("created_at", True)),
-        limit=1000,
+        # Behavior-visible knob: cards beyond this cap fall off the public list and
+        # topic groups are computed on the truncated set. Default preserves the
+        # historical 1000-card cap; raise via env as the card count grows.
+        limit=_env_positive_int(PUBLIC_LOOP_LIST_MAX_CARDS_ENV, DEFAULT_PUBLIC_LOOP_LIST_MAX_CARDS),
     )
     cutoff = 0.0 if since_days == 0 else datetime.now(timezone.utc).timestamp() - max(0, since_days) * 86400
     filtered = [
@@ -888,6 +1031,136 @@ async def fetch_public_loop_detail(ticket_id: str) -> dict[str, Any] | None:
     }
 
 
+async def reproject_stale_public_cards(
+    *,
+    config: ResearchLabGatewayConfig | None = None,
+    batch_size: int = DEFAULT_REPROJECTION_SWEEP_BATCH_SIZE,
+    max_cards: int = DEFAULT_PUBLIC_LOOP_LIST_MAX_CARDS,
+    reason: str = "public_reprojection_sweep",
+    force: bool = False,
+) -> dict[str, Any]:
+    """Best-effort sweep that re-projects public cards whose stored status drifted.
+
+    Covers every projection a lifecycle path missed (recovery actions, terminal paths
+    that skip projection, the historical awaiting_payment CHECK failures): a card is
+    stale when its derived outcome label disagrees with the stored one, or when the
+    derived outcome carries canonical lifecycle fields (public_status/payment_state)
+    that the stored current event lacks. Reuses the existing idempotent projection
+    path (event_ref dedup), so re-running it is safe.
+
+    Gated by RESEARCH_LAB_PUBLIC_REPROJECTION_SWEEP_ENABLED (default true) with a
+    RESEARCH_LAB_PUBLIC_REPROJECTION_LOG_ONLY mode (default false) for a log-only
+    first rollout. At most ``batch_size`` cards are re-projected per sweep; the rest
+    are picked up by later sweeps. Never raises: per-card failures are logged and
+    counted.
+    """
+    result: dict[str, Any] = {
+        "action": "reproject-stale-public-cards",
+        "enabled": True,
+        "log_only": _env_flag(PUBLIC_REPROJECTION_LOG_ONLY_ENV, default=False),
+        "cards_checked": 0,
+        "stale_found": 0,
+        "reprojected": 0,
+        "deferred_to_next_sweep": 0,
+        "stale": [],
+        "failed": [],
+    }
+    if not _env_flag(PUBLIC_REPROJECTION_SWEEP_ENABLED_ENV, default=True):
+        result["enabled"] = False
+        return result
+    effective_config = config or ResearchLabGatewayConfig.from_env()
+    if not force and not (
+        effective_config.api_enabled
+        and effective_config.reports_enabled
+        and effective_config.public_activity_enabled
+    ):
+        result["enabled"] = False
+        result["disabled_reason"] = "public_activity_disabled"
+        return result
+
+    cards = await select_many(
+        "research_lab_public_loop_card_current",
+        filters=(),
+        order_by=(("current_last_activity_at", True), ("created_at", True)),
+        limit=max(1, int(max_cards)),
+    )
+    for card in cards:
+        ticket_id = str(card.get("ticket_id") or "")
+        if not ticket_id:
+            continue
+        result["cards_checked"] += 1
+        try:
+            inputs = await _fetch_projection_inputs(ticket_id)
+            if inputs is None:
+                continue
+            outcome = derive_public_loop_outcome(
+                ticket=inputs["ticket"],
+                queue_rows=inputs["queue_rows"],
+                receipt_rows=inputs["receipt_rows"],
+                candidate_rows=inputs["candidate_rows"],
+                score_bundle_rows=inputs["score_bundle_rows"],
+                promotion_event_rows=inputs["promotion_event_rows"],
+                improvement_threshold_points=effective_config.improvement_threshold_points,
+            )
+        except Exception as exc:  # noqa: BLE001 - sweep must never fail the worker pass
+            result["failed"].append({"ticket_id": ticket_id, "stage": "derive", "error": str(exc)[:200]})
+            continue
+
+        stored_label = str(card.get("current_outcome_label") or "")
+        stored_doc = card.get("current_event_doc") if isinstance(card.get("current_event_doc"), Mapping) else {}
+        canonical_fields_missing = bool(outcome.event_doc.get("public_status")) and not (
+            stored_doc.get("public_status") and stored_doc.get("payment_state")
+        )
+        if outcome.outcome_label == stored_label and not canonical_fields_missing:
+            continue
+        result["stale_found"] += 1
+        stale_entry = {
+            "ticket_id": ticket_id,
+            "stored_outcome_label": stored_label,
+            "derived_outcome_label": outcome.outcome_label,
+            "canonical_fields_missing": canonical_fields_missing,
+        }
+        result["stale"].append(stale_entry)
+        if result["log_only"]:
+            logger.info(
+                "research_lab_public_reprojection_sweep_stale_card ticket_id=%s stored=%s derived=%s canonical_missing=%s (log-only)",
+                ticket_id,
+                stored_label or "-",
+                outcome.outcome_label,
+                canonical_fields_missing,
+            )
+            continue
+        if result["reprojected"] >= max(1, int(batch_size)):
+            result["deferred_to_next_sweep"] += 1
+            continue
+        try:
+            await project_public_loop_activity(
+                ticket_id,
+                source_ref=f"{reason}:{ticket_id}",
+                reason=reason,
+                config=effective_config,
+            )
+            result["reprojected"] += 1
+        except Exception as exc:  # noqa: BLE001 - sweep must never fail the worker pass
+            result["failed"].append({"ticket_id": ticket_id, "stage": "project", "error": str(exc)[:200]})
+            logger.warning(
+                "research_lab_public_reprojection_sweep_failed ticket_id=%s error=%s",
+                ticket_id,
+                str(exc)[:200],
+            )
+    if result["stale_found"]:
+        logger.info(
+            "research_lab_public_reprojection_sweep checked=%s stale=%s reprojected=%s deferred=%s failed=%s log_only=%s",
+            result["cards_checked"],
+            result["stale_found"],
+            result["reprojected"],
+            result["deferred_to_next_sweep"],
+            len(result["failed"]),
+            result["log_only"],
+        )
+    return result
+
+
 async def _promotion_events_for_candidates(candidate_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     candidate_ids = {str(row.get("candidate_id") or "") for row in candidate_rows if row.get("candidate_id")}
     if not candidate_ids:
@@ -916,10 +1189,6 @@ def _has_active_candidate(status_counts: Mapping[str, int]) -> bool:
 
 def _has_candidate_reason(rows: Sequence[Mapping[str, Any]], reason: str) -> bool:
     return any(str(row.get("current_reason") or row.get("reason") or "") == reason for row in rows)
-
-
-def _has_any_candidate_reason(rows: Sequence[Mapping[str, Any]], reasons: frozenset[str]) -> bool:
-    return any(str(row.get("current_reason") or row.get("reason") or "") in reasons for row in rows)
 
 
 def _is_credit_block_reason(reason: str) -> bool:

@@ -36,6 +36,7 @@ from .maintenance import (
     default_actor_ref,
 )
 from .promotion import load_active_private_model
+from .public_activity import safe_project_public_loop_activity
 from .reimbursement_awards import (
     cost_evidence_actual_microusd,
     create_reimbursement_decision,
@@ -74,6 +75,39 @@ _OPENROUTER_CREDIT_MARKERS = (
 def _is_openrouter_credit_failure(error_text: str) -> bool:
     low = (error_text or "").lower()
     return any(marker in low for marker in _OPENROUTER_CREDIT_MARKERS)
+
+
+async def _project_after_recovery(
+    ticket_id: str,
+    *,
+    source_ref: str,
+    reason: str,
+    config: ResearchLabGatewayConfig,
+) -> None:
+    """Best-effort public-card projection after a state-changing recovery action.
+
+    Recovery operators change lifecycle state (requeues, terminal marks, rebases)
+    that the public dashboard must reflect; without this the card freezes at its
+    pre-recovery status. Projection failure never fails or aborts the recovery —
+    ``safe_project_public_loop_activity`` already swallows errors, and this wrapper
+    guards against anything escaping it.
+    """
+    if not ticket_id:
+        return
+    try:
+        await safe_project_public_loop_activity(
+            ticket_id,
+            source_ref=source_ref,
+            reason=reason,
+            config=config,
+        )
+    except Exception as exc:  # noqa: BLE001 - projection must never fail recovery
+        logger.warning(
+            "research_lab_recovery_projection_failed ticket_id=%s reason=%s error=%s",
+            ticket_id,
+            reason,
+            str(exc)[:200],
+        )
 
 
 async def _latest_queue_event_error(run_id: str) -> str:
@@ -288,6 +322,12 @@ async def award_failed_run_reimbursements(
             result["skipped"].append({**plan, "reason": (decision or {}).get("status", "not_awarded")})
             continue
         result["awarded"].append({**plan, **decision, "reason": reason})
+        await _project_after_recovery(
+            ticket_id,
+            source_ref=f"recovery_reimbursement_awarded:{rid}",
+            reason="award_failed_run_reimbursements",
+            config=config,
+        )
 
     result["ok"] = not result["failed"]
     return result
@@ -419,6 +459,12 @@ async def resume_failed_runs_from_checkpoint(
                 "requeued_event_hash": event.get("anchored_hash"),
             }
         )
+        await _project_after_recovery(
+            ticket_id,
+            source_ref=f"recovery_resume_from_checkpoint:{run_id}",
+            reason="resume_failed_runs_from_checkpoint",
+            config=config,
+        )
 
     return result
 
@@ -485,6 +531,12 @@ async def resume_credit_blocked_runs_for_miner(
             )
             requeued += 1
             results.append({"run_id": run_id, "status": "requeued", "credit_check": detail})
+            await _project_after_recovery(
+                ticket_id,
+                source_ref=f"recovery_credit_topup_resume:{run_id}",
+                reason="resume_credit_blocked_runs_for_miner",
+                config=config,
+            )
         except Exception as exc:  # noqa: BLE001
             status = "requeue_capacity_conflict" if _is_queue_capacity_conflict(exc) else "requeue_failed"
             results.append({"run_id": run_id, "status": status, "detail": str(exc)[:160]})
@@ -602,6 +654,12 @@ async def requeue_baseline_not_ready_candidates(
                 "requeued_event_id": event.get("event_id"),
                 "requeued_event_seq": event.get("seq"),
             }
+        )
+        await _project_after_recovery(
+            str(row.get("ticket_id") or ""),
+            source_ref=f"recovery_baseline_ready_requeue:{candidate_id}",
+            reason="requeue_baseline_not_ready_candidates",
+            config=config,
         )
 
     return result
@@ -722,6 +780,12 @@ async def rebase_stale_parent_candidates(
                     "derived_candidate_id": rebase.get("derived_candidate_id"),
                     "repair_used": rebase.get("repair_used"),
                 }
+            )
+            await _project_after_recovery(
+                str(row.get("ticket_id") or ""),
+                source_ref=f"recovery_stale_parent_rebased:{candidate_id}",
+                reason="rebase_stale_parent_candidates",
+                config=config,
             )
         else:
             result["rebases"].append({**plan, "status": rebase_status or "no_rebase", "detail": rebase})
@@ -941,6 +1005,12 @@ async def recover_rebase_failed_candidates(
         if plan["regenerate"]:
             result["regenerated"] += 1
         result["plans"].append({**plan, "regenerated_run_id": new_run_id})
+        await _project_after_recovery(
+            ticket_id,
+            source_ref=f"recovery_rebase_failed_recovered:{candidate_id}",
+            reason="recover_rebase_failed_candidates",
+            config=config,
+        )
 
     if result["failed"]:
         result["ok"] = result["recovered"] > 0 or dry_run

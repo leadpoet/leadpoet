@@ -1,7 +1,8 @@
 """Research Lab rolling ICP window selection.
 
 The gateway owns hidden ICP plaintext. This module builds a deterministic
-10-day / 60-ICP scoring window while exposing only public refs and hashes.
+``days x icps_per_day`` scoring window (prod default: 10 days x 2 ICPs = 20)
+while exposing only public refs and hashes.
 """
 
 from __future__ import annotations
@@ -41,7 +42,8 @@ def select_rolling_icp_window_from_sets(
     rows: Sequence[Mapping[str, Any]],
     *,
     days: int = 10,
-    icps_per_day: int = 6,
+    # Matches the reconciled prod default (config lab_champion_icps_per_day).
+    icps_per_day: int = 2,
     allow_partial: bool = False,
 ) -> ResearchLabRollingIcpWindow:
     if days <= 0 or icps_per_day <= 0:
@@ -132,7 +134,8 @@ def select_rolling_icp_window_from_sets(
 async def fetch_rolling_icp_window(
     *,
     days: int = 10,
-    icps_per_day: int = 6,
+    # Matches the reconciled prod default (config lab_champion_icps_per_day).
+    icps_per_day: int = 2,
     allow_partial: bool = False,
 ) -> ResearchLabRollingIcpWindow:
     """Fetch private ICP sets through the gateway service-role client."""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
 import json
+import os
 import posixpath
 import re
 from typing import Any, Mapping, Sequence
@@ -56,6 +57,38 @@ DISALLOWED_DIFF_PATTERNS = (
     r"\bparamiko\b",
 )
 
+# plan_path_id values that are prompt-example placeholders, not real path ids.
+_PLAN_PATH_ID_PLACEHOLDERS = frozenset(
+    {
+        "selected_path_id",
+        "selectedpathid",
+        "<selected_path_id>",
+        "path_id_copied_from_loop_direction_plan",
+    }
+)
+
+# Conservative synonyms live judge models use for a passing verdict. Anything
+# not recognized here still defaults to "fail" (unchanged behavior).
+_PASS_VERDICT_SYNONYMS = frozenset(
+    {
+        "pass",
+        "passed",
+        "passes",
+        "accept",
+        "accepted",
+        "approve",
+        "approved",
+        "true",
+        "yes",
+        "ok",
+        "okay",
+        "aligned",
+        "success",
+        "successful",
+        "valid",
+    }
+)
+
 
 @dataclass(frozen=True)
 class CodeEditDraft:
@@ -89,6 +122,10 @@ class CodeEditSourceInspectionRequest:
     query: str = ""
     path: str = ""
     rationale: str = ""
+    # Optional 1-based line range for read_file (0 = whole-file/head behavior).
+    # Only honored when RESEARCH_LAB_SOURCE_ACCESS_V2 is enabled.
+    start_line: int = 0
+    max_lines: int = 0
 
     def to_event_doc(self) -> dict[str, Any]:
         payload = {
@@ -97,6 +134,10 @@ class CodeEditSourceInspectionRequest:
             "path": self.path,
             "rationale_hash": sha256_json({"rationale": self.rationale}) if self.rationale else "",
         }
+        if self.start_line > 0:
+            payload["start_line"] = self.start_line
+        if self.max_lines > 0:
+            payload["max_lines"] = self.max_lines
         return {key: value for key, value in payload.items() if value not in {"", None}}
 
 
@@ -244,17 +285,30 @@ def build_code_edit_source_inspection_messages(
         "generalizable improvement patch later. Never request secrets, hidden benchmark "
         "plaintext, judge prompts, provider keys, raw private data, or environment files."
     )
+    ranged_read_shape = ""
+    ranged_read_rules = ""
+    if _source_access_v2_enabled():
+        ranged_read_shape = (
+            "{\"requests\":[{\"operation\":\"read_file\",\"path\":\"sourcing_model/foo.py\","
+            "\"start_line\":400,\"max_lines\":200,\"rationale\":\"...\"}]}\n"
+        )
+        ranged_read_rules = (
+            "- Large files may be read in ranges: pass optional start_line (1-based) and max_lines on read_file.\n"
+            "- If an earlier read_file result was truncated, request the deeper range you still need instead of guessing.\n"
+        )
     user = (
         "Return strict JSON only, no markdown.\n\n"
         "Your job in this stage is not to write a patch. Request source context first.\n\n"
         "Allowed request shapes:\n"
         "{\"requests\":[{\"operation\":\"search\",\"query\":\"...\",\"rationale\":\"...\"}]}\n"
         "{\"requests\":[{\"operation\":\"read_file\",\"path\":\"sourcing_model/foo.py\",\"rationale\":\"...\"}]}\n"
-        "{\"requests\":[{\"operation\":\"finish\",\"rationale\":\"enough exact source has been read\"}]}\n\n"
+        + ranged_read_shape
+        + "{\"requests\":[{\"operation\":\"finish\",\"rationale\":\"enough exact source has been read\"}]}\n\n"
         "Rules:\n"
         "- Use search to locate relevant code when the exact path is unclear.\n"
         "- Use read_file before proposing edits to any file.\n"
-        "- Only request paths listed in runtime_source_index.editable_files.\n"
+        + ranged_read_rules
+        + "- Only request paths listed in runtime_source_index.editable_files.\n"
         "- Do not request Dockerfile, dependency files, lockfiles, env files, CI, credentials, or new files.\n"
         "- Stop with finish once you have enough exact file content to draft a narrow patch.\n"
         "- Prefer source related to query construction, ICP normalization, provider fallback, intent evidence, ranking, and adapter output.\n\n"
@@ -291,6 +345,15 @@ def build_code_edit_auto_research_messages(
     editable_files = source_context.get("editable_files") if isinstance(source_context, Mapping) else None
     read_files = inspection_context.get("read_files") if isinstance(inspection_context, Mapping) else None
     example_target = _example_target_file(read_files, None) or _example_target_file(editable_files, None)
+    example_path_id = ""
+    if isinstance(loop_direction_plan, Mapping):
+        example_path_id = _string_value(
+            _get_first_present(loop_direction_plan, ("selected_path_id", "selectedPathId"))
+        ).strip()[:120]
+    if not example_path_id:
+        # Never show the literal key name as the example value: models copy it
+        # verbatim and the copied placeholder then fails plan_path_id matching.
+        example_path_id = "path_id_copied_from_loop_direction_plan"
     context = {
         "ticket": _redacted_mapping(ticket),
         "artifact_manifest": _redacted_mapping(artifact_manifest),
@@ -368,11 +431,12 @@ def build_code_edit_auto_research_messages(
         "LoopDirectionPlan binding:\n"
         "- If loop_direction_plan is present, it is binding.\n"
         "- Only emit candidates that directly implement loop_direction_plan.required_lane, required_mechanism, and selected_path_id.\n"
+        "- Set plan_path_id to the exact value of loop_direction_plan.selected_path_id, not the literal text 'selected_path_id'.\n"
         "- If no safe patch can directly implement the plan from read source files, return {\"no_viable_patch\":true,\"reason\":\"...\"}.\n"
         "- Do not emit a plausible unrelated cleanup or switch lanes.\n"
         "- Do not claim alignment in prose while the diff implements another change.\n\n"
         "Expected output shape:\n"
-        "{\"candidates\":[{\"lane\":\"query_construction\",\"plan_path_id\":\"selected_path_id\","
+        "{\"candidates\":[{\"lane\":\"query_construction\",\"plan_path_id\":\"" + example_path_id + "\","
         "\"plan_alignment\":{\"implements_required_mechanism\":true,\"alignment_summary\":\"...\","
         "\"success_criteria_addressed\":[\"...\"]},\"hypothesis\":{\"failure_mode\":\"...\","
         "\"mechanism\":\"...\",\"expected_improvement\":\"...\",\"risk\":\"...\","
@@ -427,8 +491,8 @@ def build_plan_alignment_judge_messages(
         "- The diff repeats a prior target/mechanism or exact diff.\n"
         "- The hypothesis claims alignment but the code does not.\n"
         "- The patch weakens ICP constraints when the plan requires preserving them.\n\n"
-        "Required output shape:\n"
-        "{\"schema_version\":\"1.0\",\"verdict\":\"pass|fail\",\"reason\":\"...\","
+        "Required output shape (set \"verdict\" to exactly \"pass\" or exactly \"fail\"):\n"
+        "{\"schema_version\":\"1.0\",\"verdict\":\"pass\",\"reason\":\"...\","
         "\"detected_lane\":\"...\",\"detected_mechanism\":\"...\",\"novel\":true,"
         "\"blocking_issue\":\"\",\"confidence\":0.0}\n\n"
         "Context JSON:\n"
@@ -588,7 +652,7 @@ def parse_plan_alignment_judge_response(raw_text: str) -> PlanAlignmentVerdict:
     decoded = _decode_json_value(raw_text)
     if not isinstance(decoded, Mapping):
         raise ValueError("plan alignment judge response must be a JSON object")
-    if _contains_forbidden_material(decoded):
+    if _contains_forbidden_material_diff_aware(decoded):
         raise ValueError("plan alignment judge response contains forbidden private or secret material")
     verdict_mapping = _mapping_with_any_keys(
         decoded,
@@ -606,7 +670,8 @@ def parse_plan_alignment_judge_response(raw_text: str) -> PlanAlignmentVerdict:
             verdict_raw = "pass"
         elif verdict_mapping.get("passes") is False or verdict_mapping.get("pass") is False:
             verdict_raw = "fail"
-    verdict = "pass" if verdict_raw in {"pass", "passed", "accept", "accepted", "true"} else "fail"
+    verdict_raw = verdict_raw.strip().strip(".!\"'` ")
+    verdict = "pass" if verdict_raw in _PASS_VERDICT_SYNONYMS else "fail"
     return PlanAlignmentVerdict(
         schema_version=_string_value(verdict_mapping.get("schema_version") or verdict_mapping.get("schemaVersion") or "1.0")[:20],
         verdict=verdict,
@@ -664,9 +729,14 @@ def code_edit_plan_alignment_errors(
             errors.append("declared_lane_missing")
     selected_path_id = plan.selected_path_id.strip()
     if selected_path_id:
-        if draft.plan_path_id and draft.plan_path_id != selected_path_id:
-            errors.append(f"plan_path_id_mismatch:{draft.plan_path_id}!={selected_path_id}")
-        elif strict and not draft.plan_path_id:
+        draft_path_id = str(draft.plan_path_id or "").strip()
+        if draft_path_id.lower() in _PLAN_PATH_ID_PLACEHOLDERS:
+            # Prompt-taught placeholder (older prompt showed the literal key
+            # name as the example value) — treat as missing, not a mismatch.
+            draft_path_id = ""
+        if draft_path_id and draft_path_id != selected_path_id:
+            errors.append(f"plan_path_id_mismatch:{draft_path_id}!={selected_path_id}")
+        elif strict and not draft_path_id:
             errors.append("plan_path_id_missing")
 
     diff_hash = sha256_json({"unified_diff": draft.unified_diff})
@@ -683,9 +753,11 @@ def code_edit_plan_alignment_errors(
             _string_value(
                 attempt.get("semantic_edit_summary")
                 or attempt.get("redacted_summary")
+                or attempt.get("expected_improvement")
+                or attempt.get("test_plan")
                 or attempt.get("mechanism")
                 or attempt.get("summary")
-            )
+            )[:500]
         )
         if strict and previous_files and target_files == previous_files and semantic_summary and semantic_summary == previous_summary:
             errors.append("duplicate_target_files_and_semantic_summary")
@@ -775,6 +847,17 @@ def parse_code_edit_source_inspection_response(
         if raw_path is not None:
             path = _normalize_repo_path(raw_path)
         rationale = str(_get_first_present(item, ("rationale", "reason", "why", "description")) or "")[:700]
+        start_line = 0
+        max_lines = 0
+        if operation == "read_file":
+            start_line = _int_value(
+                _get_first_present(item, ("start_line", "startLine", "from_line", "fromLine", "offset", "line_offset")),
+                default=0,
+            )
+            max_lines = _int_value(
+                _get_first_present(item, ("max_lines", "maxLines", "line_limit", "lineLimit", "num_lines", "numLines")),
+                default=0,
+            )
         if operation == "search" and not query.strip():
             raise ValueError("source-inspection search requires query")
         if operation == "read_file" and not path:
@@ -788,6 +871,8 @@ def parse_code_edit_source_inspection_response(
                 query=query,
                 path=path,
                 rationale=rationale,
+                start_line=max(0, start_line),
+                max_lines=max(0, max_lines),
             )
         )
     return parsed
@@ -821,7 +906,7 @@ def parse_code_edit_response(raw_text: str, *, max_candidates: int = 1) -> list[
 
     if not isinstance(decoded, (Mapping, list)):
         raise ValueError("code-edit response must be a JSON object or candidate array")
-    if _contains_forbidden_material(decoded):
+    if _contains_forbidden_material_diff_aware(decoded):
         raise ValueError("code-edit response contains forbidden private or secret material")
 
     candidates = _code_edit_candidate_items(decoded)
@@ -860,24 +945,27 @@ def parse_code_edit_repair_response(
     otherwise valid fixed diff.
     """
 
-    decoded = _decode_json_value(raw_text)
-    if not isinstance(decoded, Mapping):
-        raise ValueError("code-edit repair response must be a JSON object")
-    if _contains_forbidden_material(decoded):
+    try:
+        decoded = _decode_json_value(raw_text)
+    except ValueError:
+        # The draft parser accepts a bare unified diff; accept it here too and
+        # carry the original hypothesis forward.
+        diff_only = _draft_from_diff_only_response(raw_text)
+        if diff_only is None:
+            raise
+        decoded = {"code_edit": {"unified_diff": diff_only.unified_diff, "target_files": list(diff_only.target_files)}}
+    if isinstance(decoded, str):
+        return parse_code_edit_repair_response(decoded, original_draft=original_draft)
+    if not isinstance(decoded, (Mapping, list)):
+        raise ValueError("code-edit repair response must be a JSON object or candidate array")
+    if _contains_forbidden_material_diff_aware(decoded):
         raise ValueError("code-edit repair response contains forbidden private or secret material")
 
-    candidate_items: list[Mapping[str, Any]] = []
-    candidates = decoded.get("candidates")
-    if isinstance(candidates, list) and candidates:
-        for item in candidates[:1]:
-            if not isinstance(item, Mapping):
-                raise ValueError("repair candidate must be an object")
-            candidate_items.append(item)
-    elif isinstance(decoded.get("code_edit"), Mapping):
-        candidate_items.append(decoded)
-    elif decoded.get("unified_diff") is not None:
-        candidate_items.append({"code_edit": decoded})
-    else:
+    # Reuse the draft parser's candidate discovery so a repair never fails on a
+    # wrapper shape the first-pass parser accepts (repair parser used to be
+    # stricter than the draft parser).
+    candidate_items = _code_edit_candidate_items(decoded)[:1]
+    if not candidate_items:
         raise ValueError("code-edit repair response requires a candidate or code_edit object")
 
     drafts: list[CodeEditDraft] = []
@@ -891,12 +979,19 @@ def parse_code_edit_repair_response(
                 "risk": original_draft.risk,
                 "predicted_delta": original_draft.predicted_delta,
             }
-        code_edit = item.get("code_edit")
-        if not isinstance(code_edit, Mapping):
-            raise ValueError("repair candidate requires code_edit object")
-        raw_target_files = code_edit.get("target_files") or item.get("target_files") or original_draft.target_files
-        target_files = tuple(_normalize_repo_path(path) for path in raw_target_files)
-        unified_diff = normalize_unified_diff_text(str(code_edit.get("unified_diff") or item.get("unified_diff") or ""))
+        code_edit = _candidate_code_edit_mapping(item)
+        raw_target_files = (
+            _get_first_present(
+                code_edit,
+                ("target_files", "targetFiles", "targets", "files", "paths", "target_file", "targetFile", "file", "path"),
+            )
+            or _get_first_present(
+                item,
+                ("target_files", "targetFiles", "targets", "files", "paths", "target_file", "targetFile", "file", "path"),
+            )
+        )
+        target_files = _coerce_target_files(raw_target_files) or tuple(original_draft.target_files)
+        unified_diff = normalize_unified_diff_text(_string_value(_candidate_unified_diff(item, code_edit)))
         if not unified_diff.strip():
             raise ValueError("code_edit.unified_diff is required")
         draft = CodeEditDraft(
@@ -910,13 +1005,24 @@ def parse_code_edit_repair_response(
             target_files=target_files,
             unified_diff=unified_diff,
             redacted_summary=str(
-                code_edit.get("redacted_summary") or item.get("redacted_summary") or original_draft.redacted_summary
+                _get_first_present(code_edit, ("redacted_summary", "redactedSummary", "summary"))
+                or _get_first_present(item, ("redacted_summary", "redactedSummary", "summary"))
+                or original_draft.redacted_summary
             )[:1200],
-            test_plan=str(code_edit.get("test_plan") or item.get("test_plan") or original_draft.test_plan)[:1200],
+            test_plan=str(
+                _get_first_present(code_edit, ("test_plan", "testPlan"))
+                or _get_first_present(item, ("test_plan", "testPlan"))
+                or original_draft.test_plan
+            )[:1200],
             rollback_plan=str(
-                code_edit.get("rollback_plan") or item.get("rollback_plan") or original_draft.rollback_plan
+                _get_first_present(code_edit, ("rollback_plan", "rollbackPlan"))
+                or _get_first_present(item, ("rollback_plan", "rollbackPlan"))
+                or original_draft.rollback_plan
             )[:1200],
-            predicted_delta=float(hypothesis.get("predicted_delta") or original_draft.predicted_delta or 1.0),
+            predicted_delta=_float_value(
+                hypothesis.get("predicted_delta"),
+                default=float(original_draft.predicted_delta or 1.0),
+            ),
             plan_path_id=str(
                 item.get("plan_path_id")
                 or item.get("planPathId")
@@ -1374,24 +1480,44 @@ def _float_value(value: Any, *, default: float) -> float:
         return float(default)
 
 
+def _int_value(value: Any, *, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _source_access_v2_enabled() -> bool:
+    """Local flag read; config.py is intentionally not touched here."""
+
+    raw = str(os.getenv("RESEARCH_LAB_SOURCE_ACCESS_V2", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _normalize_semantic_summary(value: str) -> str:
     text = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
     return re.sub(r"\s+", " ", text)[:240]
 
 
 def _semantic_summary_key(draft: CodeEditDraft) -> str:
-    return _normalize_semantic_summary(
-        " ".join(
-            item
-            for item in (
-                draft.lane,
-                draft.plan_path_id,
-                draft.mechanism,
-                draft.redacted_summary,
-            )
-            if item
-        )
+    """Build the draft-side semantic key in the shape prior attempts store it.
+
+    ``gateway/research_lab/worker.py::_candidate_attempt_memory`` persists
+    ``semantic_edit_summary`` as the redacted summary (falling back to
+    expected_improvement, then test_plan) truncated to 500 raw characters.
+    The draft-side key must be built from the same material with the same
+    truncation, or the semantic-duplicate comparison never matches and the
+    novelty guard is dead code (bug #22).
+    """
+
+    raw = (
+        draft.redacted_summary
+        or draft.expected_improvement
+        or draft.test_plan
+        or draft.mechanism
+        or ""
     )
+    return _normalize_semantic_summary(str(raw)[:500])
 
 
 def normalize_unified_diff_text(value: str) -> str:
@@ -1439,7 +1565,7 @@ def validate_code_edit_draft(
 ) -> list[str]:
     errors: list[str] = []
     payload = draft.to_dict()
-    if _contains_forbidden_material(payload):
+    if _contains_forbidden_material_diff_aware(payload):
         errors.append("code_edit_contains_forbidden_material")
     stripped_diff = draft.unified_diff.lstrip()
     if "*** Begin Patch" in stripped_diff or "*** Update File:" in stripped_diff or "*** End Patch" in stripped_diff:
@@ -1458,8 +1584,11 @@ def validate_code_edit_draft(
             allowed_exact_paths=allowed_exact_paths,
             allowed_suffixes=allowed_suffixes,
         ))
+    # Scan only added lines: context/removed lines are verbatim parent source,
+    # and rejecting on them blacklists files that already use these APIs.
+    added_diff_material = _diff_added_line_material(draft.unified_diff)
     for pattern in DISALLOWED_DIFF_PATTERNS:
-        if re.search(pattern, draft.unified_diff):
+        if re.search(pattern, added_diff_material):
             errors.append(f"code_edit_disallowed_diff_pattern:{pattern}")
     if errors:
         raise ValueError("; ".join(errors))
@@ -1568,6 +1697,56 @@ def _contains_forbidden_material(value: Any) -> bool:
     if isinstance(value, str):
         lowered = value.lower()
         return any(marker in lowered for marker in FORBIDDEN_CODE_EDIT_TERMS)
+    return False
+
+
+def _looks_like_unified_diff(value: str) -> bool:
+    text = str(value or "")
+    stripped = text.lstrip()
+    return (
+        stripped.startswith(("diff --git ", "--- a/", "@@ "))
+        or "diff --git " in text
+        or "\n@@ " in text
+        or "\n--- a/" in text
+    )
+
+
+def _diff_added_line_material(diff_text: str) -> str:
+    """Return only the parts of a unified diff a term filter should scan.
+
+    Context (' ') and removed ('-') lines are verbatim parent-image source, so
+    scanning them rejects any edit touching a file that merely *mentions* a
+    forbidden term — blacklisting exactly the files the intent/provider lanes
+    target (bug #18). Only added lines can introduce new material into the
+    tree; hunk section headings ('@@ ... @@ def foo') are also verbatim source
+    and are excluded. File headers are kept because paths are model-chosen.
+    """
+
+    kept: list[str] = []
+    for line in str(diff_text or "").splitlines():
+        if line.startswith("+++ "):
+            kept.append(line)
+        elif line.startswith("+"):
+            kept.append(line)
+        elif line.startswith(("diff --git ", "--- ")):
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def _contains_forbidden_material_diff_aware(value: Any) -> bool:
+    """Forbidden-term scan that ignores unified-diff context/removed lines."""
+
+    if isinstance(value, Mapping):
+        return any(
+            _contains_forbidden_material_diff_aware(key) or _contains_forbidden_material_diff_aware(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_forbidden_material_diff_aware(item) for item in value)
+    if isinstance(value, str):
+        if _looks_like_unified_diff(value):
+            return _contains_forbidden_material(_diff_added_line_material(value))
+        return _contains_forbidden_material(value)
     return False
 
 

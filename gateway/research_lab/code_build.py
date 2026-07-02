@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 from typing import Any, Mapping, Sequence
 
 from gateway.research_lab.config import ResearchLabGatewayConfig
@@ -27,6 +29,22 @@ from research_lab.eval import (
     compute_private_source_tree_hash,
     validate_private_model_artifact_manifest,
 )
+
+
+logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Local env-flag read; gateway config.py is intentionally not touched here."""
+
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _source_access_v2_enabled() -> bool:
+    return _env_flag("RESEARCH_LAB_SOURCE_ACCESS_V2", False)
 
 
 class CodeEditBuildError(RuntimeError):
@@ -60,6 +78,18 @@ class CodeEditPrivateTestError(CodeEditBuildError):
 
 class CodeEditImageBuildError(CodeEditBuildError):
     default_failure_stage = "candidate_image_build_failed"
+
+
+class CodeEditInfraFailureError(CodeEditImageBuildError):
+    """Registry/auth/network failure — not the candidate's fault (bug #30).
+
+    Subclasses ``CodeEditImageBuildError`` so every existing handler keeps
+    catching it; ``failure_stage`` marks the outcome as infra-failed so
+    higher-level callers can requeue instead of charging the candidate.
+    """
+
+    default_failure_stage = "candidate_build_infra_failed"
+    retryable = True
 
 
 @dataclass(frozen=True)
@@ -352,31 +382,38 @@ class CodeEditCandidateBuilder:
                 timeout_seconds=120,
             )
             git_commit_sha = _run(["git", "rev-parse", "HEAD"], cwd=repo_dir, timeout_seconds=60).strip()
-            try:
-                _run_shell(
-                    self.config.private_build_cmd,
-                    cwd=repo_dir,
-                    env={
-                        **self._build_env(
-                            draft_path=draft_path,
-                            parent_manifest_path=parent_manifest_path,
-                            diff_path=diff_path,
-                            run_id=run_id,
-                            candidate_index=candidate_index,
-                            include_aws=True,
-                        ),
-                        "RESEARCH_LAB_PRIVATE_COMMIT_SHA": git_commit_sha,
-                        "RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT": self.config.private_artifact_manifest_output,
-                    },
-                    timeout_seconds=self.config.code_edit_build_timeout_seconds,
+            recorded_commit_sha, recorded_commit_sha_source = _resolve_recorded_commit_sha(
+                workspace_sha=git_commit_sha,
+                parent_artifact=parent_artifact,
+            )
+            commit_excluded_paths = _git_ignored_paths(repo_dir)
+            if commit_excluded_paths:
+                # Bug #29(b): these files exist in the built image (docker COPY)
+                # but git ignore rules keep them out of any pushed commit, so a
+                # promotion push would silently diverge from the scored image.
+                logger.warning(
+                    "research-lab code-edit build: %d extracted path(s) excluded from git commits "
+                    "by ignore rules; a promotion push will not contain them: %s",
+                    len(commit_excluded_paths),
+                    ", ".join(commit_excluded_paths[:20]),
                 )
-            except CodeEditBuildError as exc:
-                raise CodeEditImageBuildError(
-                    str(exc),
-                    stderr=exc.stderr,
-                    stdout=exc.stdout,
-                    exit_code=exc.exit_code,
-                ) from exc
+            _run_private_build_cmd_with_infra_retry(
+                cmd=self.config.private_build_cmd,
+                cwd=repo_dir,
+                env={
+                    **self._build_env(
+                        draft_path=draft_path,
+                        parent_manifest_path=parent_manifest_path,
+                        diff_path=diff_path,
+                        run_id=run_id,
+                        candidate_index=candidate_index,
+                        include_aws=True,
+                    ),
+                    "RESEARCH_LAB_PRIVATE_COMMIT_SHA": recorded_commit_sha,
+                    "RESEARCH_LAB_PRIVATE_ARTIFACT_MANIFEST_OUTPUT": self.config.private_artifact_manifest_output,
+                },
+                timeout_seconds=self.config.code_edit_build_timeout_seconds,
+            )
             manifest_path = Path(self.config.private_artifact_manifest_output)
             if not manifest_path.is_absolute():
                 manifest_path = repo_dir / manifest_path
@@ -405,6 +442,11 @@ class CodeEditCandidateBuilder:
                 "candidate_model_artifact_hash": candidate_manifest.model_artifact_hash,
                 "candidate_model_manifest_hash": candidate_manifest.manifest_hash,
                 "candidate_git_commit_sha": candidate_manifest.git_commit_sha,
+                "build_workspace_git_commit_sha": git_commit_sha,
+                "recorded_git_commit_sha": recorded_commit_sha,
+                "recorded_git_commit_sha_source": recorded_commit_sha_source,
+                "commit_excluded_paths": commit_excluded_paths[:200],
+                "commit_excluded_path_count": len(commit_excluded_paths),
                 "source_diff_hash": source_diff_hash,
                 "changed_files": changed_files,
                 "test_command_hash": canonical_hash({"cmd": self.config.private_test_cmd}),
@@ -492,6 +534,52 @@ _AWS_BUILD_ENV_NAMES = (
     "AWS_DEFAULT_REGION",
 )
 
+# Conservative stderr/stdout markers for registry/auth/network failures that a
+# candidate's diff cannot cause (bug #30). Kept narrow on purpose: anything
+# unrecognized stays charged to the candidate as today.
+_INFRA_FAILURE_MARKERS = (
+    "no basic auth credentials",
+    "authorization token has expired",
+    "unable to locate credentials",
+    "expiredtoken",
+    "expired token",
+    "toomanyrequests",
+    "too many requests",
+    "tls handshake timeout",
+    "connection refused",
+    "connection reset by peer",
+    "i/o timeout",
+    "temporary failure in name resolution",
+    "no such host",
+    "dial tcp",
+    "request canceled while waiting for connection",
+    "received unexpected http status: 5",
+    "502 bad gateway",
+    "503 service unavailable",
+    "504 gateway",
+    "unexpected eof",
+    "blob upload unknown",
+    "cannot connect to the docker daemon",
+    "error during connect",
+)
+
+
+def _is_infra_failure_text(*texts: str) -> bool:
+    blob = " ".join(str(text or "") for text in texts).lower()
+    return any(marker in blob for marker in _INFRA_FAILURE_MARKERS)
+
+
+def _infra_retry_enabled() -> bool:
+    return _env_flag("RESEARCH_LAB_BUILD_INFRA_RETRY_ENABLED", True)
+
+
+def _infra_retry_backoff_seconds() -> float:
+    raw = str(os.getenv("RESEARCH_LAB_BUILD_INFRA_RETRY_BACKOFF_SECONDS", "") or "").strip()
+    try:
+        return max(0.0, float(raw)) if raw else 5.0
+    except ValueError:
+        return 5.0
+
 
 _REQUIRED_PARENT_APP_DIRS = (
     "gateway",
@@ -556,11 +644,30 @@ def _ensure_parent_image_available(image_ref: str, *, timeout_seconds: int) -> N
         return
     except CodeEditBuildError:
         pass
-    _run(
-        ["docker", "pull", "--platform", _docker_platform(), image_ref],
-        cwd=Path.cwd(),
-        timeout_seconds=timeout_seconds,
-    )
+    pull_cmd = ["docker", "pull", "--platform", _docker_platform(), image_ref]
+    try:
+        _run(pull_cmd, cwd=Path.cwd(), timeout_seconds=timeout_seconds)
+        return
+    except CodeEditBuildError as exc:
+        if not _infra_retry_enabled():
+            raise
+        # A pull failure (auth, network, registry, timeout during pull) cannot
+        # be caused by the candidate's diff — retry once, then surface it as
+        # an infra failure instead of charging the candidate (bug #30).
+        logger.warning(
+            "research-lab code-edit build: parent image pull failed, retrying once after backoff: %s",
+            str(exc)[:300],
+        )
+        time.sleep(_infra_retry_backoff_seconds())
+        try:
+            _run(pull_cmd, cwd=Path.cwd(), timeout_seconds=timeout_seconds)
+        except CodeEditBuildError as retry_exc:
+            raise CodeEditInfraFailureError(
+                f"parent image pull failed after infra retry: {retry_exc}",
+                stderr=retry_exc.stderr,
+                stdout=retry_exc.stdout,
+                exit_code=retry_exc.exit_code,
+            ) from retry_exc
 
 
 def _extract_parent_image_app(image_ref: str, *, repo_dir: Path, timeout_seconds: int) -> None:
@@ -880,7 +987,63 @@ def _preview_priority(path: str) -> tuple[int, str]:
     return (5, path)
 
 
+# Patterns matching secret VALUES (literal keys, tokens, connection strings).
+# Bug #19: the old behavior replaced every line that merely *mentioned* a
+# marker keyword, corrupting the source shown to the model → hunks built
+# against text that does not match the real file → guaranteed-futile repairs.
+# Value-level masking keeps line structure byte-stable: masked characters are
+# replaced 1:1 with '*' so line counts and column offsets survive.
+_SOURCE_SECRET_VALUE_PATTERNS = (
+    re.compile(r"sk-or-[A-Za-z0-9_\-]{8,}"),
+    re.compile(r"sb_secret_[A-Za-z0-9_\-]{8,}"),
+    re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\b"),  # JWTs
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"(?i)\b[a-z][a-z0-9+.\-]{1,20}://[^\s'\"@/]{1,64}:[^\s'\"@]{4,}@[^\s'\"]+"),  # URL creds
+    re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9_\-.=]{16,})"),
+    re.compile(
+        r"(?i)(\b(?:api[_-]?key|apikey|api[_-]?secret|secret[_-]?key|access[_-]?key|auth[_-]?token"
+        r"|token|secret|passwd|password|pwd|service_role_key|aws_secret_access_key|private_key)\b"
+        r"\s*[:=]\s*[\"']?)([A-Za-z0-9_\-]{16,})"
+    ),
+)
+
+
+def _mask_secret_chars(value: str) -> str:
+    return re.sub(r"[^\n]", "*", value)
+
+
+def _redact_secret_values(text: str) -> str:
+    """Mask secret literals in place, preserving line count and offsets.
+
+    Residual risk (documented): a hard-coded secret in a format not covered by
+    ``_SOURCE_SECRET_VALUE_PATTERNS`` is now shown to the model where the old
+    line-blanking would have hidden it. Source here is extracted from a built
+    image whose env/credential files are excluded from editable inventory, so
+    literal secrets in scanned files should already be rare; the pattern list
+    covers the provider/registry credentials this runtime actually uses.
+    """
+
+    def _sub(match: re.Match[str]) -> str:
+        groups = match.groups()
+        if not groups:
+            return _mask_secret_chars(match.group(0))
+        prefix = groups[0] or ""
+        value = groups[1] if len(groups) > 1 else ""
+        if value and not re.search(r"\d", value):
+            # Identifier-like (no digits) — likely code, not a literal secret.
+            return match.group(0)
+        return prefix + _mask_secret_chars(match.group(0)[len(prefix):])
+
+    for pattern in _SOURCE_SECRET_VALUE_PATTERNS:
+        text = pattern.sub(_sub, text)
+    return text
+
+
 def _redact_source_excerpt(text: str) -> str:
+    if _env_flag("RESEARCH_LAB_REDACT_VALUES_ONLY", True):
+        return _redact_secret_values(text)
+    # Legacy behavior (flag off): blank whole keyword-mentioning lines.
     redacted_lines = []
     for line in text.splitlines():
         lowered = line.lower()
@@ -958,6 +1121,106 @@ def _docker_platform() -> str:
 def _changed_files(repo_dir: Path) -> list[str]:
     output = _run(["git", "diff", "--name-only"], cwd=repo_dir, timeout_seconds=60)
     return sorted(line.strip() for line in output.splitlines() if line.strip())
+
+
+def _git_ignored_paths(repo_dir: Path) -> list[str]:
+    """Extracted files that git ignore rules keep out of commits (bug #29b).
+
+    Never fails the build: this is diagnostic-only so a push can be audited
+    against the built image.
+    """
+
+    try:
+        output = _run(
+            ["git", "ls-files", "--others", "--ignored", "--exclude-standard"],
+            cwd=repo_dir,
+            timeout_seconds=60,
+        )
+    except CodeEditBuildError:
+        return []
+    return sorted(line.strip() for line in output.splitlines() if line.strip())
+
+
+def _looks_like_git_sha(value: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{7,40}", str(value or "").strip().lower()))
+
+
+def _resolve_recorded_commit_sha(
+    *,
+    workspace_sha: str,
+    parent_artifact: PrivateModelArtifactManifest,
+) -> tuple[str, str]:
+    """Pick the commit sha recorded into the candidate artifact manifest.
+
+    Bug #29(a): the sha from the throwaway ``git init`` workspace never exists
+    in the real private source repo, so auto-commit promotion wedges on the
+    head check after the first push. Prefer a real source-repo sha when one is
+    available: an explicit env input first, then the parent manifest's sha.
+    Controlled by RESEARCH_LAB_BUILD_RECORD_REAL_HEAD_SHA (default true);
+    disabling restores the previous throwaway-workspace behavior.
+    """
+
+    if not _env_flag("RESEARCH_LAB_BUILD_RECORD_REAL_HEAD_SHA", True):
+        return workspace_sha, "build_workspace"
+    env_sha = str(os.getenv("RESEARCH_LAB_PRIVATE_SOURCE_HEAD_SHA", "") or "").strip()
+    if _looks_like_git_sha(env_sha):
+        return env_sha.lower(), "env"
+    parent_sha = str(parent_artifact.git_commit_sha or "").strip()
+    if _looks_like_git_sha(parent_sha):
+        return parent_sha.lower(), "parent_manifest"
+    return workspace_sha, "build_workspace"
+
+
+def _run_private_build_cmd_with_infra_retry(
+    *,
+    cmd: str,
+    cwd: Path,
+    env: Mapping[str, str],
+    timeout_seconds: int,
+) -> str:
+    """Run the private build/push command, retrying once on infra failures.
+
+    Genuine build/test failures stay charged to the candidate as
+    ``CodeEditImageBuildError``. Registry/auth/network failures (which the
+    candidate's diff cannot cause) are retried once with a short backoff and,
+    if persistent, surfaced as ``CodeEditInfraFailureError`` so higher levels
+    can requeue instead of rejecting the candidate (bug #30). Timeouts of the
+    build command itself remain charged to the candidate.
+    """
+
+    try:
+        return _run_shell(cmd, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
+    except CodeEditBuildError as exc:
+        infra = _infra_retry_enabled() and _is_infra_failure_text(str(exc), exc.stderr, exc.stdout)
+        if not infra:
+            raise CodeEditImageBuildError(
+                str(exc),
+                stderr=exc.stderr,
+                stdout=exc.stdout,
+                exit_code=exc.exit_code,
+            ) from exc
+        logger.warning(
+            "research-lab code-edit build: private build command hit an infra-classified failure, "
+            "retrying once after backoff: %s",
+            str(exc)[:300],
+        )
+        time.sleep(_infra_retry_backoff_seconds())
+        try:
+            return _run_shell(cmd, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
+        except CodeEditBuildError as retry_exc:
+            if _is_infra_failure_text(str(retry_exc), retry_exc.stderr, retry_exc.stdout):
+                raise CodeEditInfraFailureError(
+                    f"private build command failed on infrastructure after one retry: {retry_exc}",
+                    stderr=retry_exc.stderr,
+                    stdout=retry_exc.stdout,
+                    exit_code=retry_exc.exit_code,
+                ) from retry_exc
+            raise CodeEditImageBuildError(
+                str(retry_exc),
+                stderr=retry_exc.stderr,
+                stdout=retry_exc.stdout,
+                exit_code=retry_exc.exit_code,
+            ) from retry_exc
 
 
 def _py_compile_changed_files(repo_dir: Path, changed_files: list[str]) -> None:

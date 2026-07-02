@@ -212,7 +212,8 @@ def main() -> int:
                 benchmark_items=[
                     {"icp_ref": "icp:a", "icp_hash": "sha256:" + "a" * 64, "icp": {"id": "public-a"}},
                     {"icp_ref": "icp:b", "icp_hash": "sha256:" + "b" * 64, "icp": {"id": "public-b"}},
-                    {"icp_ref": "icp:c", "icp_hash": "sha256:" + "c" * 64, "icp": {"id": "private"}},
+                    {"icp_ref": "icp:c", "icp_hash": "sha256:" + "c" * 64, "icp": {"id": "public-c"}},
+                    {"icp_ref": "icp:d", "icp_hash": "sha256:" + "d" * 64, "icp": {"id": "private"}},
                 ],
                 base_runner=_gated_reject_base_runner,
                 candidate_runner=_timeout_candidate_runner,
@@ -222,7 +223,7 @@ def main() -> int:
                 private_holdout_gate={
                     "baseline_benchmark_bundle_id": "private_benchmark:test",
                     "baseline_public_score": 1.0,
-                    "public_icp_refs": ["icp:a", "icp:b"],
+                    "public_icp_refs": ["icp:a", "icp:b", "icp:c"],
                 },
             )
         )
@@ -237,18 +238,21 @@ def main() -> int:
         timeout_results = timeout_bundle["aggregates"]["per_icp_results"]
         if "candidate_model_runtime_timeout" not in timeout_results[0]["failure_reason"]:
             errors.append("candidate timeout failure reason was not recorded")
-        if "candidate_model_runtime_skipped_after_timeout" not in timeout_results[1]["failure_reason"]:
-            errors.append("candidate timeout did not skip remaining public ICP candidate calls")
-        if timeout_candidate_calls != ["public-a"]:
-            errors.append(f"candidate timeout called candidate runner too many times: {timeout_candidate_calls}")
+        # Bug #14: the first timeout is retried once and the skip latch only
+        # engages after 2+ consecutive post-retry timeouts, so ICPs a and b are
+        # each attempted twice and only ICP c is skipped.
+        if "candidate_model_runtime_skipped_after_timeout" not in timeout_results[2]["failure_reason"]:
+            errors.append("candidate timeout did not skip remaining public ICP candidate calls after 2 consecutive timeouts")
+        if timeout_candidate_calls != ["public-a", "public-a", "public-b", "public-b"]:
+            errors.append(f"candidate timeout retry/latch call pattern unexpected: {timeout_candidate_calls}")
         timeout_gate = timeout_bundle.get("private_holdout_gate") or {}
         if timeout_gate.get("decision") != "rejected_before_private_holdout":
             errors.append("candidate timeout did not reject before private holdout")
-        if int((timeout_bundle.get("aggregates") or {}).get("icp_count") or 0) != 2:
+        if int((timeout_bundle.get("aggregates") or {}).get("icp_count") or 0) != 3:
             errors.append("candidate timeout should only score public gate ICPs before rejection")
         timeout_health = timeout_bundle.get("scoring_health") if isinstance(timeout_bundle.get("scoring_health"), dict) else {}
-        if timeout_health.get("timeout_count") != 1:
-            errors.append(f"candidate timeout health did not count one timeout: {timeout_health}")
+        if timeout_health.get("timeout_count") != 2:
+            errors.append(f"candidate timeout health did not count two post-retry timeouts: {timeout_health}")
         if timeout_health.get("skipped_candidate_count") != 1:
             errors.append(f"candidate timeout health did not count one skipped candidate ICP: {timeout_health}")
         if timeout_health.get("public_holdout_decision") != "rejected_before_private_holdout":

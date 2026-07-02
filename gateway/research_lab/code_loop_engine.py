@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 import json
+import logging
+import os
 from pathlib import Path
 import re
 import tempfile
@@ -35,6 +37,7 @@ from gateway.research_lab.loop_engine import (
 )
 from research_lab.canonical import sha256_json
 from research_lab.code_editing import (
+    FORBIDDEN_CODE_EDIT_TERMS,
     CodeEditDraft,
     build_code_edit_auto_research_messages,
     build_code_edit_repair_messages,
@@ -58,6 +61,73 @@ CodeEditOpenRouterCaller = Callable[
     Awaitable[Union[str, OpenRouterCallResult]],
 ]
 
+logger = logging.getLogger(__name__)
+
+_ENGINE_FLAG_TRUTHY = {"1", "true", "yes", "on"}
+
+# Exception class names (checked by name to avoid a circular import with
+# worker.py) that must always escape bug-17 stage containment: they change the
+# run's funding or ownership, not just the current stage.
+_STAGE_PROPAGATE_ERROR_CLASS_NAMES = frozenset(
+    {
+        "CreditBlockedHostedRunError",
+        "HostedResearchLabClaimLost",
+    }
+)
+
+
+def _engine_env_flag(name: str, default: str) -> bool:
+    return os.environ.get(name, default).strip().lower() in _ENGINE_FLAG_TRUTHY
+
+
+def _resume_restore_selected_enabled() -> bool:
+    """Bug 5 kill switch: restore already-built candidates from the checkpoint on resume."""
+
+    return _engine_env_flag("RESEARCH_LAB_LOOP_RESUME_RESTORE_SELECTED", "true")
+
+
+def _planner_parse_retry_enabled() -> bool:
+    """Bug 16 kill switch: retry the planner once on parse failure, then fall back to plan-less mode."""
+
+    return _engine_env_flag("RESEARCH_LAB_LOOP_PLANNER_PARSE_RETRY", "true")
+
+
+def _stage_error_containment_enabled() -> bool:
+    """Bug 17 kill switch: a failed stage LLM call skips that stage/iteration instead of failing the run."""
+
+    return _engine_env_flag("RESEARCH_LAB_LOOP_STAGE_ERROR_CONTAINMENT", "true")
+
+
+def _stop_at_candidate_cap_enabled() -> bool:
+    """Bug 20 kill switch: stop iterating/building once max_candidates is reached (no build-and-discard)."""
+
+    return _engine_env_flag("RESEARCH_LAB_LOOP_STOP_AT_CANDIDATE_CAP", "true")
+
+
+def _judge_parse_soft_skip_enabled() -> bool:
+    """Bug 21 kill switch: retry the alignment judge once on parse failure, then accept neutrally
+    instead of recording a confident rejection."""
+
+    return _engine_env_flag("RESEARCH_LAB_LOOP_JUDGE_PARSE_SOFT_SKIP", "true")
+
+
+def _within_run_memory_enabled() -> bool:
+    """Feed this run's prior rejections into later iterations and dedupe rejected diff hashes."""
+
+    return _engine_env_flag("RESEARCH_LAB_LOOP_WITHIN_RUN_MEMORY", "true")
+
+
+def _min_runtime_skip_when_selected_enabled() -> bool:
+    """Skip the post-loop minimum-runtime sleep when candidates are already selected."""
+
+    return _engine_env_flag("RESEARCH_LAB_LOOP_MIN_RUNTIME_SKIP_WHEN_SELECTED", "true")
+
+
+def _build_heartbeat_enabled() -> bool:
+    """Run the docker build off the event loop and emit heartbeat loop events during it."""
+
+    return _engine_env_flag("RESEARCH_LAB_LOOP_BUILD_HEARTBEAT", "true")
+
 
 @dataclass(frozen=True)
 class BuiltCodeEditCandidate:
@@ -65,6 +135,8 @@ class BuiltCodeEditCandidate:
     build: CodeEditBuildResult
     node_id: str
     iteration: int
+    rehydration_artifact_uri: str = ""
+    rehydration_artifact_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -101,6 +173,206 @@ class CodeEditLoopEngine:
     call_openrouter: CodeEditOpenRouterCaller
     event_sink: Any
     builder: CodeEditCandidateBuilder
+
+    async def _restore_selected_from_resume(
+        self,
+        *,
+        resume: Mapping[str, Any],
+        run_id: str,
+        artifact: PrivateModelArtifactManifest,
+        elapsed: Callable[[], float],
+        openrouter_calls: int,
+        estimated_cost: float,
+        actual_cost_microusd: int,
+    ) -> list[BuiltCodeEditCandidate]:
+        """Rehydrate already-built candidates from checkpoint artifacts (bug #5).
+
+        Each checkpoint summary carries a ``rehydration_artifact_uri``/``_hash``
+        pointing at the full S3 rehydration doc. Any per-candidate failure is
+        logged and skipped; the caller degrades to the legacy empty ``selected``
+        on total failure. The ``loop_resumed`` event reports the restored count.
+        """
+        del elapsed, openrouter_calls, estimated_cost, actual_cost_microusd  # event-free restore
+        summaries = resume.get("selected_candidates")
+        if not isinstance(summaries, Sequence):
+            return []
+        restored: list[BuiltCodeEditCandidate] = []
+        for summary in summaries:
+            if not isinstance(summary, Mapping):
+                continue
+            uri = str(summary.get("rehydration_artifact_uri") or "")
+            expected_hash = str(summary.get("rehydration_artifact_hash") or "")
+            if not uri.startswith("s3://"):
+                continue
+            try:
+                bucket, object_key = _parse_s3_uri(uri)
+
+                def _get(bucket: str = bucket, object_key: str = object_key) -> dict[str, Any]:
+                    import boto3  # type: ignore
+
+                    body = boto3.client("s3").get_object(Bucket=bucket, Key=object_key)["Body"].read()
+                    return json.loads(body.decode("utf-8"))
+
+                payload = await asyncio.to_thread(_get)
+                stored_hash = str(payload.get("loop_candidate_artifact_hash") or "")
+                if expected_hash and stored_hash and stored_hash != expected_hash:
+                    raise ValueError("rehydration_artifact_hash_mismatch")
+                candidate = _rehydrated_candidate_from_artifact_payload(payload)
+                restored.append(
+                    replace(
+                        candidate,
+                        rehydration_artifact_uri=uri,
+                        rehydration_artifact_hash=expected_hash or stored_hash,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_loop_candidate_restore_failed run_id=%s node_id=%s error=%s",
+                    run_id,
+                    str(summary.get("node_id") or "")[:80],
+                    str(exc)[:200],
+                )
+                continue
+        if restored:
+            logger.info(
+                "research_lab_loop_candidates_restored run_id=%s count=%s parent=%s",
+                run_id,
+                len(restored),
+                artifact.model_artifact_hash[:24],
+            )
+        return restored
+
+    async def _call_stage_contained(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        timeout_seconds: int,
+        max_tokens: int,
+        stage: str,
+    ) -> tuple[OpenRouterCallResult | None, str | None]:
+        """Run one stage LLM call with bug-17 error containment.
+
+        Returns ``(result, None)`` on success and ``(None, error_text)`` on a
+        contained failure — the caller skips the stage/iteration and the run
+        keeps whatever it already built. Credit blocks and claim losses always
+        propagate (they change run ownership/funding, not just this stage), as
+        does everything when containment is disabled.
+        """
+        try:
+            raw = await self.call_openrouter(messages, timeout_seconds, max_tokens, stage)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if any(
+                base.__name__ in _STAGE_PROPAGATE_ERROR_CLASS_NAMES
+                for base in type(exc).__mro__
+            ):
+                raise
+            if not _stage_error_containment_enabled():
+                raise
+            lost_cost_microusd = max(0, int(getattr(exc, "cost_microusd", 0) or 0))
+            logger.warning(
+                "research_lab_loop_stage_call_contained stage=%s lost_cost_microusd=%s error=%s",
+                stage,
+                lost_cost_microusd,
+                str(exc)[:200],
+            )
+            return None, _diagnostic_text(f"{type(exc).__name__}: {exc}", limit=300)
+        return _coerce_call_result(raw), None
+
+    async def _build_candidate_with_heartbeat(
+        self,
+        *,
+        draft: CodeEditDraft,
+        artifact: PrivateModelArtifactManifest,
+        run_id: str,
+        candidate_index: int,
+        source_context: Any,
+        node_id: str,
+        iteration: int,
+        elapsed: Callable[[], float],
+        openrouter_calls: int,
+        estimated_cost: float,
+        actual_cost_microusd: int,
+    ) -> CodeEditBuildResult:
+        """Run the docker build off the event loop with liveness heartbeats.
+
+        The synchronous build used to block the event loop for up to the full
+        build timeout with no loop events — exactly the no-loop-event window
+        the stale-claim guard requeues (Chain E). Heartbeat events keep the run
+        visibly alive during long builds.
+        """
+        if not _build_heartbeat_enabled():
+            return self.builder.build(
+                draft=draft,
+                parent_artifact=artifact,
+                run_id=run_id,
+                candidate_index=candidate_index,
+                source_context=source_context,
+            )
+        source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
+        await self.event_sink(
+            AutoResearchLoopEvent(
+                event_type="candidate_build_started",
+                loop_status="running",
+                elapsed_seconds=elapsed(),
+                node_id=node_id,
+                cost_ledger=_running_cost_ledger(
+                    openrouter_calls, estimated_cost, actual_cost_microusd, "candidate_build_started"
+                ),
+                event_doc={
+                    "iteration": iteration,
+                    "candidate_index": candidate_index,
+                    "status": "started",
+                    "source_diff_hash": source_diff_hash,
+                },
+            )
+        )
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self.builder.build,
+                draft=draft,
+                parent_artifact=artifact,
+                run_id=run_id,
+                candidate_index=candidate_index,
+                source_context=source_context,
+            )
+        )
+        heartbeat_index = 0
+        try:
+            while not task.done():
+                done, _pending = await asyncio.wait({task}, timeout=30.0)
+                if done:
+                    break
+                heartbeat_index += 1
+                try:
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="candidate_build_started",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            node_id=node_id,
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "candidate_build_heartbeat",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "candidate_index": candidate_index,
+                                "status": "heartbeat",
+                                "heartbeat_index": heartbeat_index,
+                                "source_diff_hash": source_diff_hash,
+                            },
+                        )
+                    )
+                except Exception:
+                    # A failed heartbeat write must never fail the build itself.
+                    pass
+            return await task
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
 
     async def _prepare_parent_source_context_with_heartbeat(
         self,
@@ -243,6 +515,59 @@ class CodeEditLoopEngine:
         elapsed_offset = max(0.0, float(resume.get("elapsed_seconds") or 0.0))
         elapsed = lambda: elapsed_offset + (time.monotonic() - start)
         budget_limit_microusd = _budget_limit_microusd(budget_context)
+        built_candidate_total = max(0, int(resume.get("built_candidate_count") or 0))
+        within_run_memory_active = _within_run_memory_enabled()
+        rejected_diff_hashes: set[str] = set()
+        within_run_rejections: list[dict[str, Any]] = []
+
+        def _record_within_run_rejection(
+            *,
+            stage: str,
+            reason: str,
+            iteration_index: int,
+            draft: CodeEditDraft | None = None,
+            diff_hash: str | None = None,
+        ) -> None:
+            if not within_run_memory_active:
+                return
+            resolved_hash = diff_hash or (
+                sha256_json({"unified_diff": draft.unified_diff}) if draft is not None else ""
+            )
+            if resolved_hash:
+                rejected_diff_hashes.add(resolved_hash)
+            within_run_rejections.append(
+                {
+                    "iteration": int(iteration_index),
+                    "stage": str(stage)[:80],
+                    "reason": _memory_safe_text(reason),
+                    "lane": str(draft.lane if draft is not None else "")[:80],
+                    "plan_path_id": str(draft.plan_path_id if draft is not None else "")[:120],
+                    "target_files": list(draft.target_files)[:10] if draft is not None else [],
+                    "unified_diff_hash": resolved_hash,
+                    "status": "rejected",
+                }
+            )
+            del within_run_rejections[:-25]
+
+        def _within_run_memory_doc() -> dict[str, Any] | None:
+            if not within_run_memory_active or not within_run_rejections:
+                return None
+            return {
+                "schema_version": "1.0",
+                "note": (
+                    "Rejections recorded earlier in this run. Do not propose a diff identical to a "
+                    "rejected one; address the recorded rejection reason instead."
+                ),
+                "rejected_attempt_count": len(within_run_rejections),
+                "rejected_diff_hashes": sorted(rejected_diff_hashes)[:50],
+                "recent_rejections": [dict(item) for item in within_run_rejections[-10:]],
+            }
+
+        def _memory_budget_context(base: dict[str, Any]) -> dict[str, Any]:
+            memory_doc = _within_run_memory_doc()
+            if memory_doc is None:
+                return base
+            return {**base, "within_run_memory": memory_doc}
 
         source_tmp = tempfile.TemporaryDirectory(prefix="research-lab-parent-image-source-")
 
@@ -267,6 +592,26 @@ class CodeEditLoopEngine:
             _cleanup_source_tmp()
             raise
 
+        # Bug 5: resume used to discard already-built candidates, so a paused/requeued run
+        # that had built+pushed an image resumed empty-handed and failed with "no finalists".
+        # Restoration is strictly best-effort: any failure degrades to the previous behavior.
+        restored_candidate_count = 0
+        if resume and _resume_restore_selected_enabled():
+            try:
+                selected = await self._restore_selected_from_resume(
+                    resume=resume,
+                    run_id=run_id,
+                    artifact=artifact,
+                    elapsed=elapsed,
+                    openrouter_calls=openrouter_calls,
+                    estimated_cost=estimated_cost,
+                    actual_cost_microusd=actual_cost_microusd,
+                )
+            except Exception:
+                selected = []
+            restored_candidate_count = len(selected)
+            built_candidate_total = max(built_candidate_total, restored_candidate_count)
+
         await self.event_sink(
             AutoResearchLoopEvent(
                 event_type="loop_resumed" if resume else "loop_started",
@@ -285,6 +630,7 @@ class CodeEditLoopEngine:
                     "settings": _settings_doc(settings),
                     "budget_context": _safe_budget_doc(budget_context),
                     "resumed_from_checkpoint": bool(resume),
+                    "restored_selected_candidate_count": restored_candidate_count,
                     "checkpoint_hash": resume.get("checkpoint_hash"),
                     "source_mode": source_context.source_mode,
                     "source_tree_hash": source_context.source_tree_hash,
@@ -327,7 +673,13 @@ class CodeEditLoopEngine:
         planner_terminal_without_candidate = False
         last_checkpoint: dict[str, Any] | None = None
         stop_reason = "max_iterations"
-        if self.builder.config.loop_planner_enabled and loop_direction_plan_doc is None:
+        if (
+            self.builder.config.loop_planner_enabled
+            and loop_direction_plan_doc is None
+            # Bug 5/20: skip the planner call when restored candidates already fill the cap;
+            # the loop will finalize immediately, so a plan would be paid for and unused.
+            and not (selected and len(selected) >= settings.max_candidates and _stop_at_candidate_cap_enabled())
+        ):
             if _would_exceed_budget(
                 actual_cost_microusd,
                 _estimated_call_microusd(settings.estimated_iteration_cost_usd),
@@ -336,10 +688,20 @@ class CodeEditLoopEngine:
                 stop_reason = "compute_budget_exhausted_before_loop_planner"
                 planner_terminal_without_candidate = True
             else:
-                remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
-                raw_plan = ""
-                planner_result = _coerce_call_result(
-                    await self.call_openrouter(
+                # Bug 16: the planner used to be single-shot — one malformed planner response
+                # terminally failed the paid run. Retry the call once on failure, then fall
+                # back to the existing plan-less mode instead of a terminal failure.
+                planner_attempt_limit = 2 if _planner_parse_retry_enabled() else 1
+                for planner_attempt in range(1, planner_attempt_limit + 1):
+                    if planner_attempt > 1 and _would_exceed_budget(
+                        actual_cost_microusd,
+                        _estimated_call_microusd(settings.estimated_iteration_cost_usd),
+                        budget_limit_microusd,
+                    ):
+                        break
+                    remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
+                    raw_plan = ""
+                    planner_result, planner_call_error = await self._call_stage_contained(
                         build_loop_direction_planner_messages(
                             ticket={
                                 "ticket_id": str(ticket.get("ticket_id") or ""),
@@ -366,16 +728,74 @@ class CodeEditLoopEngine:
                         self.builder.config.loop_planner_max_tokens,
                         "loop_planner",
                     )
-                )
-                raw_plan = planner_result.content
-                openrouter_calls += 1
-                estimated_cost += settings.estimated_iteration_cost_usd
-                actual_cost_microusd += max(0, int(planner_result.cost_microusd))
-                if planner_result.provider_usage:
-                    provider_usage.append({**planner_result.provider_usage, "call_stage": "loop_planner"})
-                try:
-                    loop_plan = parse_loop_direction_plan_response(raw_plan)
-                    loop_direction_plan_doc = loop_plan.to_dict()
+                    if planner_result is None:
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type="code_edit_validation_failed",
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                cost_ledger=_running_cost_ledger(
+                                    openrouter_calls,
+                                    estimated_cost,
+                                    actual_cost_microusd,
+                                    "loop_direction_planner_call_failed",
+                                ),
+                                event_doc={
+                                    "stage": "loop_direction_planner",
+                                    "planner_attempt": planner_attempt,
+                                    "error": planner_call_error or "loop_direction_planner_call_failed",
+                                    "fallback": (
+                                        "plan_less_mode" if planner_attempt >= planner_attempt_limit else "retry"
+                                    ),
+                                    "focus_signature_hash": _focus_signature_hash(ticket),
+                                },
+                            )
+                        )
+                        continue
+                    raw_plan = planner_result.content
+                    openrouter_calls += 1
+                    estimated_cost += settings.estimated_iteration_cost_usd
+                    actual_cost_microusd += max(0, int(planner_result.cost_microusd))
+                    if planner_result.provider_usage:
+                        provider_usage.append({**planner_result.provider_usage, "call_stage": "loop_planner"})
+                    try:
+                        loop_plan = parse_loop_direction_plan_response(raw_plan)
+                        loop_direction_plan_doc = loop_plan.to_dict()
+                    except Exception as exc:
+                        if planner_attempt >= planner_attempt_limit and not _planner_parse_retry_enabled():
+                            stop_reason = "loop_direction_plan_parse_failed"
+                            planner_terminal_without_candidate = True
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type="code_edit_validation_failed",
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                provider_usage=([provider_usage[-1]] if provider_usage else []),
+                                cost_ledger=_running_cost_ledger(
+                                    openrouter_calls,
+                                    estimated_cost,
+                                    actual_cost_microusd,
+                                    "loop_direction_plan_parse_failed",
+                                ),
+                                event_doc={
+                                    "stage": "loop_direction_planner",
+                                    "planner_attempt": planner_attempt,
+                                    "error": str(exc)[:500],
+                                    "raw_response_hash": sha256_json({"raw_response": raw_plan}),
+                                    "fallback": (
+                                        "terminal"
+                                        if planner_terminal_without_candidate
+                                        else (
+                                            "plan_less_mode"
+                                            if planner_attempt >= planner_attempt_limit
+                                            else "retry"
+                                        )
+                                    ),
+                                    "focus_signature_hash": _focus_signature_hash(ticket),
+                                },
+                            )
+                        )
+                        continue
                     await self.event_sink(
                         AutoResearchLoopEvent(
                             event_type="loop_direction_planned",
@@ -418,29 +838,7 @@ class CodeEditLoopEngine:
                                 },
                             )
                         )
-                except Exception as exc:
-                    stop_reason = "loop_direction_plan_parse_failed"
-                    planner_terminal_without_candidate = True
-                    await self.event_sink(
-                        AutoResearchLoopEvent(
-                            event_type="code_edit_validation_failed",
-                            loop_status="running",
-                            elapsed_seconds=elapsed(),
-                            provider_usage=([provider_usage[-1]] if provider_usage else []),
-                            cost_ledger=_running_cost_ledger(
-                                openrouter_calls,
-                                estimated_cost,
-                                actual_cost_microusd,
-                                "loop_direction_plan_parse_failed",
-                            ),
-                            event_doc={
-                                "stage": "loop_direction_planner",
-                                "error": str(exc)[:500],
-                                "raw_response_hash": sha256_json({"raw_response": raw_plan}),
-                                "focus_signature_hash": _focus_signature_hash(ticket),
-                            },
-                        )
-                    )
+                    break
         elif not self.builder.config.loop_planner_enabled:
             loop_direction_plan_doc = None
         while iteration < settings.max_iterations:
@@ -448,6 +846,12 @@ class CodeEditLoopEngine:
                 break
             if elapsed() >= settings.max_seconds:
                 stop_reason = "max_seconds"
+                break
+            # Bug 20: iterations past the candidate cap used to build docker images and then
+            # discard them (selected is truncated to max_candidates every iteration). Once the
+            # cap is filled, stop iterating; minimum runtime is enforced by the post-loop wait.
+            if len(selected) >= settings.max_candidates and _stop_at_candidate_cap_enabled():
+                stop_reason = "candidate_limit_reached"
                 break
             if (
                 iteration >= settings.min_iterations
@@ -479,6 +883,7 @@ class CodeEditLoopEngine:
                     actual_cost_microusd=actual_cost_microusd,
                     stage="pause_before_next_code_edit",
                     loop_direction_plan=loop_direction_plan_doc,
+                    built_candidate_count=built_candidate_total,
                 )
                 _cleanup_source_tmp()
                 return self._result(
@@ -519,44 +924,66 @@ class CodeEditLoopEngine:
                     budget_exhausted_after_source_inspection = True
                     break
                 remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
-                inspection_result = _coerce_call_result(
-                    await self.call_openrouter(
-                        build_code_edit_source_inspection_messages(
-                            ticket={
-                                "ticket_id": str(ticket.get("ticket_id") or ""),
-                                "run_id": run_id,
-                                "miner_hotkey": ticket.get("miner_hotkey"),
-                                "island": ticket.get("island"),
-                                "brief_sanitized_ref": ticket.get("brief_sanitized_ref"),
-                                "brief_public_summary": _ticket_doc_value(ticket, "brief_public_summary"),
-                                "requested_loop_count": requested_loop_count,
-                                "loop_iteration": iteration,
-                                "inspection_round": inspection_round,
-                            },
-                            artifact_manifest=artifact.to_dict(),
-                            component_registry=dict(component_registry),
-                            benchmark_public_summary=benchmark_public_summary,
-                            runtime_source_index=source_context.inspection_index(),
-                            source_inspection_context=source_inspection_context,
-                            loop_direction_plan=loop_direction_plan_doc,
-                            budget_context={
-                                **dict(budget_context),
-                                "loop_iteration": iteration,
-                                "inspection_round": inspection_round,
-                                "candidate_kind": "image_build",
-                                "loop_direction_plan_hash": (
-                                    (loop_direction_plan_doc or {}).get("plan_hash")
-                                    if isinstance(loop_direction_plan_doc, Mapping)
-                                    else None
-                                ),
-                            },
-                            max_requests=4,
-                        ),
-                        min(settings.draft_timeout_seconds, remaining_call_seconds),
-                        3000,
-                        "source_inspection",
-                    )
+                inspection_result, inspection_call_error = await self._call_stage_contained(
+                    build_code_edit_source_inspection_messages(
+                        ticket={
+                            "ticket_id": str(ticket.get("ticket_id") or ""),
+                            "run_id": run_id,
+                            "miner_hotkey": ticket.get("miner_hotkey"),
+                            "island": ticket.get("island"),
+                            "brief_sanitized_ref": ticket.get("brief_sanitized_ref"),
+                            "brief_public_summary": _ticket_doc_value(ticket, "brief_public_summary"),
+                            "requested_loop_count": requested_loop_count,
+                            "loop_iteration": iteration,
+                            "inspection_round": inspection_round,
+                        },
+                        artifact_manifest=artifact.to_dict(),
+                        component_registry=dict(component_registry),
+                        benchmark_public_summary=benchmark_public_summary,
+                        runtime_source_index=source_context.inspection_index(),
+                        source_inspection_context=source_inspection_context,
+                        loop_direction_plan=loop_direction_plan_doc,
+                        budget_context=_memory_budget_context({
+                            **dict(budget_context),
+                            "loop_iteration": iteration,
+                            "inspection_round": inspection_round,
+                            "candidate_kind": "image_build",
+                            "loop_direction_plan_hash": (
+                                (loop_direction_plan_doc or {}).get("plan_hash")
+                                if isinstance(loop_direction_plan_doc, Mapping)
+                                else None
+                            ),
+                        }),
+                        max_requests=4,
+                    ),
+                    min(settings.draft_timeout_seconds, remaining_call_seconds),
+                    3000,
+                    "source_inspection",
                 )
+                if inspection_result is None:
+                    # Bug 17: a non-retryable LLM error mid-inspection used to abort the run.
+                    # Skip the remaining inspection rounds and continue with what was gathered.
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="source_inspection_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "source_inspection_call_failed",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "inspection_round": inspection_round,
+                                "stage": "source_inspection_call_failed",
+                                "error": inspection_call_error or "source_inspection_call_failed",
+                                "source_tree_hash": source_context.source_tree_hash,
+                            },
+                        )
+                    )
+                    break
                 raw_inspection = inspection_result.content
                 openrouter_calls += 1
                 estimated_cost += settings.estimated_iteration_cost_usd
@@ -718,95 +1145,165 @@ class CodeEditLoopEngine:
                 ):
                     stop_reason = "compute_budget_exhausted_before_code_edit"
                     break
-                draft_result = _coerce_call_result(
-                    await self.call_openrouter(
-                        build_code_edit_auto_research_messages(
-                            ticket={
-                                "ticket_id": str(ticket.get("ticket_id") or ""),
-                                "run_id": run_id,
-                                "miner_hotkey": ticket.get("miner_hotkey"),
-                                "island": ticket.get("island"),
-                                "brief_sanitized_ref": ticket.get("brief_sanitized_ref"),
-                                "brief_public_summary": _ticket_doc_value(ticket, "brief_public_summary"),
-                                "requested_loop_count": requested_loop_count,
-                                "loop_iteration": iteration,
+                draft_result, draft_call_error = await self._call_stage_contained(
+                    build_code_edit_auto_research_messages(
+                        ticket={
+                            "ticket_id": str(ticket.get("ticket_id") or ""),
+                            "run_id": run_id,
+                            "miner_hotkey": ticket.get("miner_hotkey"),
+                            "island": ticket.get("island"),
+                            "brief_sanitized_ref": ticket.get("brief_sanitized_ref"),
+                            "brief_public_summary": _ticket_doc_value(ticket, "brief_public_summary"),
+                            "requested_loop_count": requested_loop_count,
+                            "loop_iteration": iteration,
+                        },
+                        artifact_manifest=artifact.to_dict(),
+                        component_registry=dict(component_registry),
+                        benchmark_public_summary=benchmark_public_summary,
+                        runtime_source_context=source_context.prompt_context(),
+                        source_inspection_context=source_inspection_context,
+                        loop_direction_plan=loop_direction_plan_doc,
+                        budget_context=_memory_budget_context({
+                            **dict(budget_context),
+                            "loop_iteration": iteration,
+                            "candidate_kind": "image_build",
+                            "loop_direction_plan_hash": (
+                                (loop_direction_plan_doc or {}).get("plan_hash")
+                                if isinstance(loop_direction_plan_doc, Mapping)
+                                else None
+                            ),
+                        }),
+                        max_candidates=settings.max_candidates,
+                    ),
+                    min(settings.draft_timeout_seconds, remaining_call_seconds),
+                    3000,
+                    "code_edit_draft",
+                )
+                if draft_result is None:
+                    # Bug 17: a non-retryable LLM error on the draft call used to abort the
+                    # run and discard prior iterations/candidates. Skip this iteration instead.
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="code_edit_validation_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "code_edit_draft_call_failed",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "stage": "code_edit_draft_call_failed",
+                                "error": draft_call_error or "code_edit_draft_call_failed",
                             },
-                            artifact_manifest=artifact.to_dict(),
-                            component_registry=dict(component_registry),
-                            benchmark_public_summary=benchmark_public_summary,
-                            runtime_source_context=source_context.prompt_context(),
-                            source_inspection_context=source_inspection_context,
-                            loop_direction_plan=loop_direction_plan_doc,
-                            budget_context={
-                                **dict(budget_context),
-                                "loop_iteration": iteration,
-                                "candidate_kind": "image_build",
-                                "loop_direction_plan_hash": (
-                                    (loop_direction_plan_doc or {}).get("plan_hash")
-                                    if isinstance(loop_direction_plan_doc, Mapping)
-                                    else None
-                                ),
-                            },
-                            max_candidates=settings.max_candidates,
-                        ),
-                        min(settings.draft_timeout_seconds, remaining_call_seconds),
-                        3000,
-                        "code_edit_draft",
+                        )
                     )
-                )
-                raw = draft_result.content
-                openrouter_calls += 1
-                estimated_cost += settings.estimated_iteration_cost_usd
-                actual_cost_microusd += max(0, int(draft_result.cost_microusd))
-                if draft_result.provider_usage:
-                    provider_usage.append({**draft_result.provider_usage, "loop_iteration": iteration, "call_stage": "code_edit_draft"})
-                budget_exhausted_after_call = (
-                    budget_limit_microusd > 0 and actual_cost_microusd >= budget_limit_microusd
-                )
-                try:
-                    drafts = parse_code_edit_response(raw, max_candidates=settings.max_candidates)
-                except Exception as exc:
-                    no_viable_reason = code_edit_no_viable_patch_reason(raw)
-                    if no_viable_reason:
-                        await self.event_sink(
-                            AutoResearchLoopEvent(
-                                event_type="no_viable_patch",
-                                loop_status="running",
-                                elapsed_seconds=elapsed(),
-                                cost_ledger=_running_cost_ledger(
-                                    openrouter_calls,
-                                    estimated_cost,
-                                    actual_cost_microusd,
-                                    "no_viable_patch",
-                                ),
-                                event_doc={
-                                    "iteration": iteration,
-                                    "reason": no_viable_reason,
-                                    "raw_response_hash": sha256_json({"raw_response": raw}),
-                                    "loop_direction_plan_hash": (
-                                        (loop_direction_plan_doc or {}).get("plan_hash")
-                                        if isinstance(loop_direction_plan_doc, Mapping)
-                                        else None
-                                    ),
-                                },
-                            )
-                        )
-                    else:
-                        await self.event_sink(
-                            AutoResearchLoopEvent(
-                                event_type="code_edit_validation_failed",
-                                loop_status="running",
-                                elapsed_seconds=elapsed(),
-                                cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "code_edit_parse_failed"),
-                                event_doc={
-                                    "iteration": iteration,
-                                    "error": str(exc)[:500],
-                                    "raw_response_hash": sha256_json({"raw_response": raw}),
-                                },
-                            )
-                        )
                     drafts = []
+                    raw = ""
+                    budget_exhausted_after_call = actual_cost_microusd >= budget_limit_microusd > 0
+                else:
+                    raw = draft_result.content
+                    openrouter_calls += 1
+                    estimated_cost += settings.estimated_iteration_cost_usd
+                    actual_cost_microusd += max(0, int(draft_result.cost_microusd))
+                    if draft_result.provider_usage:
+                        provider_usage.append({**draft_result.provider_usage, "loop_iteration": iteration, "call_stage": "code_edit_draft"})
+                    budget_exhausted_after_call = (
+                        budget_limit_microusd > 0 and actual_cost_microusd >= budget_limit_microusd
+                    )
+                    try:
+                        drafts = parse_code_edit_response(raw, max_candidates=settings.max_candidates)
+                    except Exception as exc:
+                        no_viable_reason = code_edit_no_viable_patch_reason(raw)
+                        if no_viable_reason:
+                            await self.event_sink(
+                                AutoResearchLoopEvent(
+                                    event_type="no_viable_patch",
+                                    loop_status="running",
+                                    elapsed_seconds=elapsed(),
+                                    cost_ledger=_running_cost_ledger(
+                                        openrouter_calls,
+                                        estimated_cost,
+                                        actual_cost_microusd,
+                                        "no_viable_patch",
+                                    ),
+                                    event_doc={
+                                        "iteration": iteration,
+                                        "reason": no_viable_reason,
+                                        "raw_response_hash": sha256_json({"raw_response": raw}),
+                                        "loop_direction_plan_hash": (
+                                            (loop_direction_plan_doc or {}).get("plan_hash")
+                                            if isinstance(loop_direction_plan_doc, Mapping)
+                                            else None
+                                        ),
+                                    },
+                                )
+                            )
+                        else:
+                            await self.event_sink(
+                                AutoResearchLoopEvent(
+                                    event_type="code_edit_validation_failed",
+                                    loop_status="running",
+                                    elapsed_seconds=elapsed(),
+                                    cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "code_edit_parse_failed"),
+                                    event_doc={
+                                        "iteration": iteration,
+                                        "error": str(exc)[:500],
+                                        "raw_response_hash": sha256_json({"raw_response": raw}),
+                                    },
+                                )
+                            )
+                        drafts = []
             for draft_index, draft in enumerate(drafts):
+                if len(selected) >= settings.max_candidates and _stop_at_candidate_cap_enabled():
+                    # Bug 20: never start a docker build for a candidate that would be
+                    # truncated away by the max_candidates cap.
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="code_edit_validation_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "candidate_cap_reached",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "stage": "candidate_cap_reached",
+                                "error": "candidate_cap_reached_draft_skipped",
+                                "selected_candidate_count": len(selected),
+                            },
+                        )
+                    )
+                    break
+                draft_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
+                if within_run_memory_active and draft_diff_hash in rejected_diff_hashes:
+                    # Within-run memory: skip a draft identical to a diff already rejected
+                    # earlier in this run instead of paying to judge/build it again.
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="code_edit_validation_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "within_run_duplicate_rejected_diff",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "stage": "within_run_duplicate_rejected_diff",
+                                "error": "duplicate_rejected_diff_skipped",
+                                "unified_diff_hash": draft_diff_hash,
+                            },
+                        )
+                    )
+                    continue
                 node_id = _node_id(run_id, iteration, draft_index, draft)
                 source_errors = self.builder.validate_draft_against_source_context(
                     draft,
@@ -835,6 +1332,13 @@ class CodeEditLoopEngine:
                                 "source_tree_hash": source_context.source_tree_hash,
                             },
                         )
+                    )
+                    _record_within_run_rejection(
+                        stage="source_context_validation",
+                        reason="; ".join(source_errors),
+                        iteration_index=iteration,
+                        draft=draft,
+                        diff_hash=draft_diff_hash,
                     )
                     continue
                 await self.event_sink(
@@ -889,11 +1393,19 @@ class CodeEditLoopEngine:
                     estimated_cost=estimated_cost,
                     actual_cost_microusd=actual_cost_microusd,
                     provider_usage=provider_usage,
+                    within_run_memory=_within_run_memory_doc(),
                 )
                 if patch_budget_exhausted:
                     budget_exhausted_after_call = True
                     continue
                 if candidate_draft is None:
+                    _record_within_run_rejection(
+                        stage="patch_apply_repair_exhausted",
+                        reason="patch did not apply after repair attempts",
+                        iteration_index=iteration,
+                        draft=draft,
+                        diff_hash=draft_diff_hash,
+                    )
                     continue
                 (
                     alignment_ok,
@@ -920,7 +1432,15 @@ class CodeEditLoopEngine:
                     budget_exhausted_after_call = True
                     continue
                 if not alignment_ok:
+                    alignment_doc = dict(candidate_draft.plan_alignment or {})
+                    _record_within_run_rejection(
+                        stage="plan_alignment_rejected",
+                        reason=str(alignment_doc.get("blocking_issue") or alignment_doc.get("reason") or "plan alignment rejected"),
+                        iteration_index=iteration,
+                        draft=candidate_draft,
+                    )
                     continue
+                build_completed = False
                 try:
                     await self.event_sink(
                         AutoResearchLoopEvent(
@@ -941,14 +1461,44 @@ class CodeEditLoopEngine:
                             },
                         )
                     )
-                    build = self.builder.build(
+                    # Bug 20: candidate_index is a monotonically increasing per-run build counter
+                    # (previously len(selected), which repeats after the post-cap truncation and
+                    # overwrote the persisted S3 source-diff artifact key each iteration).
+                    build = await self._build_candidate_with_heartbeat(
                         draft=candidate_draft,
-                        parent_artifact=artifact,
+                        artifact=artifact,
                         run_id=run_id,
-                        candidate_index=len(selected),
+                        candidate_index=built_candidate_total,
                         source_context=source_context,
+                        node_id=node_id,
+                        iteration=iteration,
+                        elapsed=elapsed,
+                        openrouter_calls=openrouter_calls,
+                        estimated_cost=estimated_cost,
+                        actual_cost_microusd=actual_cost_microusd,
                     )
-                    selected.append(BuiltCodeEditCandidate(draft=candidate_draft, build=build, node_id=node_id, iteration=iteration))
+                    built_candidate_total += 1
+                    build_completed = True
+                    # Bug 5: persist a full rehydration doc so a paused/requeued run can restore
+                    # this candidate on resume. Best-effort: failure only loses restorability.
+                    rehydration_doc = await _write_private_loop_candidate_artifact(
+                        artifact=artifact,
+                        run_id=run_id,
+                        node_id=node_id,
+                        iteration=iteration,
+                        draft=candidate_draft,
+                        build=build,
+                    )
+                    selected.append(
+                        BuiltCodeEditCandidate(
+                            draft=candidate_draft,
+                            build=build,
+                            node_id=node_id,
+                            iteration=iteration,
+                            rehydration_artifact_uri=str(rehydration_doc.get("loop_candidate_artifact_uri") or ""),
+                            rehydration_artifact_hash=str(rehydration_doc.get("loop_candidate_artifact_hash") or ""),
+                        )
+                    )
                     await self.event_sink(
                         AutoResearchLoopEvent(
                             event_type="candidate_build_passed",
@@ -970,11 +1520,22 @@ class CodeEditLoopEngine:
                                     else None
                                 ),
                                 "plan_alignment": dict(candidate_draft.plan_alignment or {}),
+                                **{
+                                    key: value
+                                    for key, value in rehydration_doc.items()
+                                    if key.startswith("loop_candidate_artifact")
+                                },
                             },
                         )
                     )
                 except (CodeEditPrivateTestError, CodeEditImageBuildError, CodeEditPatchApplyError) as exc:
                     event_type = str(getattr(exc, "failure_stage", "") or "candidate_build_failed")
+                    _record_within_run_rejection(
+                        stage=event_type,
+                        reason=str(exc),
+                        iteration_index=iteration,
+                        draft=candidate_draft,
+                    )
                     diagnostic_doc = await _write_private_code_edit_diagnostic(
                         artifact=artifact,
                         run_id=run_id,
@@ -1002,6 +1563,12 @@ class CodeEditLoopEngine:
                         )
                     )
                 except CodeEditBuildError as exc:
+                    _record_within_run_rejection(
+                        stage="candidate_build_failed",
+                        reason=str(exc),
+                        iteration_index=iteration,
+                        draft=candidate_draft,
+                    )
                     await self.event_sink(
                         AutoResearchLoopEvent(
                             event_type="candidate_build_failed",
@@ -1018,23 +1585,72 @@ class CodeEditLoopEngine:
                             },
                         )
                     )
+                except Exception as exc:
+                    # Bug 17: an unexpected infra error during build/event emission used to
+                    # abort the run. Contain it to this candidate; the run keeps whatever it
+                    # has already built.
+                    if not _stage_error_containment_enabled():
+                        raise
+                    if not build_completed:
+                        _record_within_run_rejection(
+                            stage="candidate_build_unexpected_error",
+                            reason=str(exc),
+                            iteration_index=iteration,
+                            draft=candidate_draft,
+                        )
+                    try:
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type="candidate_build_failed" if not build_completed else "code_edit_validation_failed",
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                node_id=node_id,
+                                cost_ledger=_running_cost_ledger(
+                                    openrouter_calls,
+                                    estimated_cost,
+                                    actual_cost_microusd,
+                                    "candidate_build_unexpected_error",
+                                ),
+                                event_doc={
+                                    "iteration": iteration,
+                                    "stage": (
+                                        "candidate_build_unexpected_error"
+                                        if not build_completed
+                                        else "post_build_event_emit_failed"
+                                    ),
+                                    "target_files": list(candidate_draft.target_files),
+                                    "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
+                                    "error": str(exc)[:500],
+                                    "error_hash": sha256_json({"error": str(exc)}),
+                                },
+                            )
+                        )
+                    except Exception:
+                        pass
             selected = selected[: settings.max_candidates]
-            last_checkpoint = await self._emit_checkpoint(
-                run_id=run_id,
-                settings=settings,
-                artifact=artifact,
-                model_id=model_id,
-                budget_context=budget_context,
-                iterations_completed=iteration,
-                elapsed_seconds=elapsed(),
-                selected=selected,
-                provider_usage=provider_usage,
-                openrouter_calls=openrouter_calls,
-                estimated_cost=estimated_cost,
-                actual_cost_microusd=actual_cost_microusd,
-                stage="code_edit_iteration_completed",
-                loop_direction_plan=loop_direction_plan_doc,
-            )
+            try:
+                last_checkpoint = await self._emit_checkpoint(
+                    run_id=run_id,
+                    settings=settings,
+                    artifact=artifact,
+                    model_id=model_id,
+                    budget_context=budget_context,
+                    iterations_completed=iteration,
+                    elapsed_seconds=elapsed(),
+                    selected=selected,
+                    provider_usage=provider_usage,
+                    openrouter_calls=openrouter_calls,
+                    estimated_cost=estimated_cost,
+                    actual_cost_microusd=actual_cost_microusd,
+                    stage="code_edit_iteration_completed",
+                    loop_direction_plan=loop_direction_plan_doc,
+                    built_candidate_count=built_candidate_total,
+                )
+            except Exception:
+                # Bug 17: a transient checkpoint-write failure must not fail a run that may
+                # already hold built candidates; the previous checkpoint remains usable.
+                if not _stage_error_containment_enabled():
+                    raise
             if should_pause and await should_pause():
                 _cleanup_source_tmp()
                 return self._result(
@@ -1056,6 +1672,10 @@ class CodeEditLoopEngine:
         if selected:
             remaining_minimum = settings.min_seconds - elapsed()
             remaining_maximum = settings.max_seconds - elapsed()
+            if _min_runtime_skip_when_selected_enabled():
+                # Candidates are already selected; parking the worker slot until min_seconds
+                # elapses is pure waste. Proceed straight to finalization.
+                remaining_minimum = 0.0
             if remaining_minimum > 0 and remaining_maximum > 0:
                 import asyncio
 
@@ -1081,6 +1701,7 @@ class CodeEditLoopEngine:
                     actual_cost_microusd=actual_cost_microusd,
                     stage="pause_after_code_edit_minimum_runtime",
                     loop_direction_plan=loop_direction_plan_doc,
+                    built_candidate_count=built_candidate_total,
                 )
                 _cleanup_source_tmp()
                 return self._result(
@@ -1188,6 +1809,7 @@ class CodeEditLoopEngine:
         actual_cost_microusd: int,
         stage: str,
         loop_direction_plan: Mapping[str, Any] | None = None,
+        built_candidate_count: int = 0,
     ) -> dict[str, Any]:
         payload = {
             "schema_version": "1.0",
@@ -1202,6 +1824,7 @@ class CodeEditLoopEngine:
             "iterations_completed": int(iterations_completed),
             "next_iteration": int(iterations_completed) + 1,
             "elapsed_seconds": round(float(elapsed_seconds), 3),
+            "built_candidate_count": max(0, int(built_candidate_count)),
             "selected_candidates": [
                 {
                     "node_id": candidate.node_id,
@@ -1211,6 +1834,12 @@ class CodeEditLoopEngine:
                     "candidate_source_diff_hash": candidate.build.source_diff_hash,
                     "build_doc_hash": candidate.build.build_doc.get("build_doc_hash"),
                     "draft": _redacted_draft_doc(candidate.draft),
+                    # Bug 5: private artifact refs (hashes/URIs only — never raw diffs or
+                    # manifests) that let resume rehydrate this already-built candidate.
+                    "rehydration_artifact_uri": candidate.rehydration_artifact_uri or None,
+                    "rehydration_artifact_hash": candidate.rehydration_artifact_hash or None,
+                    "source_diff_artifact_uri": candidate.build.build_doc.get("source_diff_artifact_uri"),
+                    "source_diff_artifact_hash": candidate.build.build_doc.get("source_diff_artifact_hash"),
                 }
                 for candidate in selected
             ],
@@ -1387,10 +2016,26 @@ class CodeEditLoopEngine:
             )
             return False, draft, openrouter_calls, estimated_cost, actual_cost_microusd, True
 
-        remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
+        # Bug 21: a judge parse failure used to be recorded as a hard rejection at
+        # confidence 1.0. Retry the judge once on a failed/unparseable call; if it is still
+        # unusable, accept neutrally on the already-passed local heuristics instead of
+        # recording a confident rejection.
+        judge_attempt_limit = 2 if _judge_parse_soft_skip_enabled() else 1
+        verdict_doc: dict[str, Any] | None = None
         raw_judge = ""
-        judge_result = _coerce_call_result(
-            await self.call_openrouter(
+        judge_failure_reason = ""
+        for judge_attempt in range(1, judge_attempt_limit + 1):
+            if judge_attempt > 1 and (
+                elapsed() >= settings.max_seconds
+                or _would_exceed_budget(
+                    actual_cost_microusd,
+                    _estimated_call_microusd(settings.estimated_iteration_cost_usd),
+                    budget_limit_microusd,
+                )
+            ):
+                break
+            remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
+            judge_result, judge_call_error = await self._call_stage_contained(
                 build_plan_alignment_judge_messages(
                     loop_direction_plan=loop_direction_plan,
                     draft=draft,
@@ -1400,29 +2045,51 @@ class CodeEditLoopEngine:
                 self.builder.config.loop_alignment_judge_max_tokens,
                 "plan_alignment_judge",
             )
-        )
-        raw_judge = judge_result.content
-        openrouter_calls += 1
-        estimated_cost += settings.estimated_iteration_cost_usd
-        actual_cost_microusd += max(0, int(judge_result.cost_microusd))
-        if judge_result.provider_usage:
-            provider_usage.append({**judge_result.provider_usage, "loop_iteration": iteration, "call_stage": "plan_alignment_judge"})
-        try:
-            verdict = parse_plan_alignment_judge_response(raw_judge)
-            verdict_doc = {**verdict.to_dict(), "source": "model_judge"}
-        except Exception as exc:
-            verdict_doc = {
-                "schema_version": "1.0",
-                "verdict": "fail",
-                "source": "model_judge_parse_failed",
-                "reason": str(exc)[:700],
-                "detected_lane": "",
-                "detected_mechanism": "",
-                "novel": False,
-                "blocking_issue": "plan_alignment_judge_parse_failed",
-                "confidence": 1.0,
-                "raw_response_hash": sha256_json({"raw_response": raw_judge}),
-            }
+            if judge_result is None:
+                judge_failure_reason = judge_call_error or "plan_alignment_judge_call_failed"
+                continue
+            raw_judge = judge_result.content
+            openrouter_calls += 1
+            estimated_cost += settings.estimated_iteration_cost_usd
+            actual_cost_microusd += max(0, int(judge_result.cost_microusd))
+            if judge_result.provider_usage:
+                provider_usage.append({**judge_result.provider_usage, "loop_iteration": iteration, "call_stage": "plan_alignment_judge"})
+            try:
+                verdict = parse_plan_alignment_judge_response(raw_judge)
+                verdict_doc = {**verdict.to_dict(), "source": "model_judge"}
+                break
+            except Exception as exc:
+                judge_failure_reason = str(exc)[:700]
+        if verdict_doc is None:
+            if _judge_parse_soft_skip_enabled():
+                verdict_doc = {
+                    "schema_version": "1.0",
+                    "verdict": "pass",
+                    "source": "model_judge_unavailable",
+                    "reason": (
+                        "plan alignment judge unavailable or unparseable after retry; "
+                        "accepted on local heuristics: " + judge_failure_reason
+                    )[:700],
+                    "detected_lane": draft.lane,
+                    "detected_mechanism": draft.mechanism,
+                    "novel": True,
+                    "blocking_issue": "",
+                    "confidence": 0.0,
+                    "raw_response_hash": sha256_json({"raw_response": raw_judge}),
+                }
+            else:
+                verdict_doc = {
+                    "schema_version": "1.0",
+                    "verdict": "fail",
+                    "source": "model_judge_parse_failed",
+                    "reason": judge_failure_reason,
+                    "detected_lane": "",
+                    "detected_mechanism": "",
+                    "novel": False,
+                    "blocking_issue": "plan_alignment_judge_parse_failed",
+                    "confidence": 1.0,
+                    "raw_response_hash": sha256_json({"raw_response": raw_judge}),
+                }
         verdict_doc["loop_direction_plan_hash"] = loop_direction_plan.get("plan_hash")
         verdict_doc["selected_path_id"] = loop_direction_plan.get("selected_path_id")
         await self.event_sink(
@@ -1524,6 +2191,7 @@ class CodeEditLoopEngine:
         estimated_cost: float,
         actual_cost_microusd: int,
         provider_usage: list[dict[str, Any]],
+        within_run_memory: Mapping[str, Any] | None = None,
     ) -> tuple[CodeEditDraft | None, int, float, int, bool]:
         candidate_draft = draft.with_unified_diff(draft.unified_diff)
         max_repairs = max(0, int(self.builder.config.code_edit_patch_repair_attempts))
@@ -1867,6 +2535,109 @@ def _diagnostic_text(value: str, *, limit: int) -> str:
     if any(marker in lowered for marker in replacements):
         return "[redacted secret-like diagnostic text]"
     return text[: max(1, int(limit))]
+
+
+def _memory_safe_text(value: str) -> str:
+    """Sanitized short text for within-run memory records (§6.2-5): rejection
+    reasons re-enter later prompts and event docs, so secret-shaped content is
+    redacted the same way diagnostics are."""
+    return _diagnostic_text(str(value or ""), limit=280)
+
+
+async def _write_private_loop_candidate_artifact(
+    *,
+    artifact: PrivateModelArtifactManifest,
+    run_id: str,
+    node_id: str,
+    iteration: int,
+    draft: CodeEditDraft,
+    build: CodeEditBuildResult,
+) -> dict[str, Any]:
+    """Persist a full rehydration doc for a built candidate (bug #5).
+
+    The checkpoint keeps only URI + hash; this S3 artifact carries everything
+    needed to reconstruct the ``BuiltCodeEditCandidate`` on resume. Best-effort:
+    a failed write only loses restorability for this candidate.
+    """
+    manifest_uri = str(getattr(artifact, "manifest_uri", "") or "")
+    if not manifest_uri.startswith("s3://"):
+        return {"loop_candidate_artifact_skipped": "manifest_uri_not_s3"}
+    try:
+        bucket, key = _parse_s3_uri(manifest_uri)
+    except ValueError as exc:
+        return {"loop_candidate_artifact_error": str(exc)[:200]}
+    base_prefix = key.rsplit("/", 1)[0] if "/" in key else "research-lab/sourcing-model"
+    safe_node = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(node_id or "node"))[:80]
+    object_key = f"{base_prefix}/candidates/{run_id}/loop-candidates/{int(iteration):03d}-{safe_node}.json"
+    payload = {
+        "schema_version": "1.0",
+        "artifact_type": "research_lab_loop_candidate_rehydration",
+        "run_id": str(run_id),
+        "node_id": str(node_id),
+        "iteration": int(iteration),
+        "draft": draft.to_dict(),
+        "candidate_model_manifest": build.candidate_model_manifest.to_dict(),
+        "code_edit_manifest": dict(build.code_edit_manifest),
+        "source_diff_hash": str(build.source_diff_hash),
+        "build_doc": dict(build.build_doc),
+    }
+    payload_hash = sha256_json(payload)
+
+    def _put() -> None:
+        import boto3  # type: ignore
+
+        boto3.client("s3").put_object(
+            Bucket=bucket,
+            Key=object_key,
+            Body=json.dumps({**payload, "loop_candidate_artifact_hash": payload_hash}, sort_keys=True).encode("utf-8"),
+            ContentType="application/json",
+        )
+
+    try:
+        await asyncio.to_thread(_put)
+    except Exception as exc:
+        return {
+            "loop_candidate_artifact_hash": payload_hash,
+            "loop_candidate_artifact_error": str(exc)[:300],
+        }
+    return {
+        "loop_candidate_artifact_uri": f"s3://{bucket}/{object_key}",
+        "loop_candidate_artifact_hash": payload_hash,
+    }
+
+
+def _rehydrated_candidate_from_artifact_payload(
+    payload: Mapping[str, Any],
+) -> BuiltCodeEditCandidate:
+    """Reconstruct a ``BuiltCodeEditCandidate`` from a rehydration artifact.
+
+    Raises on any shape mismatch — the caller treats a failed candidate as
+    unrestorable and degrades to the legacy empty-``selected`` behavior.
+    """
+    stored = dict(payload)
+    expected_hash = str(stored.pop("loop_candidate_artifact_hash", "") or "")
+    if expected_hash and sha256_json(stored) != expected_hash:
+        raise ValueError("loop_candidate_artifact_hash_mismatch")
+    draft_doc = dict(stored.get("draft") or {})
+    draft_fields = {f.name for f in fields(CodeEditDraft)}
+    draft_kwargs = {name: value for name, value in draft_doc.items() if name in draft_fields}
+    draft_kwargs["target_files"] = tuple(draft_kwargs.get("target_files") or ())
+    draft_kwargs["plan_alignment"] = dict(draft_kwargs.get("plan_alignment") or {})
+    draft = CodeEditDraft(**draft_kwargs)
+    build = CodeEditBuildResult(
+        candidate_model_manifest=PrivateModelArtifactManifest.from_mapping(
+            stored["candidate_model_manifest"]
+        ),
+        code_edit_manifest=dict(stored.get("code_edit_manifest") or {}),
+        source_diff_hash=str(stored.get("source_diff_hash") or ""),
+        build_doc=dict(stored.get("build_doc") or {}),
+    )
+    return BuiltCodeEditCandidate(
+        draft=draft,
+        build=build,
+        node_id=str(stored.get("node_id") or ""),
+        iteration=int(stored.get("iteration") or 0),
+    )
 
 
 def _node_id(run_id: str, iteration: int, candidate_index: int, draft: CodeEditDraft) -> str:

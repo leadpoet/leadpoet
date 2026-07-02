@@ -36,8 +36,17 @@ from gateway.research_lab.loop_engine import (
 )
 from gateway.research_lab.maintenance import autoresearch_queue_capacity_doc, is_autoresearch_maintenance_paused
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabReceiptCreateRequest
-from gateway.research_lab.promotion import latest_public_benchmark_summary, load_active_private_model
-from gateway.research_lab.public_activity import safe_project_public_loop_activity
+from gateway.research_lab.promotion import (
+    PromotionPausedError,
+    latest_public_benchmark_summary,
+    load_active_private_model,
+    reconcile_active_private_model_lineage,
+    reconcile_pending_champion_rewards,
+)
+from gateway.research_lab.public_activity import (
+    reproject_stale_public_cards,
+    safe_project_public_loop_activity,
+)
 from gateway.research_lab.reimbursement_awards import (
     cost_evidence_cost_ledger,
     cost_evidence_from_loop_result,
@@ -99,6 +108,39 @@ def _openrouter_generation_attempts() -> int:
         return max(1, min(5, int(os.getenv("RESEARCH_LAB_OPENROUTER_GENERATION_ATTEMPTS", "3"))))
     except ValueError:
         return 3
+
+
+def _heartbeat_conflict_claim_lost_enabled() -> bool:
+    """When true, a queue-heartbeat insert rejected by the DB claim guard aborts
+    the in-flight run as claim-lost. Enable ONLY after scripts/59 is applied:
+    under the scripts/42 guard every heartbeat insert conflicts, so enabling
+    this first would abort every run at its first heartbeat."""
+    return str(
+        os.getenv("RESEARCH_LAB_HEARTBEAT_CONFLICT_CLAIM_LOST_ENABLED", "false")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _generation_stats_mode() -> str:
+    """OpenRouter generation-stats reconciliation mode for worker chat calls.
+
+    "full" (default, current behavior): up to 3 synchronous GETs with retry
+    sleeps after every chat call. "best_effort_once": a single attempt with no
+    retry sleeps. "off": skip the fetch entirely (cost stays at the
+    chat-completion usage figure with status generation_stats_disabled).
+    """
+    mode = str(os.getenv("RESEARCH_LAB_GENERATION_STATS_MODE", "full")).strip().lower()
+    if mode not in {"full", "best_effort_once", "off"}:
+        return "full"
+    return mode
+
+
+def _worker_proxy_apply_to_llm_enabled() -> bool:
+    """When true, the configured hosted-worker proxy is applied to the worker's
+    own OpenRouter traffic (chat completions + generation stats), not just
+    exported to docker runs. Defaults to current behavior (not applied)."""
+    return str(
+        os.getenv("RESEARCH_LAB_WORKER_PROXY_APPLY_TO_LLM", "false")
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_openrouter_reasoning_effort_unsupported(status_code: int, message: str) -> bool:
@@ -318,6 +360,16 @@ _OPENROUTER_TRANSIENT_ERROR_MARKERS = (
     "http 504",
 )
 
+# Paused-queue reasons that are deliberately parked and must only be revived by
+# their explicit resume paths (never by the stale-paused reaper). Mirrors the
+# maintenance-resume exclusion in maintenance.requeue_paused_autoresearch_runs.
+_STALE_PAUSED_REAPER_EXCLUDED_REASONS = frozenset({"blocked_for_credit"})
+
+# Number of most-recent queue events loaded into the hosted run context. Fields
+# written only at loop start (e.g. loop_start_credit_id) can fall outside this
+# window on much-requeued runs; see _resolve_loop_start_credit_id.
+_RUN_CONTEXT_QUEUE_EVENT_LIMIT = 20
+
 
 def _is_retryable_worker_exception(exc: BaseException) -> bool:
     seen: set[int] = set()
@@ -325,6 +377,10 @@ def _is_retryable_worker_exception(exc: BaseException) -> bool:
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         if isinstance(current, RetryableHostedResearchLabWorkerError):
+            return True
+        if isinstance(current, PromotionPausedError):
+            # Fail-closed lineage/promotion pauses (bug #2): retry, never
+            # terminally fail a paid run on a transient lineage read.
             return True
         if isinstance(current, HTTPError):
             code = int(getattr(current, "code", 0) or 0)
@@ -539,6 +595,13 @@ class HostedRunContext:
     queue_events: tuple[Mapping[str, Any], ...] = ()
     receipt_id: str | None = None
     provider_env: dict[str, str] = field(default_factory=dict)
+    # Set when a queue heartbeat observed that another worker owns this run (or
+    # the DB claim guard fenced our heartbeat); gates further OpenRouter spend.
+    claim_lost: bool = False
+    # Loop-start credit ref resolved beyond the run-context event window
+    # (see _resolve_loop_start_credit_id).
+    resolved_loop_start_credit_id: str | None = None
+    loop_start_credit_id_resolved: bool = False
 
     @property
     def run_id(self) -> str:
@@ -679,6 +742,7 @@ class ResearchLabHostedWorker:
             )
         if not self.config.hosted_worker_dry_run:
             await self._recover_stale_paused_runs()
+            await self._run_periodic_reconciles()
         builder_unavailable = self._code_edit_builder_unavailable_reason()
         if builder_unavailable:
             logger.warning(
@@ -886,6 +950,65 @@ class ResearchLabHostedWorker:
         # Claim conflicts are handled as no-ops, not failures.
         return rows[0]
 
+    async def _run_periodic_reconciles(self) -> None:
+        """Every-Nth-pass maintenance reconciles (bugs 3, 24, 34).
+
+        Each is idempotent, self-limiting (acts only on drifted rows), and
+        best-effort — a reconcile failure never blocks run processing.
+        """
+        counter = getattr(self, "_periodic_reconcile_pass", 0) + 1
+        self._periodic_reconcile_pass = counter
+        try:
+            every_n = max(1, int(os.getenv("RESEARCH_LAB_WORKER_PERIODIC_RECONCILE_EVERY_N", "10")))
+        except ValueError:
+            every_n = 10
+        if counter % every_n:
+            return
+        try:
+            await reproject_stale_public_cards(config=self.config)
+        except Exception as exc:
+            logger.warning(
+                "research_lab_periodic_reprojection_sweep_failed worker_ref=%s error=%s",
+                self.worker_ref,
+                str(exc)[:200],
+            )
+        try:
+            await reconcile_active_private_model_lineage(
+                actor_ref=self.worker_ref, dry_run=False
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_periodic_lineage_reconcile_failed worker_ref=%s error=%s",
+                self.worker_ref,
+                str(exc)[:200],
+            )
+        try:
+            await reconcile_pending_champion_rewards(
+                self.config, worker_ref=self.worker_ref, dry_run=False
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_periodic_reward_reconcile_failed worker_ref=%s error=%s",
+                self.worker_ref,
+                str(exc)[:200],
+            )
+        try:
+            from gateway.research_lab.trajectory_projector import (
+                project_completed_runs,
+                projector_enabled,
+            )
+
+            # §9.1 trajectory capture: inert until scripts/27 is applied and
+            # RESEARCH_LAB_TRAJECTORY_PROJECTOR_ENABLED=true.
+            if projector_enabled():
+                await project_completed_runs(dry_run=False)
+        except Exception as exc:
+            logger.warning(
+                "research_lab_periodic_trajectory_projection_failed worker_ref=%s error=%s",
+                self.worker_ref,
+                str(exc)[:200],
+            )
+
     async def _recover_stale_started_runs(self) -> int:
         stale_after_seconds = max(
             60,
@@ -898,7 +1021,9 @@ class ResearchLabHostedWorker:
                 "current_event_hash,queue_priority,worker_ref"
             ),
             filters=(("current_queue_status", "started"),),
-            order_by=(("current_status_at", True),),
+            # Oldest-first so the stalest rows are still seen when the backlog
+            # exceeds the fetch limit.
+            order_by=(("current_status_at", False),),
             limit=50,
         )
         recovered = 0
@@ -952,15 +1077,21 @@ class ResearchLabHostedWorker:
         rows = await select_many(
             "research_loop_run_queue_current",
             columns=(
-                "run_id,ticket_id,current_queue_status,current_status_at,"
+                "run_id,ticket_id,current_queue_status,current_reason,current_status_at,"
                 "current_event_hash,queue_priority,worker_ref"
             ),
             filters=(("current_queue_status", "paused"),),
-            order_by=(("current_status_at", True),),
+            # Oldest-first so the stalest rows are still seen when the backlog
+            # exceeds the fetch limit.
+            order_by=(("current_status_at", False),),
             limit=50,
         )
         recovered = 0
         for row in rows:
+            if str(row.get("current_reason") or "") in _STALE_PAUSED_REAPER_EXCLUDED_REASONS:
+                # Deliberately parked runs (e.g. blocked_for_credit awaiting a
+                # key top-up) are only revived by their explicit resume paths.
+                continue
             if not _status_is_stale(row.get("current_status_at"), stale_after_seconds):
                 continue
             run_id = str(row.get("run_id") or "")
@@ -1053,7 +1184,7 @@ class ResearchLabHostedWorker:
             "research_loop_run_queue_events",
             filters=(("run_id", str(queue_row["run_id"])),),
             order_by=(("seq", True),),
-            limit=20,
+            limit=_RUN_CONTEXT_QUEUE_EVENT_LIMIT,
         )
         payment = None
         payment_id = _payment_id_from_queue_events(queue_events)
@@ -1228,6 +1359,13 @@ class ResearchLabHostedWorker:
                 max_tokens: int,
                 call_stage: str = "code_edit_draft",
             ) -> str:
+                if context.claim_lost:
+                    # A heartbeat already observed that another worker owns this
+                    # run; never start more OpenRouter spend on the miner's key
+                    # even if an intermediate layer swallowed the abort.
+                    raise HostedResearchLabClaimLost(
+                        "hosted run claim was lost; refusing further OpenRouter calls"
+                    )
                 stage_options = _resolve_code_edit_loop_stage_model_request(
                     self.config,
                     stage=call_stage,
@@ -1947,6 +2085,7 @@ class ResearchLabHostedWorker:
         existing = await find_queued_receipt_for_run(context.run_id)
         if existing:
             return str(existing["receipt_id"])
+        await self._resolve_loop_start_credit_id(context)
         receipt, _event = await create_receipt(self._queued_receipt_request(context))
         return str(receipt["receipt_id"])
 
@@ -2176,6 +2315,41 @@ class ResearchLabHostedWorker:
             return None
         return resume_state
 
+    async def _resolve_loop_start_credit_id(self, context: HostedRunContext) -> str | None:
+        """Resolve the run's preserved loop-start credit ref, looking past the
+        run-context event window when necessary.
+
+        The credit ref is written on the earliest queued event; a much-requeued
+        run's most-recent-20-events window no longer contains it, and treating
+        that as "no preserved credit" wrongly denies reimbursement. Fall back to
+        a targeted fetch of the run's queued events (heartbeats are `started`
+        events, so this stays small) before concluding the ref is absent.
+        """
+        if context.loop_start_credit_id_resolved:
+            return context.resolved_loop_start_credit_id
+        credit_id = _loop_start_credit_id_from_queue_events(context.queue_events)
+        if not credit_id and len(context.queue_events) >= _RUN_CONTEXT_QUEUE_EVENT_LIMIT:
+            try:
+                queued_events = await select_many(
+                    "research_loop_run_queue_events",
+                    columns="run_id,seq,event_type,event_doc",
+                    filters=(("run_id", context.run_id), ("event_type", "queued")),
+                    order_by=(("seq", False),),
+                    limit=200,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_loop_start_credit_history_fetch_failed run_id=%s error=%s",
+                    compact_ref(context.run_id),
+                    str(exc)[:240],
+                )
+                # Leave unresolved so a later call can retry the fetch.
+                return None
+            credit_id = _loop_start_credit_id_from_queue_events(queued_events)
+        context.resolved_loop_start_credit_id = credit_id
+        context.loop_start_credit_id_resolved = True
+        return credit_id
+
     async def _maybe_create_reimbursement_decision(
         self,
         *,
@@ -2215,7 +2389,7 @@ class ResearchLabHostedWorker:
             queue_terminal_status=queue_terminal_status,
             actor_ref=self.worker_ref,
             miner_openrouter_key_ref=miner_key_ref,
-            preserved_loop_start_credit=bool(_loop_start_credit_id_from_queue_events(context.queue_events)),
+            preserved_loop_start_credit=bool(await self._resolve_loop_start_credit_id(context)),
             require_positive_cost=require_positive_cost,
             skip_ineligible_prereqs=skip_ineligible_prereqs,
         )
@@ -2386,6 +2560,21 @@ class ResearchLabHostedWorker:
             filters=(("run_id", context.run_id),),
         )
         if (
+            current
+            and current.get("current_queue_status") == "started"
+            and current.get("worker_ref")
+            and current.get("worker_ref") != self.worker_ref
+        ):
+            # Another worker re-claimed this run (stale requeue steal). Abort
+            # promptly so this superseded worker stops charging the miner's
+            # OpenRouter key; the new claimant owns the run now, so no
+            # terminal event is written on this path.
+            context.claim_lost = True
+            raise HostedResearchLabClaimLost(
+                "hosted run claim now owned by another worker "
+                f"(current worker_ref={current.get('worker_ref')})"
+            )
+        if (
             not current
             or current.get("current_queue_status") != "started"
             or current.get("worker_ref") != self.worker_ref
@@ -2410,6 +2599,15 @@ class ResearchLabHostedWorker:
             )
             return True
         except Exception as exc:
+            if _is_claim_race_error(exc) and _heartbeat_conflict_claim_lost_enabled():
+                # The DB claim guard fenced this heartbeat: the run was
+                # re-claimed, requeued, or paused between the read above and
+                # the insert. Treat as claim lost (see the flag docstring for
+                # why this is gated on the scripts/59 guard being applied).
+                context.claim_lost = True
+                raise HostedResearchLabClaimLost(
+                    "hosted run queue heartbeat was rejected by the claim guard"
+                ) from exc
             logger.warning(
                 "research_lab_hosted_queue_heartbeat_failed run_id=%s worker_ref=%s error=%s",
                 compact_ref(context.run_id),
@@ -2438,12 +2636,18 @@ class ResearchLabHostedWorker:
             if done:
                 break
             heartbeat_index += 1
-            await self._append_queue_heartbeat(
-                context,
-                source_event_type=f"{heartbeat_label}_heartbeat_{heartbeat_index}",
-                source_event_seq=None,
-                source_event_hash=None,
-            )
+            try:
+                await self._append_queue_heartbeat(
+                    context,
+                    source_event_type=f"{heartbeat_label}_heartbeat_{heartbeat_index}",
+                    source_event_seq=None,
+                    source_event_hash=None,
+                )
+            except HostedResearchLabClaimLost:
+                # Abort the run promptly; the worker thread itself cannot be
+                # cancelled, so detach it and discard its eventual result.
+                task.add_done_callback(_discard_backgrounded_task_result)
+                raise
         return await task
 
     async def _mark_failed(
@@ -2470,6 +2674,7 @@ class ResearchLabHostedWorker:
         provider_usage = cost_evidence_provider_usage(cost_evidence)
         receipt_id = context.receipt_id
         if not receipt_id:
+            await self._resolve_loop_start_credit_id(context)
             receipt, _event = await create_receipt(
                 self._failed_receipt_request(context, error, cost_evidence=cost_evidence)
             )
@@ -2597,15 +2802,26 @@ class ResearchLabHostedWorker:
                     compact_ref(context.receipt_id),
                     str(exc)[:240],
                 )
-        await create_queue_event(
-            run_id=context.run_id,
-            ticket_id=context.ticket_id,
-            event_type="queued",
-            queue_priority=int(context.queue_row.get("queue_priority") or 0),
-            worker_ref=self.worker_ref,
-            reason="code_edit_builder_not_ready_requeued",
-            event_doc=event_doc,
-        )
+        try:
+            await create_queue_event(
+                run_id=context.run_id,
+                ticket_id=context.ticket_id,
+                event_type="queued",
+                queue_priority=int(context.queue_row.get("queue_priority") or 0),
+                worker_ref=self.worker_ref,
+                reason="code_edit_builder_not_ready_requeued",
+                event_doc=event_doc,
+            )
+        except Exception as exc:
+            if _is_queue_capacity_conflict_error(exc):
+                return await self._park_requeue_conflict(
+                    context,
+                    error,
+                    requeue_reason="code_edit_builder_not_ready_requeued",
+                    conflict_error=exc,
+                    base_event_doc=event_doc,
+                )
+            raise
         try:
             await create_ticket_event(
                 ticket_id=context.ticket_id,
@@ -2672,15 +2888,26 @@ class ResearchLabHostedWorker:
                     compact_ref(context.receipt_id),
                     str(exc)[:240],
                 )
-        await create_queue_event(
-            run_id=context.run_id,
-            ticket_id=context.ticket_id,
-            event_type="queued",
-            queue_priority=int(context.queue_row.get("queue_priority") or 0),
-            worker_ref=self.worker_ref,
-            reason="transient_worker_error_requeued",
-            event_doc=event_doc,
-        )
+        try:
+            await create_queue_event(
+                run_id=context.run_id,
+                ticket_id=context.ticket_id,
+                event_type="queued",
+                queue_priority=int(context.queue_row.get("queue_priority") or 0),
+                worker_ref=self.worker_ref,
+                reason="transient_worker_error_requeued",
+                event_doc=event_doc,
+            )
+        except Exception as exc:
+            if _is_queue_capacity_conflict_error(exc):
+                return await self._park_requeue_conflict(
+                    context,
+                    error,
+                    requeue_reason="transient_worker_error_requeued",
+                    conflict_error=exc,
+                    base_event_doc=event_doc,
+                )
+            raise
         try:
             await create_ticket_event(
                 ticket_id=context.ticket_id,
@@ -2711,6 +2938,74 @@ class ResearchLabHostedWorker:
             error=error[:500],
         )
 
+    async def _park_requeue_conflict(
+        self,
+        context: HostedRunContext,
+        error: str,
+        *,
+        requeue_reason: str,
+        conflict_error: BaseException,
+        base_event_doc: Mapping[str, Any],
+    ) -> HostedWorkerOutcome:
+        """Park a run whose requeue was rejected by the queue capacity/hotkey guard.
+
+        The guard conflict can outlive every retry (e.g. the miner keeps another
+        active run), and letting it escape the failure handler would leave this
+        run wedged `started` forever. A `paused` event is not capacity-guarded
+        and stays recoverable: the stale-paused reaper (or a maintenance resume)
+        requeues it once capacity frees up.
+        """
+        event_doc = {
+            **dict(base_event_doc),
+            "pause_reason": "requeue_capacity_conflict_parked",
+            "requeue_conflict_reason": requeue_reason,
+            "requeue_conflict_error": str(conflict_error)[:300],
+        }
+        await create_queue_event(
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            event_type="paused",
+            queue_priority=int(context.queue_row.get("queue_priority") or 0),
+            worker_ref=self.worker_ref,
+            reason="requeue_capacity_conflict_parked",
+            event_doc=event_doc,
+        )
+        try:
+            await create_ticket_event(
+                ticket_id=context.ticket_id,
+                event_type="running",
+                actor_hotkey=None,
+                reason="requeue_capacity_conflict_parked",
+                event_doc=event_doc,
+            )
+            await safe_project_public_loop_activity(
+                context.ticket_id,
+                source_ref=f"hosted_worker_requeue_conflict_parked:{context.run_id}",
+                reason="requeue_capacity_conflict_parked",
+                config=self.config,
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_requeue_conflict_parked_projection_failed run_id=%s error=%s",
+                compact_ref(context.run_id),
+                str(exc)[:240],
+            )
+        logger.warning(
+            "research_lab_requeue_conflict_parked run_id=%s requeue_reason=%s error=%s",
+            compact_ref(context.run_id),
+            requeue_reason,
+            str(conflict_error)[:240],
+        )
+        return HostedWorkerOutcome(
+            processed=True,
+            dry_run=False,
+            run_id=context.run_id,
+            ticket_id=context.ticket_id,
+            status="requeue_capacity_conflict_parked",
+            receipt_id=context.receipt_id,
+            error=error[:500],
+        )
+
     def _queued_receipt_request(self, context: HostedRunContext) -> ResearchLabReceiptCreateRequest:
         budget_context = self._run_budget_context(context)
         return ResearchLabReceiptCreateRequest(
@@ -2722,7 +3017,7 @@ class ResearchLabHostedWorker:
             island=str(context.ticket["island"]),
             receipt_status="queued",
             loop_count=int(context.ticket.get("requested_loop_count") or 1),
-            loop_start_credit_id=_loop_start_credit_id_from_queue_events(context.queue_events),
+            loop_start_credit_id=_context_loop_start_credit_id(context),
             miner_openrouter_key_ref=_miner_openrouter_key_ref(context),
             provider_usage=self._provider_usage(context),
             cost_ledger={
@@ -2773,7 +3068,7 @@ class ResearchLabHostedWorker:
             island=str(context.ticket["island"]),
             receipt_status="failed",
             loop_count=int(context.ticket.get("requested_loop_count") or 1),
-            loop_start_credit_id=_loop_start_credit_id_from_queue_events(context.queue_events),
+            loop_start_credit_id=_context_loop_start_credit_id(context),
             miner_openrouter_key_ref=key_ref,
             provider_usage=provider_usage,
             cost_ledger=cost_ledger,
@@ -2848,6 +3143,9 @@ class ResearchLabHostedWorker:
                 body["include_reasoning"] = True
             return body
 
+        proxy_opener = _worker_llm_proxy_opener(self.config)
+        open_fn = proxy_opener.open if proxy_opener else urlrequest.urlopen
+
         def _call_once(*, effective_max_tokens: int, include_reasoning_effort: bool) -> OpenRouterCallResult:
             body = _request_body(
                 effective_max_tokens,
@@ -2864,7 +3162,7 @@ class ResearchLabHostedWorker:
                 method="POST",
             )
             try:
-                with urlrequest.urlopen(req, timeout=int(timeout_seconds)) as response:
+                with open_fn(req, timeout=int(timeout_seconds)) as response:
                     decoded = json.loads(response.read().decode("utf-8"))
             except HTTPError as exc:
                 message = exc.read().decode("utf-8", errors="replace")[:500]
@@ -2896,6 +3194,7 @@ class ResearchLabHostedWorker:
                 usage=usage,
                 model_id=model_id,
                 api_key=api_key,
+                generation_stats_opener=proxy_opener.open if proxy_opener else None,
             )
             if not content:
                 _raise_openrouter_generation_response_error(
@@ -2997,9 +3296,19 @@ class ResearchLabHostedWorker:
                         retry_cost_microusd += max(0, int(exc.cost_microusd))
                     if attempt >= attempts:
                         if isinstance(exc, OpenRouterLengthRetryableError):
-                            raise HostedResearchLabWorkerError(
+                            # Bug 25: the spend accumulated across failed length
+                            # retries must ride the exception or it vanishes
+                            # from every ledger when the call terminally fails.
+                            terminal = HostedResearchLabWorkerError(
                                 "OpenRouter candidate generation exceeded output token cap after length retries"
-                            ) from exc
+                            )
+                            terminal.cost_microusd = retry_cost_microusd  # type: ignore[attr-defined]
+                            terminal.provider_usage = {  # type: ignore[attr-defined]
+                                "retry_attempt_count": len(retry_provider_usage),
+                                "retry_cost_microusd": retry_cost_microusd,
+                                "retry_attempts": retry_provider_usage,
+                            }
+                            raise terminal from exc
                         raise
                     next_max_tokens = _openrouter_generation_retry_max_tokens(
                         base_max_tokens,
@@ -3331,6 +3640,15 @@ def _loop_start_credit_id_from_queue_events(events: Sequence[Mapping[str, Any]])
     return None
 
 
+def _context_loop_start_credit_id(context: HostedRunContext) -> str | None:
+    """Synchronous credit-ref read for receipt builders: prefer the value
+    resolved by _resolve_loop_start_credit_id (which looks past the run-context
+    event window), falling back to the in-window scan."""
+    if context.loop_start_credit_id_resolved:
+        return context.resolved_loop_start_credit_id
+    return _loop_start_credit_id_from_queue_events(context.queue_events)
+
+
 def _latest_event_doc(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     for event in events:
         event_doc = event.get("event_doc")
@@ -3495,6 +3813,18 @@ def _worker_proxy_url(config: ResearchLabGatewayConfig) -> str:
     return str(config.hosted_worker_proxy_url or "").strip()
 
 
+def _worker_llm_proxy_opener(config: ResearchLabGatewayConfig) -> Any | None:
+    """Opener routing the worker's own OpenRouter traffic through the configured
+    hosted-worker proxy. Gated on RESEARCH_LAB_WORKER_PROXY_APPLY_TO_LLM
+    (default: current behavior — proxy exported to docker runs only)."""
+    if not _worker_proxy_apply_to_llm_enabled():
+        return None
+    proxy = _worker_proxy_url(config)
+    if not proxy:
+        return None
+    return urlrequest.build_opener(urlrequest.ProxyHandler({"http": proxy, "https": proxy}))
+
+
 def _worker_proxy_env(config: ResearchLabGatewayConfig) -> dict[str, str]:
     proxy = _worker_proxy_url(config)
     if not proxy:
@@ -3555,6 +3885,27 @@ def _is_claim_race_error(exc: BaseException) -> bool:
         or "unique constraint" in message
         or "23505" in message
     )
+
+
+def _is_queue_capacity_conflict_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return (
+        "research_lab_queue_capacity_conflict" in message
+        or "research_lab_queue_hotkey_conflict" in message
+    )
+
+
+def _discard_backgrounded_task_result(task: "asyncio.Task[Any]") -> None:
+    """Consume a detached background task's outcome so asyncio never logs an
+    unretrieved exception for work abandoned after a claim-lost abort."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(
+            "research_lab_backgrounded_phase_failed_after_claim_lost error=%s",
+            str(exc)[:240],
+        )
 
 
 def _usage_cost_usd(usage: Mapping[str, Any]) -> Decimal:
@@ -3681,6 +4032,12 @@ def _fetch_openrouter_generation_stats(
 ) -> tuple[dict[str, Any] | None, str]:
     if not api_key or not response_id:
         return None, "missing_inputs"
+    stats_mode = _generation_stats_mode()
+    if stats_mode == "off":
+        return None, "disabled"
+    # "best_effort_once" skips the retry sleeps that otherwise run synchronously
+    # after every chat call in the hot path.
+    attempts_allowed = 1 if stats_mode == "best_effort_once" else _OPENROUTER_GENERATION_STATS_ATTEMPTS
     open_fn = opener or urlrequest.urlopen
     query = urlparse.urlencode({"id": response_id})
     req = urlrequest.Request(
@@ -3692,7 +4049,7 @@ def _fetch_openrouter_generation_stats(
         method="GET",
     )
     last_status = "not_attempted"
-    for attempt in range(1, _OPENROUTER_GENERATION_STATS_ATTEMPTS + 1):
+    for attempt in range(1, attempts_allowed + 1):
         try:
             with open_fn(req, timeout=_OPENROUTER_GENERATION_STATS_TIMEOUT_SECONDS) as response:
                 decoded = json.loads(response.read().decode("utf-8"))
@@ -3726,7 +4083,7 @@ def _fetch_openrouter_generation_stats(
                 compact_ref(response_id),
             )
             return None, "invalid_response"
-        if attempt < _OPENROUTER_GENERATION_STATS_ATTEMPTS:
+        if attempt < attempts_allowed:
             delay_index = min(attempt - 1, len(_OPENROUTER_GENERATION_STATS_RETRY_DELAYS_SECONDS) - 1)
             time.sleep(_OPENROUTER_GENERATION_STATS_RETRY_DELAYS_SECONDS[delay_index])
 
@@ -3734,7 +4091,7 @@ def _fetch_openrouter_generation_stats(
         "research_lab_openrouter_generation_stats_unavailable response_id=%s status=%s attempts=%s",
         compact_ref(response_id),
         last_status,
-        _OPENROUTER_GENERATION_STATS_ATTEMPTS,
+        attempts_allowed,
     )
     return None, last_status
 

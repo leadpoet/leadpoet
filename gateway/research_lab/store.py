@@ -6,11 +6,15 @@ import asyncio
 from datetime import datetime, timezone
 import hashlib
 import json
-from typing import Any, Iterable
+import logging
+import os
+from typing import Any, Iterable, Mapping
 from uuid import UUID, uuid4, uuid5, NAMESPACE_URL
 
 from gateway.db.client import get_write_client
 from research_lab.canonical import sha256_json
+
+logger = logging.getLogger(__name__)
 
 
 RESEARCH_LAB_UUID_NAMESPACE = uuid5(NAMESPACE_URL, "leadpoet:research_lab:gateway")
@@ -1529,6 +1533,61 @@ async def create_participation_snapshot(
     return await insert_row("research_island_participation_snapshots", row)
 
 
+def _award_supplement_events_enabled() -> bool:
+    return os.getenv(
+        "RESEARCH_LAB_REIMBURSEMENT_SUPPLEMENT_EVENTS", "true"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _maybe_record_award_supplement(
+    existing: Mapping[str, Any], award: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """Record post-resume spend that exceeds the recorded award target (bug #25).
+
+    Awards are append-only (first terminal event wins the base row), so a
+    resumed run's extra spend used to vanish entirely. The base row cannot be
+    rewritten; instead a supplemental ``awarded`` event carries the reconcilable
+    delta for operators/allocators to consume.
+    """
+    if not _award_supplement_events_enabled():
+        return None
+    try:
+        existing_status = str(existing.get("award_status") or "")
+        if existing_status != "awarded":
+            return None
+        existing_target = int(existing.get("target_reimbursement_microusd") or 0)
+        new_target = int(award.get("target_reimbursement_microusd") or 0)
+        if new_target <= existing_target:
+            return None
+        event = await create_reimbursement_award_event(
+            award_id=str(existing["award_id"]),
+            event_type="awarded",
+            award_status="awarded",
+            event_doc={
+                "award_id": str(existing["award_id"]),
+                "reason": "supplemental_spend_after_first_terminal_event",
+                "previous_target_reimbursement_microusd": existing_target,
+                "recomputed_target_reimbursement_microusd": new_target,
+                "supplemental_target_reimbursement_microusd": new_target - existing_target,
+                "target_reimbursement_microusd": new_target,
+            },
+        )
+        logger.warning(
+            "research_lab_reimbursement_supplement_recorded award_id=%s previous_microusd=%s new_microusd=%s",
+            str(existing.get("award_id") or "")[:24],
+            existing_target,
+            new_target,
+        )
+        return event
+    except Exception as exc:
+        logger.warning(
+            "research_lab_reimbursement_supplement_failed award_id=%s error=%s",
+            str(existing.get("award_id") or "")[:24],
+            str(exc)[:200],
+        )
+        return None
+
+
 async def create_reimbursement_award(
     *,
     award: dict[str, Any],
@@ -1559,7 +1618,8 @@ async def create_reimbursement_award(
                 },
             ),
         )
-        return existing, event
+        supplement_event = await _maybe_record_award_supplement(existing, award)
+        return existing, supplement_event or event
     row = {
         "award_id": str(award["award_id"]),
         "schema_version": "1.0",

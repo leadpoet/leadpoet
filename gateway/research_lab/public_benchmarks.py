@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import os
 import re
 from typing import Any, Mapping, Optional, Sequence
 
@@ -12,7 +13,21 @@ from research_lab.eval.miner_report_stats import build_icp_stats
 
 DEFAULT_PUBLIC_ICPS_PER_DAY = 3
 DEFAULT_PUBLIC_WEAK_PER_DAY = 2
-SPLIT_POLICY = "global_score_rank_public_split:v2"
+# Legacy policy: within each strength pool the public subset was the extreme
+# rows (absolute weakest / absolute strongest by baseline score). That leaks
+# and biases the public pre-gate toward the baseline's weakest ICPs.
+SPLIT_POLICY_LEGACY = "global_score_rank_public_split:v2"
+# Unbiased policy: strength pools are still the score-median halves (so the
+# configured weak/strong public composition is honored), but WHICH pool members
+# go public is chosen by a score-independent hash rotation: rows are ordered by
+# sha256 over (rolling_window_hash, icp_ref, icp_hash) and the first N are
+# taken. The rolling window hash changes with each day's window, so the subset
+# rotates per day, is deterministic for a given day (all workers agree), and is
+# independent of how weak or strong an ICP scored.
+SPLIT_POLICY_UNBIASED = "hash_rotation_public_split:v3"
+# Backwards-compatible alias for existing imports.
+SPLIT_POLICY = SPLIT_POLICY_LEGACY
+PUBLIC_SPLIT_UNBIASED_ENV = "RESEARCH_LAB_PUBLIC_SPLIT_UNBIASED"
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 PUBLIC_ICP_FORBIDDEN_KEY_MARKERS = (
     "api_key",
@@ -317,8 +332,19 @@ def _build_scored_visibility_rows(
     if public_strong_count > len(strong_pool):
         raise ValueError("public split requested more strong ICPs than the global strong pool contains")
 
-    public_weak_rows = weak_pool[:public_weak_count]
-    public_strong_rows = list(reversed(strong_pool))[:public_strong_count]
+    unbiased = _public_split_unbiased_enabled()
+    if unbiased:
+        # Deterministic, score-independent hash rotation within each pool (see
+        # SPLIT_POLICY_UNBIASED). Same rolling window + same ICPs => identical
+        # selection on every worker; a new day's window rotates the subset.
+        public_weak_rows = sorted(weak_pool, key=_public_selection_key)[:public_weak_count]
+        public_strong_rows = sorted(strong_pool, key=_public_selection_key)[:public_strong_count]
+    else:
+        # Legacy defect (bug #13 residual): exposes the baseline's absolute
+        # weakest and strongest ICPs.
+        public_weak_rows = weak_pool[:public_weak_count]
+        public_strong_rows = list(reversed(strong_pool))[:public_strong_count]
+    split_policy = SPLIT_POLICY_UNBIASED if unbiased else SPLIT_POLICY_LEGACY
     public_refs = {
         str(row["icp_ref"])
         for row in [*public_weak_rows, *public_strong_rows]
@@ -330,7 +356,26 @@ def _build_scored_visibility_rows(
         ref = str(row["icp_ref"])
         row["visibility"] = "public" if ref in public_refs else "private"
         row["strength_label"] = "weak" if ref in weak_refs else "strong"
+        row["split_policy"] = split_policy
     return sorted(rows, key=lambda row: int(row["item_rank"]))
+
+
+def _public_split_unbiased_enabled() -> bool:
+    """Env gate for the unbiased public split (default ON: the biased split is a defect)."""
+    raw = os.getenv(PUBLIC_SPLIT_UNBIASED_ENV, "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _public_selection_key(row: Mapping[str, Any]) -> str:
+    """Score-independent deterministic ordering key for public-subset rotation."""
+    return sha256_json(
+        {
+            "purpose": "public_split_selection",
+            "rolling_window_hash": str(row.get("rolling_window_hash") or ""),
+            "icp_ref": str(row.get("icp_ref") or ""),
+            "icp_hash": str(row.get("icp_hash") or ""),
+        }
+    )
 
 
 def _visibility_split_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -340,7 +385,7 @@ def _visibility_split_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, An
     private_strength = Counter(str(row.get("strength_label")) for row in private_rows)
     return {
         "schema_version": "1.0",
-        "split_policy": SPLIT_POLICY,
+        "split_policy": str(rows[0].get("split_policy") if rows else "") or SPLIT_POLICY,
         "rolling_window_hash": str(rows[0].get("rolling_window_hash") if rows else ""),
         "public_count": len(public_rows),
         "private_count": len(private_rows),

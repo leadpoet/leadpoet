@@ -8,6 +8,7 @@ import inspect
 import os
 from typing import Any, Awaitable, Callable, Mapping, Sequence, Union
 
+from leadpoet_verifier.aggregation import per_icp_normalized_score
 from leadpoet_verifier.research_evaluation import (
     build_research_evaluation_score_bundle,
     score_bundle_hash,
@@ -38,6 +39,77 @@ CompanyScorer = Callable[
     Union[Awaitable[list[float]], list[float]],
 ]
 ParentFreshnessCheck = Callable[[Mapping[str, Any]], Union[Awaitable[None], None]]
+IcpCheckpoint = Callable[[Mapping[str, Any]], Union[Awaitable[None], None]]
+
+# Company scores are normalized against a fixed lead budget per ICP when the
+# capped top-5 scoring flag is on; must match the verifier's advisory recompute
+# (leadpoet_verifier.research_evaluation.DEFAULT_LEADS_PER_ICP_NORMALIZER).
+_TOP5_LEADS_PER_ICP = 5
+_EVAL_ENV_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in _EVAL_ENV_TRUTHY
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _timeout_latch_legacy_enabled() -> bool:
+    """Bug #14 revert switch: latch the candidate skip on the FIRST timeout.
+
+    Default (false) retries a timed-out ICP once and only latches the
+    remaining-ICP skip after 2+ consecutive post-retry timeouts.
+    """
+    return _env_flag("RESEARCH_LAB_EVAL_TIMEOUT_LATCH_LEGACY", False)
+
+
+def _provider_flake_retry_enabled() -> bool:
+    """Bug #15 fairness fix: retry retryable candidate provider errors once and
+    exclude still-failing ICPs from the candidate aggregate instead of booking
+    a hard 0 for infra noise. Default ON; flip off to restore legacy zeroing.
+    """
+    return _env_flag("RESEARCH_LAB_EVAL_PROVIDER_FLAKE_RETRY", True)
+
+
+def _capped_top5_score_enabled() -> bool:
+    """Bug #8 score-scale switch: per-ICP score becomes the verifier's capped
+    sum(top-5 company scores)/5 instead of the unweighted company mean.
+
+    Default OFF — enabling changes the score scale, so the daily baseline and
+    all candidates must flip in the same deploy followed by a fresh baseline
+    run (never compare scores across the boundary).
+    """
+    return _env_flag("RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE", False)
+
+
+def _max_scored_companies_per_icp() -> int:
+    """Bug #8 cost control: cap how many companies are LLM-scored per ICP.
+
+    Default 0 = unlimited (legacy). When RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE is
+    enabled, keep this cap >= 5 so the top-5 normalization still sees a full
+    lead budget. Applied inside QualificationStyleCompanyScorer so the baseline
+    and candidate paths are capped identically.
+    """
+    return max(0, _env_int("RESEARCH_LAB_EVAL_MAX_SCORED_COMPANIES", 0))
+
+
+def _candidate_scoring_concurrency() -> int:
+    """Optional ICP-level concurrency for candidate scoring (default 1 = serial,
+    the legacy behavior). Results are always assembled in benchmark-item order
+    so summary hashing stays deterministic regardless of completion order.
+    """
+    return max(1, _env_int("RESEARCH_LAB_EVAL_CANDIDATE_CONCURRENCY", 1))
 
 
 class RealEvaluatorRequired(RuntimeError):
@@ -58,11 +130,19 @@ async def evaluate_private_model_pair(
     policy: Mapping[str, Any] | None = None,
     private_holdout_gate: Mapping[str, Any] | None = None,
     parent_freshness_check: ParentFreshnessCheck | None = None,
+    icp_checkpoint: IcpCheckpoint | None = None,
+    resume_results: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run a real paired base-vs-candidate evaluation.
 
     Production callers must pass private model runner callables backed by the
     immutable artifact. This function deliberately has no fallback fixture model.
+
+    ``icp_checkpoint`` (optional) is invoked with each completed per-ICP result
+    so callers can persist progress; ``resume_results`` (optional) supplies
+    previously completed per-ICP results (matched by icp_ref/icp_hash) that are
+    reused instead of re-running their ICPs. Both default to off so existing
+    callers are unchanged.
     """
     artifact = artifact_manifest if isinstance(artifact_manifest, PrivateModelArtifactManifest) else PrivateModelArtifactManifest.from_mapping(artifact_manifest)
     benchmark_set = benchmark if isinstance(benchmark, SealedBenchmarkSet) else SealedBenchmarkSet.from_mapping(benchmark)
@@ -117,6 +197,8 @@ async def evaluate_private_model_pair(
             runtime_patch=runtime_patch,
             gate=private_holdout_gate,
             parent_freshness_check=parent_freshness_check,
+            icp_checkpoint=icp_checkpoint,
+            resume_results=resume_results,
         )
         return build_score_bundle_from_scored_icps(
             artifact_manifest=artifact,
@@ -138,6 +220,8 @@ async def evaluate_private_model_pair(
         image_candidate=image_candidate,
         runtime_patch=runtime_patch,
         parent_freshness_check=parent_freshness_check,
+        icp_checkpoint=icp_checkpoint,
+        resume_results=resume_results,
     )
     return build_score_bundle_from_scored_icps(
         artifact_manifest=artifact,
@@ -160,95 +244,370 @@ async def score_private_model_pair_items(
     image_candidate: bool,
     runtime_patch: CandidatePatchManifest | None = None,
     parent_freshness_check: ParentFreshnessCheck | None = None,
+    icp_checkpoint: IcpCheckpoint | None = None,
+    resume_results: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Score a subset of private benchmark items without building a bundle."""
+    """Score a subset of private benchmark items without building a bundle.
+
+    Fairness semantics (bugs #14/#15):
+    - A timed-out candidate ICP is retried once; the remaining-ICP skip latch
+      only engages after 2+ consecutive post-retry timeouts
+      (``RESEARCH_LAB_EVAL_TIMEOUT_LATCH_LEGACY=true`` restores first-timeout
+      latching with no retry).
+    - Retryable candidate provider errors are retried once; ICPs that still
+      provider-error are marked ``provider_excluded`` and dropped from
+      ``_benchmark_style_score`` aggregates instead of booking a hard 0
+      (``RESEARCH_LAB_EVAL_PROVIDER_FLAKE_RETRY=false`` restores legacy
+      zeroing).
+    - Any candidate ICP that returns zero companies without a recorded runtime
+      error is flagged ``sourced_zero_no_error`` (bug #35) so health gates and
+      unresolved-error counters can see silent zeros.
+
+    ``icp_checkpoint``/``resume_results`` implement optional per-ICP
+    checkpointing (bug #31); resumed rows are reused verbatim, do not re-invoke
+    the checkpoint sink, and do not affect the timeout latch.
+
+    ``RESEARCH_LAB_EVAL_CANDIDATE_CONCURRENCY`` (default 1 = the legacy serial
+    behavior) fans ICPs out in fixed-size waves; results are always assembled
+    in benchmark-item order so summary hashing stays deterministic. At
+    concurrency 1 the serial semantics (latch visibility, freshness-check
+    ordering) are preserved exactly; at higher settings ICPs inside one wave
+    cannot see a latch raised by a wave-mate.
+    """
 
     scorer = company_scorer or QualificationStyleCompanyScorer()
+    legacy_timeout_latch = _timeout_latch_legacy_enabled()
+    provider_flake_retry = _provider_flake_retry_enabled()
+    concurrency = _candidate_scoring_concurrency()
+    resume_rows = _resume_rows_by_ref(resume_results)
     per_icp_results: list[dict[str, Any]] = []
     candidate_runtime_skip_reason = ""
-    for item_index, item in enumerate(benchmark_items):
-        await _run_parent_freshness_check(
-            parent_freshness_check,
-            {
-                "phase": "before_icp",
-                "next_icp_index": item_index,
-                "completed_icp_count": len(per_icp_results),
-                "icp_ref": str(item.get("icp_ref") or item.get("icp_hash") or ""),
-                "icp_hash": str(item.get("icp_hash") or ""),
-            },
-        )
-        icp = item.get("icp")
-        if not isinstance(icp, Mapping):
-            raise RealEvaluatorRequired("benchmark item is missing private ICP payload")
-        failure_reasons: list[str] = []
-        if base_runner is None:
-            base_outputs = []
-        else:
-            try:
-                base_outputs = ensure_private_model_outputs(
-                    await _call_model_runner(base_runner, icp, run_context),
-                    context_label=f"reference model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
-                    require_non_empty=False,
+    consecutive_candidate_timeouts = 0
+    indexed_items = list(enumerate(benchmark_items))
+    for chunk_start in range(0, len(indexed_items), concurrency):
+        chunk = indexed_items[chunk_start : chunk_start + concurrency]
+        completed_before_chunk = len(per_icp_results)
+        entries: list[tuple[str, int, Mapping[str, Any], dict[str, Any] | None]] = []
+        for item_index, item in chunk:
+            resumed = resume_rows.get(_benchmark_item_ref(item)) if resume_rows else None
+            if resumed is not None:
+                entries.append(("resumed", item_index, item, dict(resumed)))
+            else:
+                entries.append(("run", item_index, item, None))
+        pending = [(position, entry) for position, entry in enumerate(entries) if entry[0] == "run"]
+        outcomes: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
+        if pending:
+            # Settle-then-raise: blocking runner waits cannot be cancelled, so a
+            # fail-fast gather would leave containers racing the failure path.
+            # Wait for every ICP in the wave, then surface the first fatal error
+            # in benchmark order.
+            settled = await asyncio.gather(
+                *(
+                    _score_single_icp(
+                        item=entry[2],
+                        item_index=entry[1],
+                        completed_icp_count=completed_before_chunk,
+                        base_runner=base_runner,
+                        candidate_runner=candidate_runner,
+                        scorer=scorer,
+                        run_context=run_context,
+                        image_candidate=image_candidate,
+                        runtime_patch=runtime_patch,
+                        parent_freshness_check=parent_freshness_check,
+                        candidate_runtime_skip_reason=candidate_runtime_skip_reason,
+                        legacy_timeout_latch=legacy_timeout_latch,
+                        provider_flake_retry=provider_flake_retry,
+                    )
+                    for _position, entry in pending
+                ),
+                return_exceptions=True,
+            )
+            fatal = [entry for entry in settled if isinstance(entry, BaseException)]
+            if fatal:
+                raise fatal[0]
+            for (position, _entry), outcome in zip(pending, settled):
+                outcomes[position] = outcome
+        for position, (kind, item_index, item, resumed_row) in enumerate(entries):
+            if kind == "resumed":
+                per_icp_results.append(resumed_row or {})
+                continue
+            row, markers = outcomes[position]
+            if markers["timed_out"]:
+                consecutive_candidate_timeouts += 1
+            elif not markers["skipped"]:
+                consecutive_candidate_timeouts = 0
+            if markers["latch_reason"] and not candidate_runtime_skip_reason:
+                candidate_runtime_skip_reason = markers["latch_reason"]
+            if (
+                not legacy_timeout_latch
+                and not candidate_runtime_skip_reason
+                and consecutive_candidate_timeouts >= 2
+            ):
+                candidate_runtime_skip_reason = _candidate_runtime_skip_reason(
+                    "candidate_model_runtime_timeout"
                 )
-            except PrivateModelRuntimeError as exc:
-                if not _is_provider_backed_sourcing_error(exc):
-                    raise
-                base_outputs = []
-                failure_reasons.append("reference_model_runtime_provider_error")
-        candidate_context = dict(run_context)
-        if not image_candidate:
-            if runtime_patch is None:
-                raise RealEvaluatorRequired("candidate patch runtime payload is required for patch candidates")
-            candidate_context["patch"] = runtime_patch.to_dict()
-        if candidate_runtime_skip_reason:
-            candidate_outputs = []
-            failure_reasons.append(candidate_runtime_skip_reason)
-        else:
-            try:
-                candidate_outputs = ensure_private_model_outputs(
-                    await _call_model_runner(candidate_runner, icp, candidate_context),
-                    context_label=f"candidate model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
-                    require_non_empty=False,
-                )
-            except PrivateModelRuntimeError as exc:
-                candidate_failure_reason = _scoreable_candidate_runtime_failure_reason(exc)
-                if not candidate_failure_reason:
-                    raise
-                candidate_outputs = []
-                failure_reasons.append(candidate_failure_reason)
-                candidate_runtime_skip_reason = _candidate_runtime_skip_reason(candidate_failure_reason)
-        base_scores = await _maybe_await(scorer(base_outputs, icp, True)) if base_runner is not None else []
-        candidate_scores = await _maybe_await(scorer(candidate_outputs, icp, False))
-        if base_runner is not None and not base_outputs:
-            failure_reasons.append("reference_model_zero_companies")
-        elif base_runner is not None and not base_scores:
-            failure_reasons.append("reference_model_zero_scoreable_companies")
-        if not candidate_outputs:
-            failure_reasons.append("candidate_model_zero_companies")
-        elif not candidate_scores:
-            failure_reasons.append("candidate_model_zero_scoreable_companies")
-        per_icp_results.append(
-            {
-                "icp_ref": str(item.get("icp_ref") or item.get("icp_hash") or ""),
-                "icp_hash": str(item.get("icp_hash") or ""),
-                "status": "completed",
-                "hard_failure": False,
-                "base_company_scores": base_scores,
-                "candidate_company_scores": candidate_scores,
-                "failure_reason": ";".join(failure_reasons),
-            }
-        )
-        await _run_parent_freshness_check(
-            parent_freshness_check,
-            {
-                "phase": "after_icp",
-                "last_icp_index": item_index,
-                "completed_icp_count": len(per_icp_results),
-                "icp_ref": str(item.get("icp_ref") or item.get("icp_hash") or ""),
-                "icp_hash": str(item.get("icp_hash") or ""),
-            },
-        )
+            per_icp_results.append(row)
+            if icp_checkpoint is not None:
+                checkpoint_result = icp_checkpoint(row)
+                if inspect.isawaitable(checkpoint_result):
+                    await checkpoint_result
+            await _run_parent_freshness_check(
+                parent_freshness_check,
+                {
+                    "phase": "after_icp",
+                    "last_icp_index": item_index,
+                    "completed_icp_count": len(per_icp_results),
+                    "icp_ref": str(item.get("icp_ref") or item.get("icp_hash") or ""),
+                    "icp_hash": str(item.get("icp_hash") or ""),
+                },
+            )
     return per_icp_results
+
+
+async def _score_single_icp(
+    *,
+    item: Mapping[str, Any],
+    item_index: int,
+    completed_icp_count: int,
+    base_runner: ModelRunner | None,
+    candidate_runner: ModelRunner,
+    scorer: CompanyScorer,
+    run_context: Mapping[str, Any],
+    image_candidate: bool,
+    runtime_patch: CandidatePatchManifest | None,
+    parent_freshness_check: ParentFreshnessCheck | None,
+    candidate_runtime_skip_reason: str,
+    legacy_timeout_latch: bool,
+    provider_flake_retry: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run and score one benchmark ICP.
+
+    Returns ``(row, markers)`` where ``markers`` carries the latch signals the
+    ordered driver loop needs (``timed_out``, ``latch_reason``, ``skipped``).
+    """
+    await _run_parent_freshness_check(
+        parent_freshness_check,
+        {
+            "phase": "before_icp",
+            "next_icp_index": item_index,
+            "completed_icp_count": completed_icp_count,
+            "icp_ref": str(item.get("icp_ref") or item.get("icp_hash") or ""),
+            "icp_hash": str(item.get("icp_hash") or ""),
+        },
+    )
+    icp = item.get("icp")
+    if not isinstance(icp, Mapping):
+        raise RealEvaluatorRequired("benchmark item is missing private ICP payload")
+    failure_reasons: list[str] = []
+    if base_runner is None:
+        base_outputs = []
+    else:
+        try:
+            base_outputs = ensure_private_model_outputs(
+                await _call_model_runner(base_runner, icp, run_context),
+                context_label=f"reference model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
+                require_non_empty=False,
+            )
+        except PrivateModelRuntimeError as exc:
+            if not _is_provider_backed_sourcing_error(exc):
+                raise
+            base_outputs = []
+            failure_reasons.append("reference_model_runtime_provider_error")
+    candidate_context = dict(run_context)
+    if not image_candidate:
+        if runtime_patch is None:
+            raise RealEvaluatorRequired("candidate patch runtime payload is required for patch candidates")
+        candidate_context["patch"] = runtime_patch.to_dict()
+    markers = {"timed_out": False, "latch_reason": "", "skipped": False}
+    provider_excluded = False
+    if candidate_runtime_skip_reason:
+        candidate_outputs = []
+        failure_reasons.append(candidate_runtime_skip_reason)
+        markers["skipped"] = True
+    else:
+        candidate_outputs, candidate_failure_reason, provider_excluded = await _run_candidate_with_retries(
+            candidate_runner=candidate_runner,
+            icp=icp,
+            candidate_context=candidate_context,
+            item_label=str(item.get("icp_ref") or item.get("icp_hash") or ""),
+            legacy_timeout_latch=legacy_timeout_latch,
+            provider_flake_retry=provider_flake_retry,
+        )
+        if candidate_failure_reason:
+            failure_reasons.append(candidate_failure_reason)
+            if candidate_failure_reason == "candidate_model_runtime_timeout":
+                markers["timed_out"] = True
+                if legacy_timeout_latch:
+                    markers["latch_reason"] = _candidate_runtime_skip_reason(candidate_failure_reason)
+            else:
+                markers["latch_reason"] = _candidate_runtime_skip_reason(candidate_failure_reason)
+    base_scores = await _maybe_await(scorer(base_outputs, icp, True)) if base_runner is not None else []
+    candidate_scores = await _maybe_await(scorer(candidate_outputs, icp, False))
+    if base_runner is not None and not base_outputs:
+        failure_reasons.append("reference_model_zero_companies")
+    elif base_runner is not None and not base_scores:
+        failure_reasons.append("reference_model_zero_scoreable_companies")
+    if not candidate_outputs:
+        failure_reasons.append("candidate_model_zero_companies")
+    elif not candidate_scores:
+        failure_reasons.append("candidate_model_zero_scoreable_companies")
+    row = {
+        "icp_ref": str(item.get("icp_ref") or item.get("icp_hash") or ""),
+        "icp_hash": str(item.get("icp_hash") or ""),
+        "status": "completed",
+        "hard_failure": False,
+        "base_company_scores": base_scores,
+        "candidate_company_scores": candidate_scores,
+        "failure_reason": ";".join(failure_reasons),
+        "provider_excluded": provider_excluded,
+        # Bug #35: a zero-company result with no recorded runtime error is the
+        # silent-zero blind spot — flag it so gates/counters can see it.
+        "sourced_zero_no_error": (
+            not candidate_outputs
+            and not any(reason.startswith("candidate_model_runtime_") for reason in failure_reasons)
+        ),
+        "reference_sourced_zero_no_error": (
+            base_runner is not None
+            and not base_outputs
+            and not any(reason.startswith("reference_model_runtime_") for reason in failure_reasons)
+        ),
+    }
+    return row, markers
+
+
+async def _run_candidate_with_retries(
+    *,
+    candidate_runner: ModelRunner,
+    icp: Mapping[str, Any],
+    candidate_context: Mapping[str, Any],
+    item_label: str,
+    legacy_timeout_latch: bool,
+    provider_flake_retry: bool,
+) -> tuple[list[Mapping[str, Any]], str, bool]:
+    """Run the candidate for one ICP with at most one fairness retry.
+
+    Returns ``(outputs, failure_reason, provider_excluded)``. Timeouts retry
+    once unless the legacy latch flag is on (bug #14); provider errors the
+    local classifier deems retryable retry once, and an ICP that still
+    provider-errors afterwards is excluded from aggregates instead of booking
+    a hard 0 (bug #15). Non-scoreable runtime failures re-raise as before.
+    """
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            outputs = ensure_private_model_outputs(
+                await _call_model_runner(candidate_runner, icp, candidate_context),
+                context_label=f"candidate model for ICP {item_label}",
+                require_non_empty=False,
+            )
+            return list(outputs), "", False
+        except PrivateModelRuntimeError as exc:
+            failure_reason = _scoreable_candidate_runtime_failure_reason(exc)
+            if not failure_reason:
+                raise
+            if attempts == 1 and _candidate_failure_should_retry(
+                failure_reason,
+                str(exc),
+                legacy_timeout_latch=legacy_timeout_latch,
+                provider_flake_retry=provider_flake_retry,
+            ):
+                continue
+            provider_excluded = (
+                provider_flake_retry
+                and failure_reason == "candidate_model_runtime_provider_error"
+            )
+            return [], failure_reason, provider_excluded
+
+
+def _candidate_failure_should_retry(
+    failure_reason: str,
+    error_text: str,
+    *,
+    legacy_timeout_latch: bool,
+    provider_flake_retry: bool,
+) -> bool:
+    if failure_reason == "candidate_model_runtime_timeout":
+        return not legacy_timeout_latch
+    if failure_reason == "candidate_model_runtime_provider_error":
+        return provider_flake_retry and _candidate_error_is_retryable(error_text)
+    return False
+
+
+def _candidate_error_is_retryable(error_text: str) -> bool:
+    """Local mirror of the gateway baseline retry classifier semantics.
+
+    Reimplemented here (not imported) so research_lab.eval keeps no gateway
+    dependency. Transient provider/infra failures — 408/429/5xx, timeouts,
+    connection resets, OOM kills — are retryable; auth and request-validation
+    errors are not. Scrapingdog's 400 "Something went wrong or profile not
+    found" and 410 responses are empirically transient-or-data-shaped, so they
+    are retryable too (bug #37 semantics).
+    """
+    lowered = error_text.lower()
+    status = _provider_error_status_code(lowered)
+    if status in (408, 410, 429) or status >= 500:
+        return True
+    if status == 400 and "something went wrong" in lowered:
+        return True
+    if status in (400, 401, 403, 404, 409):
+        return False
+    if any(
+        marker in lowered
+        for marker in (
+            "too many requests",
+            "rate limit",
+            "timed out",
+            "timeout",
+            "connection reset",
+            "connection refused",
+            "temporarily unavailable",
+        )
+    ):
+        return True
+    if any(
+        marker in lowered
+        for marker in (
+            "exit status 137",
+            "killed",
+            "docker daemon",
+            "no space left on device",
+        )
+    ):
+        # Infra pressure (OOM-kill, daemon wedge) clears when fewer containers
+        # run at once on the retry.
+        return True
+    return False
+
+
+def _provider_error_status_code(lowered_error_text: str) -> int:
+    # 410 is matched here even though the gateway diagnostics status list
+    # omits it (bug #37).
+    for code in (400, 401, 403, 404, 408, 409, 410, 429, 500, 502, 503, 504):
+        if (
+            f"http error {code}" in lowered_error_text
+            or f"status={code}" in lowered_error_text
+            or f'"status":{code}' in lowered_error_text
+        ):
+            return code
+    return 0
+
+
+def _resume_rows_by_ref(
+    resume_results: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    for row in resume_results or ():
+        if not isinstance(row, Mapping):
+            continue
+        ref = str(row.get("icp_ref") or row.get("icp_hash") or "")
+        if ref:
+            rows[ref] = dict(row)
+    return rows
+
+
+def _benchmark_item_ref(item: Mapping[str, Any]) -> str:
+    return str(item.get("icp_ref") or item.get("icp_hash") or "")
 
 
 async def _score_with_private_holdout_gate(
@@ -262,6 +621,8 @@ async def _score_with_private_holdout_gate(
     runtime_patch: CandidatePatchManifest | None,
     gate: Mapping[str, Any],
     parent_freshness_check: ParentFreshnessCheck | None = None,
+    icp_checkpoint: IcpCheckpoint | None = None,
+    resume_results: Sequence[Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     public_refs = {
         str(item)
@@ -292,6 +653,8 @@ async def _score_with_private_holdout_gate(
         image_candidate=image_candidate,
         runtime_patch=runtime_patch,
         parent_freshness_check=parent_freshness_check,
+        icp_checkpoint=icp_checkpoint,
+        resume_results=resume_results,
     )
     baseline_public_score = float(gate.get("baseline_public_score") or 0.0)
     baseline_aggregate_score = _optional_float(gate.get("baseline_aggregate_score"))
@@ -313,6 +676,10 @@ async def _score_with_private_holdout_gate(
         "public_icp_count": len(public_items),
         "private_holdout_icp_count": len(private_items),
         "private_holdout_evaluated": bool(passed_public_gate),
+        # Fixed promotion contract (bug #15): ICPs excluded for unresolved
+        # provider errors; the promotion-side merge metric drops the matching
+        # baseline ICPs so the exclusion stays symmetric.
+        "provider_excluded_icp_ids": _provider_excluded_icp_ids(public_results),
     }
     if not passed_public_gate:
         return public_results, gate_result
@@ -326,6 +693,8 @@ async def _score_with_private_holdout_gate(
         image_candidate=image_candidate,
         runtime_patch=runtime_patch,
         parent_freshness_check=parent_freshness_check,
+        icp_checkpoint=icp_checkpoint,
+        resume_results=resume_results,
     )
     all_results = [*public_results, *private_results]
     candidate_total_score = _benchmark_style_score(all_results, "candidate_company_scores")
@@ -339,6 +708,7 @@ async def _score_with_private_holdout_gate(
         "candidate_total_score": round(candidate_total_score, 6),
         "paired_base_total_score": None,
         "candidate_delta_vs_daily_baseline": round(daily_delta, 6) if daily_delta is not None else None,
+        "provider_excluded_icp_ids": _provider_excluded_icp_ids(all_results),
     }
     return all_results, gate_result
 
@@ -364,15 +734,65 @@ def _benchmark_style_score(
     # that ICP and should score 0 for it. Per-company resilience lives upstream in the
     # model (one failed company is skipped, not fatal), so this 0 only happens when the
     # whole ICP yielded nothing.
+    #
+    # Two deliberate deviations:
+    # - Rows marked provider_excluded (unresolved provider flakes after retry,
+    #   bug #15) are dropped from the aggregate entirely instead of booking 0;
+    #   their ids ride the provider_excluded_icp_ids contract so the promotion
+    #   side drops the matching baseline ICPs.
+    # - With RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE on (bug #8), the per-ICP score
+    #   is the verifier's capped sum(top-5 company scores)/5 instead of the
+    #   unweighted mean, closing the truncate-to-best-company exploit.
+    capped_top5 = _capped_top5_score_enabled()
     per_icp_scores: list[float] = []
     for row in per_icp_results:
+        if row.get("provider_excluded"):
+            continue
         scores = row.get(score_field)
         if not isinstance(scores, Sequence) or isinstance(scores, (str, bytes, bytearray)):
             per_icp_scores.append(0.0)
             continue
         values = [float(item or 0.0) for item in scores]
-        per_icp_scores.append(float(sum(values) / len(values)) if values else 0.0)
+        per_icp_scores.append(_benchmark_icp_score(values, capped_top5=capped_top5))
     return float(sum(per_icp_scores) / len(per_icp_scores)) if per_icp_scores else 0.0
+
+
+def benchmark_icp_score_from_company_scores(scores: Sequence[float]) -> float:
+    """Per-ICP score on the live-gate scale for one ICP's company scores.
+
+    Shared entry point so the daily-baseline path and the candidate path flip
+    together when RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE changes; never mix scores
+    computed under different settings of that flag.
+    """
+    values = [float(item or 0.0) for item in scores]
+    return _benchmark_icp_score(values, capped_top5=_capped_top5_score_enabled())
+
+
+def _benchmark_icp_score(values: list[float], *, capped_top5: bool) -> float:
+    if capped_top5:
+        # Match the verifier's advisory arithmetic exactly
+        # (leadpoet_verifier.aggregation.per_icp_normalized_score): each company
+        # score is clamped to [0, MAX_COMPANY_TOTAL_SCORE], summed over the top
+        # five companies, and divided by the fixed 5-lead budget.
+        top_values = sorted(values, reverse=True)[:_TOP5_LEADS_PER_ICP]
+        return float(per_icp_normalized_score(top_values, max_leads=_TOP5_LEADS_PER_ICP))
+    return float(sum(values) / len(values)) if values else 0.0
+
+
+def _provider_excluded_icp_ids(per_icp_results: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Identifiers of ICPs excluded for unresolved provider errors (bug #15).
+
+    KEY NAME IS A FIXED CONTRACT: the promotion-side merge metric reads
+    ``provider_excluded_icp_ids`` and drops the matching baseline ICPs so
+    exclusion stays symmetric. Ids are the per-ICP ``icp_ref`` (falling back to
+    ``icp_hash``), deduplicated and sorted.
+    """
+    ids = {
+        str(row.get("icp_ref") or row.get("icp_hash") or "")
+        for row in per_icp_results
+        if row.get("provider_excluded")
+    }
+    return sorted(ref for ref in ids if ref)
 
 
 def _optional_float(value: Any) -> float | None:
@@ -473,6 +893,9 @@ def build_score_bundle_from_scored_icps(
         **bundle,
         **extra_fields,
         "scoring_health": scoring_health,
+        # Fixed promotion contract (bug #15): also surfaced at bundle top level
+        # so non-holdout-gate callers can consume it.
+        "provider_excluded_icp_ids": _provider_excluded_icp_ids(per_icp_results),
         "score_bundle_hash": "",
         "anchored_hash": "",
     }
@@ -497,6 +920,8 @@ def build_scoring_health_doc(
         "timeout_count": 0,
         "invalid_output_count": 0,
         "skipped_candidate_count": 0,
+        "provider_excluded_icp_count": 0,
+        "sourced_zero_no_error_count": 0,
     }
     failure_classes: dict[str, int] = {}
     for row in per_icp_results:
@@ -532,6 +957,10 @@ def build_scoring_health_doc(
             counts["invalid_output_count"] += 1
         if any(reason.startswith("candidate_model_runtime_skipped_after_") for reason in reasons):
             counts["skipped_candidate_count"] += 1
+        if row.get("provider_excluded"):
+            counts["provider_excluded_icp_count"] += 1
+        if row.get("sourced_zero_no_error") or row.get("reference_sourced_zero_no_error"):
+            counts["sourced_zero_no_error_count"] += 1
 
     rates = {
         "reference_runtime_success_rate": _health_success_rate(total, counts["reference_runtime_failure_count"]),
@@ -542,6 +971,8 @@ def build_scoring_health_doc(
         "timeout_rate": _health_rate(total, counts["timeout_count"]),
         "invalid_output_rate": _health_rate(total, counts["invalid_output_count"]),
         "skipped_candidate_rate": _health_rate(total, counts["skipped_candidate_count"]),
+        "provider_excluded_icp_rate": _health_rate(total, counts["provider_excluded_icp_count"]),
+        "sourced_zero_no_error_rate": _health_rate(total, counts["sourced_zero_no_error_count"]),
     }
     holdout_doc = _scoring_health_holdout_doc(private_holdout_gate)
     degraded = any(value > 0 for value in counts.values())
@@ -584,6 +1015,7 @@ def _scoring_health_holdout_doc(value: Mapping[str, Any] | None) -> dict[str, An
             "private_holdout_evaluated": False,
             "public_icp_count": 0,
             "private_holdout_icp_count": 0,
+            "provider_excluded_icp_ids": [],
         }
     return {
         "decision": str(value.get("decision") or ""),
@@ -600,6 +1032,9 @@ def _scoring_health_holdout_doc(value: Mapping[str, Any] | None) -> dict[str, An
         "public_icp_count": int(value.get("public_icp_count") or 0),
         "private_holdout_icp_count": int(value.get("private_holdout_icp_count") or 0),
         "private_holdout_evaluated": bool(value.get("private_holdout_evaluated")),
+        "provider_excluded_icp_ids": [
+            str(item) for item in (value.get("provider_excluded_icp_ids") or ())
+        ],
     }
 
 
@@ -636,7 +1071,15 @@ class QualificationStyleCompanyScorer:
         allowed_buckets = employee_count_buckets_for_icp(icp)
         seen_companies: set[str] = set()
         breakdowns: list[dict[str, Any]] = []
+        max_scored = _max_scored_companies_per_icp()
         for company in companies:
+            if max_scored and len(breakdowns) >= max_scored:
+                # Cost cap (bug #8): stop LLM-scoring once the per-ICP budget
+                # is reached. Shared by the baseline and candidate paths since
+                # both score through this adapter. With
+                # RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE on, keep this cap >= 5 so
+                # the top-5 normalization still sees a full lead budget.
+                break
             scoring_icp = dict(icp)
             company_bucket = normalize_employee_count_bucket(
                 (company or {}).get("employee_count"),

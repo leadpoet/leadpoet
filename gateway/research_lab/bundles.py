@@ -10,8 +10,18 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
+import os
 from typing import Any, Mapping, Sequence
 
+
+logger = logging.getLogger(__name__)
+
+AUDIT_SECRET_SCAN_MODE_ENV_VAR = "RESEARCH_LAB_AUDIT_SECRET_SCAN_MODE"
+AUDIT_SECRET_SCAN_MODE_REDACT = "redact"
+AUDIT_SECRET_SCAN_MODE_RAISE = "raise"
+SHADOW_REPORT_ALLOWLIST_ENV_VAR = "RESEARCH_LAB_SHADOW_REPORT_ALLOWLIST"
+_TRUTHY = {"1", "true", "yes", "on"}
 
 SECRET_MARKERS = (
     "sk-or-",
@@ -61,6 +71,112 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def audit_secret_scan_mode() -> str:
+    """Return the bundle secret-scan mode: ``redact`` (default) or ``raise``.
+
+    ``raise`` restores the legacy strict behavior for auditors: any secret
+    marker anywhere in the source state throws the whole bundle away. The
+    default ``redact`` mode replaces offending values with deterministic
+    placeholders so one poisoned historical row cannot wedge every future
+    bundle build.
+    """
+    mode = os.getenv(AUDIT_SECRET_SCAN_MODE_ENV_VAR, AUDIT_SECRET_SCAN_MODE_REDACT).strip().lower()
+    if mode == AUDIT_SECRET_SCAN_MODE_RAISE:
+        return AUDIT_SECRET_SCAN_MODE_RAISE
+    return AUDIT_SECRET_SCAN_MODE_REDACT
+
+
+def shadow_report_allowlist_enabled() -> bool:
+    """Return whether the shadow report source state is allowlist-filtered."""
+    return os.getenv(SHADOW_REPORT_ALLOWLIST_ENV_VAR, "true").strip().lower() in _TRUTHY
+
+
+def redact_secret_material(value: Any) -> tuple[Any, dict[str, Any]]:
+    """Return a redacted deep copy of ``value`` plus a redaction summary.
+
+    String values containing a ``SECRET_MARKERS`` substring are replaced with
+    ``[REDACTED:<marker-label>:sha256:<first-12-hex-of-sha256-of-original>]``
+    so auditors can correlate incidents without seeing content. Mapping
+    entries whose key looks secret are dropped and counted. The input is
+    never mutated, and the redacted copy passes ``contains_secret_material``.
+    """
+    marker_counts: dict[str, int] = {}
+    redacted_value_count = 0
+
+    def _redact(item: Any) -> Any:
+        nonlocal redacted_value_count
+        if isinstance(item, Mapping):
+            redacted: dict[str, Any] = {}
+            for key, nested in item.items():
+                key_marker = _first_secret_key_marker(str(key).lower())
+                if key_marker is not None:
+                    label = _secret_marker_label(key_marker)
+                    marker_counts[label] = marker_counts.get(label, 0) + 1
+                    redacted_value_count += 1
+                    continue
+                redacted[key] = _redact(nested)
+            return redacted
+        if isinstance(item, list):
+            return [_redact(nested) for nested in item]
+        if isinstance(item, str):
+            lowered = item.lower()
+            hit_markers = [marker for marker in SECRET_MARKERS if marker in lowered]
+            if hit_markers:
+                for marker in hit_markers:
+                    label = _secret_marker_label(marker)
+                    marker_counts[label] = marker_counts.get(label, 0) + 1
+                redacted_value_count += 1
+                return _redaction_placeholder(hit_markers[0], item)
+        return item
+
+    redacted_copy = _redact(value)
+    summary = {
+        "redaction_count": redacted_value_count,
+        "redactions": [
+            {"marker": label, "count": count}
+            for label, count in sorted(marker_counts.items())
+        ],
+    }
+    return redacted_copy, summary
+
+
+def _redaction_placeholder(marker: str, original: str) -> str:
+    digest = hashlib.sha256(original.encode("utf-8")).hexdigest()[:12]
+    return f"[REDACTED:{_secret_marker_label(marker)}:sha256:{digest}]"
+
+
+_MARKER_LABEL_TRANSLATION = str.maketrans({"-": "_", "_": "-", ".": "-"})
+
+
+def _secret_marker_label(marker: str) -> str:
+    """Return a defanged marker label safe to embed in redacted output.
+
+    Swapping ``-``/``_``/``.`` keeps labels readable while guaranteeing the
+    placeholder never re-trips this module's or downstream verifier scans.
+    """
+    label = marker.translate(_MARKER_LABEL_TRANSLATION).strip("-")
+    if not label or any(existing in label for existing in SECRET_MARKERS):
+        return "marker-" + hashlib.sha256(marker.encode("utf-8")).hexdigest()[:8]
+    return label
+
+
+def _apply_secret_scan(source_state: Any, *, error_message: str) -> tuple[Any, dict[str, Any]]:
+    mode = audit_secret_scan_mode()
+    if mode == AUDIT_SECRET_SCAN_MODE_RAISE:
+        if contains_secret_material(source_state):
+            raise ValueError(error_message)
+        return source_state, {"mode": mode, "redaction_count": 0, "redactions": []}
+    redacted_state, summary = redact_secret_material(source_state)
+    if summary["redaction_count"]:
+        logger.warning(
+            "%s; redacted %s value(s) (markers: %s)",
+            error_message,
+            summary["redaction_count"],
+            ",".join(entry["marker"] for entry in summary["redactions"]),
+        )
+    return redacted_state, {"mode": mode, **summary}
+
+
 def build_shadow_report_bundle(
     *,
     epoch: int,
@@ -76,17 +192,33 @@ def build_shadow_report_bundle(
     ``submission_allowed`` stays false and the Research Lab component defaults
     to a zero/empty vector unless a future writer emits an explicit verified
     weight vector into ``research_weight_input_snapshots.snapshot_doc``.
+
+    Unless ``RESEARCH_LAB_SHADOW_REPORT_ALLOWLIST`` is disabled, the source
+    state rows are allowlist-filtered like the audit bundle rows so the
+    public shadow report never exposes unfiltered internal rows.
     """
-    source_state = {
-        "epoch": int(epoch),
-        "weight_input_snapshots": _stable_rows(weight_input_snapshots),
-        "ticket_rows": _stable_rows(ticket_rows),
-        "queue_rows": _stable_rows(queue_rows),
-        "receipt_rows": _stable_rows(receipt_rows),
-        "reimbursement_rows": _stable_rows(reimbursement_rows),
-    }
-    if contains_secret_material(source_state):
-        raise ValueError("Research Lab shadow source state contains raw secret material")
+    if shadow_report_allowlist_enabled():
+        source_state = {
+            "epoch": int(epoch),
+            "weight_input_snapshots": _stable_rows(_redact_rows(weight_input_snapshots, _SHADOW_WEIGHT_INPUT_FIELDS)),
+            "ticket_rows": _stable_rows(_redact_rows(ticket_rows, _AUDIT_TICKET_FIELDS)),
+            "queue_rows": _stable_rows(_redact_rows(queue_rows, _AUDIT_QUEUE_FIELDS)),
+            "receipt_rows": _stable_rows(_redact_rows(receipt_rows, _AUDIT_RECEIPT_FIELDS)),
+            "reimbursement_rows": _stable_rows(_redact_rows(reimbursement_rows, _SHADOW_REIMBURSEMENT_AWARD_FIELDS)),
+        }
+    else:
+        source_state = {
+            "epoch": int(epoch),
+            "weight_input_snapshots": _stable_rows(weight_input_snapshots),
+            "ticket_rows": _stable_rows(ticket_rows),
+            "queue_rows": _stable_rows(queue_rows),
+            "receipt_rows": _stable_rows(receipt_rows),
+            "reimbursement_rows": _stable_rows(reimbursement_rows),
+        }
+    source_state, secret_scan = _apply_secret_scan(
+        source_state,
+        error_message="Research Lab shadow source state contains raw secret material",
+    )
 
     weight_vector = _extract_verified_shadow_weight_vector(weight_input_snapshots)
     weight_vector_hash = sha256_json(weight_vector)
@@ -114,6 +246,7 @@ def build_shadow_report_bundle(
         "on_chain_submission_allowed": False,
         "source_state_hash": source_state_hash,
         "source_state": source_state,
+        "secret_scan": secret_scan,
         "weight_vector": weight_vector,
         "weight_vector_hash": weight_vector_hash,
         "observability": observability,
@@ -173,8 +306,10 @@ def build_research_lab_audit_bundle(
         "public_benchmark_report_rows": _stable_rows(_redact_rows(public_benchmark_report_rows, _AUDIT_PUBLIC_BENCHMARK_FIELDS)),
         "score_bundle_rows": _stable_rows(_redact_rows(score_bundle_rows, _AUDIT_SCORE_BUNDLE_FIELDS)),
     }
-    if contains_secret_material(source_state):
-        raise ValueError("Research Lab audit source state contains private or secret material")
+    source_state, secret_scan = _apply_secret_scan(
+        source_state,
+        error_message="Research Lab audit source state contains private or secret material",
+    )
 
     source_state_hash = sha256_json(source_state)
     bundle_without_id = {
@@ -189,6 +324,7 @@ def build_research_lab_audit_bundle(
         "validator_private_artifact_access": "forbidden",
         "source_state_hash": source_state_hash,
         "source_state": source_state,
+        "secret_scan": secret_scan,
         "observability": {
             "ticket_count": len(ticket_rows),
             "run_queue_count": len(queue_rows),
@@ -242,9 +378,17 @@ def contains_secret_material(value: Any) -> bool:
 
 
 def _looks_like_secret_key(lowered_key: str) -> bool:
-    if any(marker in lowered_key for marker in SECRET_KEY_MARKERS):
-        return True
-    return any(marker in lowered_key for marker in SECRET_TOKEN_KEY_MARKERS)
+    return _first_secret_key_marker(lowered_key) is not None
+
+
+def _first_secret_key_marker(lowered_key: str) -> str | None:
+    for marker in SECRET_KEY_MARKERS:
+        if marker in lowered_key:
+            return marker
+    for marker in SECRET_TOKEN_KEY_MARKERS:
+        if marker in lowered_key:
+            return marker
+    return None
 
 
 def _stable_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -323,6 +467,45 @@ _FORBIDDEN_AUDIT_KEYS = {
     "proxy_url",
 }
 
+_SHADOW_WEIGHT_INPUT_FIELDS = {
+    "weight_input_snapshot_id",
+    "epoch",
+    "netuid",
+    "snapshot_status",
+    "fulfillment_weight_ref",
+    "leaderboard_weight_ref",
+    "improvement_grant_ref",
+    "reimbursement_weight_ref",
+    "active_researcher_floor_ref",
+    "source_bundle_ref",
+    "input_state_hash",
+    "weight_vector_hash",
+    "snapshot_doc",
+    "created_at",
+}
+_SHADOW_REIMBURSEMENT_AWARD_FIELDS = {
+    "award_id",
+    "receipt_id",
+    "run_id",
+    "miner_hotkey",
+    "island",
+    "run_day",
+    "policy_id",
+    "award_status",
+    "participation_score",
+    "participation_fraction",
+    "rebate_rate",
+    "eligible_cost_microusd",
+    "target_reimbursement_microusd",
+    "reimbursement_epochs",
+    "loop_start_fee_included",
+    "input_hash",
+    "current_event_seq",
+    "current_event_type",
+    "current_award_status",
+    "current_status_at",
+    "created_at",
+}
 _AUDIT_TICKET_FIELDS = {
     "ticket_id",
     "miner_hotkey",

@@ -916,16 +916,192 @@ def _research_lab_http_error_details(exc):
             parts.append(f"body_unavailable={type(body_exc).__name__}")
     return "; ".join(parts)
 
+def _research_lab_emit_provider_error(details, target):
+    # Single line: the host-side parser matches marker lines individually.
+    message = _research_lab_sanitize(f"{details}; url={target}").replace("\n", " ")
+    sys.stderr.write("research_lab_private_runtime_provider_error " + message[-900:] + "\n")
+
 def _research_lab_urlopen(req, *args, **kwargs):
     try:
         return _research_lab_original_urlopen(req, *args, **kwargs)
     except Exception as exc:
         target = getattr(req, "full_url", req if isinstance(req, str) else "")
-        message = _research_lab_sanitize(f"{_research_lab_http_error_details(exc)}; url={target}")
-        sys.stderr.write("research_lab_private_runtime_provider_error " + message[-900:] + "\n")
+        _research_lab_emit_provider_error(_research_lab_http_error_details(exc), target)
         raise
 
 urllib.request.urlopen = _research_lab_urlopen
+
+def _research_lab_generic_error_details(exc):
+    # httpx / requests / aiohttp analog of _research_lab_http_error_details:
+    # best-effort status/reason/body extraction, never raising.
+    parts = [f"{type(exc).__name__}: {exc}"]
+    response = getattr(exc, "response", None)
+    status = getattr(exc, "code", None) or getattr(exc, "status", None) or getattr(exc, "status_code", None)
+    if status is None and response is not None:
+        status = getattr(response, "status_code", None) or getattr(response, "status", None)
+    if status is not None and not callable(status):
+        parts.append(f"status={status}")
+    reason = getattr(exc, "reason", None)
+    if reason is None and response is not None:
+        reason = getattr(response, "reason_phrase", None) or getattr(response, "reason", None)
+    if reason and not callable(reason):
+        parts.append(f"reason={reason}")
+    if response is not None:
+        try:
+            body = getattr(response, "text", None)
+            if callable(body):
+                # aiohttp's text() is an async method; skip rather than await.
+                body = None
+            if body is None:
+                raw = getattr(response, "content", None)
+                if isinstance(raw, bytes):
+                    body = raw.decode("utf-8", "replace")
+                elif isinstance(raw, str):
+                    body = raw
+            if isinstance(body, str) and body:
+                body = _research_lab_sanitize(body).replace("\n", " ")[:900]
+                parts.append(f"body={body}")
+        except Exception as body_exc:
+            parts.append(f"body_unavailable={type(body_exc).__name__}")
+    return "; ".join(parts)
+
+def _research_lab_patch_httpx():
+    # Bug #35: httpx failures previously read as "model returned nothing".
+    try:
+        import httpx
+    except Exception:
+        return
+    try:
+        _research_lab_original_httpx_send = httpx.Client.send
+
+        def _research_lab_httpx_send(self, request, *args, **kwargs):
+            try:
+                return _research_lab_original_httpx_send(self, request, *args, **kwargs)
+            except Exception as exc:
+                _research_lab_emit_provider_error(
+                    _research_lab_generic_error_details(exc),
+                    getattr(request, "url", ""),
+                )
+                raise
+
+        httpx.Client.send = _research_lab_httpx_send
+    except Exception:
+        pass
+    try:
+        _research_lab_original_httpx_async_send = httpx.AsyncClient.send
+
+        async def _research_lab_httpx_async_send(self, request, *args, **kwargs):
+            try:
+                return await _research_lab_original_httpx_async_send(self, request, *args, **kwargs)
+            except Exception as exc:
+                _research_lab_emit_provider_error(
+                    _research_lab_generic_error_details(exc),
+                    getattr(request, "url", ""),
+                )
+                raise
+
+        httpx.AsyncClient.send = _research_lab_httpx_async_send
+    except Exception:
+        pass
+    try:
+        _research_lab_original_httpx_raise = httpx.Response.raise_for_status
+
+        def _research_lab_httpx_raise_for_status(self, *args, **kwargs):
+            try:
+                return _research_lab_original_httpx_raise(self, *args, **kwargs)
+            except Exception as exc:
+                _research_lab_emit_provider_error(
+                    _research_lab_generic_error_details(exc),
+                    getattr(self, "url", ""),
+                )
+                raise
+
+        httpx.Response.raise_for_status = _research_lab_httpx_raise_for_status
+    except Exception:
+        pass
+
+def _research_lab_patch_requests():
+    # Bug #35: requests rides urllib3, not urllib.request, so the urlopen hook
+    # never saw its failures.
+    try:
+        import requests
+    except Exception:
+        return
+    try:
+        _research_lab_original_requests_send = requests.Session.send
+
+        def _research_lab_requests_send(self, request, *args, **kwargs):
+            try:
+                return _research_lab_original_requests_send(self, request, *args, **kwargs)
+            except Exception as exc:
+                _research_lab_emit_provider_error(
+                    _research_lab_generic_error_details(exc),
+                    getattr(request, "url", ""),
+                )
+                raise
+
+        requests.Session.send = _research_lab_requests_send
+    except Exception:
+        pass
+    try:
+        _research_lab_original_requests_raise = requests.models.Response.raise_for_status
+
+        def _research_lab_requests_raise_for_status(self, *args, **kwargs):
+            try:
+                return _research_lab_original_requests_raise(self, *args, **kwargs)
+            except Exception as exc:
+                _research_lab_emit_provider_error(
+                    _research_lab_generic_error_details(exc),
+                    getattr(self, "url", ""),
+                )
+                raise
+
+        requests.models.Response.raise_for_status = _research_lab_requests_raise_for_status
+    except Exception:
+        pass
+
+def _research_lab_patch_aiohttp():
+    # Bug #35: aiohttp failures were equally invisible to the urlopen hook.
+    try:
+        import aiohttp
+    except Exception:
+        return
+    try:
+        _research_lab_original_aiohttp_request = aiohttp.ClientSession._request
+
+        async def _research_lab_aiohttp_request(self, method, str_or_url, *args, **kwargs):
+            try:
+                return await _research_lab_original_aiohttp_request(self, method, str_or_url, *args, **kwargs)
+            except Exception as exc:
+                _research_lab_emit_provider_error(
+                    _research_lab_generic_error_details(exc),
+                    str_or_url,
+                )
+                raise
+
+        aiohttp.ClientSession._request = _research_lab_aiohttp_request
+    except Exception:
+        pass
+    try:
+        _research_lab_original_aiohttp_raise = aiohttp.ClientResponse.raise_for_status
+
+        def _research_lab_aiohttp_raise_for_status(self, *args, **kwargs):
+            try:
+                return _research_lab_original_aiohttp_raise(self, *args, **kwargs)
+            except Exception as exc:
+                _research_lab_emit_provider_error(
+                    _research_lab_generic_error_details(exc),
+                    getattr(self, "url", ""),
+                )
+                raise
+
+        aiohttp.ClientResponse.raise_for_status = _research_lab_aiohttp_raise_for_status
+    except Exception:
+        pass
+
+_research_lab_patch_httpx()
+_research_lab_patch_requests()
+_research_lab_patch_aiohttp()
 
 def _research_lab_patch_strict_qualify(adapter_module):
     try:

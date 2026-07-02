@@ -197,6 +197,27 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+# Floor for the promotion improvement threshold. A threshold of 0 (or below)
+# would promote unmeasured / 0.0-basis candidates — explicitly forbidden by
+# fableanalysis §8.3 and §0-N3. The clamp is defense in depth alongside the
+# promotion metric's hard-reject of unmeasured candidates.
+MIN_IMPROVEMENT_THRESHOLD_POINTS = 0.1
+
+
+def _improvement_threshold_points(default: float = 1.0) -> float:
+    value = _float("RESEARCH_LAB_IMPROVEMENT_THRESHOLD_POINTS", default)
+    if value < MIN_IMPROVEMENT_THRESHOLD_POINTS:
+        logger.warning(
+            "RESEARCH_LAB_IMPROVEMENT_THRESHOLD_POINTS=%s is below the minimum %s; "
+            "clamping. A zero or negative threshold promotes unmeasured/0.0-basis "
+            "candidates (fableanalysis §8.3, §0-N3).",
+            value,
+            MIN_IMPROVEMENT_THRESHOLD_POINTS,
+        )
+        return MIN_IMPROVEMENT_THRESHOLD_POINTS
+    return value
+
+
 def _count_configured_proxy_values(prefixes: tuple[str, ...]) -> int:
     seen: set[str] = set()
     count = 0
@@ -321,12 +342,14 @@ class ResearchLabGatewayConfig:
     scoring_worker_retryable_failure_retry_seconds: int = 300
     private_model_docker_global_proxy_enabled: bool = False
     scoring_worker_allow_partial_icp_window: bool = False
-    scoring_health_gate_enabled: bool = False
+    # Health gate defaults on so flake-driven scores are quarantined instead of
+    # recorded (fableanalysis §6.4); provider-error tolerance tightened 0.25→0.10.
+    scoring_health_gate_enabled: bool = True
     scoring_health_max_reference_runtime_failure_rate: float = 0.25
     scoring_health_max_candidate_runtime_failure_rate: float = 0.25
     scoring_health_max_reference_zero_company_rate: float = 0.50
     scoring_health_max_candidate_zero_company_rate: float = 0.50
-    scoring_health_max_provider_error_rate: float = 0.25
+    scoring_health_max_provider_error_rate: float = 0.10
     scoring_health_max_timeout_rate: float = 0.10
     private_baseline_rebenchmark_enabled: bool = False
     private_baseline_concurrency: int = 1
@@ -338,7 +361,8 @@ class ResearchLabGatewayConfig:
     auto_research_max_seconds: int = 2700
     auto_research_min_iterations: int = 3
     auto_research_max_iterations: int = 6
-    auto_research_draft_timeout_seconds: int = 90
+    # 180s: 12k-token draft diffs routinely exceed the old 90s (fableanalysis §6.4).
+    auto_research_draft_timeout_seconds: int = 180
     auto_research_reflection_timeout_seconds: int = 90
     auto_research_max_tokens: int = 12000
     auto_research_temperature: float = 0.35
@@ -349,7 +373,9 @@ class ResearchLabGatewayConfig:
     loop_planner_model: str = ""
     loop_planner_fallback_models: tuple[str, ...] = ()
     loop_planner_reasoning_effort: str = ""
-    loop_planner_max_tokens: int = 2400
+    # Matches the from_env default (12000) so direct constructions exercise the
+    # same behavior prod gets (fableanalysis bug #32).
+    loop_planner_max_tokens: int = 12000
     loop_planner_temperature: float = 0.40
     loop_planner_allow_non_zdr: bool = False
     loop_executor_model: str = ""
@@ -385,11 +411,19 @@ class ResearchLabGatewayConfig:
     lab_champion_queue_trigger_ratio: float = 0.50
     lab_champion_threshold_points: float = 2.0
     lab_champion_eval_days: int = 10
-    lab_champion_icps_per_day: int = 6
+    # 2 matches the from_env default (fableanalysis bug #32); §6.4 recommends
+    # raising to 4-6 only after benchmark-concurrency parity is verified.
+    lab_champion_icps_per_day: int = 2
     public_benchmark_public_icps_per_day: int = 3
     public_benchmark_public_weak_per_day: int = 2
-    public_benchmark_public_total_icps: Optional[int] = None
-    public_benchmark_public_weak_total: Optional[int] = None
+    # Ratio rule (fableanalysis §6.4): the public split must expose at most 1/3
+    # of the private scoring window (lab_champion_eval_days *
+    # lab_champion_icps_per_day = 10 * 2 = 20 ICPs by default), so the default
+    # public total is 6 (was 10, i.e. half the sealed set exposed daily). The
+    # weak share keeps roughly the per-day 2/3 proportion and must stay <=
+    # public_benchmark_public_total_icps (validate_public_benchmark_split).
+    public_benchmark_public_total_icps: Optional[int] = 6
+    public_benchmark_public_weak_total: Optional[int] = 4
     improvement_threshold_points: float = 1.0
     private_model_manifest_uri: str = (
         "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json"
@@ -402,12 +436,16 @@ class ResearchLabGatewayConfig:
     private_artifact_manifest_output: str = DEFAULT_PRIVATE_ARTIFACT_MANIFEST_OUTPUT
     private_benchmark_path: str = ""
     code_edit_candidates_enabled: bool = True
-    code_edit_build_timeout_seconds: int = 900
+    # 1800s: the build includes the cold docker pull, and 900s unfairly killed
+    # first candidates on cold workers (fableanalysis §6.4).
+    code_edit_build_timeout_seconds: int = 1800
     code_edit_allowed_paths_json: str = ""
     code_edit_allowed_exact_paths_json: str = ""
     code_edit_allowed_suffixes_json: str = ""
     code_edit_source_inspection_rounds: int = 3
-    code_edit_source_inspection_max_files: int = 8
+    # 12 cumulative file reads: 8 caps patch quality on ~300-file trees
+    # (fableanalysis §6.4 recommends 12-16).
+    code_edit_source_inspection_max_files: int = 12
     code_edit_source_inspection_file_bytes: int = 24_000
     code_edit_source_inspection_total_bytes: int = 120_000
     code_edit_source_inspection_search_matches: int = 30
@@ -553,7 +591,7 @@ class ResearchLabGatewayConfig:
                 "RESEARCH_LAB_SCORING_ALLOW_PARTIAL_ICP_WINDOW",
                 "false",
             ),
-            scoring_health_gate_enabled=_truthy("RESEARCH_LAB_SCORING_HEALTH_GATE_ENABLED", "false"),
+            scoring_health_gate_enabled=_truthy("RESEARCH_LAB_SCORING_HEALTH_GATE_ENABLED", "true"),
             scoring_health_max_reference_runtime_failure_rate=min(
                 1.0,
                 max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_REFERENCE_RUNTIME_FAILURE_RATE", 0.25)),
@@ -572,7 +610,7 @@ class ResearchLabGatewayConfig:
             ),
             scoring_health_max_provider_error_rate=min(
                 1.0,
-                max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_PROVIDER_ERROR_RATE", 0.25)),
+                max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_PROVIDER_ERROR_RATE", 0.10)),
             ),
             scoring_health_max_timeout_rate=min(
                 1.0,
@@ -605,7 +643,7 @@ class ResearchLabGatewayConfig:
             auto_research_max_iterations=max(1, _int("RESEARCH_LAB_AUTO_RESEARCH_MAX_ITERATIONS", 6)),
             auto_research_draft_timeout_seconds=max(
                 10,
-                _int("RESEARCH_LAB_AUTO_RESEARCH_DRAFT_TIMEOUT_SECONDS", 90),
+                _int("RESEARCH_LAB_AUTO_RESEARCH_DRAFT_TIMEOUT_SECONDS", 180),
             ),
             auto_research_reflection_timeout_seconds=max(
                 10,
@@ -737,20 +775,22 @@ class ResearchLabGatewayConfig:
                 0,
                 _int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_PER_DAY", 2),
             ),
+            # Ratio rule (fableanalysis §6.4): expose at most 1/3 of the private
+            # window (eval_days * icps_per_day = 10 * 2 = 20 by default), hence 6
+            # (the old default of 10 exposed half the sealed set daily). The weak
+            # fallback keeps roughly the per-day 2/3 proportion and must stay <=
+            # the public total (validate_public_benchmark_split enforces this).
             public_benchmark_public_total_icps=(
                 max(1, value)
                 if (value := _optional_int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_TOTAL_ICPS")) is not None
-                else 10
+                else 6
             ),
             public_benchmark_public_weak_total=(
                 max(0, value)
                 if (value := _optional_int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_TOTAL")) is not None
-                else 7
+                else 4
             ),
-            improvement_threshold_points=max(
-                0.0,
-                _float("RESEARCH_LAB_IMPROVEMENT_THRESHOLD_POINTS", 1.0),
-            ),
+            improvement_threshold_points=_improvement_threshold_points(),
             private_model_manifest_uri=os.getenv(
                 "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI",
                 "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json",
@@ -768,7 +808,7 @@ class ResearchLabGatewayConfig:
             code_edit_candidates_enabled=_truthy("RESEARCH_LAB_CODE_EDIT_CANDIDATES_ENABLED", "true"),
             code_edit_build_timeout_seconds=max(
                 60,
-                _int("RESEARCH_LAB_CODE_EDIT_BUILD_TIMEOUT_SECONDS", 900),
+                _int("RESEARCH_LAB_CODE_EDIT_BUILD_TIMEOUT_SECONDS", 1800),
             ),
             code_edit_allowed_paths_json=os.getenv("RESEARCH_LAB_CODE_EDIT_ALLOWED_PATHS_JSON", ""),
             code_edit_allowed_exact_paths_json=os.getenv("RESEARCH_LAB_CODE_EDIT_ALLOWED_EXACT_PATHS_JSON", ""),
@@ -779,7 +819,7 @@ class ResearchLabGatewayConfig:
             ),
             code_edit_source_inspection_max_files=max(
                 1,
-                _int("RESEARCH_LAB_CODE_EDIT_SOURCE_INSPECTION_MAX_FILES", 8),
+                _int("RESEARCH_LAB_CODE_EDIT_SOURCE_INSPECTION_MAX_FILES", 12),
             ),
             code_edit_source_inspection_file_bytes=max(
                 1024,

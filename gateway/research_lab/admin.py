@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 from typing import Any, Mapping
 
 from .config import ResearchLabGatewayConfig
@@ -23,7 +24,14 @@ from .maintenance import (
     set_autoresearch_maintenance_paused,
     wait_until_autoresearch_drained,
 )
-from .promotion import ResearchLabPromotionController, promotion_improvement_metric
+from .promotion import (
+    ResearchLabPromotionController,
+    load_baseline_summary_doc_for_gate,
+    promotion_improvement_metric,
+    reconcile_active_private_model_lineage,
+    reconcile_pending_champion_rewards,
+    reregister_active_manifest,
+)
 from .recovery import (
     award_failed_run_reimbursements,
     rebase_stale_parent_candidates as recovery_rebase_stale_parent_candidates,
@@ -32,6 +40,9 @@ from .recovery import (
     resume_failed_runs_from_checkpoint,
 )
 from .store import select_many, select_one
+
+
+logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -236,7 +247,50 @@ def build_parser() -> argparse.ArgumentParser:
     promote_scored.add_argument(
         "--force",
         action="store_true",
-        help="Replay even if this candidate already has an active_version_created event",
+        help="Replay past the already-promoted, scoring-health-quarantine, and "
+        "baseline-health gates (each bypass is logged explicitly); the "
+        "unavailable-basis rejection is never bypassed",
+    )
+
+    sub.add_parser(
+        "check-duplicate-active",
+        help="Read-only: list private model versions whose latest event is 'active' "
+        "(more than one means a duplicate-active state; supersede strays before "
+        "relying on promotions)",
+    )
+
+    reregister_manifest = sub.add_parser(
+        "reregister-active-manifest",
+        help="Deliberately re-register the active lineage row after an operator "
+        "manifest update (mutable_manifest_hash_mismatch): verifies the manifest "
+        "at the row's URI and, on --write, supersedes the mismatched row and "
+        "registers the loaded manifest as the new active version",
+    )
+    reregister_manifest.add_argument("--actor-ref", default=default_actor_ref())
+    reregister_manifest.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
+    reregister_manifest.add_argument("--write", dest="dry_run", action="store_false")
+
+    reconcile_lineage = sub.add_parser(
+        "reconcile-active-lineage",
+        help="Repair the zero-active-versions crash window: when the lineage is "
+        "non-empty but nothing is active, re-activate the newest superseded version",
+    )
+    reconcile_lineage.add_argument("--actor-ref", default=default_actor_ref())
+    reconcile_lineage.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
+    reconcile_lineage.add_argument("--write", dest="dry_run", action="store_false")
+
+    reconcile_rewards = sub.add_parser(
+        "reconcile-champion-rewards",
+        help="Finalize champion rewards stuck at reward_pending_uid by re-resolving "
+        "the miner UID and creating the obligation",
+    )
+    reconcile_rewards.add_argument(
+        "--candidate-id", action="append", dest="candidate_ids", help="candidate_id (repeatable; omit for all pending)"
+    )
+    reconcile_rewards.add_argument("--limit", type=int, default=25)
+    reconcile_rewards.add_argument("--actor-ref", default=default_actor_ref())
+    reconcile_rewards.add_argument(
+        "--apply", action="store_true", help="Apply the reward creation (default is dry-run)"
     )
 
     return parser
@@ -324,8 +378,59 @@ async def _promote_scored_candidate(
             "score_bundle_candidate_artifact_hash": bundle_row.get("candidate_artifact_hash"),
         }
 
+    # Bug #23 residual: a scoring-health-quarantined bundle must not be
+    # replayed past the health gate. --force bypasses it, but logs exactly
+    # which gates it bypasses.
+    quarantine_events = await select_many(
+        "research_lab_candidate_promotion_events",
+        columns="promotion_event_id,event_type,promotion_status,source_score_bundle_id,created_at",
+        filters=(
+            ("candidate_id", candidate_id),
+            ("event_type", "scoring_health_quarantined"),
+            ("source_score_bundle_id", str(bundle_row.get("score_bundle_id") or "")),
+        ),
+        order_by=(("created_at", True),),
+        limit=1,
+    )
+    if quarantine_events and not force:
+        return {
+            "ok": False,
+            "action": "promote-scored-candidate",
+            "candidate_id": candidate_id,
+            "score_bundle_id": bundle_row.get("score_bundle_id"),
+            "error": "candidate_scoring_health_quarantined",
+            "quarantine_event": quarantine_events[0],
+            "guidance": "requeue for rescore instead of replaying a quarantined bundle; "
+            "--force bypasses this gate (logged) but is unsafe on quarantined bundles",
+        }
+
+    force_bypassed_gates: list[str] = []
+    bypass_gates: frozenset[str] = frozenset()
+    if force:
+        if existing_promotions:
+            force_bypassed_gates.append("already_promoted")
+        if quarantine_events:
+            force_bypassed_gates.append("scoring_health_quarantine")
+        bypass_gates = frozenset({"scoring_health_quarantine", "baseline_health"})
+        logger.warning(
+            "promote-scored-candidate --force candidate=%s bypassing gates: %s "
+            "(baseline_health bypass applies only if the gate would have held; "
+            "the unavailable-basis rejection is never bypassed)",
+            candidate_id,
+            ", ".join(force_bypassed_gates + ["baseline_health"]),
+        )
+
     aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
-    metric = promotion_improvement_metric(score_bundle)
+    holdout_gate = (
+        score_bundle.get("private_holdout_gate")
+        if isinstance(score_bundle.get("private_holdout_gate"), Mapping)
+        else None
+    )
+    baseline_summary_doc, baseline_doc_status = await load_baseline_summary_doc_for_gate(holdout_gate)
+    metric = promotion_improvement_metric(
+        score_bundle,
+        baseline_score_summary_doc=baseline_summary_doc,
+    )
     planned = {
         "candidate_id": candidate_id,
         "score_bundle_id": bundle_row.get("score_bundle_id"),
@@ -337,6 +442,10 @@ async def _promote_scored_candidate(
         "mean_delta": aggregates.get("mean_delta"),
         "promotion_improvement_points": metric.improvement_points,
         "promotion_metric": metric.event_doc(),
+        "promotion_rejection_status": metric.rejection_status,
+        "baseline_summary_doc_status": baseline_doc_status,
+        "scoring_health_quarantined": bool(quarantine_events),
+        "force_bypassed_gates": force_bypassed_gates,
         "threshold_points": ResearchLabGatewayConfig.from_env().improvement_threshold_points,
         "reason": reason,
     }
@@ -356,6 +465,7 @@ async def _promote_scored_candidate(
         candidate=candidate,
         score_bundle_row=bundle_row,
         score_bundle=dict(score_bundle),
+        bypass_gates=bypass_gates,
     )
     return {
         "ok": result.get("status") == "merged",
@@ -557,7 +667,56 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             actor_ref=args.actor_ref,
             reason=args.reason,
         )
+    if args.command == "check-duplicate-active":
+        return await _check_duplicate_active_versions()
+    if args.command == "reregister-active-manifest":
+        return await reregister_active_manifest(
+            ResearchLabGatewayConfig.from_env(),
+            actor_ref=args.actor_ref,
+            dry_run=args.dry_run,
+        )
+    if args.command == "reconcile-active-lineage":
+        return await reconcile_active_private_model_lineage(
+            actor_ref=args.actor_ref,
+            dry_run=args.dry_run,
+        )
+    if args.command == "reconcile-champion-rewards":
+        return await reconcile_pending_champion_rewards(
+            ResearchLabGatewayConfig.from_env(),
+            worker_ref=args.actor_ref,
+            candidate_ids=args.candidate_ids,
+            limit=args.limit,
+            dry_run=not args.apply,
+        )
     raise ValueError(f"unknown command: {args.command}")
+
+
+async def _check_duplicate_active_versions() -> dict[str, Any]:
+    """Read-only duplicate-active check (bug #4 / §0.3 Week-1 step 0a)."""
+
+    rows = await select_many(
+        "research_lab_private_model_version_current",
+        columns=(
+            "private_model_version_id,model_artifact_hash,private_model_manifest_hash,"
+            "current_event_type,current_version_status,current_status_at,created_at"
+        ),
+        filters=(("current_version_status", "active"),),
+        order_by=(("current_status_at", True),),
+        limit=50,
+    )
+    return {
+        "ok": len(rows) <= 1,
+        "action": "check-duplicate-active",
+        "active_version_count": len(rows),
+        "duplicate_active": len(rows) > 1,
+        "active_versions": rows,
+        "guidance": (
+            "at most one version may have a latest 'active' event; supersede stray "
+            "versions before applying scripts/60 promotions"
+            if len(rows) > 1
+            else "ok"
+        ),
+    }
 
 
 def main() -> int:

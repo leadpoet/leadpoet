@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import os
 import random
 import sys
 
@@ -12,6 +13,12 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# The detailed composition assertions below verify the LEGACY extremes-based
+# split; the production default is now the bug-13 unbiased hash-rotation
+# scheme (RESEARCH_LAB_PUBLIC_SPLIT_UNBIASED=true), verified separately in
+# _verify_unbiased_split_mode().
+os.environ["RESEARCH_LAB_PUBLIC_SPLIT_UNBIASED"] = "false"
 
 from gateway.research_lab.bundles import contains_secret_material
 from gateway.research_lab.bundles import sha256_json
@@ -31,6 +38,7 @@ def main() -> int:
     fuzz_errors = _verify_fuzzed_splits(seed=71060, runs=200)
     secret_errors = _verify_secret_rejection()
     migration_errors = _verify_migration_policy()
+    unbiased_errors = _verify_unbiased_split_mode()
     errors.extend(deterministic_errors)
     errors.extend(skewed_errors)
     errors.extend(launch_config_errors)
@@ -38,6 +46,7 @@ def main() -> int:
     errors.extend(fuzz_errors)
     errors.extend(secret_errors)
     errors.extend(migration_errors)
+    errors.extend(unbiased_errors)
     if errors:
         for error in errors:
             print(f"ERROR: {error}")
@@ -565,6 +574,60 @@ def _skewed_fixture() -> tuple[list[dict[str, object]], list[dict[str, object]]]
                 )
             )
     return items, summaries
+
+
+def _verify_unbiased_split_mode() -> list[str]:
+    """Verify the bug-13 hash-rotation split (the production default)."""
+
+    from gateway.research_lab.public_benchmarks import SPLIT_POLICY_UNBIASED
+
+    errors: list[str] = []
+    previous = os.environ.get("RESEARCH_LAB_PUBLIC_SPLIT_UNBIASED")
+    os.environ["RESEARCH_LAB_PUBLIC_SPLIT_UNBIASED"] = "true"
+    try:
+        items, summaries = _fixture(seed=71)
+        kwargs = dict(
+            benchmark_items=items,
+            per_icp_summaries=summaries,
+            public_icps_per_day=3,
+            public_weak_per_day=2,
+        )
+        window_a = "sha256:" + "9" * 64
+        window_b = "sha256:" + "8" * 64
+        first = build_benchmark_visibility_split(rolling_window_hash=window_a, **kwargs)
+        second = build_benchmark_visibility_split(rolling_window_hash=window_a, **kwargs)
+        rotated = build_benchmark_visibility_split(rolling_window_hash=window_b, **kwargs)
+
+        def _public_refs(split: dict) -> list[str]:
+            return sorted(
+                str(row.get("icp_ref"))
+                for row in split.get("items", [])
+                if str(row.get("visibility")) == "public"
+            )
+
+        if _public_refs(first) != _public_refs(second):
+            errors.append("unbiased split must be deterministic for the same rolling window")
+        if _public_refs(first) == _public_refs(rotated):
+            errors.append("unbiased split should rotate the public subset when the window changes")
+        if len(_public_refs(first)) != len(_public_refs(rotated)):
+            errors.append("unbiased split must keep the public count stable across windows")
+        policy = str(first.get("split_policy") or "")
+        if policy != SPLIT_POLICY_UNBIASED:
+            errors.append(f"unbiased split must be labeled {SPLIT_POLICY_UNBIASED}, got {policy!r}")
+        legacy = build_benchmark_visibility_split(rolling_window_hash=window_a, **kwargs)
+        os.environ["RESEARCH_LAB_PUBLIC_SPLIT_UNBIASED"] = "false"
+        legacy = build_benchmark_visibility_split(rolling_window_hash=window_a, **kwargs)
+        if _public_refs(first) == _public_refs(legacy):
+            errors.append(
+                "unbiased split unexpectedly matches the legacy weakest-biased selection "
+                "(rotation not applied)"
+            )
+    finally:
+        if previous is None:
+            os.environ.pop("RESEARCH_LAB_PUBLIC_SPLIT_UNBIASED", None)
+        else:
+            os.environ["RESEARCH_LAB_PUBLIC_SPLIT_UNBIASED"] = previous
+    return errors
 
 
 if __name__ == "__main__":

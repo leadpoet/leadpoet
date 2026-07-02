@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from inspect import signature
+import json
 import os
 from pathlib import Path
 import sys
@@ -337,18 +338,37 @@ def main() -> int:
         errors.append("shadow report source_state_hash mismatch")
     if sha256_json(bundle["weight_vector"]) != bundle["weight_vector_hash"]:
         errors.append("shadow report weight_vector_hash mismatch")
+    # Bug #36: the secret scan defaults to redact-and-log; strict raise mode
+    # remains available. Both behaviors are contract-checked.
+    poisoned_rows = [{"ticket_doc": {"raw_secret": "should-fail"}}]
+    redacted_bundle = build_shadow_report_bundle(
+        epoch=123,
+        weight_input_snapshots=[],
+        ticket_rows=poisoned_rows,
+        queue_rows=[],
+        receipt_rows=[],
+        reimbursement_rows=[],
+    )
+    secret_scan = redacted_bundle.get("secret_scan") or {}
+    if "should-fail" in json.dumps(redacted_bundle.get("source_state", {})):
+        errors.append("shadow report leaked raw secret source state in redact mode")
+    if not int(secret_scan.get("redaction_count") or 0):
+        errors.append("shadow report did not record redactions for raw secret source state")
+    os.environ["RESEARCH_LAB_AUDIT_SECRET_SCAN_MODE"] = "raise"
     try:
         build_shadow_report_bundle(
             epoch=123,
             weight_input_snapshots=[],
-            ticket_rows=[{"ticket_doc": {"raw_secret": "should-fail"}}],
+            ticket_rows=poisoned_rows,
             queue_rows=[],
             receipt_rows=[],
             reimbursement_rows=[],
         )
-        errors.append("shadow report accepted raw secret source state")
+        errors.append("shadow report accepted raw secret source state in raise mode")
     except ValueError:
         pass
+    finally:
+        os.environ.pop("RESEARCH_LAB_AUDIT_SECRET_SCAN_MODE", None)
 
     score_bundle = build_research_evaluation_score_bundle(
         run_id="11111111-1111-4111-8111-111111111111",

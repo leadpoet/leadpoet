@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import functools
 import json
 import logging
@@ -133,6 +133,10 @@ def _short_error(exc: BaseException) -> str:
     return f"{exc.__class__.__name__}: {str(exc)[:300]}"
 
 
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _safe_event_error_text(exc: BaseException) -> str:
     text = f"{exc.__class__.__name__}: {str(exc)}"
     for marker in ("sk-or-", "sb_secret", "service_role", "openrouter_api_key", "raw_secret"):
@@ -154,7 +158,7 @@ def _runtime_error_diagnostics(error_text: str) -> dict[str, Any]:
         provider = "openrouter"
 
     status = 0
-    for code in (400, 401, 403, 404, 408, 409, 429, 500, 502, 503, 504):
+    for code in (400, 401, 403, 404, 408, 409, 410, 429, 500, 502, 503, 504):
         if f"http error {code}" in lowered or f"status={code}" in lowered or f'"status":{code}' in lowered:
             status = code
             break
@@ -174,6 +178,19 @@ def _runtime_error_diagnostics(error_text: str) -> dict[str, Any]:
     }
 
 
+def _event_error_diagnostics(exc: BaseException) -> dict[str, Any]:
+    """DB-safe structured error doc for audit-visible event docs.
+
+    Raw ``str(exc)`` from providers/infra can carry secret-shaped markers
+    (ECR registry hosts, Supabase roles) that permanently poison the audit
+    bundle secret scan (bug #36), so event docs store this sanitized shape
+    instead of raw error text.
+    """
+    diagnostics = _runtime_error_diagnostics(f"{exc.__class__.__name__}: {exc}")
+    diagnostics["error_class"] = exc.__class__.__name__[:120]
+    return diagnostics
+
+
 def _baseline_error_is_retryable(error_text: str) -> bool:
     """Transient provider/infra failures are retryable; model code bugs and
     auth/request errors are not.
@@ -187,7 +204,15 @@ def _baseline_error_is_retryable(error_text: str) -> bool:
     lowered = error_text.lower()
     diagnostics = _runtime_error_diagnostics(error_text)
     status = int(diagnostics.get("status") or 0)
+    provider = str(diagnostics.get("provider") or "unknown")
     if status in (408, 429) or status >= 500:
+        return True
+    # Scrapingdog's 400 "Something went wrong or profile not found" and its
+    # 410s are empirically transient/data-shaped, not auth or request
+    # validation — they recover on retry (bug #37).
+    if status == 410:
+        return True
+    if status == 400 and (provider == "scrapingdog" or "something went wrong" in lowered):
         return True
     if status in (400, 401, 403, 404, 409):
         return False
@@ -219,8 +244,158 @@ def _baseline_error_is_retryable(error_text: str) -> bool:
     return False
 
 
+class BaselineHealthGateFailure(RuntimeError):
+    """Raised when a completed baseline run fails its health gate and must not
+    be recorded as the day's promotion reference (§5.2-1)."""
+
+    def __init__(self, message: str, *, baseline_health: Mapping[str, Any]) -> None:
+        super().__init__(message)
+        self.baseline_health = dict(baseline_health)
+
+
+def _per_icp_checkpoint_enabled() -> bool:
+    """Bug #31: persist per-ICP candidate results so a requeue/rescore resumes
+    instead of re-running the whole multi-hour evaluation."""
+    return os.getenv(
+        "RESEARCH_LAB_SCORING_PER_ICP_CHECKPOINT", "true"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _scoring_progress_s3_location(
+    manifest_uri: str, candidate_id: str, window_hash: str
+) -> tuple[str, str] | None:
+    uri = str(manifest_uri or "")
+    if not uri.startswith("s3://"):
+        return None
+    rest = uri[5:]
+    bucket, sep, key = rest.partition("/")
+    if not bucket or not sep or not key:
+        return None
+    base_prefix = key.rsplit("/", 1)[0] if "/" in key else "research-lab/sourcing-model"
+    safe_candidate = "".join(
+        ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(candidate_id or "candidate")
+    )[:96]
+    window_tag = str(window_hash or "").removeprefix("sha256:")[:16] or "window"
+    object_key = f"{base_prefix}/candidates/{safe_candidate}/scoring-progress/{window_tag}.json"
+    return bucket, object_key
+
+
+def _load_scoring_progress(
+    bucket: str,
+    object_key: str,
+    *,
+    window_hash: str,
+    candidate_artifact_hash: str,
+) -> list[dict[str, Any]]:
+    import boto3  # type: ignore
+
+    try:
+        body = boto3.client("s3").get_object(Bucket=bucket, Key=object_key)["Body"].read()
+        doc = json.loads(body.decode("utf-8"))
+    except Exception:
+        return []
+    if not isinstance(doc, Mapping):
+        return []
+    if str(doc.get("rolling_window_hash") or "") != str(window_hash):
+        return []
+    if str(doc.get("candidate_artifact_hash") or "") != str(candidate_artifact_hash):
+        return []
+    rows = doc.get("per_icp_results")
+    if not isinstance(rows, list):
+        return []
+    return [dict(row) for row in rows if isinstance(row, Mapping)]
+
+
+def _store_scoring_progress(
+    bucket: str,
+    object_key: str,
+    *,
+    candidate_id: str,
+    window_hash: str,
+    candidate_artifact_hash: str,
+    rows: list[dict[str, Any]],
+) -> None:
+    import boto3  # type: ignore
+
+    doc = {
+        "schema_version": "1.0",
+        "artifact_type": "research_lab_candidate_scoring_progress",
+        "candidate_id": str(candidate_id),
+        "rolling_window_hash": str(window_hash),
+        "candidate_artifact_hash": str(candidate_artifact_hash),
+        "completed_icp_count": len(rows),
+        "per_icp_results": rows,
+    }
+    boto3.client("s3").put_object(
+        Bucket=bucket,
+        Key=object_key,
+        Body=json.dumps(doc, sort_keys=True, default=str).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
+def _baseline_max_unresolved_icps() -> int:
+    try:
+        return max(0, int(os.getenv("RESEARCH_LAB_BASELINE_MAX_UNRESOLVED_ICPS", "2")))
+    except ValueError:
+        return 2
+
+
+def _baseline_max_day_jump_points() -> float | None:
+    """Day-over-day quarantine threshold; unset means warn-only."""
+    raw = os.getenv("RESEARCH_LAB_BASELINE_MAX_DAY_JUMP_POINTS", "").strip()
+    if not raw:
+        return None
+    try:
+        return abs(float(raw))
+    except ValueError:
+        return None
+
+
+def _summary_has_unresolved_runtime_error(item_summary: Mapping[str, Any]) -> bool:
+    diagnostics = item_summary.get("diagnostics")
+    return isinstance(diagnostics, Mapping) and bool(diagnostics.get("runtime_error"))
+
+
+def _build_baseline_health(
+    *,
+    per_icp_summaries: list[dict[str, Any]],
+    retried: int,
+    recovered: int,
+    max_unresolved_icps: int,
+) -> dict[str, Any]:
+    """Health verdict for a completed baseline run. ``gate_passed`` is consumed
+    by the promotion gate (legacy benchmark docs simply lack the key)."""
+    unresolved = sum(
+        1 for summary in per_icp_summaries if _summary_has_unresolved_runtime_error(summary)
+    )
+    return {
+        "unresolved_provider_errors": unresolved,
+        "gate_passed": unresolved <= max_unresolved_icps,
+        "retried": int(retried),
+        "recovered": int(recovered),
+        "max_unresolved_icps": int(max_unresolved_icps),
+    }
+
+
 class CandidateBaselineNotReady(RuntimeError):
     """Raised when candidate scoring must wait for a matching private baseline."""
+
+
+class ClaimLostDuringScoring(RuntimeError):
+    """Raised at an ICP boundary when this worker's claim was lost mid-scoring."""
+
+
+# Known-terminal error classes: validation / malformed-candidate style failures
+# that will fail identically on every retry. Everything else defaults to
+# retryable (bug #10) — the claim-attempt cap remains the loop guard.
+_TERMINAL_CANDIDATE_ERROR_CLASSES = (
+    CodeEditBuildError,
+    CodeEditPatchApplyError,
+    ValueError,
+    KeyError,
+    TypeError,
+)
 
 
 def _candidate_scoring_failure_class(exc: BaseException) -> tuple[str, bool]:
@@ -260,16 +435,24 @@ def _candidate_scoring_failure_class(exc: BaseException) -> tuple[str, bool]:
         )
     )
     if not provider_like:
+        if isinstance(exc, _TERMINAL_CANDIDATE_ERROR_CLASSES):
+            return "candidate_scoring_error", False
         if isinstance(exc, PrivateModelRuntimeError):
+            # Model code crashed without provider markers: the candidate's own
+            # code is at fault and will crash again.
             return "candidate_runtime_error", False
-        return "candidate_scoring_error", False
+        # Unknown infra/environment failures (window rotation, KMS/S3 signing,
+        # PostgREST resets) default retryable; the attempt cap bounds loops.
+        return "candidate_scoring_error", True
     if category in {"provider_http_5xx", "runtime_provider_error"}:
         return category, True
     if category == "provider_http_4xx":
-        return category, False
+        # Same status-level verdicts as the baseline classifier: 408/429/410
+        # and Scrapingdog 400s retry; genuine auth/request errors stay terminal.
+        return category, _baseline_error_is_retryable(text)
     if isinstance(exc, PrivateModelRuntimeError):
         return "candidate_runtime_error", False
-    return "candidate_scoring_error", False
+    return "candidate_scoring_error", True
 
 
 def _load_candidate_source_diff(candidate: Mapping[str, Any]) -> str:
@@ -443,6 +626,32 @@ def _status_age_seconds(raw_status_at: object) -> float | None:
 def _status_is_stale(raw_status_at: object, stale_after_seconds: int) -> bool:
     age_seconds = _status_age_seconds(raw_status_at)
     return age_seconds is not None and age_seconds > max(60, int(stale_after_seconds))
+
+
+# Requeue reasons that mean the claim cycle only waited (no scoring happened);
+# such cycles must not burn the retry budget (bug #6).
+_CLAIM_WAIT_REASONS = frozenset({"baseline_not_ready"})
+
+
+def _count_claim_attempts(rows: list[Mapping[str, Any]]) -> int:
+    """Count genuine scoring attempts from seq-ascending assigned/queued events.
+
+    Each ``assigned`` event opens one attempt. A requeue that closes the cycle
+    does not count again (the old counter double-charged stale requeues), and a
+    cycle that ended waiting (``baseline_not_ready``) is refunded entirely.
+    """
+    attempts = 0
+    open_cycle = False
+    for row in rows:
+        event_type = str(row.get("event_type") or "")
+        if event_type == "assigned":
+            attempts += 1
+            open_cycle = True
+        elif event_type == "queued" and open_cycle:
+            if str(row.get("reason") or "") in _CLAIM_WAIT_REASONS:
+                attempts -= 1
+            open_cycle = False
+    return max(0, attempts)
 
 
 class ResearchLabGatewayScoringWorker:
@@ -788,11 +997,13 @@ class ResearchLabGatewayScoringWorker:
                 await select_many(
                     "research_lab_candidate_evaluation_current",
                     columns=(
-                        "candidate_id,run_id,ticket_id,current_candidate_status,current_status_at,"
+                        "candidate_id,run_id,ticket_id,receipt_id,current_candidate_status,current_status_at,"
                         "current_evaluator_ref,current_event_hash"
                     ),
                     filters=(("current_candidate_status", status),),
-                    order_by=(("current_status_at", True),),
+                    # Oldest first: under backlog the stalest claims must be
+                    # recovered before the limit truncates the scan.
+                    order_by=(("current_status_at", False),),
                     limit=50,
                 )
             )
@@ -831,7 +1042,9 @@ class ResearchLabGatewayScoringWorker:
                         },
                     )
                     await create_scoring_dispatch_event(
-                        dispatch_type="candidate_scoring_recovery",
+                        # NOTE: 'candidate_scoring' (not a '_recovery' variant) —
+                        # the dispatch_type DB CHECK only allows the base types.
+                        dispatch_type="candidate_scoring",
                         dispatch_status="failed",
                         worker_ref=self.worker_ref,
                         proxy_ref_hash=self.proxy_ref_hash,
@@ -840,6 +1053,7 @@ class ResearchLabGatewayScoringWorker:
                         ticket_id=ticket_id,
                         event_doc={
                             "reason": "stale_gateway_scoring_retry_limit_exceeded",
+                            "dispatch_context": "candidate_scoring_recovery",
                             "failure_class": "stale_claim_retry_limit_exceeded",
                             "retryable": False,
                             "claim_attempts": claim_attempts,
@@ -852,6 +1066,29 @@ class ResearchLabGatewayScoringWorker:
                         "research_lab_stale_candidate_fail_limit_failed candidate_id=%s error=%s",
                         compact_ref(candidate_id),
                         str(exc)[:240],
+                    )
+                    continue
+                # This terminal path must mirror the normal terminal path:
+                # finalize the receipt and project the public card, or the
+                # card freezes at `scoring` forever (bug #11).
+                try:
+                    await self._maybe_finalize_candidate_receipt(row)
+                except Exception:
+                    logger.exception(
+                        "research_lab_stale_candidate_receipt_finalize_failed candidate_id=%s",
+                        compact_ref(candidate_id),
+                    )
+                try:
+                    await safe_project_public_loop_activity(
+                        ticket_id,
+                        source_ref=f"candidate_stale_claim_retry_limit:{candidate_id}",
+                        reason="stale_gateway_scoring_retry_limit_exceeded",
+                        config=self.config,
+                    )
+                except Exception:
+                    logger.exception(
+                        "research_lab_stale_candidate_projection_failed candidate_id=%s",
+                        compact_ref(candidate_id),
                     )
                 continue
             try:
@@ -891,17 +1128,18 @@ class ResearchLabGatewayScoringWorker:
     async def _candidate_claim_attempt_count(self, candidate_id: str) -> int:
         rows = await select_many(
             "research_lab_candidate_evaluation_events",
-            columns="candidate_id,event_type,candidate_status,reason",
-            filters=(("candidate_id", candidate_id),),
-            order_by=(("seq", True),),
+            columns="candidate_id,event_type,candidate_status,reason,seq",
+            filters=(
+                ("candidate_id", candidate_id),
+                # Heartbeats write an `evaluating` event every ~120s; without
+                # this filter the seq-ascending page fills with heartbeats and
+                # later assigned events fall outside the limit.
+                ("event_type", "in", ("assigned", "queued")),
+            ),
+            order_by=(("seq", False),),
             limit=100,
         )
-        return sum(
-            1
-            for row in rows
-            if str(row.get("event_type") or "") == "assigned"
-            or str(row.get("reason") or "") == "stale_gateway_scoring_requeued"
-        )
+        return _count_claim_attempts(rows)
 
     async def _candidate_scoring_heartbeat(
         self,
@@ -909,6 +1147,7 @@ class ResearchLabGatewayScoringWorker:
         candidate: Mapping[str, Any],
         candidate_id: str,
         started_at: float,
+        claim_lost: asyncio.Event | None = None,
     ) -> None:
         try:
             interval = max(
@@ -935,6 +1174,8 @@ class ResearchLabGatewayScoringWorker:
                         compact_ref(candidate_id),
                         self.worker_ref,
                     )
+                    if claim_lost is not None:
+                        claim_lost.set()
                     return
                 await create_candidate_evaluation_event(
                     candidate_id=candidate_id,
@@ -1062,6 +1303,26 @@ class ResearchLabGatewayScoringWorker:
             if not isinstance(candidate_manifest_doc, Mapping):
                 raise RuntimeError("image_build candidate is missing candidate_model_manifest_doc")
             candidate_artifact = PrivateModelArtifactManifest.from_mapping(candidate_manifest_doc)
+            reused_bundle_row = await self._find_reusable_scored_bundle(
+                candidate_id=candidate_id,
+                run_id=str(candidate["run_id"]),
+                candidate_artifact_hash=candidate_artifact.model_artifact_hash,
+                evaluation_epoch=evaluation_epoch,
+            )
+            if reused_bundle_row is not None:
+                # Bug #12 rescore path: this candidate's signed bundle already
+                # landed but its `scored` event write failed; reuse the bundle
+                # instead of producing a divergent second evaluation.
+                scored_score_bundle_id = str(reused_bundle_row["score_bundle_id"])
+                await self._complete_candidate_from_reused_bundle(
+                    candidate,
+                    candidate_id=candidate_id,
+                    bundle_row=reused_bundle_row,
+                    evaluation_epoch=evaluation_epoch,
+                    start=start,
+                )
+                scored_event_written = True
+                return
             benchmark = SealedBenchmarkSet(
                 benchmark_id=window.benchmark_id,
                 icp_set_hash=window.window_hash,
@@ -1088,9 +1349,15 @@ class ResearchLabGatewayScoringWorker:
                 evaluation_epoch=evaluation_epoch,
             )
             last_parent_check_at = 0.0
+            claim_lost_event = asyncio.Event()
 
             async def parent_freshness_check(progress: Mapping[str, Any]) -> None:
                 nonlocal last_parent_check_at
+                if claim_lost_event.is_set() and _env_flag("RESEARCH_LAB_SCORING_ABORT_ON_CLAIM_LOSS"):
+                    raise ClaimLostDuringScoring(
+                        f"scoring claim lost for candidate {compact_ref(candidate_id)}; "
+                        "aborting in-flight evaluation at ICP boundary"
+                    )
                 now = time.time()
                 phase = str(progress.get("phase") or "")
                 if (
@@ -1109,11 +1376,71 @@ class ResearchLabGatewayScoringWorker:
                         progress=progress,
                     )
 
+            # Bug #31: resume already-completed ICPs from the persisted progress
+            # artifact and checkpoint each new ICP result, so a requeue at ICP
+            # 19/20 no longer re-runs the whole evaluation. Best-effort: any
+            # checkpoint failure only loses resumability.
+            resume_results: list[dict[str, Any]] | None = None
+            icp_checkpoint = None
+            progress_location = (
+                _scoring_progress_s3_location(
+                    artifact.manifest_uri, candidate_id, window.window_hash
+                )
+                if _per_icp_checkpoint_enabled()
+                else None
+            )
+            if progress_location:
+                progress_bucket, progress_key = progress_location
+                try:
+                    resume_results = await asyncio.to_thread(
+                        _load_scoring_progress,
+                        progress_bucket,
+                        progress_key,
+                        window_hash=window.window_hash,
+                        candidate_artifact_hash=candidate_artifact.model_artifact_hash,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "research_lab_scoring_progress_load_failed candidate_id=%s error=%s",
+                        compact_ref(candidate_id),
+                        str(exc)[:200],
+                    )
+                    resume_results = []
+                if resume_results:
+                    logger.info(
+                        "research_lab_scoring_progress_resumed candidate_id=%s completed_icps=%s",
+                        compact_ref(candidate_id),
+                        len(resume_results),
+                    )
+                progress_rows: list[dict[str, Any]] = [dict(row) for row in resume_results or []]
+
+                async def _checkpoint_completed_icp(row: Mapping[str, Any]) -> None:
+                    progress_rows.append(dict(row))
+                    try:
+                        await asyncio.to_thread(
+                            _store_scoring_progress,
+                            progress_bucket,
+                            progress_key,
+                            candidate_id=candidate_id,
+                            window_hash=window.window_hash,
+                            candidate_artifact_hash=candidate_artifact.model_artifact_hash,
+                            rows=progress_rows,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "research_lab_scoring_progress_store_failed candidate_id=%s error=%s",
+                            compact_ref(candidate_id),
+                            str(exc)[:200],
+                        )
+
+                icp_checkpoint = _checkpoint_completed_icp
+
             heartbeat_task = asyncio.create_task(
                 self._candidate_scoring_heartbeat(
                     candidate=candidate,
                     candidate_id=candidate_id,
                     started_at=start,
+                    claim_lost=claim_lost_event,
                 )
             )
             try:
@@ -1130,6 +1457,8 @@ class ResearchLabGatewayScoringWorker:
                         policy=self._evaluation_policy(),
                         private_holdout_gate=private_holdout_gate,
                         parent_freshness_check=parent_freshness_check,
+                        icp_checkpoint=icp_checkpoint,
+                        resume_results=resume_results,
                     )
                 finally:
                     heartbeat_task.cancel()
@@ -1191,14 +1520,9 @@ class ResearchLabGatewayScoringWorker:
             )
             bundle, _bundle_event = await create_score_bundle(score_bundle_request)
             scored_score_bundle_id = str(bundle["score_bundle_id"])
-            await create_candidate_evaluation_event(
+            await self._create_scored_evaluation_event(
+                candidate=candidate,
                 candidate_id=candidate_id,
-                run_id=str(candidate["run_id"]),
-                ticket_id=str(candidate["ticket_id"]),
-                event_type="scored",
-                candidate_status="scored",
-                evaluator_ref=self.worker_ref,
-                reason="gateway_qualification_worker_scored_candidate",
                 score_bundle_id=scored_score_bundle_id,
                 event_doc={
                     "score_bundle_hash": score_bundle["score_bundle_hash"],
@@ -1306,7 +1630,7 @@ class ResearchLabGatewayScoringWorker:
                         "failure_class": failure_class,
                         "retryable": True,
                         "retry_after_seconds": retry_after_seconds,
-                        "error": str(exc)[:500],
+                        "error_diagnostics": _event_error_diagnostics(exc),
                         "elapsed_seconds": round(time.time() - start, 3),
                         "worker_ref": self.worker_ref,
                         "proxy_ref_hash": self.proxy_ref_hash,
@@ -1334,7 +1658,7 @@ class ResearchLabGatewayScoringWorker:
                         "failure_class": failure_class,
                         "retryable": True,
                         "retry_after_seconds": retry_after_seconds,
-                        "error": str(exc)[:500],
+                        "error_diagnostics": _event_error_diagnostics(exc),
                         "elapsed_seconds": round(time.time() - start, 3),
                         "worker_ref": self.worker_ref,
                         "proxy_ref_hash": self.proxy_ref_hash,
@@ -1364,7 +1688,7 @@ class ResearchLabGatewayScoringWorker:
                     "retryable": bool(retryable),
                     "claim_attempts": claim_attempts,
                     "max_claim_attempts": max_attempts,
-                    "error": str(exc)[:500],
+                    "error_diagnostics": _event_error_diagnostics(exc),
                     "elapsed_seconds": round(time.time() - start, 3),
                     "worker_ref": self.worker_ref,
                     "proxy_ref_hash": self.proxy_ref_hash,
@@ -1383,7 +1707,7 @@ class ResearchLabGatewayScoringWorker:
                     "retryable": bool(retryable),
                     "claim_attempts": claim_attempts,
                     "max_claim_attempts": max_attempts,
-                    "error": str(exc)[:500],
+                    "error_diagnostics": _event_error_diagnostics(exc),
                 },
             )
             await self._maybe_finalize_candidate_receipt(candidate)
@@ -1410,6 +1734,259 @@ class ResearchLabGatewayScoringWorker:
                 )
             )
 
+    async def _create_scored_evaluation_event(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        candidate_id: str,
+        score_bundle_id: str,
+        event_doc: dict[str, Any],
+    ) -> None:
+        """Write the terminal ``scored`` event with bounded retries (bug #12).
+
+        A signed score bundle already exists when this runs; losing the scored
+        event orphans that bundle and re-scores the candidate from scratch on
+        the next claim, so transient write failures retry and a persistent
+        failure leaves a reconcilable marker before propagating.
+        """
+        try:
+            attempts = max(1, int(os.getenv("RESEARCH_LAB_SCORED_EVENT_WRITE_ATTEMPTS", "3")))
+        except ValueError:
+            attempts = 3
+        last_exc: BaseException | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                await create_candidate_evaluation_event(
+                    candidate_id=candidate_id,
+                    run_id=str(candidate["run_id"]),
+                    ticket_id=str(candidate["ticket_id"]),
+                    event_type="scored",
+                    candidate_status="scored",
+                    evaluator_ref=self.worker_ref,
+                    reason="gateway_qualification_worker_scored_candidate",
+                    score_bundle_id=score_bundle_id,
+                    event_doc=event_doc,
+                )
+                return
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "research_lab_scored_event_write_retry candidate_id=%s attempt=%s/%s error=%s",
+                    compact_ref(candidate_id),
+                    attempt,
+                    attempts,
+                    _short_error(exc),
+                )
+                if attempt < attempts:
+                    await asyncio.sleep(min(30.0, 2.0 * attempt))
+        try:
+            await create_scoring_dispatch_event(
+                dispatch_type="candidate_scoring",
+                dispatch_status="failed",
+                worker_ref=self.worker_ref,
+                proxy_ref_hash=self.proxy_ref_hash,
+                candidate_id=candidate_id,
+                run_id=str(candidate["run_id"]),
+                ticket_id=str(candidate["ticket_id"]),
+                score_bundle_id=score_bundle_id,
+                event_doc={
+                    "reason": "scored_event_write_failed_for_signed_bundle",
+                    "reconcile_marker": "scored_event_missing_for_signed_bundle",
+                    "error_diagnostics": _event_error_diagnostics(last_exc),
+                },
+            )
+        except Exception:
+            logger.exception("research_lab_scored_event_marker_write_failed")
+        logger.error(
+            "research_lab_scored_event_write_failed_permanently candidate_id=%s score_bundle_id=%s attempts=%s",
+            compact_ref(candidate_id),
+            compact_ref(score_bundle_id),
+            attempts,
+        )
+        assert last_exc is not None
+        raise last_exc
+
+    async def _find_reusable_scored_bundle(
+        self,
+        *,
+        candidate_id: str,
+        run_id: str,
+        candidate_artifact_hash: str,
+        evaluation_epoch: int,
+    ) -> dict[str, Any] | None:
+        """Locate a signed score bundle already produced for this candidate+epoch.
+
+        Bug #12 rescore path: a candidate whose bundle landed but whose scored
+        event write failed gets re-claimed; without this it re-runs the full
+        evaluation and produces a divergent second signed bundle.
+        """
+        if _env_flag("RESEARCH_LAB_DISABLE_SCORED_BUNDLE_REUSE"):
+            return None
+        try:
+            rows = await select_many(
+                "research_evaluation_score_bundle_current",
+                columns="*",
+                filters=(
+                    ("run_id", run_id),
+                    ("candidate_artifact_hash", candidate_artifact_hash),
+                    ("evaluation_epoch", int(evaluation_epoch)),
+                    ("bundle_status", "scored"),
+                ),
+                order_by=(("created_at", True),),
+                limit=5,
+            )
+        except Exception as exc:
+            # Best-effort side check: never fail the scoring pass over it.
+            logger.warning(
+                "research_lab_reusable_bundle_lookup_failed candidate_id=%s error=%s",
+                compact_ref(candidate_id),
+                str(exc)[:200],
+            )
+            return None
+        trace_suffix = f":{candidate_id}"
+        for row in rows:
+            doc = row.get("score_bundle_doc") if isinstance(row.get("score_bundle_doc"), Mapping) else None
+            if not doc:
+                continue
+            if not str(doc.get("execution_trace_ref") or "").endswith(trace_suffix):
+                continue
+            if not str(row.get("signature_ref") or doc.get("signature_ref") or ""):
+                continue
+            if not str(doc.get("score_bundle_hash") or ""):
+                continue
+            return dict(row)
+        return None
+
+    async def _complete_candidate_from_reused_bundle(
+        self,
+        candidate: Mapping[str, Any],
+        *,
+        candidate_id: str,
+        bundle_row: Mapping[str, Any],
+        evaluation_epoch: int,
+        start: float,
+    ) -> None:
+        """Finish a candidate from its already-signed bundle (bug #12): write the
+        scored event, then mirror the normal post-scored side-effect sequence."""
+        score_bundle = dict(bundle_row.get("score_bundle_doc") or {})
+        score_bundle_id = str(bundle_row["score_bundle_id"])
+        rolling_window_hash = str(score_bundle.get("icp_set_hash") or bundle_row.get("icp_set_hash") or "")
+        gate_result = score_bundle.get("private_holdout_gate")
+        private_holdout_rejected = (
+            isinstance(gate_result, Mapping)
+            and str(gate_result.get("decision") or "") == "rejected_before_private_holdout"
+        )
+        scoring_health_gate = self._scoring_health_gate_result(score_bundle)
+        logger.warning(
+            format_worker_block(
+                "RESEARCH LAB CANDIDATE REUSING SIGNED SCORE BUNDLE",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Candidate", compact_ref(candidate_id)),
+                    ("Run", compact_ref(candidate.get("run_id"))),
+                    ("Score bundle", compact_ref(score_bundle_id)),
+                    ("Evaluation epoch", evaluation_epoch),
+                    ("Reason", "signed bundle exists for this candidate+epoch; skipping re-evaluation"),
+                ),
+            )
+        )
+        await self._create_scored_evaluation_event(
+            candidate=candidate,
+            candidate_id=candidate_id,
+            score_bundle_id=score_bundle_id,
+            event_doc={
+                "score_bundle_hash": str(score_bundle.get("score_bundle_hash") or ""),
+                "rolling_window_hash": rolling_window_hash,
+                "elapsed_seconds": round(time.time() - start, 3),
+                "worker_ref": self.worker_ref,
+                "proxy_ref_hash": self.proxy_ref_hash,
+                "private_holdout_gate": _candidate_gate_event_doc(gate_result),
+                "scoring_health_gate": scoring_health_gate,
+                "reused_signed_score_bundle": True,
+            },
+        )
+        # From here the candidate is scored: side-effect failures must not undo
+        # that, mirroring the main path's post-scored handling.
+        try:
+            await create_scoring_dispatch_event(
+                dispatch_type="candidate_scoring",
+                dispatch_status="scored",
+                worker_ref=self.worker_ref,
+                proxy_ref_hash=self.proxy_ref_hash,
+                candidate_id=candidate_id,
+                run_id=str(candidate["run_id"]),
+                ticket_id=str(candidate["ticket_id"]),
+                rolling_window_hash=rolling_window_hash or None,
+                score_bundle_id=score_bundle_id,
+                event_doc={
+                    "elapsed_seconds": round(time.time() - start, 3),
+                    "private_holdout_gate": _candidate_gate_event_doc(gate_result),
+                    "scoring_health_gate": scoring_health_gate,
+                    "reused_signed_score_bundle": True,
+                },
+            )
+            if private_holdout_rejected:
+                promotion_result = await self._record_public_holdout_rejected(
+                    candidate=candidate,
+                    score_bundle_row=bundle_row,
+                    score_bundle=score_bundle,
+                    gate_result=gate_result,
+                )
+            elif scoring_health_gate.get("decision") == "quarantined":
+                promotion_result = await self._record_scoring_health_quarantined(
+                    candidate=candidate,
+                    score_bundle_row=bundle_row,
+                    score_bundle=score_bundle,
+                    scoring_health_gate=scoring_health_gate,
+                )
+            else:
+                promotion_result = await self._maybe_promote_scored_candidate(
+                    candidate=candidate,
+                    score_bundle_row=bundle_row,
+                    score_bundle=score_bundle,
+                )
+            if promotion_result.get("status") == "stale_parent_needs_rescore":
+                promotion_result = await self._queue_stale_parent_rebase(
+                    candidate,
+                    active_artifact=(await load_active_private_model(self.config, register_bootstrap=True)).artifact,
+                    candidate_parent=str(candidate.get("parent_artifact_hash") or ""),
+                    evaluation_epoch=evaluation_epoch,
+                    elapsed_seconds=round(time.time() - start, 3),
+                    stage="after_scoring_parent_changed",
+                )
+            await self._maybe_finalize_candidate_receipt(candidate)
+            await safe_project_public_loop_activity(
+                str(candidate["ticket_id"]),
+                source_ref=f"candidate_scored:{candidate_id}:{score_bundle_id}",
+                reason="gateway_qualification_worker_scored_candidate",
+                config=self.config,
+            )
+            await self._write_audit_bundle(evaluation_epoch)
+            logger.info(
+                format_worker_block(
+                    "RESEARCH LAB CANDIDATE SCORED",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Candidate", compact_ref(candidate_id)),
+                        ("Run", compact_ref(candidate.get("run_id"))),
+                        ("Score bundle", compact_ref(score_bundle_id)),
+                        ("Rolling window", compact_ref(rolling_window_hash)),
+                        ("Private holdout gate", (gate_result or {}).get("decision") if isinstance(gate_result, Mapping) else "-"),
+                        ("Promotion", promotion_result.get("status")),
+                        ("Reused signed bundle", True),
+                        ("Elapsed", f"{time.time() - start:.1f}s"),
+                    ),
+                )
+            )
+        except Exception as exc:
+            await self._record_scored_candidate_side_effect_failure(
+                candidate=candidate,
+                candidate_id=candidate_id,
+                score_bundle_id=score_bundle_id,
+                error=exc,
+                elapsed_seconds=round(time.time() - start, 3),
+            )
+
     async def _record_scored_candidate_side_effect_failure(
         self,
         *,
@@ -1420,7 +1997,7 @@ class ResearchLabGatewayScoringWorker:
         elapsed_seconds: float,
     ) -> None:
         event_doc = {
-            "error": _safe_event_error_text(error),
+            "error_diagnostics": _event_error_diagnostics(error),
             "elapsed_seconds": elapsed_seconds,
             "worker_ref": self.worker_ref,
             "proxy_ref_hash": self.proxy_ref_hash,
@@ -1428,11 +2005,15 @@ class ResearchLabGatewayScoringWorker:
             "candidate_status_preserved": "scored",
         }
         try:
+            # Deliberately NOT promotion_failed/failed: scoring (and possibly
+            # promotion) succeeded — only a post-score side effect failed. The
+            # failed labels outrank `scored` in the public card derivation and
+            # corrupted all 21 historical scored candidates (chain B).
             await create_candidate_promotion_event(
                 candidate_id=candidate_id,
                 source_score_bundle_id=score_bundle_id or None,
-                event_type="promotion_failed",
-                promotion_status="failed",
+                event_type="post_score_side_effect_failed",
+                promotion_status="post_score_side_effect_failed",
                 active_parent_artifact_hash=str(candidate.get("parent_artifact_hash") or ""),
                 candidate_parent_artifact_hash=str(candidate.get("parent_artifact_hash") or ""),
                 worker_ref=self.worker_ref,
@@ -1442,10 +2023,12 @@ class ResearchLabGatewayScoringWorker:
                 },
             )
         except Exception:
-            logger.exception("research_lab_promotion_failed_event_write_failed")
+            logger.exception("research_lab_post_score_side_effect_event_write_failed")
         try:
             await create_scoring_dispatch_event(
-                dispatch_type="candidate_scoring_side_effect",
+                # 'candidate_scoring' — the dispatch_type DB CHECK only allows
+                # the base types, so the old side_effect variant never landed.
+                dispatch_type="candidate_scoring",
                 dispatch_status="failed",
                 worker_ref=self.worker_ref,
                 proxy_ref_hash=self.proxy_ref_hash,
@@ -1457,6 +2040,21 @@ class ResearchLabGatewayScoringWorker:
             )
         except Exception:
             logger.exception("research_lab_scored_candidate_side_effect_dispatch_failed")
+        # The candidate genuinely scored: finalize the receipt and project the
+        # true scored state so the public card does not freeze at `scoring`.
+        try:
+            await self._maybe_finalize_candidate_receipt(candidate)
+        except Exception:
+            logger.exception("research_lab_scored_candidate_side_effect_receipt_finalize_failed")
+        try:
+            await safe_project_public_loop_activity(
+                str(candidate["ticket_id"]),
+                source_ref=f"candidate_scored_side_effect_failed:{candidate_id}",
+                reason="gateway_qualification_worker_scored_candidate",
+                config=self.config,
+            )
+        except Exception:
+            logger.exception("research_lab_scored_candidate_side_effect_projection_failed")
         logger.exception(
             format_worker_block(
                 "RESEARCH LAB CANDIDATE POST-SCORE SIDE EFFECT FAILED",
@@ -1787,7 +2385,7 @@ class ResearchLabGatewayScoringWorker:
                     base_event_doc={
                         **base_event_doc,
                         "failure_class": "stale_parent_rebase_repair_failed",
-                        "error": str(repair_exc)[:500],
+                        "error_diagnostics": _event_error_diagnostics(repair_exc),
                         "error_hash": sha256_json({"error": str(repair_exc)}),
                     },
                     reason="stale_parent_rebase_failed",
@@ -1800,7 +2398,7 @@ class ResearchLabGatewayScoringWorker:
                 base_event_doc={
                     **base_event_doc,
                     "failure_class": "stale_parent_rebase_failed",
-                    "error": str(exc)[:500],
+                    "error_diagnostics": _event_error_diagnostics(exc),
                     "error_hash": sha256_json({"error": str(exc)}),
                 },
                 reason="stale_parent_rebase_failed",
@@ -2139,6 +2737,42 @@ class ResearchLabGatewayScoringWorker:
                 "rolling_window_hash": window.window_hash,
                 "private_model_manifest_hash": artifact.manifest_hash,
             }
+        same_day_reference = await self._reusable_same_day_benchmark(
+            today=today,
+            manifest_hash=artifact.manifest_hash,
+        )
+        if same_day_reference is not None:
+            reuse_key = f"{today}:reuse:{artifact.manifest_hash}"
+            if self._baseline_already_logged_date != reuse_key:
+                logger.warning(
+                    format_worker_block(
+                        "RESEARCH LAB PRIVATE BASELINE SAME-DAY REFERENCE REUSED",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("Benchmark date", today),
+                            ("Existing bundle", compact_ref(same_day_reference.get("benchmark_bundle_id"))),
+                            ("Existing window", compact_ref(same_day_reference.get("rolling_window_hash"))),
+                            ("Requested window", compact_ref(window.window_hash)),
+                            ("Private model", compact_ref(artifact.model_artifact_hash)),
+                            (
+                                "Action",
+                                "NOT re-running: a same-day re-run silently replaces the day's promotion "
+                                "reference (same-day deltas of 3+ points observed). Set "
+                                "RESEARCH_LAB_BASELINE_ALLOW_SAMEDAY_REPLACE=true to replace deliberately.",
+                            ),
+                        ),
+                    )
+                )
+                self._baseline_already_logged_date = reuse_key
+            return {
+                "status": "reused_same_day_benchmark",
+                "benchmark_date": today,
+                "benchmark_bundle_id": str(same_day_reference.get("benchmark_bundle_id") or ""),
+                "rolling_window_hash": str(same_day_reference.get("rolling_window_hash") or ""),
+                "private_model_manifest_hash": artifact.manifest_hash,
+            }
+        if _env_flag("RESEARCH_LAB_BASELINE_ANY_WORKER") and await self._baseline_leased_by_other_worker(today):
+            return {"status": "baseline_leased_elsewhere", "benchmark_date": today}
         benchmark_attempt = _next_benchmark_attempt(existing)
         await create_rolling_icp_window(window)
         logger.info(
@@ -2170,6 +2804,8 @@ class ResearchLabGatewayScoringWorker:
         scorer = QualificationStyleCompanyScorer()
         per_icp_summaries: list[dict[str, Any]] = []
         nonempty_output_count = 0
+        retried_total = 0
+        recovered_total = 0
         try:
             await create_scoring_dispatch_event(
                 dispatch_type="private_baseline_rebenchmark",
@@ -2196,13 +2832,15 @@ class ResearchLabGatewayScoringWorker:
                         pull_before_run=False,
                     )
                 )
-                batch_summaries = await self._run_baseline_batch(
+                batch_summaries, retry_stats = await self._run_baseline_batch(
                     runner=runner,
                     retry_runner=retry_runner,
                     scorer=scorer,
                     window=window,
                     run_start=start,
                 )
+                retried_total = int(retry_stats.get("retried") or 0)
+                recovered_total = int(retry_stats.get("recovered") or 0)
                 for item_summary in batch_summaries:
                     if item_summary.pop("_nonempty", False):
                         nonempty_output_count += 1
@@ -2314,6 +2952,43 @@ class ResearchLabGatewayScoringWorker:
                 raise PrivateModelRuntimeError(
                     f"private baseline returned zero companies across all {len(window.benchmark_items)} ICPs"
                 )
+            baseline_health = _build_baseline_health(
+                per_icp_summaries=per_icp_summaries,
+                retried=retried_total,
+                recovered=recovered_total,
+                max_unresolved_icps=_baseline_max_unresolved_icps(),
+            )
+            aggregate_score = _average([summary["score"] for summary in per_icp_summaries])
+            day_jump_points = await self._baseline_day_jump_points(
+                today=today,
+                aggregate_score=aggregate_score,
+            )
+            if day_jump_points is not None:
+                baseline_health["day_jump_points"] = round(day_jump_points, 4)
+            if not baseline_health["gate_passed"]:
+                # §5.2-1: a still-degraded run must never become the day's
+                # promotion reference — auto-promotion runs against it.
+                raise BaselineHealthGateFailure(
+                    "baseline_unresolved_provider_errors_gate_failed: "
+                    f"unresolved={baseline_health['unresolved_provider_errors']} "
+                    f"max={baseline_health['max_unresolved_icps']} "
+                    f"retried={retried_total} recovered={recovered_total}; "
+                    "refusing to record this run as the day's benchmark reference",
+                    baseline_health=baseline_health,
+                )
+            max_day_jump = _baseline_max_day_jump_points()
+            if (
+                max_day_jump is not None
+                and day_jump_points is not None
+                and abs(day_jump_points) > max_day_jump
+            ):
+                raise BaselineHealthGateFailure(
+                    "baseline_day_over_day_jump_gate_failed: "
+                    f"jump={day_jump_points:+.4f} max=±{max_day_jump} "
+                    f"aggregate={aggregate_score:.4f}; "
+                    "refusing to record this run as the day's benchmark reference",
+                    baseline_health={**baseline_health, "gate_passed": False},
+                )
         except Exception as exc:
             await create_scoring_dispatch_event(
                 dispatch_type="private_baseline_rebenchmark",
@@ -2325,7 +3000,12 @@ class ResearchLabGatewayScoringWorker:
                     "benchmark_date": today,
                     "benchmark_attempt": benchmark_attempt,
                     "selected_icp_count": len(window.item_refs),
-                    "error": str(exc)[:500],
+                    "error_diagnostics": _event_error_diagnostics(exc),
+                    "baseline_health": (
+                        dict(exc.baseline_health)
+                        if isinstance(exc, BaselineHealthGateFailure)
+                        else None
+                    ),
                     "elapsed_seconds": round(time.time() - start, 3),
                 },
             )
@@ -2348,7 +3028,29 @@ class ResearchLabGatewayScoringWorker:
                 "rolling_window_hash": window.window_hash,
                 "error": str(exc)[:300],
             }
-        aggregate_score = _average([summary["score"] for summary in per_icp_summaries])
+        pre_record_conflict = await self._same_day_reference_recorded_while_running(
+            today=today,
+            window_hash=window.window_hash,
+            manifest_hash=artifact.manifest_hash,
+        )
+        if pre_record_conflict is not None:
+            logger.warning(
+                format_worker_block(
+                    "RESEARCH LAB PRIVATE BASELINE COMPLETED BUT REFERENCE ALREADY RECORDED",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Benchmark date", today),
+                        ("Existing bundle", compact_ref(pre_record_conflict.get("benchmark_bundle_id"))),
+                        ("Action", "discarding this run's recording to keep the day's reference stable"),
+                    ),
+                )
+            )
+            return {
+                "status": "already_benchmarked",
+                "benchmark_date": today,
+                "rolling_window_hash": window.window_hash,
+                "private_model_manifest_hash": artifact.manifest_hash,
+            }
         visibility_split = build_benchmark_visibility_split(
             rolling_window_hash=window.window_hash,
             benchmark_items=window.benchmark_items,
@@ -2366,6 +3068,7 @@ class ResearchLabGatewayScoringWorker:
             "per_icp_summaries": per_icp_summaries,
             "visibility_split": visibility_split,
             "aggregate_score": aggregate_score,
+            "baseline_health": baseline_health,
             "elapsed_seconds": round(time.time() - start, 3),
         }
         bundle_hash = canonical_hash(score_summary_doc)
@@ -2444,6 +3147,9 @@ class ResearchLabGatewayScoringWorker:
                     ("Public strength", visibility_split.get("public_strength_counts")),
                     ("Private strength", visibility_split.get("private_strength_counts")),
                     ("Aggregate score", f"{aggregate_score:.4f}"),
+                    ("Unresolved provider errors", baseline_health.get("unresolved_provider_errors")),
+                    ("Baseline gate", "passed" if baseline_health.get("gate_passed") else "FAILED"),
+                    ("Day jump", f"{day_jump_points:+.4f}" if day_jump_points is not None else "-"),
                     ("Elapsed", f"{time.time() - start:.1f}s"),
                 ),
             )
@@ -2587,8 +3293,11 @@ class ResearchLabGatewayScoringWorker:
         scorer: QualificationStyleCompanyScorer,
         window: Any,
         run_start: float,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Run all benchmark ICPs concurrently, then retry transient failures.
+
+        Returns the ordered per-ICP summaries plus retry stats
+        (``retried``/``recovered``/``unresolved``) for the baseline health gate.
 
         First pass fans out at private_baseline_concurrency. Provider/infra
         errors classified retryable are re-run for up to
@@ -2705,12 +3414,166 @@ class ResearchLabGatewayScoringWorker:
                     ),
                 )
             )
-            return [results[item_index] for item_index in sorted(results)]
+            return (
+                [results[item_index] for item_index in sorted(results)],
+                {
+                    "retried": retried_total,
+                    "recovered": recovered_total,
+                    "unresolved": len(unresolved),
+                },
+            )
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
+    async def _reusable_same_day_benchmark(
+        self,
+        *,
+        today: str,
+        manifest_hash: str,
+    ) -> dict[str, Any] | None:
+        """Any valid benchmark already recorded today for this model (any window).
+
+        A restart used to silently re-run the baseline and replace the day's
+        promotion reference mid-day (§0.3); replacement must be deliberate via
+        RESEARCH_LAB_BASELINE_ALLOW_SAMEDAY_REPLACE.
+        """
+        if _env_flag("RESEARCH_LAB_BASELINE_ALLOW_SAMEDAY_REPLACE"):
+            return None
+        rows = await select_many(
+            "research_lab_private_model_benchmark_current",
+            columns="*",
+            filters=(
+                ("benchmark_date", today),
+                ("private_model_manifest_hash", manifest_hash),
+            ),
+            order_by=(("created_at", True),),
+            limit=25,
+        )
+        for row in rows:
+            if _private_benchmark_row_is_valid(row):
+                return dict(row)
+        return None
+
+    async def _same_day_reference_recorded_while_running(
+        self,
+        *,
+        today: str,
+        window_hash: str,
+        manifest_hash: str,
+    ) -> dict[str, Any] | None:
+        """Re-check just before recording: another worker (or a restart) may have
+        recorded the day's reference while this multi-hour run was in flight."""
+        if _env_flag("RESEARCH_LAB_BASELINE_ALLOW_SAMEDAY_REPLACE"):
+            return None
+        try:
+            rows = await select_many(
+                "research_lab_private_model_benchmark_current",
+                columns="*",
+                filters=(
+                    ("benchmark_date", today),
+                    ("private_model_manifest_hash", manifest_hash),
+                ),
+                order_by=(("created_at", True),),
+                limit=25,
+            )
+        except Exception as exc:
+            logger.warning("research_lab_baseline_pre_record_check_failed error=%s", str(exc)[:200])
+            return None
+        for row in rows:
+            if _private_benchmark_row_is_valid(row):
+                return dict(row)
+        return None
+
+    async def _baseline_day_jump_points(
+        self,
+        *,
+        today: str,
+        aggregate_score: float,
+    ) -> float | None:
+        """Aggregate jump vs the most recent valid pre-today benchmark.
+
+        Best-effort: a lookup failure never fails the baseline. Always logs the
+        jump loudly — day-over-day drift of 3-5 points has been observed live,
+        several times the 1.0-point promotion threshold (§0-N1).
+        """
+        try:
+            rows = await select_many(
+                "research_lab_private_model_benchmark_current",
+                columns="*",
+                filters=(("benchmark_date", "lt", today),),
+                order_by=(("benchmark_date", True), ("created_at", True)),
+                limit=10,
+            )
+        except Exception as exc:
+            logger.warning("research_lab_baseline_day_jump_lookup_failed error=%s", str(exc)[:200])
+            return None
+        previous = next((row for row in rows if _private_benchmark_row_is_valid(row)), None)
+        if previous is None:
+            return None
+        previous_aggregate = _safe_float(previous.get("aggregate_score"), default=0.0)
+        day_jump = float(aggregate_score) - previous_aggregate
+        logger.warning(
+            format_worker_block(
+                "RESEARCH LAB PRIVATE BASELINE DAY-OVER-DAY JUMP",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Benchmark date", today),
+                    ("Aggregate score", f"{aggregate_score:.4f}"),
+                    ("Previous date", previous.get("benchmark_date")),
+                    ("Previous aggregate", f"{previous_aggregate:.4f}"),
+                    ("Previous model", compact_ref(previous.get("private_model_manifest_hash"))),
+                    ("Jump", f"{day_jump:+.4f}"),
+                    ("Quarantine threshold", _baseline_max_day_jump_points() or "warn-only"),
+                ),
+            )
+        )
+        return day_jump
+
+    async def _baseline_leased_by_other_worker(self, today: str) -> bool:
+        """Best-effort lease via dispatch events so any worker can run baselines
+        (RESEARCH_LAB_BASELINE_ANY_WORKER) without doubling the day's run."""
+        try:
+            lease_seconds = max(600, int(os.getenv("RESEARCH_LAB_BASELINE_LEASE_SECONDS", "5400")))
+        except ValueError:
+            lease_seconds = 5400
+        try:
+            rows = await select_many(
+                "research_lab_scoring_dispatch_events",
+                columns="dispatch_event_id,dispatch_status,worker_ref,event_doc,created_at",
+                filters=(("dispatch_type", "private_baseline_rebenchmark"),),
+                order_by=(("created_at", True),),
+                limit=50,
+            )
+        except Exception as exc:
+            logger.warning("research_lab_baseline_lease_check_failed error=%s", str(exc)[:200])
+            return False
+        for row in rows:
+            doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
+            if str(doc.get("benchmark_date") or "") != today:
+                continue
+            # Rows are newest-first: the first event for today decides.
+            status = str(row.get("dispatch_status") or "")
+            if status in ("completed", "failed"):
+                return False
+            if status == "assigned" and str(row.get("worker_ref") or "") != self.worker_ref:
+                age = _status_age_seconds(row.get("created_at"))
+                if age is not None and age <= lease_seconds:
+                    logger.info(
+                        "research_lab_baseline_leased_elsewhere worker_ref=%s owner=%s age_seconds=%.0f",
+                        self.worker_ref,
+                        row.get("worker_ref"),
+                        age,
+                    )
+                    return True
+            return False
+        return False
+
     def _is_private_baseline_owner(self) -> bool:
-        return self.config.scoring_worker_index == 0
+        if self.config.scoring_worker_index == 0:
+            return True
+        # Opt-in: let any worker run the daily baseline (leased via dispatch
+        # events) instead of being hostage to worker 0.
+        return _env_flag("RESEARCH_LAB_BASELINE_ANY_WORKER")
 
     async def _resolve_evaluation_epoch(self) -> int:
         now = time.monotonic()
@@ -2735,18 +3598,48 @@ class ResearchLabGatewayScoringWorker:
         return epoch
 
     async def _write_audit_bundle(self, epoch: int) -> None:
+        """Best-effort audit bundle write: it runs on the scoring hot path after
+        every scored candidate/baseline, so a failure here must never fail the
+        pass (bug #9/#36 — it used to mislabel every scored candidate)."""
+        try:
+            await self._write_audit_bundle_inner(epoch)
+        except Exception as exc:
+            logger.warning(
+                "research_lab_audit_bundle_write_failed epoch=%s error=%s",
+                epoch,
+                _short_error(exc),
+            )
+            try:
+                await create_scoring_dispatch_event(
+                    dispatch_type="audit_bundle_build",
+                    dispatch_status="failed",
+                    worker_ref=self.worker_ref,
+                    proxy_ref_hash=self.proxy_ref_hash,
+                    event_doc={
+                        "evaluation_epoch": int(epoch),
+                        "error_diagnostics": _event_error_diagnostics(exc),
+                    },
+                )
+            except Exception:
+                logger.exception("research_lab_audit_bundle_failure_event_write_failed")
+
+    async def _write_audit_bundle_inner(self, epoch: int) -> None:
+        # The five append-only event tables grow without bound and overflow the
+        # select_all cap; scope them to a recent window like score bundles are
+        # scoped by epoch (bug #9).
+        event_window = self._audit_event_window_filters()
         ticket_rows = await self._audit_select_all("research_loop_ticket_current", current_view=True)
         queue_rows = await self._audit_select_all("research_loop_run_queue_current", current_view=True)
         receipt_rows = await self._audit_select_all("research_loop_receipt_current", current_view=True)
         candidate_rows = await self._audit_select_all("research_lab_candidate_evaluation_current", current_view=True)
-        candidate_event_rows = await self._audit_select_all("research_lab_candidate_evaluation_events")
-        loop_event_rows = await self._audit_select_all("research_lab_auto_research_loop_events")
-        dispatch_event_rows = await self._audit_select_all("research_lab_scoring_dispatch_events")
+        candidate_event_rows = await self._audit_select_all("research_lab_candidate_evaluation_events", filters=event_window)
+        loop_event_rows = await self._audit_select_all("research_lab_auto_research_loop_events", filters=event_window)
+        dispatch_event_rows = await self._audit_select_all("research_lab_scoring_dispatch_events", filters=event_window)
         rolling_window_rows = await self._audit_select_all("research_lab_rolling_icp_windows")
         benchmark_rows = await self._audit_select_all("research_lab_private_model_benchmark_current", current_view=True)
         private_model_version_rows = await self._audit_select_all("research_lab_private_model_version_current", current_view=True)
-        promotion_event_rows = await self._audit_select_all("research_lab_candidate_promotion_events")
-        private_repo_commit_event_rows = await self._audit_select_all("research_lab_private_repo_commit_events")
+        promotion_event_rows = await self._audit_select_all("research_lab_candidate_promotion_events", filters=event_window)
+        private_repo_commit_event_rows = await self._audit_select_all("research_lab_private_repo_commit_events", filters=event_window)
         public_benchmark_report_rows = await self._audit_select_all(
             "research_lab_public_benchmark_report_current",
             current_view=True,
@@ -2806,6 +3699,17 @@ class ResearchLabGatewayScoringWorker:
                 ),
             )
         )
+
+    def _audit_event_window_filters(self) -> tuple[tuple[Any, ...], ...]:
+        try:
+            days = float(os.getenv("RESEARCH_LAB_AUDIT_EVENT_WINDOW_DAYS", "14"))
+        except ValueError:
+            days = 14.0
+        if days <= 0:
+            # Explicit opt-out restores unscoped full-history fetches.
+            return ()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        return (("created_at", "gte", cutoff.isoformat()),)
 
     async def _audit_select_all(
         self,
@@ -3142,6 +4046,14 @@ def _private_holdout_gate_from_baseline_row(row: Mapping[str, Any]) -> dict[str,
         "rolling_window_hash": str(row.get("rolling_window_hash") or ""),
         "private_model_manifest_hash": str(row.get("private_model_manifest_hash") or ""),
         "public_icp_refs": public_refs,
+        # Per-ICP baseline scores let verifiers recompute the true advisory
+        # delta (candidate-per-ICP minus stored-baseline-per-ICP) instead of
+        # falling back to a not_applicable verdict (§0-N2).
+        "baseline_per_icp_scores": {
+            str(item.get("icp_ref") or ""): _safe_float(item.get("score"), default=0.0)
+            for item in items
+            if isinstance(item, Mapping) and str(item.get("icp_ref") or "").strip()
+        },
     }
 
 

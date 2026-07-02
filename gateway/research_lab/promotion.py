@@ -23,6 +23,7 @@ from gateway.research_lab.store import (
     create_private_model_version_event,
     create_private_repo_commit_event,
     select_many,
+    select_one,
 )
 from leadpoet_verifier.economics import build_champion_reward_obligation
 from research_lab.eval import (
@@ -33,6 +34,78 @@ from research_lab.eval import (
 
 
 logger = logging.getLogger(__name__)
+
+
+TRUTHY = {"1", "true", "yes", "on"}
+
+# Fresh-environment escape hatch: bootstrap registration from the configured
+# manifest URI is allowed only when the lineage table is genuinely empty AND
+# this flag is explicitly enabled. Default false so a transient lineage read
+# failure (or an operator manifest drift) can never silently re-activate the
+# bootstrap version with a fresh timestamp (bug #2 / Chain A).
+ALLOW_BOOTSTRAP_REGISTER_ENV = "RESEARCH_LAB_ALLOW_BOOTSTRAP_REGISTER"
+
+# Bug #29 (auto-commit head-mismatch wedge): default false keeps the current
+# hard-fail behavior, which is deliberately the accidental guard against
+# noise-merges (§8.3). Enable only after the baseline health gate is live.
+AUTO_COMMIT_HEAD_MISMATCH_RECOVER_ENV = "RESEARCH_LAB_AUTO_COMMIT_HEAD_MISMATCH_RECOVER"
+
+
+def _env_flag(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in TRUTHY
+
+
+class PromotionPausedError(RuntimeError):
+    """Fail-closed promotion/lineage error: pause and retry, never fall back.
+
+    Raised instead of silently degrading to the bootstrap manifest. Callers
+    should treat this as retryable (a paused promotion retries; a bootstrap
+    rollback corrupts every in-flight candidate).
+    """
+
+
+class PrivateModelLineageUnavailableError(PromotionPausedError):
+    """The private-model lineage could not be read (or its active manifest
+    could not be loaded). Retryable; do NOT fall back to bootstrap."""
+
+
+class NoActivePrivateModelVersionError(PromotionPausedError):
+    """Lineage is non-empty but has zero active versions (supersede/create
+    crash window, bug #3). Run the ``reconcile-active-lineage`` admin command
+    (``reconcile_active_private_model_lineage``) to re-activate the newest
+    superseded version."""
+
+
+class ActiveManifestHashMismatchError(PromotionPausedError):
+    """The active lineage row's recorded hashes no longer match the manifest
+    at its URI (operator model update mutated the manifest under a live
+    lineage row). Requires the explicit ``reregister-active-manifest`` admin
+    command; never silently falls through to bootstrap."""
+
+    def __init__(self, *, version_id: str, detail: dict[str, str]):
+        self.version_id = version_id
+        self.detail = dict(detail)
+        super().__init__(
+            "mutable_manifest_hash_mismatch: active lineage row "
+            f"{_short_ref(version_id)} no longer matches its manifest URI contents; "
+            "operator action required — run the reregister-active-manifest admin "
+            "command to verify and deliberately re-register the updated manifest"
+        )
+
+
+class RepoHeadMismatchError(RuntimeError):
+    """Source branch head does not match the active manifest git sha (bug #29)."""
+
+    def __init__(self, *, head: str, expected_sha: str):
+        self.head = str(head)
+        self.expected_sha = str(expected_sha)
+        super().__init__(
+            "repo_head_mismatch: source branch head does not match active model commit "
+            f"(head={self.head[:12]}, active_manifest_sha={self.expected_sha[:12]}); "
+            "the active manifest records a commit sha the branch head has moved past "
+            f"(auto-commit wedge). Set {AUTO_COMMIT_HEAD_MISMATCH_RECOVER_ENV}=true to "
+            "re-resolve against the current head — only after the baseline health gate is live"
+        )
 
 
 @dataclass(frozen=True)
@@ -49,6 +122,15 @@ class PromotionImprovementMetric:
     baseline_aggregate_score: float | None = None
     candidate_total_score: float | None = None
     candidate_delta_vs_daily_baseline: float | None = None
+    # Explicit "can't compute" rejection (§0-N3): set on holdout-gated bundles
+    # whose stored-baseline basis is unavailable, so a future
+    # improvement_threshold_points=0 can never promote unmeasured candidates.
+    rejection_status: str | None = None
+    # Symmetric ICP exclusion (§5.2-1): ICPs excluded from the candidate totals
+    # due to unresolved provider errors, mirrored out of the baseline basis.
+    provider_excluded_icp_ids: tuple[str, ...] = ()
+    baseline_basis_adjusted: bool = False
+    unadjusted_baseline_aggregate_score: float | None = None
 
     def event_doc(self) -> dict[str, Any]:
         return {
@@ -57,10 +139,18 @@ class PromotionImprovementMetric:
             "baseline_aggregate_score": self.baseline_aggregate_score,
             "candidate_total_score": self.candidate_total_score,
             "candidate_delta_vs_daily_baseline": self.candidate_delta_vs_daily_baseline,
+            "rejection_status": self.rejection_status,
+            "provider_excluded_icp_ids": list(self.provider_excluded_icp_ids),
+            "baseline_basis_adjusted": self.baseline_basis_adjusted,
+            "unadjusted_baseline_aggregate_score": self.unadjusted_baseline_aggregate_score,
         }
 
 
-def promotion_improvement_metric(score_bundle: Mapping[str, Any]) -> PromotionImprovementMetric:
+def promotion_improvement_metric(
+    score_bundle: Mapping[str, Any],
+    *,
+    baseline_score_summary_doc: Mapping[str, Any] | None = None,
+) -> PromotionImprovementMetric:
     """Return the promotion metric without re-running the active parent model.
 
     Candidate score bundles emitted by the private-holdout path are judged
@@ -68,6 +158,18 @@ def promotion_improvement_metric(score_bundle: Mapping[str, Any]) -> PromotionIm
     their legacy paired mean-delta path for compatibility with historical tests
     and tooling, but any bundle that carries a holdout gate must provide the
     stored-baseline final delta to be promotable.
+
+    An unavailable basis is an explicit rejection (``rejection_status`` set,
+    §0-N3) rather than a silent 0.0 improvement.
+
+    When the bundle's aggregates carry ``provider_excluded_icp_ids`` (ICPs
+    excluded from the candidate totals due to unresolved provider errors), the
+    SAME ICPs are excluded from the baseline basis using the stored daily
+    benchmark's per-ICP scores (``baseline_score_summary_doc``), so a candidate
+    flake is not scored 0 against a baseline with no flake there (§5.2-1). If
+    the exclusion list is present but the baseline per-ICP scores cannot be
+    resolved, the basis is unavailable (explicit rejection), never a skewed
+    asymmetric delta.
     """
 
     aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
@@ -76,29 +178,63 @@ def promotion_improvement_metric(score_bundle: Mapping[str, Any]) -> PromotionIm
         decision = str(gate.get("decision") or "")
         baseline_aggregate = _optional_float(gate.get("baseline_aggregate_score"))
         candidate_total = _optional_float(gate.get("candidate_total_score"))
-        daily_delta = _optional_float(gate.get("candidate_delta_vs_daily_baseline"))
-        if daily_delta is None and baseline_aggregate is not None and candidate_total is not None:
-            daily_delta = candidate_total - baseline_aggregate
+        excluded_icp_ids = _provider_excluded_icp_ids(aggregates)
+        unadjusted_baseline_aggregate: float | None = None
+        baseline_basis_adjusted = False
+        basis_unavailable_reason: str | None = None
+        if excluded_icp_ids:
+            adjusted_baseline = _baseline_aggregate_excluding_icps(
+                baseline_score_summary_doc,
+                excluded_icp_ids,
+            )
+            if adjusted_baseline is None:
+                basis_unavailable_reason = "provider_excluded_icps_baseline_per_icp_unavailable"
+            else:
+                unadjusted_baseline_aggregate = baseline_aggregate
+                baseline_aggregate = adjusted_baseline
+                baseline_basis_adjusted = True
+        if baseline_basis_adjusted:
+            daily_delta = (
+                candidate_total - baseline_aggregate
+                if candidate_total is not None and baseline_aggregate is not None
+                else None
+            )
+        else:
+            daily_delta = _optional_float(gate.get("candidate_delta_vs_daily_baseline"))
+            if daily_delta is None and baseline_aggregate is not None and candidate_total is not None:
+                daily_delta = candidate_total - baseline_aggregate
         if (
             decision == "private_holdout_approved"
             and bool(gate.get("private_holdout_evaluated"))
             and daily_delta is not None
+            and basis_unavailable_reason is None
         ):
             return PromotionImprovementMetric(
                 improvement_points=float(daily_delta),
-                basis="stored_daily_baseline_total_delta",
+                basis=(
+                    "stored_daily_baseline_total_delta_provider_excluded_icps"
+                    if baseline_basis_adjusted
+                    else "stored_daily_baseline_total_delta"
+                ),
                 daily_baseline_available=True,
                 baseline_aggregate_score=baseline_aggregate,
                 candidate_total_score=candidate_total,
                 candidate_delta_vs_daily_baseline=float(daily_delta),
+                provider_excluded_icp_ids=excluded_icp_ids,
+                baseline_basis_adjusted=baseline_basis_adjusted,
+                unadjusted_baseline_aggregate_score=unadjusted_baseline_aggregate,
             )
+        unavailable_reason = basis_unavailable_reason or decision or "missing_decision"
         return PromotionImprovementMetric(
             improvement_points=0.0,
-            basis=f"stored_daily_baseline_unavailable:{decision or 'missing_decision'}",
+            basis=f"stored_daily_baseline_unavailable:{unavailable_reason}",
             daily_baseline_available=False,
             baseline_aggregate_score=baseline_aggregate,
             candidate_total_score=candidate_total,
             candidate_delta_vs_daily_baseline=daily_delta,
+            rejection_status="rejected_basis_unavailable",
+            provider_excluded_icp_ids=excluded_icp_ids,
+            unadjusted_baseline_aggregate_score=unadjusted_baseline_aggregate,
         )
 
     legacy_delta = _optional_float(aggregates.get("mean_delta")) or 0.0
@@ -109,15 +245,149 @@ def promotion_improvement_metric(score_bundle: Mapping[str, Any]) -> PromotionIm
     )
 
 
+def _provider_excluded_icp_ids(aggregates: Mapping[str, Any]) -> tuple[str, ...]:
+    value = aggregates.get("provider_excluded_icp_ids")
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return ()
+    seen: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if text and text not in seen:
+            seen.append(text)
+    return tuple(seen)
+
+
+def _baseline_per_icp_scores(doc: Mapping[str, Any] | None) -> dict[str, float]:
+    """Map icp_ref -> baseline score from the stored daily benchmark doc.
+
+    The benchmark's ``score_summary_doc`` carries ``per_icp_summaries``
+    (``sanitize_benchmark_item_summary`` rows with ``icp_ref``/``score``) and a
+    ``visibility_split.items`` list with the same fields; prefer the former.
+    """
+
+    if not isinstance(doc, Mapping):
+        return {}
+    scores: dict[str, float] = {}
+    summaries = doc.get("per_icp_summaries")
+    if isinstance(summaries, list):
+        for item in summaries:
+            if not isinstance(item, Mapping):
+                continue
+            ref = str(item.get("icp_ref") or "").strip()
+            score = _optional_float(item.get("score"))
+            if ref and score is not None:
+                scores[ref] = score
+    if scores:
+        return scores
+    split = doc.get("visibility_split")
+    items = split.get("items") if isinstance(split, Mapping) else None
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            ref = str(item.get("icp_ref") or "").strip()
+            score = _optional_float(item.get("score"))
+            if ref and score is not None:
+                scores[ref] = score
+    return scores
+
+
+def _baseline_aggregate_excluding_icps(
+    doc: Mapping[str, Any] | None,
+    excluded_icp_ids: Sequence[str],
+) -> float | None:
+    """Baseline aggregate recomputed without the excluded ICPs, or None.
+
+    Strict: every excluded ICP id must resolve to a baseline per-ICP score, so
+    identifier-format drift degrades to an explicit unavailable basis instead
+    of silently reintroducing the asymmetry.
+    """
+
+    per_icp = _baseline_per_icp_scores(doc)
+    if not per_icp:
+        return None
+    excluded = {str(item) for item in excluded_icp_ids}
+    if not excluded.issubset(per_icp.keys()):
+        return None
+    remaining = [score for ref, score in per_icp.items() if ref not in excluded]
+    if not remaining:
+        return None
+    return float(sum(remaining) / len(remaining))
+
+
+def _baseline_health_doc(doc: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The day's benchmark ``baseline_health`` dict, or None when absent.
+
+    Shape (written by the parallel-baseline gate):
+    ``{"unresolved_provider_errors": n, "gate_passed": bool, ...}``.
+    Legacy docs without the field pass (tolerated absence).
+    """
+
+    if not isinstance(doc, Mapping):
+        return None
+    health = doc.get("baseline_health")
+    if not isinstance(health, Mapping):
+        return None
+    return dict(health)
+
+
+async def load_baseline_summary_doc_for_gate(
+    gate: Any,
+) -> tuple[dict[str, Any] | None, str]:
+    """Load the stored daily benchmark ``score_summary_doc`` a holdout gate used.
+
+    Returns ``(doc, status)`` with status ``loaded`` | ``absent`` |
+    ``unavailable``. ``absent`` means there is genuinely no doc to consult
+    (legacy bundles pass); ``unavailable`` means the read itself failed and the
+    caller should hold (retryable) rather than decide without it.
+    """
+
+    if not isinstance(gate, Mapping):
+        return None, "absent"
+    bundle_id = str(gate.get("baseline_benchmark_bundle_id") or "")
+    if not bundle_id:
+        return None, "absent"
+    try:
+        row = await select_one(
+            "research_lab_private_model_benchmark_current",
+            columns="benchmark_bundle_id,score_summary_doc",
+            filters=(("benchmark_bundle_id", bundle_id),),
+        )
+    except Exception as exc:
+        logger.warning(
+            "research_lab_promotion_baseline_summary_doc_unavailable: bundle=%s error=%s",
+            _short_ref(bundle_id),
+            _safe_text(str(exc))[:200],
+        )
+        return None, "unavailable"
+    doc = row.get("score_summary_doc") if isinstance(row, Mapping) else None
+    if not isinstance(doc, Mapping):
+        return None, "absent"
+    return dict(doc), "loaded"
+
+
 async def load_active_private_model(
     config: ResearchLabGatewayConfig,
     *,
     register_bootstrap: bool = False,
 ) -> ActivePrivateModel:
-    """Load the current active private model.
+    """Load the current active private model, failing CLOSED on lineage doubt.
 
-    The lineage table is authoritative when present. If it has not been
-    initialized yet, the configured manifest URI is used as a bootstrap source.
+    The lineage table is authoritative when present. Failure modes are
+    distinguished explicitly (bug #2 / Chain A):
+
+    * lineage read error -> ``PrivateModelLineageUnavailableError`` (retryable);
+    * active row's manifest fails to load -> ``PrivateModelLineageUnavailableError``;
+    * active row's hashes no longer match its manifest URI contents ->
+      ``ActiveManifestHashMismatchError`` (operator must run
+      ``reregister-active-manifest``);
+    * zero active versions but lineage non-empty ->
+      ``NoActivePrivateModelVersionError`` (run ``reconcile-active-lineage``);
+    * lineage genuinely empty (0 rows) -> the configured manifest URI is used
+      as a bootstrap source; registration additionally requires
+      ``RESEARCH_LAB_ALLOW_BOOTSTRAP_REGISTER=true`` (fresh environments only).
+
+    None of these ever silently re-activates the bootstrap version.
     """
 
     try:
@@ -129,90 +399,304 @@ async def load_active_private_model(
         )
     except Exception as exc:
         logger.warning("research_lab_active_model_lineage_unavailable: %s", str(exc)[:200])
-        rows = []
+        raise PrivateModelLineageUnavailableError(
+            "private model lineage read failed; promotion paused (retryable), "
+            f"not falling back to bootstrap: {_safe_text(str(exc))[:200]}"
+        ) from exc
 
-    stale_active_rows: list[tuple[dict[str, Any], str, dict[str, str]]] = []
     for row in rows:
+        version_id = str(row.get("private_model_version_id") or "")
         try:
             artifact = _load_valid_artifact(str(row["private_model_manifest_uri"]))
         except Exception as exc:
-            stale_active_rows.append((row, "manifest_load_failed", {"error": _safe_text(str(exc))}))
             logger.warning(
                 "research_lab_active_model_lineage_row_load_failed: version=%s error=%s",
-                _short_ref(row.get("private_model_version_id")),
+                _short_ref(version_id),
                 _safe_text(str(exc))[:200],
             )
-            continue
+            raise PrivateModelLineageUnavailableError(
+                f"active private model manifest load failed for version {_short_ref(version_id)}; "
+                "promotion paused (retryable), not falling back to bootstrap: "
+                f"{_safe_text(str(exc))[:200]}"
+            ) from exc
 
         row_artifact_hash = str(row["model_artifact_hash"])
         row_manifest_hash = str(row["private_model_manifest_hash"])
         if artifact.model_artifact_hash == row_artifact_hash and artifact.manifest_hash == row_manifest_hash:
             return ActivePrivateModel(artifact=artifact, version_row=row)
 
-        stale_active_rows.append(
-            (
-                row,
-                "mutable_manifest_hash_mismatch",
-                {
-                    "row_model_artifact_hash": row_artifact_hash,
-                    "loaded_model_artifact_hash": artifact.model_artifact_hash,
-                    "row_private_model_manifest_hash": row_manifest_hash,
-                    "loaded_private_model_manifest_hash": artifact.manifest_hash,
-                },
-            )
-        )
-        logger.warning(
-            "research_lab_active_model_lineage_stale: version=%s row_artifact=%s loaded_artifact=%s",
-            _short_ref(row.get("private_model_version_id")),
+        logger.error(
+            "research_lab_active_manifest_hash_mismatch_requires_reregister: version=%s "
+            "row_artifact=%s loaded_artifact=%s row_manifest=%s loaded_manifest=%s "
+            "(operator action: run the reregister-active-manifest admin command)",
+            _short_ref(version_id),
             _short_ref(row_artifact_hash),
             _short_ref(artifact.model_artifact_hash),
+            _short_ref(row_manifest_hash),
+            _short_ref(artifact.manifest_hash),
+        )
+        raise ActiveManifestHashMismatchError(
+            version_id=version_id,
+            detail={
+                "row_model_artifact_hash": row_artifact_hash,
+                "loaded_model_artifact_hash": artifact.model_artifact_hash,
+                "row_private_model_manifest_hash": row_manifest_hash,
+                "loaded_private_model_manifest_hash": artifact.manifest_hash,
+            },
+        )
+
+    # No ACTIVE rows. Distinguish "lineage genuinely empty" (fresh environment,
+    # bootstrap allowed) from "lineage exists but nothing is active" (bug #3
+    # crash window — reconcile, never bootstrap).
+    try:
+        lineage_rows = await select_many(
+            "research_lab_private_model_version_current",
+            columns="private_model_version_id,current_version_status,current_status_at",
+            filters=(),
+            order_by=(("current_status_at", True),),
+            limit=1,
+        )
+    except Exception as exc:
+        logger.warning("research_lab_active_model_lineage_unavailable: %s", str(exc)[:200])
+        raise PrivateModelLineageUnavailableError(
+            "private model lineage emptiness check failed; promotion paused (retryable), "
+            f"not falling back to bootstrap: {_safe_text(str(exc))[:200]}"
+        ) from exc
+    if lineage_rows:
+        raise NoActivePrivateModelVersionError(
+            "private model lineage is non-empty but has zero active versions "
+            "(supersede/create crash window); run the reconcile-active-lineage admin "
+            "command to re-activate the newest superseded version"
         )
 
     artifact = _load_valid_artifact(config.private_model_manifest_uri)
     version_row = None
     if register_bootstrap:
-        try:
-            version_row, _event = await create_private_model_version(
-                artifact_manifest=artifact.to_dict(),
-                manifest_uri=config.private_model_manifest_uri,
-                redacted_version_doc={
-                    "source": "bootstrap_private_model_manifest_uri",
-                    "model_artifact_hash": artifact.model_artifact_hash,
-                    "private_model_manifest_hash": artifact.manifest_hash,
-                    "git_commit_sha": artifact.git_commit_sha,
-                    "component_registry_version": artifact.component_registry_version,
-                    "scoring_adapter_version": artifact.scoring_adapter_version,
-                },
-                version_status="active",
-                reason="bootstrap_private_model_manifest_uri",
+        if not _env_flag(ALLOW_BOOTSTRAP_REGISTER_ENV):
+            logger.warning(
+                "research_lab_bootstrap_register_suppressed: lineage is empty but %s is not "
+                "enabled; returning unregistered bootstrap manifest",
+                ALLOW_BOOTSTRAP_REGISTER_ENV,
             )
-            for stale_row, stale_reason, stale_doc in stale_active_rows:
-                stale_version_id = str(stale_row.get("private_model_version_id") or "")
-                if not stale_version_id or stale_version_id == str(version_row.get("private_model_version_id") or ""):
-                    continue
-                try:
-                    await create_private_model_version_event(
-                        private_model_version_id=stale_version_id,
-                        event_type="superseded",
-                        version_status="superseded",
-                        reason="superseded_by_current_private_model_manifest",
-                        event_doc={
-                            "reason": stale_reason,
-                            "replacement_private_model_version_id": str(version_row["private_model_version_id"]),
-                            "replacement_model_artifact_hash": artifact.model_artifact_hash,
-                            "replacement_private_model_manifest_hash": artifact.manifest_hash,
-                            **stale_doc,
-                        },
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "research_lab_stale_active_model_supersede_failed: version=%s error=%s",
-                        _short_ref(stale_version_id),
-                        _safe_text(str(exc))[:200],
-                    )
-        except Exception as exc:
-            logger.warning("research_lab_active_model_bootstrap_write_failed: %s", str(exc)[:200])
+        else:
+            try:
+                version_row, _event = await create_private_model_version(
+                    artifact_manifest=artifact.to_dict(),
+                    manifest_uri=config.private_model_manifest_uri,
+                    redacted_version_doc={
+                        "source": "bootstrap_private_model_manifest_uri",
+                        "model_artifact_hash": artifact.model_artifact_hash,
+                        "private_model_manifest_hash": artifact.manifest_hash,
+                        "git_commit_sha": artifact.git_commit_sha,
+                        "component_registry_version": artifact.component_registry_version,
+                        "scoring_adapter_version": artifact.scoring_adapter_version,
+                    },
+                    version_status="active",
+                    reason="bootstrap_private_model_manifest_uri",
+                )
+            except Exception as exc:
+                logger.warning("research_lab_active_model_bootstrap_write_failed: %s", str(exc)[:200])
     return ActivePrivateModel(artifact=artifact, version_row=version_row)
+
+
+async def reconcile_active_private_model_lineage(
+    *,
+    actor_ref: str = "maintenance",
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Repair the bug #3 crash window: zero active versions, lineage non-empty.
+
+    Re-activates the newest superseded version so the champion lookup recovers
+    without a bootstrap rollback. Safe to call at startup or from maintenance;
+    a no-op when an active version exists or the lineage is empty.
+    """
+
+    active_rows = await select_many(
+        "research_lab_private_model_version_current",
+        columns="private_model_version_id,current_version_status,current_status_at",
+        filters=(("current_version_status", "active"),),
+        order_by=(("current_status_at", True),),
+        limit=5,
+    )
+    if active_rows:
+        return {
+            "ok": True,
+            "action": "reconcile-active-lineage",
+            "status": "active_version_present",
+            "active_version_count": len(active_rows),
+            "active_version_ids": [str(row.get("private_model_version_id") or "") for row in active_rows],
+        }
+    lineage_rows = await select_many(
+        "research_lab_private_model_version_current",
+        columns="private_model_version_id,current_version_status,current_status_at,model_artifact_hash",
+        filters=(),
+        order_by=(("current_status_at", True),),
+        limit=50,
+    )
+    if not lineage_rows:
+        return {"ok": True, "action": "reconcile-active-lineage", "status": "lineage_empty"}
+    superseded_rows = [
+        row for row in lineage_rows if str(row.get("current_version_status") or "") == "superseded"
+    ]
+    if not superseded_rows:
+        return {
+            "ok": False,
+            "action": "reconcile-active-lineage",
+            "status": "no_superseded_version_to_reactivate",
+            "lineage_statuses": sorted(
+                {str(row.get("current_version_status") or "") for row in lineage_rows}
+            ),
+        }
+    newest = superseded_rows[0]
+    version_id = str(newest.get("private_model_version_id") or "")
+    planned = {
+        "private_model_version_id": version_id,
+        "model_artifact_hash": str(newest.get("model_artifact_hash") or ""),
+        "previous_status_at": str(newest.get("current_status_at") or ""),
+    }
+    if dry_run:
+        return {
+            "ok": True,
+            "action": "reconcile-active-lineage",
+            "status": "would_reactivate_newest_superseded",
+            "dry_run": True,
+            "planned": planned,
+        }
+    await create_private_model_version_event(
+        private_model_version_id=version_id,
+        event_type="active",
+        version_status="active",
+        reason="reconcile_reactivate_newest_superseded_version",
+        event_doc={
+            "source": "research_lab_lineage_reconcile",
+            "actor_ref": actor_ref,
+            "previous_version_status": "superseded",
+        },
+    )
+    logger.warning(
+        "research_lab_lineage_reconcile_reactivated: version=%s actor=%s",
+        _short_ref(version_id),
+        actor_ref,
+    )
+    return {
+        "ok": True,
+        "action": "reconcile-active-lineage",
+        "status": "reactivated_newest_superseded",
+        "dry_run": False,
+        "planned": planned,
+    }
+
+
+async def reregister_active_manifest(
+    config: ResearchLabGatewayConfig,
+    *,
+    actor_ref: str,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Deliberate operator re-register after a mutable-manifest hash mismatch.
+
+    Loads the manifest currently at the active lineage row's URI, verifies it,
+    and (on ``--write``) supersedes the mismatched row then registers the
+    loaded manifest as the new active version. This is the explicit
+    replacement for the old silent fall-through-to-bootstrap path (§0.3).
+    The supersede -> create order matches the one-active DB guard
+    (scripts/60); a crash in between is repaired by
+    ``reconcile_active_private_model_lineage`` (which re-activates the
+    superseded row, after which this command can simply be re-run).
+    """
+
+    rows = await select_many(
+        "research_lab_private_model_version_current",
+        filters=(("current_version_status", "active"),),
+        order_by=(("current_status_at", True),),
+        limit=1,
+    )
+    if not rows:
+        return {
+            "ok": False,
+            "action": "reregister-active-manifest",
+            "status": "no_active_version",
+            "guidance": "run reconcile-active-lineage (or bootstrap a fresh environment) first",
+        }
+    row = rows[0]
+    version_id = str(row.get("private_model_version_id") or "")
+    manifest_uri = str(row.get("private_model_manifest_uri") or "")
+    try:
+        artifact = _load_valid_artifact(manifest_uri)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "action": "reregister-active-manifest",
+            "status": "manifest_load_failed",
+            "private_model_version_id": version_id,
+            "error": _safe_text(str(exc))[:300],
+        }
+    row_artifact_hash = str(row.get("model_artifact_hash") or "")
+    row_manifest_hash = str(row.get("private_model_manifest_hash") or "")
+    mismatch_doc = {
+        "row_model_artifact_hash": row_artifact_hash,
+        "loaded_model_artifact_hash": artifact.model_artifact_hash,
+        "row_private_model_manifest_hash": row_manifest_hash,
+        "loaded_private_model_manifest_hash": artifact.manifest_hash,
+    }
+    if artifact.model_artifact_hash == row_artifact_hash and artifact.manifest_hash == row_manifest_hash:
+        return {
+            "ok": True,
+            "action": "reregister-active-manifest",
+            "status": "hashes_match_no_reregister_needed",
+            "private_model_version_id": version_id,
+        }
+    if dry_run:
+        return {
+            "ok": True,
+            "action": "reregister-active-manifest",
+            "status": "would_reregister_active_manifest",
+            "dry_run": True,
+            "private_model_version_id": version_id,
+            "mismatch": mismatch_doc,
+        }
+    await create_private_model_version_event(
+        private_model_version_id=version_id,
+        event_type="superseded",
+        version_status="superseded",
+        reason="operator_manifest_reregister",
+        event_doc={
+            "source": "research_lab_operator_manifest_reregister",
+            "actor_ref": actor_ref,
+            **mismatch_doc,
+        },
+    )
+    version_row, _event = await create_private_model_version(
+        artifact_manifest=artifact.to_dict(),
+        manifest_uri=manifest_uri,
+        redacted_version_doc={
+            "source": "operator_manifest_reregister",
+            "model_artifact_hash": artifact.model_artifact_hash,
+            "private_model_manifest_hash": artifact.manifest_hash,
+            "git_commit_sha": artifact.git_commit_sha,
+            "component_registry_version": artifact.component_registry_version,
+            "scoring_adapter_version": artifact.scoring_adapter_version,
+            "superseded_private_model_version_id": version_id,
+        },
+        version_status="active",
+        reason="operator_manifest_reregister",
+    )
+    new_version_id = str(version_row.get("private_model_version_id") or "")
+    logger.warning(
+        "research_lab_operator_manifest_reregistered: old=%s new=%s actor=%s",
+        _short_ref(version_id),
+        _short_ref(new_version_id),
+        actor_ref,
+    )
+    return {
+        "ok": True,
+        "action": "reregister-active-manifest",
+        "status": "reregistered_active_manifest",
+        "dry_run": False,
+        "superseded_private_model_version_id": version_id,
+        "private_model_version_id": new_version_id,
+        "mismatch": mismatch_doc,
+    }
 
 
 async def latest_public_benchmark_summary() -> dict[str, Any]:
@@ -253,10 +737,20 @@ class ResearchLabPromotionController:
         candidate: Mapping[str, Any],
         score_bundle_row: Mapping[str, Any],
         score_bundle: Mapping[str, Any],
+        bypass_gates: frozenset[str] | set[str] = frozenset(),
     ) -> dict[str, Any]:
         candidate_parent = str(candidate.get("parent_artifact_hash") or score_bundle.get("parent_artifact_hash") or "")
         candidate_kind = str(candidate.get("candidate_kind") or "patch")
-        metric = promotion_improvement_metric(score_bundle)
+        holdout_gate = (
+            score_bundle.get("private_holdout_gate")
+            if isinstance(score_bundle.get("private_holdout_gate"), Mapping)
+            else None
+        )
+        baseline_summary_doc, baseline_doc_status = await load_baseline_summary_doc_for_gate(holdout_gate)
+        metric = promotion_improvement_metric(
+            score_bundle,
+            baseline_score_summary_doc=baseline_summary_doc,
+        )
         improvement_points = float(metric.improvement_points)
         delta_lcb = float((score_bundle.get("aggregates") or {}).get("delta_lcb") or 0.0)
         threshold = float(self.config.improvement_threshold_points)
@@ -346,6 +840,120 @@ class ResearchLabPromotionController:
             )
             return {"status": "rejected_legacy_patch_candidate"}
 
+        # --- Merge-path health gates (§7-7): run before any promotion/merge
+        # decision. Holds are retryable (recorded as checked, candidate stays
+        # scored); only the basis-unavailable case is an explicit rejection.
+        bypassed_gates: list[str] = []
+
+        quarantined_event = await self._candidate_bundle_quarantined(
+            candidate_id=str(candidate["candidate_id"]),
+            score_bundle_id=score_bundle_id,
+        )
+        if quarantined_event:
+            if "scoring_health_quarantine" in bypass_gates:
+                bypassed_gates.append("scoring_health_quarantine")
+                logger.warning(
+                    "research_lab_promotion_gate_bypassed: gate=scoring_health_quarantine candidate=%s",
+                    _short_ref(candidate["candidate_id"]),
+                )
+            else:
+                await create_candidate_promotion_event(
+                    candidate_id=str(candidate["candidate_id"]),
+                    source_score_bundle_id=score_bundle_id,
+                    event_type="scoring_health_quarantined",
+                    promotion_status="rejected",
+                    active_parent_artifact_hash=active_parent,
+                    candidate_parent_artifact_hash=candidate_parent,
+                    rolling_window_hash=rolling_window_hash,
+                    improvement_points=improvement_points,
+                    threshold_points=threshold,
+                    worker_ref=self.worker_ref,
+                    event_doc={
+                        "reason": "scoring_health_quarantined_bundle_blocked_on_merge_path",
+                        "quarantine_promotion_event_id": str(quarantined_event.get("promotion_event_id") or ""),
+                        "promotion_metric": metric.event_doc(),
+                    },
+                )
+                return {"status": "scoring_health_quarantined"}
+
+        if holdout_gate is not None and baseline_doc_status == "unavailable":
+            if "baseline_health" in bypass_gates:
+                bypassed_gates.append("baseline_health")
+                logger.warning(
+                    "research_lab_promotion_gate_bypassed: gate=baseline_health "
+                    "(summary doc unavailable) candidate=%s",
+                    _short_ref(candidate["candidate_id"]),
+                )
+            else:
+                await create_candidate_promotion_event(
+                    candidate_id=str(candidate["candidate_id"]),
+                    source_score_bundle_id=score_bundle_id,
+                    event_type="promotion_checked",
+                    promotion_status="checked",
+                    active_parent_artifact_hash=active_parent,
+                    candidate_parent_artifact_hash=candidate_parent,
+                    rolling_window_hash=rolling_window_hash,
+                    improvement_points=improvement_points,
+                    threshold_points=threshold,
+                    worker_ref=self.worker_ref,
+                    event_doc={
+                        "reason": "held_baseline_summary_doc_unavailable",
+                        "decision_path": "baseline_health_hold",
+                        "promotion_metric": metric.event_doc(),
+                    },
+                )
+                return {"status": "held_baseline_doc_unavailable"}
+
+        baseline_health = _baseline_health_doc(baseline_summary_doc)
+        if baseline_health is not None and not bool(baseline_health.get("gate_passed")):
+            if "baseline_health" in bypass_gates:
+                if "baseline_health" not in bypassed_gates:
+                    bypassed_gates.append("baseline_health")
+                logger.warning(
+                    "research_lab_promotion_gate_bypassed: gate=baseline_health "
+                    "(gate_passed false) candidate=%s",
+                    _short_ref(candidate["candidate_id"]),
+                )
+            else:
+                await create_candidate_promotion_event(
+                    candidate_id=str(candidate["candidate_id"]),
+                    source_score_bundle_id=score_bundle_id,
+                    event_type="promotion_checked",
+                    promotion_status="checked",
+                    active_parent_artifact_hash=active_parent,
+                    candidate_parent_artifact_hash=candidate_parent,
+                    rolling_window_hash=rolling_window_hash,
+                    improvement_points=improvement_points,
+                    threshold_points=threshold,
+                    worker_ref=self.worker_ref,
+                    event_doc={
+                        "reason": "held_baseline_health_gate_failed",
+                        "decision_path": "baseline_health_hold",
+                        "baseline_health": dict(baseline_health),
+                        "promotion_metric": metric.event_doc(),
+                    },
+                )
+                return {"status": "held_baseline_health_gate_failed"}
+
+        if metric.rejection_status:
+            await create_candidate_promotion_event(
+                candidate_id=str(candidate["candidate_id"]),
+                source_score_bundle_id=score_bundle_id,
+                event_type="below_threshold",
+                promotion_status="rejected",
+                active_parent_artifact_hash=active_parent,
+                candidate_parent_artifact_hash=candidate_parent,
+                rolling_window_hash=rolling_window_hash,
+                improvement_points=improvement_points,
+                threshold_points=threshold,
+                worker_ref=self.worker_ref,
+                event_doc={
+                    "reason": metric.rejection_status,
+                    "promotion_metric": metric.event_doc(),
+                },
+            )
+            return {"status": metric.rejection_status, "bypassed_gates": bypassed_gates}
+
         if improvement_points < threshold:
             await create_candidate_promotion_event(
                 candidate_id=str(candidate["candidate_id"]),
@@ -403,7 +1011,7 @@ class ResearchLabPromotionController:
             },
         )
 
-        return await self._promote_built_image_candidate(
+        result = await self._promote_built_image_candidate(
             candidate=candidate,
             score_bundle_row=score_bundle_row,
             score_bundle=score_bundle,
@@ -414,6 +1022,38 @@ class ResearchLabPromotionController:
             improvement_points=improvement_points,
             threshold=threshold,
         )
+        if bypassed_gates:
+            result = {**result, "bypassed_gates": bypassed_gates}
+        return result
+
+    async def _candidate_bundle_quarantined(
+        self,
+        *,
+        candidate_id: str,
+        score_bundle_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the quarantine promotion event for THIS bundle, if any.
+
+        Scoped to the source score bundle so a candidate legitimately
+        re-scored healthy on a new bundle is not blocked by an older
+        quarantined bundle (bug #23 residual: replay of a quarantined bundle
+        must not pass the health gate).
+        """
+
+        if not score_bundle_id:
+            return None
+        rows = await select_many(
+            "research_lab_candidate_promotion_events",
+            columns="promotion_event_id,event_type,promotion_status,source_score_bundle_id,created_at",
+            filters=(
+                ("candidate_id", candidate_id),
+                ("event_type", "scoring_health_quarantined"),
+                ("source_score_bundle_id", score_bundle_id),
+            ),
+            order_by=(("created_at", True),),
+            limit=1,
+        )
+        return rows[0] if rows else None
 
     async def _promote_built_image_candidate(
         self,
@@ -451,6 +1091,14 @@ class ResearchLabPromotionController:
         )
         if private_repo_result.get("status") == "failed":
             return private_repo_result
+        # Bug #3 design note: the one-active DB guard (scripts/60) enforces at
+        # most one version whose latest event is 'active', so the order here
+        # must stay supersede -> create (create-first would conflict with the
+        # still-active previous champion). The two writes are adjacent (nothing
+        # slow runs between them); a create failure re-activates the previous
+        # champion below, and a process kill between the writes is repaired by
+        # reconcile_active_private_model_lineage (re-activate newest
+        # superseded) instead of the old silent bootstrap rollback.
         if active.version_row:
             await create_private_model_version_event(
                 private_model_version_id=str(active.version_row["private_model_version_id"]),
@@ -459,23 +1107,41 @@ class ResearchLabPromotionController:
                 reason="superseded_by_research_lab_image_build_promotion",
                 event_doc={"source_candidate_id": str(candidate["candidate_id"])},
             )
-        version_row, _version_event = await create_private_model_version(
-            artifact_manifest=new_artifact.to_dict(),
-            manifest_uri=new_artifact.manifest_uri,
-            source_candidate_id=str(candidate["candidate_id"]),
-            source_score_bundle_id=str(score_bundle_row["score_bundle_id"]),
-            redacted_version_doc={
-                "source": "gateway_code_edit_image_build",
-                "model_artifact_hash": new_artifact.model_artifact_hash,
-                "private_model_manifest_hash": new_artifact.manifest_hash,
-                "git_commit_sha": new_artifact.git_commit_sha,
-                "component_registry_version": new_artifact.component_registry_version,
-                "scoring_adapter_version": new_artifact.scoring_adapter_version,
-                "candidate_source_diff_hash": candidate.get("candidate_source_diff_hash"),
-            },
-            version_status="active",
-            reason="research_lab_image_build_candidate_promoted",
-        )
+        try:
+            version_row, _version_event = await create_private_model_version(
+                artifact_manifest=new_artifact.to_dict(),
+                manifest_uri=new_artifact.manifest_uri,
+                source_candidate_id=str(candidate["candidate_id"]),
+                source_score_bundle_id=str(score_bundle_row["score_bundle_id"]),
+                redacted_version_doc={
+                    "source": "gateway_code_edit_image_build",
+                    "model_artifact_hash": new_artifact.model_artifact_hash,
+                    "private_model_manifest_hash": new_artifact.manifest_hash,
+                    "git_commit_sha": new_artifact.git_commit_sha,
+                    "component_registry_version": new_artifact.component_registry_version,
+                    "scoring_adapter_version": new_artifact.scoring_adapter_version,
+                    "candidate_source_diff_hash": candidate.get("candidate_source_diff_hash"),
+                },
+                version_status="active",
+                reason="research_lab_image_build_candidate_promoted",
+            )
+        except Exception:
+            if active.version_row:
+                try:
+                    await create_private_model_version_event(
+                        private_model_version_id=str(active.version_row["private_model_version_id"]),
+                        event_type="active",
+                        version_status="active",
+                        reason="promotion_create_failed_reactivate_previous_champion",
+                        event_doc={"source_candidate_id": str(candidate["candidate_id"])},
+                    )
+                except Exception:
+                    logger.exception(
+                        "research_lab_promotion_previous_champion_reactivate_failed: version=%s "
+                        "(zero active versions until reconcile-active-lineage runs)",
+                        _short_ref(active.version_row.get("private_model_version_id")),
+                    )
+            raise
         await create_candidate_promotion_event(
             candidate_id=str(candidate["candidate_id"]),
             source_score_bundle_id=str(score_bundle_row["score_bundle_id"]),
@@ -563,6 +1229,16 @@ class ResearchLabPromotionController:
             )
         except Exception as exc:
             error_hash = canonical_hash({"error": str(exc)})
+            # Bug #29 reporting: name the head-mismatch cause explicitly so the
+            # wedge is diagnosable from events instead of an opaque error hash.
+            failure_detail: dict[str, Any] = {}
+            if isinstance(exc, RepoHeadMismatchError):
+                failure_detail = {
+                    "failure_reason": "repo_head_mismatch",
+                    "repo_head_sha_prefix": exc.head[:12],
+                    "active_manifest_git_sha_prefix": exc.expected_sha[:12],
+                    "recover_flag_env": AUTO_COMMIT_HEAD_MISMATCH_RECOVER_ENV,
+                }
             await create_private_repo_commit_event(
                 commit_status="failed",
                 branch_name=branch_name,
@@ -574,6 +1250,7 @@ class ResearchLabPromotionController:
                     "stage": "failed",
                     "error_hash": error_hash,
                     "error_class": type(exc).__name__,
+                    **failure_detail,
                 },
             )
             await create_candidate_promotion_event(
@@ -592,15 +1269,22 @@ class ResearchLabPromotionController:
                     "error_hash": error_hash,
                     "error_class": type(exc).__name__,
                     "candidate_status_preserved": "scored",
+                    **failure_detail,
                 },
             )
             logger.warning(
-                "research_lab_private_source_push_failed candidate=%s score_bundle=%s error_hash=%s",
+                "research_lab_private_source_push_failed candidate=%s score_bundle=%s error_hash=%s cause=%s",
                 _short_ref(candidate_id),
                 _short_ref(score_bundle_id),
                 error_hash,
+                failure_detail.get("failure_reason") or type(exc).__name__,
             )
-            return {"status": "failed", "reason": "private_source_push_failed", "error_hash": error_hash}
+            return {
+                "status": "failed",
+                "reason": "private_source_push_failed",
+                "error_hash": error_hash,
+                **failure_detail,
+            }
 
         await create_private_repo_commit_event(
             commit_status="pushed" if result.get("status") == "pushed" else "committed",
@@ -684,6 +1368,124 @@ class ResearchLabPromotionController:
         return {"champion_reward_status": "created", "champion_reward_id": str(row["champion_reward_id"])}
 
 
+async def reconcile_pending_champion_rewards(
+    config: ResearchLabGatewayConfig,
+    *,
+    worker_ref: str,
+    candidate_ids: Sequence[str] | None = None,
+    limit: int = 25,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Finalize champion rewards stuck at ``reward_pending_uid`` (bug #24).
+
+    A transient metagraph/UID resolution failure at promotion time leaves a
+    ``champion_reward_pending_uid`` event with no reconciler, permanently
+    losing the reward. This re-resolves the UID and creates the obligation +
+    ``champion_reward_created`` event via the normal promotion path. Designed
+    to be callable from a periodic maintenance pass (follow-up: wire into the
+    worker cycle) or the ``reconcile-champion-rewards`` admin command. UIDs
+    that still fail to resolve are reported (no event spam) and retried on the
+    next run.
+    """
+
+    pending_events = await select_many(
+        "research_lab_candidate_promotion_events",
+        columns=(
+            "promotion_event_id,candidate_id,source_score_bundle_id,"
+            "improvement_points,threshold_points,created_at"
+        ),
+        filters=(("event_type", "champion_reward_pending_uid"),),
+        order_by=(("created_at", True),),
+        limit=200,
+    )
+    wanted = {str(item) for item in candidate_ids} if candidate_ids else None
+    seen: set[str] = set()
+    results: list[dict[str, Any]] = []
+    controller = ResearchLabPromotionController(config, worker_ref=worker_ref)
+    for event in pending_events:
+        candidate_id = str(event.get("candidate_id") or "")
+        if not candidate_id or candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        if wanted is not None and candidate_id not in wanted:
+            continue
+        if len(results) >= max(1, int(limit)):
+            break
+        entry: dict[str, Any] = {
+            "candidate_id": candidate_id,
+            "pending_promotion_event_id": str(event.get("promotion_event_id") or ""),
+        }
+        created_events = await select_many(
+            "research_lab_candidate_promotion_events",
+            columns="promotion_event_id,event_type,created_at",
+            filters=(("candidate_id", candidate_id), ("event_type", "champion_reward_created")),
+            order_by=(("created_at", True),),
+            limit=1,
+        )
+        if created_events:
+            entry["status"] = "already_created"
+            entry["champion_reward_event_id"] = str(created_events[0].get("promotion_event_id") or "")
+            results.append(entry)
+            continue
+        candidate = await select_one(
+            "research_lab_candidate_evaluation_current",
+            filters=(("candidate_id", candidate_id),),
+        )
+        if not candidate:
+            entry["status"] = "candidate_not_found"
+            results.append(entry)
+            continue
+        score_bundle_id = str(
+            event.get("source_score_bundle_id")
+            or candidate.get("current_score_bundle_id")
+            or ""
+        )
+        bundle_row = (
+            await select_one(
+                "research_evaluation_score_bundle_current",
+                filters=(("score_bundle_id", score_bundle_id),),
+            )
+            if score_bundle_id
+            else None
+        )
+        score_bundle = bundle_row.get("score_bundle_doc") if isinstance(bundle_row, Mapping) else None
+        if not isinstance(score_bundle, Mapping):
+            entry["status"] = "score_bundle_not_found"
+            entry["score_bundle_id"] = score_bundle_id
+            results.append(entry)
+            continue
+        uid = await _resolve_miner_uid(str(candidate.get("miner_hotkey") or ""))
+        if uid is None:
+            entry["status"] = "uid_still_unresolved"
+            results.append(entry)
+            continue
+        entry["resolved_uid"] = int(uid)
+        if dry_run:
+            entry["status"] = "would_create_champion_reward"
+            results.append(entry)
+            continue
+        reward_status = await controller._maybe_create_champion_reward(
+            candidate=candidate,
+            score_bundle_row=bundle_row,
+            score_bundle=score_bundle,
+            improvement_points=float(event.get("improvement_points") or 0.0),
+            threshold=float(event.get("threshold_points") or 0.0),
+        )
+        entry["status"] = str(reward_status.get("champion_reward_status") or "unknown")
+        if reward_status.get("champion_reward_id"):
+            entry["champion_reward_id"] = str(reward_status["champion_reward_id"])
+        results.append(entry)
+    finalized = sum(1 for item in results if item.get("status") in {"created", "would_create_champion_reward"})
+    return {
+        "ok": True,
+        "action": "reconcile-champion-rewards",
+        "dry_run": dry_run,
+        "found_pending": len(results),
+        "finalized": finalized,
+        "results": results,
+    }
+
+
 def _load_valid_artifact(uri: str) -> PrivateModelArtifactManifest:
     artifact = PrivateModelArtifactManifest.from_mapping(load_private_artifact_manifest(uri))
     errors = validate_private_model_artifact_manifest(artifact)
@@ -764,7 +1566,23 @@ def _push_candidate_source_diff_to_repo(
         head = _run_command(["git", "rev-parse", "HEAD"], cwd=worktree, timeout_seconds=10).strip()
         active_sha = str(active_git_commit_sha or "").strip()
         if active_sha and head[: len(active_sha)] != active_sha:
-            raise RuntimeError("private source branch head does not match active model commit")
+            # Bug #29 wedge: the active manifest's sha comes from a throwaway
+            # `git init`, so after the first push the branch head never matches
+            # again and every subsequent auto-commit hard-fails here. The
+            # hard-fail is deliberately kept as the default (it is currently
+            # the accidental guard against noise-merges, §8.3); the recovery
+            # flag re-resolves against the current head and must only be
+            # enabled once the baseline health gate is live.
+            if _env_flag(AUTO_COMMIT_HEAD_MISMATCH_RECOVER_ENV):
+                logger.warning(
+                    "research_lab_auto_commit_head_mismatch_recovered: head=%s active_manifest_sha=%s "
+                    "(%s enabled; applying candidate diff against current branch head)",
+                    head[:12],
+                    active_sha[:12],
+                    AUTO_COMMIT_HEAD_MISMATCH_RECOVER_ENV,
+                )
+            else:
+                raise RepoHeadMismatchError(head=head, expected_sha=active_sha)
 
         patch_path = tmp_dir / "candidate.patch"
         patch_path.write_text(unified_diff, encoding="utf-8")

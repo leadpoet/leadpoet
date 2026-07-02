@@ -2245,13 +2245,6 @@ class ResearchLabGatewayScoringWorker:
                     score_bundle=score_bundle,
                     gate_result=gate_result,
                 )
-            elif scoring_health_gate.get("decision") == "quarantined":
-                promotion_result = await self._record_scoring_health_quarantined(
-                    candidate=candidate,
-                    score_bundle_row=bundle,
-                    score_bundle=score_bundle,
-                    scoring_health_gate=scoring_health_gate,
-                )
             else:
                 promotion_result = await self._maybe_promote_scored_candidate(
                     candidate=candidate,
@@ -2619,13 +2612,6 @@ class ResearchLabGatewayScoringWorker:
                     score_bundle=score_bundle,
                     gate_result=gate_result,
                 )
-            elif scoring_health_gate.get("decision") == "quarantined":
-                promotion_result = await self._record_scoring_health_quarantined(
-                    candidate=candidate,
-                    score_bundle_row=bundle_row,
-                    score_bundle=score_bundle,
-                    scoring_health_gate=scoring_health_gate,
-                )
             else:
                 promotion_result = await self._maybe_promote_scored_candidate(
                     candidate=candidate,
@@ -2810,61 +2796,6 @@ class ResearchLabGatewayScoringWorker:
         )
         return {"status": "rejected_public_holdout_gate"}
 
-    async def _record_scoring_health_quarantined(
-        self,
-        *,
-        candidate: Mapping[str, Any],
-        score_bundle_row: Mapping[str, Any],
-        score_bundle: Mapping[str, Any],
-        scoring_health_gate: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
-        metric = promotion_improvement_metric(score_bundle)
-        improvement_points = float(metric.improvement_points)
-        delta_lcb = float(aggregates.get("delta_lcb") or 0.0)
-        candidate_parent = str(candidate.get("parent_artifact_hash") or score_bundle.get("parent_artifact_hash") or "")
-        await create_candidate_promotion_event(
-            candidate_id=str(candidate["candidate_id"]),
-            source_score_bundle_id=str(score_bundle_row.get("score_bundle_id") or ""),
-            event_type="promotion_checked",
-            promotion_status="checked",
-            active_parent_artifact_hash=candidate_parent,
-            candidate_parent_artifact_hash=candidate_parent,
-            rolling_window_hash=str(score_bundle.get("icp_set_hash") or ""),
-            improvement_points=improvement_points,
-            threshold_points=float(self.config.improvement_threshold_points),
-            worker_ref=self.worker_ref,
-            event_doc={
-                "delta_lcb": round(delta_lcb, 6),
-                "auto_commit_enabled": self.config.auto_commit_enabled,
-                "candidate_kind": str(candidate.get("candidate_kind") or ""),
-                "decision_path": "scoring_health_quarantined",
-                "promotion_metric": metric.event_doc(),
-            },
-        )
-        await create_candidate_promotion_event(
-            candidate_id=str(candidate["candidate_id"]),
-            source_score_bundle_id=str(score_bundle_row.get("score_bundle_id") or ""),
-            event_type="scoring_health_quarantined",
-            promotion_status="rejected",
-            active_parent_artifact_hash=candidate_parent,
-            candidate_parent_artifact_hash=candidate_parent,
-            rolling_window_hash=str(score_bundle.get("icp_set_hash") or ""),
-            improvement_points=improvement_points,
-            threshold_points=float(self.config.improvement_threshold_points),
-            worker_ref=self.worker_ref,
-            event_doc={
-                "reason": "scoring_health_gate_enabled_and_failed",
-                "scoring_health_gate": dict(scoring_health_gate),
-                "scoring_health": _compact_scoring_health_doc(score_bundle.get("scoring_health")),
-                "mean_delta": round(improvement_points, 6),
-                "delta_lcb": round(delta_lcb, 6),
-                "candidate_kind": str(candidate.get("candidate_kind") or ""),
-                "promotion_metric": metric.event_doc(),
-            },
-        )
-        return {"status": "scoring_health_quarantined"}
-
     def _scoring_health_gate_result(self, score_bundle: Mapping[str, Any]) -> dict[str, Any]:
         health = score_bundle.get("scoring_health") if isinstance(score_bundle.get("scoring_health"), Mapping) else {}
         thresholds = {
@@ -2899,11 +2830,12 @@ class ResearchLabGatewayScoringWorker:
                     "threshold": round(float(threshold), 6),
                 }
             )
-        enabled = bool(self.config.scoring_health_gate_enabled)
+        configured_enabled = bool(self.config.scoring_health_gate_enabled)
         return {
             "schema_version": "1.0",
-            "enabled": enabled,
-            "decision": "quarantined" if enabled and violations else ("passed" if enabled else "observe_only"),
+            "enabled": False,
+            "configured_enabled": configured_enabled,
+            "decision": "observe_only",
             "would_quarantine": bool(violations),
             "violations": violations,
             "thresholds": {key: round(float(value), 6) for key, value in thresholds.items()},

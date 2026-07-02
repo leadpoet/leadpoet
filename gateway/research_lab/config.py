@@ -342,9 +342,9 @@ class ResearchLabGatewayConfig:
     scoring_worker_retryable_failure_retry_seconds: int = 300
     private_model_docker_global_proxy_enabled: bool = False
     scoring_worker_allow_partial_icp_window: bool = False
-    # Health gate defaults on so flake-driven scores are quarantined instead of
-    # recorded (fableanalysis §6.4); provider-error tolerance tightened 0.25→0.10.
-    scoring_health_gate_enabled: bool = True
+    # Scoring health is audit metadata only. Promotion is score-only against the
+    # stored daily baseline; provider/runtime health must not veto champions.
+    scoring_health_gate_enabled: bool = False
     scoring_health_max_reference_runtime_failure_rate: float = 0.25
     scoring_health_max_candidate_runtime_failure_rate: float = 0.25
     scoring_health_max_reference_zero_company_rate: float = 0.50
@@ -591,7 +591,7 @@ class ResearchLabGatewayConfig:
                 "RESEARCH_LAB_SCORING_ALLOW_PARTIAL_ICP_WINDOW",
                 "false",
             ),
-            scoring_health_gate_enabled=_truthy("RESEARCH_LAB_SCORING_HEALTH_GATE_ENABLED", "true"),
+            scoring_health_gate_enabled=_truthy("RESEARCH_LAB_SCORING_HEALTH_GATE_ENABLED", "false"),
             scoring_health_max_reference_runtime_failure_rate=min(
                 1.0,
                 max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_REFERENCE_RUNTIME_FAILURE_RATE", 0.25)),

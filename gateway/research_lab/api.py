@@ -58,6 +58,7 @@ from .models import (
     ResearchLabScoreBundleResponse,
     ResearchLabTicketCreateRequest,
     ResearchLabTicketResponse,
+    reject_secret_material,
 )
 from .public_activity import (
     fetch_public_loop_detail,
@@ -77,11 +78,16 @@ from .store import (
     create_score_bundle,
     create_ticket,
     create_ticket_event,
+    insert_row,
     payment_ref_exists,
     select_all,
     select_many,
     select_one,
+    update_row,
 )
+from research_lab.improvement_engine.config import ImprovementEngineConfig
+from research_lab.improvement_engine.fix_generator import sanitized_miner_opportunity
+from research_lab.improvement_engine.scanner import scan_for_issues
 
 
 logger = logging.getLogger(__name__)
@@ -927,6 +933,153 @@ async def get_research_lab_latest_evaluation_bundles(
     }
 
 
+@router.get("/engine/issues")
+async def list_research_lab_engine_issues(
+    status: str = Query(default="open", max_length=32),
+    priority: Optional[str] = Query(default=None, max_length=32),
+    limit: int = Query(default=100, ge=1, le=500),
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_internal_key(config, x_leadpoet_internal_key)
+    _require_improvement_engine_enabled()
+    filters: list[tuple[str, Any]] = [("status", status)]
+    if priority:
+        filters.append(("priority", priority))
+    rows = await select_many(
+        "engine_issues",
+        filters=tuple(filters),
+        order_by=(("last_seen_at", True),),
+        limit=limit,
+    )
+    return {"issues": [_engine_issue_public(row) for row in rows]}
+
+
+@router.get("/engine/issues/{issue_id}")
+async def get_research_lab_engine_issue(
+    issue_id: str,
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_internal_key(config, x_leadpoet_internal_key)
+    _require_improvement_engine_enabled()
+    row = await select_one("engine_issues", filters=(("id", issue_id),))
+    if not row:
+        row = await select_one("engine_issues", filters=(("issue_key", issue_id),))
+    if not row:
+        raise HTTPException(status_code=404, detail="Research Lab Engine issue not found")
+    return {"issue": _engine_issue_public(row)}
+
+
+@router.post("/engine/issues/{issue_id}/status")
+async def update_research_lab_engine_issue_status(
+    issue_id: str,
+    payload: dict[str, Any],
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_internal_key(config, x_leadpoet_internal_key)
+    _require_improvement_engine_enabled()
+    reject_secret_material(payload)
+    status = str(payload.get("status") or "").strip()
+    if status not in {"open", "in_review", "fixed", "ignored", "reopened"}:
+        raise HTTPException(status_code=400, detail="unsupported Engine issue status")
+    row = await select_one("engine_issues", filters=(("id", issue_id),))
+    if not row:
+        row = await select_one("engine_issues", filters=(("issue_key", issue_id),))
+    if not row:
+        raise HTTPException(status_code=404, detail="Research Lab Engine issue not found")
+    updated = await update_row(
+        "engine_issues",
+        {"status": status, "updated_at": datetime.now(timezone.utc).isoformat()},
+        filters=(("id", row["id"]),),
+    )
+    event = await insert_row(
+        "engine_issue_events",
+        {
+            "issue_id": row["id"],
+            "event_type": "status_changed",
+            "event_doc": {
+                "old_status": row.get("status"),
+                "new_status": status,
+                "reason": str(payload.get("reason") or "")[:500],
+            },
+        },
+    )
+    return {"issue": _engine_issue_public(updated), "event_id": event["id"]}
+
+
+@router.post("/engine/scans")
+async def run_research_lab_engine_scan(
+    payload: Optional[dict[str, Any]] = None,
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_internal_key(config, x_leadpoet_internal_key)
+    engine_config = _require_improvement_engine_enabled()
+    payload = payload or {}
+    reject_secret_material(payload)
+    result = await scan_for_issues(
+        config=engine_config,
+        dry_run=bool(payload.get("dry_run", True)),
+        persist=bool(payload.get("persist", False)),
+    )
+    return result
+
+
+@router.post("/engine/issues/{issue_id}/generate-fix")
+async def generate_research_lab_engine_fix(
+    issue_id: str,
+    payload: Optional[dict[str, Any]] = None,
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_internal_key(config, x_leadpoet_internal_key)
+    engine_config = _require_improvement_engine_enabled()
+    payload = payload or {}
+    reject_secret_material(payload)
+    row = await select_one("engine_issues", filters=(("id", issue_id),))
+    if not row:
+        row = await select_one("engine_issues", filters=(("issue_key", issue_id),))
+    if not row:
+        raise HTTPException(status_code=404, detail="Research Lab Engine issue not found")
+    fix_doc = row.get("suggested_fix_doc") if isinstance(row.get("suggested_fix_doc"), Mapping) else {}
+    response: dict[str, Any] = {
+        "issue_id": row["id"],
+        "issue_key": row["issue_key"],
+        "dry_run": bool(payload.get("dry_run", True)),
+        "auto_generate_patches_enabled": engine_config.auto_generate_patches,
+        "fix_doc": fix_doc,
+    }
+    if bool(payload.get("include_miner_opportunity", False)):
+        from research_lab.improvement_engine.models import EngineIssue
+
+        issue = EngineIssue(
+            issue_key=str(row["issue_key"]),
+            title=str(row["title"]),
+            status=str(row["status"]),
+            priority=str(row["priority"]),
+            category=str(row["category"]),
+            fingerprint=str(row["fingerprint"]),
+            first_seen_at=str(row["first_seen_at"]),
+            last_seen_at=str(row["last_seen_at"]),
+            occurrence_count=int(row.get("occurrence_count") or 0),
+            severity_score=float(row.get("severity_score") or 0),
+            confidence=float(row.get("confidence") or 0),
+            root_cause_doc=dict(row.get("root_cause_doc") or {}),
+            suggested_fix_doc=dict(fix_doc),
+            evaluator_spec_doc=dict(row.get("evaluator_spec_doc") or {}),
+            dataset_spec_doc=dict(row.get("dataset_spec_doc") or {}),
+        )
+        response["miner_opportunity"] = sanitized_miner_opportunity(issue)
+    return response
+
+
 @router.get("/benchmarks/public/latest")
 async def get_latest_public_benchmark_report():
     config = ResearchLabGatewayConfig.from_env()
@@ -1263,6 +1416,43 @@ def _require_internal_key(config: ResearchLabGatewayConfig, provided: Optional[s
         raise HTTPException(status_code=403, detail="Research Lab internal API key is not configured")
     if not provided or not secrets.compare_digest(provided, config.internal_api_key):
         raise HTTPException(status_code=401, detail="invalid Research Lab internal API key")
+
+
+def _require_improvement_engine_enabled() -> ImprovementEngineConfig:
+    config = ImprovementEngineConfig.from_env()
+    if not config.enabled:
+        raise HTTPException(status_code=403, detail="Research Lab Improvement Engine is disabled")
+    return config
+
+
+def _engine_issue_public(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row.get("id"),
+        "issue_key": row.get("issue_key"),
+        "title": row.get("title"),
+        "status": row.get("status"),
+        "priority": row.get("priority"),
+        "category": row.get("category"),
+        "fingerprint": row.get("fingerprint"),
+        "first_seen_at": row.get("first_seen_at"),
+        "last_seen_at": row.get("last_seen_at"),
+        "occurrence_count": row.get("occurrence_count"),
+        "severity_score": row.get("severity_score"),
+        "confidence": row.get("confidence"),
+        "root_cause_doc": row.get("root_cause_doc") if isinstance(row.get("root_cause_doc"), Mapping) else {},
+        "suggested_fix_doc": row.get("suggested_fix_doc") if isinstance(row.get("suggested_fix_doc"), Mapping) else {},
+        "evaluator_spec_doc": row.get("evaluator_spec_doc") if isinstance(row.get("evaluator_spec_doc"), Mapping) else {},
+        "dataset_spec_doc": row.get("dataset_spec_doc") if isinstance(row.get("dataset_spec_doc"), Mapping) else {},
+        "linked_trace_ids": row.get("linked_trace_ids") or [],
+        "linked_score_bundle_hashes": row.get("linked_score_bundle_hashes") or [],
+        "linked_run_ids": row.get("linked_run_ids") or [],
+        "linked_ticket_ids": row.get("linked_ticket_ids") or [],
+        "created_pr_url": row.get("created_pr_url"),
+        "created_candidate_id": row.get("created_candidate_id"),
+        "created_by_engine_version": row.get("created_by_engine_version"),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
 
 
 def _enforce_openrouter_key_registration_rate_limit(miner_hotkey: str) -> None:

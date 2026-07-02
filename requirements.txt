@@ -42,6 +42,10 @@ arweave-python-client>=1.0.19
 # Monitoring and metrics
 prometheus_client>=0.19.0
 structlog>=23.2.0
+langfuse>=3,<4
+opentelemetry-api>=1.25.0
+opentelemetry-sdk>=1.25.0
+opentelemetry-exporter-otlp-proto-http>=1.25.0
 
 # Retry and resilience
 tenacity>=8.2.0

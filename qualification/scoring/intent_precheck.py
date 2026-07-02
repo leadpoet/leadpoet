@@ -606,6 +606,31 @@ async def llm_classify_evidence_type(text: str) -> Optional[str]:
                             continue
                         return None
                     body = await resp.json()
+                    # trajectoryimprovements.md P1: capture the evidence-type
+                    # classification exchange (label-producing call).
+                    try:
+                        from research_lab.openrouter_telemetry import (
+                            record_openrouter_trace,
+                        )
+
+                        record_openrouter_trace(
+                            channel="qualification",
+                            purpose="classify_evidence_type",
+                            stage="scorer_judgment",
+                            model_id="google/gemini-2.5-flash-lite",
+                            request_body={
+                                "model": "google/gemini-2.5-flash-lite",
+                                "messages": [
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": user_prompt},
+                                ],
+                                "max_tokens": 32,
+                                "temperature": 0,
+                            },
+                            response_doc=body,
+                        )
+                    except Exception:  # noqa: BLE001 - capture never affects the call
+                        pass
                     raw = body["choices"][0]["message"]["content"] or ""
                     norm = (
                         raw.strip().strip("\"'`. ").upper()
@@ -1094,11 +1119,23 @@ async def _call_openrouter(
       - on success:                ``({"verdict": ..., "reason": ...}, "")``
       - on transient failure:      ``(None, "<error_kind>")`` — caller fails-open
     """
+    # trajectoryimprovements.md P8 (dated decision 2026-07-02): the explicit
+    # ``reasoning: {"exclude": true}`` cost cut is REMOVED — this pre-gate's
+    # verdicts are training labels and their reasoning is corpus signal.
+    # Reasoning is requested per the fleet default
+    # (RESEARCH_LAB_LLM_INCLUDE_REASONING, default on) with the standard
+    # retry-without-reasoning fallback; flip that env to re-instate the cost
+    # cut fleet-wide rather than editing this body.
+    from research_lab.openrouter_telemetry import (
+        include_reasoning_default,
+        reasoning_request_unsupported,
+        record_openrouter_trace,
+    )
+
     body = {
         "model": MODEL,
         "temperature": 0,
         "max_tokens": 400,
-        "reasoning": {"exclude": True},
         "messages": [
             {"role": "system", "content": _SYS_MESSAGE},
             {"role": "user",   "content": prompt},
@@ -1112,6 +1149,9 @@ async def _call_openrouter(
             "zdr": True,
         },
     }
+    request_reasoning = include_reasoning_default()
+    if request_reasoning:
+        body["include_reasoning"] = True
     last_err = "retries_exhausted"
     for attempt in range(NUM_RETRIES):
         try:
@@ -1135,12 +1175,30 @@ async def _call_openrouter(
                 last_err = "rate_limited_429"
                 continue
             if r.status_code != 200:
+                if request_reasoning and reasoning_request_unsupported(
+                    r.status_code, r.text
+                ):
+                    request_reasoning = False
+                    body.pop("include_reasoning", None)
+                    last_err = "reasoning_request_dropped"
+                    continue
                 logger.warning(
                     "Intent pre-check HTTP %s  body=%s  model=%s — fail-open",
                     r.status_code, r.text[:200], MODEL,
                 )
                 return None, f"http_{r.status_code}"
             resp = r.json()
+            try:
+                record_openrouter_trace(
+                    channel="qualification",
+                    purpose="intent_precheck",
+                    stage="scorer_judgment",
+                    model_id=MODEL,
+                    request_body=body,
+                    response_doc=resp,
+                )
+            except Exception:  # noqa: BLE001 - capture never affects the gate
+                pass
             content = (resp.get("choices") or [{}])[0].get("message", {}).get("content", "")
             try:
                 parsed = json.loads(content)

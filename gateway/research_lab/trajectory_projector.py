@@ -8,12 +8,15 @@ into the v5 corpus tables created by ``scripts/27-research-lab-v5-schemas.sql``:
 * ``research_trajectories``        -- one envelope row per run (no events array)
 * ``research_trajectory_events``   -- append-only canonical event log
 * ``research_lab_results_ledger``  -- one row per (run x drafted node)
-* ``execution_traces``             -- pointer aggregation rows: one "engine"
-  row per run (non-node-attributed raw LLM trace pointers) plus one row per
-  node with node-scoped pointers (draft-stage raw traces, in-container
-  sourcing-model trace refs) -- fablefollowup.md item 5.5
-* ``evidence_bundles``             -- one row per scored candidate node
-  pointing at its score bundle + per-ICP evidence summary (numbers/refs only)
+* ``execution_traces``             -- pointer/metadata aggregation rows: one
+  "engine" row per run (non-node-attributed raw LLM trace pointers and
+  metadata-only reasoning captures) plus one row per node with node-scoped
+  pointers (draft-stage raw traces, in-container sourcing-model trace refs),
+  plus score-bundle fallback rows for scored bundles that are not linked to a
+  node -- fablefollowup.md item 5.5
+* ``evidence_bundles``             -- one row per scored candidate node (or
+  score-bundle fallback) pointing at its score bundle + per-ICP evidence
+  summary (numbers/refs only)
 
 Design facts this module encodes (verified against the code/schemas):
 
@@ -91,6 +94,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from research_lab.axis_provenance import axis_rollup, provenance_for_stage
 from research_lab.canonical import coerce_iso_z, sha256_json, utc_now_iso
 from research_lab.schema_validation import validate_schema_record
 from research_lab.trajectory_corpus import (
@@ -256,6 +260,11 @@ class GatewayProjectorStore:
 
         return await store.insert_row(table, row)
 
+    async def update_row(self, table: str, values: dict[str, Any], *, filters: Any):
+        from gateway.research_lab import store
+
+        return await store.update_row(table, values, filters=filters)
+
 
 def _deterministic_uuid(*parts: Any) -> str:
     from gateway.research_lab.store import deterministic_uuid
@@ -277,10 +286,24 @@ def execution_trace_id_for_node(run_id: str, node_id: str) -> str:
     return _deterministic_uuid("execution_trace", str(run_id), "node", str(node_id))
 
 
+def execution_trace_id_for_score_bundle(run_id: str, score_bundle_id: str) -> str:
+    """Deterministic trace row for a score bundle with no node linkage."""
+    return _deterministic_uuid(
+        "execution_trace", str(run_id), "score_bundle", str(score_bundle_id)
+    )
+
+
 def evidence_bundle_id_for_node(run_id: str, node_id: str, score_bundle_id: str) -> str:
     """Deterministic ``evidence_bundles.bundle_id`` for a scored node."""
     return _deterministic_uuid(
         "evidence_bundle", str(run_id), str(node_id), str(score_bundle_id)
+    )
+
+
+def evidence_bundle_id_for_score_bundle(run_id: str, score_bundle_id: str) -> str:
+    """Deterministic evidence row for a score bundle with no node linkage."""
+    return _deterministic_uuid(
+        "evidence_bundle", str(run_id), "score_bundle", str(score_bundle_id)
     )
 
 
@@ -553,15 +576,145 @@ def _iter_raw_trace_pointers(value: Any, model: Any = None):
             yield from _iter_raw_trace_pointers(item, model)
 
 
+def _looks_like_provider_usage_item(value: Mapping[str, Any]) -> bool:
+    return (
+        isinstance(value.get("raw_trace_ref"), Mapping)
+        or isinstance(value.get("reasoning_logs"), Mapping)
+        or isinstance(value.get("reasoning_capture"), Mapping)
+        or str(value.get("provider") or "").lower() == "openrouter"
+        or bool(value.get("response_id"))
+    )
+
+
+def _iter_provider_usage_items(value: Any, model: Any = None):
+    """Yield provider-usage-shaped mappings, including nested retry attempts."""
+    if isinstance(value, Mapping):
+        current_model = value.get("model") or model
+        if _looks_like_provider_usage_item(value):
+            yield value, current_model
+        for key, item in value.items():
+            if str(key) in {"raw_trace_ref", "reasoning_logs", "reasoning_capture"}:
+                continue
+            yield from _iter_provider_usage_items(item, current_model)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_provider_usage_items(item, model)
+
+
+def _reasoning_hashes_from_logs(logs: Mapping[str, Any]) -> list[str]:
+    hashes: list[str] = []
+    raw_hashes = logs.get("reasoning_hashes")
+    if isinstance(raw_hashes, Sequence) and not isinstance(raw_hashes, (str, bytes, bytearray)):
+        hashes.extend(str(item) for item in raw_hashes if str(item))
+    for key in ("reasoning_hash", "reasoning_details_hash"):
+        if logs.get(key):
+            hashes.append(str(logs[key]))
+    choices = logs.get("choices")
+    if isinstance(choices, Sequence) and not isinstance(choices, (str, bytes, bytearray)):
+        for choice in choices:
+            if not isinstance(choice, Mapping):
+                continue
+            for key in ("reasoning_hash", "reasoning_details_hash"):
+                if choice.get(key):
+                    hashes.append(str(choice[key]))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in hashes:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item[:256])
+    return deduped[:32]
+
+
+def _reasoning_fields_from_logs(logs: Mapping[str, Any]) -> list[str]:
+    fields: set[str] = set()
+    raw_fields = logs.get("fields_present")
+    if isinstance(raw_fields, Sequence) and not isinstance(raw_fields, (str, bytes, bytearray)):
+        fields.update(str(item)[:80] for item in raw_fields if str(item))
+    for key in ("reasoning", "reasoning_details"):
+        if logs.get(key) is not None:
+            fields.add(key)
+    choices = logs.get("choices")
+    if isinstance(choices, Sequence) and not isinstance(choices, (str, bytes, bytearray)):
+        for choice in choices:
+            if not isinstance(choice, Mapping):
+                continue
+            choice_fields = choice.get("fields_present")
+            if isinstance(choice_fields, Sequence) and not isinstance(choice_fields, (str, bytes, bytearray)):
+                fields.update(str(item)[:80] for item in choice_fields if str(item))
+            for key in ("reasoning", "reasoning_details"):
+                if choice.get(key) is not None:
+                    fields.add(key)
+    return sorted(fields)
+
+
+def _provider_reasoning_token_count(item: Mapping[str, Any], capture: Mapping[str, Any]) -> int | None:
+    for holder in (capture, item, item.get("generation_stats")):
+        if not isinstance(holder, Mapping):
+            continue
+        for key in ("reasoning_token_count", "native_tokens_reasoning", "reasoning_tokens", "tokens_reasoning"):
+            if holder.get(key) is not None:
+                return max(0, _i(holder.get(key)))
+        details = holder.get("completion_tokens_details")
+        if isinstance(details, Mapping) and details.get("reasoning_tokens") is not None:
+            return max(0, _i(details.get("reasoning_tokens")))
+    return None
+
+
+def _reasoning_capture_doc(item: Mapping[str, Any], *, raw_trace_ref_present: bool) -> dict[str, Any]:
+    logs = item.get("reasoning_logs") if isinstance(item.get("reasoning_logs"), Mapping) else {}
+    capture = item.get("reasoning_capture") if isinstance(item.get("reasoning_capture"), Mapping) else {}
+    fields_present = list(capture.get("fields_present") or []) if capture else []
+    if not fields_present and isinstance(logs, Mapping):
+        fields_present = _reasoning_fields_from_logs(logs)
+    hashes = list(capture.get("reasoning_hashes") or []) if capture else []
+    if not hashes and isinstance(logs, Mapping):
+        hashes = _reasoning_hashes_from_logs(logs)
+    returned = bool(capture.get("returned")) if capture else bool(logs)
+    requested = bool(capture.get("requested")) if capture else (returned or bool(item.get("reasoning_request_dropped")))
+    token_count = _provider_reasoning_token_count(item, capture)
+    storage_state = (
+        "raw_trace_ref"
+        if raw_trace_ref_present
+        else ("metadata_only" if returned else ("requested_but_absent" if requested else "not_requested"))
+    )
+    storage_policy = str(
+        capture.get("storage_policy")
+        or (logs.get("storage_policy") if isinstance(logs, Mapping) else "")
+        or ("raw_trace_s3_ref" if raw_trace_ref_present else "no_reasoning_returned")
+    )[:160]
+    doc: dict[str, Any] = {
+        "requested": requested,
+        "returned": returned,
+        "fields_present": [str(field)[:80] for field in fields_present][:16],
+        "reasoning_hashes": [str(item_hash)[:256] for item_hash in hashes][:32],
+        "reasoning_token_count": token_count,
+        "storage_state": storage_state,
+        "storage_policy": storage_policy,
+        "raw_trace_ref_present": raw_trace_ref_present,
+    }
+    if item.get("reasoning_request_dropped") or capture.get("request_dropped"):
+        doc["request_dropped"] = True
+    drop_hash = item.get("reasoning_effort_drop_error_hash") or capture.get("drop_error_hash")
+    if drop_hash:
+        doc["drop_error_hash"] = str(drop_hash)[:256]
+    effort = item.get("requested_reasoning_effort") or capture.get("requested_reasoning_effort")
+    if effort:
+        doc["requested_reasoning_effort"] = str(effort)[:80]
+    return sanitize_capture_payload(doc)
+
+
 def _collect_engine_trace_calls(
     loop_events: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     """Engine-side raw LLM trace pointers grouped by stage/iteration/attempt.
 
-    One ``calls`` entry per distinct ``{s3_ref, sha256}`` pointer, tagged with
-    the emitting live event's stage (event_type), iteration, node and seq so
-    the run's execution can be replayed pointer-by-pointer.  Pointers only --
-    never request/response content.
+    One ``calls`` entry per distinct ``{s3_ref, sha256}`` pointer or
+    metadata-only reasoning capture, tagged with the emitting live event's
+    stage (event_type), iteration, node and seq so the run's execution can be
+    replayed pointer-by-pointer.  Pointers/hashes/metadata only -- never raw
+    request/response/reasoning content.
     """
     calls: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -570,33 +723,58 @@ def _collect_engine_trace_calls(
         stage = str(row.get("event_type") or "unknown_stage")
         node_id = str(row.get("node_id") or "") or None
         attempt = 0
-        for pointer, model in _iter_raw_trace_pointers(
+        for item, model in _iter_provider_usage_items(
             [row.get("provider_usage"), doc]
         ):
-            s3_ref = str(pointer.get("s3_ref") or "")
-            sha256 = str(pointer.get("sha256") or "")
-            if not s3_ref and not sha256:
+            pointer = item.get("raw_trace_ref") if isinstance(item.get("raw_trace_ref"), Mapping) else {}
+            s3_ref = str(pointer.get("s3_ref") or "") if isinstance(pointer, Mapping) else ""
+            sha256 = str(pointer.get("sha256") or "") if isinstance(pointer, Mapping) else ""
+            reasoning_logs = item.get("reasoning_logs") if isinstance(item.get("reasoning_logs"), Mapping) else {}
+            if not s3_ref and not sha256 and not reasoning_logs:
                 continue
-            key = (s3_ref, sha256)
+            call_stage = str(item.get("call_stage") or stage or "unknown_stage")
+            call_iteration = _i(item.get("loop_iteration"), _i(doc.get("iteration")))
+            key = (
+                "raw" if (s3_ref or sha256) else "metadata",
+                s3_ref,
+                sha256,
+                str(row.get("event_id") or ""),
+                str(item.get("response_id") or ""),
+                call_stage,
+            )
             if key in seen:
                 continue
             seen.add(key)
             attempt += 1
+            raw_trace_ref_present = bool(s3_ref or sha256)
+            # P11: emitter/teacher/purpose are derived per call from the
+            # auditable stage mapping — fixed engine stages are code-emitted
+            # (axis-B); only source-inspection rounds are model-emitted.
+            provenance = provenance_for_stage(call_stage)
             calls.append(
                 sanitize_capture_payload(
                     {
-                        "call_emitter": "model",
-                        "call_kind": "engine_raw_trace",
-                        "stage": stage[:128],
-                        "iteration": _i(doc.get("iteration")),
+                        "call_emitter": provenance["call_emitter"],
+                        "purpose": provenance["purpose"] or call_stage[:128],
+                        "component": provenance["component"],
+                        "call_kind": "engine_raw_trace" if raw_trace_ref_present else "engine_reasoning_metadata",
+                        "stage": call_stage[:128],
+                        "iteration": call_iteration,
                         "attempt": attempt,
                         "node_id": node_id,
                         "live_event_id": str(row.get("event_id") or ""),
                         "live_seq": _i(row.get("seq")),
                         "model": (str(model or "") or "unknown")[:128],
+                        "provider": str(item.get("provider") or "openrouter")[:80],
+                        "response_id": str(item.get("response_id") or "")[:160],
                         "s3_ref": s3_ref,
                         "sha256": sha256,
-                        "teacher_model_flag": False,
+                        "storage_state": "raw_trace_ref" if raw_trace_ref_present else "metadata_only",
+                        "reasoning_capture": _reasoning_capture_doc(
+                            item,
+                            raw_trace_ref_present=raw_trace_ref_present,
+                        ),
+                        "teacher_model_flag": provenance["teacher_model_flag"],
                     }
                 )
             )
@@ -635,21 +813,42 @@ def _collect_incontainer_calls(
                 key = (s3_ref, sha256)
                 if key not in seen:
                     seen.add(key)
-                    calls.append(
-                        sanitize_capture_payload(
-                            {
-                                "call_emitter": "code",
-                                "call_kind": "incontainer_trace",
-                                "icp_ref": (row_icp or "unknown_icp")[:256],
-                                "s3_ref": s3_ref,
-                                "sha256": sha256,
-                                "call_count": max(
-                                    0, _i(value.get("incontainer_trace_call_count"))
-                                ),
-                                "teacher_model_flag": False,
-                            }
-                        )
+                    # P11 (amended): the in-container champion pipeline is
+                    # axis-B by construction (v5 §8.3) — derived from the
+                    # auditable mapping, not a per-stream constant.
+                    incontainer_provenance = provenance_for_stage(
+                        "incontainer_model_runtime"
                     )
+                    entry = {
+                        "call_emitter": incontainer_provenance["call_emitter"],
+                        "purpose": incontainer_provenance["purpose"],
+                        "component": incontainer_provenance["component"],
+                        "stage": "incontainer_model_runtime",
+                        "call_kind": "incontainer_trace",
+                        "icp_ref": (row_icp or "unknown_icp")[:256],
+                        "s3_ref": s3_ref,
+                        "sha256": sha256,
+                        "call_count": max(
+                            0, _i(value.get("incontainer_trace_call_count"))
+                        ),
+                        "teacher_model_flag": incontainer_provenance[
+                            "teacher_model_flag"
+                        ],
+                    }
+                    # P13: truncated captures are flagged and filterable.
+                    if value.get("incontainer_trace_truncated_count"):
+                        entry["truncated"] = True
+                        entry["truncated_call_count"] = max(
+                            0, _i(value.get("incontainer_trace_truncated_count"))
+                        )
+                    # P5: dropped captures stay visible (and countable) in the
+                    # corpus instead of masquerading as populated rows.
+                    if value.get("incontainer_trace_dropped"):
+                        entry["dropped"] = True
+                        entry["dropped_call_count"] = max(
+                            0, _i(value.get("incontainer_trace_dropped_call_count"))
+                        )
+                    calls.append(sanitize_capture_payload(entry))
             for item in value.values():
                 _walk(item, row_icp)
         elif isinstance(value, (list, tuple)):
@@ -657,6 +856,140 @@ def _collect_incontainer_calls(
                 _walk(item, icp_ref)
 
     _walk(bundle_row, None)
+    return calls
+
+
+def _collect_judge_verdicts(
+    bundle_row: Mapping[str, Any] | None,
+    *,
+    candidate_id: str | None = None,
+    score_bundle_id: str | None = None,
+    scorer_trace_refs: Mapping[str, Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """P2/P12: scorer judgment trace pointers as first-class judge verdicts.
+
+    Sources, deduped by ``(s3_ref, sha256)``:
+
+    * per-ICP bundle rows carrying ``scorer_trace_ref`` (the P12 passthrough);
+    * the scored event doc's ``scorer_trace_refs`` map (``{icp_ref:
+      {s3_ref, sha256}}``) — the only source for pre-P12 historical rows.
+
+    Pointer/metadata only; the structured verdict content lives in the S3
+    scorer trace doc.
+    """
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(icp_ref: str, s3_ref: str, sha256: str, source: str) -> None:
+        if not s3_ref and not sha256:
+            return
+        key = (s3_ref, sha256)
+        if key in seen:
+            return
+        seen.add(key)
+        entries.append(
+            sanitize_capture_payload(
+                {
+                    "verdict_kind": "scorer_judgment_trace",
+                    "icp_ref": (icp_ref or "unknown_icp")[:256],
+                    "s3_ref": s3_ref,
+                    "sha256": sha256,
+                    "candidate_ref": (
+                        f"candidate:{candidate_id}" if candidate_id else None
+                    ),
+                    "score_bundle_ref": (
+                        _score_bundle_ref(score_bundle_id) if score_bundle_id else None
+                    ),
+                    "is_reference_model": False,
+                    "stage": "scorer_judgment",
+                    "source": source,
+                    "storage_state": "raw_trace_ref" if s3_ref else "metadata_only",
+                    "teacher_model_flag": provenance_for_stage("scorer_judgment")[
+                        "teacher_model_flag"
+                    ],
+                }
+            )
+        )
+
+    for row in _bundle_per_icp_rows(bundle_row):
+        _add(
+            str(row.get("icp_ref") or row.get("icp_hash") or ""),
+            str(row.get("scorer_trace_ref") or ""),
+            str(row.get("scorer_trace_sha256") or ""),
+            "per_icp_row",
+        )
+    for icp_ref, pointer in (scorer_trace_refs or {}).items():
+        if isinstance(pointer, Mapping):
+            _add(
+                str(icp_ref),
+                str(pointer.get("s3_ref") or ""),
+                str(pointer.get("sha256") or ""),
+                "scored_event",
+            )
+    return entries
+
+
+def _collect_build_diagnostic_calls(
+    loop_events: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """P4: build-failure diagnostic artifact pointers as corpus calls.
+
+    Recursively scans event docs for ``diagnostic_artifact_uri`` /
+    ``diagnostic_artifact_hash`` (bad diff, stderr/stdout, exit code live in
+    the S3 artifact — never copied here). Dedupes by ``(s3_ref, sha256)``.
+    """
+    calls: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in sorted(loop_events, key=lambda item: _i(item.get("seq"))):
+        doc = _doc(row)
+        node_id = str(row.get("node_id") or "") or None
+
+        def _walk(value: Any, iteration: int) -> None:
+            if isinstance(value, Mapping):
+                row_iteration = _i(value.get("iteration"), iteration)
+                s3_ref = str(value.get("diagnostic_artifact_uri") or "")
+                sha256 = str(value.get("diagnostic_artifact_hash") or "")
+                if s3_ref or sha256:
+                    key = (s3_ref, sha256)
+                    if key not in seen:
+                        seen.add(key)
+                        target_files = value.get("target_files") or doc.get("target_files") or []
+                        if not isinstance(target_files, Sequence) or isinstance(
+                            target_files, (str, bytes)
+                        ):
+                            target_files = []
+                        calls.append(
+                            sanitize_capture_payload(
+                                {
+                                    "call_emitter": "code",
+                                    "call_kind": "build_diagnostic_artifact",
+                                    "artifact_kind": "code_build_failure",
+                                    "s3_ref": s3_ref,
+                                    "sha256": sha256,
+                                    "node_id": node_id,
+                                    "iteration": row_iteration,
+                                    "target_files": [
+                                        str(path)[:200] for path in list(target_files)[:16]
+                                    ],
+                                    "live_event_id": str(row.get("event_id") or ""),
+                                    "live_seq": _i(row.get("seq")),
+                                    "storage_state": (
+                                        "raw_trace_ref" if s3_ref else "metadata_only"
+                                    ),
+                                    "diagnostic_write_failed": bool(
+                                        value.get("diagnostic_artifact_error")
+                                    ),
+                                    "teacher_model_flag": False,
+                                }
+                            )
+                        )
+                for item in value.values():
+                    _walk(item, row_iteration)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    _walk(item, iteration)
+
+        _walk(doc, _i(doc.get("iteration")))
     return calls
 
 
@@ -715,6 +1048,22 @@ def _per_icp_snapshot(row: Mapping[str, Any]) -> dict[str, Any]:
         "candidate_company_score_count": _score_count(row, "candidate_company_scores"),
         "base_company_score_count": _score_count(row, "base_company_scores"),
     }
+    # P14: a zero-company ICP is a first-class negative example — record the
+    # empty-output judgment context instead of leaving the row ambiguous.
+    if row.get("sourced_zero_no_error"):
+        snapshot["sourced_zero_no_error"] = True
+        snapshot["judgment_context"] = "candidate_sourced_zero_companies"
+    # P12 dense reward: per-claim L0 verdicts (check ids/statuses only) and
+    # the per-ICP scorer judgment pointer become corpus-reachable evidence.
+    scorer_ref = row.get("scorer_trace_ref")
+    if isinstance(scorer_ref, str) and scorer_ref.strip():
+        snapshot["scorer_trace_ref"] = scorer_ref.strip()
+        snapshot["scorer_trace_sha256"] = str(row.get("scorer_trace_sha256") or "")
+    l0_findings = row.get("l0_findings")
+    if isinstance(l0_findings, Sequence) and not isinstance(l0_findings, (str, bytes)):
+        bounded = [dict(item) for item in l0_findings if isinstance(item, Mapping)][:64]
+        if bounded:
+            snapshot["l0_findings"] = bounded
     incontainer_ref = row.get("incontainer_trace_ref")
     if isinstance(incontainer_ref, str) and incontainer_ref.strip():
         snapshot["incontainer_trace_ref"] = incontainer_ref.strip()
@@ -723,6 +1072,15 @@ def _per_icp_snapshot(row: Mapping[str, Any]) -> dict[str, Any]:
         )
         snapshot["incontainer_trace_call_count"] = max(
             0, _i(row.get("incontainer_trace_call_count"))
+        )
+    elif row.get("incontainer_trace_dropped"):
+        # P5: dropped in-container captures stay visible in evidence snapshots.
+        snapshot["incontainer_trace_dropped"] = True
+        snapshot["incontainer_trace_dropped_call_count"] = max(
+            0, _i(row.get("incontainer_trace_dropped_call_count"))
+        )
+        snapshot["incontainer_trace_sha256"] = str(
+            row.get("incontainer_trace_sha256") or ""
         )
     return snapshot
 
@@ -794,13 +1152,113 @@ def _eval_version_doc(bundle_row: Mapping[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+def _score_bundle_artifact_hash(
+    bundle_row: Mapping[str, Any] | None, score_bundle_id: str
+) -> str:
+    """Best available artifact hash for a score-bundle-only trace row."""
+    doc = _bundle_doc(bundle_row)
+    row = bundle_row if isinstance(bundle_row, Mapping) else {}
+    for key in (
+        "candidate_artifact_hash",
+        "private_model_manifest_hash",
+        "candidate_patch_hash",
+        "score_bundle_hash",
+    ):
+        value = row.get(key) or doc.get(key)
+        if value:
+            return str(value)
+    return sha256_json({"score_bundle_artifact_unavailable": str(score_bundle_id)})
+
+
+def _score_bundle_execution_status(bundle_row: Mapping[str, Any] | None) -> str:
+    """Map score-bundle lifecycle states onto execution_traces statuses."""
+    if not isinstance(bundle_row, Mapping):
+        return "timeout"
+    status = str(
+        bundle_row.get("bundle_status")
+        or bundle_row.get("current_event_status")
+        or bundle_row.get("current_event_type")
+        or ""
+    ).lower()
+    if status in {"failed", "rejected", "tombstoned"}:
+        return "crash"
+    if status in {"scored", "verified"}:
+        return "completed"
+    doc = _bundle_doc(bundle_row)
+    if bundle_row.get("score_bundle_hash") or doc.get("score_bundle_hash"):
+        return "completed"
+    return "timeout"
+
+
+def _score_bundle_total_cost_usd(bundle_row: Mapping[str, Any] | None) -> float:
+    summary = _aggregates_summary(bundle_row)
+    if summary.get("total_cost_usd") is not None:
+        return _f(summary.get("total_cost_usd"))
+    doc = _bundle_doc(bundle_row)
+    for holder in (doc.get("aggregates"), doc, bundle_row):
+        if isinstance(holder, Mapping) and holder.get("total_cost_usd") is not None:
+            return _f(holder.get("total_cost_usd"))
+    return 0.0
+
+
+def _trace_role(bundle_row: Mapping[str, Any] | None, default: str = "candidate") -> str:
+    """P15: derive the execution-trace role from the real arm.
+
+    Bundles (or their docs) may stamp ``evaluation_role`` as
+    champion/candidate/shadow/baseline_arm/reference; a stored-daily-baseline
+    reference evaluation projects as ``baseline_arm``. Unknown/absent → the
+    caller's default — but the value is data-driven, never a per-stream
+    constant, so future champion/shadow projection streams label correctly.
+    """
+    doc = _bundle_doc(bundle_row)
+    for holder in (bundle_row or {}, doc, doc.get("aggregates") or {}):
+        if not isinstance(holder, Mapping):
+            continue
+        role = str(holder.get("evaluation_role") or "").strip()
+        if role in EXECUTION_TRACE_ROLES:
+            return role
+    aggregates = doc.get("aggregates") if isinstance(doc.get("aggregates"), Mapping) else {}
+    if str(aggregates.get("reference_evaluation_mode") or "") == "stored_daily_baseline_reference":
+        return "baseline_arm"
+    return default
+
+
 def _node_execution_status(state: "_NodeState") -> str:
     """Map node lifecycle onto execution_traces' completed/crash/timeout CHECK."""
     if state.build_failed_row is not None and state.build_passed_row is None:
         return "crash"
+    if state.scoring_crashed and not state.score_bundle_id:
+        # P14: a crashed scoring is a crash row, not an invisible node.
+        return "crash"
     if state.gate_doc:
         return "completed"
     return "timeout"  # built-but-never-scored, or drafted-but-never-built
+
+
+def _execution_trace_trajectory_id_enabled() -> bool:
+    """P18: include the explicit ``trajectory_id`` join key on execution trace
+    rows. Requires the scripts/64 column — leave off until applied (an unknown
+    column fails the insert)."""
+    return os.getenv(
+        "RESEARCH_LAB_EXECUTION_TRACE_TRAJECTORY_ID_ENABLED", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _run_summary_contract_enforced() -> bool:
+    """P14 / v5 §8.3: when on, a terminal loop event WITHOUT the run-summary
+    block classifies the run as crash — absence of the summary IS the crash
+    detector. Default off until the fleet has emitted summaries long enough
+    that historical rows are the exception."""
+    return os.getenv(
+        "RESEARCH_LAB_RUN_SUMMARY_CONTRACT_ENFORCED", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _terminal_run_summary(terminal_row: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    if terminal_row is None:
+        return None
+    summary = _doc(terminal_row).get("run_summary")
+    return summary if isinstance(summary, Mapping) and summary else None
 
 
 def _engine_execution_status(
@@ -808,6 +1266,12 @@ def _engine_execution_status(
 ) -> str:
     terminal_type = str(terminal_row.get("event_type") or "") if terminal_row else ""
     if queue_status == "completed" or terminal_type == "loop_completed":
+        if (
+            _run_summary_contract_enforced()
+            and terminal_row is not None
+            and _terminal_run_summary(terminal_row) is None
+        ):
+            return "crash"
         return "completed"
     if queue_status == "failed" or terminal_type == "loop_failed":
         return "crash"
@@ -822,6 +1286,7 @@ def _build_corpus_trace_rows(
     nodes: Mapping[str, "_NodeState"],
     node_order: Sequence[str],
     engine_calls: Sequence[Mapping[str, Any]],
+    build_diagnostic_calls: Sequence[Mapping[str, Any]] = (),
     bundles_by_id: Mapping[str, Mapping[str, Any]],
     reflections_by_node: Mapping[str, Sequence[Mapping[str, Any]]],
     queue_status: str,
@@ -839,7 +1304,11 @@ def _build_corpus_trace_rows(
       exists) OR node-attributed trace pointers exist;
     * evidence row -- written iff the node was scored; ``snapshots`` falls
       back to a single score-bundle summary entry when the bundle doc carries
-      no per-ICP rows (scripts/27 CHECKs snapshots non-empty).
+      no per-ICP rows (scripts/27 CHECKs snapshots non-empty);
+    * score-bundle fallback row -- written iff a score bundle exists for the
+      run but no scored node claimed it.  This covers late/reused/manual
+      scoring paths whose rich bundle data would otherwise be present in the
+      source table but absent from the v5 corpus pointer tables.
     """
     execution_trace_rows: list[dict[str, Any]] = []
     evidence_bundle_rows: list[dict[str, Any]] = []
@@ -855,6 +1324,7 @@ def _build_corpus_trace_rows(
         "",
     ) or sha256_json({"icp_set_hash_unavailable_for_run": run_id})
     first_bundle_id = next(iter(bundles_by_id), "")
+    used_score_bundle_ids: set[str] = set()
 
     for node_id in node_order:
         state = nodes[node_id]
@@ -862,8 +1332,25 @@ def _build_corpus_trace_rows(
         node_calls = [
             dict(call) for call in engine_calls if call.get("node_id") == node_id
         ]
+        node_diagnostic_calls = [
+            dict(call)
+            for call in build_diagnostic_calls
+            if call.get("node_id") == node_id
+        ]
         incontainer_calls = _collect_incontainer_calls(bundle_row)
-        if not state.score_bundle_id and not node_calls and not incontainer_calls:
+        judge_verdicts = _collect_judge_verdicts(
+            bundle_row,
+            candidate_id=state.candidate_id,
+            score_bundle_id=state.score_bundle_id,
+            scorer_trace_refs=state.scorer_trace_refs,
+        )
+        if (
+            not state.score_bundle_id
+            and not node_calls
+            and not incontainer_calls
+            and not node_diagnostic_calls
+            and not state.scoring_crashed
+        ):
             continue  # nothing to point at for this node
         trace_id = execution_trace_id_for_node(run_id, node_id)
         anchor_row = state.build_passed_row or state.build_failed_row or state.drafted_row
@@ -882,6 +1369,7 @@ def _build_corpus_trace_rows(
         )
 
         if state.score_bundle_id:
+            used_score_bundle_ids.add(state.score_bundle_id)
             score_bundle_ref = _score_bundle_ref(state.score_bundle_id)
             outputs_ref = score_bundle_ref
             evidence_id = evidence_bundle_id_for_node(
@@ -998,7 +1486,20 @@ def _build_corpus_trace_rows(
                 ),
                 "engine_call_count": len(node_calls),
                 "incontainer_trace_count": len(incontainer_calls),
+                "build_diagnostic_count": len(node_diagnostic_calls),
+                "judge_verdict_count": len(judge_verdicts),
                 "reflection_count": len(reflections_by_node.get(node_id, ())),
+                **(
+                    {
+                        "scoring_crashed": True,
+                        "scoring_failure_event_type": state.scoring_failure_event_type,
+                    }
+                    if state.scoring_crashed and not state.score_bundle_id
+                    else {}
+                ),
+                # P11: v5 §8.3 trace-level axis rollup — conjunction over the
+                # control-flow-driving calls (axis_a only if all model-emitted).
+                "trajectory_axis": axis_rollup([*node_calls, *incontainer_calls]),
             }
         )
         execution_trace_rows.append(
@@ -1007,19 +1508,23 @@ def _build_corpus_trace_rows(
                 "schema_version": "1.0",
                 "artifact_hash": state.candidate_artifact_hash
                 or state.unified_diff_hash,
-                "role": "candidate",
+                "role": _trace_role(bundle_row),
                 "rung": "L0",
                 "status": _node_execution_status(state),
                 "lane_id": None,  # live lanes are labels, not UUIDs (see trace_doc)
                 "icp_set_hash": node_icp_set_hash,
                 "eval_version": _eval_version_doc(bundle_row),
                 "calls": _cap_pointer_entries(
-                    [*node_calls, *incontainer_calls],
+                    [*node_calls, *node_diagnostic_calls, *incontainer_calls],
                     _EXECUTION_TRACE_CALL_CAP,
                     "call_truncation_marker",
                 ),
                 "evidence_bundles": evidence_refs,
-                "judge_verdicts": [],  # scorer-judge traces are item 5.4
+                "judge_verdicts": _cap_pointer_entries(
+                    judge_verdicts,
+                    _EXECUTION_TRACE_CALL_CAP,
+                    "judge_verdict_truncation_marker",
+                ),
                 "outputs_ref": outputs_ref,
                 "score_bundle_ref": score_bundle_ref,
                 "cost_ledger": {
@@ -1032,9 +1537,166 @@ def _build_corpus_trace_rows(
             }
         )
 
+    for score_bundle_id, bundle_row in bundles_by_id.items():
+        if not score_bundle_id or score_bundle_id == "None":
+            continue
+        if score_bundle_id in used_score_bundle_ids:
+            continue
+
+        score_bundle_ref = _score_bundle_ref(score_bundle_id)
+        trace_id = execution_trace_id_for_score_bundle(run_id, score_bundle_id)
+        evidence_id = evidence_bundle_id_for_score_bundle(run_id, score_bundle_id)
+        evidence_ref = f"evidence_bundle:{evidence_id}"
+        bundle_doc = _bundle_doc(bundle_row)
+        score_bundle_hash = str(
+            bundle_row.get("score_bundle_hash")
+            or bundle_doc.get("score_bundle_hash")
+            or ""
+        )
+        artifact_hash = _score_bundle_artifact_hash(bundle_row, score_bundle_id)
+        node_icp_set_hash = (
+            str(bundle_row.get("icp_set_hash") or bundle_doc.get("icp_set_hash") or "")
+            or default_icp_set_hash
+        )
+        created_at = _ts(bundle_row.get("created_at"), fallback_ts)
+        incontainer_calls = _collect_incontainer_calls(bundle_row)
+        judge_verdicts = _collect_judge_verdicts(
+            bundle_row, score_bundle_id=score_bundle_id
+        )
+        per_icp_rows = _bundle_per_icp_rows(bundle_row)
+        raw_bundle_gate = bundle_doc.get("private_holdout_gate")
+        gate = raw_bundle_gate if isinstance(raw_bundle_gate, Mapping) else {}
+        gate_summary = _holdout_gate_summary(gate)
+        aggregates_summary = _aggregates_summary(bundle_row)
+        if per_icp_rows:
+            snapshots = _cap_pointer_entries(
+                [_per_icp_snapshot(row) for row in per_icp_rows],
+                _EVIDENCE_SNAPSHOT_CAP,
+                "per_icp_truncation_marker",
+            )
+        else:
+            snapshots = [
+                {
+                    "snapshot_kind": "score_bundle_summary",
+                    "score_bundle_ref": score_bundle_ref,
+                    "score_bundle_hash": score_bundle_hash,
+                    "icp_count": _i(aggregates_summary.get("icp_count"))
+                    or (
+                        gate_summary.get("public_icp_count", 0)
+                        + gate_summary.get("private_holdout_icp_count", 0)
+                    ),
+                    "per_icp_rows_available": False,
+                }
+            ]
+        evidence_doc = sanitize_capture_payload(
+            {
+                "evidence_kind": "score_bundle_evidence",
+                "source": "score_bundle_fallback",
+                "fallback_reason": "score_bundle_not_linked_to_node",
+                "lab_run_ref": run_ref,
+                "trajectory_ref": trajectory_ref,
+                "execution_trace_ref": f"execution_trace:{trace_id}",
+                "score_bundle_ref": score_bundle_ref,
+                "score_bundle_hash": score_bundle_hash,
+                "score_bundle_status": bundle_row.get("bundle_status")
+                or bundle_row.get("current_event_status")
+                or bundle_row.get("current_event_type"),
+                "candidate_artifact_hash": artifact_hash,
+                "evaluation_epoch": (
+                    _i(bundle_row.get("evaluation_epoch"))
+                    if bundle_row.get("evaluation_epoch") is not None
+                    else None
+                ),
+                "icp_set_hash": node_icp_set_hash,
+                "holdout_gate": gate_summary or None,
+                "aggregates": aggregates_summary or None,
+                "per_icp_snapshot_count": len(snapshots),
+                "incontainer_trace_count": len(incontainer_calls),
+                "incontainer_call_count_total": sum(
+                    max(0, _i(call.get("call_count"))) for call in incontainer_calls
+                ),
+            }
+        )
+        snapshots = sanitize_capture_payload(snapshots)
+        evidence_bundle_rows.append(
+            {
+                "bundle_id": evidence_id,
+                "schema_version": "1.0",
+                "run_id": _coerce_uuid(run_id),
+                "artifact_hash": artifact_hash,
+                "retention_class": "live_verification",
+                "verification_state": "active",
+                "bundle_hash": sha256_json(
+                    {
+                        "evidence_bundle_id": evidence_id,
+                        "snapshots": snapshots,
+                        "bundle_doc": evidence_doc,
+                    }
+                ),
+                "merkle_anchor_ref": None,
+                "deletion_request_ref": None,
+                "snapshots": snapshots,
+                "bundle_doc": evidence_doc,
+                "created_at": created_at,
+            }
+        )
+        trace_doc = sanitize_capture_payload(
+            {
+                "trace_kind": "score_bundle_only",
+                "source": "score_bundle_fallback",
+                "fallback_reason": "score_bundle_not_linked_to_node",
+                "lab_run_ref": run_ref,
+                "trajectory_ref": trajectory_ref,
+                "score_bundle_ref": score_bundle_ref,
+                "score_bundle_hash": score_bundle_hash,
+                "candidate_artifact_hash": artifact_hash,
+                "incontainer_trace_count": len(incontainer_calls),
+                "per_icp_snapshot_count": len(snapshots),
+                "trajectory_axis": axis_rollup(incontainer_calls),
+            }
+        )
+        execution_trace_rows.append(
+            {
+                "run_id": trace_id,
+                "schema_version": "1.0",
+                "artifact_hash": artifact_hash,
+                "role": _trace_role(bundle_row),
+                "rung": "L0",
+                "status": _score_bundle_execution_status(bundle_row),
+                "lane_id": None,
+                "icp_set_hash": node_icp_set_hash,
+                "eval_version": _eval_version_doc(bundle_row),
+                "calls": _cap_pointer_entries(
+                    incontainer_calls,
+                    _EXECUTION_TRACE_CALL_CAP,
+                    "call_truncation_marker",
+                ),
+                "evidence_bundles": [evidence_ref],
+                "judge_verdicts": _cap_pointer_entries(
+                    judge_verdicts,
+                    _EXECUTION_TRACE_CALL_CAP,
+                    "judge_verdict_truncation_marker",
+                ),
+                "outputs_ref": score_bundle_ref,
+                "score_bundle_ref": score_bundle_ref,
+                "cost_ledger": {
+                    "cost_ledger_ref": cost_ledger_ref,
+                    "score_bundle_cost_usd": round(
+                        max(0.0, _score_bundle_total_cost_usd(bundle_row)), 6
+                    ),
+                },
+                "attestation_ref": None,
+                "trace_doc": trace_doc,
+                "created_at": created_at,
+            }
+        )
+
     run_scoped_calls = [
         dict(call) for call in engine_calls if not call.get("node_id")
     ]
+    run_scoped_calls.extend(
+        dict(call) for call in build_diagnostic_calls if not call.get("node_id")
+    )
     if run_scoped_calls:
         execution_trace_rows.insert(
             0,
@@ -1042,6 +1704,8 @@ def _build_corpus_trace_rows(
                 "run_id": execution_trace_id_for_run(run_id),
                 "schema_version": "1.0",
                 "artifact_hash": champion_base,
+                # The engine loop generates candidates; role stays data-driven
+                # for bundle-backed rows above.
                 "role": "candidate",
                 "rung": "L0",
                 "status": _engine_execution_status(queue_status, terminal_row),
@@ -1075,11 +1739,21 @@ def _build_corpus_trace_rows(
                         "trajectory_ref": trajectory_ref,
                         "engine_call_count": len(run_scoped_calls),
                         "node_ids": [str(node_id) for node_id in node_order][:64],
+                        "trajectory_axis": axis_rollup(run_scoped_calls),
+                        # P14 run-summary contract: countable without forensics.
+                        "run_summary_present": _terminal_run_summary(terminal_row)
+                        is not None,
                     }
                 ),
                 "created_at": fallback_ts,
             },
         )
+    # P18: explicit trajectory join key (scripts/64 column, env-gated so
+    # pre-migration fleets keep inserting cleanly).
+    if _execution_trace_trajectory_id_enabled():
+        trajectory_uuid = _coerce_uuid(trajectory_id) or str(trajectory_id)
+        for row in execution_trace_rows:
+            row["trajectory_id"] = trajectory_uuid
     return execution_trace_rows, evidence_bundle_rows
 
 
@@ -1150,6 +1824,13 @@ class _NodeState:
     cost_usd: float = 0.0
     draft_seq: int | None = None
     evaluated_seq: int | None = None
+    # P2: {icp_ref: {s3_ref, sha256}} scorer judgment pointers from the
+    # scored event doc — projected into execution_traces.judge_verdicts.
+    scorer_trace_refs: Mapping[str, Mapping[str, Any]] | None = None
+    # P14: candidate scoring crashed/was rejected with no bundle — the node
+    # still gets an execution_traces row with status="crash".
+    scoring_crashed: bool = False
+    scoring_failure_event_type: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -1208,9 +1889,14 @@ def build_trajectory_projection(
             candidates_by_hash[artifact_hash] = row
 
     scored_by_candidate: dict[str, Mapping[str, Any]] = {}
+    failed_eval_by_candidate: dict[str, Mapping[str, Any]] = {}
     for row in evaluation_events:
-        if str(row.get("event_type")) == "scored":
+        event_type = str(row.get("event_type"))
+        if event_type == "scored":
             scored_by_candidate[str(row.get("candidate_id"))] = row
+        elif event_type in {"failed", "rejected"}:
+            # P14: crashed/rejected scorings must still yield corpus rows.
+            failed_eval_by_candidate.setdefault(str(row.get("candidate_id")), row)
 
     bundles_by_id: dict[str, Mapping[str, Any]] = {
         str(row.get("score_bundle_id")): row for row in score_bundles
@@ -1228,6 +1914,8 @@ def build_trajectory_projection(
     # NODE_EVALUATED emitter can embed each node's deterministic
     # execution_trace ref only when a row will actually be written.
     engine_calls = _collect_engine_trace_calls(ordered)
+    # P4: build-failure diagnostic pointers become first-class corpus calls.
+    build_diagnostic_calls = _collect_build_diagnostic_calls(ordered)
     node_ids_with_engine_calls = frozenset(
         str(call.get("node_id")) for call in engine_calls if call.get("node_id")
     )
@@ -1490,7 +2178,16 @@ def build_trajectory_projection(
                             "eval_version": "unversioned",
                         },
                         "reflection_context": sanitize_capture_payload(
-                            {**_live_ref(row), "iteration": _i(doc.get("iteration"))}
+                            {
+                                **_live_ref(row),
+                                "iteration": _i(doc.get("iteration")),
+                                # P14: mechanical template reflections are NOT
+                                # model chain-of-thought — CoT curation must
+                                # exclude anything not "model" here.
+                                "reflection_source": _sanitize_text(
+                                    str(doc.get("reflection_source") or "mechanical")
+                                )[:40],
+                            }
                         ),
                     },
                 )
@@ -1568,6 +2265,47 @@ def build_trajectory_projection(
                     "promotion_context": sanitize_capture_payload(
                         {
                             "candidate_id": candidate_id,
+                            "rolling_window_hash": row.get("rolling_window_hash"),
+                            "improvement_points": _f(row.get("improvement_points")),
+                            "threshold_points": _f(row.get("threshold_points")),
+                        }
+                    ),
+                },
+            )
+        elif promo_type in {
+            "below_threshold",
+            "promotion_failed",
+            "public_holdout_rejected",
+        }:
+            # P14: promotion-gate rejections become countable REVERTED rows —
+            # the corpus was survivorship-biased toward crowned winners.
+            rejection_epoch = default_epoch
+            rejection_bundle = bundles_by_id.get(
+                str(row.get("source_score_bundle_id") or "")
+            )
+            if rejection_bundle and rejection_bundle.get("evaluation_epoch") is not None:
+                rejection_epoch = _i(rejection_bundle.get("evaluation_epoch"))
+            _append_canonical_event(
+                canonical,
+                ts=_ts(row.get("created_at"), last_ts),
+                event_type="REVERTED",
+                cost_usd=0.0,
+                payload={
+                    "node_id": promo_node_id,
+                    "area": island,
+                    "epoch": max(0, rejection_epoch),
+                    "reason": promo_type,
+                    "delta": _f(gate.get(TARGETED_METRIC)),
+                    "revert_evidence_ref": (
+                        f"promotion_event:{row.get('promotion_event_id')}"
+                        if row.get("promotion_event_id")
+                        else None
+                    ),
+                    "rejection_context": sanitize_capture_payload(
+                        {
+                            "rejection_kind": "promotion_gate",
+                            "candidate_id": candidate_id,
+                            "promotion_event_type": promo_type,
                             "rolling_window_hash": row.get("rolling_window_hash"),
                             "improvement_points": _f(row.get("improvement_points")),
                             "threshold_points": _f(row.get("threshold_points")),
@@ -1735,6 +2473,16 @@ def build_trajectory_projection(
     ]
 
     # -- execution_traces / evidence_bundles pointer rows (item 5.5) -----------
+    # P14: mark nodes whose scoring crashed/was rejected without a bundle so
+    # they still yield crash-status execution rows.
+    for state in nodes.values():
+        if not state.candidate_id or state.score_bundle_id:
+            continue
+        failed_row = failed_eval_by_candidate.get(state.candidate_id)
+        if failed_row is not None:
+            state.scoring_crashed = True
+            state.scoring_failure_event_type = str(failed_row.get("event_type") or "")
+
     execution_trace_rows, evidence_bundle_rows = _build_corpus_trace_rows(
         run_id=run_id,
         trajectory_id=tid,
@@ -1742,12 +2490,29 @@ def build_trajectory_projection(
         nodes=nodes,
         node_order=node_order,
         engine_calls=engine_calls,
+        build_diagnostic_calls=build_diagnostic_calls,
         bundles_by_id=bundles_by_id,
         reflections_by_node=reflections_by_node,
         queue_status=queue_status,
         terminal_row=terminal_row,
         total_cost_usd=last_anchor_total,
         fallback_ts=ledger_created_at,
+    )
+
+    # P15 token-budget invariant: count tokens against the declared trainer
+    # max (flag, never drop). P10: the protected scan is a computed result
+    # over the actual projected payloads, not a caller-supplied boolean.
+    total_tokens = 0
+    for row in ordered:
+        for item, _model in _iter_provider_usage_items([row.get("provider_usage"), _doc(row)]):
+            total_tokens += max(0, _i(item.get("total_tokens")))
+    trainer_max_tokens = _i(os.getenv("RESEARCH_LAB_TRAINER_MAX_TOKENS", "1000000"))
+    protected_hits = find_protected_material(
+        {
+            "trajectory_doc": trajectory_doc,
+            "execution_trace_rows": execution_trace_rows,
+            "evidence_bundle_rows": evidence_bundle_rows,
+        }
     )
 
     corpus_source_record = TrajectoryCorpusSourceRecord(
@@ -1773,6 +2538,13 @@ def build_trajectory_projection(
         pii_review_ref="pii_review:unassigned",
         legal_gate_ref="legal_gate:unassigned",
         island=island,
+        # P15 leak-guard keys: paraphrased ICPs from the same brief share the
+        # cluster key (sanitized-brief signature) and can never straddle splits.
+        brief_id=brief_id,
+        customer_ref=CUSTOMER_REF_STAND_IN,
+        split_cluster_key=brief_sanitized_ref or brief_id,
+        token_count=total_tokens,
+        over_token_budget=bool(trainer_max_tokens and total_tokens > trainer_max_tokens),
         split="train",
         data_state="production_measured",
         measured_data=True,
@@ -1780,7 +2552,9 @@ def build_trajectory_projection(
         distillation_rights_verified=False,
         pii_review_passed=False,
         legal_gate_passed=False,
+        # P10: computed from the scan that actually ran, not self-declared.
         protected_data_scanned=True,
+        contains_raw_evidence_snapshot=bool(protected_hits),
         eligible_for_training=False,  # readiness stays BLOCKED by design
         eligible_for_distillation=False,
     )
@@ -1838,6 +2612,43 @@ def _emit_node_evaluated(
         )
         state.gate_doc = gate
         state.score_bundle_id = score_bundle_id
+        # P2: keep the scored event's scorer-trace pointer map so the node's
+        # execution trace can project judge_verdicts.
+        raw_scorer_refs = scored_doc.get("scorer_trace_refs")
+        if isinstance(raw_scorer_refs, Mapping):
+            state.scorer_trace_refs = {
+                str(icp_ref): dict(pointer)
+                for icp_ref, pointer in raw_scorer_refs.items()
+                if isinstance(pointer, Mapping)
+            }
+        # Bundle→trace linkage check (warn-only): a bundle stamped with an
+        # execution_trace:<uuid> ref must point at THIS node's deterministic
+        # row id, else the forward join is silently broken. Legacy
+        # gateway_qualification_worker:* refs predate the linkage and are
+        # expected on historical bundles — no warning for those.
+        if score_bundle_id and run_id:
+            bundle_row = bundles_by_id.get(score_bundle_id)
+            bundle_doc = (
+                bundle_row.get("score_bundle_doc") if isinstance(bundle_row, Mapping) else None
+            )
+            embedded_ref = (
+                str(bundle_doc.get("execution_trace_ref") or "")
+                if isinstance(bundle_doc, Mapping)
+                else ""
+            )
+            if embedded_ref.startswith("execution_trace:"):
+                expected_ref = (
+                    f"execution_trace:{execution_trace_id_for_node(run_id, state.node_id)}"
+                )
+                if embedded_ref != expected_ref:
+                    logger.warning(
+                        "research_lab_trajectory_bundle_trace_ref_mismatch run_id=%s node_id=%s "
+                        "bundle_ref=%s expected=%s (bundle→trace join broken for this bundle)",
+                        run_id,
+                        state.node_id,
+                        embedded_ref,
+                        expected_ref,
+                    )
     if state.build_failed_row is not None and state.build_passed_row is None:
         status = "crash"
     elif gate:
@@ -2109,19 +2920,97 @@ async def _insert_missing(
     return True
 
 
+def _trace_call_key(call: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
+    s3_ref = str(call.get("s3_ref") or "")
+    sha256 = str(call.get("sha256") or "")
+    if s3_ref or sha256:
+        return ("raw", s3_ref, sha256, "", "")
+    return (
+        "metadata",
+        str(call.get("live_event_id") or ""),
+        str(call.get("response_id") or ""),
+        str(call.get("stage") or ""),
+        str(call.get("attempt") or ""),
+    )
+
+
+def _merge_trace_calls(
+    existing_calls: Any,
+    proposed_calls: Any,
+) -> tuple[bool, list[dict[str, Any]]]:
+    merged: list[dict[str, Any]] = [
+        dict(item) for item in (existing_calls if isinstance(existing_calls, list) else [])
+        if isinstance(item, Mapping)
+    ]
+    seen = {_trace_call_key(item) for item in merged}
+    changed = False
+    for item in proposed_calls if isinstance(proposed_calls, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        key = _trace_call_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(dict(item))
+        changed = True
+    if len(merged) > _EXECUTION_TRACE_CALL_CAP:
+        merged = _cap_pointer_entries(
+            merged,
+            _EXECUTION_TRACE_CALL_CAP,
+            "call_truncation_marker",
+        )
+        changed = True
+    return changed, merged
+
+
+async def _upsert_execution_trace_row(store: Any, row: Mapping[str, Any]) -> str:
+    """Insert a trace row, or merge newly discovered calls into an existing row."""
+    existing = await store.select_one(
+        EXECUTION_TRACES_TABLE, filters=(("run_id", row["run_id"]),)
+    )
+    if not existing:
+        if await _insert_missing(store, EXECUTION_TRACES_TABLE, "run_id", row):
+            return "inserted"
+        existing = await store.select_one(
+            EXECUTION_TRACES_TABLE, filters=(("run_id", row["run_id"]),)
+        )
+    if not existing:
+        return "unchanged"
+    changed, calls = _merge_trace_calls(existing.get("calls"), row.get("calls"))
+    if not changed:
+        return "unchanged"
+    await store.update_row(
+        EXECUTION_TRACES_TABLE,
+        {"calls": calls},
+        filters=(("run_id", row["run_id"]),),
+    )
+    return "updated"
+
+
+async def _execution_trace_row_needs_write(store: Any, row: Mapping[str, Any]) -> bool:
+    existing = await store.select_one(
+        EXECUTION_TRACES_TABLE, filters=(("run_id", row["run_id"]),)
+    )
+    if not existing:
+        return True
+    changed, _calls = _merge_trace_calls(existing.get("calls"), row.get("calls"))
+    return changed
+
+
 async def _write_missing_corpus_trace_rows(
     store: Any, projection: TrajectoryProjection
 ) -> tuple[int, int]:
-    """Write missing execution_traces / evidence_bundles rows; return counts."""
-    trace_written = 0
+    """Write/merge execution_traces and missing evidence_bundles; return counts."""
+    trace_changed = 0
     for row in projection.execution_trace_rows:
-        if await _insert_missing(store, EXECUTION_TRACES_TABLE, "run_id", row):
-            trace_written += 1
+        trace_status = await _upsert_execution_trace_row(store, row)
+        if trace_status in {"inserted", "updated"}:
+            trace_changed += 1
     evidence_written = 0
     for row in projection.evidence_bundle_rows:
         if await _insert_missing(store, EVIDENCE_BUNDLES_TABLE, "bundle_id", row):
             evidence_written += 1
-    return trace_written, evidence_written
+    return trace_changed, evidence_written
 
 
 async def load_projection_inputs(
@@ -2408,9 +3297,7 @@ async def backfill_run_corpus_trace_rows(
         missing_traces = [
             row
             for row in projection.execution_trace_rows
-            if not await store.select_one(
-                EXECUTION_TRACES_TABLE, filters=(("run_id", row["run_id"]),)
-            )
+            if await _execution_trace_row_needs_write(store, row)
         ]
         missing_evidence = [
             row
@@ -2433,7 +3320,8 @@ async def backfill_run_corpus_trace_rows(
             )
         trace_written = 0
         for row in missing_traces:
-            if await _insert_missing(store, EXECUTION_TRACES_TABLE, "run_id", row):
+            trace_status = await _upsert_execution_trace_row(store, row)
+            if trace_status in {"inserted", "updated"}:
                 trace_written += 1
         evidence_written = 0
         for row in missing_evidence:
@@ -2515,6 +3403,127 @@ async def backfill_corpus_trace_rows(
     return results
 
 
+async def summarize_reasoning_capture_coverage(
+    *,
+    store: Any | None = None,
+    max_events: int = 5000,
+    max_traces: int = 5000,
+) -> dict[str, Any]:
+    """Private coverage report for OpenRouter reasoning/raw-trace capture."""
+    store = store or GatewayProjectorStore()
+    loop_events = await store.select_all(
+        LOOP_EVENTS_TABLE,
+        columns="run_id,event_id,seq,event_type,node_id,provider_usage,event_doc,created_at",
+        filters=(),
+        order_by=(("created_at", True),),
+        max_rows=max(1, int(max_events)),
+    )
+    execution_traces = await store.select_all(
+        EXECUTION_TRACES_TABLE,
+        columns="run_id,calls,trace_doc,created_at",
+        filters=(),
+        order_by=(("created_at", True),),
+        max_rows=max(1, int(max_traces)),
+    )
+
+    projected_raw_refs: set[tuple[str, str]] = set()
+    projected_reasoning_calls = 0
+    projected_metadata_only_calls = 0
+    for trace in execution_traces:
+        calls = trace.get("calls")
+        if not isinstance(calls, list):
+            continue
+        for call in calls:
+            if not isinstance(call, Mapping):
+                continue
+            s3_ref = str(call.get("s3_ref") or "")
+            sha256 = str(call.get("sha256") or "")
+            if s3_ref or sha256:
+                projected_raw_refs.add((s3_ref, sha256))
+            reasoning_capture = call.get("reasoning_capture")
+            if isinstance(reasoning_capture, Mapping):
+                projected_reasoning_calls += 1
+                if reasoning_capture.get("storage_state") == "metadata_only":
+                    projected_metadata_only_calls += 1
+
+    openrouter_calls = 0
+    reasoning_requested = 0
+    reasoning_returned = 0
+    raw_trace_stored = 0
+    raw_trace_projected = 0
+    missing_projected_raw_trace_refs = 0
+    requested_without_raw_trace_ref = 0
+    reasoning_request_dropped = 0
+    metadata_only_reasoning = 0
+    models: dict[str, dict[str, int]] = {}
+    for row in loop_events:
+        doc = _doc(row)
+        for item, model in _iter_provider_usage_items([row.get("provider_usage"), doc]):
+            provider = str(item.get("provider") or "openrouter").lower()
+            if provider != "openrouter" and not item.get("reasoning_logs") and not item.get("raw_trace_ref"):
+                continue
+            openrouter_calls += 1
+            model_key = (str(model or item.get("model") or "unknown") or "unknown")[:128]
+            model_stats = models.setdefault(
+                model_key,
+                {
+                    "openrouter_calls": 0,
+                    "reasoning_requested": 0,
+                    "reasoning_returned": 0,
+                    "raw_trace_stored": 0,
+                    "raw_trace_projected": 0,
+                },
+            )
+            model_stats["openrouter_calls"] += 1
+            capture = item.get("reasoning_capture") if isinstance(item.get("reasoning_capture"), Mapping) else {}
+            logs = item.get("reasoning_logs") if isinstance(item.get("reasoning_logs"), Mapping) else {}
+            requested = bool(capture.get("requested")) or bool(logs) or bool(item.get("reasoning_request_dropped"))
+            returned = bool(capture.get("returned")) or bool(logs)
+            pointer = item.get("raw_trace_ref") if isinstance(item.get("raw_trace_ref"), Mapping) else {}
+            s3_ref = str(pointer.get("s3_ref") or "") if isinstance(pointer, Mapping) else ""
+            sha256 = str(pointer.get("sha256") or "") if isinstance(pointer, Mapping) else ""
+            has_raw = bool(s3_ref or sha256)
+            if requested:
+                reasoning_requested += 1
+                model_stats["reasoning_requested"] += 1
+            if returned:
+                reasoning_returned += 1
+                model_stats["reasoning_returned"] += 1
+            if item.get("reasoning_request_dropped") or capture.get("request_dropped"):
+                reasoning_request_dropped += 1
+            if has_raw:
+                raw_trace_stored += 1
+                model_stats["raw_trace_stored"] += 1
+                if (s3_ref, sha256) in projected_raw_refs:
+                    raw_trace_projected += 1
+                    model_stats["raw_trace_projected"] += 1
+                else:
+                    missing_projected_raw_trace_refs += 1
+            elif requested:
+                requested_without_raw_trace_ref += 1
+                if returned:
+                    metadata_only_reasoning += 1
+
+    return {
+        "schema_version": "1.0",
+        "source": "research_lab_openrouter_reasoning_capture",
+        "loop_events_scanned": len(loop_events),
+        "execution_traces_scanned": len(execution_traces),
+        "openrouter_calls": openrouter_calls,
+        "reasoning_requested": reasoning_requested,
+        "reasoning_returned": reasoning_returned,
+        "raw_trace_stored": raw_trace_stored,
+        "raw_trace_projected": raw_trace_projected,
+        "missing_projected_raw_trace_refs": missing_projected_raw_trace_refs,
+        "requested_without_raw_trace_ref": requested_without_raw_trace_ref,
+        "metadata_only_reasoning": metadata_only_reasoning,
+        "reasoning_request_dropped": reasoning_request_dropped,
+        "projected_reasoning_calls": projected_reasoning_calls,
+        "projected_metadata_only_calls": projected_metadata_only_calls,
+        "models": models,
+    }
+
+
 # ---------------------------------------------------------------------------
 # CLI: python3 -m gateway.research_lab.trajectory_projector --backfill --dry-run
 # ---------------------------------------------------------------------------
@@ -2543,12 +3552,55 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "combine with --run-id to target one run"
         ),
     )
+    parser.add_argument(
+        "--reasoning-coverage",
+        action="store_true",
+        help="print private OpenRouter reasoning/raw-trace capture coverage without writing",
+    )
+    parser.add_argument(
+        "--capture-coverage",
+        action="store_true",
+        help=(
+            "print the P7 all-channel capture coverage report (engine, scorer, "
+            "in-container, diagnostics, judge verdicts, crash rows)"
+        ),
+    )
+    parser.add_argument(
+        "--reconcile-pointers",
+        action="store_true",
+        help="P6: HEAD every recent S3 trace pointer and report verified/missing/hash_mismatch",
+    )
+    parser.add_argument(
+        "--verify-hash",
+        action="store_true",
+        help="with --reconcile-pointers: fetch objects and verify sha256 (slow)",
+    )
+    parser.add_argument(
+        "--import-shadow-windows",
+        action="store_true",
+        help=(
+            "P18: import shadow-monitor window reports as DB rows keyed to the "
+            "promotion they adjudicate (requires scripts/64)"
+        ),
+    )
     parser.add_argument("--run-id", default=None, help="project a single run id")
     parser.add_argument(
         "--batch-size",
         type=int,
         default=25,
         help="max runs to project per pass (backfill loops until drained)",
+    )
+    parser.add_argument(
+        "--max-events",
+        type=int,
+        default=5000,
+        help="max live loop events to scan for --reasoning-coverage",
+    )
+    parser.add_argument(
+        "--max-traces",
+        type=int,
+        default=5000,
+        help="max execution_traces rows to scan for --reasoning-coverage",
     )
     parser.add_argument(
         "--dry-run",
@@ -2561,10 +3613,58 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 async def _cli_main(argv: Sequence[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv)
-    if not args.backfill and not args.run_id and not args.traces_backfill:
+    if (
+        not args.backfill
+        and not args.run_id
+        and not args.traces_backfill
+        and not args.reasoning_coverage
+        and not args.capture_coverage
+        and not args.reconcile_pointers
+        and not args.import_shadow_windows
+    ):
         _build_arg_parser().print_help()
         return 2
     store = GatewayProjectorStore()
+    if args.capture_coverage or args.reconcile_pointers or args.import_shadow_windows:
+        from gateway.research_lab.trace_reconciler import (
+            import_shadow_windows,
+            reconcile_trace_pointers,
+            summarize_capture_coverage,
+        )
+
+        report: dict[str, Any] = {"dry_run": True, "projector_enabled": projector_enabled()}
+        if args.capture_coverage:
+            report["capture_coverage"] = await summarize_capture_coverage(
+                store=store, max_rows=args.max_events
+            )
+        if args.reconcile_pointers:
+            report["pointer_reconciliation"] = await reconcile_trace_pointers(
+                store=store, verify_hash=args.verify_hash, max_rows=args.max_events
+            )
+        if args.import_shadow_windows:
+            report["dry_run"] = False
+            report["shadow_window_import"] = await import_shadow_windows(store=store)
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+    if args.reasoning_coverage:
+        coverage = await summarize_reasoning_capture_coverage(
+            store=store,
+            max_events=args.max_events,
+            max_traces=args.max_traces,
+        )
+        print(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "projector_enabled": projector_enabled(),
+                    "corpus_contract_version": TRAJECTORY_CORPUS_CONTRACT_VERSION,
+                    "coverage": coverage,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     results: list[ProjectionResult] = []
     if args.run_id and not args.traces_backfill:
         results.append(await project_run(args.run_id, store=store, dry_run=args.dry_run))

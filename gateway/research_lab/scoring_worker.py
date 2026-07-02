@@ -35,7 +35,13 @@ from gateway.research_lab.icp_window import (
     fetch_rolling_icp_window,
     select_rolling_icp_window_from_sets,
 )
-from gateway.research_lab.logging_utils import compact_ref, format_worker_block
+from gateway.research_lab.logging_utils import (
+    compact_ref,
+    event_error_diagnostics as _event_error_diagnostics,
+    format_worker_block,
+    runtime_error_diagnostics as _runtime_error_diagnostics,
+    safe_event_error_text as _safe_event_error_text,
+)
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabScoreBundleCreateRequest
 from gateway.research_lab.promotion import (
     CONFIRMATION_ATTEMPT_FAILED_REASON,
@@ -58,6 +64,7 @@ from gateway.research_lab.public_benchmarks import (
     build_public_benchmark_report,
     sanitize_benchmark_item_summary,
 )
+from gateway.research_lab.trajectory_projector import execution_trace_id_for_node
 from gateway.research_lab.store import (
     canonical_hash,
     create_candidate_artifact,
@@ -72,6 +79,7 @@ from gateway.research_lab.store import (
     create_scoring_dispatch_event,
     create_signed_audit_bundle,
     create_ticket_event,
+    insert_row,
     select_all,
     select_many,
     select_one,
@@ -106,6 +114,9 @@ from research_lab.eval.private_runtime import (
     end_incontainer_trace_collection,
     incontainer_trace_capture_enabled,
 )
+from research_lab.observability.langfuse_client import observation
+from research_lab.observability.redaction import miner_hotkey_hash
+from research_lab.observability.tracing import finish_score_bundle_observation
 
 
 logger = logging.getLogger(__name__)
@@ -161,58 +172,9 @@ def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _safe_event_error_text(exc: BaseException) -> str:
-    text = f"{exc.__class__.__name__}: {str(exc)}"
-    for marker in ("sk-or-", "sb_secret", "service_role", "openrouter_api_key", "raw_secret"):
-        text = re.sub(re.escape(marker), "[redacted]", text, flags=re.IGNORECASE)
-    text = re.sub(r"https?://[^/\s:]+:[^@\s]+@", "https://[redacted]@", text)
-    return text[:500]
-
-
-def _runtime_error_diagnostics(error_text: str) -> dict[str, Any]:
-    """Return DB-safe runtime diagnostics without provider URLs or request text."""
-
-    lowered = error_text.lower()
-    provider = "unknown"
-    if "scrapingdog" in lowered:
-        provider = "scrapingdog"
-    elif "exa" in lowered:
-        provider = "exa"
-    elif "openrouter" in lowered:
-        provider = "openrouter"
-
-    status = 0
-    for code in (400, 401, 403, 404, 408, 409, 410, 429, 500, 502, 503, 504):
-        if f"http error {code}" in lowered or f"status={code}" in lowered or f'"status":{code}' in lowered:
-            status = code
-            break
-
-    if status >= 500:
-        category = "provider_http_5xx"
-    elif status >= 400:
-        category = "provider_http_4xx"
-    else:
-        category = "runtime_provider_error"
-
-    return {
-        "error_class": "PrivateModelRuntimeError" if "privatemodelruntimeerror" in lowered else "RuntimeError",
-        "provider": provider,
-        "status": status,
-        "category": category,
-    }
-
-
-def _event_error_diagnostics(exc: BaseException) -> dict[str, Any]:
-    """DB-safe structured error doc for audit-visible event docs.
-
-    Raw ``str(exc)`` from providers/infra can carry secret-shaped markers
-    (ECR registry hosts, Supabase roles) that permanently poison the audit
-    bundle secret scan (bug #36), so event docs store this sanitized shape
-    instead of raw error text.
-    """
-    diagnostics = _runtime_error_diagnostics(f"{exc.__class__.__name__}: {exc}")
-    diagnostics["error_class"] = exc.__class__.__name__[:120]
-    return diagnostics
+# Event-doc error sanitizers (bug #36) moved to logging_utils so the loop
+# engine shares them; imported at the top with underscore aliases to keep
+# existing call sites and tests stable.
 
 
 def _baseline_error_is_retryable(error_text: str) -> bool:
@@ -513,6 +475,15 @@ _SCORER_TRACE_COMPANY_IDENTITY_FIELDS = (
 
 def _scorer_trace_capture_enabled() -> bool:
     return os.getenv(_SCORER_TRACE_CAPTURE_ENV, "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _openrouter_include_reasoning_enabled() -> bool:
+    return os.getenv("RESEARCH_LAB_LLM_INCLUDE_REASONING", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _trace_path_segment(value: object, *, fallback: str) -> str:
@@ -822,6 +793,15 @@ class _TraceCapturingCompanyScorer:
             )
         return breakdowns
 
+    def scorer_trace_pointer_for(self, icp_ref: str) -> dict[str, str] | None:
+        """P12: the evaluator's row builder picks up this ICP's judgment-trace
+        pointer so ``scorer_trace_ref`` rides the per-ICP row into the bundle
+        (previously the pointers reached only the scored event doc)."""
+        if not self._pointer_map:
+            return None
+        pointer = self._pointer_map.get(str(icp_ref))
+        return dict(pointer) if isinstance(pointer, Mapping) else None
+
 
 def _upload_baseline_incontainer_trace(
     prefix: str,
@@ -852,6 +832,11 @@ def _upload_baseline_incontainer_trace(
         )
         if part
     )
+    if not kms_key_id:
+        # P5/P13: never PUT in-container trace content without aws:kms.
+        raise PrivateModelRuntimeError(
+            "in-container trace upload requires a KMS key id (unencrypted uploads are refused)"
+        )
     payload = {
         "schema_version": "1.0",
         "artifact_type": "research_lab_incontainer_trace",
@@ -865,10 +850,9 @@ def _upload_baseline_incontainer_trace(
         "Key": key,
         "Body": canonical_json(payload).encode("utf-8"),
         "ContentType": "application/json",
+        "ServerSideEncryption": "aws:kms",
+        "SSEKMSKeyId": kms_key_id,
     }
-    if kms_key_id:
-        put_kwargs["ServerSideEncryption"] = "aws:kms"
-        put_kwargs["SSEKMSKeyId"] = kms_key_id
     boto3.client("s3").put_object(**put_kwargs)
     return f"s3://{bucket}/{key}"
 
@@ -883,25 +867,31 @@ async def _publish_baseline_incontainer_trace(
     """Persist one baseline/champion ICP's collected in-container trace entries
     and build the POINTER-ONLY diagnostics fields (mirroring the evaluator's
     ``_finalize_incontainer_trace`` semantics: upload failures are logged and
-    swallowed; the sha256/call-count pointers still record that capture
-    happened). Returns ``{}`` when there is nothing to record."""
+    swallowed). P5: a dropped capture must not look populated — no ref means
+    ``incontainer_trace_call_count=0`` plus ``incontainer_trace_dropped=true``;
+    the sha256 stays as the attestation the entries existed. Returns ``{}``
+    when there is nothing to record."""
     if not entries:
         return {}
     ref = ""
     prefix = str(os.getenv(INCONTAINER_TRACE_S3_PREFIX_ENV) or "").strip().rstrip("/")
-    if not prefix:
+    kms_key_id = str(os.getenv(INCONTAINER_TRACE_KMS_KEY_ENV) or "").strip()
+    if not prefix or not kms_key_id:
+        reason = "no_s3_prefix" if not prefix else "missing_kms_key"
         drop_state["dropped_entries"] = int(drop_state.get("dropped_entries") or 0) + len(entries)
         if not drop_state.get("logged"):
             drop_state["logged"] = True
-            logger.info(
-                "research_lab_incontainer_trace_dropped run_ref=%s reason=no_s3_prefix "
-                "(set %s to persist baseline in-container traces; further drops this "
-                "run are silent)",
+            log = logger.info if not prefix else logger.error
+            log(
+                "research_lab_incontainer_trace_dropped run_ref=%s reason=%s "
+                "(set %s and %s to persist baseline in-container traces encrypted; "
+                "further drops this run are silent)",
                 context_ref,
+                reason,
                 INCONTAINER_TRACE_S3_PREFIX_ENV,
+                INCONTAINER_TRACE_KMS_KEY_ENV,
             )
     else:
-        kms_key_id = str(os.getenv(INCONTAINER_TRACE_KMS_KEY_ENV) or "").strip()
         try:
             ref = await asyncio.to_thread(
                 _upload_baseline_incontainer_trace,
@@ -919,11 +909,19 @@ async def _publish_baseline_incontainer_trace(
                 exc_info=True,
             )
             ref = ""
-    return {
+    fields = {
         "incontainer_trace_ref": ref,
         "incontainer_trace_sha256": sha256_json(list(entries)),
-        "incontainer_trace_call_count": len(entries),
+        "incontainer_trace_call_count": len(entries) if ref else 0,
     }
+    # P13: truncation is filterable from the index, not just inside the blob.
+    truncated_count = sum(1 for entry in entries if entry.get("truncated"))
+    if truncated_count:
+        fields["incontainer_trace_truncated_count"] = truncated_count
+    if not ref:
+        fields["incontainer_trace_dropped"] = True
+        fields["incontainer_trace_dropped_call_count"] = len(entries)
+    return fields
 
 
 def _baseline_max_unresolved_icps() -> int:
@@ -1148,48 +1146,34 @@ async def _call_operator_openrouter_json(
     messages: list[dict[str, str]],
     timeout_seconds: int,
 ) -> str:
-    body = {
-        "model": model_id,
-        "messages": messages,
-        "temperature": 0.1,
-        "max_tokens": 2200,
-        "response_format": {"type": "json_object"},
-        "provider": {
-            "data_collection": "deny",
-            "zdr": True,
-        },
-    }
+    """Operator stale-parent repair/rebase call, via the shared telemetry
+    transport (trajectoryimprovements.md P1: this path used to request
+    reasoning, pay for it, then extract only ``message.content`` — the
+    reasoning trace is now captured to encrypted S3 instead of discarded)."""
+    from research_lab.openrouter_telemetry import (
+        OpenRouterTelemetryError,
+        call_openrouter_chat_async,
+    )
 
-    def _call() -> str:
-        req = urlrequest.Request(
-            "https://openrouter.ai/api/v1/chat/completions",
-            data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            method="POST",
+    try:
+        result = await call_openrouter_chat_async(
+            api_key=api_key,
+            model_id=model_id,
+            messages=messages,
+            channel="research_lab_operator",
+            purpose="operator_stale_parent_repair",
+            stage="operator_repair",
+            max_tokens=2200,
+            temperature=0.1,
+            timeout_seconds=max(1, int(timeout_seconds)),
+            response_format={"type": "json_object"},
+            include_reasoning=_openrouter_include_reasoning_enabled(),
         )
-        try:
-            with urlrequest.urlopen(req, timeout=max(1, int(timeout_seconds))) as response:
-                decoded = json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            message = exc.read().decode("utf-8", errors="replace")[:500]
-            raise CodeEditBuildError(f"operator stale-parent repair failed: HTTP {exc.code}: {message}") from exc
-        except URLError as exc:
-            raise CodeEditBuildError(f"operator stale-parent repair failed: {exc}") from exc
-        choices = decoded.get("choices") if isinstance(decoded, Mapping) else None
-        if not isinstance(choices, list) or not choices:
-            raise CodeEditBuildError("operator stale-parent repair returned no choices")
-        first = choices[0] if isinstance(choices[0], Mapping) else {}
-        message = first.get("message") if isinstance(first.get("message"), Mapping) else {}
-        content = message.get("content")
-        if not content:
-            raise CodeEditBuildError("operator stale-parent repair returned empty content")
-        return str(content)
-
-    return await asyncio.to_thread(_call)
+    except OpenRouterTelemetryError as exc:
+        raise CodeEditBuildError(f"operator stale-parent repair failed: {exc}") from exc
+    if not result.content:
+        raise CodeEditBuildError("operator stale-parent repair returned empty content")
+    return str(result.content)
 
 
 def _status_age_seconds(raw_status_at: object) -> float | None:
@@ -1263,6 +1247,11 @@ class ResearchLabGatewayScoringWorker:
         self._confirmation_trace_scope: dict[str, Any] | None = None
 
     async def run_forever(self) -> None:
+        # trajectoryimprovements.md P5: one structured capture health block at
+        # startup; refuses to start in production when capture is degraded.
+        from gateway.research_lab.capture_health import enforce_capture_health
+
+        enforce_capture_health(self.config, worker_kind="scoring_worker")
         last_idle_log = 0.0
         last_error_log = 0.0
         idle_log_seconds = _idle_log_seconds()
@@ -2077,31 +2066,51 @@ class ResearchLabGatewayScoringWorker:
                     claim_lost=claim_lost_event,
                 )
             )
+            langfuse_obs = None
+            langfuse_trace_id = ""
             try:
-                try:
-                    score_bundle = await evaluate_private_model_pair(
-                        artifact_manifest=artifact,
-                        benchmark=benchmark,
-                        patch_manifest=patch,
-                        candidate_artifact_manifest=candidate_artifact.to_dict(),
-                        benchmark_items=window.benchmark_items,
-                        base_runner=None,
-                        candidate_runner=candidate_runner,
-                        company_scorer=candidate_company_scorer,
-                        run_context={**run_context, "signature_ref": "pending"},
-                        policy=self._evaluation_policy(),
-                        private_holdout_gate=private_holdout_gate,
-                        parent_freshness_check=parent_freshness_check,
-                        icp_checkpoint=icp_checkpoint,
-                        resume_results=resume_results,
-                        # In-container traces upload keyed by candidate; the
-                        # evaluator puts the returned refs into per-ICP rows.
-                        trace_sink=self._candidate_incontainer_trace_sink(candidate_id),
-                    )
-                finally:
-                    heartbeat_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await heartbeat_task
+                with observation(
+                    "research_lab.private_eval_pair",
+                    as_type="span",
+                    metadata={
+                        "run_id": str(candidate["run_id"]),
+                        "ticket_id": str(candidate["ticket_id"]),
+                        "candidate_id": candidate_id,
+                        "miner_hotkey_hash": miner_hotkey_hash(str(candidate.get("miner_hotkey") or "")),
+                        "evaluation_epoch": evaluation_epoch,
+                        "parent_artifact_hash": artifact.model_artifact_hash,
+                        "candidate_artifact_hash": candidate_artifact.model_artifact_hash,
+                        "candidate_patch_hash": str(candidate.get("candidate_patch_hash") or ""),
+                        "icp_set_hash": window.window_hash,
+                        "benchmark_split_ref": window.split_ref,
+                        "worker_ref": self.worker_ref,
+                    },
+                ) as langfuse_obs:
+                    try:
+                        score_bundle = await evaluate_private_model_pair(
+                            artifact_manifest=artifact,
+                            benchmark=benchmark,
+                            patch_manifest=patch,
+                            candidate_artifact_manifest=candidate_artifact.to_dict(),
+                            benchmark_items=window.benchmark_items,
+                            base_runner=None,
+                            candidate_runner=candidate_runner,
+                            company_scorer=candidate_company_scorer,
+                            run_context={**run_context, "signature_ref": "pending"},
+                            policy=self._evaluation_policy(),
+                            private_holdout_gate=private_holdout_gate,
+                            parent_freshness_check=parent_freshness_check,
+                            icp_checkpoint=icp_checkpoint,
+                            resume_results=resume_results,
+                            # In-container traces upload keyed by candidate; the
+                            # evaluator puts the returned refs into per-ICP rows.
+                            trace_sink=self._candidate_incontainer_trace_sink(candidate_id),
+                        )
+                        langfuse_trace_id = finish_score_bundle_observation(langfuse_obs, score_bundle)
+                    finally:
+                        heartbeat_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await heartbeat_task
             except StaleParentDuringScoring as stale_exc:
                 stale_result = await self._queue_stale_parent_rebase(
                     candidate,
@@ -2158,6 +2167,25 @@ class ResearchLabGatewayScoringWorker:
             )
             bundle, _bundle_event = await create_score_bundle(score_bundle_request)
             scored_score_bundle_id = str(bundle["score_bundle_id"])
+            if langfuse_trace_id:
+                try:
+                    await insert_row(
+                        "engine_trace_mappings",
+                        {
+                            "execution_trace_ref": str(score_bundle.get("execution_trace_ref") or f"score_bundle:{score_bundle['score_bundle_hash']}"),
+                            "langfuse_trace_id": langfuse_trace_id,
+                            "langfuse_project": os.getenv("LANGFUSE_PROJECT", "leadpoet-lab-prod-redacted"),
+                            "score_bundle_hash": score_bundle["score_bundle_hash"],
+                            "run_id": str(candidate["run_id"]),
+                            "ticket_id": str(candidate["ticket_id"]),
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "research_lab_langfuse_trace_mapping_write_failed candidate_id=%s error=%s",
+                        compact_ref(candidate_id),
+                        str(exc)[:200],
+                    )
             await self._create_scored_evaluation_event(
                 candidate=candidate,
                 candidate_id=candidate_id,
@@ -2177,6 +2205,7 @@ class ResearchLabGatewayScoringWorker:
                         if scorer_trace_pointers
                         else {}
                     ),
+                    **({"langfuse_trace_id": langfuse_trace_id} if langfuse_trace_id else {}),
                 },
             )
             scored_event_written = True
@@ -2202,13 +2231,6 @@ class ResearchLabGatewayScoringWorker:
                     score_bundle_row=bundle,
                     score_bundle=score_bundle,
                     gate_result=gate_result,
-                )
-            elif scoring_health_gate.get("decision") == "quarantined":
-                promotion_result = await self._record_scoring_health_quarantined(
-                    candidate=candidate,
-                    score_bundle_row=bundle,
-                    score_bundle=score_bundle,
-                    scoring_health_gate=scoring_health_gate,
                 )
             else:
                 promotion_result = await self._maybe_promote_scored_candidate(
@@ -2577,13 +2599,6 @@ class ResearchLabGatewayScoringWorker:
                     score_bundle=score_bundle,
                     gate_result=gate_result,
                 )
-            elif scoring_health_gate.get("decision") == "quarantined":
-                promotion_result = await self._record_scoring_health_quarantined(
-                    candidate=candidate,
-                    score_bundle_row=bundle_row,
-                    score_bundle=score_bundle,
-                    scoring_health_gate=scoring_health_gate,
-                )
             else:
                 promotion_result = await self._maybe_promote_scored_candidate(
                     candidate=candidate,
@@ -2768,61 +2783,6 @@ class ResearchLabGatewayScoringWorker:
         )
         return {"status": "rejected_public_holdout_gate"}
 
-    async def _record_scoring_health_quarantined(
-        self,
-        *,
-        candidate: Mapping[str, Any],
-        score_bundle_row: Mapping[str, Any],
-        score_bundle: Mapping[str, Any],
-        scoring_health_gate: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
-        metric = promotion_improvement_metric(score_bundle)
-        improvement_points = float(metric.improvement_points)
-        delta_lcb = float(aggregates.get("delta_lcb") or 0.0)
-        candidate_parent = str(candidate.get("parent_artifact_hash") or score_bundle.get("parent_artifact_hash") or "")
-        await create_candidate_promotion_event(
-            candidate_id=str(candidate["candidate_id"]),
-            source_score_bundle_id=str(score_bundle_row.get("score_bundle_id") or ""),
-            event_type="promotion_checked",
-            promotion_status="checked",
-            active_parent_artifact_hash=candidate_parent,
-            candidate_parent_artifact_hash=candidate_parent,
-            rolling_window_hash=str(score_bundle.get("icp_set_hash") or ""),
-            improvement_points=improvement_points,
-            threshold_points=float(self.config.improvement_threshold_points),
-            worker_ref=self.worker_ref,
-            event_doc={
-                "delta_lcb": round(delta_lcb, 6),
-                "auto_commit_enabled": self.config.auto_commit_enabled,
-                "candidate_kind": str(candidate.get("candidate_kind") or ""),
-                "decision_path": "scoring_health_quarantined",
-                "promotion_metric": metric.event_doc(),
-            },
-        )
-        await create_candidate_promotion_event(
-            candidate_id=str(candidate["candidate_id"]),
-            source_score_bundle_id=str(score_bundle_row.get("score_bundle_id") or ""),
-            event_type="scoring_health_quarantined",
-            promotion_status="rejected",
-            active_parent_artifact_hash=candidate_parent,
-            candidate_parent_artifact_hash=candidate_parent,
-            rolling_window_hash=str(score_bundle.get("icp_set_hash") or ""),
-            improvement_points=improvement_points,
-            threshold_points=float(self.config.improvement_threshold_points),
-            worker_ref=self.worker_ref,
-            event_doc={
-                "reason": "scoring_health_gate_enabled_and_failed",
-                "scoring_health_gate": dict(scoring_health_gate),
-                "scoring_health": _compact_scoring_health_doc(score_bundle.get("scoring_health")),
-                "mean_delta": round(improvement_points, 6),
-                "delta_lcb": round(delta_lcb, 6),
-                "candidate_kind": str(candidate.get("candidate_kind") or ""),
-                "promotion_metric": metric.event_doc(),
-            },
-        )
-        return {"status": "scoring_health_quarantined"}
-
     def _scoring_health_gate_result(self, score_bundle: Mapping[str, Any]) -> dict[str, Any]:
         health = score_bundle.get("scoring_health") if isinstance(score_bundle.get("scoring_health"), Mapping) else {}
         thresholds = {
@@ -2857,11 +2817,12 @@ class ResearchLabGatewayScoringWorker:
                     "threshold": round(float(threshold), 6),
                 }
             )
-        enabled = bool(self.config.scoring_health_gate_enabled)
+        configured_enabled = bool(self.config.scoring_health_gate_enabled)
         return {
             "schema_version": "1.0",
-            "enabled": enabled,
-            "decision": "quarantined" if enabled and violations else ("passed" if enabled else "observe_only"),
+            "enabled": False,
+            "configured_enabled": configured_enabled,
+            "decision": "observe_only",
             "would_quarantine": bool(violations),
             "violations": violations,
             "thresholds": {key: round(float(value), 6) for key, value in thresholds.items()},
@@ -3336,6 +3297,21 @@ class ResearchLabGatewayScoringWorker:
                 "decision_path": "confirmation_rerun_result",
                 "attempt": attempt,
                 "confirmation": confirmation_doc,
+                # P18: the confirmation pair is calibration gold — two
+                # measurements of the SAME artifact. Surface both aggregates
+                # and their disagreement as flat, queryable fields (the
+                # empirical same-model noise any reward-model training needs).
+                "measurement_pair": {
+                    "first_pass_delta": round(float(first_pass_points), 6),
+                    "confirmation_delta": round(
+                        _safe_float(confirmation_doc.get("confirmation_delta"), default=0.0), 6
+                    ),
+                    "delta_of_deltas": round(
+                        _safe_float(confirmation_doc.get("confirmation_delta"), default=0.0)
+                        - float(first_pass_points),
+                        6,
+                    ),
+                },
             },
         )
         logger.info(
@@ -3779,6 +3755,15 @@ class ResearchLabGatewayScoringWorker:
 
         rebase_build_doc = {
             **build.build_doc,
+            # Preserve the source candidate's loop-node linkage so the rebased
+            # candidate's score bundle keeps the deterministic
+            # execution_trace:<uuid5> ref (bundle→trace join survives rebases).
+            **(
+                {"loop_node_id": str((candidate.get("candidate_build_doc") or {}).get("loop_node_id") or "")}
+                if isinstance(candidate.get("candidate_build_doc"), Mapping)
+                and (candidate.get("candidate_build_doc") or {}).get("loop_node_id")
+                else {}
+            ),
             "stale_parent_rebase": {
                 "schema_version": "1.0",
                 "source_candidate_id": candidate_id,
@@ -4697,6 +4682,16 @@ class ResearchLabGatewayScoringWorker:
         if not prefix.startswith("s3://"):
             return None
         kms_key_id = str(os.getenv(INCONTAINER_TRACE_KMS_KEY_ENV) or "").strip()
+        if not kms_key_id:
+            # P5/P13: prefix-on/key-off must never write unencrypted; fall back
+            # to the evaluator's default sink, which drops loudly for this case.
+            logger.error(
+                "research_lab_incontainer_trace_sink_refused candidate=%s reason=missing_kms_key "
+                "(set %s so candidate in-container traces are written SSE-KMS encrypted)",
+                compact_ref(candidate_id),
+                INCONTAINER_TRACE_KMS_KEY_ENV,
+            )
+            return None
         safe_candidate = _trace_path_segment(candidate_id, fallback="candidate")
 
         async def _sink(icp_ref: str, entries: list[dict[str, Any]]) -> str:
@@ -5589,6 +5584,26 @@ class ResearchLabGatewayScoringWorker:
         window_hash: str,
         evaluation_epoch: int,
     ) -> dict[str, Any]:
+        # Bundle→trace forward linkage: when the candidate row carries its loop
+        # node id (worker-side annotation in candidate_build_doc), stamp the
+        # SAME deterministic execution_trace:<uuid5> ref the trajectory
+        # projector writes for that node, so score bundles, engine_trace_
+        # mappings, and execution_traces all join on one key. Candidates
+        # without node linkage (pre-annotation rows) keep the legacy
+        # worker-scoped ref; readers must tolerate both formats — historical
+        # bundles are immutable.
+        loop_node_id = ""
+        build_doc_for_node = candidate.get("candidate_build_doc")
+        if isinstance(build_doc_for_node, Mapping):
+            loop_node_id = str(build_doc_for_node.get("loop_node_id") or "")
+        if loop_node_id:
+            execution_trace_ref = (
+                f"execution_trace:{execution_trace_id_for_node(str(candidate['run_id']), loop_node_id)}"
+            )
+        else:
+            execution_trace_ref = (
+                f"gateway_qualification_worker:{self.worker_ref}:{candidate['candidate_id']}"
+            )
         context = {
             "run_id": str(candidate["run_id"]),
             "ticket_id": str(candidate["ticket_id"]),
@@ -5597,7 +5612,7 @@ class ResearchLabGatewayScoringWorker:
             "evaluation_epoch": int(evaluation_epoch),
             "evaluator_version": "leadpoet-gateway-qualification-worker:research-lab:v1",
             "evidence_bundle_refs": [f"research_lab_rolling_icp_window:{window_hash}"],
-            "execution_trace_ref": f"gateway_qualification_worker:{self.worker_ref}:{candidate['candidate_id']}",
+            "execution_trace_ref": execution_trace_ref,
             "cost_ledger_ref": "cost_ledger:" + canonical_hash(
                 {
                     "candidate_id": candidate["candidate_id"],
@@ -5663,6 +5678,12 @@ class ResearchLabGatewayScoringWorker:
         if no_proxy:
             env["NO_PROXY"] = no_proxy
             env["no_proxy"] = no_proxy
+        # P13 corpus-mode capture budgets: with an S3 persistence prefix set,
+        # containers get the larger byte caps so tool-call payloads are not
+        # silently truncated (explicit operator caps always win).
+        from research_lab.eval.private_runtime import incontainer_trace_corpus_env
+
+        env.update(incontainer_trace_corpus_env())
         return env
 
     def _private_baseline_scoring_env(self) -> dict[str, str]:

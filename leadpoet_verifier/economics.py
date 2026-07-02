@@ -31,7 +31,7 @@ DEFAULT_RESEARCH_LAB_CHAMPION_MIN_ALPHA_PERCENT = Decimal("2.0")
 DEFAULT_RESEARCH_LAB_CHAMPION_EXTRA_ALPHA_PERCENT_PER_POINT = Decimal("0.1")
 DEFAULT_RESEARCH_LAB_CHAMPION_MAX_ALPHA_PERCENT = Decimal("5.0")
 DEFAULT_RESEARCH_LAB_CHAMPION_PLACEHOLDER_ALPHA_PERCENT = Decimal("0.0001")
-DEFAULT_RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS = Decimal("2.0")
+DEFAULT_RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS = Decimal("1.0")
 DEFAULT_RESEARCH_LAB_CHAMPION_EVAL_DAYS = 10
 DEFAULT_RESEARCH_LAB_CHAMPION_ICPS_PER_DAY = 6
 DEFAULT_USD_PER_0_1_PERCENT_EPOCH = Decimal("0.162")
@@ -298,8 +298,9 @@ def build_champion_reward_obligation(candidate: Mapping[str, Any], policy: Mappi
         "required_icp_count": total_required,
         "input_hash": sha256_json(_sorted_public({"candidate": candidate, "policy": policy})),
     }
-    reward_id = "champion_reward:" + sha256_json(payload_without_id)
-    return {**payload_without_id, "champion_reward_id": reward_id, "anchored_hash": reward_id}
+    anchored_hash = sha256_json(payload_without_id)
+    reward_id = "champion_reward:" + anchored_hash
+    return {**payload_without_id, "champion_reward_id": reward_id, "anchored_hash": anchored_hash}
 
 
 def allocate_research_lab_epoch(

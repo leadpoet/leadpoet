@@ -31,6 +31,11 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 # ============================================================
 FROM python:3.11-slim
 
+ARG BUILD_ID=unknown
+ARG GITHUB_SHA=unknown
+ARG GITHUB_REF_NAME=unknown
+ARG BUILD_TIME_UTC=unknown
+
 # Install runtime dependencies only
 RUN apt-get update && apt-get install -y \
     curl \
@@ -63,6 +68,10 @@ ENV PATH=/home/gateway/.local/bin:$PATH
 
 # Set Python to run in unbuffered mode (logs appear immediately)
 ENV PYTHONUNBUFFERED=1
+ENV BUILD_ID=${BUILD_ID}
+ENV GITHUB_SHA=${GITHUB_SHA}
+ENV GITHUB_REF_NAME=${GITHUB_REF_NAME}
+ENV BUILD_TIME_UTC=${BUILD_TIME_UTC}
 
 # Expose port
 EXPOSE 8000
@@ -73,4 +82,3 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 # Run application
 CMD ["python", "-m", "uvicorn", "gateway.main:app", "--host", "0.0.0.0", "--port", "8000"]
-

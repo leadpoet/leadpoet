@@ -350,7 +350,23 @@ async def _judge_chunk(
                     r.status_code, r.text[:200],
                 )
                 return None
-            content = (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "")
+            resp_doc = r.json()
+            # trajectoryimprovements.md P1: role-fit verdicts are training
+            # labels — capture the exchange (never affects the judgment).
+            try:
+                from research_lab.openrouter_telemetry import record_openrouter_trace
+
+                record_openrouter_trace(
+                    channel="qualification",
+                    purpose="role_batch_check",
+                    stage="scorer_judgment",
+                    model_id=MODEL,
+                    request_body=body,
+                    response_doc=resp_doc,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            content = (resp_doc.get("choices") or [{}])[0].get("message", {}).get("content", "")
             parsed = _parse_response(content)
             if parsed is not None and len(parsed) == len(chunk):
                 return parsed

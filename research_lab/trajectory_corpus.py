@@ -115,6 +115,15 @@ class TrajectoryCorpusSourceRecord:
     island: str
     component_refs: tuple[str, ...] = ()
     outcome_label_refs: tuple[str, ...] = ()
+    # P15 trainability invariants: near-duplicate leak-guard keys and the
+    # token-budget flag. ``split_cluster_key`` groups trajectories that must
+    # never straddle splits (paraphrased/attribute-reordered ICPs share it —
+    # today the sanitized-brief signature; a minhash band key later).
+    brief_id: str = ""
+    customer_ref: str = ""
+    split_cluster_key: str = ""
+    token_count: int = 0
+    over_token_budget: bool = False
     split: str = CorpusSplit.TRAIN.value
     data_state: str = CorpusDataState.LOCAL_FIXTURE.value
     measured_data: bool = False
@@ -152,6 +161,11 @@ class TrajectoryCorpusSourceRecord:
             island=str(data.get("island", "")),
             component_refs=tuple(str(item) for item in data.get("component_refs", [])),
             outcome_label_refs=tuple(str(item) for item in data.get("outcome_label_refs", [])),
+            brief_id=str(data.get("brief_id", "")),
+            customer_ref=str(data.get("customer_ref", "")),
+            split_cluster_key=str(data.get("split_cluster_key", "")),
+            token_count=int(data.get("token_count", 0) or 0),
+            over_token_budget=bool(data.get("over_token_budget", False)),
             split=str(data.get("split", CorpusSplit.TRAIN.value)),
             data_state=str(data.get("data_state", CorpusDataState.LOCAL_FIXTURE.value)),
             measured_data=bool(data.get("measured_data", False)),
@@ -617,14 +631,30 @@ def _source_protected_material_free(record: TrajectoryCorpusSourceRecord) -> boo
 
 
 def _split_policy_passes(policy: CorpusSplitPolicyRecord, records: Sequence[TrajectoryCorpusSourceRecord]) -> bool:
+    """P15 near-duplicate leak guard.
+
+    The old guard checked exact ``trajectory_id`` only — a paraphrased /
+    attribute-reordered ICP passed into train AND holdout, inflating the
+    held-out delta. Cross-split collisions are now rejected on every leak key
+    the record carries: trajectory_id, brief_id, customer_ref, and the
+    ``split_cluster_key`` cluster key (empty values are skipped).
+    """
     if validate_corpus_split_policy_record(policy):
         return False
-    seen: dict[str, str] = {}
+    seen_by_key: dict[tuple[str, str], str] = {}
     for record in records:
-        prior = seen.get(record.trajectory_id)
-        if prior is not None and prior != record.split:
-            return False
-        seen[record.trajectory_id] = record.split
+        leak_keys = [("trajectory_id", record.trajectory_id)]
+        if policy.no_cross_split_brief_id and record.brief_id:
+            leak_keys.append(("brief_id", record.brief_id))
+        if policy.no_cross_split_customer_ref and record.customer_ref:
+            leak_keys.append(("customer_ref", record.customer_ref))
+        if record.split_cluster_key:
+            leak_keys.append(("split_cluster_key", record.split_cluster_key))
+        for key in leak_keys:
+            prior = seen_by_key.get(key)
+            if prior is not None and prior != record.split:
+                return False
+            seen_by_key[key] = record.split
     return True
 
 

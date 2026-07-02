@@ -1056,6 +1056,16 @@ async def _fetch_sd_then_exa(
 async def _call_openrouter(
     client: httpx.AsyncClient, model: str, prompt: str,
 ) -> Dict[str, Any]:
+    # trajectoryimprovements.md P1/P8: the intent judge's exchanges are
+    # captured through the shared telemetry hook (encrypted S3, pointer-only
+    # provider_usage), and reasoning is requested by default with a
+    # retry-without-reasoning fallback. Capture never affects the verdict.
+    from research_lab.openrouter_telemetry import (
+        include_reasoning_default,
+        reasoning_request_unsupported,
+        record_openrouter_trace,
+    )
+
     or_key = _get_openrouter_key()
     if not or_key:
         return {"_error": "no_openrouter_key"}
@@ -1079,6 +1089,10 @@ async def _call_openrouter(
             "zdr": True,
         },
     }
+    request_reasoning = include_reasoning_default()
+    reasoning_dropped = False
+    if request_reasoning:
+        body["include_reasoning"] = True
     for attempt in range(3):
         try:
             r = await client.post(
@@ -1093,11 +1107,43 @@ async def _call_openrouter(
                 await asyncio.sleep(8 * (attempt + 1))
                 continue
             if r.status_code != 200:
+                if request_reasoning and reasoning_request_unsupported(
+                    r.status_code, r.text
+                ):
+                    request_reasoning = False
+                    reasoning_dropped = True
+                    body.pop("include_reasoning", None)
+                    continue
+                record_openrouter_trace(
+                    channel="qualification",
+                    purpose="intent_three_stage_verify",
+                    stage="scorer_judgment",
+                    model_id=model,
+                    request_body=body,
+                    response_doc={
+                        "http_status": r.status_code,
+                        "error_excerpt": r.text[:400],
+                    },
+                    outcome="http_error",
+                )
                 return {
                     "_error": f"http_{r.status_code}",
                     "_body": r.text[:400],
                 }
             resp = r.json()
+            provider_usage = record_openrouter_trace(
+                channel="qualification",
+                purpose="intent_three_stage_verify",
+                stage="scorer_judgment",
+                model_id=model,
+                request_body=body,
+                response_doc=resp,
+                outcome="response",
+            )
+            if reasoning_dropped:
+                provider_usage.setdefault("reasoning_capture", {})[
+                    "request_dropped"
+                ] = True
             content = (resp.get("choices") or [{}])[0].get(
                 "message", {}
             ).get("content", "")
@@ -1114,6 +1160,7 @@ async def _call_openrouter(
                 "citations": resp.get("citations") or [],
                 "usage": resp.get("usage") or {},
                 "model": model,
+                "provider_usage": provider_usage,
             }
         except (httpx.TimeoutException, httpx.NetworkError) as e:
             if attempt == 2:

@@ -1277,6 +1277,21 @@ async def _call_reasoning_llm(
                     raise
                 await asyncio.sleep(wait_s)
         data = response.json()
+        # trajectoryimprovements.md P1: hardcoding/gaming verdicts are
+        # training labels — capture the exchange (never affects detection).
+        try:
+            from research_lab.openrouter_telemetry import record_openrouter_trace
+
+            record_openrouter_trace(
+                channel="qualification_validator",
+                purpose="hardcoding_detection",
+                stage="scorer_judgment",
+                model_id=str(payload.get("model") or ""),
+                request_body=payload,
+                response_doc=data,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         cost = 0.0
         usage = data.get("usage", {})

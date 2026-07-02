@@ -28,6 +28,7 @@ for _path in (_PACKAGE_PARENT, _ATTESTED_RUNTIME_DIR):
         sys.path.insert(0, _path)
 
 # Import configuration
+from gateway.build_info import get_build_info
 from gateway.config import BUILD_ID, GITHUB_COMMIT, TIMESTAMP_TOLERANCE_SECONDS
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
@@ -552,8 +553,21 @@ async def root():
         status="ok",
         build_id=BUILD_ID,
         github_commit=GITHUB_COMMIT,
-        timestamp=datetime.utcnow().isoformat()
+        timestamp=datetime.utcnow().isoformat(),
+        build_info=get_build_info(),
     )
+
+
+@app.get("/build-info")
+async def build_info():
+    """
+    Runtime build provenance.
+
+    This is the canonical operator endpoint for checking which source commit is
+    live. Deployments should ship gateway/BUILD_INFO.json; env and local git are
+    fallback sources for CI and development.
+    """
+    return get_build_info()
 
 
 @app.get("/health")
@@ -841,8 +855,16 @@ if __name__ == "__main__":
     print("=" * 60)
     print("🚀 Starting LeadPoet Trustless Gateway")
     print("=" * 60)
+    _build_info = get_build_info()
     print(f"Build ID: {BUILD_ID}")
     print(f"GitHub Commit: {GITHUB_COMMIT}")
+    print(f"Commit Source: {_build_info.get('commit_source')}")
+    print(f"Build Time UTC: {_build_info.get('build_time_utc')}")
+    print(f"Git Branch: {_build_info.get('git_branch')}")
+    print(f"Git Dirty: {_build_info.get('git_dirty')}")
+    print(f"Build Info File: {_build_info.get('build_info_path') or 'not found'}")
+    if not _build_info.get("is_commit_known"):
+        print("⚠️  WARNING: gateway commit is unknown. Generate and deploy BUILD_INFO.json.")
     print("=" * 60)
     
     uvicorn.run(

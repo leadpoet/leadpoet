@@ -253,9 +253,7 @@ def build_parser() -> argparse.ArgumentParser:
     promote_scored.add_argument(
         "--force",
         action="store_true",
-        help="Replay past the already-promoted, scoring-health-quarantine, "
-        "baseline-health, and confirmation-rerun gates (each bypass is logged "
-        "explicitly); the unavailable-basis rejection is never bypassed",
+        help="Replay even when this candidate already has a prior promoted event",
     )
 
     sub.add_parser(
@@ -396,49 +394,15 @@ async def _promote_scored_candidate(
             "score_bundle_candidate_artifact_hash": bundle_row.get("candidate_artifact_hash"),
         }
 
-    # Bug #23 residual: a scoring-health-quarantined bundle must not be
-    # replayed past the health gate. --force bypasses it, but logs exactly
-    # which gates it bypasses.
-    quarantine_events = await select_many(
-        "research_lab_candidate_promotion_events",
-        columns="promotion_event_id,event_type,promotion_status,source_score_bundle_id,created_at",
-        filters=(
-            ("candidate_id", candidate_id),
-            ("event_type", "scoring_health_quarantined"),
-            ("source_score_bundle_id", str(bundle_row.get("score_bundle_id") or "")),
-        ),
-        order_by=(("created_at", True),),
-        limit=1,
-    )
-    if quarantine_events and not force:
-        return {
-            "ok": False,
-            "action": "promote-scored-candidate",
-            "candidate_id": candidate_id,
-            "score_bundle_id": bundle_row.get("score_bundle_id"),
-            "error": "candidate_scoring_health_quarantined",
-            "quarantine_event": quarantine_events[0],
-            "guidance": "requeue for rescore instead of replaying a quarantined bundle; "
-            "--force bypasses this gate (logged) but is unsafe on quarantined bundles",
-        }
-
     force_bypassed_gates: list[str] = []
     bypass_gates: frozenset[str] = frozenset()
     if force:
         if existing_promotions:
             force_bypassed_gates.append("already_promoted")
-        if quarantine_events:
-            force_bypassed_gates.append("scoring_health_quarantine")
-        bypass_gates = frozenset(
-            {"scoring_health_quarantine", "baseline_health", "confirmation_rerun"}
-        )
         logger.warning(
-            "promote-scored-candidate --force candidate=%s bypassing gates: %s "
-            "(baseline_health and confirmation_rerun bypasses apply only if the "
-            "gate would have held; the unavailable-basis rejection is never "
-            "bypassed)",
+            "promote-scored-candidate --force candidate=%s bypassing safeguards: %s",
             candidate_id,
-            ", ".join(force_bypassed_gates + ["baseline_health", "confirmation_rerun"]),
+            ", ".join(force_bypassed_gates) or "-",
         )
 
     aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
@@ -469,7 +433,6 @@ async def _promote_scored_candidate(
         "promotion_metric": metric.event_doc(),
         "promotion_rejection_status": metric.rejection_status,
         "baseline_summary_doc_status": baseline_doc_status,
-        "scoring_health_quarantined": bool(quarantine_events),
         "confirmation": confirmation_state,
         "force_bypassed_gates": force_bypassed_gates,
         "threshold_points": ResearchLabGatewayConfig.from_env().improvement_threshold_points,
@@ -493,8 +456,14 @@ async def _promote_scored_candidate(
         score_bundle=dict(score_bundle),
         bypass_gates=bypass_gates,
     )
+    ok = result.get("status") == "merged"
+    if result.get("status") == "already_promoted":
+        private_source = result.get("private_source_status")
+        private_status = private_source.get("status") if isinstance(private_source, Mapping) else ""
+        reward_status = str(result.get("champion_reward_status") or "")
+        ok = private_status != "failed" and reward_status in {"created", "already_created"}
     return {
-        "ok": result.get("status") == "merged",
+        "ok": ok,
         "action": "promote-scored-candidate",
         "dry_run": False,
         "planned": planned,

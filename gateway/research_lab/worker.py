@@ -80,6 +80,11 @@ from research_lab.reimbursements import (
     compute_reimbursement_award,
 )
 from research_lab.auto_research_prompt import coerce_component_registry
+from research_lab.axis_provenance import (
+    current_call_episode,
+    episode_id,
+    provenance_for_stage,
+)
 from research_lab.canonical import canonical_json, sha256_bytes, sha256_json
 from research_lab.eval import (
     DockerPrivateModelRunner,
@@ -655,6 +660,7 @@ class _OpenRouterRawTraceRecorder:
         self._pending: set[Future[None]] = set()
         self._run_seq: Counter[str] = Counter()
         self._failure_logged_runs: set[str] = set()
+        self._availability_warning_logged = False
         self._destination: tuple[str, str] | None = None
         self._destination_resolved = False
         self._disabled = False
@@ -673,7 +679,13 @@ class _OpenRouterRawTraceRecorder:
         Returns the ``{s3_ref, sha256}`` pointer for event docs, or None when
         capture is disabled/unconfigured. Never raises."""
         try:
-            if self._disabled or not run_id or not _raw_trace_capture_enabled():
+            if self._disabled or not run_id:
+                return None
+            if not _raw_trace_capture_enabled():
+                self._log_availability_warning(
+                    "disabled_by_env",
+                    f"set {_RAW_TRACE_CAPTURE_ENABLED_ENV}=true to capture raw prompt/response traces",
+                )
                 return None
             destination = self._resolve_destination()
             if destination is None:
@@ -695,19 +707,30 @@ class _OpenRouterRawTraceRecorder:
                 )
                 if segment
             )
-            payload = _redact_raw_trace_value(
-                {
-                    "schema_version": "1.0",
-                    "artifact_type": "research_lab_raw_llm_trace",
-                    "run_id": str(run_id),
-                    "stage": str(stage or ""),
-                    "seq": seq,
-                    "outcome": str(outcome or ""),
-                    "captured_at": datetime.now(timezone.utc).isoformat(),
-                    "request": dict(request_doc),
-                    "response": response_doc,
-                }
-            )
+            # P11: derived axis-A/B provenance on every persisted call. The
+            # emitter/teacher values come from the single auditable mapping in
+            # research_lab/axis_provenance.py, never per-stream constants.
+            provenance = provenance_for_stage(stage)
+            trace_doc: dict[str, Any] = {
+                "schema_version": "1.1",
+                "artifact_type": "research_lab_raw_llm_trace",
+                "run_id": str(run_id),
+                "stage": str(stage or ""),
+                "seq": seq,
+                "outcome": str(outcome or ""),
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+                "call_emitter": provenance["call_emitter"],
+                "purpose": provenance["purpose"],
+                "component": provenance["component"],
+                "teacher_model_flag": provenance["teacher_model_flag"],
+                "request": dict(request_doc),
+                "response": response_doc,
+            }
+            episode = current_call_episode()
+            if episode:
+                trace_doc["episode"] = episode
+                trace_doc["episode_id"] = episode_id(episode)
+            payload = _redact_raw_trace_value(trace_doc)
             body = canonical_json(payload).encode("utf-8")
             digest = sha256_bytes(body)
             self._submit(run_id=str(run_id), bucket=bucket, object_key=object_key, body=body)
@@ -757,13 +780,30 @@ class _OpenRouterRawTraceRecorder:
             if destination is None:
                 self._disabled = True
         if destination is None:
-            # Local/dev: no S3 destination — one log, then the path stays inert.
-            logger.info(
-                "research_lab_raw_trace_capture_disabled reason=missing_s3_prefix env=%s; "
-                "raw prompt/response capture is skipped for this process",
-                _RAW_TRACE_S3_PREFIX_ENV,
+            # Local/dev: no S3 destination — one warning, then the path stays inert.
+            self._log_availability_warning(
+                "missing_s3_prefix",
+                (
+                    f"set {_RAW_TRACE_S3_PREFIX_ENV}=s3://bucket/prefix or configure "
+                    "private_model_manifest_uri with an s3:// parent"
+                ),
             )
         return destination
+
+    def _log_availability_warning(self, reason: str, hint: str) -> None:
+        with self._lock:
+            if self._availability_warning_logged:
+                return
+            self._availability_warning_logged = True
+        logger.warning(
+            (
+                "research_lab_raw_trace_capture_unavailable reason=%s env=%s hint=%s; "
+                "OpenRouter reasoning/full raw traces will not be stored for this process"
+            ),
+            reason,
+            _RAW_TRACE_S3_PREFIX_ENV,
+            hint,
+        )
 
     def _submit(self, *, run_id: str, bucket: str, object_key: str, body: bytes) -> None:
         with self._lock:
@@ -955,6 +995,11 @@ class ResearchLabHostedWorker:
         self._raw_trace_recorder = _OpenRouterRawTraceRecorder(self.config)
 
     async def run_forever(self) -> None:
+        # trajectoryimprovements.md P5: one structured capture health block at
+        # startup; refuses to start in production when capture is degraded.
+        from gateway.research_lab.capture_health import enforce_capture_health
+
+        enforce_capture_health(self.config, worker_kind="hosted_worker")
         processed = 0
         last_idle_log = 0.0
         last_error_log = 0.0
@@ -1270,6 +1315,7 @@ class ResearchLabHostedWorker:
             )
         try:
             from gateway.research_lab.trajectory_projector import (
+                backfill_corpus_trace_rows,
                 project_completed_runs,
                 projector_enabled,
             )
@@ -1278,6 +1324,11 @@ class ResearchLabHostedWorker:
             # RESEARCH_LAB_TRAJECTORY_PROJECTOR_ENABLED=true.
             if projector_enabled():
                 await project_completed_runs(dry_run=False)
+                await backfill_corpus_trace_rows(
+                    batch_size=10,
+                    dry_run=False,
+                    max_candidates=250,
+                )
         except Exception as exc:
             logger.warning(
                 "research_lab_periodic_trajectory_projection_failed worker_ref=%s error=%s",
@@ -1831,7 +1882,15 @@ class ResearchLabHostedWorker:
                 candidate_patch_manifest=candidate_patch_manifest,
                 candidate_model_manifest=finalist.get("candidate_model_manifest"),
                 candidate_source_diff_hash=finalist.get("candidate_source_diff_hash"),
-                candidate_build_doc=dict(finalist.get("candidate_build_doc") or {}),
+                candidate_build_doc={
+                    **dict(finalist.get("candidate_build_doc") or {}),
+                    # Worker-side annotation (deliberately outside the engine's
+                    # build_doc_hash, which covers only engine-produced fields):
+                    # carries the loop node id to the scoring worker so score
+                    # bundles stamp the deterministic execution_trace:<uuid5>
+                    # ref the trajectory projector writes (bundle→trace join).
+                    "loop_node_id": str(finalist.get("node_id") or ""),
+                },
                 hypothesis_doc=hypothesis_doc,
                 redacted_public_summary=redacted_summary,
             )
@@ -3512,12 +3571,22 @@ class ResearchLabHostedWorker:
                 model_id=model_id,
                 api_key=api_key,
                 generation_stats_opener=proxy_opener.open if proxy_opener else None,
+                reasoning_requested=include_reasoning_effort,
+                requested_reasoning_effort=requested_reasoning_effort,
             )
             if raw_trace_ref:
                 # Pointer only ({s3_ref, sha256}) — never raw prompt/response
                 # text: the trajectory-corpus protected-material scanner fails
                 # any event doc carrying content keys.
                 provider_usage = {**provider_usage, "raw_trace_ref": dict(raw_trace_ref)}
+                reasoning_capture = dict(
+                    provider_usage.get("reasoning_capture")
+                    if isinstance(provider_usage.get("reasoning_capture"), Mapping)
+                    else {}
+                )
+                reasoning_capture["raw_trace_ref_present"] = True
+                reasoning_capture["storage_state"] = "raw_trace_ref"
+                provider_usage["reasoning_capture"] = reasoning_capture
             if not content:
                 _raise_openrouter_generation_response_error(
                     decoded,
@@ -3581,8 +3650,19 @@ class ResearchLabHostedWorker:
                     if reasoning_effort_drop_error_hash:
                         provider_usage = dict(result.provider_usage or {})
                         provider_usage["reasoning_effort_dropped"] = True
+                        provider_usage["reasoning_request_dropped"] = True
                         provider_usage["requested_reasoning_effort"] = requested_reasoning_effort
                         provider_usage["reasoning_effort_drop_error_hash"] = reasoning_effort_drop_error_hash
+                        reasoning_capture = dict(
+                            provider_usage.get("reasoning_capture")
+                            if isinstance(provider_usage.get("reasoning_capture"), Mapping)
+                            else {}
+                        )
+                        reasoning_capture["requested"] = True
+                        reasoning_capture["request_dropped"] = True
+                        reasoning_capture["drop_error_hash"] = reasoning_effort_drop_error_hash
+                        reasoning_capture["requested_reasoning_effort"] = requested_reasoning_effort
+                        provider_usage["reasoning_capture"] = reasoning_capture
                         result = OpenRouterCallResult(
                             content=result.content,
                             provider_usage=provider_usage,
@@ -3756,6 +3836,7 @@ class ResearchLabHostedWorker:
             promotion_events = await select_many(
                 "research_lab_candidate_promotion_events",
                 columns="candidate_id,event_type,promotion_status,event_doc,created_at",
+                filters=(),
                 order_by=(("created_at", True),),
                 limit=max(1, min(limit * 2, 400)),
             )
@@ -4286,11 +4367,32 @@ def _build_openrouter_provider_usage(
     model_id: str,
     api_key: str,
     generation_stats_opener: Any | None = None,
+    reasoning_requested: bool = False,
+    requested_reasoning_effort: str = "",
 ) -> tuple[dict[str, Any], int]:
     usage_cost_microusd = _usd_to_microusd(_usage_cost_usd(usage))
     response_id = str(decoded.get("id") or "")
     choices = decoded.get("choices")
     first_choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else {}
+    reasoning_logs = _safe_openrouter_reasoning_logs(decoded)
+    usage_reasoning_token_count = _openrouter_reasoning_token_count(usage)
+    reasoning_capture: dict[str, Any] = {
+        "requested": bool(reasoning_requested),
+        "returned": bool(reasoning_logs),
+        "fields_present": list(reasoning_logs.get("fields_present") or []) if reasoning_logs else [],
+        "reasoning_hashes": list(reasoning_logs.get("reasoning_hashes") or []) if reasoning_logs else [],
+        "reasoning_token_count": usage_reasoning_token_count,
+        "requested_reasoning_effort": str(requested_reasoning_effort or "")[:80],
+        "raw_trace_ref_present": False,
+        "storage_state": (
+            "metadata_only"
+            if reasoning_logs
+            else ("requested_but_absent" if reasoning_requested else "not_requested")
+        ),
+        "storage_policy": (
+            str(reasoning_logs.get("storage_policy") or "") if reasoning_logs else "no_reasoning_returned"
+        ),
+    }
     provider_usage: dict[str, Any] = {
         "provider": "openrouter",
         "key_source": "miner_key_ref",
@@ -4308,8 +4410,10 @@ def _build_openrouter_provider_usage(
         "cost_source": "chat_completion_usage",
         "cost_reconciliation_status": "pending_generation_stats",
         "cost_details": _safe_cost_details(usage.get("cost_details")),
+        "reasoning_capture": reasoning_capture,
     }
-    reasoning_logs = _safe_openrouter_reasoning_logs(decoded)
+    if usage_reasoning_token_count is not None:
+        provider_usage["reasoning_token_count"] = usage_reasoning_token_count
     if reasoning_logs:
         provider_usage["reasoning_logs"] = reasoning_logs
     if not response_id:
@@ -4327,6 +4431,12 @@ def _build_openrouter_provider_usage(
         return provider_usage, usage_cost_microusd
 
     provider_usage["generation_stats"] = _safe_generation_stats(generation_stats)
+    stats_reasoning_token_count = _openrouter_reasoning_token_count(generation_stats)
+    if stats_reasoning_token_count is not None:
+        provider_usage["reasoning_token_count"] = stats_reasoning_token_count
+        reasoning_capture = dict(provider_usage.get("reasoning_capture") or {})
+        reasoning_capture["reasoning_token_count"] = stats_reasoning_token_count
+        provider_usage["reasoning_capture"] = reasoning_capture
     generation_cost_usd = _generation_stats_cost_usd(generation_stats)
     if generation_cost_usd is None:
         provider_usage["cost_reconciliation_status"] = "generation_stats_missing_cost"
@@ -4434,25 +4544,107 @@ def _safe_cost_details(value: Any) -> dict[str, Any]:
     return allowed
 
 
+def _bounded_openrouter_diagnostic(value: Any, *, limit: int = 20000) -> tuple[str, int, bool]:
+    text = value if isinstance(value, str) else json.dumps(value, sort_keys=True, default=str)
+    byte_count = len(text.encode("utf-8"))
+    redacted = _redact_openrouter_diagnostic(text, limit=limit)
+    return redacted, byte_count, byte_count > max(1, int(limit))
+
+
+def _openrouter_reasoning_token_count(*docs: Mapping[str, Any]) -> int | None:
+    for doc in docs:
+        if not isinstance(doc, Mapping):
+            continue
+        for key in ("native_tokens_reasoning", "reasoning_tokens", "tokens_reasoning"):
+            value = _int_or_none(doc.get(key))
+            if value is not None:
+                return max(0, value)
+        completion_details = doc.get("completion_tokens_details")
+        if isinstance(completion_details, Mapping):
+            value = _int_or_none(completion_details.get("reasoning_tokens"))
+            if value is not None:
+                return max(0, value)
+    return None
+
+
 def _safe_openrouter_reasoning_logs(decoded: Mapping[str, Any]) -> dict[str, Any]:
     choices = decoded.get("choices")
-    first_choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else {}
-    message = first_choice.get("message") if isinstance(first_choice.get("message"), Mapping) else {}
-    if not message:
+    if not isinstance(choices, list):
         return {}
-    logs: dict[str, Any] = {}
-    reasoning = message.get("reasoning")
-    if isinstance(reasoning, str) and reasoning.strip():
-        logs["reasoning"] = _redact_openrouter_diagnostic(reasoning, limit=20000)
-        logs["reasoning_hash"] = sha256_json({"reasoning": reasoning})
-    reasoning_details = message.get("reasoning_details")
-    if reasoning_details:
-        encoded = json.dumps(reasoning_details, sort_keys=True, default=str)
-        logs["reasoning_details"] = _redact_openrouter_diagnostic(encoded, limit=20000)
-        logs["reasoning_details_hash"] = sha256_json({"reasoning_details": reasoning_details})
-    if logs:
-        logs["storage_policy"] = "redacted_bounded_openrouter_message_reasoning"
-        logs["schema_version"] = "1.0"
+    choice_logs: list[dict[str, Any]] = []
+    all_fields: set[str] = set()
+    all_hashes: list[str] = []
+    first_reasoning: str | None = None
+    first_reasoning_hash = ""
+    first_reasoning_details: str | None = None
+    first_reasoning_details_hash = ""
+
+    for choice_index, raw_choice in enumerate(choices):
+        if not isinstance(raw_choice, Mapping):
+            continue
+        message = raw_choice.get("message") if isinstance(raw_choice.get("message"), Mapping) else {}
+        if not message:
+            continue
+        fields_present: list[str] = []
+        choice_doc: dict[str, Any] = {"choice_index": int(choice_index), "fields_present": fields_present}
+        reasoning = message.get("reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            fields_present.append("reasoning")
+            preview, byte_count, truncated = _bounded_openrouter_diagnostic(reasoning)
+            reasoning_hash = sha256_json({"choice_index": choice_index, "reasoning": reasoning})
+            choice_doc.update(
+                {
+                    "reasoning": preview,
+                    "reasoning_hash": reasoning_hash,
+                    "reasoning_byte_count": byte_count,
+                    "reasoning_truncated": truncated,
+                }
+            )
+            all_hashes.append(reasoning_hash)
+            if first_reasoning is None:
+                first_reasoning = preview
+                first_reasoning_hash = reasoning_hash
+        reasoning_details = message.get("reasoning_details")
+        if reasoning_details:
+            fields_present.append("reasoning_details")
+            preview, byte_count, truncated = _bounded_openrouter_diagnostic(reasoning_details)
+            reasoning_details_hash = sha256_json(
+                {"choice_index": choice_index, "reasoning_details": reasoning_details}
+            )
+            choice_doc.update(
+                {
+                    "reasoning_details": preview,
+                    "reasoning_details_hash": reasoning_details_hash,
+                    "reasoning_details_byte_count": byte_count,
+                    "reasoning_details_truncated": truncated,
+                }
+            )
+            all_hashes.append(reasoning_details_hash)
+            if first_reasoning_details is None:
+                first_reasoning_details = preview
+                first_reasoning_details_hash = reasoning_details_hash
+        if fields_present:
+            all_fields.update(fields_present)
+            choice_logs.append(choice_doc)
+
+    if not choice_logs:
+        return {}
+    logs: dict[str, Any] = {
+        "storage_policy": "redacted_bounded_openrouter_message_reasoning",
+        "schema_version": "1.1",
+        "choice_count": len(choices),
+        "choices_with_reasoning_count": len(choice_logs),
+        "fields_present": sorted(all_fields),
+        "reasoning_hashes": list(all_hashes),
+        "choices": choice_logs,
+    }
+    # Backward-compatible first-choice/top-level fields for existing readers.
+    if first_reasoning is not None:
+        logs["reasoning"] = first_reasoning
+        logs["reasoning_hash"] = first_reasoning_hash
+    if first_reasoning_details is not None:
+        logs["reasoning_details"] = first_reasoning_details
+        logs["reasoning_details_hash"] = first_reasoning_details_hash
     return logs
 
 

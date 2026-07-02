@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.store import (
     canonical_hash,
@@ -50,14 +51,8 @@ ALLOW_BOOTSTRAP_REGISTER_ENV = "RESEARCH_LAB_ALLOW_BOOTSTRAP_REGISTER"
 # noise-merges (§8.3). Enable only after the baseline health gate is live.
 AUTO_COMMIT_HEAD_MISMATCH_RECOVER_ENV = "RESEARCH_LAB_AUTO_COMMIT_HEAD_MISMATCH_RECOVER"
 
-# §5.2-2 confirmation re-run before merges: an apparent winner is NOT merged on
-# its first measurement. The scoring worker re-measures a fresh baseline AND a
-# fresh candidate evaluation over the same rolling window, and promotion
-# proceeds only if that confirmation delta also clears the confirmation bar.
-# This is the deliberate noise control for the merge decision (same-model sd is
-# 1.9-3.4 points against a 1.0-point bar, §5.1) and it also cancels the
-# shared-daily-baseline correlated error (§0-N1) that no per-candidate
-# statistic can see. Default ON per the §5.2-2 recommendation.
+# Historical confirmation re-run support remains for reading old events, but
+# automatic promotion is score-only against the stored daily baseline.
 PROMOTION_CONFIRMATION_RERUN_ENV = "RESEARCH_LAB_PROMOTION_CONFIRMATION_RERUN"
 # Confirmation pass bar; unset/invalid falls back to the promotion threshold.
 CONFIRMATION_MIN_DELTA_ENV = "RESEARCH_LAB_CONFIRMATION_MIN_DELTA"
@@ -114,9 +109,8 @@ def _env_flag(name: str, default: str = "false") -> bool:
 
 
 def promotion_confirmation_rerun_enabled() -> bool:
-    """§5.2-2 flag, default true. Disable to restore single-measurement merges
-    (e.g. for an operator replay that must merge without a confirmation run)."""
-    return _env_flag(PROMOTION_CONFIRMATION_RERUN_ENV, "true")
+    """Confirmation reruns are no longer a promotion gate."""
+    return False
 
 
 def confirmation_min_delta(threshold_points: float) -> float:
@@ -356,14 +350,9 @@ def promotion_improvement_metric(
     An unavailable basis is an explicit rejection (``rejection_status`` set,
     §0-N3) rather than a silent 0.0 improvement.
 
-    When the bundle's aggregates carry ``provider_excluded_icp_ids`` (ICPs
-    excluded from the candidate totals due to unresolved provider errors), the
-    SAME ICPs are excluded from the baseline basis using the stored daily
-    benchmark's per-ICP scores (``baseline_score_summary_doc``), so a candidate
-    flake is not scored 0 against a baseline with no flake there (§5.2-1). If
-    the exclusion list is present but the baseline per-ICP scores cannot be
-    resolved, the basis is unavailable (explicit rejection), never a skewed
-    asymmetric delta.
+    Provider/runtime health and provider-exclusion audit fields do not change
+    the promotion basis. A candidate promotes only when its stored final score
+    beats the stored daily baseline aggregate by the configured threshold.
     """
 
     aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
@@ -373,52 +362,26 @@ def promotion_improvement_metric(
         baseline_aggregate = _optional_float(gate.get("baseline_aggregate_score"))
         candidate_total = _optional_float(gate.get("candidate_total_score"))
         excluded_icp_ids = _provider_excluded_icp_ids(aggregates)
-        unadjusted_baseline_aggregate: float | None = None
-        baseline_basis_adjusted = False
-        basis_unavailable_reason: str | None = None
-        if excluded_icp_ids:
-            adjusted_baseline = _baseline_aggregate_excluding_icps(
-                baseline_score_summary_doc,
-                excluded_icp_ids,
-            )
-            if adjusted_baseline is None:
-                basis_unavailable_reason = "provider_excluded_icps_baseline_per_icp_unavailable"
-            else:
-                unadjusted_baseline_aggregate = baseline_aggregate
-                baseline_aggregate = adjusted_baseline
-                baseline_basis_adjusted = True
-        if baseline_basis_adjusted:
-            daily_delta = (
-                candidate_total - baseline_aggregate
-                if candidate_total is not None and baseline_aggregate is not None
-                else None
-            )
-        else:
-            daily_delta = _optional_float(gate.get("candidate_delta_vs_daily_baseline"))
-            if daily_delta is None and baseline_aggregate is not None and candidate_total is not None:
-                daily_delta = candidate_total - baseline_aggregate
+        daily_delta = _optional_float(gate.get("candidate_delta_vs_daily_baseline"))
+        if daily_delta is None and baseline_aggregate is not None and candidate_total is not None:
+            daily_delta = candidate_total - baseline_aggregate
         if (
             decision == "private_holdout_approved"
             and bool(gate.get("private_holdout_evaluated"))
             and daily_delta is not None
-            and basis_unavailable_reason is None
         ):
             return PromotionImprovementMetric(
                 improvement_points=float(daily_delta),
-                basis=(
-                    "stored_daily_baseline_total_delta_provider_excluded_icps"
-                    if baseline_basis_adjusted
-                    else "stored_daily_baseline_total_delta"
-                ),
+                basis="stored_daily_baseline_total_delta",
                 daily_baseline_available=True,
                 baseline_aggregate_score=baseline_aggregate,
                 candidate_total_score=candidate_total,
                 candidate_delta_vs_daily_baseline=float(daily_delta),
                 provider_excluded_icp_ids=excluded_icp_ids,
-                baseline_basis_adjusted=baseline_basis_adjusted,
-                unadjusted_baseline_aggregate_score=unadjusted_baseline_aggregate,
+                baseline_basis_adjusted=False,
+                unadjusted_baseline_aggregate_score=None,
             )
-        unavailable_reason = basis_unavailable_reason or decision or "missing_decision"
+        unavailable_reason = decision or "missing_decision"
         return PromotionImprovementMetric(
             improvement_points=0.0,
             basis=f"stored_daily_baseline_unavailable:{unavailable_reason}",
@@ -428,7 +391,8 @@ def promotion_improvement_metric(
             candidate_delta_vs_daily_baseline=daily_delta,
             rejection_status="rejected_basis_unavailable",
             provider_excluded_icp_ids=excluded_icp_ids,
-            unadjusted_baseline_aggregate_score=unadjusted_baseline_aggregate,
+            baseline_basis_adjusted=False,
+            unadjusted_baseline_aggregate_score=None,
         )
 
     legacy_delta = _optional_float(aggregates.get("mean_delta")) or 0.0
@@ -935,16 +899,7 @@ class ResearchLabPromotionController:
     ) -> dict[str, Any]:
         candidate_parent = str(candidate.get("parent_artifact_hash") or score_bundle.get("parent_artifact_hash") or "")
         candidate_kind = str(candidate.get("candidate_kind") or "patch")
-        holdout_gate = (
-            score_bundle.get("private_holdout_gate")
-            if isinstance(score_bundle.get("private_holdout_gate"), Mapping)
-            else None
-        )
-        baseline_summary_doc, baseline_doc_status = await load_baseline_summary_doc_for_gate(holdout_gate)
-        metric = promotion_improvement_metric(
-            score_bundle,
-            baseline_score_summary_doc=baseline_summary_doc,
-        )
+        metric = promotion_improvement_metric(score_bundle)
         improvement_points = float(metric.improvement_points)
         delta_lcb = float((score_bundle.get("aggregates") or {}).get("delta_lcb") or 0.0)
         threshold = float(self.config.improvement_threshold_points)
@@ -995,6 +950,42 @@ class ResearchLabPromotionController:
         active = await load_active_private_model(self.config, register_bootstrap=True)
         active_parent = active.artifact.model_artifact_hash
 
+        # Re-drive idempotency: a candidate that already merged must never
+        # merge again, and replay must not insert duplicate promotion_checked
+        # events. Checked before the stale-parent branch because a merged
+        # candidate's own merge makes its parent stale.
+        merged_event = await candidate_already_promoted(str(candidate["candidate_id"]))
+        if merged_event is not None:
+            logger.info(
+                "research_lab_promotion_already_promoted candidate=%s promotion_event=%s",
+                _short_ref(candidate["candidate_id"]),
+                _short_ref(merged_event.get("promotion_event_id")),
+            )
+            private_source_status = await self._maybe_finalize_missing_private_source_push(
+                candidate=candidate,
+                score_bundle_row=score_bundle_row,
+                score_bundle=score_bundle,
+                active=active,
+                candidate_parent=candidate_parent,
+                rolling_window_hash=rolling_window_hash,
+                improvement_points=improvement_points,
+                threshold=threshold,
+            )
+            reward_status = await self._maybe_finalize_missing_champion_reward(
+                candidate=candidate,
+                score_bundle_row=score_bundle_row,
+                score_bundle=score_bundle,
+                improvement_points=improvement_points,
+                threshold=threshold,
+            )
+            return {
+                "status": "already_promoted",
+                "promotion_event_id": str(merged_event.get("promotion_event_id") or ""),
+                "private_model_version_id": str(merged_event.get("private_model_version_id") or ""),
+                "private_source_status": private_source_status,
+                **reward_status,
+            }
+
         await create_candidate_promotion_event(
             candidate_id=str(candidate["candidate_id"]),
             source_score_bundle_id=score_bundle_id,
@@ -1034,100 +1025,7 @@ class ResearchLabPromotionController:
             )
             return {"status": "rejected_legacy_patch_candidate"}
 
-        # --- Merge-path health gates (§7-7): run before any promotion/merge
-        # decision. Holds are retryable (recorded as checked, candidate stays
-        # scored); only the basis-unavailable case is an explicit rejection.
         bypassed_gates: list[str] = []
-
-        quarantined_event = await self._candidate_bundle_quarantined(
-            candidate_id=str(candidate["candidate_id"]),
-            score_bundle_id=score_bundle_id,
-        )
-        if quarantined_event:
-            if "scoring_health_quarantine" in bypass_gates:
-                bypassed_gates.append("scoring_health_quarantine")
-                logger.warning(
-                    "research_lab_promotion_gate_bypassed: gate=scoring_health_quarantine candidate=%s",
-                    _short_ref(candidate["candidate_id"]),
-                )
-            else:
-                await create_candidate_promotion_event(
-                    candidate_id=str(candidate["candidate_id"]),
-                    source_score_bundle_id=score_bundle_id,
-                    event_type="scoring_health_quarantined",
-                    promotion_status="rejected",
-                    active_parent_artifact_hash=active_parent,
-                    candidate_parent_artifact_hash=candidate_parent,
-                    rolling_window_hash=rolling_window_hash,
-                    improvement_points=improvement_points,
-                    threshold_points=threshold,
-                    worker_ref=self.worker_ref,
-                    event_doc={
-                        "reason": "scoring_health_quarantined_bundle_blocked_on_merge_path",
-                        "quarantine_promotion_event_id": str(quarantined_event.get("promotion_event_id") or ""),
-                        "promotion_metric": metric.event_doc(),
-                    },
-                )
-                return {"status": "scoring_health_quarantined"}
-
-        if holdout_gate is not None and baseline_doc_status == "unavailable":
-            if "baseline_health" in bypass_gates:
-                bypassed_gates.append("baseline_health")
-                logger.warning(
-                    "research_lab_promotion_gate_bypassed: gate=baseline_health "
-                    "(summary doc unavailable) candidate=%s",
-                    _short_ref(candidate["candidate_id"]),
-                )
-            else:
-                await create_candidate_promotion_event(
-                    candidate_id=str(candidate["candidate_id"]),
-                    source_score_bundle_id=score_bundle_id,
-                    event_type="promotion_checked",
-                    promotion_status="checked",
-                    active_parent_artifact_hash=active_parent,
-                    candidate_parent_artifact_hash=candidate_parent,
-                    rolling_window_hash=rolling_window_hash,
-                    improvement_points=improvement_points,
-                    threshold_points=threshold,
-                    worker_ref=self.worker_ref,
-                    event_doc={
-                        "reason": "held_baseline_summary_doc_unavailable",
-                        "decision_path": "baseline_health_hold",
-                        "promotion_metric": metric.event_doc(),
-                    },
-                )
-                return {"status": "held_baseline_doc_unavailable"}
-
-        baseline_health = _baseline_health_doc(baseline_summary_doc)
-        if baseline_health is not None and not bool(baseline_health.get("gate_passed")):
-            if "baseline_health" in bypass_gates:
-                if "baseline_health" not in bypassed_gates:
-                    bypassed_gates.append("baseline_health")
-                logger.warning(
-                    "research_lab_promotion_gate_bypassed: gate=baseline_health "
-                    "(gate_passed false) candidate=%s",
-                    _short_ref(candidate["candidate_id"]),
-                )
-            else:
-                await create_candidate_promotion_event(
-                    candidate_id=str(candidate["candidate_id"]),
-                    source_score_bundle_id=score_bundle_id,
-                    event_type="promotion_checked",
-                    promotion_status="checked",
-                    active_parent_artifact_hash=active_parent,
-                    candidate_parent_artifact_hash=candidate_parent,
-                    rolling_window_hash=rolling_window_hash,
-                    improvement_points=improvement_points,
-                    threshold_points=threshold,
-                    worker_ref=self.worker_ref,
-                    event_doc={
-                        "reason": "held_baseline_health_gate_failed",
-                        "decision_path": "baseline_health_hold",
-                        "baseline_health": dict(baseline_health),
-                        "promotion_metric": metric.event_doc(),
-                    },
-                )
-                return {"status": "held_baseline_health_gate_failed"}
 
         if metric.rejection_status:
             await create_candidate_promotion_event(
@@ -1168,27 +1066,6 @@ class ResearchLabPromotionController:
             )
             return {"status": "rejected_below_threshold"}
 
-        # §5.2-2 re-drive idempotency: a candidate that already merged must
-        # never merge again (worker crash mid-confirmation, racing recorded
-        # confirmations, or a replay). Checked before the stale-parent branch
-        # because a merged candidate's own merge makes its parent stale — a
-        # re-drive would otherwise queue a pointless self-rebase.
-        confirmation_enabled = promotion_confirmation_rerun_enabled()
-        confirmation_bypassed = "confirmation_rerun" in bypass_gates
-        if confirmation_enabled and not confirmation_bypassed:
-            merged_event = await candidate_already_promoted(str(candidate["candidate_id"]))
-            if merged_event is not None:
-                logger.info(
-                    "research_lab_promotion_already_promoted candidate=%s promotion_event=%s",
-                    _short_ref(candidate["candidate_id"]),
-                    _short_ref(merged_event.get("promotion_event_id")),
-                )
-                return {
-                    "status": "already_promoted",
-                    "promotion_event_id": str(merged_event.get("promotion_event_id") or ""),
-                    "private_model_version_id": str(merged_event.get("private_model_version_id") or ""),
-                }
-
         if candidate_parent != active_parent:
             await create_candidate_promotion_event(
                 candidate_id=str(candidate["candidate_id"]),
@@ -1209,41 +1086,6 @@ class ResearchLabPromotionController:
             )
             return {"status": "stale_parent_needs_rescore"}
 
-        # --- §5.2-2 confirmation re-run gate: the candidate has now cleared
-        # every merge gate on its FIRST measurement (holdout approved, not
-        # quarantined, baseline_health passed, above threshold, parent
-        # current). Do not merge on that single noisy number — hold for a
-        # confirmation measurement, or decide from a recorded one.
-        confirmation_summary: dict[str, Any] | None = None
-        if confirmation_bypassed:
-            if "confirmation_rerun" not in bypassed_gates:
-                bypassed_gates.append("confirmation_rerun")
-            logger.warning(
-                "research_lab_promotion_gate_bypassed: gate=confirmation_rerun candidate=%s",
-                _short_ref(candidate["candidate_id"]),
-            )
-        elif confirmation_enabled and holdout_gate is not None:
-            gate_outcome = await self._confirmation_rerun_gate(
-                candidate=candidate,
-                score_bundle_id=score_bundle_id,
-                metric=metric,
-                improvement_points=improvement_points,
-                threshold=threshold,
-                active_parent=active_parent,
-                candidate_parent=candidate_parent,
-                rolling_window_hash=rolling_window_hash,
-                holdout_gate=holdout_gate,
-            )
-            if gate_outcome.get("decision") != "confirmed":
-                result = {
-                    "status": str(gate_outcome.get("status") or "held_pending_confirmation"),
-                    **{k: v for k, v in gate_outcome.items() if k not in {"decision", "status"}},
-                }
-                if bypassed_gates:
-                    result["bypassed_gates"] = bypassed_gates
-                return result
-            confirmation_summary = gate_outcome.get("confirmation_summary") or None
-
         await create_candidate_promotion_event(
             candidate_id=str(candidate["candidate_id"]),
             source_score_bundle_id=score_bundle_id,
@@ -1258,7 +1100,6 @@ class ResearchLabPromotionController:
             event_doc={
                 "auto_commit_enabled": self.config.auto_commit_enabled,
                 "promotion_metric": metric.event_doc(),
-                **({"confirmation": confirmation_summary} if confirmation_summary else {}),
             },
         )
 
@@ -1273,40 +1114,9 @@ class ResearchLabPromotionController:
             improvement_points=improvement_points,
             threshold=threshold,
         )
-        if confirmation_summary:
-            result = {**result, "confirmation": confirmation_summary}
         if bypassed_gates:
             result = {**result, "bypassed_gates": bypassed_gates}
         return result
-
-    async def _candidate_bundle_quarantined(
-        self,
-        *,
-        candidate_id: str,
-        score_bundle_id: str,
-    ) -> dict[str, Any] | None:
-        """Return the quarantine promotion event for THIS bundle, if any.
-
-        Scoped to the source score bundle so a candidate legitimately
-        re-scored healthy on a new bundle is not blocked by an older
-        quarantined bundle (bug #23 residual: replay of a quarantined bundle
-        must not pass the health gate).
-        """
-
-        if not score_bundle_id:
-            return None
-        rows = await select_many(
-            "research_lab_candidate_promotion_events",
-            columns="promotion_event_id,event_type,promotion_status,source_score_bundle_id,created_at",
-            filters=(
-                ("candidate_id", candidate_id),
-                ("event_type", "scoring_health_quarantined"),
-                ("source_score_bundle_id", score_bundle_id),
-            ),
-            order_by=(("created_at", True),),
-            limit=1,
-        )
-        return rows[0] if rows else None
 
     async def _confirmation_rerun_gate(
         self,
@@ -1643,8 +1453,17 @@ class ResearchLabPromotionController:
                 "branch_name": branch_name,
             }
         )
+        existing_attempt_events = await select_many(
+            "research_lab_private_repo_commit_events",
+            columns="commit_event_id,commit_status,created_at",
+            filters=(("candidate_id", candidate_id), ("score_bundle_id", score_bundle_id)),
+            order_by=(("created_at", True),),
+            limit=100,
+        )
+        source_push_attempt = len(existing_attempt_events) + 1
         event_base = {
             "source": "research_lab_source_push",
+            "source_push_attempt": source_push_attempt,
             "candidate_kind": "image_build",
             "candidate_model_artifact_hash": new_artifact.model_artifact_hash,
             "candidate_source_diff_hash": candidate.get("candidate_source_diff_hash"),
@@ -1712,6 +1531,7 @@ class ResearchLabPromotionController:
                     "error_hash": error_hash,
                     "error_class": type(exc).__name__,
                     "candidate_status_preserved": "scored",
+                    "source_push_attempt": source_push_attempt,
                     **failure_detail,
                 },
             )
@@ -1772,6 +1592,24 @@ class ResearchLabPromotionController:
             "champion_threshold_points": threshold,
             "reward_epochs": self.config.lab_reward_epochs,
         }
+        # The reward window starts at reward-creation (merge) time, never at the
+        # bundle's scoring epoch: a candidate scored at epoch N but merged at
+        # N+15 would otherwise have ~75% of its window expired on creation (the
+        # 2026-07-02 incident paid ~2.5h of a ~24h window). The bundle epoch is
+        # kept for provenance; start_epoch comes from the live chain epoch.
+        evaluation_epoch = int(score_bundle.get("evaluation_epoch") or self.config.evaluation_epoch or 0)
+        try:
+            current_epoch, _block, _epoch_source = await resolve_research_lab_evaluation_epoch(
+                self.config.evaluation_epoch
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_champion_reward_epoch_resolution_failed_using_bundle_epoch "
+                "candidate=%s error=%s",
+                _short_ref(candidate["candidate_id"]),
+                str(exc)[:200],
+            )
+            current_epoch = evaluation_epoch
         obligation_input = {
             "uid": uid,
             "miner_uid": uid,
@@ -1780,8 +1618,8 @@ class ResearchLabPromotionController:
             "candidate_id": str(candidate["candidate_id"]),
             "score_bundle_id": str(score_bundle_row["score_bundle_id"]),
             "run_id": str(candidate["run_id"]),
-            "evaluation_epoch": int(score_bundle.get("evaluation_epoch") or self.config.evaluation_epoch or 0),
-            "start_epoch": int(score_bundle.get("evaluation_epoch") or self.config.evaluation_epoch or 0) + 1,
+            "evaluation_epoch": evaluation_epoch,
+            "start_epoch": max(current_epoch, evaluation_epoch) + 1,
             "improvement_points": improvement_points,
             "threshold_points": threshold,
             "daily_icp_counts": _daily_counts_from_score_bundle(score_bundle),
@@ -1809,6 +1647,91 @@ class ResearchLabPromotionController:
             event_doc={"champion_reward_id": str(row["champion_reward_id"])},
         )
         return {"champion_reward_status": "created", "champion_reward_id": str(row["champion_reward_id"])}
+
+    async def _maybe_finalize_missing_private_source_push(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_row: Mapping[str, Any],
+        score_bundle: Mapping[str, Any],
+        active: ActivePrivateModel,
+        candidate_parent: str,
+        rolling_window_hash: str,
+        improvement_points: float,
+        threshold: float,
+    ) -> dict[str, Any]:
+        candidate_id = str(candidate["candidate_id"])
+        score_bundle_id = str(score_bundle_row["score_bundle_id"])
+        existing_events = await select_many(
+            "research_lab_private_repo_commit_events",
+            columns="commit_event_id,commit_status,git_commit_sha,created_at",
+            filters=(("candidate_id", candidate_id), ("score_bundle_id", score_bundle_id)),
+            order_by=(("created_at", True),),
+            limit=10,
+        )
+        successful_events = [
+            event for event in existing_events if str(event.get("commit_status") or "") in {"committed", "pushed"}
+        ]
+        if successful_events:
+            event = successful_events[0]
+            return {
+                "status": "already_recorded",
+                "commit_status": str(event.get("commit_status") or ""),
+                "commit_event_id": str(event.get("commit_event_id") or ""),
+            }
+        if not self.config.auto_commit_enabled:
+            return {"status": "skipped_auto_commit_disabled"}
+        manifest_doc = candidate.get("candidate_model_manifest_doc")
+        if not isinstance(manifest_doc, Mapping):
+            return {"status": "skipped_candidate_manifest_missing"}
+        try:
+            new_artifact = PrivateModelArtifactManifest.from_mapping(manifest_doc)
+            errors = validate_private_model_artifact_manifest(new_artifact)
+            if errors:
+                return {"status": "skipped_candidate_manifest_invalid", "errors": errors[:5]}
+        except Exception as exc:
+            return {"status": "skipped_candidate_manifest_invalid", "error": type(exc).__name__}
+        return await self._maybe_push_private_repo_candidate(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            score_bundle=score_bundle,
+            active=active,
+            new_artifact=new_artifact,
+            active_parent=candidate_parent,
+            candidate_parent=candidate_parent,
+            rolling_window_hash=rolling_window_hash,
+            improvement_points=improvement_points,
+            threshold=threshold,
+        )
+
+    async def _maybe_finalize_missing_champion_reward(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_row: Mapping[str, Any],
+        score_bundle: Mapping[str, Any],
+        improvement_points: float,
+        threshold: float,
+    ) -> dict[str, Any]:
+        created_events = await select_many(
+            "research_lab_candidate_promotion_events",
+            columns="promotion_event_id,event_type,created_at",
+            filters=(("candidate_id", str(candidate["candidate_id"])), ("event_type", "champion_reward_created")),
+            order_by=(("created_at", True),),
+            limit=1,
+        )
+        if created_events:
+            return {
+                "champion_reward_status": "already_created",
+                "champion_reward_event_id": str(created_events[0].get("promotion_event_id") or ""),
+            }
+        return await self._maybe_create_champion_reward(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            score_bundle=score_bundle,
+            improvement_points=improvement_points,
+            threshold=threshold,
+        )
 
 
 async def reconcile_pending_champion_rewards(
@@ -2028,8 +1951,21 @@ def _push_candidate_source_diff_to_repo(
                 raise RepoHeadMismatchError(head=head, expected_sha=active_sha)
 
         patch_path = tmp_dir / "candidate.patch"
-        patch_path.write_text(unified_diff, encoding="utf-8")
+        patch_text = unified_diff
+        patch_normalized = False
+        patch_path.write_text(patch_text, encoding="utf-8")
         check = _run_command_result(["git", "apply", "--check", str(patch_path)], cwd=worktree, timeout_seconds=30)
+        if check.returncode != 0 and "corrupt patch" in ((check.stderr or "") + (check.stdout or "")):
+            normalized = _normalize_unified_diff_hunk_headers(patch_text)
+            if normalized != patch_text:
+                patch_text = normalized
+                patch_normalized = True
+                patch_path.write_text(patch_text, encoding="utf-8")
+                check = _run_command_result(
+                    ["git", "apply", "--check", str(patch_path)],
+                    cwd=worktree,
+                    timeout_seconds=30,
+                )
         if check.returncode != 0:
             reverse = _run_command_result(
                 ["git", "apply", "--reverse", "--check", str(patch_path)],
@@ -2043,6 +1979,7 @@ def _push_candidate_source_diff_to_repo(
                     "candidate_manifest_git_commit_sha": candidate_manifest_sha,
                     "target_files": target_files,
                     "source_diff_hash": source_diff_hash,
+                    "patch_normalized": patch_normalized,
                 }
             raise RuntimeError("candidate source diff does not apply to private source branch")
 
@@ -2055,6 +1992,7 @@ def _push_candidate_source_diff_to_repo(
                 "candidate_manifest_git_commit_sha": candidate_manifest_sha,
                 "target_files": target_files,
                 "source_diff_hash": source_diff_hash,
+                "patch_normalized": patch_normalized,
             }
         _run_command(["git", "config", "user.name", os.getenv("RESEARCH_LAB_PRIVATE_REPO_GIT_AUTHOR_NAME", "Leadpoet Research Lab")], cwd=worktree, timeout_seconds=10)
         _run_command(["git", "config", "user.email", os.getenv("RESEARCH_LAB_PRIVATE_REPO_GIT_AUTHOR_EMAIL", "research-lab@leadpoet.ai")], cwd=worktree, timeout_seconds=10)
@@ -2075,9 +2013,47 @@ def _push_candidate_source_diff_to_repo(
             "candidate_manifest_git_commit_sha": candidate_manifest_sha,
             "target_files": target_files,
             "source_diff_hash": source_diff_hash,
+            "patch_normalized": patch_normalized,
         }
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _normalize_unified_diff_hunk_headers(unified_diff: str) -> str:
+    """Repair incorrect hunk line counts while preserving diff contents."""
+    lines = unified_diff.splitlines()
+    hunk_header = re.compile(
+        r"^@@ -(?P<old_start>\d+)(?:,\d+)? \+(?P<new_start>\d+)(?:,\d+)? @@(?P<suffix>.*)$"
+    )
+    out = list(lines)
+    index = 0
+    while index < len(lines):
+        match = hunk_header.match(lines[index])
+        if not match:
+            index += 1
+            continue
+        old_count = 0
+        new_count = 0
+        cursor = index + 1
+        while cursor < len(lines) and not lines[cursor].startswith("diff --git ") and not lines[cursor].startswith("@@ "):
+            line = lines[cursor]
+            if line.startswith("\\"):
+                cursor += 1
+                continue
+            if line.startswith("+"):
+                new_count += 1
+            elif line.startswith("-"):
+                old_count += 1
+            else:
+                old_count += 1
+                new_count += 1
+            cursor += 1
+        out[index] = (
+            f"@@ -{match.group('old_start')},{old_count} "
+            f"+{match.group('new_start')},{new_count} @@{match.group('suffix')}"
+        )
+        index = cursor
+    return "\n".join(out) + ("\n" if unified_diff.endswith("\n") else "")
 
 
 def _safe_target_files(value: Any) -> list[str]:

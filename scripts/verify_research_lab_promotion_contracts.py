@@ -109,6 +109,11 @@ def main() -> int:
         errors.append(f"champion obligation was not active: {obligation}")
     if float(obligation["threshold_points"]) != 1.0:
         errors.append("champion obligation did not use the 1-point threshold")
+    if not str(obligation.get("champion_reward_id") or "").startswith("champion_reward:sha256:"):
+        errors.append("champion reward id must keep champion_reward:sha256 prefix")
+    anchored_hash = str(obligation.get("anchored_hash") or "")
+    if not anchored_hash.startswith("sha256:") or anchored_hash.startswith("champion_reward:"):
+        errors.append("champion reward anchored_hash must satisfy DB sha256 check constraint")
 
     try:
         asyncio.run(_test_stale_scored_candidate_requires_rebase())
@@ -140,10 +145,16 @@ def main() -> int:
 def _public_report() -> dict[str, object]:
     benchmark_items = []
     summaries = []
+    # The v3 hash-rotation public split is deterministic and score-independent:
+    # for this window hash it puts icp_b/icp_c/icp_f in the public split. The
+    # issue-bearing rows must therefore BE those rows — icp_b carries the
+    # zero-company + hallucinated-intent failure, icp_c the low-intent row
+    # (score 22 -> intent_signal 11 < 15), and the private rows stay healthy
+    # (a weak, d/e strong) to keep the expected strength distribution.
     rows = [
-        ("icp_a", "Healthcare", "Revenue Cycle", "hiring revenue operations leaders", 0.0, 0),
-        ("icp_b", "Manufacturing", "Industrial Automation", "expansion into new facilities", 22.0, 3),
-        ("icp_c", "Financial Services", "Risk", "new compliance audit program", 35.0, 2),
+        ("icp_a", "Healthcare", "Revenue Cycle", "hiring revenue operations leaders", 35.0, 2),
+        ("icp_b", "Manufacturing", "Industrial Automation", "expansion into new facilities", 0.0, 0),
+        ("icp_c", "Financial Services", "Risk", "new compliance audit program", 22.0, 3),
         ("icp_d", "Software", "Developer Tools", "migration to cloud data warehouse", 72.0, 4),
         ("icp_e", "Logistics", "Cold Chain", "opening new fulfillment centers", 83.0, 4),
         ("icp_f", "Cybersecurity", "IAM", "security platform implementation", 91.0, 5),

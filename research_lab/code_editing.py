@@ -105,6 +105,7 @@ class CodeEditDraft:
     predicted_delta: float = 1.0
     plan_path_id: str = ""
     plan_alignment: dict[str, Any] = field(default_factory=dict)
+    expected_metric_effect: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -155,8 +156,11 @@ class LoopDirectionPlan:
     must_not_try: tuple[str, ...]
     success_criteria: tuple[str, ...]
     novelty_requirements: tuple[str, ...]
+    anti_overfit_checks: tuple[str, ...]
     ranked_paths: tuple[dict[str, Any], ...]
     selected_path_id: str
+    generalization_claim: str = ""
+    novelty_contrast: str = ""
     no_new_safe_path: bool = False
     reason: str = ""
 
@@ -170,6 +174,7 @@ class LoopDirectionPlan:
             "must_not_try",
             "success_criteria",
             "novelty_requirements",
+            "anti_overfit_checks",
             "ranked_paths",
         ):
             payload[key] = list(payload[key])
@@ -229,19 +234,29 @@ def build_loop_direction_planner_messages(
     user = (
         "Return strict JSON only, no markdown.\n\n"
         "Rules:\n"
+        "- Primary objective: improve true sourcing quality for future sealed ICPs. Treat public benchmark performance as a noisy validation signal, not as the objective.\n"
         "- Treat ticket.brief_public_summary as the miner research focus.\n"
+        "- If ticket.brief_public_summary names a failure mode, selected_path_id must directly address that failure mode.\n"
+        "- Do not optimize for known public ICP quirks, visible examples, or benchmark-specific shortcuts.\n"
         "- If the miner focus is blank or broad, narrow it to one testable mechanism using benchmark and outcome context.\n"
         "- If prior_attempts show an already-tried path, choose a meaningfully different selected_path_id.\n"
+        "- State how the selected path differs from prior_attempts by mechanism, target function/file, and expected behavior.\n"
+        "- Do not improve apparent score by returning fewer companies, selecting only one safest company, weakening ICP constraints, removing hard filters without replacement, or hiding failures.\n"
+        "- Do not remove ICP constraints unless replacing them with a more faithful constraint or adding a compensating downstream validation/filter.\n"
+        "- Provider fallback paths must classify, retry, timeout, log, or route provider/runtime failures; pure query wording changes are not provider fallback.\n"
         "- Do not select paths that weaken ICP fit, remove constraints as the primary mechanism, or merely clean up code.\n"
         "- Do not request, reveal, or store secrets, hidden ICP plaintext, judge prompts, provider keys, private repo URLs, or raw private data.\n"
         "- If no safe new path exists, return no_new_safe_path=true with a clear reason.\n\n"
         "Required output shape:\n"
         "{\"schema_version\":\"1.0\",\"miner_focus_interpretation\":\"...\",\"loop_goal\":\"...\","
         "\"required_lane\":\"provider_fallback\",\"required_mechanism\":\"...\","
+        "\"generalization_claim\":\"Why this helps future sealed ICPs rather than one public example.\","
         "\"target_behavior\":[\"...\"],\"must_inspect\":[\"...\"],"
         "\"allowed_lanes\":[\"provider_fallback\"],\"disallowed_lanes\":[\"query_construction\"],"
         "\"must_not_try\":[\"Do not remove LinkedIn employee-count clauses from Exa search queries.\"],"
         "\"success_criteria\":[\"...\"],\"novelty_requirements\":[\"...\"],"
+        "\"anti_overfit_checks\":[\"Preserves multiple qualified company outputs.\"],"
+        "\"novelty_contrast\":\"How this differs from prior attempts by mechanism, target function/file, and expected behavior.\","
         "\"ranked_paths\":[{\"path_id\":\"provider_retry_backoff\",\"lane\":\"provider_fallback\","
         "\"mechanism\":\"Classify retryable provider errors and add bounded retry/backoff.\"}],"
         "\"selected_path_id\":\"provider_retry_backoff\"}\n\n"
@@ -388,8 +403,8 @@ def build_code_edit_auto_research_messages(
         "perfect-fit companies for a supplied ICP plus observable buying-intent "
         "signals. You may propose small source, prompt, or model logic edits only "
         "inside the runtime extracted from the current ECR image. Optimize for "
-        "general improvements across future sealed ICPs, "
-        "not one visible ICP. Never request, infer, reveal, or store secrets, hidden "
+        "true sourcing quality across future sealed ICPs, "
+        "not one visible ICP, public benchmark quirk, or score-looking shortcut. Never request, infer, reveal, or store secrets, hidden "
         "benchmark plaintext, judge prompts, provider keys, private repo URLs, or "
         "customer-private data."
     )
@@ -427,7 +442,12 @@ def build_code_edit_auto_research_messages(
         "- Do not guess function bodies, line numbers, imports, or context lines that are not visible in source_inspection_context.\n"
         "- Keep the change testable and reversible.\n"
         "- Prefer one narrow code path over broad rewrites.\n"
-        "- Do not overfit to one public ICP; the improvement must generalize.\n\n"
+        "- Do not overfit to one public ICP; the improvement must generalize to future sealed ICPs.\n"
+        "- Treat public benchmark performance as a noisy validation signal, not the objective.\n"
+        "- Do not improve apparent score by returning fewer companies, selecting only one safest company, weakening ICP constraints, removing hard filters without replacement, or hiding failures.\n"
+        "- Do not remove ICP constraints unless replacing them with a more faithful constraint or adding a compensating downstream validation/filter.\n"
+        "- If relaxing a brittle query constraint, preserve the semantic constraint elsewhere.\n"
+        "- Provider fallback changes must classify, retry, timeout, log, or route provider/runtime failures; pure query wording changes are not provider fallback.\n\n"
         "LoopDirectionPlan binding:\n"
         "- If loop_direction_plan is present, it is binding.\n"
         "- Only emit candidates that directly implement loop_direction_plan.required_lane, required_mechanism, and selected_path_id.\n"
@@ -438,7 +458,10 @@ def build_code_edit_auto_research_messages(
         "Expected output shape:\n"
         "{\"candidates\":[{\"lane\":\"query_construction\",\"plan_path_id\":\"" + example_path_id + "\","
         "\"plan_alignment\":{\"implements_required_mechanism\":true,\"alignment_summary\":\"...\","
-        "\"success_criteria_addressed\":[\"...\"]},\"hypothesis\":{\"failure_mode\":\"...\","
+        "\"success_criteria_addressed\":[\"...\"]},\"expected_metric_effect\":{"
+        "\"sealed_icp_generalization\":\"...\",\"company_count\":\"...\","
+        "\"provider_error_rate\":\"...\",\"precision_recall_tradeoff\":\"...\"},"
+        "\"hypothesis\":{\"failure_mode\":\"...\","
         "\"mechanism\":\"...\",\"expected_improvement\":\"...\",\"risk\":\"...\","
         "\"predicted_delta\":1.0},\"code_edit\":{\"target_files\":[\"" + example_target + "\"],"
         "\"unified_diff\":\"diff --git a/" + example_target + " b/" + example_target + "\\n--- a/" + example_target + "\\n+++ b/" + example_target + "\\n@@ ...\","
@@ -474,6 +497,7 @@ def build_plan_alignment_judge_messages(
             "redacted_summary": draft.redacted_summary,
             "test_plan": draft.test_plan,
             "rollback_plan": draft.rollback_plan,
+            "expected_metric_effect": dict(draft.expected_metric_effect or {}),
         },
         "prior_attempts": _redacted_mapping({"attempts": list(prior_attempts or [])}).get("attempts", []),
     }
@@ -532,6 +556,7 @@ def build_code_edit_repair_messages(
             "redacted_summary": draft.redacted_summary,
             "test_plan": draft.test_plan,
             "rollback_plan": draft.rollback_plan,
+            "expected_metric_effect": dict(draft.expected_metric_effect or {}),
         },
         "git_apply_error": str(apply_error or "")[:2000],
         "runtime_source_context": source_context,
@@ -631,6 +656,9 @@ def loop_direction_plan_from_mapping(value: Mapping[str, Any]) -> LoopDirectionP
         required_mechanism=_string_value(
             _get_first_present(value, ("required_mechanism", "requiredMechanism", "mechanism"))
         )[:1200],
+        generalization_claim=_string_value(
+            _get_first_present(value, ("generalization_claim", "generalizationClaim", "sealed_icp_generalization", "sealedIcpGeneralization"))
+        )[:1200],
         target_behavior=_coerce_string_tuple(_get_first_present(value, ("target_behavior", "targetBehavior")), max_items=12),
         must_inspect=_coerce_string_tuple(_get_first_present(value, ("must_inspect", "mustInspect")), max_items=12),
         allowed_lanes=allowed_lanes,
@@ -641,6 +669,13 @@ def loop_direction_plan_from_mapping(value: Mapping[str, Any]) -> LoopDirectionP
             _get_first_present(value, ("novelty_requirements", "noveltyRequirements")),
             max_items=16,
         ),
+        anti_overfit_checks=_coerce_string_tuple(
+            _get_first_present(value, ("anti_overfit_checks", "antiOverfitChecks", "overfit_checks", "overfitChecks")),
+            max_items=12,
+        ),
+        novelty_contrast=_string_value(
+            _get_first_present(value, ("novelty_contrast", "noveltyContrast", "prior_attempt_contrast", "priorAttemptContrast"))
+        )[:1200],
         ranked_paths=ranked_paths,
         selected_path_id=selected_path_id,
         no_new_safe_path=no_new_safe_path,
@@ -1039,6 +1074,24 @@ def parse_code_edit_repair_response(
                     else original_draft.plan_alignment
                 )
             ),
+            expected_metric_effect=_compact_mapping(
+                _mapping_or_empty(
+                    _get_first_present(
+                        item,
+                        ("expected_metric_effect", "expectedMetricEffect", "metric_effect", "metricEffect"),
+                    )
+                    or _get_first_present(
+                        code_edit,
+                        ("expected_metric_effect", "expectedMetricEffect", "metric_effect", "metricEffect"),
+                    )
+                    or _get_first_present(
+                        hypothesis,
+                        ("expected_metric_effect", "expectedMetricEffect", "metric_effect", "metricEffect"),
+                    )
+                    or original_draft.expected_metric_effect
+                ),
+                max_string=700,
+            ),
         )
         validate_code_edit_draft(draft)
         drafts.append(draft)
@@ -1286,6 +1339,23 @@ def _draft_from_code_edit_candidate(item: Mapping[str, Any]) -> CodeEditDraft:
             if isinstance(item.get("plan_alignment"), Mapping)
             else (item.get("planAlignment") if isinstance(item.get("planAlignment"), Mapping) else {})
         ),
+        expected_metric_effect=_compact_mapping(
+            _mapping_or_empty(
+                _get_first_present(
+                    item,
+                    ("expected_metric_effect", "expectedMetricEffect", "metric_effect", "metricEffect"),
+                )
+                or _get_first_present(
+                    code_edit,
+                    ("expected_metric_effect", "expectedMetricEffect", "metric_effect", "metricEffect"),
+                )
+                or _get_first_present(
+                    hypothesis,
+                    ("expected_metric_effect", "expectedMetricEffect", "metric_effect", "metricEffect"),
+                )
+            ),
+            max_string=700,
+        ),
     )
 
 
@@ -1456,6 +1526,10 @@ def _compact_mapping(value: Mapping[str, Any], *, max_string: int) -> dict[str, 
         else:
             payload[clean_key] = _string_value(item)[:max_string]
     return payload
+
+
+def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
 
 
 def _string_value(value: Any) -> str:

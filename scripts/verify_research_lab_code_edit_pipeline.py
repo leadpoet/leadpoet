@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from research_lab.canonical import sha256_json  # noqa: E402
 from research_lab.code_editing import (  # noqa: E402
     CodeEditDraft,
+    build_code_edit_auto_research_messages,
     build_loop_direction_planner_messages,
     build_plan_alignment_judge_messages,
     code_edit_no_viable_patch_reason,
@@ -67,6 +68,12 @@ def _valid_response() -> str:
             "candidates": [
                 {
                     "lane": "query_construction",
+                    "expected_metric_effect": {
+                        "sealed_icp_generalization": "Improves intent-query grounding across future sealed ICPs.",
+                        "company_count": "Preserves multiple scoreable company outputs.",
+                        "provider_error_rate": "No expected provider error-rate increase.",
+                        "precision_recall_tradeoff": "Higher precision with bounded recall impact.",
+                    },
                     "hypothesis": {
                         "failure_mode": "Queries are too broad.",
                         "mechanism": "Add ICP-specific signal terms.",
@@ -100,6 +107,8 @@ def test_code_edit_parser_accepts_safe_diff() -> CodeEditDraft:
     draft = drafts[0]
     assert draft.target_files == ("sourcing_model/query_builder.py",)
     assert "buying intent evidence" in draft.unified_diff
+    assert draft.expected_metric_effect["sealed_icp_generalization"].startswith("Improves intent-query")
+    assert "multiple" in draft.expected_metric_effect["company_count"]
     return draft
 
 
@@ -111,6 +120,7 @@ def _provider_fallback_plan() -> dict[str, object]:
             "loop_goal": "Improve provider fallback without weakening ICP filters.",
             "required_lane": "provider_fallback",
             "required_mechanism": "Add bounded retry/backoff or secondary-provider fallback for zero-result/provider-error cases.",
+            "generalization_claim": "This improves transient provider handling across future sealed ICPs.",
             "target_behavior": ["Retry transient provider failures.", "Fallback when primary provider returns zero usable companies."],
             "must_inspect": ["provider error handling", "zero-result routing"],
             "allowed_lanes": ["provider_fallback"],
@@ -118,6 +128,8 @@ def _provider_fallback_plan() -> dict[str, object]:
             "must_not_try": ["Do not remove LinkedIn employee-count clauses from Exa search queries."],
             "success_criteria": ["Diff touches fallback, retry, provider error handling, or zero-result routing code."],
             "novelty_requirements": ["Do not repeat exact source diff hashes."],
+            "anti_overfit_checks": ["Preserve multiple scoreable company outputs.", "Do not tune to one public ICP."],
+            "novelty_contrast": "Uses provider runtime classification, not query clause removal.",
             "ranked_paths": [
                 {
                     "path_id": "provider_retry_backoff",
@@ -135,6 +147,9 @@ def test_loop_direction_plan_parser_and_prompt_contract() -> None:
     plan = parse_loop_direction_plan_response(raw)
     assert plan.required_lane == "provider_fallback"
     assert plan.selected_path_id == "provider_retry_backoff"
+    assert "future sealed ICPs" in plan.generalization_claim
+    assert "scoreable" in " ".join(plan.anti_overfit_checks)
+    assert "provider runtime" in plan.novelty_contrast
     assert plan.to_dict()["plan_hash"].startswith("sha256:")
 
     messages = build_loop_direction_planner_messages(
@@ -149,6 +164,39 @@ def test_loop_direction_plan_parser_and_prompt_contract() -> None:
     content = "\n".join(message["content"] for message in messages)
     assert "ticket.brief_public_summary" in content
     assert "prior_attempts" in content
+    assert "future sealed ICPs" in content
+    assert "noisy validation signal" in content
+    assert "one safest company" in content
+    assert "Provider fallback paths must classify" in content
+
+
+def test_code_edit_prompt_contract_discourages_public_icp_overfitting() -> None:
+    messages = build_code_edit_auto_research_messages(
+        ticket={"brief_public_summary": "Improve provider fallback for zero-company and HTTP 4xx failures."},
+        artifact_manifest={"manifest_hash": "sha256:test"},
+        component_registry={},
+        benchmark_public_summary={"public_icp_count": 10},
+        runtime_source_context={"editable_files": ["sourcing_model/query_builder.py"]},
+        source_inspection_context={
+            "read_files": ["sourcing_model/query_builder.py"],
+            "results": [
+                {
+                    "path": "sourcing_model/query_builder.py",
+                    "content": 'QUERY_SUFFIX = ""\n',
+                }
+            ],
+        },
+        budget_context={"requested_compute_budget_usd": 5.0},
+        loop_direction_plan=_provider_fallback_plan(),
+        max_candidates=1,
+    )
+    content = "\n".join(message["content"] for message in messages)
+    assert "future sealed ICPs" in content
+    assert "public benchmark quirk" in content
+    assert "one safest company" in content
+    assert "expected_metric_effect" in content
+    assert "sealed_icp_generalization" in content
+    assert "Provider fallback changes must classify" in content
 
 
 def test_plan_alignment_judge_parser_and_prompt_contract() -> None:
@@ -226,6 +274,21 @@ def test_code_edit_parser_carries_plan_fields_and_detects_no_viable_patch() -> N
     assert draft.plan_path_id == "query_intent_terms"
     assert draft.plan_alignment["implements_required_mechanism"] is True
     assert code_edit_no_viable_patch_reason(json.dumps({"no_viable_patch": True, "reason": "no safe source path"})) == "no safe source path"
+
+    payload["candidates"][0].pop("expected_metric_effect", None)
+    payload["candidates"][0]["hypothesis"]["expected_metric_effect"] = {
+        "company_count": "Maintains broad enough candidate output for scoring."
+    }
+    draft = parse_code_edit_response(json.dumps(payload), max_candidates=1)[0]
+    assert draft.expected_metric_effect["company_count"].startswith("Maintains")
+
+    payload = json.loads(_valid_response())
+    payload["candidates"][0].pop("expected_metric_effect", None)
+    payload["candidates"][0]["code_edit"]["expectedMetricEffect"] = {
+        "provider_error_rate": "Does not increase provider failures."
+    }
+    draft = parse_code_edit_response(json.dumps(payload), max_candidates=1)[0]
+    assert draft.expected_metric_effect["provider_error_rate"].startswith("Does not")
 
 
 def test_code_edit_parser_normalizes_markdown_wrapped_diff() -> None:
@@ -388,6 +451,7 @@ def test_code_edit_repair_parser_accepts_direct_code_edit() -> None:
     assert len(repaired) == 1
     assert repaired[0].failure_mode == original.failure_mode
     assert repaired[0].target_files == original.target_files
+    assert repaired[0].expected_metric_effect == original.expected_metric_effect
     assert "verified intent evidence" in repaired[0].unified_diff
 
 
@@ -1264,6 +1328,7 @@ async def test_image_build_score_bundle_contract(draft: CodeEditDraft) -> None:
 def main() -> None:
     draft = test_code_edit_parser_accepts_safe_diff()
     test_loop_direction_plan_parser_and_prompt_contract()
+    test_code_edit_prompt_contract_discourages_public_icp_overfitting()
     test_plan_alignment_judge_parser_and_prompt_contract()
     test_provider_fallback_plan_rejects_employee_count_query_only_diff()
     test_code_edit_parser_carries_plan_fields_and_detects_no_viable_patch()

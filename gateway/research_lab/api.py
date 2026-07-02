@@ -62,6 +62,7 @@ from .models import (
 from .public_activity import (
     fetch_public_loop_detail,
     fetch_public_loop_rows,
+    fetch_public_loop_summary,
     safe_project_public_loop_activity,
 )
 from .store import (
@@ -828,6 +829,38 @@ async def get_research_lab_public_loops(
             "offset": offset,
             "returned": len(items),
         },
+        "filters": {
+            "status": status,
+            "topic": topic,
+            "research_area": research_area,
+            "since_days": since_days,
+        },
+    }
+
+
+@router.get("/public/loops/summary")
+async def get_research_lab_public_loop_summary(
+    status: Optional[str] = Query(default=None, max_length=80),
+    topic: Optional[str] = Query(default=None, max_length=80),
+    research_area: Optional[str] = Query(default=None, max_length=80),
+    since_days: int = Query(default=14, ge=0, le=90),
+):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    _require_enabled(config.public_activity_enabled, "Research Lab public activity is disabled")
+    try:
+        summary = await fetch_public_loop_summary(
+            status=status,
+            topic=topic,
+            research_area=research_area,
+            since_days=since_days,
+        )
+    except Exception as exc:
+        _raise_storage_error(exc)
+    return {
+        "schema_version": "1.0",
+        "summary": summary,
         "filters": {
             "status": status,
             "topic": topic,

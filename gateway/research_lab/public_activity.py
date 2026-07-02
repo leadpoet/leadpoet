@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
@@ -800,6 +801,52 @@ async def fetch_public_loop_rows(
         for row in page
     ]
     return items, groups
+
+
+async def fetch_public_loop_summary(
+    *,
+    status: str | None = None,
+    topic: str | None = None,
+    research_area: str | None = None,
+    since_days: int = 14,
+) -> dict[str, Any]:
+    rows = await select_many(
+        "research_lab_public_loop_card_current",
+        filters=(),
+        order_by=(("current_last_activity_at", True), ("created_at", True)),
+        limit=1000,
+    )
+    cutoff = 0.0 if since_days == 0 else datetime.now(timezone.utc).timestamp() - max(0, since_days) * 86400
+    filtered = [
+        row
+        for row in rows
+        if _row_matches_filters(
+            row,
+            status=status,
+            topic=topic,
+            research_area=research_area,
+            cutoff_timestamp=cutoff,
+        )
+    ]
+    outcome_counts = Counter(str(row.get("current_outcome_label") or "submitted") for row in filtered)
+    band_counts = Counter(str(row.get("current_outcome_band") or "pending") for row in filtered)
+    miner_hotkeys = {str(row.get("miner_hotkey") or "") for row in filtered if row.get("miner_hotkey")}
+    topic_signatures = {
+        str(row.get("current_topic_signature_hash") or row.get("topic_signature_hash") or "")
+        for row in filtered
+        if row.get("current_topic_signature_hash") or row.get("topic_signature_hash")
+    }
+    return {
+        "total_visible": len(filtered),
+        "run_count": len(filtered),
+        "miner_count": len(miner_hotkeys),
+        "direction_count": len(topic_signatures),
+        "candidate_count": sum(int(row.get("current_candidate_count") or 0) for row in filtered),
+        "scored_candidate_count": sum(int(row.get("current_scored_candidate_count") or 0) for row in filtered),
+        "outcome_label_counts": dict(sorted(outcome_counts.items())),
+        "outcome_band_counts": dict(sorted(band_counts.items())),
+        "topic_groups": topic_group_items(filtered),
+    }
 
 
 async def fetch_public_loop_detail(ticket_id: str) -> dict[str, Any] | None:

@@ -458,6 +458,7 @@ def _store_scoring_progress(
 
 _SCORER_TRACE_CAPTURE_ENV = "RESEARCH_LAB_SCORER_TRACE_CAPTURE"
 _SCORER_TRACE_S3_PREFIX_ENV = "RESEARCH_LAB_SCORER_TRACE_S3_PREFIX"
+_TRACE_KMS_KEY_ENV = "RESEARCH_LAB_TRACE_KMS_KEY_ID"
 _SCORER_TRACE_PUT_CONNECT_TIMEOUT_SECONDS = 5
 _SCORER_TRACE_PUT_READ_TIMEOUT_SECONDS = 15
 # Model-output fields safe to persist as scorer-INPUT context: company identity
@@ -475,6 +476,11 @@ _SCORER_TRACE_COMPANY_IDENTITY_FIELDS = (
 
 def _scorer_trace_capture_enabled() -> bool:
     return os.getenv(_SCORER_TRACE_CAPTURE_ENV, "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _trace_kms_key_id() -> str:
+    """KMS key used for S3 SSE-KMS trace encryption."""
+    return str(os.getenv(_TRACE_KMS_KEY_ENV, "") or "").strip()
 
 
 def _openrouter_include_reasoning_enabled() -> bool:
@@ -527,7 +533,7 @@ class _ScorerTraceRecorder:
         failed write leaves a dangling (never wrong) reference.
 
     Flag: ``RESEARCH_LAB_SCORER_TRACE_CAPTURE`` (default true; inert without
-    S3 config). Encryption: SSE-KMS via the score-bundle signing key id.
+    S3/KMS config). Encryption: SSE-KMS via ``RESEARCH_LAB_TRACE_KMS_KEY_ID``.
     """
 
     def __init__(self, config: ResearchLabGatewayConfig):
@@ -562,7 +568,11 @@ class _ScorerTraceRecorder:
                 return None
             destination = self._resolve_destination(manifest_uri)
             if destination is None:
-                self._count_drop()
+                self._count_drop(reason="missing_s3_prefix", env_name=_SCORER_TRACE_S3_PREFIX_ENV)
+                return None
+            kms_key_id = _trace_kms_key_id()
+            if not kms_key_id:
+                self._count_drop(reason="missing_kms_key", env_name=_TRACE_KMS_KEY_ENV)
                 return None
             bucket, key_prefix = destination
             safe_context = _trace_path_segment(context_ref, fallback="context")
@@ -587,7 +597,13 @@ class _ScorerTraceRecorder:
             }
             body = canonical_json(doc).encode("utf-8")
             digest = sha256_json(doc)
-            self._submit(context_ref=str(context_ref), bucket=bucket, object_key=object_key, body=body)
+            self._submit(
+                context_ref=str(context_ref),
+                bucket=bucket,
+                object_key=object_key,
+                body=body,
+                kms_key_id=kms_key_id,
+            )
             return {"s3_ref": f"s3://{bucket}/{object_key}", "sha256": digest}
         except Exception as exc:
             self._log_failure_once(str(context_ref or "unknown"), exc)
@@ -632,7 +648,7 @@ class _ScorerTraceRecorder:
             self._destinations[cache_key] = destination
         return destination
 
-    def _count_drop(self) -> None:
+    def _count_drop(self, *, reason: str, env_name: str) -> None:
         with self._lock:
             self._dropped_docs += 1
             if self._drop_logged:
@@ -640,12 +656,21 @@ class _ScorerTraceRecorder:
             self._drop_logged = True
         # Local/dev inertness: no S3 destination — one log, then silent drops.
         logger.info(
-            "research_lab_scorer_trace_capture_disabled reason=missing_s3_prefix env=%s; "
+            "research_lab_scorer_trace_capture_disabled reason=%s env=%s; "
             "scorer judgment capture is skipped for this process",
-            _SCORER_TRACE_S3_PREFIX_ENV,
+            reason,
+            env_name,
         )
 
-    def _submit(self, *, context_ref: str, bucket: str, object_key: str, body: bytes) -> None:
+    def _submit(
+        self,
+        *,
+        context_ref: str,
+        bucket: str,
+        object_key: str,
+        body: bytes,
+        kms_key_id: str,
+    ) -> None:
         with self._lock:
             if self._executor is None:
                 self._executor = concurrent.futures.ThreadPoolExecutor(
@@ -653,12 +678,18 @@ class _ScorerTraceRecorder:
                     thread_name_prefix="research-lab-scorer-trace",
                 )
             executor = self._executor
-        future = executor.submit(self._put_object, bucket=bucket, object_key=object_key, body=body)
+        future = executor.submit(
+            self._put_object,
+            bucket=bucket,
+            object_key=object_key,
+            body=body,
+            kms_key_id=kms_key_id,
+        )
         with self._lock:
             self._pending.add(future)
         future.add_done_callback(lambda done: self._consume_put_result(context_ref, done))
 
-    def _put_object(self, *, bucket: str, object_key: str, body: bytes) -> None:
+    def _put_object(self, *, bucket: str, object_key: str, body: bytes, kms_key_id: str) -> None:
         import boto3  # type: ignore
 
         client_kwargs: dict[str, Any] = {}
@@ -677,13 +708,11 @@ class _ScorerTraceRecorder:
             "Key": object_key,
             "Body": body,
             "ContentType": "application/json",
-            # SSE-KMS at rest via the score-bundle signing key id, matching the
+            # SSE-KMS at rest via an ENCRYPT_DECRYPT key, matching the
             # raw-trace recorder's §9.1 encryption requirement.
             "ServerSideEncryption": "aws:kms",
+            "SSEKMSKeyId": kms_key_id,
         }
-        kms_key_id = str(getattr(self.config, "score_bundle_kms_key_id", "") or "").strip()
-        if kms_key_id:
-            put_kwargs["SSEKMSKeyId"] = kms_key_id
         boto3.client("s3", **client_kwargs).put_object(**put_kwargs)
 
     def _consume_put_result(self, context_ref: str, future: "concurrent.futures.Future[None]") -> None:

@@ -3,7 +3,7 @@
 Covers:
   * KMS-encrypted S3 writes under
     ``{prefix}/trajectories/{run_id}/{stage}/{seq}-{stage}.json.enc`` with the
-    score-bundle KMS key id (SSE-KMS headers on put_object).
+    trace encryption KMS key id (SSE-KMS headers on put_object).
   * Pointer-not-content: loop-event / provider-usage docs carry only
     ``{s3_ref, sha256}`` and pass the trajectory-corpus protected-material scan.
   * Credential redaction: Authorization / api keys never reach the trace store;
@@ -68,6 +68,7 @@ def fake_boto3(monkeypatch):
 @pytest.fixture
 def trace_env(monkeypatch):
     monkeypatch.setenv(worker_mod._RAW_TRACE_S3_PREFIX_ENV, TRACE_PREFIX)
+    monkeypatch.setenv(worker_mod._TRACE_KMS_KEY_ENV, "trace-kms-key-1")
     monkeypatch.delenv(worker_mod._RAW_TRACE_CAPTURE_ENABLED_ENV, raising=False)
 
 
@@ -159,7 +160,7 @@ def test_recorder_writes_kms_encrypted_object_with_pointer(fake_boto3, trace_env
     assert put["Bucket"] == "test-trace-bucket"
     assert put["Key"] == "lab-traces/trajectories/run-abc/loop_planner/0001-loop_planner.json.enc"
     assert put["ServerSideEncryption"] == "aws:kms"
-    assert put["SSEKMSKeyId"] == config.score_bundle_kms_key_id
+    assert put["SSEKMSKeyId"] == "trace-kms-key-1"
     assert put["ContentType"] == "application/json"
     assert ref["s3_ref"] == f"s3://test-trace-bucket/{put['Key']}"
     # sha256 pointer verifies the exact stored bytes.
@@ -235,6 +236,7 @@ def test_recorder_seq_is_global_per_run_across_stages(fake_boto3, trace_env):
 
 def test_recorder_falls_back_to_manifest_uri_prefix(fake_boto3, monkeypatch):
     monkeypatch.delenv(worker_mod._RAW_TRACE_S3_PREFIX_ENV, raising=False)
+    monkeypatch.setenv(worker_mod._TRACE_KMS_KEY_ENV, "trace-kms-key-1")
     config = ResearchLabGatewayConfig(
         private_model_manifest_uri="s3://artifact-bucket/research-lab/sourcing-model/current.json"
     )

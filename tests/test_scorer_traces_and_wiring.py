@@ -4,7 +4,7 @@ candidate-scoped trace-sink wiring, and the admin confirmation follow-ups.
 Covers, with fake boto3 + fake scorers (no live AWS / Supabase / docker):
   * _ScorerTraceRecorder — doc shape (identity-only inputs, full breakdowns),
     key scheme {prefix}/scorer-traces/{context}/{icp}.json, SSE-KMS via the
-    score-bundle key, env-prefix override vs manifest-URI derivation,
+    trace encryption key, env-prefix override vs manifest-URI derivation,
     flag-off, count-and-drop inertness, and failure containment;
   * _run_baseline_icp — in-container collection through run_in_executor
     (contextvars copied explicitly), pointer-only diagnostics fields, the
@@ -50,6 +50,7 @@ from research_lab.eval.private_runtime import publish_incontainer_trace_entries
 TRACE_ENV_NAMES = (
     "RESEARCH_LAB_SCORER_TRACE_CAPTURE",
     "RESEARCH_LAB_SCORER_TRACE_S3_PREFIX",
+    "RESEARCH_LAB_TRACE_KMS_KEY_ID",
     "RESEARCH_LAB_INCONTAINER_TRACE_CAPTURE",
     "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX",
     "RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID",
@@ -91,6 +92,7 @@ def fake_s3(monkeypatch):
     fail: dict[str, Any] = {"error": None}
     fake_boto3 = types.SimpleNamespace(client=lambda service, **kwargs: _FakeS3Client(puts, fail))
     monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
+    monkeypatch.setenv(sw._TRACE_KMS_KEY_ENV, "trace-kms-key-1")
     return {"puts": puts, "fail": fail}
 
 
@@ -242,7 +244,7 @@ def test_scorer_trace_uploads_doc_with_sse_kms_and_returns_pointer(fake_s3):
         "research-lab/sourcing-model/scorer-traces/daily-2026-07-02-a0-abc123/icp-a.json"
     )
     assert put["ServerSideEncryption"] == "aws:kms"
-    assert put["SSEKMSKeyId"] == "kms-key-1"
+    assert put["SSEKMSKeyId"] == "trace-kms-key-1"
 
     doc = json.loads(put["Body"].decode("utf-8"))
     assert doc["artifact_type"] == "research_lab_scorer_judgment_trace"

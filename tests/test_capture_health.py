@@ -20,6 +20,7 @@ CAPTURE_ENVS = (
     ch.RAW_TRACE_S3_PREFIX_ENV,
     ch.SCORER_TRACE_CAPTURE_ENV,
     ch.SCORER_TRACE_S3_PREFIX_ENV,
+    ch.TRACE_KMS_KEY_ENV,
     ch.INCONTAINER_TRACE_CAPTURE_ENV,
     ch.INCONTAINER_TRACE_S3_PREFIX_ENV,
     ch.INCONTAINER_TRACE_KMS_KEY_ENV,
@@ -48,6 +49,7 @@ def _config(**overrides) -> ResearchLabGatewayConfig:
 def _fully_configured(monkeypatch) -> None:
     monkeypatch.setenv(ch.RAW_TRACE_S3_PREFIX_ENV, "s3://bucket/raw")
     monkeypatch.setenv(ch.SCORER_TRACE_S3_PREFIX_ENV, "s3://bucket/scorer")
+    monkeypatch.setenv(ch.TRACE_KMS_KEY_ENV, "kms-key-raw-scorer")
     monkeypatch.setenv(ch.INCONTAINER_TRACE_S3_PREFIX_ENV, "s3://bucket/incontainer")
     monkeypatch.setenv(ch.INCONTAINER_TRACE_KMS_KEY_ENV, "kms-key-1")
     monkeypatch.setenv(ch.PROJECTOR_ENABLED_ENV, "true")
@@ -65,6 +67,8 @@ def test_env_names_match_recorder_modules():
     assert ch.RAW_TRACE_S3_PREFIX_ENV == w._RAW_TRACE_S3_PREFIX_ENV
     assert ch.SCORER_TRACE_CAPTURE_ENV == sw._SCORER_TRACE_CAPTURE_ENV
     assert ch.SCORER_TRACE_S3_PREFIX_ENV == sw._SCORER_TRACE_S3_PREFIX_ENV
+    assert ch.TRACE_KMS_KEY_ENV == w._TRACE_KMS_KEY_ENV
+    assert ch.TRACE_KMS_KEY_ENV == sw._TRACE_KMS_KEY_ENV
     assert ch.INCONTAINER_TRACE_S3_PREFIX_ENV == ev.INCONTAINER_TRACE_S3_PREFIX_ENV
     assert ch.INCONTAINER_TRACE_KMS_KEY_ENV == ev.INCONTAINER_TRACE_KMS_KEY_ENV
     assert ch.PROJECTOR_ENABLED_ENV == tp.PROJECTOR_ENABLED_ENV
@@ -87,6 +91,14 @@ def test_missing_prefix_is_misconfigured_not_green(monkeypatch):
 
 def test_prefix_without_kms_is_misconfigured(monkeypatch):
     _fully_configured(monkeypatch)
+    monkeypatch.delenv(ch.TRACE_KMS_KEY_ENV)
+    health = ch.collect_capture_health(_config())
+    assert health["channels"]["raw_trace"]["status"] == "misconfigured_missing_kms_key"
+    assert health["channels"]["scorer_trace"]["status"] == "misconfigured_missing_kms_key"
+
+
+def test_incontainer_prefix_without_kms_is_misconfigured(monkeypatch):
+    _fully_configured(monkeypatch)
     monkeypatch.delenv(ch.INCONTAINER_TRACE_KMS_KEY_ENV)
     health = ch.collect_capture_health(_config())
     assert (
@@ -106,6 +118,7 @@ def test_disabled_channel_and_projector_off_are_violations(monkeypatch):
 
 
 def test_manifest_uri_fallback_resolves_raw_and_scorer_prefixes(monkeypatch):
+    monkeypatch.setenv(ch.TRACE_KMS_KEY_ENV, "kms-key-raw-scorer")
     monkeypatch.setenv(ch.INCONTAINER_TRACE_S3_PREFIX_ENV, "s3://bucket/incontainer")
     monkeypatch.setenv(ch.INCONTAINER_TRACE_KMS_KEY_ENV, "kms-key-1")
     monkeypatch.setenv(ch.PROJECTOR_ENABLED_ENV, "true")

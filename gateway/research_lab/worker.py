@@ -128,6 +128,11 @@ def _raw_trace_capture_enabled() -> bool:
     ).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _trace_kms_key_id() -> str:
+    """KMS key used for S3 SSE-KMS trace encryption."""
+    return str(os.getenv(_TRACE_KMS_KEY_ENV, "") or "").strip()
+
+
 def _llm_include_reasoning_enabled() -> bool:
     """§9.1/5.6: request reasoning output on every chat call (default true) so
     raw traces preserve chain-of-thought whenever the model produces it."""
@@ -261,6 +266,7 @@ _OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completion
 _OPENROUTER_GENERATION_STATS_URL = "https://openrouter.ai/api/v1/generation"
 _RAW_TRACE_CAPTURE_ENABLED_ENV = "RESEARCH_LAB_RAW_TRACE_CAPTURE_ENABLED"
 _RAW_TRACE_S3_PREFIX_ENV = "RESEARCH_LAB_RAW_TRACE_S3_PREFIX"
+_TRACE_KMS_KEY_ENV = "RESEARCH_LAB_TRACE_KMS_KEY_ID"
 _RAW_TRACE_PUT_CONNECT_TIMEOUT_SECONDS = 5
 _RAW_TRACE_PUT_READ_TIMEOUT_SECONDS = 15
 _OPENROUTER_GENERATION_STATS_TIMEOUT_SECONDS = 5
@@ -632,7 +638,7 @@ class _OpenRouterRawTraceRecorder:
     JSON at the chat-completion boundary (fableanalysis §9.1 item 5).
 
     Objects land under ``{prefix}/trajectories/{run_id}/{stage}/{seq}-{stage}.json.enc``
-    with SSE-KMS (the score-bundle signing key id), where ``{prefix}`` comes
+    with SSE-KMS (``RESEARCH_LAB_TRACE_KMS_KEY_ID``), where ``{prefix}`` comes
     from ``RESEARCH_LAB_RAW_TRACE_S3_PREFIX`` or falls back to the private
     model manifest's bucket/prefix. Hard rules:
 
@@ -690,6 +696,13 @@ class _OpenRouterRawTraceRecorder:
             destination = self._resolve_destination()
             if destination is None:
                 return None
+            kms_key_id = _trace_kms_key_id()
+            if not kms_key_id:
+                self._log_availability_warning(
+                    "missing_kms_key",
+                    f"set {_TRACE_KMS_KEY_ENV}=alias/leadpoet-research-lab-trace-encryption",
+                )
+                return None
             bucket, key_prefix = destination
             safe_run = _raw_trace_path_segment(run_id, fallback="run")
             safe_stage = _raw_trace_path_segment(stage, fallback="call")
@@ -733,7 +746,13 @@ class _OpenRouterRawTraceRecorder:
             payload = _redact_raw_trace_value(trace_doc)
             body = canonical_json(payload).encode("utf-8")
             digest = sha256_bytes(body)
-            self._submit(run_id=str(run_id), bucket=bucket, object_key=object_key, body=body)
+            self._submit(
+                run_id=str(run_id),
+                bucket=bucket,
+                object_key=object_key,
+                body=body,
+                kms_key_id=kms_key_id,
+            )
             return {"s3_ref": f"s3://{bucket}/{object_key}", "sha256": digest}
         except Exception as exc:
             self._log_failure_once(str(run_id or "unknown"), exc)
@@ -805,7 +824,15 @@ class _OpenRouterRawTraceRecorder:
             hint,
         )
 
-    def _submit(self, *, run_id: str, bucket: str, object_key: str, body: bytes) -> None:
+    def _submit(
+        self,
+        *,
+        run_id: str,
+        bucket: str,
+        object_key: str,
+        body: bytes,
+        kms_key_id: str,
+    ) -> None:
         with self._lock:
             if self._executor is None:
                 self._executor = ThreadPoolExecutor(
@@ -813,12 +840,18 @@ class _OpenRouterRawTraceRecorder:
                     thread_name_prefix="research-lab-raw-trace",
                 )
             executor = self._executor
-        future = executor.submit(self._put_object, bucket=bucket, object_key=object_key, body=body)
+        future = executor.submit(
+            self._put_object,
+            bucket=bucket,
+            object_key=object_key,
+            body=body,
+            kms_key_id=kms_key_id,
+        )
         with self._lock:
             self._pending.add(future)
         future.add_done_callback(lambda done: self._consume_put_result(run_id, done))
 
-    def _put_object(self, *, bucket: str, object_key: str, body: bytes) -> None:
+    def _put_object(self, *, bucket: str, object_key: str, body: bytes, kms_key_id: str) -> None:
         import boto3  # type: ignore
 
         client_kwargs: dict[str, Any] = {}
@@ -837,13 +870,11 @@ class _OpenRouterRawTraceRecorder:
             "Key": object_key,
             "Body": body,
             "ContentType": "application/json",
-            # SSE-KMS at rest is the §9.1 encryption requirement; reuse the
-            # score-bundle signing key id already provisioned for the lab.
+            # SSE-KMS at rest is the §9.1 encryption requirement. This must be
+            # an ENCRYPT_DECRYPT KMS key, not the score-bundle SIGN_VERIFY key.
             "ServerSideEncryption": "aws:kms",
+            "SSEKMSKeyId": kms_key_id,
         }
-        kms_key_id = str(self.config.score_bundle_kms_key_id or "").strip()
-        if kms_key_id:
-            put_kwargs["SSEKMSKeyId"] = kms_key_id
         boto3.client("s3", **client_kwargs).put_object(**put_kwargs)
 
     def _consume_put_result(self, run_id: str, future: "Future[None]") -> None:

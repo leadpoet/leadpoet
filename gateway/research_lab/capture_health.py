@@ -36,6 +36,7 @@ RAW_TRACE_CAPTURE_ENABLED_ENV = "RESEARCH_LAB_RAW_TRACE_CAPTURE_ENABLED"
 RAW_TRACE_S3_PREFIX_ENV = "RESEARCH_LAB_RAW_TRACE_S3_PREFIX"
 SCORER_TRACE_CAPTURE_ENV = "RESEARCH_LAB_SCORER_TRACE_CAPTURE"
 SCORER_TRACE_S3_PREFIX_ENV = "RESEARCH_LAB_SCORER_TRACE_S3_PREFIX"
+TRACE_KMS_KEY_ENV = "RESEARCH_LAB_TRACE_KMS_KEY_ID"
 INCONTAINER_TRACE_CAPTURE_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_CAPTURE"
 INCONTAINER_TRACE_S3_PREFIX_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX"
 INCONTAINER_TRACE_KMS_KEY_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID"
@@ -95,18 +96,18 @@ def _channel(*, enabled: bool, prefix: str, kms_key: str) -> dict[str, Any]:
 
 def collect_capture_health(config: "ResearchLabGatewayConfig") -> dict[str, Any]:
     """Build the structured capture health block (pure env/config, no I/O)."""
-    score_bundle_kms = str(getattr(config, "score_bundle_kms_key_id", "") or "").strip()
+    trace_kms = str(os.getenv(TRACE_KMS_KEY_ENV, "") or "").strip()
     projector_on = str(os.getenv(PROJECTOR_ENABLED_ENV, "")).strip().lower() in _TRUTHY
     channels = {
         "raw_trace": _channel(
             enabled=_flag(RAW_TRACE_CAPTURE_ENABLED_ENV, "true"),
             prefix=_resolved_prefix(RAW_TRACE_S3_PREFIX_ENV, config, manifest_fallback=True),
-            kms_key=score_bundle_kms,
+            kms_key=trace_kms,
         ),
         "scorer_trace": _channel(
             enabled=_flag(SCORER_TRACE_CAPTURE_ENV, "true"),
             prefix=_resolved_prefix(SCORER_TRACE_S3_PREFIX_ENV, config, manifest_fallback=True),
-            kms_key=score_bundle_kms,
+            kms_key=trace_kms,
         ),
         "incontainer_trace": _channel(
             enabled=_flag(INCONTAINER_TRACE_CAPTURE_ENV, "true"),

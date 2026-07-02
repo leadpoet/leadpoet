@@ -499,6 +499,8 @@ class CodeEditCandidateBuilder:
                 value = os.environ.get(key)
                 if value:
                     env[key] = value
+            env.setdefault("DOCKER_BUILDKIT", os.getenv("RESEARCH_LAB_DOCKER_BUILDKIT", "0"))
+            env.setdefault("BUILDKIT_PROGRESS", os.getenv("RESEARCH_LAB_BUILDKIT_PROGRESS", "plain"))
         env.update(
             {
                 "RESEARCH_LAB_CODE_EDIT_DRAFT_PATH": str(draft_path),
@@ -1331,8 +1333,9 @@ def _run_shell(cmd: str, *, cwd: Path, env: Mapping[str, str], timeout_seconds: 
     except subprocess.TimeoutExpired as exc:
         raise CodeEditBuildError("configured private build/test command timed out") from exc
     except subprocess.CalledProcessError as exc:
+        stderr_summary = _safe_text(exc.stderr, tail=True)
         raise CodeEditBuildError(
-            f"configured private build/test command failed exit={exc.returncode} stderr={_safe_text(exc.stderr)}",
+            f"configured private build/test command failed exit={exc.returncode} stderr_tail={stderr_summary}",
             stderr=_safe_text(exc.stderr, limit=12000),
             stdout=_safe_text(exc.stdout, limit=12000),
             exit_code=int(exc.returncode),
@@ -1350,8 +1353,14 @@ def _safe_cmd(cmd: list[str]) -> str:
     return " ".join(redacted)
 
 
-def _safe_text(value: str | None, *, limit: int = 500) -> str:
+def _safe_text(value: str | None, *, limit: int = 500, tail: bool = False) -> str:
     text = str(value or "")
     for marker in ("sk-or-", "service_role", "openrouter_api_key", "raw_secret"):
         text = text.replace(marker, "[redacted]")
-    return " ".join(text.split())[: max(1, int(limit))]
+    compacted = " ".join(text.split())
+    limit = max(1, int(limit))
+    if len(compacted) <= limit:
+        return compacted
+    if tail:
+        return compacted[-limit:]
+    return compacted[:limit]

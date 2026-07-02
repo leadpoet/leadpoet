@@ -418,6 +418,65 @@ def company_in_scrape(company_name: str, scraped_text: str) -> bool:
     return False
 
 
+# Tokens that are never distinctive enough, on their own, to prove a page is
+# about a DIFFERENT entity: legal forms, structural descriptors, and common
+# corporate tails/prefixes that recur across unrelated companies and unrelated
+# prose.  A name built only from these has no reliable deterministic
+# fingerprint, so the pre-gate defers to the Stage-3 judge rather than reject.
+_GENERIC_COMPANY_TOKENS = frozenset({
+    "inc", "llc", "ltd", "corp", "corporation", "company", "co",
+    "technologies", "technology", "holdings", "holding", "group",
+    "solutions", "systems", "software", "labs", "lab", "ventures",
+    "capital", "partners", "digital", "global", "worldwide",
+    "international", "services", "consulting", "media", "studio",
+    "studios", "agency", "ai", "io", "app", "hq", "hub", "tech",
+    "the", "and",
+})
+
+_CORE_TOKEN_MIN_LEN = 4
+
+
+def _company_core_tokens(name: str):
+    """Distinctive lowercase tokens of a company name — the parts whose absence
+    from a page is strong evidence the page is about a different entity.
+
+    Legal forms, structural descriptors, generic corporate tails, short tokens
+    (< 4 chars), and pure numbers are dropped because they recur across
+    unrelated companies and unrelated text.  Returns an empty set for names
+    built only from generic/short tokens (e.g. "Copper", "Capital Group");
+    callers treat empty as "no reliable fingerprint — defer to the LLM judge".
+    """
+    base = _normalize_company_for_match(name)
+    tokens = re.findall(r"[a-z0-9]+", base.lower())
+    return {
+        t for t in tokens
+        if len(t) >= _CORE_TOKEN_MIN_LEN
+        and not t.isdigit()
+        and t not in _GENERIC_COMPANY_TOKENS
+    }
+
+
+def _entity_plausibly_present(company_name: str, scraped_text: str) -> bool:
+    """True when cheap string logic cannot confidently rule the page a
+    wrong-entity match — either the name has no distinctive fingerprint, or at
+    least one distinctive core token appears as a whole word.
+
+    Used to distinguish a *confident absence* (no core token anywhere — reject
+    cheaply, no LLM) from an *ambiguous miss* where the exact/base string is
+    absent but the distinctive part is present (e.g. lead "OpenArt AI" vs a
+    source that writes just "OpenArt").  Ambiguous misses are deferred to the
+    Stage-3 source-grounded judge, which already adjudicates name variants,
+    instead of being hard-rejected before it ever runs.
+    """
+    core = _company_core_tokens(company_name)
+    if not core:
+        return True
+    text_lower = scraped_text.lower()
+    return any(
+        re.search(rf"\b{re.escape(tok)}\b", text_lower) for tok in core
+    )
+
+
 def _get_openrouter_key() -> str:
     return (
         os.environ.get("OPENROUTER_API_KEY")
@@ -1413,18 +1472,32 @@ async def verify_three_stage(
     contents = await _fetch_sd_then_exa(row["claimed_source_urls"])
 
     # ── PRE-STAGE-3: deterministic company-name-in-scrape check ───
-    # Skip the sonar-pro call entirely when the scraped text doesn't even
-    # mention the lead's company (or its base form).  Saves token cost and
-    # latency on obvious wrong-entity URLs (Marriott PR for Artha Capital,
-    # Sordo Madaleno post tagged as Artha Capital, Grupo Integra-T page
-    # tagged as Grupo Integra, etc.).
+    # A cost pre-filter, NOT the entity judge — Stage 3 (sonar-pro) is the
+    # authoritative source-grounded entity check and already adjudicates name
+    # variants (e.g. "OpenArt AI" vs a source that writes just "OpenArt").
+    # This gate exists only to skip the sonar-pro call on URLs that are so
+    # obviously the wrong entity there is no point paying for the judge, so it
+    # must reject ONLY on a confident absence and defer anything ambiguous:
+    #   • exact / base-name match present  → proceed to Stage 3 (as before)
+    #   • distinctive core token present, exact/base absent → AMBIGUOUS: defer
+    #     to Stage 3 rather than hard-reject a possible name variant
+    #   • no distinctive core token anywhere → confident wrong entity, reject
+    #     cheaply (Marriott PR for Artha Capital, Grupo Integra-T page tagged
+    #     as Grupo Integra, etc.)
     combined_text = "\n".join(
         (r.get("text") or "") for r in (contents.get("results") or [])
     )
     company_check: Optional[bool] = None
     if combined_text.strip():
-        company_check = company_in_scrape(company_name, combined_text)
-        if not company_check:
+        if company_in_scrape(company_name, combined_text):
+            company_check = True
+        elif _entity_plausibly_present(company_name, combined_text):
+            # Ambiguous: distinctive part of the name is present but the exact
+            # / base string isn't. company_check stays None to record
+            # "deferred, not conclusively matched"; fall through to Stage 3.
+            company_check = None
+        else:
+            company_check = False
             return {
                 "client_ready": False,
                 "decision": "reject",

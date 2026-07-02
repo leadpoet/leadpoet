@@ -2545,6 +2545,16 @@ def _research_lab_tier_budget_cap(
     return max(0.0, min(float(fallback_max_budget), tier_cap))
 
 
+def _research_lab_loop_start_fee_usd(status: dict) -> float:
+    default_fee = float(RESEARCH_LAB_DEFAULT_LOOP_START_FEE_USD)
+    try:
+        gateway_fee = float(status.get("loop_start_fee_usd"))
+    except (TypeError, ValueError):
+        gateway_fee = 0.0
+    # Honor higher gateway policy, but do not under-communicate stale/missing status.
+    return max(default_fee, gateway_fee)
+
+
 def _execute_research_lab_payment(
     *,
     wallet,
@@ -2647,7 +2657,7 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
     default_budget = float(worker_status.get("default_compute_budget_usd") or 5.0)
     min_budget = float(worker_status.get("min_compute_budget_usd") or 1.0)
     max_budget = float(worker_status.get("max_compute_budget_usd") or 100.0)
-    loop_fee = float(status.get("loop_start_fee_usd") or RESEARCH_LAB_DEFAULT_LOOP_START_FEE_USD)
+    loop_fee = _research_lab_loop_start_fee_usd(status)
     min_runtime_seconds = int(worker_status.get("auto_research_min_seconds") or 0)
     max_runtime_seconds = int(worker_status.get("auto_research_max_seconds") or 0)
     runtime_label = _research_lab_runtime_label(min_runtime_seconds, max_runtime_seconds)
@@ -2658,6 +2668,7 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
     ready = bool(status.get("api_enabled") and status.get("paid_loops_enabled") and status.get("hosted_runs_enabled"))
     print(f"  hosted auto-research: {'ready' if ready else 'not ready'}")
     print(f"  loop-start fee: ${loop_fee:.2f} USD-equivalent in TAO")
+    print("  payment conversion: live TAO/USD + 1% transfer buffer")
     print(f"  default compute budget: ${default_budget:.2f}")
     if runtime_label:
         print(f"  expected research runtime: {runtime_label}")
@@ -2734,9 +2745,7 @@ def run_research_lab_auto_research_flow(wallet, config, netuid: int) -> None:
             "brief_sanitized_ref": brief_sanitized_ref,
             "brief_public_summary": brief_public_summary,
             "requested_loop_count": requested_loop_count,
-            "loop_start_fee_required_usd": float(
-                status.get("loop_start_fee_usd") or RESEARCH_LAB_DEFAULT_LOOP_START_FEE_USD
-            ),
+            "loop_start_fee_required_usd": loop_fee,
             "research_model_tier": research_model_tier,
             "requested_compute_budget_usd": requested_compute_budget_usd,
             "max_compute_budget_usd": max_compute_budget_usd,

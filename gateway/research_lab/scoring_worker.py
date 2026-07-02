@@ -72,6 +72,7 @@ from gateway.research_lab.store import (
     create_scoring_dispatch_event,
     create_signed_audit_bundle,
     create_ticket_event,
+    insert_row,
     select_all,
     select_many,
     select_one,
@@ -106,6 +107,8 @@ from research_lab.eval.private_runtime import (
     end_incontainer_trace_collection,
     incontainer_trace_capture_enabled,
 )
+from research_lab.observability.langfuse_client import observation
+from research_lab.observability.tracing import finish_score_bundle_observation
 
 
 logger = logging.getLogger(__name__)
@@ -2077,31 +2080,50 @@ class ResearchLabGatewayScoringWorker:
                     claim_lost=claim_lost_event,
                 )
             )
+            langfuse_obs = None
+            langfuse_trace_id = ""
             try:
-                try:
-                    score_bundle = await evaluate_private_model_pair(
-                        artifact_manifest=artifact,
-                        benchmark=benchmark,
-                        patch_manifest=patch,
-                        candidate_artifact_manifest=candidate_artifact.to_dict(),
-                        benchmark_items=window.benchmark_items,
-                        base_runner=None,
-                        candidate_runner=candidate_runner,
-                        company_scorer=candidate_company_scorer,
-                        run_context={**run_context, "signature_ref": "pending"},
-                        policy=self._evaluation_policy(),
-                        private_holdout_gate=private_holdout_gate,
-                        parent_freshness_check=parent_freshness_check,
-                        icp_checkpoint=icp_checkpoint,
-                        resume_results=resume_results,
-                        # In-container traces upload keyed by candidate; the
-                        # evaluator puts the returned refs into per-ICP rows.
-                        trace_sink=self._candidate_incontainer_trace_sink(candidate_id),
-                    )
-                finally:
-                    heartbeat_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await heartbeat_task
+                with observation(
+                    "research_lab.private_eval_pair",
+                    as_type="span",
+                    metadata={
+                        "run_id": str(candidate["run_id"]),
+                        "ticket_id": str(candidate["ticket_id"]),
+                        "candidate_id": candidate_id,
+                        "evaluation_epoch": evaluation_epoch,
+                        "parent_artifact_hash": artifact.model_artifact_hash,
+                        "candidate_artifact_hash": candidate_artifact.model_artifact_hash,
+                        "candidate_patch_hash": str(candidate.get("candidate_patch_hash") or ""),
+                        "icp_set_hash": window.window_hash,
+                        "benchmark_split_ref": window.split_ref,
+                        "worker_ref": self.worker_ref,
+                    },
+                ) as langfuse_obs:
+                    try:
+                        score_bundle = await evaluate_private_model_pair(
+                            artifact_manifest=artifact,
+                            benchmark=benchmark,
+                            patch_manifest=patch,
+                            candidate_artifact_manifest=candidate_artifact.to_dict(),
+                            benchmark_items=window.benchmark_items,
+                            base_runner=None,
+                            candidate_runner=candidate_runner,
+                            company_scorer=candidate_company_scorer,
+                            run_context={**run_context, "signature_ref": "pending"},
+                            policy=self._evaluation_policy(),
+                            private_holdout_gate=private_holdout_gate,
+                            parent_freshness_check=parent_freshness_check,
+                            icp_checkpoint=icp_checkpoint,
+                            resume_results=resume_results,
+                            # In-container traces upload keyed by candidate; the
+                            # evaluator puts the returned refs into per-ICP rows.
+                            trace_sink=self._candidate_incontainer_trace_sink(candidate_id),
+                        )
+                        langfuse_trace_id = finish_score_bundle_observation(langfuse_obs, score_bundle)
+                    finally:
+                        heartbeat_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await heartbeat_task
             except StaleParentDuringScoring as stale_exc:
                 stale_result = await self._queue_stale_parent_rebase(
                     candidate,
@@ -2158,6 +2180,25 @@ class ResearchLabGatewayScoringWorker:
             )
             bundle, _bundle_event = await create_score_bundle(score_bundle_request)
             scored_score_bundle_id = str(bundle["score_bundle_id"])
+            if langfuse_trace_id:
+                try:
+                    await insert_row(
+                        "engine_trace_mappings",
+                        {
+                            "execution_trace_ref": str(score_bundle.get("execution_trace_ref") or f"score_bundle:{score_bundle['score_bundle_hash']}"),
+                            "langfuse_trace_id": langfuse_trace_id,
+                            "langfuse_project": os.getenv("LANGFUSE_PROJECT", "leadpoet-lab-prod-redacted"),
+                            "score_bundle_hash": score_bundle["score_bundle_hash"],
+                            "run_id": str(candidate["run_id"]),
+                            "ticket_id": str(candidate["ticket_id"]),
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "research_lab_langfuse_trace_mapping_write_failed candidate_id=%s error=%s",
+                        compact_ref(candidate_id),
+                        str(exc)[:200],
+                    )
             await self._create_scored_evaluation_event(
                 candidate=candidate,
                 candidate_id=candidate_id,
@@ -2177,6 +2218,7 @@ class ResearchLabGatewayScoringWorker:
                         if scorer_trace_pointers
                         else {}
                     ),
+                    **({"langfuse_trace_id": langfuse_trace_id} if langfuse_trace_id else {}),
                 },
             )
             scored_event_written = True

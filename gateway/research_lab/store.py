@@ -77,6 +77,24 @@ async def insert_row(table: str, row: dict[str, Any]) -> dict[str, Any]:
     return dict(data[0])
 
 
+async def update_row(
+    table: str,
+    values: dict[str, Any],
+    *,
+    filters: Iterable[tuple[Any, ...]],
+) -> dict[str, Any]:
+    def _call() -> Any:
+        query = get_write_client().table(table).update(values)
+        query = _apply_filters(query, filters)
+        return query.execute()
+
+    response = await asyncio.to_thread(_call)
+    data = getattr(response, "data", None) or []
+    if not data:
+        raise RuntimeError(f"{table}: update returned no rows")
+    return dict(data[0])
+
+
 async def select_one(
     table: str,
     *,

@@ -30,6 +30,8 @@ from research_lab.eval import (  # noqa: E402
     SubprocessPrivateModelRunner,
     evaluate_private_model_pair,
 )
+from research_lab.observability.langfuse_client import flush_langfuse, observation  # noqa: E402
+from research_lab.observability.tracing import finish_score_bundle_observation  # noqa: E402
 
 
 def main() -> int:
@@ -52,18 +54,34 @@ def main() -> int:
             timeout_seconds=args.timeout_seconds,
         )
     )
-    score_bundle = asyncio.run(
-        evaluate_private_model_pair(
-            artifact_manifest=artifact,
-            benchmark=benchmark,
-            patch_manifest=patch,
-            benchmark_items=benchmark_items,
-            base_runner=runner,
-            candidate_runner=runner,
-            run_context=run_context,
-            policy=_read_json(args.policy) if args.policy else {},
+    with observation(
+        "research_lab.private_eval_pair",
+        metadata={
+            "run_id": str(run_context.get("run_id") or ""),
+            "ticket_id": str(run_context.get("ticket_id") or ""),
+            "parent_artifact_hash": artifact.model_artifact_hash,
+            "candidate_patch_hash": patch.manifest_hash(),
+            "icp_set_hash": benchmark.icp_set_hash,
+            "benchmark_split_ref": benchmark.split_ref,
+            "standalone_eval": True,
+        },
+    ) as obs:
+        score_bundle = asyncio.run(
+            evaluate_private_model_pair(
+                artifact_manifest=artifact,
+                benchmark=benchmark,
+                patch_manifest=patch,
+                benchmark_items=benchmark_items,
+                base_runner=runner,
+                candidate_runner=runner,
+                run_context=run_context,
+                policy=_read_json(args.policy) if args.policy else {},
+            )
         )
-    )
+        trace_id = finish_score_bundle_observation(obs, score_bundle)
+        if trace_id:
+            score_bundle = {**score_bundle, "langfuse_trace_id": trace_id}
+    flush_langfuse()
 
     _write_json(args.output, score_bundle)
     print(f"Wrote Research Lab score bundle: {args.output}")

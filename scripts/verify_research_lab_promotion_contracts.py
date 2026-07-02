@@ -109,6 +109,11 @@ def main() -> int:
         errors.append(f"champion obligation was not active: {obligation}")
     if float(obligation["threshold_points"]) != 1.0:
         errors.append("champion obligation did not use the 1-point threshold")
+    if not str(obligation.get("champion_reward_id") or "").startswith("champion_reward:sha256:"):
+        errors.append("champion reward id must keep champion_reward:sha256 prefix")
+    anchored_hash = str(obligation.get("anchored_hash") or "")
+    if not anchored_hash.startswith("sha256:") or anchored_hash.startswith("champion_reward:"):
+        errors.append("champion reward anchored_hash must satisfy DB sha256 check constraint")
 
     try:
         asyncio.run(_test_stale_scored_candidate_requires_rebase())

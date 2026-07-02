@@ -298,8 +298,9 @@ def build_champion_reward_obligation(candidate: Mapping[str, Any], policy: Mappi
         "required_icp_count": total_required,
         "input_hash": sha256_json(_sorted_public({"candidate": candidate, "policy": policy})),
     }
-    reward_id = "champion_reward:" + sha256_json(payload_without_id)
-    return {**payload_without_id, "champion_reward_id": reward_id, "anchored_hash": reward_id}
+    anchored_hash = sha256_json(payload_without_id)
+    reward_id = "champion_reward:" + anchored_hash
+    return {**payload_without_id, "champion_reward_id": reward_id, "anchored_hash": anchored_hash}
 
 
 def allocate_research_lab_epoch(

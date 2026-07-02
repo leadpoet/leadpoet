@@ -8,11 +8,12 @@ into the v5 corpus tables created by ``scripts/27-research-lab-v5-schemas.sql``:
 * ``research_trajectories``        -- one envelope row per run (no events array)
 * ``research_trajectory_events``   -- append-only canonical event log
 * ``research_lab_results_ledger``  -- one row per (run x drafted node)
-* ``execution_traces``             -- pointer aggregation rows: one "engine"
-  row per run (non-node-attributed raw LLM trace pointers) plus one row per
-  node with node-scoped pointers (draft-stage raw traces, in-container
-  sourcing-model trace refs), plus score-bundle fallback rows for scored
-  bundles that are not linked to a node -- fablefollowup.md item 5.5
+* ``execution_traces``             -- pointer/metadata aggregation rows: one
+  "engine" row per run (non-node-attributed raw LLM trace pointers and
+  metadata-only reasoning captures) plus one row per node with node-scoped
+  pointers (draft-stage raw traces, in-container sourcing-model trace refs),
+  plus score-bundle fallback rows for scored bundles that are not linked to a
+  node -- fablefollowup.md item 5.5
 * ``evidence_bundles``             -- one row per scored candidate node (or
   score-bundle fallback) pointing at its score bundle + per-ICP evidence
   summary (numbers/refs only)
@@ -257,6 +258,11 @@ class GatewayProjectorStore:
         from gateway.research_lab import store
 
         return await store.insert_row(table, row)
+
+    async def update_row(self, table: str, values: dict[str, Any], *, filters: Any):
+        from gateway.research_lab import store
+
+        return await store.update_row(table, values, filters=filters)
 
 
 def _deterministic_uuid(*parts: Any) -> str:
@@ -569,15 +575,145 @@ def _iter_raw_trace_pointers(value: Any, model: Any = None):
             yield from _iter_raw_trace_pointers(item, model)
 
 
+def _looks_like_provider_usage_item(value: Mapping[str, Any]) -> bool:
+    return (
+        isinstance(value.get("raw_trace_ref"), Mapping)
+        or isinstance(value.get("reasoning_logs"), Mapping)
+        or isinstance(value.get("reasoning_capture"), Mapping)
+        or str(value.get("provider") or "").lower() == "openrouter"
+        or bool(value.get("response_id"))
+    )
+
+
+def _iter_provider_usage_items(value: Any, model: Any = None):
+    """Yield provider-usage-shaped mappings, including nested retry attempts."""
+    if isinstance(value, Mapping):
+        current_model = value.get("model") or model
+        if _looks_like_provider_usage_item(value):
+            yield value, current_model
+        for key, item in value.items():
+            if str(key) in {"raw_trace_ref", "reasoning_logs", "reasoning_capture"}:
+                continue
+            yield from _iter_provider_usage_items(item, current_model)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_provider_usage_items(item, model)
+
+
+def _reasoning_hashes_from_logs(logs: Mapping[str, Any]) -> list[str]:
+    hashes: list[str] = []
+    raw_hashes = logs.get("reasoning_hashes")
+    if isinstance(raw_hashes, Sequence) and not isinstance(raw_hashes, (str, bytes, bytearray)):
+        hashes.extend(str(item) for item in raw_hashes if str(item))
+    for key in ("reasoning_hash", "reasoning_details_hash"):
+        if logs.get(key):
+            hashes.append(str(logs[key]))
+    choices = logs.get("choices")
+    if isinstance(choices, Sequence) and not isinstance(choices, (str, bytes, bytearray)):
+        for choice in choices:
+            if not isinstance(choice, Mapping):
+                continue
+            for key in ("reasoning_hash", "reasoning_details_hash"):
+                if choice.get(key):
+                    hashes.append(str(choice[key]))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in hashes:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item[:256])
+    return deduped[:32]
+
+
+def _reasoning_fields_from_logs(logs: Mapping[str, Any]) -> list[str]:
+    fields: set[str] = set()
+    raw_fields = logs.get("fields_present")
+    if isinstance(raw_fields, Sequence) and not isinstance(raw_fields, (str, bytes, bytearray)):
+        fields.update(str(item)[:80] for item in raw_fields if str(item))
+    for key in ("reasoning", "reasoning_details"):
+        if logs.get(key) is not None:
+            fields.add(key)
+    choices = logs.get("choices")
+    if isinstance(choices, Sequence) and not isinstance(choices, (str, bytes, bytearray)):
+        for choice in choices:
+            if not isinstance(choice, Mapping):
+                continue
+            choice_fields = choice.get("fields_present")
+            if isinstance(choice_fields, Sequence) and not isinstance(choice_fields, (str, bytes, bytearray)):
+                fields.update(str(item)[:80] for item in choice_fields if str(item))
+            for key in ("reasoning", "reasoning_details"):
+                if choice.get(key) is not None:
+                    fields.add(key)
+    return sorted(fields)
+
+
+def _provider_reasoning_token_count(item: Mapping[str, Any], capture: Mapping[str, Any]) -> int | None:
+    for holder in (capture, item, item.get("generation_stats")):
+        if not isinstance(holder, Mapping):
+            continue
+        for key in ("reasoning_token_count", "native_tokens_reasoning", "reasoning_tokens", "tokens_reasoning"):
+            if holder.get(key) is not None:
+                return max(0, _i(holder.get(key)))
+        details = holder.get("completion_tokens_details")
+        if isinstance(details, Mapping) and details.get("reasoning_tokens") is not None:
+            return max(0, _i(details.get("reasoning_tokens")))
+    return None
+
+
+def _reasoning_capture_doc(item: Mapping[str, Any], *, raw_trace_ref_present: bool) -> dict[str, Any]:
+    logs = item.get("reasoning_logs") if isinstance(item.get("reasoning_logs"), Mapping) else {}
+    capture = item.get("reasoning_capture") if isinstance(item.get("reasoning_capture"), Mapping) else {}
+    fields_present = list(capture.get("fields_present") or []) if capture else []
+    if not fields_present and isinstance(logs, Mapping):
+        fields_present = _reasoning_fields_from_logs(logs)
+    hashes = list(capture.get("reasoning_hashes") or []) if capture else []
+    if not hashes and isinstance(logs, Mapping):
+        hashes = _reasoning_hashes_from_logs(logs)
+    returned = bool(capture.get("returned")) if capture else bool(logs)
+    requested = bool(capture.get("requested")) if capture else (returned or bool(item.get("reasoning_request_dropped")))
+    token_count = _provider_reasoning_token_count(item, capture)
+    storage_state = (
+        "raw_trace_ref"
+        if raw_trace_ref_present
+        else ("metadata_only" if returned else ("requested_but_absent" if requested else "not_requested"))
+    )
+    storage_policy = str(
+        capture.get("storage_policy")
+        or (logs.get("storage_policy") if isinstance(logs, Mapping) else "")
+        or ("raw_trace_s3_ref" if raw_trace_ref_present else "no_reasoning_returned")
+    )[:160]
+    doc: dict[str, Any] = {
+        "requested": requested,
+        "returned": returned,
+        "fields_present": [str(field)[:80] for field in fields_present][:16],
+        "reasoning_hashes": [str(item_hash)[:256] for item_hash in hashes][:32],
+        "reasoning_token_count": token_count,
+        "storage_state": storage_state,
+        "storage_policy": storage_policy,
+        "raw_trace_ref_present": raw_trace_ref_present,
+    }
+    if item.get("reasoning_request_dropped") or capture.get("request_dropped"):
+        doc["request_dropped"] = True
+    drop_hash = item.get("reasoning_effort_drop_error_hash") or capture.get("drop_error_hash")
+    if drop_hash:
+        doc["drop_error_hash"] = str(drop_hash)[:256]
+    effort = item.get("requested_reasoning_effort") or capture.get("requested_reasoning_effort")
+    if effort:
+        doc["requested_reasoning_effort"] = str(effort)[:80]
+    return sanitize_capture_payload(doc)
+
+
 def _collect_engine_trace_calls(
     loop_events: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     """Engine-side raw LLM trace pointers grouped by stage/iteration/attempt.
 
-    One ``calls`` entry per distinct ``{s3_ref, sha256}`` pointer, tagged with
-    the emitting live event's stage (event_type), iteration, node and seq so
-    the run's execution can be replayed pointer-by-pointer.  Pointers only --
-    never request/response content.
+    One ``calls`` entry per distinct ``{s3_ref, sha256}`` pointer or
+    metadata-only reasoning capture, tagged with the emitting live event's
+    stage (event_type), iteration, node and seq so the run's execution can be
+    replayed pointer-by-pointer.  Pointers/hashes/metadata only -- never raw
+    request/response/reasoning content.
     """
     calls: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -586,32 +722,51 @@ def _collect_engine_trace_calls(
         stage = str(row.get("event_type") or "unknown_stage")
         node_id = str(row.get("node_id") or "") or None
         attempt = 0
-        for pointer, model in _iter_raw_trace_pointers(
+        for item, model in _iter_provider_usage_items(
             [row.get("provider_usage"), doc]
         ):
-            s3_ref = str(pointer.get("s3_ref") or "")
-            sha256 = str(pointer.get("sha256") or "")
-            if not s3_ref and not sha256:
+            pointer = item.get("raw_trace_ref") if isinstance(item.get("raw_trace_ref"), Mapping) else {}
+            s3_ref = str(pointer.get("s3_ref") or "") if isinstance(pointer, Mapping) else ""
+            sha256 = str(pointer.get("sha256") or "") if isinstance(pointer, Mapping) else ""
+            reasoning_logs = item.get("reasoning_logs") if isinstance(item.get("reasoning_logs"), Mapping) else {}
+            if not s3_ref and not sha256 and not reasoning_logs:
                 continue
-            key = (s3_ref, sha256)
+            call_stage = str(item.get("call_stage") or stage or "unknown_stage")
+            call_iteration = _i(item.get("loop_iteration"), _i(doc.get("iteration")))
+            key = (
+                "raw" if (s3_ref or sha256) else "metadata",
+                s3_ref,
+                sha256,
+                str(row.get("event_id") or ""),
+                str(item.get("response_id") or ""),
+                call_stage,
+            )
             if key in seen:
                 continue
             seen.add(key)
             attempt += 1
+            raw_trace_ref_present = bool(s3_ref or sha256)
             calls.append(
                 sanitize_capture_payload(
                     {
                         "call_emitter": "model",
-                        "call_kind": "engine_raw_trace",
-                        "stage": stage[:128],
-                        "iteration": _i(doc.get("iteration")),
+                        "call_kind": "engine_raw_trace" if raw_trace_ref_present else "engine_reasoning_metadata",
+                        "stage": call_stage[:128],
+                        "iteration": call_iteration,
                         "attempt": attempt,
                         "node_id": node_id,
                         "live_event_id": str(row.get("event_id") or ""),
                         "live_seq": _i(row.get("seq")),
                         "model": (str(model or "") or "unknown")[:128],
+                        "provider": str(item.get("provider") or "openrouter")[:80],
+                        "response_id": str(item.get("response_id") or "")[:160],
                         "s3_ref": s3_ref,
                         "sha256": sha256,
+                        "storage_state": "raw_trace_ref" if raw_trace_ref_present else "metadata_only",
+                        "reasoning_capture": _reasoning_capture_doc(
+                            item,
+                            raw_trace_ref_present=raw_trace_ref_present,
+                        ),
                         "teacher_model_flag": False,
                     }
                 )
@@ -2326,19 +2481,97 @@ async def _insert_missing(
     return True
 
 
+def _trace_call_key(call: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
+    s3_ref = str(call.get("s3_ref") or "")
+    sha256 = str(call.get("sha256") or "")
+    if s3_ref or sha256:
+        return ("raw", s3_ref, sha256, "", "")
+    return (
+        "metadata",
+        str(call.get("live_event_id") or ""),
+        str(call.get("response_id") or ""),
+        str(call.get("stage") or ""),
+        str(call.get("attempt") or ""),
+    )
+
+
+def _merge_trace_calls(
+    existing_calls: Any,
+    proposed_calls: Any,
+) -> tuple[bool, list[dict[str, Any]]]:
+    merged: list[dict[str, Any]] = [
+        dict(item) for item in (existing_calls if isinstance(existing_calls, list) else [])
+        if isinstance(item, Mapping)
+    ]
+    seen = {_trace_call_key(item) for item in merged}
+    changed = False
+    for item in proposed_calls if isinstance(proposed_calls, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        key = _trace_call_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(dict(item))
+        changed = True
+    if len(merged) > _EXECUTION_TRACE_CALL_CAP:
+        merged = _cap_pointer_entries(
+            merged,
+            _EXECUTION_TRACE_CALL_CAP,
+            "call_truncation_marker",
+        )
+        changed = True
+    return changed, merged
+
+
+async def _upsert_execution_trace_row(store: Any, row: Mapping[str, Any]) -> str:
+    """Insert a trace row, or merge newly discovered calls into an existing row."""
+    existing = await store.select_one(
+        EXECUTION_TRACES_TABLE, filters=(("run_id", row["run_id"]),)
+    )
+    if not existing:
+        if await _insert_missing(store, EXECUTION_TRACES_TABLE, "run_id", row):
+            return "inserted"
+        existing = await store.select_one(
+            EXECUTION_TRACES_TABLE, filters=(("run_id", row["run_id"]),)
+        )
+    if not existing:
+        return "unchanged"
+    changed, calls = _merge_trace_calls(existing.get("calls"), row.get("calls"))
+    if not changed:
+        return "unchanged"
+    await store.update_row(
+        EXECUTION_TRACES_TABLE,
+        {"calls": calls},
+        filters=(("run_id", row["run_id"]),),
+    )
+    return "updated"
+
+
+async def _execution_trace_row_needs_write(store: Any, row: Mapping[str, Any]) -> bool:
+    existing = await store.select_one(
+        EXECUTION_TRACES_TABLE, filters=(("run_id", row["run_id"]),)
+    )
+    if not existing:
+        return True
+    changed, _calls = _merge_trace_calls(existing.get("calls"), row.get("calls"))
+    return changed
+
+
 async def _write_missing_corpus_trace_rows(
     store: Any, projection: TrajectoryProjection
 ) -> tuple[int, int]:
-    """Write missing execution_traces / evidence_bundles rows; return counts."""
-    trace_written = 0
+    """Write/merge execution_traces and missing evidence_bundles; return counts."""
+    trace_changed = 0
     for row in projection.execution_trace_rows:
-        if await _insert_missing(store, EXECUTION_TRACES_TABLE, "run_id", row):
-            trace_written += 1
+        trace_status = await _upsert_execution_trace_row(store, row)
+        if trace_status in {"inserted", "updated"}:
+            trace_changed += 1
     evidence_written = 0
     for row in projection.evidence_bundle_rows:
         if await _insert_missing(store, EVIDENCE_BUNDLES_TABLE, "bundle_id", row):
             evidence_written += 1
-    return trace_written, evidence_written
+    return trace_changed, evidence_written
 
 
 async def load_projection_inputs(
@@ -2625,9 +2858,7 @@ async def backfill_run_corpus_trace_rows(
         missing_traces = [
             row
             for row in projection.execution_trace_rows
-            if not await store.select_one(
-                EXECUTION_TRACES_TABLE, filters=(("run_id", row["run_id"]),)
-            )
+            if await _execution_trace_row_needs_write(store, row)
         ]
         missing_evidence = [
             row
@@ -2650,7 +2881,8 @@ async def backfill_run_corpus_trace_rows(
             )
         trace_written = 0
         for row in missing_traces:
-            if await _insert_missing(store, EXECUTION_TRACES_TABLE, "run_id", row):
+            trace_status = await _upsert_execution_trace_row(store, row)
+            if trace_status in {"inserted", "updated"}:
                 trace_written += 1
         evidence_written = 0
         for row in missing_evidence:
@@ -2732,6 +2964,127 @@ async def backfill_corpus_trace_rows(
     return results
 
 
+async def summarize_reasoning_capture_coverage(
+    *,
+    store: Any | None = None,
+    max_events: int = 5000,
+    max_traces: int = 5000,
+) -> dict[str, Any]:
+    """Private coverage report for OpenRouter reasoning/raw-trace capture."""
+    store = store or GatewayProjectorStore()
+    loop_events = await store.select_all(
+        LOOP_EVENTS_TABLE,
+        columns="run_id,event_id,seq,event_type,node_id,provider_usage,event_doc,created_at",
+        filters=(),
+        order_by=(("created_at", True),),
+        max_rows=max(1, int(max_events)),
+    )
+    execution_traces = await store.select_all(
+        EXECUTION_TRACES_TABLE,
+        columns="run_id,calls,trace_doc,created_at",
+        filters=(),
+        order_by=(("created_at", True),),
+        max_rows=max(1, int(max_traces)),
+    )
+
+    projected_raw_refs: set[tuple[str, str]] = set()
+    projected_reasoning_calls = 0
+    projected_metadata_only_calls = 0
+    for trace in execution_traces:
+        calls = trace.get("calls")
+        if not isinstance(calls, list):
+            continue
+        for call in calls:
+            if not isinstance(call, Mapping):
+                continue
+            s3_ref = str(call.get("s3_ref") or "")
+            sha256 = str(call.get("sha256") or "")
+            if s3_ref or sha256:
+                projected_raw_refs.add((s3_ref, sha256))
+            reasoning_capture = call.get("reasoning_capture")
+            if isinstance(reasoning_capture, Mapping):
+                projected_reasoning_calls += 1
+                if reasoning_capture.get("storage_state") == "metadata_only":
+                    projected_metadata_only_calls += 1
+
+    openrouter_calls = 0
+    reasoning_requested = 0
+    reasoning_returned = 0
+    raw_trace_stored = 0
+    raw_trace_projected = 0
+    missing_projected_raw_trace_refs = 0
+    requested_without_raw_trace_ref = 0
+    reasoning_request_dropped = 0
+    metadata_only_reasoning = 0
+    models: dict[str, dict[str, int]] = {}
+    for row in loop_events:
+        doc = _doc(row)
+        for item, model in _iter_provider_usage_items([row.get("provider_usage"), doc]):
+            provider = str(item.get("provider") or "openrouter").lower()
+            if provider != "openrouter" and not item.get("reasoning_logs") and not item.get("raw_trace_ref"):
+                continue
+            openrouter_calls += 1
+            model_key = (str(model or item.get("model") or "unknown") or "unknown")[:128]
+            model_stats = models.setdefault(
+                model_key,
+                {
+                    "openrouter_calls": 0,
+                    "reasoning_requested": 0,
+                    "reasoning_returned": 0,
+                    "raw_trace_stored": 0,
+                    "raw_trace_projected": 0,
+                },
+            )
+            model_stats["openrouter_calls"] += 1
+            capture = item.get("reasoning_capture") if isinstance(item.get("reasoning_capture"), Mapping) else {}
+            logs = item.get("reasoning_logs") if isinstance(item.get("reasoning_logs"), Mapping) else {}
+            requested = bool(capture.get("requested")) or bool(logs) or bool(item.get("reasoning_request_dropped"))
+            returned = bool(capture.get("returned")) or bool(logs)
+            pointer = item.get("raw_trace_ref") if isinstance(item.get("raw_trace_ref"), Mapping) else {}
+            s3_ref = str(pointer.get("s3_ref") or "") if isinstance(pointer, Mapping) else ""
+            sha256 = str(pointer.get("sha256") or "") if isinstance(pointer, Mapping) else ""
+            has_raw = bool(s3_ref or sha256)
+            if requested:
+                reasoning_requested += 1
+                model_stats["reasoning_requested"] += 1
+            if returned:
+                reasoning_returned += 1
+                model_stats["reasoning_returned"] += 1
+            if item.get("reasoning_request_dropped") or capture.get("request_dropped"):
+                reasoning_request_dropped += 1
+            if has_raw:
+                raw_trace_stored += 1
+                model_stats["raw_trace_stored"] += 1
+                if (s3_ref, sha256) in projected_raw_refs:
+                    raw_trace_projected += 1
+                    model_stats["raw_trace_projected"] += 1
+                else:
+                    missing_projected_raw_trace_refs += 1
+            elif requested:
+                requested_without_raw_trace_ref += 1
+                if returned:
+                    metadata_only_reasoning += 1
+
+    return {
+        "schema_version": "1.0",
+        "source": "research_lab_openrouter_reasoning_capture",
+        "loop_events_scanned": len(loop_events),
+        "execution_traces_scanned": len(execution_traces),
+        "openrouter_calls": openrouter_calls,
+        "reasoning_requested": reasoning_requested,
+        "reasoning_returned": reasoning_returned,
+        "raw_trace_stored": raw_trace_stored,
+        "raw_trace_projected": raw_trace_projected,
+        "missing_projected_raw_trace_refs": missing_projected_raw_trace_refs,
+        "requested_without_raw_trace_ref": requested_without_raw_trace_ref,
+        "metadata_only_reasoning": metadata_only_reasoning,
+        "reasoning_request_dropped": reasoning_request_dropped,
+        "projected_reasoning_calls": projected_reasoning_calls,
+        "projected_metadata_only_calls": projected_metadata_only_calls,
+        "models": models,
+    }
+
+
 # ---------------------------------------------------------------------------
 # CLI: python3 -m gateway.research_lab.trajectory_projector --backfill --dry-run
 # ---------------------------------------------------------------------------
@@ -2760,12 +3113,29 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "combine with --run-id to target one run"
         ),
     )
+    parser.add_argument(
+        "--reasoning-coverage",
+        action="store_true",
+        help="print private OpenRouter reasoning/raw-trace capture coverage without writing",
+    )
     parser.add_argument("--run-id", default=None, help="project a single run id")
     parser.add_argument(
         "--batch-size",
         type=int,
         default=25,
         help="max runs to project per pass (backfill loops until drained)",
+    )
+    parser.add_argument(
+        "--max-events",
+        type=int,
+        default=5000,
+        help="max live loop events to scan for --reasoning-coverage",
+    )
+    parser.add_argument(
+        "--max-traces",
+        type=int,
+        default=5000,
+        help="max execution_traces rows to scan for --reasoning-coverage",
     )
     parser.add_argument(
         "--dry-run",
@@ -2778,10 +3148,29 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 async def _cli_main(argv: Sequence[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv)
-    if not args.backfill and not args.run_id and not args.traces_backfill:
+    if not args.backfill and not args.run_id and not args.traces_backfill and not args.reasoning_coverage:
         _build_arg_parser().print_help()
         return 2
     store = GatewayProjectorStore()
+    if args.reasoning_coverage:
+        coverage = await summarize_reasoning_capture_coverage(
+            store=store,
+            max_events=args.max_events,
+            max_traces=args.max_traces,
+        )
+        print(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "projector_enabled": projector_enabled(),
+                    "corpus_contract_version": TRAJECTORY_CORPUS_CONTRACT_VERSION,
+                    "coverage": coverage,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     results: list[ProjectionResult] = []
     if args.run_id and not args.traces_backfill:
         results.append(await project_run(args.run_id, store=store, dry_run=args.dry_run))

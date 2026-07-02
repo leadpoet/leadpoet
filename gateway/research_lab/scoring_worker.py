@@ -518,6 +518,27 @@ def _scorer_trace_capture_enabled() -> bool:
     return os.getenv(_SCORER_TRACE_CAPTURE_ENV, "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _openrouter_include_reasoning_enabled() -> bool:
+    return os.getenv("RESEARCH_LAB_LLM_INCLUDE_REASONING", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _openrouter_reasoning_request_unsupported(message: str) -> bool:
+    text = str(message or "").lower()
+    if "http 400" not in text and "http 422" not in text:
+        return False
+    return (
+        "include_reasoning" in text
+        or "reasoning_effort" in text
+        or "reasoning effort" in text
+        or ("reasoning" in text and "unsupported" in text)
+    )
+
+
 def _trace_path_segment(value: object, *, fallback: str) -> str:
     text = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in str(value or ""))[:96]
     return text.strip("-.") or fallback
@@ -1162,11 +1183,14 @@ async def _call_operator_openrouter_json(
             "zdr": True,
         },
     }
+    include_reasoning = _openrouter_include_reasoning_enabled()
+    if include_reasoning:
+        body["include_reasoning"] = True
 
-    def _call() -> str:
+    def _call_once(request_body: Mapping[str, Any]) -> str:
         req = urlrequest.Request(
             "https://openrouter.ai/api/v1/chat/completions",
-            data=json.dumps(body).encode("utf-8"),
+            data=json.dumps(dict(request_body)).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
@@ -1191,6 +1215,21 @@ async def _call_operator_openrouter_json(
         if not content:
             raise CodeEditBuildError("operator stale-parent repair returned empty content")
         return str(content)
+
+    def _call() -> str:
+        try:
+            return _call_once(body)
+        except CodeEditBuildError as exc:
+            if not include_reasoning or not _openrouter_reasoning_request_unsupported(str(exc)):
+                raise
+            retry_body = dict(body)
+            retry_body.pop("include_reasoning", None)
+            logger.warning(
+                "research_lab_operator_openrouter_reasoning_unsupported model=%s error_hash=%s; retrying_without_reasoning",
+                compact_ref(model_id),
+                sha256_json({"error": str(exc)}),
+            )
+            return _call_once(retry_body)
 
     return await asyncio.to_thread(_call)
 

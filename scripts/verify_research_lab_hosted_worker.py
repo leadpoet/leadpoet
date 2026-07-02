@@ -413,10 +413,22 @@ def main() -> int:
                         "reasoning": "Plan: inspect provider fallback and retry code.",
                         "reasoning_details": [{"type": "summary", "text": "checked fallback path"}],
                     },
+                },
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "reasoning": "Second option: preserve source routing evidence.",
+                    },
                 }
             ],
         },
-        usage={"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost": 0.000111},
+        usage={
+            "prompt_tokens": 10,
+            "completion_tokens": 20,
+            "total_tokens": 30,
+            "cost": 0.000111,
+            "native_tokens_reasoning": 7,
+        },
         model_id="fallback/model",
         api_key="test-openrouter-api-key",
         generation_stats_opener=_fake_generation_stats_opener(
@@ -428,9 +440,12 @@ def main() -> int:
                     "total_cost": 0.001234,
                     "tokens_prompt": 10,
                     "tokens_completion": 20,
+                    "native_tokens_reasoning": 12,
                 }
             }
         ),
+        reasoning_requested=True,
+        requested_reasoning_effort="high",
     )
     if reconciled_cost != 1234:
         errors.append("OpenRouter generation stats reconciliation did not override usage cost")
@@ -449,6 +464,15 @@ def main() -> int:
         errors.append("OpenRouter provider usage did not preserve returned reasoning logs")
     if not reasoning_logs or not reasoning_logs.get("reasoning_details_hash"):
         errors.append("OpenRouter provider usage did not hash returned reasoning_details")
+    if reasoning_logs.get("choices_with_reasoning_count") != 2:
+        errors.append("OpenRouter provider usage did not preserve multi-choice reasoning metadata")
+    reasoning_capture = provider_usage.get("reasoning_capture")
+    if not isinstance(reasoning_capture, dict) or not reasoning_capture.get("requested") or not reasoning_capture.get("returned"):
+        errors.append("OpenRouter provider usage did not record requested/returned reasoning capture")
+    if not isinstance(reasoning_capture, dict) or reasoning_capture.get("reasoning_token_count") != 12:
+        errors.append("OpenRouter provider usage did not prefer generation-stats reasoning token count")
+    if not isinstance(reasoning_capture, dict) or len(reasoning_capture.get("reasoning_hashes") or []) < 3:
+        errors.append("OpenRouter provider usage did not project all reasoning hashes")
 
     artifact = _artifact()
     registry = coerce_component_registry(_metadata())

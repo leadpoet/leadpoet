@@ -171,6 +171,7 @@
         "incontainer_trace_ref": { "type": "string" },
         "incontainer_trace_sha256": { "type": "string" },
         "incontainer_trace_call_count": { "type": "integer", "minimum": 0 },
+        "incontainer_trace_truncated_count": { "type": "integer", "minimum": 0 },
         "incontainer_trace_dropped": { "type": "boolean" },
         "incontainer_trace_dropped_call_count": { "type": "integer", "minimum": 0 },
         "scorer_trace_ref": { "type": "string" },

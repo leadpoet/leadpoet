@@ -914,6 +914,10 @@ async def _publish_baseline_incontainer_trace(
         "incontainer_trace_sha256": sha256_json(list(entries)),
         "incontainer_trace_call_count": len(entries) if ref else 0,
     }
+    # P13: truncation is filterable from the index, not just inside the blob.
+    truncated_count = sum(1 for entry in entries if entry.get("truncated"))
+    if truncated_count:
+        fields["incontainer_trace_truncated_count"] = truncated_count
     if not ref:
         fields["incontainer_trace_dropped"] = True
         fields["incontainer_trace_dropped_call_count"] = len(entries)
@@ -3293,6 +3297,21 @@ class ResearchLabGatewayScoringWorker:
                 "decision_path": "confirmation_rerun_result",
                 "attempt": attempt,
                 "confirmation": confirmation_doc,
+                # P18: the confirmation pair is calibration gold — two
+                # measurements of the SAME artifact. Surface both aggregates
+                # and their disagreement as flat, queryable fields (the
+                # empirical same-model noise any reward-model training needs).
+                "measurement_pair": {
+                    "first_pass_delta": round(float(first_pass_points), 6),
+                    "confirmation_delta": round(
+                        _safe_float(confirmation_doc.get("confirmation_delta"), default=0.0), 6
+                    ),
+                    "delta_of_deltas": round(
+                        _safe_float(confirmation_doc.get("confirmation_delta"), default=0.0)
+                        - float(first_pass_points),
+                        6,
+                    ),
+                },
             },
         )
         logger.info(
@@ -5659,6 +5678,12 @@ class ResearchLabGatewayScoringWorker:
         if no_proxy:
             env["NO_PROXY"] = no_proxy
             env["no_proxy"] = no_proxy
+        # P13 corpus-mode capture budgets: with an S3 persistence prefix set,
+        # containers get the larger byte caps so tool-call payloads are not
+        # silently truncated (explicit operator caps always win).
+        from research_lab.eval.private_runtime import incontainer_trace_corpus_env
+
+        env.update(incontainer_trace_corpus_env())
         return env
 
     def _private_baseline_scoring_env(self) -> dict[str, str]:

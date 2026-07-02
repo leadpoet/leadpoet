@@ -46,6 +46,13 @@ INCONTAINER_TRACE_MAX_CALL_BYTES_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_MAX_CALL_
 INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_MAX_TOTAL_BYTES"
 INCONTAINER_TRACE_DEFAULT_MAX_CALL_BYTES = 16384
 INCONTAINER_TRACE_DEFAULT_MAX_TOTAL_BYTES = 524288
+# P13 corpus-mode budgets: the small diagnostics caps above silently truncate
+# real LLM answers with tool-call JSON and Exa/scrape payloads. When an S3
+# persistence prefix is configured (the traces are corpus data, not just
+# diagnostics), these larger defaults apply unless the operator set the caps
+# explicitly.
+INCONTAINER_TRACE_CORPUS_MAX_CALL_BYTES = 262144  # 256 KiB per call body
+INCONTAINER_TRACE_CORPUS_MAX_TOTAL_BYTES = 16777216  # 16 MiB per run
 # Forwarded into model containers so operators can disable/tune capture
 # per-fleet. Capture defaults ON when the env is absent, so forwarding only
 # matters for opting out or resizing the caps.
@@ -105,6 +112,27 @@ def private_model_env_passthrough(*, include_proxy: bool = False) -> tuple[str, 
     if include_proxy:
         return PROVIDER_KEY_ENV_PASSTHROUGH + PROVIDER_PROXY_ENV_PASSTHROUGH + INCONTAINER_TRACE_ENV_PASSTHROUGH
     return PROVIDER_KEY_ENV_PASSTHROUGH + INCONTAINER_TRACE_ENV_PASSTHROUGH
+
+
+def incontainer_trace_corpus_env() -> dict[str, str]:
+    """P13: container env cap overrides for corpus-mode capture.
+
+    Returns the larger corpus byte budgets when an in-container persistence
+    prefix is configured and the operator has not explicitly set the caps;
+    empty otherwise (diagnostics mode keeps the small defaults)."""
+    prefix = str(os.getenv("RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX") or "").strip()
+    if not prefix:
+        return {}
+    env: dict[str, str] = {}
+    if not str(os.getenv(INCONTAINER_TRACE_MAX_CALL_BYTES_ENV) or "").strip():
+        env[INCONTAINER_TRACE_MAX_CALL_BYTES_ENV] = str(
+            INCONTAINER_TRACE_CORPUS_MAX_CALL_BYTES
+        )
+    if not str(os.getenv(INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV) or "").strip():
+        env[INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV] = str(
+            INCONTAINER_TRACE_CORPUS_MAX_TOTAL_BYTES
+        )
+    return env
 
 
 def _default_docker_platform() -> str:
@@ -1103,12 +1131,14 @@ def _research_lab_trace_provider_class(url):
         except Exception:
             host = ""
         blob = host or str(url).lower()
+        # "exa" needs an exact-host match ("example.com" contains "exa").
+        if host in ("exa.ai", "api.exa.ai") or host.endswith(".exa.ai"):
+            return "search"
         for marker, provider_class in (
             ("openrouter", "llm"),
             ("api.openai", "llm"),
             ("api.anthropic", "llm"),
             ("generativelanguage.googleapis", "llm"),
-            ("exa", "search"),
             ("serper", "search"),
             ("serpapi", "search"),
             ("googleapis.com/customsearch", "search"),
@@ -1631,6 +1661,44 @@ def _research_lab_patch_aiohttp():
 _research_lab_patch_httpx()
 _research_lab_patch_requests()
 _research_lab_patch_aiohttp()
+
+def _research_lab_emit_trace_bootstrap():
+    # P13/P19: assert at bootstrap which client libraries the trace tee
+    # actually patched, so an unhooked client (e.g. a new SDK doing its own
+    # streaming) is a visible capture gap instead of a silent one. One line,
+    # parsed host-side alongside the per-call trace markers.
+    if not _research_lab_trace_enabled:
+        return
+    try:
+        patched = {"urllib": True}
+        for lib, probe in (
+            ("httpx", lambda: __import__("httpx").Client.send.__name__),
+            ("requests", lambda: __import__("requests").Session.send.__name__),
+            ("aiohttp", lambda: __import__("aiohttp").ClientSession._request.__name__),
+        ):
+            try:
+                patched[lib] = probe().startswith("_research_lab")
+            except Exception:
+                patched[lib] = None  # library not installed in this image
+        sys.stderr.write(
+            "research_lab_private_runtime_capture_bootstrap "
+            + _research_lab_json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "patched_clients": patched,
+                    "max_call_bytes": _research_lab_trace_max_call_bytes,
+                    "max_total_bytes": _research_lab_trace_max_total_bytes,
+                    "streaming_posture": "request_only_for_streams",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+    except Exception:
+        pass
+
+_research_lab_emit_trace_bootstrap()
 
 def _research_lab_patch_strict_qualify(adapter_module):
     try:

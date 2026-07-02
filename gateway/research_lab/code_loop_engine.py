@@ -965,6 +965,44 @@ class CodeEditLoopEngine:
 
             if allocator_priors_enabled():
                 cell_yield_priors_doc = await build_cell_yield_priors()
+                # P18: the priors injected into the planner prompt used to
+                # survive only inside the captured request body (S3-only,
+                # unqueryable). One pointer-scale allocator_decision event per
+                # run start records WHICH cell priors aimed this run — the
+                # meta-allocator's own future training data. Gated until
+                # scripts/64 extends the loop-event CHECK.
+                if cell_yield_priors_doc is not None and _engine_env_flag(
+                    "RESEARCH_LAB_ALLOCATOR_DECISION_EVENTS_ENABLED", "false"
+                ):
+                    priors_rows = (
+                        cell_yield_priors_doc.get("priors")
+                        if isinstance(cell_yield_priors_doc, Mapping)
+                        else None
+                    )
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="allocator_decision",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "allocator_decision",
+                            ),
+                            event_doc={
+                                "schema_version": "1.0",
+                                "run_id": run_id,
+                                "priors_doc_hash": sha256_json(cell_yield_priors_doc),
+                                "prior_count": (
+                                    len(priors_rows)
+                                    if isinstance(priors_rows, (list, tuple))
+                                    else 0
+                                ),
+                                "cell_yield_priors": cell_yield_priors_doc,
+                            },
+                        )
+                    )
         except Exception as exc:
             logger.warning(
                 "research_lab_allocator_priors_failed run_id=%s error=%s",
@@ -2285,6 +2323,18 @@ class CodeEditLoopEngine:
                         "candidate_model_manifest_hash": candidate.build.candidate_model_manifest.manifest_hash,
                         "candidate_source_diff_hash": candidate.build.source_diff_hash,
                         "redacted_summary": candidate.draft.redacted_summary,
+                        # P18: dev-eval ranking scores become queryable from
+                        # the event stream (previously only in the S3
+                        # rehydration artifact) — the dev-vs-live divergence
+                        # calibration signal for the cheap rung.
+                        **(
+                            {
+                                "dev_score": round(float(candidate.dev_score), 6),
+                                "dev_score_version": str(candidate.dev_score_version)[:120],
+                            }
+                            if candidate.dev_score is not None
+                            else {}
+                        ),
                         "loop_direction_plan_hash": (
                             (loop_direction_plan_doc or {}).get("plan_hash")
                             if isinstance(loop_direction_plan_doc, Mapping)

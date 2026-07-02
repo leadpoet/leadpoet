@@ -73,6 +73,7 @@ PER_ICP_CAPTURE_PASSTHROUGH_KEYS = (
     "incontainer_trace_ref",
     "incontainer_trace_sha256",
     "incontainer_trace_call_count",
+    "incontainer_trace_truncated_count",
     "incontainer_trace_dropped",
     "incontainer_trace_dropped_call_count",
     "scorer_trace_ref",

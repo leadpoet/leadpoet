@@ -1207,6 +1207,25 @@ async def create_public_benchmark_report_event(
     )
 
 
+def _champion_reward_corpus_refs(run_id: str) -> dict[str, str]:
+    """P18: explicit trajectory/execution-trace refs for a reward's run.
+
+    Lazy import — the projector imports this store module, so a top-level
+    import would cycle. Never raises (refs are additive metadata)."""
+    try:
+        from gateway.research_lab.trajectory_projector import (
+            execution_trace_id_for_run,
+            trajectory_id_for_run,
+        )
+
+        return {
+            "trajectory_ref": f"trajectory:{trajectory_id_for_run(run_id)}",
+            "execution_trace_ref": f"execution_trace:{execution_trace_id_for_run(run_id)}",
+        }
+    except Exception:  # noqa: BLE001 - additive metadata only
+        return {}
+
+
 async def create_champion_reward_obligation(
     *,
     obligation: dict[str, Any],
@@ -1254,7 +1273,12 @@ async def create_champion_reward_obligation(
         "source_score_bundle_hash": (obligation_doc or {}).get("source_score_bundle_hash"),
         "input_hash": obligation["input_hash"],
         "anchored_hash": obligation["anchored_hash"],
-        "obligation_doc": obligation_doc or {},
+        "obligation_doc": {
+            **(obligation_doc or {}),
+            # P18 (trajectoryimprovements.md): reward → trajectory resolves via
+            # explicit refs instead of re-deriving the deterministic uuid5s.
+            "corpus_refs": _champion_reward_corpus_refs(str(obligation["run_id"])),
+        },
     }
     inserted = await insert_row("research_lab_champion_reward_obligations", row)
     event = await create_champion_reward_event(

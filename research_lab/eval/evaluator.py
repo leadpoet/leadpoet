@@ -949,6 +949,10 @@ async def _finalize_incontainer_trace(
         "incontainer_trace_sha256": sha256_json(entries),
         "incontainer_trace_call_count": len(entries) if ref else 0,
     }
+    # P13: truncation is filterable from the index, not just inside the blob.
+    truncated_count = sum(1 for entry in entries if entry.get("truncated"))
+    if truncated_count:
+        fields["incontainer_trace_truncated_count"] = truncated_count
     if not ref:
         fields["incontainer_trace_dropped"] = True
         fields["incontainer_trace_dropped_call_count"] = len(entries)

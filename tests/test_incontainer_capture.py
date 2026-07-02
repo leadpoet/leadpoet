@@ -909,3 +909,111 @@ def test_pointer_fields_ride_bundle_rows_and_never_leak_content():
         _build_bundle(base_rows)["score_bundle_hash"]
         != bundle_with["score_bundle_hash"]
     )
+
+
+# ---------------------------------------------------------------------------
+# P13 (trajectoryimprovements.md): corpus-mode budgets, provider classes,
+# truncation surfacing, bootstrap patch assertion
+# ---------------------------------------------------------------------------
+
+
+PROVIDER_CLASS_PROBE = r"""
+cases = {
+    "https://openrouter.ai/api/v1/chat/completions": "llm",
+    "https://api.peopledatalabs.com/v5/person/enrich": "enrichment_pdl",
+    "https://api.hunter.io/v2/email-finder": "enrichment_hunter",
+    "https://api.apollo.io/v1/people/match": "enrichment_apollo",
+    "https://api.exa.ai/search": "search",
+    "https://google.serper.dev/search": "search",
+    "https://api.scrapingdog.com/scrape": "fetch",
+    "https://www.linkedin.com/company/acme": "linkedin",
+    "https://api.zerobounce.net/v2/validate": "verification_zerobounce",
+    "https://random.example.com/x": "other",
+}
+for url, expected in cases.items():
+    actual = _research_lab_trace_provider_class(url)
+    assert actual == expected, f"{url}: {actual} != {expected}"
+print("PROVIDER_CLASS_PROBE_DONE")
+"""
+
+
+def test_provider_class_names_enrichment_providers():
+    """P13: the in-container tee names PDL/hunter/apollo/etc instead of
+    collapsing everything non-core to "other"."""
+    completed = _run_bootstrap_probe(PROVIDER_CLASS_PROBE)
+    assert "PROVIDER_CLASS_PROBE_DONE" in completed.stdout
+
+
+def test_bootstrap_emits_patch_assertion_marker():
+    """P13/P19: the bootstrap asserts which client libs the tee patched."""
+    completed = _run_bootstrap_probe('print("BOOT_ONLY_DONE")')
+    assert "BOOT_ONLY_DONE" in completed.stdout
+    lines = [
+        line
+        for line in completed.stderr.splitlines()
+        if line.startswith("research_lab_private_runtime_capture_bootstrap ")
+    ]
+    assert len(lines) == 1
+    doc = json.loads(lines[0].split(" ", 1)[1])
+    assert doc["patched_clients"]["urllib"] is True
+    # Installed clients must be verifiably patched (None = not installed).
+    for lib in ("httpx", "requests", "aiohttp"):
+        assert doc["patched_clients"][lib] in (True, None)
+    assert doc["max_call_bytes"] > 0
+    assert doc["streaming_posture"] == "request_only_for_streams"
+
+
+def test_corpus_env_defaults_larger_caps_only_with_prefix(monkeypatch):
+    from research_lab.eval import private_runtime as pr
+
+    for name in (
+        "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX",
+        pr.INCONTAINER_TRACE_MAX_CALL_BYTES_ENV,
+        pr.INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV,
+    ):
+        monkeypatch.delenv(name, raising=False)
+    # Diagnostics mode: no prefix → no overrides (small caps stay).
+    assert pr.incontainer_trace_corpus_env() == {}
+
+    monkeypatch.setenv(
+        "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX", "s3://bucket/traces"
+    )
+    env = pr.incontainer_trace_corpus_env()
+    assert env == {
+        pr.INCONTAINER_TRACE_MAX_CALL_BYTES_ENV: str(
+            pr.INCONTAINER_TRACE_CORPUS_MAX_CALL_BYTES
+        ),
+        pr.INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV: str(
+            pr.INCONTAINER_TRACE_CORPUS_MAX_TOTAL_BYTES
+        ),
+    }
+    assert pr.INCONTAINER_TRACE_CORPUS_MAX_CALL_BYTES > pr.INCONTAINER_TRACE_DEFAULT_MAX_CALL_BYTES
+    assert pr.INCONTAINER_TRACE_CORPUS_MAX_TOTAL_BYTES > pr.INCONTAINER_TRACE_DEFAULT_MAX_TOTAL_BYTES
+
+    # Explicit operator caps always win over the corpus defaults.
+    monkeypatch.setenv(pr.INCONTAINER_TRACE_MAX_CALL_BYTES_ENV, "9999")
+    env = pr.incontainer_trace_corpus_env()
+    assert pr.INCONTAINER_TRACE_MAX_CALL_BYTES_ENV not in env
+    assert pr.INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV in env
+
+
+async def test_truncated_entries_surface_in_pointer_fields():
+    from research_lab.eval.evaluator import _finalize_incontainer_trace
+
+    async def sink(icp_ref, entries):
+        return "s3://bucket/traces/run/icp.json"
+
+    entries = [
+        {"seq": 1, "truncated": False},
+        {"seq": 2, "truncated": True},
+        {"seq": 3, "truncated": True},
+    ]
+    fields = await _finalize_incontainer_trace(
+        trace_sink=sink, icp_ref="icp-1", entries=entries
+    )
+    assert fields["incontainer_trace_call_count"] == 3
+    assert fields["incontainer_trace_truncated_count"] == 2
+    fields_clean = await _finalize_incontainer_trace(
+        trace_sink=sink, icp_ref="icp-1", entries=[{"seq": 1, "truncated": False}]
+    )
+    assert "incontainer_trace_truncated_count" not in fields_clean

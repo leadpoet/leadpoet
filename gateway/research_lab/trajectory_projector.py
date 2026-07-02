@@ -835,6 +835,12 @@ def _collect_incontainer_calls(
                             "teacher_model_flag"
                         ],
                     }
+                    # P13: truncated captures are flagged and filterable.
+                    if value.get("incontainer_trace_truncated_count"):
+                        entry["truncated"] = True
+                        entry["truncated_call_count"] = max(
+                            0, _i(value.get("incontainer_trace_truncated_count"))
+                        )
                     # P5: dropped captures stay visible (and countable) in the
                     # corpus instead of masquerading as populated rows.
                     if value.get("incontainer_trace_dropped"):
@@ -1195,6 +1201,28 @@ def _score_bundle_total_cost_usd(bundle_row: Mapping[str, Any] | None) -> float:
     return 0.0
 
 
+def _trace_role(bundle_row: Mapping[str, Any] | None, default: str = "candidate") -> str:
+    """P15: derive the execution-trace role from the real arm.
+
+    Bundles (or their docs) may stamp ``evaluation_role`` as
+    champion/candidate/shadow/baseline_arm/reference; a stored-daily-baseline
+    reference evaluation projects as ``baseline_arm``. Unknown/absent → the
+    caller's default — but the value is data-driven, never a per-stream
+    constant, so future champion/shadow projection streams label correctly.
+    """
+    doc = _bundle_doc(bundle_row)
+    for holder in (bundle_row or {}, doc, doc.get("aggregates") or {}):
+        if not isinstance(holder, Mapping):
+            continue
+        role = str(holder.get("evaluation_role") or "").strip()
+        if role in EXECUTION_TRACE_ROLES:
+            return role
+    aggregates = doc.get("aggregates") if isinstance(doc.get("aggregates"), Mapping) else {}
+    if str(aggregates.get("reference_evaluation_mode") or "") == "stored_daily_baseline_reference":
+        return "baseline_arm"
+    return default
+
+
 def _node_execution_status(state: "_NodeState") -> str:
     """Map node lifecycle onto execution_traces' completed/crash/timeout CHECK."""
     if state.build_failed_row is not None and state.build_passed_row is None:
@@ -1205,6 +1233,15 @@ def _node_execution_status(state: "_NodeState") -> str:
     if state.gate_doc:
         return "completed"
     return "timeout"  # built-but-never-scored, or drafted-but-never-built
+
+
+def _execution_trace_trajectory_id_enabled() -> bool:
+    """P18: include the explicit ``trajectory_id`` join key on execution trace
+    rows. Requires the scripts/64 column — leave off until applied (an unknown
+    column fails the insert)."""
+    return os.getenv(
+        "RESEARCH_LAB_EXECUTION_TRACE_TRAJECTORY_ID_ENABLED", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _run_summary_contract_enforced() -> bool:
@@ -1471,7 +1508,7 @@ def _build_corpus_trace_rows(
                 "schema_version": "1.0",
                 "artifact_hash": state.candidate_artifact_hash
                 or state.unified_diff_hash,
-                "role": "candidate",
+                "role": _trace_role(bundle_row),
                 "rung": "L0",
                 "status": _node_execution_status(state),
                 "lane_id": None,  # live lanes are labels, not UUIDs (see trace_doc)
@@ -1623,7 +1660,7 @@ def _build_corpus_trace_rows(
                 "run_id": trace_id,
                 "schema_version": "1.0",
                 "artifact_hash": artifact_hash,
-                "role": "candidate",
+                "role": _trace_role(bundle_row),
                 "rung": "L0",
                 "status": _score_bundle_execution_status(bundle_row),
                 "lane_id": None,
@@ -1667,6 +1704,8 @@ def _build_corpus_trace_rows(
                 "run_id": execution_trace_id_for_run(run_id),
                 "schema_version": "1.0",
                 "artifact_hash": champion_base,
+                # The engine loop generates candidates; role stays data-driven
+                # for bundle-backed rows above.
                 "role": "candidate",
                 "rung": "L0",
                 "status": _engine_execution_status(queue_status, terminal_row),
@@ -1709,6 +1748,12 @@ def _build_corpus_trace_rows(
                 "created_at": fallback_ts,
             },
         )
+    # P18: explicit trajectory join key (scripts/64 column, env-gated so
+    # pre-migration fleets keep inserting cleanly).
+    if _execution_trace_trajectory_id_enabled():
+        trajectory_uuid = _coerce_uuid(trajectory_id) or str(trajectory_id)
+        for row in execution_trace_rows:
+            row["trajectory_id"] = trajectory_uuid
     return execution_trace_rows, evidence_bundle_rows
 
 
@@ -2454,6 +2499,22 @@ def build_trajectory_projection(
         fallback_ts=ledger_created_at,
     )
 
+    # P15 token-budget invariant: count tokens against the declared trainer
+    # max (flag, never drop). P10: the protected scan is a computed result
+    # over the actual projected payloads, not a caller-supplied boolean.
+    total_tokens = 0
+    for row in ordered:
+        for item, _model in _iter_provider_usage_items([row.get("provider_usage"), _doc(row)]):
+            total_tokens += max(0, _i(item.get("total_tokens")))
+    trainer_max_tokens = _i(os.getenv("RESEARCH_LAB_TRAINER_MAX_TOKENS", "1000000"))
+    protected_hits = find_protected_material(
+        {
+            "trajectory_doc": trajectory_doc,
+            "execution_trace_rows": execution_trace_rows,
+            "evidence_bundle_rows": evidence_bundle_rows,
+        }
+    )
+
     corpus_source_record = TrajectoryCorpusSourceRecord(
         source_id=f"trajectory_source:{tid}",
         trajectory_id=tid,
@@ -2477,6 +2538,13 @@ def build_trajectory_projection(
         pii_review_ref="pii_review:unassigned",
         legal_gate_ref="legal_gate:unassigned",
         island=island,
+        # P15 leak-guard keys: paraphrased ICPs from the same brief share the
+        # cluster key (sanitized-brief signature) and can never straddle splits.
+        brief_id=brief_id,
+        customer_ref=CUSTOMER_REF_STAND_IN,
+        split_cluster_key=brief_sanitized_ref or brief_id,
+        token_count=total_tokens,
+        over_token_budget=bool(trainer_max_tokens and total_tokens > trainer_max_tokens),
         split="train",
         data_state="production_measured",
         measured_data=True,
@@ -2484,7 +2552,9 @@ def build_trajectory_projection(
         distillation_rights_verified=False,
         pii_review_passed=False,
         legal_gate_passed=False,
+        # P10: computed from the scan that actually ran, not self-declared.
         protected_data_scanned=True,
+        contains_raw_evidence_snapshot=bool(protected_hits),
         eligible_for_training=False,  # readiness stays BLOCKED by design
         eligible_for_distillation=False,
     )
@@ -3487,6 +3557,32 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print private OpenRouter reasoning/raw-trace capture coverage without writing",
     )
+    parser.add_argument(
+        "--capture-coverage",
+        action="store_true",
+        help=(
+            "print the P7 all-channel capture coverage report (engine, scorer, "
+            "in-container, diagnostics, judge verdicts, crash rows)"
+        ),
+    )
+    parser.add_argument(
+        "--reconcile-pointers",
+        action="store_true",
+        help="P6: HEAD every recent S3 trace pointer and report verified/missing/hash_mismatch",
+    )
+    parser.add_argument(
+        "--verify-hash",
+        action="store_true",
+        help="with --reconcile-pointers: fetch objects and verify sha256 (slow)",
+    )
+    parser.add_argument(
+        "--import-shadow-windows",
+        action="store_true",
+        help=(
+            "P18: import shadow-monitor window reports as DB rows keyed to the "
+            "promotion they adjudicate (requires scripts/64)"
+        ),
+    )
     parser.add_argument("--run-id", default=None, help="project a single run id")
     parser.add_argument(
         "--batch-size",
@@ -3517,10 +3613,39 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 async def _cli_main(argv: Sequence[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv)
-    if not args.backfill and not args.run_id and not args.traces_backfill and not args.reasoning_coverage:
+    if (
+        not args.backfill
+        and not args.run_id
+        and not args.traces_backfill
+        and not args.reasoning_coverage
+        and not args.capture_coverage
+        and not args.reconcile_pointers
+        and not args.import_shadow_windows
+    ):
         _build_arg_parser().print_help()
         return 2
     store = GatewayProjectorStore()
+    if args.capture_coverage or args.reconcile_pointers or args.import_shadow_windows:
+        from gateway.research_lab.trace_reconciler import (
+            import_shadow_windows,
+            reconcile_trace_pointers,
+            summarize_capture_coverage,
+        )
+
+        report: dict[str, Any] = {"dry_run": True, "projector_enabled": projector_enabled()}
+        if args.capture_coverage:
+            report["capture_coverage"] = await summarize_capture_coverage(
+                store=store, max_rows=args.max_events
+            )
+        if args.reconcile_pointers:
+            report["pointer_reconciliation"] = await reconcile_trace_pointers(
+                store=store, verify_hash=args.verify_hash, max_rows=args.max_events
+            )
+        if args.import_shadow_windows:
+            report["dry_run"] = False
+            report["shadow_window_import"] = await import_shadow_windows(store=store)
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
     if args.reasoning_coverage:
         coverage = await summarize_reasoning_capture_coverage(
             store=store,

@@ -1637,13 +1637,17 @@ class ResearchLabPromotionController:
             columns="commit_event_id,commit_status,git_commit_sha,created_at",
             filters=(("candidate_id", candidate_id), ("score_bundle_id", score_bundle_id)),
             order_by=(("created_at", True),),
-            limit=1,
+            limit=10,
         )
-        if existing_events:
+        successful_events = [
+            event for event in existing_events if str(event.get("commit_status") or "") in {"committed", "pushed"}
+        ]
+        if successful_events:
+            event = successful_events[0]
             return {
                 "status": "already_recorded",
-                "commit_status": str(existing_events[0].get("commit_status") or ""),
-                "commit_event_id": str(existing_events[0].get("commit_event_id") or ""),
+                "commit_status": str(event.get("commit_status") or ""),
+                "commit_event_id": str(event.get("commit_event_id") or ""),
             }
         if not self.config.auto_commit_enabled:
             return {"status": "skipped_auto_commit_disabled"}

@@ -14,7 +14,7 @@ from .diagnoser import draft_root_cause
 from .dataset_generator import draft_dataset_spec
 from .evaluator_generator import draft_evaluator_spec
 from .fix_generator import draft_fix_spec
-from .fingerprints import issue_fingerprint, normalize_reason
+from .fingerprints import normalize_reason
 from .models import ENGINE_VERSION, EngineIssue, EngineTraceEvent
 from .prioritizer import priority_for_score, severity_score
 from .store import fetch_recent_rows, persist_issue
@@ -167,7 +167,11 @@ def _safe_hash_doc(value: Any) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def issue_from_events(fingerprint: str, events: Sequence[EngineTraceEvent]) -> EngineIssue:
+def issue_from_events(
+    fingerprint: str,
+    events: Sequence[EngineTraceEvent],
+    config: ImprovementEngineConfig | None = None,
+) -> EngineIssue:
     ordered = sorted(events, key=lambda item: item.event_at or "")
     category = ordered[0].failure_category
     score = severity_score(ordered)
@@ -201,7 +205,7 @@ def issue_from_events(fingerprint: str, events: Sequence[EngineTraceEvent]) -> E
     return EngineIssue(
         **{
             **temp_issue.__dict__,
-            "suggested_fix_doc": draft_fix_spec(temp_issue),
+            "suggested_fix_doc": draft_fix_spec(temp_issue, config),
             "evaluator_spec_doc": draft_evaluator_spec(temp_issue),
             "dataset_spec_doc": draft_dataset_spec(temp_issue),
         }
@@ -256,7 +260,7 @@ async def scan_for_issues(
     events = await collect_events(cfg)
     clusters = cluster_events(events)
     issues = [
-        issue_from_events(fingerprint, cluster)
+        issue_from_events(fingerprint, cluster, cfg)
         for fingerprint, cluster in clusters.items()
         if len(cluster) >= cfg.min_cluster_size
     ]

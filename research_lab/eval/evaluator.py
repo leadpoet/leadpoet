@@ -529,6 +529,22 @@ async def _score_single_icp(
             and not any(reason.startswith("reference_model_runtime_") for reason in failure_reasons)
         ),
     }
+    # P12 dense per-claim reward: deterministic L0 verdicts per submitted
+    # signal (check ids + statuses only) ride the row into the score bundle.
+    l0_findings = _l0_per_claim_findings(candidate_outputs, icp)
+    if l0_findings:
+        row["l0_findings"] = l0_findings
+    # P12: the gateway's trace-capturing scorer exposes its per-ICP judgment
+    # pointer; duck-typed so the default scorer needs no change.
+    pointer_for = getattr(scorer, "scorer_trace_pointer_for", None)
+    if callable(pointer_for):
+        try:
+            pointer = pointer_for(row["icp_ref"] or row["icp_hash"])
+        except Exception:  # noqa: BLE001 - pointer pickup is best-effort
+            pointer = None
+        if isinstance(pointer, Mapping) and pointer.get("s3_ref"):
+            row["scorer_trace_ref"] = str(pointer["s3_ref"])
+            row["scorer_trace_sha256"] = str(pointer.get("sha256") or "")
     if trace_sink is not None and trace_entries:
         # POINTERS ONLY (fableanalysis §9.1 item 5): rows/bundles must never
         # carry decoded bodies — the protected-material scanner rejects records
@@ -682,6 +698,92 @@ def _benchmark_item_ref(item: Mapping[str, Any]) -> str:
     return str(item.get("icp_ref") or item.get("icp_hash") or "")
 
 
+# trajectoryimprovements.md P12: the deterministic L0 checks that can be graded
+# without a notary snapshot. Content-grounded checks (snippet overlap,
+# description grounding, date-in-content, antibot wall) need scraped page
+# content that does not exist at this boundary — they are reported as not-run
+# via ``snapshot_available=false``, never as silent passes.
+_L0_CONTENT_INDEPENDENT_CHECKS = (
+    "domain_source_match",
+    "freshness_window",
+    "generic_intent_description",
+    "prompt_injection",
+    "url_structural_validity",
+)
+_L0_MAX_COMPANIES = 8
+_L0_MAX_CLAIMS_PER_COMPANY = 6
+
+
+def _l0_per_claim_findings(
+    companies: Sequence[Mapping[str, Any]],
+    icp: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """P12 dense per-claim reward: run ``run_l0_checks`` per submitted signal.
+
+    Returns one bounded row per (company, claim) carrying check ids and
+    pass/fail statuses only — no free text, no evidence content — so the rows
+    can ride the score bundle into ``evidence_bundles.snapshots`` under the
+    corpus pointer rules. Never raises: L0 grading must not affect scoring.
+    """
+    try:
+        from leadpoet_verifier.l0 import run_l0_checks
+    except Exception:  # pragma: no cover - packaging-dependent
+        return []
+    rows: list[dict[str, Any]] = []
+    buyer_cap_days = (icp or {}).get("intent_max_age_days")
+    for company_index, company in enumerate(list(companies or ())[:_L0_MAX_COMPANIES]):
+        if not isinstance(company, Mapping):
+            continue
+        signals = company.get("intent_signals")
+        if not isinstance(signals, Sequence) or isinstance(signals, (str, bytes)):
+            continue
+        company_website = str(
+            company.get("company_website") or company.get("website") or ""
+        )
+        for claim_index, signal in enumerate(list(signals)[:_L0_MAX_CLAIMS_PER_COMPANY]):
+            if not isinstance(signal, Mapping):
+                continue
+            try:
+                signal_doc = dict(signal)
+                signal_doc.setdefault("company_website", company_website)
+                if buyer_cap_days is not None:
+                    signal_doc.setdefault("buyer_cap_days", buyer_cap_days)
+                result = run_l0_checks(signal_doc, {})
+                failed = {
+                    finding.check_id
+                    for finding in result.findings
+                    if finding.severity == "fail"
+                }
+            except Exception:  # noqa: BLE001 - grading must never fail scoring
+                logger.warning(
+                    "research_lab_l0_per_claim_grading_failed company_index=%s claim_index=%s",
+                    company_index,
+                    claim_index,
+                    exc_info=True,
+                )
+                continue
+            rows.append(
+                {
+                    "company_index": company_index,
+                    "claim_index": claim_index,
+                    "snapshot_available": False,
+                    "checks": [
+                        {
+                            "check_id": check_id,
+                            "status": "fail" if check_id in failed else "pass",
+                        }
+                        for check_id in _L0_CONTENT_INDEPENDENT_CHECKS
+                    ],
+                    "failed_check_count": sum(
+                        1
+                        for check_id in _L0_CONTENT_INDEPENDENT_CHECKS
+                        if check_id in failed
+                    ),
+                }
+            )
+    return rows
+
+
 def _resolve_trace_sink(trace_sink: TraceSink | None, run_context: Mapping[str, Any]) -> TraceSink | None:
     """Resolve the effective in-container trace sink for one evaluation.
 
@@ -717,6 +819,25 @@ def _build_default_trace_sink(run_context: Mapping[str, Any]) -> TraceSink:
         return _count_and_drop_sink
 
     kms_key_id = str(os.getenv(INCONTAINER_TRACE_KMS_KEY_ENV) or "").strip()
+    if not kms_key_id:
+        # P5/P13: prefix-on/key-off must never write de-sanitized prompt text
+        # unencrypted — refuse the upload path and drop loudly instead.
+        state = {"logged": False, "dropped_entries": 0}
+
+        def _missing_kms_drop_sink(icp_ref: str, entries: list[dict[str, Any]]) -> str:
+            state["dropped_entries"] += len(entries)
+            if not state["logged"]:
+                state["logged"] = True
+                logger.error(
+                    "research_lab_incontainer_trace_dropped run_ref=%s reason=missing_kms_key "
+                    "(set %s so in-container traces are written SSE-KMS encrypted; "
+                    "unencrypted uploads are refused)",
+                    run_ref,
+                    INCONTAINER_TRACE_KMS_KEY_ENV,
+                )
+            return ""
+
+        return _missing_kms_drop_sink
 
     async def _s3_sink(icp_ref: str, entries: list[dict[str, Any]]) -> str:
         return await asyncio.to_thread(
@@ -756,6 +877,11 @@ def _upload_incontainer_trace(
         )
         if part
     )
+    if not kms_key_id:
+        # Backstop for the sink-level refusal: never PUT without aws:kms.
+        raise PrivateModelRuntimeError(
+            "in-container trace upload requires a KMS key id (unencrypted uploads are refused)"
+        )
     payload = {
         "schema_version": "1.0",
         "artifact_type": "research_lab_incontainer_trace",
@@ -769,10 +895,9 @@ def _upload_incontainer_trace(
         "Key": key,
         "Body": canonical_json(payload).encode("utf-8"),
         "ContentType": "application/json",
+        "ServerSideEncryption": "aws:kms",
+        "SSEKMSKeyId": kms_key_id,
     }
-    if kms_key_id:
-        put_kwargs["ServerSideEncryption"] = "aws:kms"
-        put_kwargs["SSEKMSKeyId"] = kms_key_id
     boto3.client("s3").put_object(**put_kwargs)
     return f"s3://{bucket}/{key}"
 
@@ -798,9 +923,11 @@ async def _finalize_incontainer_trace(
 ) -> dict[str, Any]:
     """Hand entries to the sink and build the row's pointer-only fields.
 
-    Sink failures are logged and swallowed (capture must never fail a run);
-    the sha256/call-count pointers are kept so the row still records that the
-    capture happened even when persistence failed.
+    Sink failures are logged and swallowed (capture must never fail a run).
+    P5: a dropped capture must not look populated — when no ref was written the
+    row zeroes ``incontainer_trace_call_count`` and carries
+    ``incontainer_trace_dropped=true`` plus the dropped count; the sha256 is
+    kept as the attestation that the entries existed.
     """
     ref = ""
     try:
@@ -817,11 +944,15 @@ async def _finalize_incontainer_trace(
             exc_info=True,
         )
         ref = ""
-    return {
+    fields = {
         "incontainer_trace_ref": ref,
         "incontainer_trace_sha256": sha256_json(entries),
-        "incontainer_trace_call_count": len(entries),
+        "incontainer_trace_call_count": len(entries) if ref else 0,
     }
+    if not ref:
+        fields["incontainer_trace_dropped"] = True
+        fields["incontainer_trace_dropped_call_count"] = len(entries)
+    return fields
 
 
 async def _score_with_private_holdout_gate(

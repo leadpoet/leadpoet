@@ -44,7 +44,7 @@ import os
 import re
 import logging
 from datetime import date, datetime
-from typing import Set, Optional, Tuple, List
+from typing import Any, Set, Optional, Tuple, List
 from collections import Counter
 from urllib.parse import urlparse
 
@@ -750,6 +750,10 @@ async def score_company_autoresearch_intent_signal(
                 "date_status": "fabricated",
                 "matched_icp_signal": dup_idx,
                 "evidence_type": _evidence_type_for(dup_idx),
+                "judge_verdict": {
+                    "decision": "rejected_pregate",
+                    "rejection_reason": "duplicate_evidence_domain",
+                },
             })
             continue
         seen_domains.add(domain)
@@ -780,9 +784,16 @@ async def score_company_autoresearch_intent_signal(
                 "date_status": "fabricated",
                 "matched_icp_signal": matched_idx,
                 "evidence_type": _evidence_type_for(matched_idx),
+                "judge_verdict": {
+                    "decision": "rejected_pregate",
+                    "rejection_reason": "freshness_gate",
+                },
             })
             continue
 
+        # P12: keep the verifier's structured per-signal verdict alongside the
+        # scalar score so the training corpus sees HOW each claim was decided.
+        signal_verdicts: List[dict] = []
         score, confidence, date_status, content_found_date, _matched_idx = (
             await _score_single_intent_signal(
                 signal,
@@ -798,6 +809,7 @@ async def score_company_autoresearch_intent_signal(
                 # reject so Stage 3 makes the call. Fulfillment calls
                 # _score_single_intent_signal directly and keeps the default.
                 stage1_soft_reject=True,
+                verdict_out=signal_verdicts,
             )
         )
         if no_time_decay:
@@ -819,6 +831,7 @@ async def score_company_autoresearch_intent_signal(
             "date_status": date_status,
             "matched_icp_signal": resolved_idx,
             "evidence_type": _evidence_type_for(resolved_idx),
+            **({"judge_verdict": signal_verdicts[-1]} if signal_verdicts else {}),
         })
 
     if not signal_results:
@@ -1133,6 +1146,7 @@ async def _score_single_intent_signal(
     product_service_context: str = "",
     trust_signal_date: bool = False,
     stage1_soft_reject: bool = False,
+    verdict_out: Optional[List[dict]] = None,
 ) -> Tuple[float, int, str, Optional[str], int]:
     """
     Verify and score a single intent signal.
@@ -1145,7 +1159,24 @@ async def _score_single_intent_signal(
         ``icp.intent_signals`` of the client-requested signal this miner
         signal satisfies, or ``-1`` if none. When ``icp.intent_signals``
         is empty, this is always ``-1``.
+
+    ``verdict_out`` (trajectoryimprovements.md P12): when provided, one
+    structured verdict dict is appended describing HOW this signal was
+    decided — the pre-gate rejection code or the three-stage judge's
+    decision/stage statuses — so the training corpus keeps the per-signal
+    verdict the scalar return collapses. Existing callers are unaffected.
     """
+
+    def _record_verdict(decision: str, **fields: Any) -> None:
+        if verdict_out is None:
+            return
+        verdict_out.append(
+            {
+                "decision": decision,
+                **{key: value for key, value in fields.items() if value is not None},
+            }
+        )
+
     # ── Gate 0: miner-asserted matched_icp_signal must be set and in range ──
     # Each intent signal a miner submits MUST be tagged with the index of
     # the client-listed signal that this evidence is meant to satisfy.  A
@@ -1162,12 +1193,14 @@ async def _score_single_intent_signal(
             f"(value={miner_asserted_idx!r}).  Miner must declare which "
             f"client intent signal this evidence proves."
         )
+        _record_verdict("rejected_pregate", rejection_reason="matched_icp_signal_unset")
         return 0.0, 0, "fabricated", None, -1
     if not icp_signals_for_gate or miner_asserted_idx >= len(icp_signals_for_gate):
         logger.info(
             f"Intent signal rejected: matched_icp_signal={miner_asserted_idx} "
             f"out of range (request has {len(icp_signals_for_gate)} listed signals)."
         )
+        _record_verdict("rejected_pregate", rejection_reason="matched_icp_signal_out_of_range")
         return 0.0, 0, "fabricated", None, -1
 
     # ── Cheap pre-checks BEFORE the three-stage LLM pipeline ────────────
@@ -1193,13 +1226,16 @@ async def _score_single_intent_signal(
     is_generic, generic_reason = is_generic_intent_description(signal.description or "")
     if is_generic:
         logger.warning(f"Intent signal rejected: generic/templated — {generic_reason}")
+        _record_verdict("rejected_pregate", rejection_reason="generic_description")
         return 0.0, 5, "fabricated", None, -1
     if source_lower == "other" and len(signal.description or "") < 100:
         logger.warning("Intent signal rejected: 'other' source with short description")
+        _record_verdict("rejected_pregate", rejection_reason="other_source_short_description")
         return 0.0, 10, "fabricated", None, -1
     future_err = check_future_date(signal.date)
     if future_err:
         logger.warning(f"Intent signal rejected: future date — {future_err}")
+        _record_verdict("rejected_pregate", rejection_reason="future_dated_signal")
         return 0.0, 0, "fabricated", None, -1
 
     # ── Fabricated-source domain guard ───────────────────────────────────
@@ -1214,6 +1250,7 @@ async def _score_single_intent_signal(
     untrusted = _is_untrusted_evidence_source(signal.url, company_website)
     if untrusted:
         logger.warning(f"Intent signal rejected: untrusted evidence source — {untrusted}")
+        _record_verdict("rejected_pregate", rejection_reason="untrusted_evidence_source")
         return 0.0, 0, "fabricated", None, -1
 
     # ── Self-contradicting evidence guard ────────────────────────────────
@@ -1252,6 +1289,7 @@ async def _score_single_intent_signal(
             f"contains a negation phrase ({_neg_match.group(0)!r}) — "
             f"evidence URL appears to NOT support the claim"
         )
+        _record_verdict("rejected_pregate", rejection_reason="self_contradicting_evidence")
         return 0.0, 0, "fabricated", None, -1
 
     # Get source type multiplier (penalize low-value sources like "other")
@@ -1330,6 +1368,11 @@ async def _score_single_intent_signal(
             type(three_stage_error).__name__, three_stage_error,
             signal.url[:60],
         )
+        _record_verdict(
+            "rejected_verifier_error",
+            rejection_reason="three_stage_exception",
+            error_class=type(three_stage_error).__name__,
+        )
         return 0.0, confidence, "verified", content_found_date, -1
 
     s1_status = (three_stage_result.get("stage1") or {}).get("status")
@@ -1347,6 +1390,15 @@ async def _score_single_intent_signal(
             signal.url[:60],
             miner_asserted_idx, target_signal_text[:60],
         )
+        _record_verdict(
+            "rejected_three_stage",
+            rejection_reason=str(three_stage_result.get("rejection_reason") or "")[:120] or None,
+            pipeline_decision=pipeline_decision,
+            stage1_status=s1_status,
+            stage3_status=s3_status,
+            scrape_result_count=scrape_summary.get("result_count"),
+            client_ready=False,
+        )
         return 0.0, confidence, "verified", content_found_date, -1
 
     miner_date_match = (
@@ -1357,6 +1409,15 @@ async def _score_single_intent_signal(
             "Intent signal three-stage REJECT  reason=miner_date_contradicted  "
             "miner_date=%s  source=%s",
             (str(signal.date) if signal.date else None), signal.url[:60],
+        )
+        _record_verdict(
+            "rejected_three_stage",
+            rejection_reason="miner_date_contradicted",
+            pipeline_decision=pipeline_decision,
+            stage1_status=s1_status,
+            stage3_status=s3_status,
+            miner_date_match=miner_date_match,
+            client_ready=True,
         )
         return 0.0, confidence, "fabricated", content_found_date, -1
     if miner_date_match == "contradicted" and trust_signal_date:
@@ -1374,6 +1435,16 @@ async def _score_single_intent_signal(
         scrape_summary.get("result_count"),
         signal.url[:60],
         miner_asserted_idx, target_signal_text[:60],
+    )
+    _record_verdict(
+        "verified",
+        pipeline_decision=pipeline_decision,
+        stage1_status=s1_status,
+        stage3_status=s3_status,
+        miner_date_match=miner_date_match,
+        scrape_result_count=scrape_summary.get("result_count"),
+        source_multiplier=source_multiplier,
+        client_ready=True,
     )
     return (
         60.0 * source_multiplier,

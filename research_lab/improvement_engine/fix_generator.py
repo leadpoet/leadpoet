@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+from .config import ImprovementEngineConfig
 from .models import EngineIssue
 
 
-def draft_fix_spec(issue: EngineIssue) -> dict[str, object]:
+def draft_fix_spec(issue: EngineIssue, config: ImprovementEngineConfig | None = None) -> dict[str, object]:
+    # Belt and suspenders (plan §8.3 / §20.4): auto-apply stays hardcoded off
+    # AND the config contract must agree — a config claiming auto-apply is a
+    # deployment error, not a capability.
+    if config is not None and config.auto_apply_patches:
+        raise ValueError(
+            "RESEARCH_LAB_IMPROVEMENT_ENGINE_AUTO_APPLY_PATCHES=true is not supported: "
+            "engine fixes are review-only and are never auto-applied"
+        )
     return {
         "candidate_kind": "research_direction",
         "summary": f"Investigate and reduce recurring {issue.category}.",

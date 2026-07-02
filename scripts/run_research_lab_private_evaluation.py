@@ -31,6 +31,7 @@ from research_lab.eval import (  # noqa: E402
     evaluate_private_model_pair,
 )
 from research_lab.observability.langfuse_client import flush_langfuse, observation  # noqa: E402
+from research_lab.observability.redaction import miner_hotkey_hash  # noqa: E402
 from research_lab.observability.tracing import finish_score_bundle_observation  # noqa: E402
 
 
@@ -59,6 +60,7 @@ def main() -> int:
         metadata={
             "run_id": str(run_context.get("run_id") or ""),
             "ticket_id": str(run_context.get("ticket_id") or ""),
+            "miner_hotkey_hash": miner_hotkey_hash(str(run_context.get("miner_hotkey") or "")),
             "parent_artifact_hash": artifact.model_artifact_hash,
             "candidate_patch_hash": patch.manifest_hash(),
             "icp_set_hash": benchmark.icp_set_hash,

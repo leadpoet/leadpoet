@@ -128,7 +128,27 @@ async def openrouter_chat(
         )
         response.raise_for_status()
         data = response.json()
-        
+        # trajectoryimprovements.md P1: qualification LLM exchanges are
+        # training data — capture (never affects the business result).
+        try:
+            from research_lab.openrouter_telemetry import record_openrouter_trace
+
+            record_openrouter_trace(
+                channel="qualification",
+                purpose="qualification_helpers_chat",
+                stage="scorer_judgment",
+                model_id=f"openai/{model}",
+                request_body={
+                    "model": f"openai/{model}",
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+                response_doc=data,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         return data["choices"][0]["message"]["content"]
 
 

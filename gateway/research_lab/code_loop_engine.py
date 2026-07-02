@@ -36,6 +36,8 @@ from gateway.research_lab.loop_engine import (
     _settings_doc,
     _would_exceed_budget,
 )
+from research_lab.axis_provenance import call_episode
+from gateway.research_lab.logging_utils import safe_event_error_text
 from research_lab.canonical import sha256_json
 from research_lab.code_editing import (
     FORBIDDEN_CODE_EDIT_TERMS,
@@ -238,6 +240,47 @@ def _rank_selected_by_dev_score(
     return scored + unscored
 
 
+class ContainedStageFailure(str):
+    """Contained-failure error text that keeps the failed call's telemetry.
+
+    trajectoryimprovements.md P3: the raw trace was already captured at the
+    HTTP layer before containment; this ``str`` subclass rides the existing
+    error-text plumbing unchanged while carrying ``provider_usage`` /
+    ``cost_microusd`` so failure events keep the pointer and the cost ledger
+    is incremented. Failed generations are high-value negative examples.
+    """
+
+    provider_usage: dict[str, Any] | None
+    cost_microusd: int
+    stage: str
+
+    def __new__(
+        cls,
+        error_text: str,
+        *,
+        stage: str = "",
+        provider_usage: Mapping[str, Any] | None = None,
+        cost_microusd: int = 0,
+    ) -> "ContainedStageFailure":
+        obj = super().__new__(cls, error_text)
+        obj.provider_usage = dict(provider_usage) if provider_usage else None
+        obj.cost_microusd = max(0, int(cost_microusd or 0))
+        obj.stage = str(stage or "")
+        return obj
+
+    def failure_usage_entries(self) -> list[dict[str, Any]]:
+        """Provider-usage entries for the failure event doc (may be empty)."""
+        if not self.provider_usage:
+            return []
+        return [
+            {
+                **self.provider_usage,
+                "call_stage": self.provider_usage.get("call_stage") or self.stage,
+                "call_outcome": "contained_failure",
+            }
+        ]
+
+
 @dataclass(frozen=True)
 class CodeEditLoopResult:
     selected_candidates: tuple[BuiltCodeEditCandidate, ...]
@@ -414,14 +457,19 @@ class CodeEditLoopEngine:
         timeout_seconds: int,
         max_tokens: int,
         stage: str,
-    ) -> tuple[OpenRouterCallResult | None, str | None]:
+    ) -> tuple[OpenRouterCallResult | None, "ContainedStageFailure | None"]:
         """Run one stage LLM call with bug-17 error containment.
 
-        Returns ``(result, None)`` on success and ``(None, error_text)`` on a
+        Returns ``(result, None)`` on success and ``(None, failure)`` on a
         contained failure — the caller skips the stage/iteration and the run
         keeps whatever it already built. Credit blocks and claim losses always
         propagate (they change run ownership/funding, not just this stage), as
         does everything when containment is disabled.
+
+        P3: the failure is a ``str`` subclass still carrying the failed call's
+        ``provider_usage`` / ``cost_microusd`` when the exception had them, so
+        failure events keep the raw-trace pointer instead of dropping it on
+        the containment floor.
         """
         try:
             raw = await self.call_openrouter(messages, timeout_seconds, max_tokens, stage)
@@ -436,13 +484,19 @@ class CodeEditLoopEngine:
             if not _stage_error_containment_enabled():
                 raise
             lost_cost_microusd = max(0, int(getattr(exc, "cost_microusd", 0) or 0))
+            failure_usage = getattr(exc, "provider_usage", None)
             logger.warning(
                 "research_lab_loop_stage_call_contained stage=%s lost_cost_microusd=%s error=%s",
                 stage,
                 lost_cost_microusd,
                 str(exc)[:200],
             )
-            return None, _diagnostic_text(f"{type(exc).__name__}: {exc}", limit=300)
+            return None, ContainedStageFailure(
+                _diagnostic_text(f"{type(exc).__name__}: {exc}", limit=300),
+                stage=stage,
+                provider_usage=failure_usage if isinstance(failure_usage, Mapping) else None,
+                cost_microusd=lost_cost_microusd,
+            )
         return _coerce_call_result(raw), None
 
     async def _build_candidate_with_heartbeat(
@@ -622,7 +676,7 @@ class CodeEditLoopEngine:
                         "status": "failed",
                         "run_id": run_id,
                         "parent_image_digest_hash": sha256_json({"image_digest": artifact.image_digest}),
-                        "error": str(exc)[:500],
+                        "error": safe_event_error_text(exc),
                         "error_hash": sha256_json({"error": str(exc)}),
                     },
                 )
@@ -937,7 +991,7 @@ class CodeEditLoopEngine:
                         ),
                         event_doc={
                             "stage": "resume_loop_direction_plan_parse",
-                            "error": str(exc)[:500],
+                            "error": safe_event_error_text(exc),
                             "checkpoint_hash": resume.get("checkpoint_hash"),
                         },
                     )
@@ -1012,6 +1066,16 @@ class CodeEditLoopEngine:
                         "loop_planner",
                     )
                     if planner_result is None:
+                        # P3: keep the failed call's telemetry — the raw trace
+                        # already exists; propagate the pointer and the cost.
+                        failure_usage = (
+                            planner_call_error.failure_usage_entries()
+                            if isinstance(planner_call_error, ContainedStageFailure)
+                            else []
+                        )
+                        if isinstance(planner_call_error, ContainedStageFailure):
+                            actual_cost_microusd += planner_call_error.cost_microusd
+                            provider_usage.extend(failure_usage)
                         await self.event_sink(
                             AutoResearchLoopEvent(
                                 event_type="code_edit_validation_failed",
@@ -1023,6 +1087,7 @@ class CodeEditLoopEngine:
                                     actual_cost_microusd,
                                     "loop_direction_planner_call_failed",
                                 ),
+                                provider_usage=failure_usage,
                                 event_doc={
                                     "stage": "loop_direction_planner",
                                     "planner_attempt": planner_attempt,
@@ -1063,7 +1128,7 @@ class CodeEditLoopEngine:
                                 event_doc={
                                     "stage": "loop_direction_planner",
                                     "planner_attempt": planner_attempt,
-                                    "error": str(exc)[:500],
+                                    "error": safe_event_error_text(exc),
                                     "raw_response_hash": sha256_json({"raw_response": raw_plan}),
                                     "fallback": (
                                         "terminal"
@@ -1207,45 +1272,64 @@ class CodeEditLoopEngine:
                     budget_exhausted_after_source_inspection = True
                     break
                 remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
-                inspection_result, inspection_call_error = await self._call_stage_contained(
-                    build_code_edit_source_inspection_messages(
-                        ticket={
-                            "ticket_id": str(ticket.get("ticket_id") or ""),
-                            "run_id": run_id,
-                            "miner_hotkey": ticket.get("miner_hotkey"),
-                            "island": ticket.get("island"),
-                            "brief_sanitized_ref": ticket.get("brief_sanitized_ref"),
-                            "brief_public_summary": _ticket_doc_value(ticket, "brief_public_summary"),
-                            "requested_loop_count": requested_loop_count,
-                            "loop_iteration": iteration,
-                            "inspection_round": inspection_round,
-                        },
-                        artifact_manifest=artifact.to_dict(),
-                        component_registry=dict(component_registry),
-                        benchmark_public_summary=benchmark_public_summary,
-                        runtime_source_index=source_context.inspection_index(),
-                        source_inspection_context=source_inspection_context,
-                        loop_direction_plan=loop_direction_plan_doc,
-                        budget_context=_memory_budget_context({
-                            **dict(budget_context),
-                            "loop_iteration": iteration,
-                            "inspection_round": inspection_round,
-                            "candidate_kind": "image_build",
-                            "loop_direction_plan_hash": (
-                                (loop_direction_plan_doc or {}).get("plan_hash")
-                                if isinstance(loop_direction_plan_doc, Mapping)
-                                else None
-                            ),
-                        }),
-                        max_requests=4,
-                    ),
-                    min(settings.draft_timeout_seconds, remaining_call_seconds),
-                    3000,
-                    "source_inspection",
-                )
+                # P11: source-inspection rounds are the one genuinely agentic
+                # stage (the model's search/read_file/finish output chooses the
+                # next tool call). The episode scope stamps the correlation id
+                # onto the persisted raw trace so multi-round inspection
+                # reassembles as one axis-A episode.
+                with call_episode(
+                    run_id=run_id,
+                    iteration=iteration,
+                    inspection_round=inspection_round,
+                ):
+                    inspection_result, inspection_call_error = await self._call_stage_contained(
+                        build_code_edit_source_inspection_messages(
+                            ticket={
+                                "ticket_id": str(ticket.get("ticket_id") or ""),
+                                "run_id": run_id,
+                                "miner_hotkey": ticket.get("miner_hotkey"),
+                                "island": ticket.get("island"),
+                                "brief_sanitized_ref": ticket.get("brief_sanitized_ref"),
+                                "brief_public_summary": _ticket_doc_value(ticket, "brief_public_summary"),
+                                "requested_loop_count": requested_loop_count,
+                                "loop_iteration": iteration,
+                                "inspection_round": inspection_round,
+                            },
+                            artifact_manifest=artifact.to_dict(),
+                            component_registry=dict(component_registry),
+                            benchmark_public_summary=benchmark_public_summary,
+                            runtime_source_index=source_context.inspection_index(),
+                            source_inspection_context=source_inspection_context,
+                            loop_direction_plan=loop_direction_plan_doc,
+                            budget_context=_memory_budget_context({
+                                **dict(budget_context),
+                                "loop_iteration": iteration,
+                                "inspection_round": inspection_round,
+                                "candidate_kind": "image_build",
+                                "loop_direction_plan_hash": (
+                                    (loop_direction_plan_doc or {}).get("plan_hash")
+                                    if isinstance(loop_direction_plan_doc, Mapping)
+                                    else None
+                                ),
+                            }),
+                            max_requests=4,
+                        ),
+                        min(settings.draft_timeout_seconds, remaining_call_seconds),
+                        3000,
+                        "source_inspection",
+                    )
                 if inspection_result is None:
                     # Bug 17: a non-retryable LLM error mid-inspection used to abort the run.
                     # Skip the remaining inspection rounds and continue with what was gathered.
+                    # P3: keep the failed call's telemetry pointer + cost.
+                    failure_usage = (
+                        inspection_call_error.failure_usage_entries()
+                        if isinstance(inspection_call_error, ContainedStageFailure)
+                        else []
+                    )
+                    if isinstance(inspection_call_error, ContainedStageFailure):
+                        actual_cost_microusd += inspection_call_error.cost_microusd
+                        provider_usage.extend(failure_usage)
                     await self.event_sink(
                         AutoResearchLoopEvent(
                             event_type="source_inspection_failed",
@@ -1257,6 +1341,7 @@ class CodeEditLoopEngine:
                                 actual_cost_microusd,
                                 "source_inspection_call_failed",
                             ),
+                            provider_usage=failure_usage,
                             event_doc={
                                 "iteration": iteration,
                                 "inspection_round": inspection_round,
@@ -1298,7 +1383,7 @@ class CodeEditLoopEngine:
                             event_doc={
                                 "iteration": iteration,
                                 "inspection_round": inspection_round,
-                                "error": str(exc)[:500],
+                                "error": safe_event_error_text(exc),
                                 "raw_response_hash": sha256_json({"raw_response": raw_inspection}),
                                 "source_tree_hash": source_context.source_tree_hash,
                             },
@@ -1357,7 +1442,7 @@ class CodeEditLoopEngine:
                             event_doc={
                                 "iteration": iteration,
                                 "inspection_round": inspection_round,
-                                "error": str(exc)[:500],
+                                "error": safe_event_error_text(exc),
                                 "source_tree_hash": source_context.source_tree_hash,
                             },
                         )
@@ -1480,6 +1565,15 @@ class CodeEditLoopEngine:
                 if draft_result is None:
                     # Bug 17: a non-retryable LLM error on the draft call used to abort the
                     # run and discard prior iterations/candidates. Skip this iteration instead.
+                    # P3: keep the failed call's telemetry pointer + cost.
+                    failure_usage = (
+                        draft_call_error.failure_usage_entries()
+                        if isinstance(draft_call_error, ContainedStageFailure)
+                        else []
+                    )
+                    if isinstance(draft_call_error, ContainedStageFailure):
+                        actual_cost_microusd += draft_call_error.cost_microusd
+                        provider_usage.extend(failure_usage)
                     await self.event_sink(
                         AutoResearchLoopEvent(
                             event_type="code_edit_validation_failed",
@@ -1491,6 +1585,7 @@ class CodeEditLoopEngine:
                                 actual_cost_microusd,
                                 "code_edit_draft_call_failed",
                             ),
+                            provider_usage=failure_usage,
                             event_doc={
                                 "iteration": iteration,
                                 "stage": "code_edit_draft_call_failed",
@@ -1527,6 +1622,10 @@ class CodeEditLoopEngine:
                                         actual_cost_microusd,
                                         "no_viable_patch",
                                     ),
+                                    # P3: the draft call succeeded (the model
+                                    # declined to patch) — carry its usage so
+                                    # the raw-trace pointer rides the event.
+                                    provider_usage=([provider_usage[-1]] if provider_usage else []),
                                     event_doc={
                                         "iteration": iteration,
                                         "reason": no_viable_reason,
@@ -1546,9 +1645,14 @@ class CodeEditLoopEngine:
                                     loop_status="running",
                                     elapsed_seconds=elapsed(),
                                     cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "code_edit_parse_failed"),
+                                    # P3: parse failures are negative training
+                                    # examples — the draft call's usage carries
+                                    # the raw-trace pointer to the malformed
+                                    # response.
+                                    provider_usage=([provider_usage[-1]] if provider_usage else []),
                                     event_doc={
                                         "iteration": iteration,
-                                        "error": str(exc)[:500],
+                                        "error": safe_event_error_text(exc),
                                         "raw_response_hash": sha256_json({"raw_response": raw}),
                                     },
                                 )
@@ -1917,7 +2021,7 @@ class CodeEditLoopEngine:
                     event_type = str(getattr(exc, "failure_stage", "") or "candidate_build_failed")
                     _record_within_run_rejection(
                         stage=event_type,
-                        reason=str(exc),
+                        reason=safe_event_error_text(exc),
                         iteration_index=iteration,
                         draft=candidate_draft,
                     )
@@ -1941,7 +2045,7 @@ class CodeEditLoopEngine:
                                 "iteration": iteration,
                                 "target_files": list(candidate_draft.target_files),
                                 "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
-                                "error": str(exc)[:500],
+                                "error": safe_event_error_text(exc),
                                 "error_hash": sha256_json({"error": str(exc)}),
                                 **diagnostic_doc,
                             },
@@ -1964,7 +2068,7 @@ class CodeEditLoopEngine:
                 except CodeEditBuildError as exc:
                     _record_within_run_rejection(
                         stage="candidate_build_failed",
-                        reason=str(exc),
+                        reason=safe_event_error_text(exc),
                         iteration_index=iteration,
                         draft=candidate_draft,
                     )
@@ -1979,7 +2083,7 @@ class CodeEditLoopEngine:
                                 "iteration": iteration,
                                 "target_files": list(candidate_draft.target_files),
                                 "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
-                                "error": str(exc)[:500],
+                                "error": safe_event_error_text(exc),
                                 "error_hash": sha256_json({"error": str(exc)}),
                             },
                         )
@@ -2007,7 +2111,7 @@ class CodeEditLoopEngine:
                     if not build_completed:
                         _record_within_run_rejection(
                             stage="candidate_build_unexpected_error",
-                            reason=str(exc),
+                            reason=safe_event_error_text(exc),
                             iteration_index=iteration,
                             draft=candidate_draft,
                         )
@@ -2033,7 +2137,7 @@ class CodeEditLoopEngine:
                                     ),
                                     "target_files": list(candidate_draft.target_files),
                                     "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
-                                    "error": str(exc)[:500],
+                                    "error": safe_event_error_text(exc),
                                     "error_hash": sha256_json({"error": str(exc)}),
                                 },
                             )
@@ -2240,6 +2344,20 @@ class CodeEditLoopEngine:
                         else None
                     ),
                     "gateway_scoring_queue_visible_after_this_event": bool(selected),
+                    # P14 / v5 §8.3 run-summary contract: every run exit path
+                    # terminates with this fixed machine-parseable block; a
+                    # terminal event WITHOUT it is mechanically classifiable
+                    # as a crash by the projector.
+                    "run_summary": {
+                        "schema_version": "1.0",
+                        "status": "completed" if selected else "failed",
+                        "stop_reason": result.stop_reason,
+                        "iterations_completed": result.iterations_completed,
+                        "selected_candidate_count": len(selected),
+                        "wall_clock_seconds": round(float(result.elapsed_seconds), 3),
+                        "cost_ledger": result.cost_ledger(),
+                        "openrouter_call_count": result.openrouter_call_count,
+                    },
                 },
             )
         )
@@ -2515,6 +2633,10 @@ class CodeEditLoopEngine:
             )
             if judge_result is None:
                 judge_failure_reason = judge_call_error or "plan_alignment_judge_call_failed"
+                # P3: keep the failed judge call's telemetry pointer + cost.
+                if isinstance(judge_call_error, ContainedStageFailure):
+                    actual_cost_microusd += judge_call_error.cost_microusd
+                    provider_usage.extend(judge_call_error.failure_usage_entries())
                 continue
             raw_judge = judge_result.content
             openrouter_calls += 1
@@ -2527,7 +2649,7 @@ class CodeEditLoopEngine:
                 verdict_doc = {**verdict.to_dict(), "source": "model_judge"}
                 break
             except Exception as exc:
-                judge_failure_reason = str(exc)[:700]
+                judge_failure_reason = safe_event_error_text(exc)
         if verdict_doc is None:
             if _judge_parse_soft_skip_enabled():
                 verdict_doc = {
@@ -2761,7 +2883,7 @@ class CodeEditLoopEngine:
                             "repair_attempt": repair_attempt,
                             "target_files": list(candidate_draft.target_files),
                             "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
-                            "error": str(exc)[:500],
+                            "error": safe_event_error_text(exc),
                             "error_hash": sha256_json({"error": str(exc)}),
                             "stderr_hash": sha256_json({"stderr": getattr(exc, "stderr", "")}),
                             **diagnostic_doc,
@@ -2787,7 +2909,7 @@ class CodeEditLoopEngine:
                                 "repair_attempts": max_repairs,
                                 "target_files": list(candidate_draft.target_files),
                                 "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
-                                "error": str(exc)[:500],
+                                "error": safe_event_error_text(exc),
                                 "error_hash": sha256_json({"error": str(exc)}),
                             },
                         )
@@ -2987,7 +3109,7 @@ async def _write_private_code_edit_diagnostic(
     try:
         bucket, key = _parse_s3_uri(manifest_uri)
     except ValueError as exc:
-        return {"diagnostic_artifact_error": str(exc)[:200]}
+        return {"diagnostic_artifact_error": safe_event_error_text(exc)}
     base_prefix = key.rsplit("/", 1)[0] if "/" in key else "research-lab/sourcing-model"
     safe_node = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(node_id or "node"))[:80]
     safe_stage = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(stage or "failure"))[:80]
@@ -3024,7 +3146,7 @@ async def _write_private_code_edit_diagnostic(
     except Exception as exc:
         return {
             "diagnostic_artifact_hash": payload_hash,
-            "diagnostic_artifact_error": str(exc)[:300],
+            "diagnostic_artifact_error": safe_event_error_text(exc),
         }
     return {
         "diagnostic_artifact_uri": f"s3://{bucket}/{object_key}",
@@ -3260,7 +3382,7 @@ async def _write_private_loop_candidate_artifact(
     try:
         bucket, key = _parse_s3_uri(manifest_uri)
     except ValueError as exc:
-        return {"loop_candidate_artifact_error": str(exc)[:200]}
+        return {"loop_candidate_artifact_error": safe_event_error_text(exc)}
     base_prefix = key.rsplit("/", 1)[0] if "/" in key else "research-lab/sourcing-model"
     safe_node = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(node_id or "node"))[:80]
     object_key = f"{base_prefix}/candidates/{run_id}/loop-candidates/{int(iteration):03d}-{safe_node}.json"
@@ -3296,7 +3418,7 @@ async def _write_private_loop_candidate_artifact(
     except Exception as exc:
         return {
             "loop_candidate_artifact_hash": payload_hash,
-            "loop_candidate_artifact_error": str(exc)[:300],
+            "loop_candidate_artifact_error": safe_event_error_text(exc),
         }
     return {
         "loop_candidate_artifact_uri": f"s3://{bucket}/{object_key}",

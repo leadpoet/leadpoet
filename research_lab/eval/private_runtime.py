@@ -1092,6 +1092,9 @@ def _research_lab_trace_sanitize_text(text):
     return re.sub(r"sk-or-[A-Za-z0-9_\-]+", "[REDACTED]", text)
 
 def _research_lab_trace_provider_class(url):
+    # P13: name the provider instead of collapsing everything non-core to
+    # "other" — the tool-call sequence is training data and the class is the
+    # cheapest queryable signal about what the model reached for.
     try:
         host = ""
         try:
@@ -1100,12 +1103,33 @@ def _research_lab_trace_provider_class(url):
         except Exception:
             host = ""
         blob = host or str(url).lower()
-        if "openrouter" in blob:
-            return "llm"
-        if "exa" in blob:
-            return "search"
-        if "scrapingdog" in blob:
-            return "fetch"
+        for marker, provider_class in (
+            ("openrouter", "llm"),
+            ("api.openai", "llm"),
+            ("api.anthropic", "llm"),
+            ("generativelanguage.googleapis", "llm"),
+            ("exa", "search"),
+            ("serper", "search"),
+            ("serpapi", "search"),
+            ("googleapis.com/customsearch", "search"),
+            ("scrapingdog", "fetch"),
+            ("firecrawl", "fetch"),
+            ("scrapingbee", "fetch"),
+            ("peopledatalabs", "enrichment_pdl"),
+            ("pdl.sh", "enrichment_pdl"),
+            ("hunter.io", "enrichment_hunter"),
+            ("apollo.io", "enrichment_apollo"),
+            ("clearbit", "enrichment_clearbit"),
+            ("rocketreach", "enrichment_rocketreach"),
+            ("prospeo", "enrichment_prospeo"),
+            ("findymail", "enrichment_findymail"),
+            ("zerobounce", "verification_zerobounce"),
+            ("truelist", "verification_truelist"),
+            ("linkedin", "linkedin"),
+            ("crustdata", "enrichment_crustdata"),
+        ):
+            if marker in blob:
+                return provider_class
         return "other"
     except Exception:
         return "other"

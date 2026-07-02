@@ -94,6 +94,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from research_lab.axis_provenance import axis_rollup, provenance_for_stage
 from research_lab.canonical import coerce_iso_z, sha256_json, utc_now_iso
 from research_lab.schema_validation import validate_schema_record
 from research_lab.trajectory_corpus import (
@@ -746,10 +747,16 @@ def _collect_engine_trace_calls(
             seen.add(key)
             attempt += 1
             raw_trace_ref_present = bool(s3_ref or sha256)
+            # P11: emitter/teacher/purpose are derived per call from the
+            # auditable stage mapping — fixed engine stages are code-emitted
+            # (axis-B); only source-inspection rounds are model-emitted.
+            provenance = provenance_for_stage(call_stage)
             calls.append(
                 sanitize_capture_payload(
                     {
-                        "call_emitter": "model",
+                        "call_emitter": provenance["call_emitter"],
+                        "purpose": provenance["purpose"] or call_stage[:128],
+                        "component": provenance["component"],
                         "call_kind": "engine_raw_trace" if raw_trace_ref_present else "engine_reasoning_metadata",
                         "stage": call_stage[:128],
                         "iteration": call_iteration,
@@ -767,7 +774,7 @@ def _collect_engine_trace_calls(
                             item,
                             raw_trace_ref_present=raw_trace_ref_present,
                         ),
-                        "teacher_model_flag": False,
+                        "teacher_model_flag": provenance["teacher_model_flag"],
                     }
                 )
             )
@@ -806,21 +813,36 @@ def _collect_incontainer_calls(
                 key = (s3_ref, sha256)
                 if key not in seen:
                     seen.add(key)
-                    calls.append(
-                        sanitize_capture_payload(
-                            {
-                                "call_emitter": "code",
-                                "call_kind": "incontainer_trace",
-                                "icp_ref": (row_icp or "unknown_icp")[:256],
-                                "s3_ref": s3_ref,
-                                "sha256": sha256,
-                                "call_count": max(
-                                    0, _i(value.get("incontainer_trace_call_count"))
-                                ),
-                                "teacher_model_flag": False,
-                            }
-                        )
+                    # P11 (amended): the in-container champion pipeline is
+                    # axis-B by construction (v5 §8.3) — derived from the
+                    # auditable mapping, not a per-stream constant.
+                    incontainer_provenance = provenance_for_stage(
+                        "incontainer_model_runtime"
                     )
+                    entry = {
+                        "call_emitter": incontainer_provenance["call_emitter"],
+                        "purpose": incontainer_provenance["purpose"],
+                        "component": incontainer_provenance["component"],
+                        "stage": "incontainer_model_runtime",
+                        "call_kind": "incontainer_trace",
+                        "icp_ref": (row_icp or "unknown_icp")[:256],
+                        "s3_ref": s3_ref,
+                        "sha256": sha256,
+                        "call_count": max(
+                            0, _i(value.get("incontainer_trace_call_count"))
+                        ),
+                        "teacher_model_flag": incontainer_provenance[
+                            "teacher_model_flag"
+                        ],
+                    }
+                    # P5: dropped captures stay visible (and countable) in the
+                    # corpus instead of masquerading as populated rows.
+                    if value.get("incontainer_trace_dropped"):
+                        entry["dropped"] = True
+                        entry["dropped_call_count"] = max(
+                            0, _i(value.get("incontainer_trace_dropped_call_count"))
+                        )
+                    calls.append(sanitize_capture_payload(entry))
             for item in value.values():
                 _walk(item, row_icp)
         elif isinstance(value, (list, tuple)):
@@ -828,6 +850,140 @@ def _collect_incontainer_calls(
                 _walk(item, icp_ref)
 
     _walk(bundle_row, None)
+    return calls
+
+
+def _collect_judge_verdicts(
+    bundle_row: Mapping[str, Any] | None,
+    *,
+    candidate_id: str | None = None,
+    score_bundle_id: str | None = None,
+    scorer_trace_refs: Mapping[str, Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """P2/P12: scorer judgment trace pointers as first-class judge verdicts.
+
+    Sources, deduped by ``(s3_ref, sha256)``:
+
+    * per-ICP bundle rows carrying ``scorer_trace_ref`` (the P12 passthrough);
+    * the scored event doc's ``scorer_trace_refs`` map (``{icp_ref:
+      {s3_ref, sha256}}``) — the only source for pre-P12 historical rows.
+
+    Pointer/metadata only; the structured verdict content lives in the S3
+    scorer trace doc.
+    """
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(icp_ref: str, s3_ref: str, sha256: str, source: str) -> None:
+        if not s3_ref and not sha256:
+            return
+        key = (s3_ref, sha256)
+        if key in seen:
+            return
+        seen.add(key)
+        entries.append(
+            sanitize_capture_payload(
+                {
+                    "verdict_kind": "scorer_judgment_trace",
+                    "icp_ref": (icp_ref or "unknown_icp")[:256],
+                    "s3_ref": s3_ref,
+                    "sha256": sha256,
+                    "candidate_ref": (
+                        f"candidate:{candidate_id}" if candidate_id else None
+                    ),
+                    "score_bundle_ref": (
+                        _score_bundle_ref(score_bundle_id) if score_bundle_id else None
+                    ),
+                    "is_reference_model": False,
+                    "stage": "scorer_judgment",
+                    "source": source,
+                    "storage_state": "raw_trace_ref" if s3_ref else "metadata_only",
+                    "teacher_model_flag": provenance_for_stage("scorer_judgment")[
+                        "teacher_model_flag"
+                    ],
+                }
+            )
+        )
+
+    for row in _bundle_per_icp_rows(bundle_row):
+        _add(
+            str(row.get("icp_ref") or row.get("icp_hash") or ""),
+            str(row.get("scorer_trace_ref") or ""),
+            str(row.get("scorer_trace_sha256") or ""),
+            "per_icp_row",
+        )
+    for icp_ref, pointer in (scorer_trace_refs or {}).items():
+        if isinstance(pointer, Mapping):
+            _add(
+                str(icp_ref),
+                str(pointer.get("s3_ref") or ""),
+                str(pointer.get("sha256") or ""),
+                "scored_event",
+            )
+    return entries
+
+
+def _collect_build_diagnostic_calls(
+    loop_events: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """P4: build-failure diagnostic artifact pointers as corpus calls.
+
+    Recursively scans event docs for ``diagnostic_artifact_uri`` /
+    ``diagnostic_artifact_hash`` (bad diff, stderr/stdout, exit code live in
+    the S3 artifact — never copied here). Dedupes by ``(s3_ref, sha256)``.
+    """
+    calls: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in sorted(loop_events, key=lambda item: _i(item.get("seq"))):
+        doc = _doc(row)
+        node_id = str(row.get("node_id") or "") or None
+
+        def _walk(value: Any, iteration: int) -> None:
+            if isinstance(value, Mapping):
+                row_iteration = _i(value.get("iteration"), iteration)
+                s3_ref = str(value.get("diagnostic_artifact_uri") or "")
+                sha256 = str(value.get("diagnostic_artifact_hash") or "")
+                if s3_ref or sha256:
+                    key = (s3_ref, sha256)
+                    if key not in seen:
+                        seen.add(key)
+                        target_files = value.get("target_files") or doc.get("target_files") or []
+                        if not isinstance(target_files, Sequence) or isinstance(
+                            target_files, (str, bytes)
+                        ):
+                            target_files = []
+                        calls.append(
+                            sanitize_capture_payload(
+                                {
+                                    "call_emitter": "code",
+                                    "call_kind": "build_diagnostic_artifact",
+                                    "artifact_kind": "code_build_failure",
+                                    "s3_ref": s3_ref,
+                                    "sha256": sha256,
+                                    "node_id": node_id,
+                                    "iteration": row_iteration,
+                                    "target_files": [
+                                        str(path)[:200] for path in list(target_files)[:16]
+                                    ],
+                                    "live_event_id": str(row.get("event_id") or ""),
+                                    "live_seq": _i(row.get("seq")),
+                                    "storage_state": (
+                                        "raw_trace_ref" if s3_ref else "metadata_only"
+                                    ),
+                                    "diagnostic_write_failed": bool(
+                                        value.get("diagnostic_artifact_error")
+                                    ),
+                                    "teacher_model_flag": False,
+                                }
+                            )
+                        )
+                for item in value.values():
+                    _walk(item, row_iteration)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    _walk(item, iteration)
+
+        _walk(doc, _i(doc.get("iteration")))
     return calls
 
 
@@ -886,6 +1042,22 @@ def _per_icp_snapshot(row: Mapping[str, Any]) -> dict[str, Any]:
         "candidate_company_score_count": _score_count(row, "candidate_company_scores"),
         "base_company_score_count": _score_count(row, "base_company_scores"),
     }
+    # P14: a zero-company ICP is a first-class negative example — record the
+    # empty-output judgment context instead of leaving the row ambiguous.
+    if row.get("sourced_zero_no_error"):
+        snapshot["sourced_zero_no_error"] = True
+        snapshot["judgment_context"] = "candidate_sourced_zero_companies"
+    # P12 dense reward: per-claim L0 verdicts (check ids/statuses only) and
+    # the per-ICP scorer judgment pointer become corpus-reachable evidence.
+    scorer_ref = row.get("scorer_trace_ref")
+    if isinstance(scorer_ref, str) and scorer_ref.strip():
+        snapshot["scorer_trace_ref"] = scorer_ref.strip()
+        snapshot["scorer_trace_sha256"] = str(row.get("scorer_trace_sha256") or "")
+    l0_findings = row.get("l0_findings")
+    if isinstance(l0_findings, Sequence) and not isinstance(l0_findings, (str, bytes)):
+        bounded = [dict(item) for item in l0_findings if isinstance(item, Mapping)][:64]
+        if bounded:
+            snapshot["l0_findings"] = bounded
     incontainer_ref = row.get("incontainer_trace_ref")
     if isinstance(incontainer_ref, str) and incontainer_ref.strip():
         snapshot["incontainer_trace_ref"] = incontainer_ref.strip()
@@ -894,6 +1066,15 @@ def _per_icp_snapshot(row: Mapping[str, Any]) -> dict[str, Any]:
         )
         snapshot["incontainer_trace_call_count"] = max(
             0, _i(row.get("incontainer_trace_call_count"))
+        )
+    elif row.get("incontainer_trace_dropped"):
+        # P5: dropped in-container captures stay visible in evidence snapshots.
+        snapshot["incontainer_trace_dropped"] = True
+        snapshot["incontainer_trace_dropped_call_count"] = max(
+            0, _i(row.get("incontainer_trace_dropped_call_count"))
+        )
+        snapshot["incontainer_trace_sha256"] = str(
+            row.get("incontainer_trace_sha256") or ""
         )
     return snapshot
 
@@ -1018,9 +1199,29 @@ def _node_execution_status(state: "_NodeState") -> str:
     """Map node lifecycle onto execution_traces' completed/crash/timeout CHECK."""
     if state.build_failed_row is not None and state.build_passed_row is None:
         return "crash"
+    if state.scoring_crashed and not state.score_bundle_id:
+        # P14: a crashed scoring is a crash row, not an invisible node.
+        return "crash"
     if state.gate_doc:
         return "completed"
     return "timeout"  # built-but-never-scored, or drafted-but-never-built
+
+
+def _run_summary_contract_enforced() -> bool:
+    """P14 / v5 §8.3: when on, a terminal loop event WITHOUT the run-summary
+    block classifies the run as crash — absence of the summary IS the crash
+    detector. Default off until the fleet has emitted summaries long enough
+    that historical rows are the exception."""
+    return os.getenv(
+        "RESEARCH_LAB_RUN_SUMMARY_CONTRACT_ENFORCED", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _terminal_run_summary(terminal_row: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    if terminal_row is None:
+        return None
+    summary = _doc(terminal_row).get("run_summary")
+    return summary if isinstance(summary, Mapping) and summary else None
 
 
 def _engine_execution_status(
@@ -1028,6 +1229,12 @@ def _engine_execution_status(
 ) -> str:
     terminal_type = str(terminal_row.get("event_type") or "") if terminal_row else ""
     if queue_status == "completed" or terminal_type == "loop_completed":
+        if (
+            _run_summary_contract_enforced()
+            and terminal_row is not None
+            and _terminal_run_summary(terminal_row) is None
+        ):
+            return "crash"
         return "completed"
     if queue_status == "failed" or terminal_type == "loop_failed":
         return "crash"
@@ -1042,6 +1249,7 @@ def _build_corpus_trace_rows(
     nodes: Mapping[str, "_NodeState"],
     node_order: Sequence[str],
     engine_calls: Sequence[Mapping[str, Any]],
+    build_diagnostic_calls: Sequence[Mapping[str, Any]] = (),
     bundles_by_id: Mapping[str, Mapping[str, Any]],
     reflections_by_node: Mapping[str, Sequence[Mapping[str, Any]]],
     queue_status: str,
@@ -1087,8 +1295,25 @@ def _build_corpus_trace_rows(
         node_calls = [
             dict(call) for call in engine_calls if call.get("node_id") == node_id
         ]
+        node_diagnostic_calls = [
+            dict(call)
+            for call in build_diagnostic_calls
+            if call.get("node_id") == node_id
+        ]
         incontainer_calls = _collect_incontainer_calls(bundle_row)
-        if not state.score_bundle_id and not node_calls and not incontainer_calls:
+        judge_verdicts = _collect_judge_verdicts(
+            bundle_row,
+            candidate_id=state.candidate_id,
+            score_bundle_id=state.score_bundle_id,
+            scorer_trace_refs=state.scorer_trace_refs,
+        )
+        if (
+            not state.score_bundle_id
+            and not node_calls
+            and not incontainer_calls
+            and not node_diagnostic_calls
+            and not state.scoring_crashed
+        ):
             continue  # nothing to point at for this node
         trace_id = execution_trace_id_for_node(run_id, node_id)
         anchor_row = state.build_passed_row or state.build_failed_row or state.drafted_row
@@ -1224,7 +1449,20 @@ def _build_corpus_trace_rows(
                 ),
                 "engine_call_count": len(node_calls),
                 "incontainer_trace_count": len(incontainer_calls),
+                "build_diagnostic_count": len(node_diagnostic_calls),
+                "judge_verdict_count": len(judge_verdicts),
                 "reflection_count": len(reflections_by_node.get(node_id, ())),
+                **(
+                    {
+                        "scoring_crashed": True,
+                        "scoring_failure_event_type": state.scoring_failure_event_type,
+                    }
+                    if state.scoring_crashed and not state.score_bundle_id
+                    else {}
+                ),
+                # P11: v5 §8.3 trace-level axis rollup — conjunction over the
+                # control-flow-driving calls (axis_a only if all model-emitted).
+                "trajectory_axis": axis_rollup([*node_calls, *incontainer_calls]),
             }
         )
         execution_trace_rows.append(
@@ -1240,12 +1478,16 @@ def _build_corpus_trace_rows(
                 "icp_set_hash": node_icp_set_hash,
                 "eval_version": _eval_version_doc(bundle_row),
                 "calls": _cap_pointer_entries(
-                    [*node_calls, *incontainer_calls],
+                    [*node_calls, *node_diagnostic_calls, *incontainer_calls],
                     _EXECUTION_TRACE_CALL_CAP,
                     "call_truncation_marker",
                 ),
                 "evidence_bundles": evidence_refs,
-                "judge_verdicts": [],  # scorer-judge traces are item 5.4
+                "judge_verdicts": _cap_pointer_entries(
+                    judge_verdicts,
+                    _EXECUTION_TRACE_CALL_CAP,
+                    "judge_verdict_truncation_marker",
+                ),
                 "outputs_ref": outputs_ref,
                 "score_bundle_ref": score_bundle_ref,
                 "cost_ledger": {
@@ -1281,6 +1523,9 @@ def _build_corpus_trace_rows(
         )
         created_at = _ts(bundle_row.get("created_at"), fallback_ts)
         incontainer_calls = _collect_incontainer_calls(bundle_row)
+        judge_verdicts = _collect_judge_verdicts(
+            bundle_row, score_bundle_id=score_bundle_id
+        )
         per_icp_rows = _bundle_per_icp_rows(bundle_row)
         raw_bundle_gate = bundle_doc.get("private_holdout_gate")
         gate = raw_bundle_gate if isinstance(raw_bundle_gate, Mapping) else {}
@@ -1370,6 +1615,7 @@ def _build_corpus_trace_rows(
                 "candidate_artifact_hash": artifact_hash,
                 "incontainer_trace_count": len(incontainer_calls),
                 "per_icp_snapshot_count": len(snapshots),
+                "trajectory_axis": axis_rollup(incontainer_calls),
             }
         )
         execution_trace_rows.append(
@@ -1389,7 +1635,11 @@ def _build_corpus_trace_rows(
                     "call_truncation_marker",
                 ),
                 "evidence_bundles": [evidence_ref],
-                "judge_verdicts": [],
+                "judge_verdicts": _cap_pointer_entries(
+                    judge_verdicts,
+                    _EXECUTION_TRACE_CALL_CAP,
+                    "judge_verdict_truncation_marker",
+                ),
                 "outputs_ref": score_bundle_ref,
                 "score_bundle_ref": score_bundle_ref,
                 "cost_ledger": {
@@ -1407,6 +1657,9 @@ def _build_corpus_trace_rows(
     run_scoped_calls = [
         dict(call) for call in engine_calls if not call.get("node_id")
     ]
+    run_scoped_calls.extend(
+        dict(call) for call in build_diagnostic_calls if not call.get("node_id")
+    )
     if run_scoped_calls:
         execution_trace_rows.insert(
             0,
@@ -1447,6 +1700,10 @@ def _build_corpus_trace_rows(
                         "trajectory_ref": trajectory_ref,
                         "engine_call_count": len(run_scoped_calls),
                         "node_ids": [str(node_id) for node_id in node_order][:64],
+                        "trajectory_axis": axis_rollup(run_scoped_calls),
+                        # P14 run-summary contract: countable without forensics.
+                        "run_summary_present": _terminal_run_summary(terminal_row)
+                        is not None,
                     }
                 ),
                 "created_at": fallback_ts,
@@ -1522,6 +1779,13 @@ class _NodeState:
     cost_usd: float = 0.0
     draft_seq: int | None = None
     evaluated_seq: int | None = None
+    # P2: {icp_ref: {s3_ref, sha256}} scorer judgment pointers from the
+    # scored event doc — projected into execution_traces.judge_verdicts.
+    scorer_trace_refs: Mapping[str, Mapping[str, Any]] | None = None
+    # P14: candidate scoring crashed/was rejected with no bundle — the node
+    # still gets an execution_traces row with status="crash".
+    scoring_crashed: bool = False
+    scoring_failure_event_type: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -1580,9 +1844,14 @@ def build_trajectory_projection(
             candidates_by_hash[artifact_hash] = row
 
     scored_by_candidate: dict[str, Mapping[str, Any]] = {}
+    failed_eval_by_candidate: dict[str, Mapping[str, Any]] = {}
     for row in evaluation_events:
-        if str(row.get("event_type")) == "scored":
+        event_type = str(row.get("event_type"))
+        if event_type == "scored":
             scored_by_candidate[str(row.get("candidate_id"))] = row
+        elif event_type in {"failed", "rejected"}:
+            # P14: crashed/rejected scorings must still yield corpus rows.
+            failed_eval_by_candidate.setdefault(str(row.get("candidate_id")), row)
 
     bundles_by_id: dict[str, Mapping[str, Any]] = {
         str(row.get("score_bundle_id")): row for row in score_bundles
@@ -1600,6 +1869,8 @@ def build_trajectory_projection(
     # NODE_EVALUATED emitter can embed each node's deterministic
     # execution_trace ref only when a row will actually be written.
     engine_calls = _collect_engine_trace_calls(ordered)
+    # P4: build-failure diagnostic pointers become first-class corpus calls.
+    build_diagnostic_calls = _collect_build_diagnostic_calls(ordered)
     node_ids_with_engine_calls = frozenset(
         str(call.get("node_id")) for call in engine_calls if call.get("node_id")
     )
@@ -1862,7 +2133,16 @@ def build_trajectory_projection(
                             "eval_version": "unversioned",
                         },
                         "reflection_context": sanitize_capture_payload(
-                            {**_live_ref(row), "iteration": _i(doc.get("iteration"))}
+                            {
+                                **_live_ref(row),
+                                "iteration": _i(doc.get("iteration")),
+                                # P14: mechanical template reflections are NOT
+                                # model chain-of-thought — CoT curation must
+                                # exclude anything not "model" here.
+                                "reflection_source": _sanitize_text(
+                                    str(doc.get("reflection_source") or "mechanical")
+                                )[:40],
+                            }
                         ),
                     },
                 )
@@ -1940,6 +2220,47 @@ def build_trajectory_projection(
                     "promotion_context": sanitize_capture_payload(
                         {
                             "candidate_id": candidate_id,
+                            "rolling_window_hash": row.get("rolling_window_hash"),
+                            "improvement_points": _f(row.get("improvement_points")),
+                            "threshold_points": _f(row.get("threshold_points")),
+                        }
+                    ),
+                },
+            )
+        elif promo_type in {
+            "below_threshold",
+            "promotion_failed",
+            "public_holdout_rejected",
+        }:
+            # P14: promotion-gate rejections become countable REVERTED rows —
+            # the corpus was survivorship-biased toward crowned winners.
+            rejection_epoch = default_epoch
+            rejection_bundle = bundles_by_id.get(
+                str(row.get("source_score_bundle_id") or "")
+            )
+            if rejection_bundle and rejection_bundle.get("evaluation_epoch") is not None:
+                rejection_epoch = _i(rejection_bundle.get("evaluation_epoch"))
+            _append_canonical_event(
+                canonical,
+                ts=_ts(row.get("created_at"), last_ts),
+                event_type="REVERTED",
+                cost_usd=0.0,
+                payload={
+                    "node_id": promo_node_id,
+                    "area": island,
+                    "epoch": max(0, rejection_epoch),
+                    "reason": promo_type,
+                    "delta": _f(gate.get(TARGETED_METRIC)),
+                    "revert_evidence_ref": (
+                        f"promotion_event:{row.get('promotion_event_id')}"
+                        if row.get("promotion_event_id")
+                        else None
+                    ),
+                    "rejection_context": sanitize_capture_payload(
+                        {
+                            "rejection_kind": "promotion_gate",
+                            "candidate_id": candidate_id,
+                            "promotion_event_type": promo_type,
                             "rolling_window_hash": row.get("rolling_window_hash"),
                             "improvement_points": _f(row.get("improvement_points")),
                             "threshold_points": _f(row.get("threshold_points")),
@@ -2107,6 +2428,16 @@ def build_trajectory_projection(
     ]
 
     # -- execution_traces / evidence_bundles pointer rows (item 5.5) -----------
+    # P14: mark nodes whose scoring crashed/was rejected without a bundle so
+    # they still yield crash-status execution rows.
+    for state in nodes.values():
+        if not state.candidate_id or state.score_bundle_id:
+            continue
+        failed_row = failed_eval_by_candidate.get(state.candidate_id)
+        if failed_row is not None:
+            state.scoring_crashed = True
+            state.scoring_failure_event_type = str(failed_row.get("event_type") or "")
+
     execution_trace_rows, evidence_bundle_rows = _build_corpus_trace_rows(
         run_id=run_id,
         trajectory_id=tid,
@@ -2114,6 +2445,7 @@ def build_trajectory_projection(
         nodes=nodes,
         node_order=node_order,
         engine_calls=engine_calls,
+        build_diagnostic_calls=build_diagnostic_calls,
         bundles_by_id=bundles_by_id,
         reflections_by_node=reflections_by_node,
         queue_status=queue_status,
@@ -2210,6 +2542,43 @@ def _emit_node_evaluated(
         )
         state.gate_doc = gate
         state.score_bundle_id = score_bundle_id
+        # P2: keep the scored event's scorer-trace pointer map so the node's
+        # execution trace can project judge_verdicts.
+        raw_scorer_refs = scored_doc.get("scorer_trace_refs")
+        if isinstance(raw_scorer_refs, Mapping):
+            state.scorer_trace_refs = {
+                str(icp_ref): dict(pointer)
+                for icp_ref, pointer in raw_scorer_refs.items()
+                if isinstance(pointer, Mapping)
+            }
+        # Bundle→trace linkage check (warn-only): a bundle stamped with an
+        # execution_trace:<uuid> ref must point at THIS node's deterministic
+        # row id, else the forward join is silently broken. Legacy
+        # gateway_qualification_worker:* refs predate the linkage and are
+        # expected on historical bundles — no warning for those.
+        if score_bundle_id and run_id:
+            bundle_row = bundles_by_id.get(score_bundle_id)
+            bundle_doc = (
+                bundle_row.get("score_bundle_doc") if isinstance(bundle_row, Mapping) else None
+            )
+            embedded_ref = (
+                str(bundle_doc.get("execution_trace_ref") or "")
+                if isinstance(bundle_doc, Mapping)
+                else ""
+            )
+            if embedded_ref.startswith("execution_trace:"):
+                expected_ref = (
+                    f"execution_trace:{execution_trace_id_for_node(run_id, state.node_id)}"
+                )
+                if embedded_ref != expected_ref:
+                    logger.warning(
+                        "research_lab_trajectory_bundle_trace_ref_mismatch run_id=%s node_id=%s "
+                        "bundle_ref=%s expected=%s (bundle→trace join broken for this bundle)",
+                        run_id,
+                        state.node_id,
+                        embedded_ref,
+                        expected_ref,
+                    )
     if state.build_failed_row is not None and state.build_passed_row is None:
         status = "crash"
     elif gate:

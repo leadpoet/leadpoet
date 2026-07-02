@@ -36,7 +36,10 @@
       "maxLength": 128
     },
     "funder_hotkey": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "minLength": 1,
       "maxLength": 256
     },
@@ -47,10 +50,17 @@
     },
     "novelty_gate": {
       "type": "object",
-      "required": ["result", "similarity", "nearest_prior_receipt"],
+      "required": [
+        "result",
+        "similarity",
+        "nearest_prior_receipt"
+      ],
       "properties": {
         "result": {
-          "enum": ["pass", "reject"]
+          "enum": [
+            "pass",
+            "reject"
+          ]
         },
         "similarity": {
           "type": "number",
@@ -58,7 +68,10 @@
           "maximum": 1
         },
         "nearest_prior_receipt": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "maxLength": 256
         }
       },
@@ -99,7 +112,13 @@
   "$defs": {
     "event": {
       "type": "object",
-      "required": ["seq", "ts", "type", "cost_usd", "anchored_hash"],
+      "required": [
+        "seq",
+        "ts",
+        "type",
+        "cost_usd",
+        "anchored_hash"
+      ],
       "properties": {
         "seq": {
           "type": "integer",
@@ -164,11 +183,19 @@
           "maxLength": 128
         },
         "parent_id": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "maxLength": 128
         },
         "operator": {
-          "enum": ["draft", "improve", "debug", "merge"]
+          "enum": [
+            "draft",
+            "improve",
+            "debug",
+            "merge"
+          ]
         },
         "component": {
           "type": "string",
@@ -176,7 +203,13 @@
           "maxLength": 128
         },
         "patch_type": {
-          "enum": ["PROMPT_EDIT", "PARAM_EDIT", "STRATEGY_SWAP", "SOURCE_ADD", "CODE_EDIT"]
+          "enum": [
+            "PROMPT_EDIT",
+            "PARAM_EDIT",
+            "STRATEGY_SWAP",
+            "SOURCE_ADD",
+            "CODE_EDIT"
+          ]
         },
         "hypothesis": {
           "$ref": "#/$defs/hypothesis"
@@ -195,16 +228,27 @@
           "$ref": "#/$defs/tokens"
         },
         "status": {
-          "enum": ["scored", "crash", "timeout", "guardrail_breach"]
+          "enum": [
+            "scored",
+            "crash",
+            "timeout",
+            "guardrail_breach"
+          ]
         },
         "rung": {
-          "enum": ["L0", "L1"]
+          "enum": [
+            "L0",
+            "L1"
+          ]
         },
         "metrics": {
           "$ref": "#/$defs/node_metrics"
         },
         "paired_lcb_vs_parent": {
-          "type": ["number", "null"]
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "fixtures": {
           "type": "array",
@@ -216,7 +260,10 @@
         },
         "cache_hits": {
           "type": "object",
-          "required": ["snapshot", "verdict"],
+          "required": [
+            "snapshot",
+            "verdict"
+          ],
           "properties": {
             "snapshot": {
               "type": "integer",
@@ -230,21 +277,34 @@
           "additionalProperties": false
         },
         "execution_trace_ref": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "maxLength": 256
         },
         "lesson": {
           "$ref": "#/$defs/lesson"
         },
         "lesson_embedding_ref": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "maxLength": 256
         },
         "lesson_provenance": {
           "$ref": "#/$defs/lesson_provenance"
         },
         "reason": {
-          "enum": ["plateau", "balance_exhausted", "funder_stop"]
+          "enum": [
+            "plateau",
+            "balance_exhausted",
+            "funder_stop",
+            "below_threshold",
+            "promotion_failed",
+            "public_holdout_rejected"
+          ]
         },
         "best_node_id": {
           "type": "string",
@@ -286,7 +346,11 @@
           "type": "number"
         },
         "decision": {
-          "enum": ["continue", "crown", "futility_stop"]
+          "enum": [
+            "continue",
+            "crown",
+            "futility_stop"
+          ]
         },
         "area": {
           "type": "string",
@@ -298,94 +362,211 @@
           "minimum": 0
         },
         "provisional_window_end": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "format": "date-time"
         },
         "revert_evidence_ref": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "maxLength": 256
         }
       },
       "allOf": [
         {
           "if": {
-            "properties": { "type": { "const": "PROBE" } },
-            "required": ["type"]
+            "properties": {
+              "type": {
+                "const": "PROBE"
+              }
+            },
+            "required": [
+              "type"
+            ]
           },
           "then": {
-            "required": ["probe_id", "result_quantized", "fixtures_used"]
+            "required": [
+              "probe_id",
+              "result_quantized",
+              "fixtures_used"
+            ]
           }
         },
         {
           "if": {
-            "properties": { "type": { "const": "LOOP_FUNDED" } },
-            "required": ["type"]
+            "properties": {
+              "type": {
+                "const": "LOOP_FUNDED"
+              }
+            },
+            "required": [
+              "type"
+            ]
           },
           "then": {
-            "required": ["loop_n", "balance_before"]
+            "required": [
+              "loop_n",
+              "balance_before"
+            ]
           }
         },
         {
           "if": {
-            "properties": { "type": { "const": "NODE_DRAFTED" } },
-            "required": ["type"]
+            "properties": {
+              "type": {
+                "const": "NODE_DRAFTED"
+              }
+            },
+            "required": [
+              "type"
+            ]
           },
           "then": {
-            "required": ["node_id", "parent_id", "operator", "component", "patch_type", "hypothesis", "patch_ref", "model_used", "tokens"]
+            "required": [
+              "node_id",
+              "parent_id",
+              "operator",
+              "component",
+              "patch_type",
+              "hypothesis",
+              "patch_ref",
+              "model_used",
+              "tokens"
+            ]
           }
         },
         {
           "if": {
-            "properties": { "type": { "const": "NODE_EVALUATED" } },
-            "required": ["type"]
+            "properties": {
+              "type": {
+                "const": "NODE_EVALUATED"
+              }
+            },
+            "required": [
+              "type"
+            ]
           },
           "then": {
-            "required": ["node_id", "status", "rung", "metrics", "paired_lcb_vs_parent", "fixtures", "cache_hits", "execution_trace_ref"]
+            "required": [
+              "node_id",
+              "status",
+              "rung",
+              "metrics",
+              "paired_lcb_vs_parent",
+              "fixtures",
+              "cache_hits",
+              "execution_trace_ref"
+            ]
           }
         },
         {
           "if": {
-            "properties": { "type": { "const": "NODE_REFLECTED" } },
-            "required": ["type"]
+            "properties": {
+              "type": {
+                "const": "NODE_REFLECTED"
+              }
+            },
+            "required": [
+              "type"
+            ]
           },
           "then": {
-            "required": ["node_id", "lesson", "lesson_embedding_ref", "lesson_provenance"]
+            "required": [
+              "node_id",
+              "lesson",
+              "lesson_embedding_ref",
+              "lesson_provenance"
+            ]
           }
         },
         {
           "if": {
-            "properties": { "type": { "const": "PLATEAU_STOP" } },
-            "required": ["type"]
+            "properties": {
+              "type": {
+                "const": "PLATEAU_STOP"
+              }
+            },
+            "required": [
+              "type"
+            ]
           },
           "then": {
-            "required": ["reason", "best_node_id"]
+            "required": [
+              "reason",
+              "best_node_id"
+            ]
           }
         },
         {
           "if": {
-            "properties": { "type": { "const": "L2_PROMOTED" } },
-            "required": ["type"]
+            "properties": {
+              "type": {
+                "const": "L2_PROMOTED"
+              }
+            },
+            "required": [
+              "type"
+            ]
           },
           "then": {
-            "required": ["node_id", "l2_score", "champion_same_day_l2", "delta", "entry_bar_passed"]
+            "required": [
+              "node_id",
+              "l2_score",
+              "champion_same_day_l2",
+              "delta",
+              "entry_bar_passed"
+            ]
           }
         },
         {
           "if": {
-            "properties": { "type": { "enum": ["LANE_ENTERED", "PROBATION_SET_SCORED"] } },
-            "required": ["type"]
+            "properties": {
+              "type": {
+                "enum": [
+                  "LANE_ENTERED",
+                  "PROBATION_SET_SCORED"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
           },
           "then": {
-            "required": ["lane_id", "set_n", "set_hash", "d_paired_per_icp", "running_lcb", "decision"]
+            "required": [
+              "lane_id",
+              "set_n",
+              "set_hash",
+              "d_paired_per_icp",
+              "running_lcb",
+              "decision"
+            ]
           }
         },
         {
           "if": {
-            "properties": { "type": { "enum": ["CROWNED", "REVERTED", "FINALIZED"] } },
-            "required": ["type"]
+            "properties": {
+              "type": {
+                "enum": [
+                  "CROWNED",
+                  "REVERTED",
+                  "FINALIZED"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
           },
           "then": {
-            "required": ["area", "epoch"]
+            "required": [
+              "area",
+              "epoch"
+            ]
           }
         }
       ],
@@ -393,7 +574,12 @@
     },
     "hypothesis": {
       "type": "object",
-      "required": ["failure_mode", "mechanism", "predicted_delta", "falsifier"],
+      "required": [
+        "failure_mode",
+        "mechanism",
+        "predicted_delta",
+        "falsifier"
+      ],
       "properties": {
         "failure_mode": {
           "type": "string",
@@ -415,7 +601,10 @@
     },
     "tokens": {
       "type": "object",
-      "required": ["in", "out"],
+      "required": [
+        "in",
+        "out"
+      ],
       "properties": {
         "in": {
           "type": "integer",
@@ -469,7 +658,11 @@
         },
         "complexity": {
           "type": "object",
-          "required": ["diff_loc", "prompt_pack_tokens", "component_count"],
+          "required": [
+            "diff_loc",
+            "prompt_pack_tokens",
+            "component_count"
+          ],
           "properties": {
             "diff_loc": {
               "type": "integer",
@@ -491,7 +684,12 @@
     },
     "lesson": {
       "type": "object",
-      "required": ["worked", "failed", "why", "next_question"],
+      "required": [
+        "worked",
+        "failed",
+        "why",
+        "next_question"
+      ],
       "properties": {
         "worked": {
           "type": "string"
@@ -510,7 +708,11 @@
     },
     "lesson_provenance": {
       "type": "object",
-      "required": ["champion_base", "component", "eval_version"],
+      "required": [
+        "champion_base",
+        "component",
+        "eval_version"
+      ],
       "properties": {
         "champion_base": {
           "type": "string",
@@ -529,11 +731,20 @@
     },
     "final": {
       "type": "object",
-      "required": ["settlement"],
+      "required": [
+        "settlement"
+      ],
       "properties": {
         "settlement": {
           "type": "object",
-          "required": ["loops_consumed", "probation_charged", "balance_returned", "crown", "grant_state", "receipt_ref"],
+          "required": [
+            "loops_consumed",
+            "probation_charged",
+            "balance_returned",
+            "crown",
+            "grant_state",
+            "receipt_ref"
+          ],
           "properties": {
             "loops_consumed": {
               "type": "integer",
@@ -553,7 +764,12 @@
                 },
                 {
                   "type": "object",
-                  "required": ["area", "started_epoch", "grant_share", "term_k"],
+                  "required": [
+                    "area",
+                    "started_epoch",
+                    "grant_share",
+                    "term_k"
+                  ],
                   "properties": {
                     "area": {
                       "type": "string",
@@ -581,7 +797,10 @@
               "minLength": 1
             },
             "receipt_ref": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "maxLength": 256
             }
           },

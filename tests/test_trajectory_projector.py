@@ -887,3 +887,83 @@ async def _load_inputs(store: FakeStore) -> dict[str, Any]:
     from gateway.research_lab.trajectory_projector import load_projection_inputs
 
     return await load_projection_inputs(RUN_ID, store)
+
+
+# ---------------------------------------------------------------------------
+# P14: negative examples as first-class rows (trajectoryimprovements.md)
+# ---------------------------------------------------------------------------
+
+
+async def test_promotion_rejection_projects_reverted_event(enabled):
+    tables = happy_path_tables()
+    # Replace the passed promotion with a below-threshold rejection.
+    tables["research_lab_candidate_promotion_events"] = [
+        {
+            "promotion_event_id": str(uuid.uuid4()),
+            "candidate_id": CANDIDATE_1,
+            "source_score_bundle_id": SCORE_BUNDLE_ID,
+            "event_type": "below_threshold",
+            "promotion_status": "rejected",
+            "rolling_window_hash": "sha256:window",
+            "improvement_points": 0.4,
+            "threshold_points": 1.0,
+            "event_doc": {},
+            "created_at": "2026-06-20T11:05:00Z",
+        }
+    ]
+    tables["research_lab_private_model_version_events"] = []
+    store = FakeStore(tables)
+    result = await project_run(RUN_ID, store=store, dry_run=False)
+    assert result.status == "projected", result.errors
+
+    event_rows = store.inserted[TRAJECTORY_EVENTS_TABLE]
+    types = [row["event_type"] for row in event_rows]
+    assert "REVERTED" in types
+    assert "L2_PROMOTED" not in types
+    reverted = next(row["event"] for row in event_rows if row["event_type"] == "REVERTED")
+    assert reverted["reason"] == "below_threshold"
+    assert reverted["node_id"] == "node-1"
+    context = reverted["rejection_context"]
+    assert context["rejection_kind"] == "promotion_gate"
+    assert context["improvement_points"] == pytest.approx(0.4)
+    assert context["threshold_points"] == pytest.approx(1.0)
+    # The stripped schema view still validates (context is an extension key).
+    assert schema_event_view(reverted)["type"] == "REVERTED"
+
+
+async def test_scorer_crash_yields_crash_trace_row(enabled):
+    tables = happy_path_tables()
+    # The candidate's scoring crashed: a failed evaluation event, no bundle.
+    tables["research_lab_candidate_evaluation_events"] = [
+        {
+            "event_id": str(uuid.uuid4()),
+            "candidate_id": CANDIDATE_1,
+            "run_id": RUN_ID,
+            "ticket_id": TICKET_ID,
+            "seq": 3,
+            "event_type": "failed",
+            "candidate_status": "failed",
+            "event_doc": {"error": "scoring worker crashed mid-evaluation"},
+            "created_at": "2026-06-20T11:00:00Z",
+        }
+    ]
+    tables["research_evaluation_score_bundles"] = []
+    tables["research_lab_candidate_promotion_events"] = []
+    tables["research_lab_private_model_version_events"] = []
+    store = FakeStore(tables)
+    result = await project_run(RUN_ID, store=store, dry_run=False)
+    assert result.status == "projected", result.errors
+
+    from gateway.research_lab.trajectory_projector import (
+        EXECUTION_TRACES_TABLE,
+        execution_trace_id_for_node,
+    )
+
+    trace_rows = {
+        row["run_id"]: row for row in store.inserted[EXECUTION_TRACES_TABLE]
+    }
+    node1 = trace_rows[execution_trace_id_for_node(RUN_ID, "node-1")]
+    assert node1["status"] == "crash"
+    assert node1["score_bundle_ref"] == "score_bundle:unavailable"
+    assert node1["trace_doc"]["scoring_crashed"] is True
+    assert node1["trace_doc"]["scoring_failure_event_type"] == "failed"

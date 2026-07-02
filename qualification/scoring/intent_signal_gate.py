@@ -519,6 +519,22 @@ async def _call_openrouter_once(payload: Dict[str, Any],
         if owns_client:
             await client.aclose()
 
+    # trajectoryimprovements.md P1: the intent-signal judge's verdicts are
+    # training labels — capture the exchange (never affects the judgment).
+    try:
+        from research_lab.openrouter_telemetry import record_openrouter_trace
+
+        record_openrouter_trace(
+            channel="qualification",
+            purpose="intent_signal_gate_judge",
+            stage="scorer_judgment",
+            model_id=str(payload.get("model") or ""),
+            request_body=payload,
+            response_doc=resp,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     # OpenRouter error envelope: {"error": {"code": ..., "message": ...}}
     if isinstance(resp, dict) and resp.get("error") and not resp.get("choices"):
         err = resp["error"]

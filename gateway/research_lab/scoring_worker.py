@@ -35,7 +35,13 @@ from gateway.research_lab.icp_window import (
     fetch_rolling_icp_window,
     select_rolling_icp_window_from_sets,
 )
-from gateway.research_lab.logging_utils import compact_ref, format_worker_block
+from gateway.research_lab.logging_utils import (
+    compact_ref,
+    event_error_diagnostics as _event_error_diagnostics,
+    format_worker_block,
+    runtime_error_diagnostics as _runtime_error_diagnostics,
+    safe_event_error_text as _safe_event_error_text,
+)
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabScoreBundleCreateRequest
 from gateway.research_lab.promotion import (
     CONFIRMATION_ATTEMPT_FAILED_REASON,
@@ -58,6 +64,7 @@ from gateway.research_lab.public_benchmarks import (
     build_public_benchmark_report,
     sanitize_benchmark_item_summary,
 )
+from gateway.research_lab.trajectory_projector import execution_trace_id_for_node
 from gateway.research_lab.store import (
     canonical_hash,
     create_candidate_artifact,
@@ -108,6 +115,7 @@ from research_lab.eval.private_runtime import (
     incontainer_trace_capture_enabled,
 )
 from research_lab.observability.langfuse_client import observation
+from research_lab.observability.redaction import miner_hotkey_hash
 from research_lab.observability.tracing import finish_score_bundle_observation
 
 
@@ -164,58 +172,9 @@ def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _safe_event_error_text(exc: BaseException) -> str:
-    text = f"{exc.__class__.__name__}: {str(exc)}"
-    for marker in ("sk-or-", "sb_secret", "service_role", "openrouter_api_key", "raw_secret"):
-        text = re.sub(re.escape(marker), "[redacted]", text, flags=re.IGNORECASE)
-    text = re.sub(r"https?://[^/\s:]+:[^@\s]+@", "https://[redacted]@", text)
-    return text[:500]
-
-
-def _runtime_error_diagnostics(error_text: str) -> dict[str, Any]:
-    """Return DB-safe runtime diagnostics without provider URLs or request text."""
-
-    lowered = error_text.lower()
-    provider = "unknown"
-    if "scrapingdog" in lowered:
-        provider = "scrapingdog"
-    elif "exa" in lowered:
-        provider = "exa"
-    elif "openrouter" in lowered:
-        provider = "openrouter"
-
-    status = 0
-    for code in (400, 401, 403, 404, 408, 409, 410, 429, 500, 502, 503, 504):
-        if f"http error {code}" in lowered or f"status={code}" in lowered or f'"status":{code}' in lowered:
-            status = code
-            break
-
-    if status >= 500:
-        category = "provider_http_5xx"
-    elif status >= 400:
-        category = "provider_http_4xx"
-    else:
-        category = "runtime_provider_error"
-
-    return {
-        "error_class": "PrivateModelRuntimeError" if "privatemodelruntimeerror" in lowered else "RuntimeError",
-        "provider": provider,
-        "status": status,
-        "category": category,
-    }
-
-
-def _event_error_diagnostics(exc: BaseException) -> dict[str, Any]:
-    """DB-safe structured error doc for audit-visible event docs.
-
-    Raw ``str(exc)`` from providers/infra can carry secret-shaped markers
-    (ECR registry hosts, Supabase roles) that permanently poison the audit
-    bundle secret scan (bug #36), so event docs store this sanitized shape
-    instead of raw error text.
-    """
-    diagnostics = _runtime_error_diagnostics(f"{exc.__class__.__name__}: {exc}")
-    diagnostics["error_class"] = exc.__class__.__name__[:120]
-    return diagnostics
+# Event-doc error sanitizers (bug #36) moved to logging_utils so the loop
+# engine shares them; imported at the top with underscore aliases to keep
+# existing call sites and tests stable.
 
 
 def _baseline_error_is_retryable(error_text: str) -> bool:
@@ -527,18 +486,6 @@ def _openrouter_include_reasoning_enabled() -> bool:
     }
 
 
-def _openrouter_reasoning_request_unsupported(message: str) -> bool:
-    text = str(message or "").lower()
-    if "http 400" not in text and "http 422" not in text:
-        return False
-    return (
-        "include_reasoning" in text
-        or "reasoning_effort" in text
-        or "reasoning effort" in text
-        or ("reasoning" in text and "unsupported" in text)
-    )
-
-
 def _trace_path_segment(value: object, *, fallback: str) -> str:
     text = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in str(value or ""))[:96]
     return text.strip("-.") or fallback
@@ -846,6 +793,15 @@ class _TraceCapturingCompanyScorer:
             )
         return breakdowns
 
+    def scorer_trace_pointer_for(self, icp_ref: str) -> dict[str, str] | None:
+        """P12: the evaluator's row builder picks up this ICP's judgment-trace
+        pointer so ``scorer_trace_ref`` rides the per-ICP row into the bundle
+        (previously the pointers reached only the scored event doc)."""
+        if not self._pointer_map:
+            return None
+        pointer = self._pointer_map.get(str(icp_ref))
+        return dict(pointer) if isinstance(pointer, Mapping) else None
+
 
 def _upload_baseline_incontainer_trace(
     prefix: str,
@@ -876,6 +832,11 @@ def _upload_baseline_incontainer_trace(
         )
         if part
     )
+    if not kms_key_id:
+        # P5/P13: never PUT in-container trace content without aws:kms.
+        raise PrivateModelRuntimeError(
+            "in-container trace upload requires a KMS key id (unencrypted uploads are refused)"
+        )
     payload = {
         "schema_version": "1.0",
         "artifact_type": "research_lab_incontainer_trace",
@@ -889,10 +850,9 @@ def _upload_baseline_incontainer_trace(
         "Key": key,
         "Body": canonical_json(payload).encode("utf-8"),
         "ContentType": "application/json",
+        "ServerSideEncryption": "aws:kms",
+        "SSEKMSKeyId": kms_key_id,
     }
-    if kms_key_id:
-        put_kwargs["ServerSideEncryption"] = "aws:kms"
-        put_kwargs["SSEKMSKeyId"] = kms_key_id
     boto3.client("s3").put_object(**put_kwargs)
     return f"s3://{bucket}/{key}"
 
@@ -907,25 +867,31 @@ async def _publish_baseline_incontainer_trace(
     """Persist one baseline/champion ICP's collected in-container trace entries
     and build the POINTER-ONLY diagnostics fields (mirroring the evaluator's
     ``_finalize_incontainer_trace`` semantics: upload failures are logged and
-    swallowed; the sha256/call-count pointers still record that capture
-    happened). Returns ``{}`` when there is nothing to record."""
+    swallowed). P5: a dropped capture must not look populated — no ref means
+    ``incontainer_trace_call_count=0`` plus ``incontainer_trace_dropped=true``;
+    the sha256 stays as the attestation the entries existed. Returns ``{}``
+    when there is nothing to record."""
     if not entries:
         return {}
     ref = ""
     prefix = str(os.getenv(INCONTAINER_TRACE_S3_PREFIX_ENV) or "").strip().rstrip("/")
-    if not prefix:
+    kms_key_id = str(os.getenv(INCONTAINER_TRACE_KMS_KEY_ENV) or "").strip()
+    if not prefix or not kms_key_id:
+        reason = "no_s3_prefix" if not prefix else "missing_kms_key"
         drop_state["dropped_entries"] = int(drop_state.get("dropped_entries") or 0) + len(entries)
         if not drop_state.get("logged"):
             drop_state["logged"] = True
-            logger.info(
-                "research_lab_incontainer_trace_dropped run_ref=%s reason=no_s3_prefix "
-                "(set %s to persist baseline in-container traces; further drops this "
-                "run are silent)",
+            log = logger.info if not prefix else logger.error
+            log(
+                "research_lab_incontainer_trace_dropped run_ref=%s reason=%s "
+                "(set %s and %s to persist baseline in-container traces encrypted; "
+                "further drops this run are silent)",
                 context_ref,
+                reason,
                 INCONTAINER_TRACE_S3_PREFIX_ENV,
+                INCONTAINER_TRACE_KMS_KEY_ENV,
             )
     else:
-        kms_key_id = str(os.getenv(INCONTAINER_TRACE_KMS_KEY_ENV) or "").strip()
         try:
             ref = await asyncio.to_thread(
                 _upload_baseline_incontainer_trace,
@@ -943,11 +909,15 @@ async def _publish_baseline_incontainer_trace(
                 exc_info=True,
             )
             ref = ""
-    return {
+    fields = {
         "incontainer_trace_ref": ref,
         "incontainer_trace_sha256": sha256_json(list(entries)),
-        "incontainer_trace_call_count": len(entries),
+        "incontainer_trace_call_count": len(entries) if ref else 0,
     }
+    if not ref:
+        fields["incontainer_trace_dropped"] = True
+        fields["incontainer_trace_dropped_call_count"] = len(entries)
+    return fields
 
 
 def _baseline_max_unresolved_icps() -> int:
@@ -1172,66 +1142,34 @@ async def _call_operator_openrouter_json(
     messages: list[dict[str, str]],
     timeout_seconds: int,
 ) -> str:
-    body = {
-        "model": model_id,
-        "messages": messages,
-        "temperature": 0.1,
-        "max_tokens": 2200,
-        "response_format": {"type": "json_object"},
-        "provider": {
-            "data_collection": "deny",
-            "zdr": True,
-        },
-    }
-    include_reasoning = _openrouter_include_reasoning_enabled()
-    if include_reasoning:
-        body["include_reasoning"] = True
+    """Operator stale-parent repair/rebase call, via the shared telemetry
+    transport (trajectoryimprovements.md P1: this path used to request
+    reasoning, pay for it, then extract only ``message.content`` — the
+    reasoning trace is now captured to encrypted S3 instead of discarded)."""
+    from research_lab.openrouter_telemetry import (
+        OpenRouterTelemetryError,
+        call_openrouter_chat_async,
+    )
 
-    def _call_once(request_body: Mapping[str, Any]) -> str:
-        req = urlrequest.Request(
-            "https://openrouter.ai/api/v1/chat/completions",
-            data=json.dumps(dict(request_body)).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            method="POST",
+    try:
+        result = await call_openrouter_chat_async(
+            api_key=api_key,
+            model_id=model_id,
+            messages=messages,
+            channel="research_lab_operator",
+            purpose="operator_stale_parent_repair",
+            stage="operator_repair",
+            max_tokens=2200,
+            temperature=0.1,
+            timeout_seconds=max(1, int(timeout_seconds)),
+            response_format={"type": "json_object"},
+            include_reasoning=_openrouter_include_reasoning_enabled(),
         )
-        try:
-            with urlrequest.urlopen(req, timeout=max(1, int(timeout_seconds))) as response:
-                decoded = json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            message = exc.read().decode("utf-8", errors="replace")[:500]
-            raise CodeEditBuildError(f"operator stale-parent repair failed: HTTP {exc.code}: {message}") from exc
-        except URLError as exc:
-            raise CodeEditBuildError(f"operator stale-parent repair failed: {exc}") from exc
-        choices = decoded.get("choices") if isinstance(decoded, Mapping) else None
-        if not isinstance(choices, list) or not choices:
-            raise CodeEditBuildError("operator stale-parent repair returned no choices")
-        first = choices[0] if isinstance(choices[0], Mapping) else {}
-        message = first.get("message") if isinstance(first.get("message"), Mapping) else {}
-        content = message.get("content")
-        if not content:
-            raise CodeEditBuildError("operator stale-parent repair returned empty content")
-        return str(content)
-
-    def _call() -> str:
-        try:
-            return _call_once(body)
-        except CodeEditBuildError as exc:
-            if not include_reasoning or not _openrouter_reasoning_request_unsupported(str(exc)):
-                raise
-            retry_body = dict(body)
-            retry_body.pop("include_reasoning", None)
-            logger.warning(
-                "research_lab_operator_openrouter_reasoning_unsupported model=%s error_hash=%s; retrying_without_reasoning",
-                compact_ref(model_id),
-                sha256_json({"error": str(exc)}),
-            )
-            return _call_once(retry_body)
-
-    return await asyncio.to_thread(_call)
+    except OpenRouterTelemetryError as exc:
+        raise CodeEditBuildError(f"operator stale-parent repair failed: {exc}") from exc
+    if not result.content:
+        raise CodeEditBuildError("operator stale-parent repair returned empty content")
+    return str(result.content)
 
 
 def _status_age_seconds(raw_status_at: object) -> float | None:
@@ -1305,6 +1243,11 @@ class ResearchLabGatewayScoringWorker:
         self._confirmation_trace_scope: dict[str, Any] | None = None
 
     async def run_forever(self) -> None:
+        # trajectoryimprovements.md P5: one structured capture health block at
+        # startup; refuses to start in production when capture is degraded.
+        from gateway.research_lab.capture_health import enforce_capture_health
+
+        enforce_capture_health(self.config, worker_kind="scoring_worker")
         last_idle_log = 0.0
         last_error_log = 0.0
         idle_log_seconds = _idle_log_seconds()
@@ -2129,6 +2072,7 @@ class ResearchLabGatewayScoringWorker:
                         "run_id": str(candidate["run_id"]),
                         "ticket_id": str(candidate["ticket_id"]),
                         "candidate_id": candidate_id,
+                        "miner_hotkey_hash": miner_hotkey_hash(str(candidate.get("miner_hotkey") or "")),
                         "evaluation_epoch": evaluation_epoch,
                         "parent_artifact_hash": artifact.model_artifact_hash,
                         "candidate_artifact_hash": candidate_artifact.model_artifact_hash,
@@ -3792,6 +3736,15 @@ class ResearchLabGatewayScoringWorker:
 
         rebase_build_doc = {
             **build.build_doc,
+            # Preserve the source candidate's loop-node linkage so the rebased
+            # candidate's score bundle keeps the deterministic
+            # execution_trace:<uuid5> ref (bundle→trace join survives rebases).
+            **(
+                {"loop_node_id": str((candidate.get("candidate_build_doc") or {}).get("loop_node_id") or "")}
+                if isinstance(candidate.get("candidate_build_doc"), Mapping)
+                and (candidate.get("candidate_build_doc") or {}).get("loop_node_id")
+                else {}
+            ),
             "stale_parent_rebase": {
                 "schema_version": "1.0",
                 "source_candidate_id": candidate_id,
@@ -4710,6 +4663,16 @@ class ResearchLabGatewayScoringWorker:
         if not prefix.startswith("s3://"):
             return None
         kms_key_id = str(os.getenv(INCONTAINER_TRACE_KMS_KEY_ENV) or "").strip()
+        if not kms_key_id:
+            # P5/P13: prefix-on/key-off must never write unencrypted; fall back
+            # to the evaluator's default sink, which drops loudly for this case.
+            logger.error(
+                "research_lab_incontainer_trace_sink_refused candidate=%s reason=missing_kms_key "
+                "(set %s so candidate in-container traces are written SSE-KMS encrypted)",
+                compact_ref(candidate_id),
+                INCONTAINER_TRACE_KMS_KEY_ENV,
+            )
+            return None
         safe_candidate = _trace_path_segment(candidate_id, fallback="candidate")
 
         async def _sink(icp_ref: str, entries: list[dict[str, Any]]) -> str:
@@ -5602,6 +5565,26 @@ class ResearchLabGatewayScoringWorker:
         window_hash: str,
         evaluation_epoch: int,
     ) -> dict[str, Any]:
+        # Bundle→trace forward linkage: when the candidate row carries its loop
+        # node id (worker-side annotation in candidate_build_doc), stamp the
+        # SAME deterministic execution_trace:<uuid5> ref the trajectory
+        # projector writes for that node, so score bundles, engine_trace_
+        # mappings, and execution_traces all join on one key. Candidates
+        # without node linkage (pre-annotation rows) keep the legacy
+        # worker-scoped ref; readers must tolerate both formats — historical
+        # bundles are immutable.
+        loop_node_id = ""
+        build_doc_for_node = candidate.get("candidate_build_doc")
+        if isinstance(build_doc_for_node, Mapping):
+            loop_node_id = str(build_doc_for_node.get("loop_node_id") or "")
+        if loop_node_id:
+            execution_trace_ref = (
+                f"execution_trace:{execution_trace_id_for_node(str(candidate['run_id']), loop_node_id)}"
+            )
+        else:
+            execution_trace_ref = (
+                f"gateway_qualification_worker:{self.worker_ref}:{candidate['candidate_id']}"
+            )
         context = {
             "run_id": str(candidate["run_id"]),
             "ticket_id": str(candidate["ticket_id"]),
@@ -5610,7 +5593,7 @@ class ResearchLabGatewayScoringWorker:
             "evaluation_epoch": int(evaluation_epoch),
             "evaluator_version": "leadpoet-gateway-qualification-worker:research-lab:v1",
             "evidence_bundle_refs": [f"research_lab_rolling_icp_window:{window_hash}"],
-            "execution_trace_ref": f"gateway_qualification_worker:{self.worker_ref}:{candidate['candidate_id']}",
+            "execution_trace_ref": execution_trace_ref,
             "cost_ledger_ref": "cost_ledger:" + canonical_hash(
                 {
                     "candidate_id": candidate["candidate_id"],

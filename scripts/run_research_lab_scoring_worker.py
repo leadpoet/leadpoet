@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
 from gateway.research_lab.scoring_worker import ResearchLabGatewayScoringWorker  # noqa: E402
+from research_lab.observability.langfuse_client import flush_langfuse  # noqa: E402
 
 
 def _proxy_ref(proxy_url: str) -> str:
@@ -71,12 +72,17 @@ def main() -> int:
     config = ResearchLabGatewayConfig.from_env()
     _print_startup_banner(config, worker_id=args.worker_id, once=args.once)
     worker = ResearchLabGatewayScoringWorker(config, worker_ref=args.worker_id or None)
-    if args.once:
-        outcome = asyncio.run(worker.run_once())
-        print(outcome)
-        return 0 if outcome.get("status") not in {"scoring_worker_proxy_required"} else 1
-    asyncio.run(worker.run_forever())
-    return 0
+    try:
+        if args.once:
+            outcome = asyncio.run(worker.run_once())
+            print(outcome)
+            return 0 if outcome.get("status") not in {"scoring_worker_proxy_required"} else 1
+        asyncio.run(worker.run_forever())
+        return 0
+    finally:
+        # Langfuse buffers scores/spans in memory; flush on any exit path
+        # (SIGINT, crash, --once) so instrumented evals are not lost.
+        flush_langfuse()
 
 
 if __name__ == "__main__":

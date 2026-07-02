@@ -272,6 +272,11 @@ def _per_icp_row(index: int, *, run_tag: str, incontainer: bool = True) -> dict[
             {"incontainer": f"{run_tag}-{index}"}
         )
         row["incontainer_trace_call_count"] = 4 + index
+        # P12 passthrough: the per-ICP scorer judgment pointer rides the row.
+        row["scorer_trace_ref"] = (
+            f"s3://trace-bucket/research-lab/scorer-traces/{run_tag}/{index}.json"
+        )
+        row["scorer_trace_sha256"] = sha256_json({"scorer": f"{run_tag}-{index}"})
     return row
 
 
@@ -466,6 +471,23 @@ def build_run_tables(
                 "iteration": 2,
                 "error": "docker build failed: missing import",
                 "error_hash": "sha256:err",
+                # P4: build-failure diagnostic artifact pointer (present only
+                # alongside raw traces so no-pointer historical fixtures stay
+                # genuinely pointer-free).
+                **(
+                    {
+                        "diagnostic_artifact_uri": (
+                            f"s3://artifact-bucket/research-lab/candidates/{run_id}/"
+                            f"diagnostics/002-node-2-candidate_build_failed.json"
+                        ),
+                        "diagnostic_artifact_hash": sha256_json(
+                            {"diagnostic": f"{run_tag}-2"}
+                        ),
+                        "target_files": ["qualify/sources.py"],
+                    }
+                    if with_raw_traces
+                    else {}
+                ),
             },
         ),
         _loop_event(
@@ -710,7 +732,11 @@ async def test_engine_and_node_pointer_aggregation(tables, enabled):
     engine = by_id[ENGINE_TRACE_ID]
     assert engine["status"] == "completed"
     assert [call["stage"] for call in engine["calls"]] == ["loop_direction_planned"]
-    assert engine["calls"][0]["call_emitter"] == "model"
+    # P11 (amended): the planner is a fixed-order engine stage — code chooses
+    # the next call, so the derived emitter is "code" (axis-B), not the old
+    # hardcoded "model".
+    assert engine["calls"][0]["call_emitter"] == "code"
+    assert engine["calls"][0]["purpose"] == "plan_next_iteration"
     assert engine["calls"][0]["s3_ref"].startswith("s3://trace-bucket/")
     assert engine["calls"][0]["sha256"].startswith("sha256:")
     assert engine["calls"][0]["node_id"] is None
@@ -739,14 +765,35 @@ async def test_engine_and_node_pointer_aggregation(tables, enabled):
     assert node1["evidence_bundles"] == [f"evidence_bundle:{EVIDENCE_ID}"]
     assert node1["icp_set_hash"] == sha256_json({"icp_set": "run1"})
     assert node1["eval_version"]["scoring_version"] == "scoring:v9"
-    assert node1["judge_verdicts"] == []  # item 5.4 owns judge traces
+    # P2: per-ICP scorer judgment pointers project as first-class verdicts.
+    verdicts = node1["judge_verdicts"]
+    assert len(verdicts) == 2  # third per-ICP row has no scorer trace ref
+    assert all(v["verdict_kind"] == "scorer_judgment_trace" for v in verdicts)
+    assert all(
+        v["s3_ref"].startswith("s3://trace-bucket/research-lab/scorer-traces/")
+        for v in verdicts
+    )
+    assert all(v["teacher_model_flag"] is True for v in verdicts)
+    assert all(v["storage_state"] == "raw_trace_ref" for v in verdicts)
     assert node1["trace_doc"]["reflection_count"] == 1
+    assert node1["trace_doc"]["judge_verdict_count"] == 2
 
-    # Node-2 (build crashed, never scored): draft trace only, crash status.
+    # Node-2 (build crashed, never scored): draft trace + P4 diagnostic
+    # artifact pointer, crash status.
     node2 = by_id[execution_trace_id_for_node(RUN_ID, "node-2")]
     assert node2["status"] == "crash"
     assert node2["score_bundle_ref"] == "score_bundle:unavailable"
-    assert [c["call_kind"] for c in node2["calls"]] == ["engine_raw_trace"]
+    assert [c["call_kind"] for c in node2["calls"]] == [
+        "engine_raw_trace",
+        "build_diagnostic_artifact",
+    ]
+    diagnostic = node2["calls"][1]
+    assert diagnostic["artifact_kind"] == "code_build_failure"
+    assert diagnostic["s3_ref"].startswith("s3://artifact-bucket/")
+    assert diagnostic["sha256"].startswith("sha256:")
+    assert diagnostic["iteration"] == 2
+    assert diagnostic["target_files"] == ["qualify/sources.py"]
+    assert node2["judge_verdicts"] == []  # never scored
 
 
 async def test_evidence_bundle_snapshots_and_gate_refs(tables, enabled):
@@ -1125,3 +1172,47 @@ def test_deterministic_ids_are_stable_uuids():
         ORPHAN_EVIDENCE_ID,
         trajectory_id_for_run(RUN_ID),
     }) == 8
+
+
+async def test_run_summary_contract_marks_summary_presence(enabled, monkeypatch):
+    """P14 / v5 §8.3 run-summary contract: presence is recorded on the engine
+    row; with enforcement on, a summary-less completed terminal is a crash."""
+    store = FakeStore(build_run_tables())
+    await project_run(RUN_ID, store=store, dry_run=False)
+    engine = {
+        row["run_id"]: row for row in store.inserted[EXECUTION_TRACES_TABLE]
+    }[ENGINE_TRACE_ID]
+    # Fixture terminal event predates the contract → absent, not enforced.
+    assert engine["trace_doc"]["run_summary_present"] is False
+    assert engine["status"] == "completed"
+
+    monkeypatch.setenv("RESEARCH_LAB_RUN_SUMMARY_CONTRACT_ENFORCED", "true")
+    store2 = FakeStore(build_run_tables())
+    await project_run(RUN_ID, store=store2, dry_run=False)
+    engine2 = {
+        row["run_id"]: row for row in store2.inserted[EXECUTION_TRACES_TABLE]
+    }[ENGINE_TRACE_ID]
+    assert engine2["status"] == "crash"
+
+    # A terminal event carrying the run_summary block stays completed.
+    monkeypatch.setenv("RESEARCH_LAB_RUN_SUMMARY_CONTRACT_ENFORCED", "true")
+    tables = build_run_tables()
+    terminal = tables["research_lab_auto_research_loop_events"][-1]
+    assert terminal["event_type"] == "loop_completed"
+    terminal["event_doc"]["run_summary"] = {
+        "schema_version": "1.0",
+        "status": "completed",
+        "stop_reason": "max_iterations",
+        "iterations_completed": 2,
+        "selected_candidate_count": 1,
+        "wall_clock_seconds": 480.0,
+        "cost_ledger": terminal["cost_ledger"],
+        "openrouter_call_count": 3,
+    }
+    store3 = FakeStore(tables)
+    await project_run(RUN_ID, store=store3, dry_run=False)
+    engine3 = {
+        row["run_id"]: row for row in store3.inserted[EXECUTION_TRACES_TABLE]
+    }[ENGINE_TRACE_ID]
+    assert engine3["status"] == "completed"
+    assert engine3["trace_doc"]["run_summary_present"] is True

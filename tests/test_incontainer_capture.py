@@ -65,6 +65,13 @@ POINTER_KEYS = {
     "incontainer_trace_call_count",
 }
 
+# P5: dropped captures carry an explicit dropped marker instead of
+# masquerading as populated rows (call_count is zeroed, dropped count kept).
+DROPPED_POINTER_KEYS = POINTER_KEYS | {
+    "incontainer_trace_dropped",
+    "incontainer_trace_dropped_call_count",
+}
+
 
 @pytest.fixture(autouse=True)
 def _clear_trace_env(monkeypatch):
@@ -685,9 +692,11 @@ async def test_default_sink_counts_and_drops_without_s3_env(caplog):
         rows = await _score_items(runner, _benchmark_items(3))
     for row in rows:
         assert row["incontainer_trace_ref"] == ""
-        assert row["incontainer_trace_call_count"] == 1
+        assert row["incontainer_trace_call_count"] == 0
+        assert row["incontainer_trace_dropped"] is True
+        assert row["incontainer_trace_dropped_call_count"] == 1
         assert row["incontainer_trace_sha256"].startswith("sha256:")
-        assert set(row) == PRE_CAPTURE_ROW_KEYS | POINTER_KEYS
+        assert set(row) == PRE_CAPTURE_ROW_KEYS | DROPPED_POINTER_KEYS
     drop_records = [
         record
         for record in caplog.records
@@ -740,9 +749,11 @@ async def test_sink_failure_never_fails_the_run(caplog):
     for row in rows:
         assert row["status"] == "completed"
         assert row["candidate_company_scores"] == [42.0]
-        # Capture still recorded via hash/count pointers; ref empty.
+        # Capture attempt still recorded via hash + dropped marker; ref empty.
         assert row["incontainer_trace_ref"] == ""
-        assert row["incontainer_trace_call_count"] == 1
+        assert row["incontainer_trace_call_count"] == 0
+        assert row["incontainer_trace_dropped"] is True
+        assert row["incontainer_trace_dropped_call_count"] == 1
     assert any(
         "research_lab_incontainer_trace_sink_failed" in record.getMessage()
         for record in caplog.records
@@ -849,7 +860,10 @@ def _build_bundle(rows: list[dict]) -> dict:
     )
 
 
-def test_pointer_fields_do_not_change_bundle_hash_and_never_leak_content():
+def test_pointer_fields_ride_bundle_rows_and_never_leak_content():
+    """P12/P13: trace POINTERS survive the aggregation rebuild into the bundle
+    (previously stripped — the 'orphaned in S3' gap), the hash covers them
+    deterministically, and no trace CONTENT ever reaches a bundle row."""
     base_rows = [
         {
             "icp_ref": f"icp-{index}",
@@ -871,13 +885,27 @@ def test_pointer_fields_do_not_change_bundle_hash_and_never_leak_content():
             "incontainer_trace_ref": "s3://trace-bucket/lab/run-1/icp.json",
             "incontainer_trace_sha256": sha256_json([{"seq": 1}]),
             "incontainer_trace_call_count": 3,
+            "scorer_trace_ref": "s3://trace-bucket/lab/scorer-traces/run-1/icp.json",
+            "scorer_trace_sha256": sha256_json({"doc": 1}),
         }
         for row in base_rows
     ]
-    bundle_without = _build_bundle(base_rows)
     bundle_with = _build_bundle(pointered_rows)
-    assert bundle_with["score_bundle_hash"] == bundle_without["score_bundle_hash"]
-    # The verifier's normalized bundle rows carry no trace material at all.
     for row in bundle_with["aggregates"]["per_icp_results"]:
-        assert not (set(row) & POINTER_KEYS)
-        assert "request_body_b64" not in json.dumps(row)
+        assert row["incontainer_trace_ref"] == "s3://trace-bucket/lab/run-1/icp.json"
+        assert row["incontainer_trace_call_count"] == 3
+        assert row["scorer_trace_ref"].startswith("s3://trace-bucket/lab/scorer-traces/")
+        # pointers only — never decoded trace content
+        serialized = json.dumps(row)
+        assert "request_body_b64" not in serialized
+        assert "response_body_b64" not in serialized
+    # Deterministic: same pointer inputs → same hash; different pointer
+    # inputs → different hash (the pointers are now covered by the signature).
+    assert (
+        _build_bundle(pointered_rows)["score_bundle_hash"]
+        == bundle_with["score_bundle_hash"]
+    )
+    assert (
+        _build_bundle(base_rows)["score_bundle_hash"]
+        != bundle_with["score_bundle_hash"]
+    )

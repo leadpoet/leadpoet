@@ -173,7 +173,25 @@ def _get_embedding_sync(text: str, max_retries: int = 3) -> Optional[np.ndarray]
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get('data') and len(data['data']) > 0:
-                    return np.array(data['data'][0]['embedding'])
+                    embedding = data['data'][0]['embedding']
+                    # trajectoryimprovements.md P19: embeddings capture —
+                    # input-hash + model + output-hash so novelty-gate /
+                    # reranker runs are reproducible. Never affects the call.
+                    try:
+                        from research_lab.openrouter_telemetry import (
+                            record_openrouter_embeddings,
+                        )
+
+                        record_openrouter_embeddings(
+                            channel="validator",
+                            purpose="stage5_sub_industry",
+                            model_id=EMBED_MODEL,
+                            input_texts=[text],
+                            embeddings=[embedding],
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return np.array(embedding)
                 print(f"   ⚠️ Embedding API: 200 but no data (attempt {attempt}/{max_retries})")
             else:
                 print(f"   ⚠️ Embedding API: HTTP {resp.status_code} (attempt {attempt}/{max_retries}): {resp.text[:200]}")
@@ -209,6 +227,28 @@ def _call_llm_sync(prompt: str, max_retries: int = 3) -> Optional[str]:
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get('choices') and len(data['choices']) > 0:
+                    # trajectoryimprovements.md P1: sub-industry classification
+                    # verdicts are training labels — capture the exchange.
+                    try:
+                        from research_lab.openrouter_telemetry import (
+                            record_openrouter_trace,
+                        )
+
+                        record_openrouter_trace(
+                            channel="validator",
+                            purpose="stage5_sub_industry_classify",
+                            stage="scorer_judgment",
+                            model_id=CLASSIFY_LLM_MODEL,
+                            request_body={
+                                "model": CLASSIFY_LLM_MODEL,
+                                "messages": [{"role": "user", "content": prompt}],
+                                "temperature": 0,
+                                "max_tokens": 500,
+                            },
+                            response_doc=data,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                     return data['choices'][0]['message']['content'].strip()
                 print(f"   ⚠️ LLM API: 200 but no choices (attempt {attempt}/{max_retries})")
             else:

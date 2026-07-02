@@ -65,6 +65,25 @@ def sha256_json(data: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(data).encode("utf-8")).hexdigest()
 
 
+# trajectoryimprovements.md P12/P13: capture pointers and grading rows must
+# survive the aggregation rebuild — before this passthrough, per-ICP trace
+# refs written by the evaluator were stripped here and never reached the
+# bundle the trajectory projector reads (the "orphaned in S3" gap).
+PER_ICP_CAPTURE_PASSTHROUGH_KEYS = (
+    "incontainer_trace_ref",
+    "incontainer_trace_sha256",
+    "incontainer_trace_call_count",
+    "incontainer_trace_dropped",
+    "incontainer_trace_dropped_call_count",
+    "scorer_trace_ref",
+    "scorer_trace_sha256",
+    "l0_findings",
+    "provider_excluded",
+    "sourced_zero_no_error",
+    "reference_sourced_zero_no_error",
+)
+
+
 def compute_evaluation_aggregates(
     per_icp_results: Sequence[Mapping[str, Any]],
     *,
@@ -107,6 +126,9 @@ def compute_evaluation_aggregates(
             "delta_vs_base": round(delta, 6),
             "failure_reason": str(item.get("failure_reason") or ""),
         }
+        for key in PER_ICP_CAPTURE_PASSTHROUGH_KEYS:
+            if key in item:
+                row[key] = item[key]
         normalized_rows.append(row)
         base_scores.append(base_score)
         candidate_scores.append(candidate_score)

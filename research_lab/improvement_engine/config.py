@@ -44,6 +44,10 @@ class ImprovementEngineConfig:
     auto_generate_patches: bool = False
     auto_open_prs: bool = False
     auto_submit_candidates: bool = False
+    # Plan §8.3 contract flag: fix_generator additionally hardcodes
+    # auto_apply_allowed=False and asserts this stays false — patches are
+    # never auto-applied regardless of env.
+    auto_apply_patches: bool = False
     publish_miner_opportunities: bool = False
     max_llm_cost_usd_per_scan: float = 20.0
     model: str = ""
@@ -65,6 +69,7 @@ class ImprovementEngineConfig:
             auto_generate_patches=_flag("RESEARCH_LAB_IMPROVEMENT_ENGINE_AUTO_GENERATE_PATCHES", False),
             auto_open_prs=_flag("RESEARCH_LAB_IMPROVEMENT_ENGINE_AUTO_OPEN_PRS", False),
             auto_submit_candidates=_flag("RESEARCH_LAB_IMPROVEMENT_ENGINE_AUTO_SUBMIT_CANDIDATES", False),
+            auto_apply_patches=_flag("RESEARCH_LAB_IMPROVEMENT_ENGINE_AUTO_APPLY_PATCHES", False),
             publish_miner_opportunities=_flag("RESEARCH_LAB_IMPROVEMENT_ENGINE_PUBLISH_MINER_OPPORTUNITIES", False),
             max_llm_cost_usd_per_scan=max(0.0, _float("RESEARCH_LAB_IMPROVEMENT_ENGINE_MAX_LLM_COST_USD_PER_SCAN", 20.0)),
             model=os.getenv("RESEARCH_LAB_IMPROVEMENT_ENGINE_MODEL", "").strip(),

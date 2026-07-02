@@ -176,6 +176,48 @@ def test_recorder_writes_kms_encrypted_object_with_pointer(fake_boto3, trace_env
     assert "[redacted-openrouter-key]" in body_text
 
 
+def test_recorder_stamps_derived_axis_provenance(fake_boto3, trace_env):
+    """P11: every persisted trace carries derived call_emitter / purpose /
+    teacher_model_flag, and captures inside a call_episode scope carry the
+    episode correlation id."""
+    from research_lab.axis_provenance import call_episode
+
+    recorder = worker_mod._OpenRouterRawTraceRecorder(ResearchLabGatewayConfig())
+    request_doc = {"url": "u", "method": "POST", "body": {}}
+    recorder.capture(
+        run_id="run-abc", stage="loop_planner", request_doc=request_doc,
+        response_doc={}, outcome="response",
+    )
+    recorder.capture(
+        run_id="run-abc", stage="plan_alignment_judge", request_doc=request_doc,
+        response_doc={}, outcome="response",
+    )
+    with call_episode(run_id="run-abc", iteration=2, inspection_round=3):
+        recorder.capture(
+            run_id="run-abc", stage="source_inspection", request_doc=request_doc,
+            response_doc={}, outcome="response",
+        )
+    recorder.flush()
+
+    payloads = {p["stage"]: p for p in (json.loads(put["Body"]) for put in fake_boto3)}
+    planner = payloads["loop_planner"]
+    assert planner["call_emitter"] == "code"
+    assert planner["purpose"] == "plan_next_iteration"
+    assert planner["teacher_model_flag"] is False
+    assert "episode" not in planner
+
+    judge = payloads["plan_alignment_judge"]
+    assert judge["call_emitter"] == "code"
+    assert judge["teacher_model_flag"] is True
+
+    inspection = payloads["source_inspection"]
+    assert inspection["call_emitter"] == "model"
+    assert inspection["episode"] == {
+        "run_id": "run-abc", "iteration": 2, "inspection_round": 3,
+    }
+    assert inspection["episode_id"] == "run-abc:i2:r3"
+
+
 def test_recorder_seq_is_global_per_run_across_stages(fake_boto3, trace_env):
     recorder = worker_mod._OpenRouterRawTraceRecorder(ResearchLabGatewayConfig())
     request_doc = {"url": "u", "method": "POST", "body": {}}

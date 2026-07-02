@@ -7,6 +7,12 @@ from typing import Any, Mapping
 from .langfuse_client import observation, update_observation
 from .score_export import export_score_bundle_scores, langfuse_trace_id_from_observation
 
+__all__ = [
+    "observation",
+    "safe_score_bundle_output",
+    "finish_score_bundle_observation",
+]
+
 
 def safe_score_bundle_output(score_bundle: Mapping[str, Any]) -> dict[str, Any]:
     aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}

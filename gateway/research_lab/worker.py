@@ -80,6 +80,11 @@ from research_lab.reimbursements import (
     compute_reimbursement_award,
 )
 from research_lab.auto_research_prompt import coerce_component_registry
+from research_lab.axis_provenance import (
+    current_call_episode,
+    episode_id,
+    provenance_for_stage,
+)
 from research_lab.canonical import canonical_json, sha256_bytes, sha256_json
 from research_lab.eval import (
     DockerPrivateModelRunner,
@@ -702,19 +707,30 @@ class _OpenRouterRawTraceRecorder:
                 )
                 if segment
             )
-            payload = _redact_raw_trace_value(
-                {
-                    "schema_version": "1.0",
-                    "artifact_type": "research_lab_raw_llm_trace",
-                    "run_id": str(run_id),
-                    "stage": str(stage or ""),
-                    "seq": seq,
-                    "outcome": str(outcome or ""),
-                    "captured_at": datetime.now(timezone.utc).isoformat(),
-                    "request": dict(request_doc),
-                    "response": response_doc,
-                }
-            )
+            # P11: derived axis-A/B provenance on every persisted call. The
+            # emitter/teacher values come from the single auditable mapping in
+            # research_lab/axis_provenance.py, never per-stream constants.
+            provenance = provenance_for_stage(stage)
+            trace_doc: dict[str, Any] = {
+                "schema_version": "1.1",
+                "artifact_type": "research_lab_raw_llm_trace",
+                "run_id": str(run_id),
+                "stage": str(stage or ""),
+                "seq": seq,
+                "outcome": str(outcome or ""),
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+                "call_emitter": provenance["call_emitter"],
+                "purpose": provenance["purpose"],
+                "component": provenance["component"],
+                "teacher_model_flag": provenance["teacher_model_flag"],
+                "request": dict(request_doc),
+                "response": response_doc,
+            }
+            episode = current_call_episode()
+            if episode:
+                trace_doc["episode"] = episode
+                trace_doc["episode_id"] = episode_id(episode)
+            payload = _redact_raw_trace_value(trace_doc)
             body = canonical_json(payload).encode("utf-8")
             digest = sha256_bytes(body)
             self._submit(run_id=str(run_id), bucket=bucket, object_key=object_key, body=body)
@@ -979,6 +995,11 @@ class ResearchLabHostedWorker:
         self._raw_trace_recorder = _OpenRouterRawTraceRecorder(self.config)
 
     async def run_forever(self) -> None:
+        # trajectoryimprovements.md P5: one structured capture health block at
+        # startup; refuses to start in production when capture is degraded.
+        from gateway.research_lab.capture_health import enforce_capture_health
+
+        enforce_capture_health(self.config, worker_kind="hosted_worker")
         processed = 0
         last_idle_log = 0.0
         last_error_log = 0.0
@@ -1861,7 +1882,15 @@ class ResearchLabHostedWorker:
                 candidate_patch_manifest=candidate_patch_manifest,
                 candidate_model_manifest=finalist.get("candidate_model_manifest"),
                 candidate_source_diff_hash=finalist.get("candidate_source_diff_hash"),
-                candidate_build_doc=dict(finalist.get("candidate_build_doc") or {}),
+                candidate_build_doc={
+                    **dict(finalist.get("candidate_build_doc") or {}),
+                    # Worker-side annotation (deliberately outside the engine's
+                    # build_doc_hash, which covers only engine-produced fields):
+                    # carries the loop node id to the scoring worker so score
+                    # bundles stamp the deterministic execution_trace:<uuid5>
+                    # ref the trajectory projector writes (bundle→trace join).
+                    "loop_node_id": str(finalist.get("node_id") or ""),
+                },
                 hypothesis_doc=hypothesis_doc,
                 redacted_public_summary=redacted_summary,
             )

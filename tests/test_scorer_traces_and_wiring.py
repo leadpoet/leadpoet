@@ -474,7 +474,10 @@ async def test_run_baseline_icp_no_prefix_counts_and_drops_once(fake_s3, caplog)
     for summary in summaries:
         diagnostics = summary["diagnostics"]
         assert diagnostics["incontainer_trace_ref"] == ""
-        assert diagnostics["incontainer_trace_call_count"] == 1
+        # P5: dropped capture is explicit — zero live count, dropped marker.
+        assert diagnostics["incontainer_trace_call_count"] == 0
+        assert diagnostics["incontainer_trace_dropped"] is True
+        assert diagnostics["incontainer_trace_dropped_call_count"] == 1
         assert diagnostics["incontainer_trace_sha256"].startswith("sha256:")
         assert "scorer_trace_ref" not in diagnostics
     drop_logs = [
@@ -513,6 +516,7 @@ async def test_run_baseline_icp_trace_failure_never_affects_scoring(fake_s3, mon
 
 async def test_incontainer_upload_failure_keeps_sha_count_pointers(fake_s3, monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX", "s3://trace-bucket/x")
+    monkeypatch.setenv("RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID", "kms-key-42")
     fake_s3["fail"]["error"] = RuntimeError("s3 exploded for test")
     monkeypatch.setenv("RESEARCH_LAB_SCORER_TRACE_CAPTURE", "false")
     worker = _worker()
@@ -524,7 +528,10 @@ async def test_incontainer_upload_failure_keeps_sha_count_pointers(fake_s3, monk
     )
     diagnostics = summary["diagnostics"]
     assert diagnostics["incontainer_trace_ref"] == ""  # failed write, no dangling wrong ref
-    assert diagnostics["incontainer_trace_call_count"] == 1
+    # P5: failed persistence surfaces as an explicit drop, not a populated row.
+    assert diagnostics["incontainer_trace_call_count"] == 0
+    assert diagnostics["incontainer_trace_dropped"] is True
+    assert diagnostics["incontainer_trace_dropped_call_count"] == 1
     assert summary["score"] == pytest.approx((72.5 + 0.0) / 2)
 
 
@@ -622,6 +629,7 @@ async def test_candidate_wiring_through_real_evaluator(fake_s3, monkeypatch):
     rows gain the candidate-keyed incontainer_trace_ref and the scorer docs land
     under scorer-traces/{candidate_id}/."""
     monkeypatch.setenv("RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX", "s3://trace-bucket/lab/traces")
+    monkeypatch.setenv("RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID", "kms-key-42")
     monkeypatch.setenv("RESEARCH_LAB_SCORER_TRACE_S3_PREFIX", "s3://trace-bucket/lab/traces")
     worker = _worker()
     items = [_benchmark_item("a")]

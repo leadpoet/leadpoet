@@ -36,16 +36,36 @@
       "maxLength": 256
     },
     "role": {
-      "enum": ["champion", "candidate", "shadow", "baseline_arm", "reference"]
+      "enum": [
+        "champion",
+        "candidate",
+        "shadow",
+        "baseline_arm",
+        "reference"
+      ]
     },
     "rung": {
-      "enum": ["L0", "L1", "L2", "L3", "L4", "anchor"]
+      "enum": [
+        "L0",
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "anchor"
+      ]
     },
     "status": {
-      "enum": ["completed", "crash", "timeout"]
+      "enum": [
+        "completed",
+        "crash",
+        "timeout"
+      ]
     },
     "lane_id": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "format": "uuid"
     },
     "icp_set_hash": {
@@ -55,7 +75,10 @@
     },
     "eval_version": {
       "type": "object",
-      "required": ["verifier_hash", "judge_version_hash"],
+      "required": [
+        "verifier_hash",
+        "judge_version_hash"
+      ],
       "properties": {
         "verifier_hash": {
           "type": "string",
@@ -85,7 +108,17 @@
     "judge_verdicts": {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/judge_verdict"
+        "anyOf": [
+          {
+            "$ref": "#/$defs/judge_verdict"
+          },
+          {
+            "$ref": "#/$defs/scorer_judgment_trace_verdict"
+          },
+          {
+            "$ref": "#/$defs/truncation_marker"
+          }
+        ]
       }
     },
     "outputs_ref": {
@@ -102,7 +135,10 @@
       "$ref": "#/$defs/cost_ledger"
     },
     "attestation_ref": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "maxLength": 256
     }
   },
@@ -144,13 +180,26 @@
           "maxLength": 256
         },
         "purpose": {
-          "enum": ["search", "scrape", "extract", "judge", "engine_internal", "other"]
+          "enum": [
+            "search",
+            "scrape",
+            "extract",
+            "judge",
+            "engine_internal",
+            "other"
+          ]
         },
         "call_emitter": {
-          "enum": ["model", "code"]
+          "enum": [
+            "model",
+            "code"
+          ]
         },
         "component": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "maxLength": 128
         },
         "request_hash": {
@@ -165,7 +214,10 @@
         },
         "tokens": {
           "type": "object",
-          "required": ["in", "out"],
+          "required": [
+            "in",
+            "out"
+          ],
           "properties": {
             "in": {
               "type": "integer",
@@ -190,7 +242,14 @@
     },
     "evidence_ref": {
       "type": "object",
-      "required": ["url", "fetch_ts", "content_hash", "snapshot_ref", "signature", "used_in_signal_idx"],
+      "required": [
+        "url",
+        "fetch_ts",
+        "content_hash",
+        "snapshot_ref",
+        "signature",
+        "used_in_signal_idx"
+      ],
       "properties": {
         "url": {
           "type": "string",
@@ -216,7 +275,10 @@
           "maxLength": 512
         },
         "used_in_signal_idx": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         }
       },
@@ -224,7 +286,12 @@
     },
     "judge_verdict": {
       "type": "object",
-      "required": ["input_hash", "verdict_hash", "judge_version_hash", "cached"],
+      "required": [
+        "input_hash",
+        "verdict_hash",
+        "judge_version_hash",
+        "cached"
+      ],
       "properties": {
         "input_hash": {
           "type": "string",
@@ -249,7 +316,11 @@
     },
     "cost_ledger": {
       "type": "object",
-      "required": ["total_usd", "by_provider", "by_purpose"],
+      "required": [
+        "total_usd",
+        "by_provider",
+        "by_purpose"
+      ],
       "properties": {
         "total_usd": {
           "type": "number",
@@ -268,6 +339,84 @@
             "type": "number",
             "minimum": 0
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "scorer_judgment_trace_verdict": {
+      "type": "object",
+      "required": [
+        "verdict_kind",
+        "icp_ref",
+        "stage"
+      ],
+      "properties": {
+        "verdict_kind": {
+          "const": "scorer_judgment_trace"
+        },
+        "icp_ref": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "s3_ref": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "sha256": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "candidate_ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "score_bundle_ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 256
+        },
+        "is_reference_model": {
+          "type": "boolean"
+        },
+        "stage": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "source": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "storage_state": {
+          "enum": [
+            "raw_trace_ref",
+            "metadata_only"
+          ]
+        },
+        "teacher_model_flag": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "truncation_marker": {
+      "type": "object",
+      "required": [
+        "call_kind",
+        "omitted_count"
+      ],
+      "properties": {
+        "call_kind": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "omitted_count": {
+          "type": "integer",
+          "minimum": 1
         }
       },
       "additionalProperties": false

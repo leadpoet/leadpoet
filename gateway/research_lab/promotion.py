@@ -1039,6 +1039,16 @@ class ResearchLabPromotionController:
                 _short_ref(candidate["candidate_id"]),
                 _short_ref(merged_event.get("promotion_event_id")),
             )
+            private_source_status = await self._maybe_finalize_missing_private_source_push(
+                candidate=candidate,
+                score_bundle_row=score_bundle_row,
+                score_bundle=score_bundle,
+                active=active,
+                candidate_parent=candidate_parent,
+                rolling_window_hash=rolling_window_hash,
+                improvement_points=improvement_points,
+                threshold=threshold,
+            )
             reward_status = await self._maybe_finalize_missing_champion_reward(
                 candidate=candidate,
                 score_bundle_row=score_bundle_row,
@@ -1050,6 +1060,7 @@ class ResearchLabPromotionController:
                 "status": "already_promoted",
                 "promotion_event_id": str(merged_event.get("promotion_event_id") or ""),
                 "private_model_version_id": str(merged_event.get("private_model_version_id") or ""),
+                "private_source_status": private_source_status,
                 **reward_status,
             }
 
@@ -1606,6 +1617,58 @@ class ResearchLabPromotionController:
             event_doc={"champion_reward_id": str(row["champion_reward_id"])},
         )
         return {"champion_reward_status": "created", "champion_reward_id": str(row["champion_reward_id"])}
+
+    async def _maybe_finalize_missing_private_source_push(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_row: Mapping[str, Any],
+        score_bundle: Mapping[str, Any],
+        active: ActivePrivateModel,
+        candidate_parent: str,
+        rolling_window_hash: str,
+        improvement_points: float,
+        threshold: float,
+    ) -> dict[str, Any]:
+        candidate_id = str(candidate["candidate_id"])
+        score_bundle_id = str(score_bundle_row["score_bundle_id"])
+        existing_events = await select_many(
+            "research_lab_private_repo_commit_events",
+            columns="commit_event_id,commit_status,git_commit_sha,created_at",
+            filters=(("candidate_id", candidate_id), ("score_bundle_id", score_bundle_id)),
+            order_by=(("created_at", True),),
+            limit=1,
+        )
+        if existing_events:
+            return {
+                "status": "already_recorded",
+                "commit_status": str(existing_events[0].get("commit_status") or ""),
+                "commit_event_id": str(existing_events[0].get("commit_event_id") or ""),
+            }
+        if not self.config.auto_commit_enabled:
+            return {"status": "skipped_auto_commit_disabled"}
+        manifest_doc = candidate.get("candidate_model_manifest_doc")
+        if not isinstance(manifest_doc, Mapping):
+            return {"status": "skipped_candidate_manifest_missing"}
+        try:
+            new_artifact = PrivateModelArtifactManifest.from_mapping(manifest_doc)
+            errors = validate_private_model_artifact_manifest(new_artifact)
+            if errors:
+                return {"status": "skipped_candidate_manifest_invalid", "errors": errors[:5]}
+        except Exception as exc:
+            return {"status": "skipped_candidate_manifest_invalid", "error": type(exc).__name__}
+        return await self._maybe_push_private_repo_candidate(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            score_bundle=score_bundle,
+            active=active,
+            new_artifact=new_artifact,
+            active_parent=candidate_parent,
+            candidate_parent=candidate_parent,
+            rolling_window_hash=rolling_window_hash,
+            improvement_points=improvement_points,
+            threshold=threshold,
+        )
 
     async def _maybe_finalize_missing_champion_reward(
         self,

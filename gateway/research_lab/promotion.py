@@ -1039,10 +1039,18 @@ class ResearchLabPromotionController:
                 _short_ref(candidate["candidate_id"]),
                 _short_ref(merged_event.get("promotion_event_id")),
             )
+            reward_status = await self._maybe_finalize_missing_champion_reward(
+                candidate=candidate,
+                score_bundle_row=score_bundle_row,
+                score_bundle=score_bundle,
+                improvement_points=improvement_points,
+                threshold=threshold,
+            )
             return {
                 "status": "already_promoted",
                 "promotion_event_id": str(merged_event.get("promotion_event_id") or ""),
                 "private_model_version_id": str(merged_event.get("private_model_version_id") or ""),
+                **reward_status,
             }
 
         if candidate_parent != active_parent:
@@ -1598,6 +1606,35 @@ class ResearchLabPromotionController:
             event_doc={"champion_reward_id": str(row["champion_reward_id"])},
         )
         return {"champion_reward_status": "created", "champion_reward_id": str(row["champion_reward_id"])}
+
+    async def _maybe_finalize_missing_champion_reward(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_row: Mapping[str, Any],
+        score_bundle: Mapping[str, Any],
+        improvement_points: float,
+        threshold: float,
+    ) -> dict[str, Any]:
+        created_events = await select_many(
+            "research_lab_candidate_promotion_events",
+            columns="promotion_event_id,event_type,created_at",
+            filters=(("candidate_id", str(candidate["candidate_id"])), ("event_type", "champion_reward_created")),
+            order_by=(("created_at", True),),
+            limit=1,
+        )
+        if created_events:
+            return {
+                "champion_reward_status": "already_created",
+                "champion_reward_event_id": str(created_events[0].get("promotion_event_id") or ""),
+            }
+        return await self._maybe_create_champion_reward(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            score_bundle=score_bundle,
+            improvement_points=improvement_points,
+            threshold=threshold,
+        )
 
 
 async def reconcile_pending_champion_rewards(

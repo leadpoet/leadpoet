@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 from importlib import import_module
 import inspect
+import logging
 import os
+import re
 from typing import Any, Awaitable, Callable, Mapping, Sequence, Union
 
 from leadpoet_verifier.aggregation import per_icp_normalized_score
@@ -13,7 +15,7 @@ from leadpoet_verifier.research_evaluation import (
     build_research_evaluation_score_bundle,
     score_bundle_hash,
 )
-from research_lab.canonical import sha256_json
+from research_lab.canonical import canonical_json, sha256_json
 from research_lab.employee_buckets import normalize_employee_count_bucket
 
 from .artifacts import PrivateModelArtifactManifest, validate_private_model_artifact_manifest
@@ -25,10 +27,15 @@ from .patches import (
 )
 from .private_runtime import (
     PrivateModelRuntimeError,
+    begin_incontainer_trace_collection,
     canonicalize_private_model_icp,
     employee_count_buckets_for_icp,
+    end_incontainer_trace_collection,
     ensure_private_model_outputs,
+    incontainer_trace_capture_enabled,
 )
+
+logger = logging.getLogger(__name__)
 
 ModelRunner = Callable[
     [Mapping[str, Any], Mapping[str, Any]],
@@ -40,6 +47,18 @@ CompanyScorer = Callable[
 ]
 ParentFreshnessCheck = Callable[[Mapping[str, Any]], Union[Awaitable[None], None]]
 IcpCheckpoint = Callable[[Mapping[str, Any]], Union[Awaitable[None], None]]
+# Receives ``(icp_ref, entries)`` per completed ICP with the decoded
+# in-container trace entries. May be sync or async; a returned string is used
+# as the row's ``incontainer_trace_ref`` pointer. Sink failures are logged and
+# swallowed — capture never fails a run.
+TraceSink = Callable[[str, "list[dict[str, Any]]"], Union[Awaitable[Any], Any]]
+
+# Default trace sink configuration (used when no ``trace_sink`` is injected):
+# with the S3 prefix set, one JSON object per ICP is uploaded to
+# ``{prefix}/{run_or_candidate_ref}/{icp_ref}.json`` (SSE-KMS when the key id
+# is set); without it, entries are counted and dropped (logged once per eval).
+INCONTAINER_TRACE_S3_PREFIX_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX"
+INCONTAINER_TRACE_KMS_KEY_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID"
 
 # Company scores are normalized against a fixed lead budget per ICP when the
 # capped top-5 scoring flag is on; must match the verifier's advisory recompute
@@ -132,6 +151,7 @@ async def evaluate_private_model_pair(
     parent_freshness_check: ParentFreshnessCheck | None = None,
     icp_checkpoint: IcpCheckpoint | None = None,
     resume_results: Sequence[Mapping[str, Any]] | None = None,
+    trace_sink: TraceSink | None = None,
 ) -> dict[str, Any]:
     """Run a real paired base-vs-candidate evaluation.
 
@@ -143,6 +163,12 @@ async def evaluate_private_model_pair(
     previously completed per-ICP results (matched by icp_ref/icp_hash) that are
     reused instead of re-running their ICPs. Both default to off so existing
     callers are unchanged.
+
+    ``trace_sink`` (optional) receives the decoded in-container trace entries
+    per completed ICP (see ``TraceSink``); when ``None`` the default sink is
+    used (S3 upload when configured, count-and-drop otherwise). Capture is
+    gated by ``RESEARCH_LAB_INCONTAINER_TRACE_CAPTURE`` (default on) and is
+    pure observation: rows only ever gain pointer fields, never content.
     """
     artifact = artifact_manifest if isinstance(artifact_manifest, PrivateModelArtifactManifest) else PrivateModelArtifactManifest.from_mapping(artifact_manifest)
     benchmark_set = benchmark if isinstance(benchmark, SealedBenchmarkSet) else SealedBenchmarkSet.from_mapping(benchmark)
@@ -186,6 +212,9 @@ async def evaluate_private_model_pair(
 
     scorer = company_scorer or QualificationStyleCompanyScorer()
     runtime_patch = None if image_candidate else runtime_compatible_candidate_patch_manifest(patch)
+    # Resolve the trace sink once so the holdout gate's two scoring passes
+    # share one sink instance (and one log-once drop notice).
+    resolved_trace_sink = _resolve_trace_sink(trace_sink, run_context)
     if private_holdout_gate:
         per_icp_results, gate_result = await _score_with_private_holdout_gate(
             benchmark_items=benchmark_items,
@@ -199,6 +228,7 @@ async def evaluate_private_model_pair(
             parent_freshness_check=parent_freshness_check,
             icp_checkpoint=icp_checkpoint,
             resume_results=resume_results,
+            trace_sink=resolved_trace_sink,
         )
         return build_score_bundle_from_scored_icps(
             artifact_manifest=artifact,
@@ -222,6 +252,7 @@ async def evaluate_private_model_pair(
         parent_freshness_check=parent_freshness_check,
         icp_checkpoint=icp_checkpoint,
         resume_results=resume_results,
+        trace_sink=resolved_trace_sink,
     )
     return build_score_bundle_from_scored_icps(
         artifact_manifest=artifact,
@@ -246,6 +277,7 @@ async def score_private_model_pair_items(
     parent_freshness_check: ParentFreshnessCheck | None = None,
     icp_checkpoint: IcpCheckpoint | None = None,
     resume_results: Sequence[Mapping[str, Any]] | None = None,
+    trace_sink: TraceSink | None = None,
 ) -> list[dict[str, Any]]:
     """Score a subset of private benchmark items without building a bundle.
 
@@ -273,11 +305,19 @@ async def score_private_model_pair_items(
     concurrency 1 the serial semantics (latch visibility, freshness-check
     ordering) are preserved exactly; at higher settings ICPs inside one wave
     cannot see a latch raised by a wave-mate.
+
+    ``trace_sink`` (optional) receives decoded in-container trace entries per
+    completed ICP; rows that produced entries gain POINTER fields only
+    (``incontainer_trace_ref``/``incontainer_trace_sha256``/
+    ``incontainer_trace_call_count``). With capture disabled
+    (``RESEARCH_LAB_INCONTAINER_TRACE_CAPTURE=false``) or runners that emit no
+    trace markers, rows are byte-identical to the pre-capture shape.
     """
 
     scorer = company_scorer or QualificationStyleCompanyScorer()
     legacy_timeout_latch = _timeout_latch_legacy_enabled()
     provider_flake_retry = _provider_flake_retry_enabled()
+    effective_trace_sink = _resolve_trace_sink(trace_sink, run_context)
     concurrency = _candidate_scoring_concurrency()
     resume_rows = _resume_rows_by_ref(resume_results)
     per_icp_results: list[dict[str, Any]] = []
@@ -317,6 +357,7 @@ async def score_private_model_pair_items(
                         candidate_runtime_skip_reason=candidate_runtime_skip_reason,
                         legacy_timeout_latch=legacy_timeout_latch,
                         provider_flake_retry=provider_flake_retry,
+                        trace_sink=effective_trace_sink,
                     )
                     for _position, entry in pending
                 ),
@@ -379,6 +420,7 @@ async def _score_single_icp(
     candidate_runtime_skip_reason: str,
     legacy_timeout_latch: bool,
     provider_flake_retry: bool,
+    trace_sink: TraceSink | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run and score one benchmark ICP.
 
@@ -399,50 +441,65 @@ async def _score_single_icp(
     if not isinstance(icp, Mapping):
         raise RealEvaluatorRequired("benchmark item is missing private ICP payload")
     failure_reasons: list[str] = []
-    if base_runner is None:
-        base_outputs = []
-    else:
-        try:
-            base_outputs = ensure_private_model_outputs(
-                await _call_model_runner(base_runner, icp, run_context),
-                context_label=f"reference model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
-                require_non_empty=False,
-            )
-        except PrivateModelRuntimeError as exc:
-            if not _is_provider_backed_sourcing_error(exc):
-                raise
+    # In-container trace capture: install a per-task collector so runner calls
+    # (including sync runners hopping through asyncio.to_thread, which copies
+    # this context) can publish decoded trace entries. Tasks in a concurrent
+    # wave each carry their own context, so collectors never cross ICPs.
+    trace_entries: list[dict[str, Any]] | None = None
+    trace_token = None
+    base_trace_entry_count = 0
+    if trace_sink is not None:
+        trace_entries, trace_token = begin_incontainer_trace_collection()
+    try:
+        if base_runner is None:
             base_outputs = []
-            failure_reasons.append("reference_model_runtime_provider_error")
-    candidate_context = dict(run_context)
-    if not image_candidate:
-        if runtime_patch is None:
-            raise RealEvaluatorRequired("candidate patch runtime payload is required for patch candidates")
-        candidate_context["patch"] = runtime_patch.to_dict()
-    markers = {"timed_out": False, "latch_reason": "", "skipped": False}
-    provider_excluded = False
-    if candidate_runtime_skip_reason:
-        candidate_outputs = []
-        failure_reasons.append(candidate_runtime_skip_reason)
-        markers["skipped"] = True
-    else:
-        candidate_outputs, candidate_failure_reason, provider_excluded = await _run_candidate_with_retries(
-            candidate_runner=candidate_runner,
-            icp=icp,
-            candidate_context=candidate_context,
-            item_label=str(item.get("icp_ref") or item.get("icp_hash") or ""),
-            legacy_timeout_latch=legacy_timeout_latch,
-            provider_flake_retry=provider_flake_retry,
-        )
-        if candidate_failure_reason:
-            failure_reasons.append(candidate_failure_reason)
-            if candidate_failure_reason == "candidate_model_runtime_timeout":
-                markers["timed_out"] = True
-                if legacy_timeout_latch:
+        else:
+            try:
+                base_outputs = ensure_private_model_outputs(
+                    await _call_model_runner(base_runner, icp, run_context),
+                    context_label=f"reference model for ICP {item.get('icp_ref') or item.get('icp_hash') or ''}",
+                    require_non_empty=False,
+                )
+            except PrivateModelRuntimeError as exc:
+                if not _is_provider_backed_sourcing_error(exc):
+                    raise
+                base_outputs = []
+                failure_reasons.append("reference_model_runtime_provider_error")
+        if trace_entries is not None:
+            base_trace_entry_count = len(trace_entries)
+        candidate_context = dict(run_context)
+        if not image_candidate:
+            if runtime_patch is None:
+                raise RealEvaluatorRequired("candidate patch runtime payload is required for patch candidates")
+            candidate_context["patch"] = runtime_patch.to_dict()
+        markers = {"timed_out": False, "latch_reason": "", "skipped": False}
+        provider_excluded = False
+        if candidate_runtime_skip_reason:
+            candidate_outputs = []
+            failure_reasons.append(candidate_runtime_skip_reason)
+            markers["skipped"] = True
+        else:
+            candidate_outputs, candidate_failure_reason, provider_excluded = await _run_candidate_with_retries(
+                candidate_runner=candidate_runner,
+                icp=icp,
+                candidate_context=candidate_context,
+                item_label=str(item.get("icp_ref") or item.get("icp_hash") or ""),
+                legacy_timeout_latch=legacy_timeout_latch,
+                provider_flake_retry=provider_flake_retry,
+            )
+            if candidate_failure_reason:
+                failure_reasons.append(candidate_failure_reason)
+                if candidate_failure_reason == "candidate_model_runtime_timeout":
+                    markers["timed_out"] = True
+                    if legacy_timeout_latch:
+                        markers["latch_reason"] = _candidate_runtime_skip_reason(candidate_failure_reason)
+                else:
                     markers["latch_reason"] = _candidate_runtime_skip_reason(candidate_failure_reason)
-            else:
-                markers["latch_reason"] = _candidate_runtime_skip_reason(candidate_failure_reason)
-    base_scores = await _maybe_await(scorer(base_outputs, icp, True)) if base_runner is not None else []
-    candidate_scores = await _maybe_await(scorer(candidate_outputs, icp, False))
+        base_scores = await _maybe_await(scorer(base_outputs, icp, True)) if base_runner is not None else []
+        candidate_scores = await _maybe_await(scorer(candidate_outputs, icp, False))
+    finally:
+        if trace_token is not None:
+            end_incontainer_trace_collection(trace_token)
     if base_runner is not None and not base_outputs:
         failure_reasons.append("reference_model_zero_companies")
     elif base_runner is not None and not base_scores:
@@ -472,6 +529,21 @@ async def _score_single_icp(
             and not any(reason.startswith("reference_model_runtime_") for reason in failure_reasons)
         ),
     }
+    if trace_sink is not None and trace_entries:
+        # POINTERS ONLY (fableanalysis §9.1 item 5): rows/bundles must never
+        # carry decoded bodies — the protected-material scanner rejects records
+        # containing content keys. The entries themselves go to the sink.
+        tagged_entries = [
+            {**entry, "runner_role": "base" if index < base_trace_entry_count else "candidate"}
+            for index, entry in enumerate(trace_entries)
+        ]
+        row.update(
+            await _finalize_incontainer_trace(
+                trace_sink=trace_sink,
+                icp_ref=row["icp_ref"] or row["icp_hash"],
+                entries=tagged_entries,
+            )
+        )
     return row, markers
 
 
@@ -610,6 +682,148 @@ def _benchmark_item_ref(item: Mapping[str, Any]) -> str:
     return str(item.get("icp_ref") or item.get("icp_hash") or "")
 
 
+def _resolve_trace_sink(trace_sink: TraceSink | None, run_context: Mapping[str, Any]) -> TraceSink | None:
+    """Resolve the effective in-container trace sink for one evaluation.
+
+    Returns ``None`` when capture is disabled — the operator kill switch
+    overrides injected sinks too, so ``RESEARCH_LAB_INCONTAINER_TRACE_CAPTURE=
+    false`` turns the whole pipeline off in one place.
+    """
+    if not incontainer_trace_capture_enabled():
+        return None
+    if trace_sink is not None:
+        return trace_sink
+    return _build_default_trace_sink(run_context)
+
+
+def _build_default_trace_sink(run_context: Mapping[str, Any]) -> TraceSink:
+    prefix = str(os.getenv(INCONTAINER_TRACE_S3_PREFIX_ENV) or "").strip().rstrip("/")
+    run_ref = _incontainer_trace_run_ref(run_context)
+    if not prefix:
+        state = {"logged": False, "dropped_entries": 0}
+
+        def _count_and_drop_sink(icp_ref: str, entries: list[dict[str, Any]]) -> str:
+            state["dropped_entries"] += len(entries)
+            if not state["logged"]:
+                state["logged"] = True
+                logger.info(
+                    "research_lab_incontainer_trace_dropped run_ref=%s reason=no_s3_prefix "
+                    "(set %s to persist in-container traces; further drops this eval are silent)",
+                    run_ref,
+                    INCONTAINER_TRACE_S3_PREFIX_ENV,
+                )
+            return ""
+
+        return _count_and_drop_sink
+
+    kms_key_id = str(os.getenv(INCONTAINER_TRACE_KMS_KEY_ENV) or "").strip()
+
+    async def _s3_sink(icp_ref: str, entries: list[dict[str, Any]]) -> str:
+        return await asyncio.to_thread(
+            _upload_incontainer_trace,
+            prefix,
+            run_ref,
+            str(icp_ref),
+            list(entries),
+            kms_key_id,
+        )
+
+    return _s3_sink
+
+
+def _upload_incontainer_trace(
+    prefix: str,
+    run_ref: str,
+    icp_ref: str,
+    entries: list[dict[str, Any]],
+    kms_key_id: str,
+) -> str:
+    try:
+        import boto3
+    except Exception as exc:  # pragma: no cover - environment-dependent
+        raise PrivateModelRuntimeError("boto3 is required for in-container trace S3 uploads") from exc
+    if not prefix.startswith("s3://"):
+        raise PrivateModelRuntimeError(f"invalid in-container trace S3 prefix: {prefix}")
+    bucket, _, key_prefix = prefix[5:].partition("/")
+    if not bucket:
+        raise PrivateModelRuntimeError(f"invalid in-container trace S3 prefix: {prefix}")
+    key = "/".join(
+        part
+        for part in (
+            key_prefix.strip("/"),
+            _safe_trace_key_component(run_ref),
+            f"{_safe_trace_key_component(icp_ref)}.json",
+        )
+        if part
+    )
+    payload = {
+        "schema_version": "1.0",
+        "artifact_type": "research_lab_incontainer_trace",
+        "run_ref": run_ref,
+        "icp_ref": icp_ref,
+        "call_count": len(entries),
+        "entries": entries,
+    }
+    put_kwargs: dict[str, Any] = {
+        "Bucket": bucket,
+        "Key": key,
+        "Body": canonical_json(payload).encode("utf-8"),
+        "ContentType": "application/json",
+    }
+    if kms_key_id:
+        put_kwargs["ServerSideEncryption"] = "aws:kms"
+        put_kwargs["SSEKMSKeyId"] = kms_key_id
+    boto3.client("s3").put_object(**put_kwargs)
+    return f"s3://{bucket}/{key}"
+
+
+def _safe_trace_key_component(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip()).strip("-.")
+    return cleaned or "unscoped"
+
+
+def _incontainer_trace_run_ref(run_context: Mapping[str, Any]) -> str:
+    for key in ("run_id", "candidate_build_ref", "ticket_id"):
+        value = str((run_context or {}).get(key) or "").strip()
+        if value:
+            return value
+    return "unscoped"
+
+
+async def _finalize_incontainer_trace(
+    *,
+    trace_sink: TraceSink,
+    icp_ref: str,
+    entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Hand entries to the sink and build the row's pointer-only fields.
+
+    Sink failures are logged and swallowed (capture must never fail a run);
+    the sha256/call-count pointers are kept so the row still records that the
+    capture happened even when persistence failed.
+    """
+    ref = ""
+    try:
+        result = trace_sink(icp_ref, entries)
+        if inspect.isawaitable(result):
+            result = await result
+        if isinstance(result, str):
+            ref = result
+    except Exception:
+        logger.warning(
+            "research_lab_incontainer_trace_sink_failed icp_ref=%s entry_count=%s",
+            icp_ref,
+            len(entries),
+            exc_info=True,
+        )
+        ref = ""
+    return {
+        "incontainer_trace_ref": ref,
+        "incontainer_trace_sha256": sha256_json(entries),
+        "incontainer_trace_call_count": len(entries),
+    }
+
+
 async def _score_with_private_holdout_gate(
     *,
     benchmark_items: Sequence[Mapping[str, Any]],
@@ -623,6 +837,7 @@ async def _score_with_private_holdout_gate(
     parent_freshness_check: ParentFreshnessCheck | None = None,
     icp_checkpoint: IcpCheckpoint | None = None,
     resume_results: Sequence[Mapping[str, Any]] | None = None,
+    trace_sink: TraceSink | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     public_refs = {
         str(item)
@@ -655,6 +870,7 @@ async def _score_with_private_holdout_gate(
         parent_freshness_check=parent_freshness_check,
         icp_checkpoint=icp_checkpoint,
         resume_results=resume_results,
+        trace_sink=trace_sink,
     )
     baseline_public_score = float(gate.get("baseline_public_score") or 0.0)
     baseline_aggregate_score = _optional_float(gate.get("baseline_aggregate_score"))
@@ -695,6 +911,7 @@ async def _score_with_private_holdout_gate(
         parent_freshness_check=parent_freshness_check,
         icp_checkpoint=icp_checkpoint,
         resume_results=resume_results,
+        trace_sink=trace_sink,
     )
     all_results = [*public_results, *private_results]
     candidate_total_score = _benchmark_style_score(all_results, "candidate_company_scores")

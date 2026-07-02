@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import contextvars
 from datetime import datetime, timedelta, timezone
 import functools
+import importlib
 import json
 import logging
 import os
 from pathlib import Path
 import re
 import tempfile
+import threading
 import time
 from typing import Any, Mapping
 from urllib import request as urlrequest
@@ -30,12 +33,23 @@ from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.icp_window import (
     RollingIcpWindowUnavailable,
     fetch_rolling_icp_window,
+    select_rolling_icp_window_from_sets,
 )
 from gateway.research_lab.logging_utils import compact_ref, format_worker_block
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabScoreBundleCreateRequest
 from gateway.research_lab.promotion import (
+    CONFIRMATION_ATTEMPT_FAILED_REASON,
+    CONFIRMATION_CLOSED_REASON,
+    CONFIRMATION_HOLD_REASON,
+    CONFIRMATION_NON_CLOSING_STATUSES,
+    CONFIRMATION_RESULT_REASON,
+    CONFIRMATION_STARTED_REASON,
     ResearchLabPromotionController,
+    candidate_already_promoted,
+    confirmation_attempt_budget,
     load_active_private_model,
+    load_confirmation_state,
+    promotion_confirmation_rerun_enabled,
     promotion_improvement_metric,
 )
 from gateway.research_lab.public_activity import safe_project_public_loop_activity
@@ -62,7 +76,7 @@ from gateway.research_lab.store import (
     select_many,
     select_one,
 )
-from research_lab.canonical import sha256_json
+from research_lab.canonical import canonical_json, sha256_json
 from research_lab.code_editing import (
     CodeEditDraft,
     CodeEditSourceInspectionRequest,
@@ -81,7 +95,17 @@ from research_lab.eval import (
     private_model_env_passthrough,
     sign_digest_with_kms,
 )
-from research_lab.eval.evaluator import QualificationStyleCompanyScorer
+from research_lab.eval.evaluator import (
+    INCONTAINER_TRACE_KMS_KEY_ENV,
+    INCONTAINER_TRACE_S3_PREFIX_ENV,
+    QualificationStyleCompanyScorer,
+    _upload_incontainer_trace as _upload_incontainer_trace_doc,
+)
+from research_lab.eval.private_runtime import (
+    begin_incontainer_trace_collection,
+    end_incontainer_trace_collection,
+    incontainer_trace_capture_enabled,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -253,6 +277,136 @@ class BaselineHealthGateFailure(RuntimeError):
         self.baseline_health = dict(baseline_health)
 
 
+class ConfirmationMeasurementUnhealthy(RuntimeError):
+    """Raised when a §5.2-2 confirmation measurement is too degraded to decide
+    on (too many unresolved provider errors on either side). The attempt is
+    recorded as failed and the candidate stays held, bounded by the
+    claim-attempt budget — a flaky confirmation must neither reject a good
+    candidate nor confirm a phantom improvement."""
+
+
+# --- §0-N6: scorer-side burst isolation for the parallel baseline ----------
+# Only Exa is container-isolated today; the qualification scoring calls
+# (score_with_breakdowns — OpenRouter/Scrapingdog) burst N-wide on the prod
+# keys during a parallel baseline. Opt-in dedicated benchmark scorer keys,
+# applied ONLY within a baseline-batch scoring scope and falling back to prod
+# values when unset — mirroring how the benchmark Exa key is plumbed.
+
+
+def _benchmark_scorer_scrapingdog_api_key() -> str:
+    return os.getenv("RESEARCH_LAB_BENCHMARK_SCRAPINGDOG_API_KEY", "").strip()
+
+
+def _benchmark_scorer_openrouter_api_key() -> str:
+    return os.getenv("RESEARCH_LAB_BENCHMARK_OPENROUTER_API_KEY", "").strip()
+
+
+def _benchmark_scorer_max_concurrency() -> int:
+    """Optional cap on concurrent scorer calls inside a baseline batch.
+    0 (default) = unlimited (scorer calls fan out at batch concurrency)."""
+    try:
+        return max(0, int(os.getenv("RESEARCH_LAB_BENCHMARK_SCORER_MAX_CONCURRENCY", "0")))
+    except ValueError:
+        return 0
+
+
+# Module attributes that cache provider keys at import time inside the
+# qualification scoring stack (the Scrapingdog fetches read os.environ per
+# request; the OpenRouter calls read these module constants).
+_SCORER_KEY_MODULE_ATTRS: tuple[tuple[str, str, str], ...] = (
+    ("gateway.qualification.utils.helpers", "OPENROUTER_API_KEY", "openrouter"),
+    ("qualification.scoring.verification_helpers", "OPENROUTER_API_KEY", "openrouter"),
+    ("qualification.scoring.verification_helpers", "SCRAPINGDOG_API_KEY", "scrapingdog"),
+)
+
+
+@contextlib.contextmanager
+def _benchmark_scorer_isolation():
+    """Apply the dedicated benchmark scorer keys for a baseline-batch scope.
+
+    The scoring worker is a dedicated process (worker_process.py), so a
+    process-env override scoped to the batch cannot touch live qualification
+    traffic; candidate scoring in the same process runs strictly after the
+    batch returns and sees the restored prod values. Container runs inside the
+    batch keep their prod provider keys: DockerPrivateModelSpec.extra_env was
+    captured at runner construction and overrides os.environ passthrough.
+
+    No-op when neither benchmark scorer key is configured.
+    """
+    scrapingdog = _benchmark_scorer_scrapingdog_api_key()
+    openrouter = _benchmark_scorer_openrouter_api_key()
+    if not scrapingdog and not openrouter:
+        yield
+        return
+    env_overrides: dict[str, str] = {}
+    if scrapingdog:
+        env_overrides["SCRAPINGDOG_API_KEY"] = scrapingdog
+        env_overrides["QUALIFICATION_SCRAPINGDOG_API_KEY"] = scrapingdog
+    if openrouter:
+        env_overrides["QUALIFICATION_OPENROUTER_API_KEY"] = openrouter
+    saved_env: dict[str, str | None] = {}
+    saved_attrs: list[tuple[Any, str, Any]] = []
+    try:
+        for name, value in env_overrides.items():
+            saved_env[name] = os.environ.get(name)
+            os.environ[name] = value
+        for module_name, attr, provider in _SCORER_KEY_MODULE_ATTRS:
+            value = scrapingdog if provider == "scrapingdog" else openrouter
+            if not value:
+                continue
+            try:
+                module = importlib.import_module(module_name)
+            except Exception:  # pragma: no cover - scorer stack absent in some envs
+                continue
+            if hasattr(module, attr):
+                saved_attrs.append((module, attr, getattr(module, attr)))
+                setattr(module, attr, value)
+        yield
+    finally:
+        for module, attr, previous in saved_attrs:
+            try:
+                setattr(module, attr, previous)
+            except Exception:  # pragma: no cover
+                logger.warning(
+                    "research_lab_benchmark_scorer_attr_restore_failed attr=%s", attr
+                )
+        for name, previous in saved_env.items():
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
+
+
+def _confirmation_lease_seconds() -> int:
+    """Staleness window for a confirmation_rerun_started claim: a dead worker's
+    in-flight confirmation becomes reclaimable after this many seconds."""
+    try:
+        return max(600, int(os.getenv("RESEARCH_LAB_CONFIRMATION_LEASE_SECONDS", "7200")))
+    except ValueError:
+        return 7200
+
+
+def _collect_confirmation_scores(
+    summaries: list[dict[str, Any]],
+) -> tuple[dict[str, float], list[str], int]:
+    """(icp_ref -> score, unresolved-error refs, non-empty output count) from a
+    baseline-batch result. Reads the underscore orchestration fields without
+    mutating the summaries (confirmation summaries are never stored raw)."""
+    scores: dict[str, float] = {}
+    unresolved: list[str] = []
+    nonempty = 0
+    for summary in summaries:
+        ref = str(summary.get("icp_ref") or "")
+        if summary.get("_nonempty"):
+            nonempty += 1
+        if not ref:
+            continue
+        scores[ref] = _safe_float(summary.get("score"), default=0.0)
+        if summary.get("_runtime_error"):
+            unresolved.append(ref)
+    return scores, unresolved, nonempty
+
+
 def _per_icp_checkpoint_enabled() -> bool:
     """Bug #31: persist per-ICP candidate results so a requeue/rescore resumes
     instead of re-running the whole multi-hour evaluation."""
@@ -332,6 +486,444 @@ def _store_scoring_progress(
         Body=json.dumps(doc, sort_keys=True, default=str).encode("utf-8"),
         ContentType="application/json",
     )
+
+
+# --- §5.4 scorer-judge traces + baseline in-container trace collection ------
+# The qualification scorer's per-company judgments are dense reward labels for
+# a future Sales LLM; the private models' in-container provider traffic is the
+# matching trajectory data. Both captures are pure observation: best-effort,
+# pointer-only in any event/bundle doc, and inert without S3 configuration.
+
+_SCORER_TRACE_CAPTURE_ENV = "RESEARCH_LAB_SCORER_TRACE_CAPTURE"
+_SCORER_TRACE_S3_PREFIX_ENV = "RESEARCH_LAB_SCORER_TRACE_S3_PREFIX"
+_SCORER_TRACE_PUT_CONNECT_TIMEOUT_SECONDS = 5
+_SCORER_TRACE_PUT_READ_TIMEOUT_SECONDS = 15
+# Model-output fields safe to persist as scorer-INPUT context: company identity
+# only — never page content, evidence text, or contact-level material.
+_SCORER_TRACE_COMPANY_IDENTITY_FIELDS = (
+    "company_name",
+    "company_website",
+    "company_linkedin",
+    "industry",
+    "sub_industry",
+    "employee_count",
+    "country",
+)
+
+
+def _scorer_trace_capture_enabled() -> bool:
+    return os.getenv(_SCORER_TRACE_CAPTURE_ENV, "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _trace_path_segment(value: object, *, fallback: str) -> str:
+    text = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in str(value or ""))[:96]
+    return text.strip("-.") or fallback
+
+
+def _scorer_trace_company_identity(output: Any) -> dict[str, Any]:
+    if not isinstance(output, Mapping):
+        return {}
+    return {
+        field: str(output.get(field) or "")
+        for field in _SCORER_TRACE_COMPANY_IDENTITY_FIELDS
+        if str(output.get(field) or "").strip()
+    }
+
+
+class _ScorerTraceRecorder:
+    """Best-effort SSE-KMS S3 capture of the qualification scorer's per-company
+    judgments at the ``score_with_breakdowns`` boundary (§5.4).
+
+    One JSON doc per (context, icp) under
+    ``{prefix}/scorer-traces/{context_ref}/{icp_ref}.json`` — retried ICPs
+    overwrite the same key, so the freshest attempt wins (matching the batch's
+    replace-on-retry semantics). ``{prefix}`` comes from
+    ``RESEARCH_LAB_SCORER_TRACE_S3_PREFIX`` or falls back to the private model
+    manifest's bucket/prefix (like the scoring-progress writer); with neither
+    resolvable the recorder counts-and-drops after one log line. Hard rules,
+    mirroring ``_OpenRouterRawTraceRecorder``:
+
+      * a capture failure can NEVER affect scoring — S3 writes are
+        fire-and-forget on a small background pool, every synchronous step is
+        exception-wrapped, and failures log once per context;
+      * event/bundle docs receive ONLY ``{s3_ref, sha256}`` pointers — never
+        breakdown content (the protected-material scanners reject content
+        keys);
+      * docs store scorer INPUTS limited to icp context refs plus company
+        identity fields, and the scorer's full per-company breakdowns
+        (including any reasoning text the scorer returns);
+      * the pointer is optimistic: returned while the write is in flight, so a
+        failed write leaves a dangling (never wrong) reference.
+
+    Flag: ``RESEARCH_LAB_SCORER_TRACE_CAPTURE`` (default true; inert without
+    S3 config). Encryption: SSE-KMS via the score-bundle signing key id.
+    """
+
+    def __init__(self, config: ResearchLabGatewayConfig):
+        self.config = config
+        self._lock = threading.Lock()
+        self._executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._pending: set[concurrent.futures.Future[None]] = set()
+        self._failure_logged_contexts: set[str] = set()
+        self._destinations: dict[str, tuple[str, str] | None] = {}
+        self._drop_logged = False
+        self._dropped_docs = 0
+        self._disabled = False
+
+    def capture(
+        self,
+        *,
+        context_ref: str,
+        icp_ref: str,
+        icp_hash: str = "",
+        outputs: Any = (),
+        breakdowns: Any = (),
+        is_reference_model: bool = False,
+        manifest_uri: str = "",
+    ) -> dict[str, str] | None:
+        """Queue one scorer-judgment doc for upload.
+
+        Returns the ``{s3_ref, sha256}`` pointer for event/bundle docs, or None
+        when capture is disabled/unconfigured or there is nothing to record.
+        Never raises."""
+        try:
+            if self._disabled or not _scorer_trace_capture_enabled() or not breakdowns:
+                return None
+            destination = self._resolve_destination(manifest_uri)
+            if destination is None:
+                self._count_drop()
+                return None
+            bucket, key_prefix = destination
+            safe_context = _trace_path_segment(context_ref, fallback="context")
+            safe_icp = _trace_path_segment(icp_ref, fallback="icp")
+            object_key = "/".join(
+                segment
+                for segment in (key_prefix, "scorer-traces", safe_context, f"{safe_icp}.json")
+                if segment
+            )
+            doc = {
+                "schema_version": "1.0",
+                "artifact_type": "research_lab_scorer_judgment_trace",
+                "context_ref": str(context_ref),
+                "icp_ref": str(icp_ref),
+                "icp_hash": str(icp_hash or ""),
+                "is_reference_model": bool(is_reference_model),
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+                "sourced_count": len(outputs) if outputs else 0,
+                "scored_count": len(breakdowns),
+                "companies": [_scorer_trace_company_identity(output) for output in (outputs or ())],
+                "score_breakdowns": [dict(item) for item in breakdowns if isinstance(item, Mapping)],
+            }
+            body = canonical_json(doc).encode("utf-8")
+            digest = sha256_json(doc)
+            self._submit(context_ref=str(context_ref), bucket=bucket, object_key=object_key, body=body)
+            return {"s3_ref": f"s3://{bucket}/{object_key}", "sha256": digest}
+        except Exception as exc:
+            self._log_failure_once(str(context_ref or "unknown"), exc)
+            return None
+
+    def flush(self, timeout_seconds: float = 10.0) -> None:
+        """Wait for in-flight uploads (tests / orderly teardown only)."""
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        while True:
+            with self._lock:
+                pending = tuple(self._pending)
+            if not pending or time.monotonic() >= deadline:
+                return
+            for future in pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                try:
+                    future.exception(timeout=remaining)
+                except Exception:
+                    return
+
+    def _resolve_destination(self, manifest_uri: str) -> tuple[str, str] | None:
+        prefix_uri = str(os.getenv(_SCORER_TRACE_S3_PREFIX_ENV, "")).strip().rstrip("/")
+        cache_key = prefix_uri or str(manifest_uri or "")
+        with self._lock:
+            if cache_key in self._destinations:
+                return self._destinations[cache_key]
+        if not prefix_uri:
+            uri = str(manifest_uri or "").strip()
+            if uri.startswith("s3://"):
+                bucket, _sep, key = uri[5:].partition("/")
+                base_prefix = key.rsplit("/", 1)[0] if "/" in key else ""
+                if bucket:
+                    prefix_uri = f"s3://{bucket}/{base_prefix}".rstrip("/")
+        destination: tuple[str, str] | None = None
+        if prefix_uri.startswith("s3://"):
+            bucket, _sep, key_prefix = prefix_uri[5:].partition("/")
+            if bucket:
+                destination = (bucket, key_prefix.strip("/"))
+        with self._lock:
+            self._destinations[cache_key] = destination
+        return destination
+
+    def _count_drop(self) -> None:
+        with self._lock:
+            self._dropped_docs += 1
+            if self._drop_logged:
+                return
+            self._drop_logged = True
+        # Local/dev inertness: no S3 destination — one log, then silent drops.
+        logger.info(
+            "research_lab_scorer_trace_capture_disabled reason=missing_s3_prefix env=%s; "
+            "scorer judgment capture is skipped for this process",
+            _SCORER_TRACE_S3_PREFIX_ENV,
+        )
+
+    def _submit(self, *, context_ref: str, bucket: str, object_key: str, body: bytes) -> None:
+        with self._lock:
+            if self._executor is None:
+                self._executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=2,
+                    thread_name_prefix="research-lab-scorer-trace",
+                )
+            executor = self._executor
+        future = executor.submit(self._put_object, bucket=bucket, object_key=object_key, body=body)
+        with self._lock:
+            self._pending.add(future)
+        future.add_done_callback(lambda done: self._consume_put_result(context_ref, done))
+
+    def _put_object(self, *, bucket: str, object_key: str, body: bytes) -> None:
+        import boto3  # type: ignore
+
+        client_kwargs: dict[str, Any] = {}
+        try:
+            from botocore.config import Config as BotoClientConfig  # type: ignore
+
+            client_kwargs["config"] = BotoClientConfig(
+                connect_timeout=_SCORER_TRACE_PUT_CONNECT_TIMEOUT_SECONDS,
+                read_timeout=_SCORER_TRACE_PUT_READ_TIMEOUT_SECONDS,
+                retries={"max_attempts": 2},
+            )
+        except Exception:  # pragma: no cover - botocore ships with boto3
+            client_kwargs = {}
+        put_kwargs: dict[str, Any] = {
+            "Bucket": bucket,
+            "Key": object_key,
+            "Body": body,
+            "ContentType": "application/json",
+            # SSE-KMS at rest via the score-bundle signing key id, matching the
+            # raw-trace recorder's §9.1 encryption requirement.
+            "ServerSideEncryption": "aws:kms",
+        }
+        kms_key_id = str(getattr(self.config, "score_bundle_kms_key_id", "") or "").strip()
+        if kms_key_id:
+            put_kwargs["SSEKMSKeyId"] = kms_key_id
+        boto3.client("s3", **client_kwargs).put_object(**put_kwargs)
+
+    def _consume_put_result(self, context_ref: str, future: "concurrent.futures.Future[None]") -> None:
+        with self._lock:
+            self._pending.discard(future)
+        if future.cancelled():
+            return
+        exc = future.exception()
+        if exc is None:
+            return
+        if isinstance(exc, ImportError):
+            # boto3 absent: local/dev environment — go inert for the process.
+            with self._lock:
+                self._disabled = True
+        self._log_failure_once(context_ref, exc)
+
+    def _log_failure_once(self, context_ref: str, exc: BaseException) -> None:
+        context_key = str(context_ref or "unknown")
+        with self._lock:
+            if context_key in self._failure_logged_contexts:
+                return
+            self._failure_logged_contexts.add(context_key)
+        logger.warning(
+            "research_lab_scorer_trace_capture_failed context=%s error=%s; capture is "
+            "best-effort and scoring was not affected",
+            compact_ref(context_key),
+            _short_error(exc),
+        )
+
+
+class _TraceCapturingCompanyScorer:
+    """``QualificationStyleCompanyScorer`` delegate that records each judgment
+    through a ``_ScorerTraceRecorder`` (§5.4 candidate-eval scorer boundary).
+
+    Pure observation: breakdowns and derived scores are passed through
+    untouched, and the capture step is fully exception-contained — with the
+    flag off or no S3 config the delegate behaves exactly like the default
+    scorer the evaluator would have constructed itself.
+    """
+
+    def __init__(
+        self,
+        *,
+        recorder: _ScorerTraceRecorder,
+        context_ref: str,
+        manifest_uri: str,
+        benchmark_items: Any = (),
+        pointer_map: dict[str, dict[str, str]] | None = None,
+        inner: Any = None,
+    ):
+        self._inner = inner if inner is not None else QualificationStyleCompanyScorer()
+        self._recorder = recorder
+        self._context_ref = str(context_ref)
+        self._manifest_uri = str(manifest_uri or "")
+        self._pointer_map = pointer_map
+        # The evaluator hands the scorer the raw ICP payload, not the benchmark
+        # item, so refs are recovered via the payload's canonical hash.
+        self._icp_refs: dict[str, tuple[str, str]] = {}
+        for item in benchmark_items or ():
+            try:
+                icp = item.get("icp") if isinstance(item, Mapping) else None
+                if isinstance(icp, Mapping):
+                    self._icp_refs[sha256_json(icp)] = (
+                        str(item.get("icp_ref") or item.get("icp_hash") or ""),
+                        str(item.get("icp_hash") or ""),
+                    )
+            except Exception:  # noqa: BLE001 - ref recovery is best-effort
+                continue
+
+    async def __call__(
+        self,
+        companies: Any,
+        icp: Mapping[str, Any],
+        is_reference_model: bool,
+    ) -> list[float]:
+        breakdowns = await self.score_with_breakdowns(companies, icp, is_reference_model)
+        return [float(item.get("final_score", 0.0) or 0.0) for item in breakdowns]
+
+    async def score_with_breakdowns(
+        self,
+        companies: Any,
+        icp: Mapping[str, Any],
+        is_reference_model: bool,
+    ) -> list[dict[str, Any]]:
+        breakdowns = await self._inner.score_with_breakdowns(companies, icp, is_reference_model)
+        try:
+            icp_key = sha256_json(icp if isinstance(icp, Mapping) else {})
+            icp_ref, icp_hash = self._icp_refs.get(icp_key, ("", ""))
+            if not icp_ref:
+                icp_ref = icp_key.removeprefix("sha256:")[:24]
+            pointer = self._recorder.capture(
+                context_ref=self._context_ref,
+                icp_ref=icp_ref,
+                icp_hash=icp_hash,
+                outputs=list(companies or ()),
+                breakdowns=breakdowns,
+                is_reference_model=bool(is_reference_model),
+                manifest_uri=self._manifest_uri,
+            )
+            if pointer and self._pointer_map is not None:
+                self._pointer_map[icp_ref] = dict(pointer)
+        except Exception:  # noqa: BLE001 - capture can never affect scoring
+            logger.warning(
+                "research_lab_scorer_trace_wrapper_failed context=%s",
+                compact_ref(self._context_ref),
+                exc_info=True,
+            )
+        return breakdowns
+
+
+def _upload_baseline_incontainer_trace(
+    prefix: str,
+    context_ref: str,
+    icp_ref: str,
+    entries: list[dict[str, Any]],
+    kms_key_id: str,
+) -> str:
+    """Local equivalent of the evaluator's default-sink uploader for the
+    baseline batch path, writing ``{prefix}/{context}/baseline/{icp_ref}.json``
+    under the same ``RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX`` scheme."""
+    try:
+        import boto3  # type: ignore
+    except Exception as exc:  # pragma: no cover - environment-dependent
+        raise PrivateModelRuntimeError("boto3 is required for in-container trace S3 uploads") from exc
+    if not prefix.startswith("s3://"):
+        raise PrivateModelRuntimeError(f"invalid in-container trace S3 prefix: {prefix}")
+    bucket, _, key_prefix = prefix[5:].partition("/")
+    if not bucket:
+        raise PrivateModelRuntimeError(f"invalid in-container trace S3 prefix: {prefix}")
+    key = "/".join(
+        part
+        for part in (
+            key_prefix.strip("/"),
+            _trace_path_segment(context_ref, fallback="context"),
+            "baseline",
+            f"{_trace_path_segment(icp_ref, fallback='icp')}.json",
+        )
+        if part
+    )
+    payload = {
+        "schema_version": "1.0",
+        "artifact_type": "research_lab_incontainer_trace",
+        "run_ref": str(context_ref),
+        "icp_ref": str(icp_ref),
+        "call_count": len(entries),
+        "entries": entries,
+    }
+    put_kwargs: dict[str, Any] = {
+        "Bucket": bucket,
+        "Key": key,
+        "Body": canonical_json(payload).encode("utf-8"),
+        "ContentType": "application/json",
+    }
+    if kms_key_id:
+        put_kwargs["ServerSideEncryption"] = "aws:kms"
+        put_kwargs["SSEKMSKeyId"] = kms_key_id
+    boto3.client("s3").put_object(**put_kwargs)
+    return f"s3://{bucket}/{key}"
+
+
+async def _publish_baseline_incontainer_trace(
+    *,
+    context_ref: str,
+    icp_ref: str,
+    entries: list[dict[str, Any]],
+    drop_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist one baseline/champion ICP's collected in-container trace entries
+    and build the POINTER-ONLY diagnostics fields (mirroring the evaluator's
+    ``_finalize_incontainer_trace`` semantics: upload failures are logged and
+    swallowed; the sha256/call-count pointers still record that capture
+    happened). Returns ``{}`` when there is nothing to record."""
+    if not entries:
+        return {}
+    ref = ""
+    prefix = str(os.getenv(INCONTAINER_TRACE_S3_PREFIX_ENV) or "").strip().rstrip("/")
+    if not prefix:
+        drop_state["dropped_entries"] = int(drop_state.get("dropped_entries") or 0) + len(entries)
+        if not drop_state.get("logged"):
+            drop_state["logged"] = True
+            logger.info(
+                "research_lab_incontainer_trace_dropped run_ref=%s reason=no_s3_prefix "
+                "(set %s to persist baseline in-container traces; further drops this "
+                "run are silent)",
+                context_ref,
+                INCONTAINER_TRACE_S3_PREFIX_ENV,
+            )
+    else:
+        kms_key_id = str(os.getenv(INCONTAINER_TRACE_KMS_KEY_ENV) or "").strip()
+        try:
+            ref = await asyncio.to_thread(
+                _upload_baseline_incontainer_trace,
+                prefix,
+                str(context_ref),
+                str(icp_ref),
+                list(entries),
+                kms_key_id,
+            )
+        except Exception:  # noqa: BLE001 - capture must never fail the run
+            logger.warning(
+                "research_lab_incontainer_trace_sink_failed icp_ref=%s entry_count=%s",
+                icp_ref,
+                len(entries),
+                exc_info=True,
+            )
+            ref = ""
+    return {
+        "incontainer_trace_ref": ref,
+        "incontainer_trace_sha256": sha256_json(list(entries)),
+        "incontainer_trace_call_count": len(entries),
+    }
 
 
 def _baseline_max_unresolved_icps() -> int:
@@ -667,6 +1259,8 @@ class ResearchLabGatewayScoringWorker:
         self._baseline_already_logged_date: str | None = None
         self._private_scoring_env_not_ready_logged = False
         self._resolved_epoch_cache: tuple[int, float] | None = None
+        self._scorer_trace_recorder = _ScorerTraceRecorder(config)
+        self._confirmation_trace_scope: dict[str, Any] | None = None
 
     async def run_forever(self) -> None:
         last_idle_log = 0.0
@@ -777,6 +1371,21 @@ class ResearchLabGatewayScoringWorker:
             )
             self._baseline_skip_logged = True
 
+        # §5.2-2: run at most one pending confirmation measurement per pass.
+        # Any worker may pick these up (leased per candidate via
+        # confirmation_rerun_started events). Best-effort: a confirmation
+        # failure must never take down the scoring pass.
+        confirmation_result: dict[str, Any] | None = None
+        if promotion_confirmation_rerun_enabled():
+            try:
+                confirmation_result = await self._maybe_run_pending_confirmation()
+            except Exception as exc:  # noqa: BLE001 - never fail the worker pass
+                logger.warning(
+                    "research_lab_confirmation_pass_failed worker_ref=%s error=%s",
+                    self.worker_ref,
+                    _short_error(exc),
+                )
+
         processed: list[str] = []
         for _ in range(max(1, self.config.scoring_worker_max_candidates)):
             candidate = await self._claim_next_candidate()
@@ -789,11 +1398,24 @@ class ResearchLabGatewayScoringWorker:
             isinstance(baseline_result, Mapping)
             and str(baseline_result.get("status") or "") == "completed"
         )
+        confirmation_processed = (
+            isinstance(confirmation_result, Mapping)
+            and bool(confirmation_result.get("processed"))
+        )
+        if processed:
+            status = "processed"
+        elif baseline_completed:
+            status = "baseline_completed"
+        elif confirmation_processed:
+            status = "confirmation_processed"
+        else:
+            status = "idle"
         return {
-            "processed": bool(processed or baseline_completed),
-            "status": "processed" if processed else ("baseline_completed" if baseline_completed else "idle"),
+            "processed": bool(processed or baseline_completed or confirmation_processed),
+            "status": status,
             "candidate_ids": processed,
             "baseline": baseline_result,
+            "confirmation": confirmation_result,
         }
 
     async def _claim_next_candidate(self) -> dict[str, Any] | None:
@@ -1348,6 +1970,18 @@ class ResearchLabGatewayScoringWorker:
                 window_hash=window.window_hash,
                 evaluation_epoch=evaluation_epoch,
             )
+            # §5.4 scorer-judge traces: wrap the qualification scorer so every
+            # per-company judgment is captured (pointer-only in event docs) at
+            # the evaluator's scoring boundary; behavior-identical to the
+            # default scorer the evaluator would otherwise construct.
+            scorer_trace_pointers: dict[str, dict[str, str]] = {}
+            candidate_company_scorer = _TraceCapturingCompanyScorer(
+                recorder=self._get_scorer_trace_recorder(),
+                context_ref=candidate_id,
+                manifest_uri=artifact.manifest_uri,
+                benchmark_items=window.benchmark_items,
+                pointer_map=scorer_trace_pointers,
+            )
             last_parent_check_at = 0.0
             claim_lost_event = asyncio.Event()
 
@@ -1453,12 +2087,16 @@ class ResearchLabGatewayScoringWorker:
                         benchmark_items=window.benchmark_items,
                         base_runner=None,
                         candidate_runner=candidate_runner,
+                        company_scorer=candidate_company_scorer,
                         run_context={**run_context, "signature_ref": "pending"},
                         policy=self._evaluation_policy(),
                         private_holdout_gate=private_holdout_gate,
                         parent_freshness_check=parent_freshness_check,
                         icp_checkpoint=icp_checkpoint,
                         resume_results=resume_results,
+                        # In-container traces upload keyed by candidate; the
+                        # evaluator puts the returned refs into per-ICP rows.
+                        trace_sink=self._candidate_incontainer_trace_sink(candidate_id),
                     )
                 finally:
                     heartbeat_task.cancel()
@@ -1532,6 +2170,13 @@ class ResearchLabGatewayScoringWorker:
                     "proxy_ref_hash": self.proxy_ref_hash,
                     "private_holdout_gate": _candidate_gate_event_doc(gate_result),
                     "scoring_health_gate": scoring_health_gate,
+                    # §5.4 pointers only ({icp_ref: {s3_ref, sha256}}) — never
+                    # judgment content (audit-scan poison).
+                    **(
+                        {"scorer_trace_refs": dict(scorer_trace_pointers)}
+                        if scorer_trace_pointers
+                        else {}
+                    ),
                 },
             )
             scored_event_written = True
@@ -2241,6 +2886,732 @@ class ResearchLabGatewayScoringWorker:
             score_bundle=score_bundle,
         )
 
+    # --- §5.2-2 confirmation re-run: worker-side measurement ---------------
+    # A candidate held `held_pending_confirmation` cleared every merge gate on
+    # its first measurement. The worker re-measures BOTH sides fresh — a full
+    # champion (baseline) run AND a candidate run over the same rolling window
+    # — as a side measurement (never recorded as the day's benchmark
+    # reference), then re-drives the promotion decision. All state derives
+    # from promotion events; a crash at any point resumes from the events.
+
+    async def _maybe_run_pending_confirmation(self) -> dict[str, Any] | None:
+        holds = await self._find_pending_confirmation_holds()
+        if not holds:
+            return None
+        lease_seconds = _confirmation_lease_seconds()
+        budget = confirmation_attempt_budget(self.config)
+        for hold in holds:
+            candidate_id = str(hold.get("candidate_id") or "")
+            score_bundle_id = str(hold.get("source_score_bundle_id") or "")
+            if not candidate_id or not score_bundle_id:
+                continue
+            try:
+                state = await load_confirmation_state(
+                    candidate_id=candidate_id,
+                    score_bundle_id=score_bundle_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - skip unreadable state, next pass retries
+                logger.warning(
+                    "research_lab_confirmation_state_load_failed candidate_id=%s error=%s",
+                    compact_ref(candidate_id),
+                    str(exc)[:200],
+                )
+                continue
+            latest_reason = str(state.get("latest_reason") or "")
+            if latest_reason == CONFIRMATION_CLOSED_REASON:
+                # A terminal promotion decision already landed for this
+                # candidate+bundle; nothing left to drive.
+                continue
+            try:
+                if await candidate_already_promoted(candidate_id):
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "research_lab_confirmation_promoted_check_failed candidate_id=%s error=%s",
+                    compact_ref(candidate_id),
+                    str(exc)[:200],
+                )
+                continue
+            if latest_reason == CONFIRMATION_RESULT_REASON:
+                # Measurement recorded but the decision never landed (crash
+                # between record and re-drive): finish the state machine
+                # without re-measuring.
+                result = await self._redrive_confirmation_decision(
+                    candidate_id=candidate_id,
+                    score_bundle_id=score_bundle_id,
+                    context="recorded_confirmation_pending_decision",
+                )
+                if result is not None:
+                    return {
+                        "processed": True,
+                        "status": "confirmation_decision_redriven",
+                        "candidate_id": candidate_id,
+                        "promotion_status": str(result.get("status") or ""),
+                    }
+                continue
+            if latest_reason == CONFIRMATION_STARTED_REASON:
+                started = state.get("latest_event") or {}
+                age = _status_age_seconds(started.get("created_at"))
+                if age is not None and age <= lease_seconds:
+                    # In flight elsewhere (or our own crashed predecessor —
+                    # wait out the lease either way).
+                    continue
+            if int(state.get("attempts") or 0) >= budget:
+                # Budget exhausted: re-drive so the gate records the terminal
+                # rejected_confirmation_failed decision.
+                result = await self._redrive_confirmation_decision(
+                    candidate_id=candidate_id,
+                    score_bundle_id=score_bundle_id,
+                    context="confirmation_attempts_exhausted",
+                )
+                if result is not None:
+                    return {
+                        "processed": True,
+                        "status": "confirmation_decision_redriven",
+                        "candidate_id": candidate_id,
+                        "promotion_status": str(result.get("status") or ""),
+                    }
+                continue
+            return await self._run_confirmation_attempt(hold=hold, state=state)
+        return None
+
+    async def _find_pending_confirmation_holds(self) -> list[dict[str, Any]]:
+        """Newest-first held_pending_confirmation events, deduped per
+        candidate+bundle. Primary query filters on event_doc->>reason (a plain
+        PostgREST JSON filter); falls back to a bounded promotion_checked scan
+        filtered in Python if the JSON filter is rejected."""
+        columns = (
+            "promotion_event_id,candidate_id,source_score_bundle_id,rolling_window_hash,"
+            "improvement_points,threshold_points,worker_ref,event_doc,created_at"
+        )
+        try:
+            rows = await select_many(
+                "research_lab_candidate_promotion_events",
+                columns=columns,
+                filters=(
+                    ("event_type", "promotion_checked"),
+                    ("event_doc->>reason", CONFIRMATION_HOLD_REASON),
+                ),
+                order_by=(("created_at", True),),
+                limit=50,
+            )
+        except Exception as exc:  # noqa: BLE001 - fall back to a plain-column scan
+            logger.warning(
+                "research_lab_confirmation_hold_scan_json_filter_failed error=%s",
+                str(exc)[:200],
+            )
+            try:
+                rows = await select_many(
+                    "research_lab_candidate_promotion_events",
+                    columns=columns,
+                    filters=(("event_type", "promotion_checked"),),
+                    order_by=(("created_at", True),),
+                    limit=200,
+                )
+            except Exception as fallback_exc:  # noqa: BLE001
+                logger.warning(
+                    "research_lab_confirmation_hold_scan_failed error=%s",
+                    str(fallback_exc)[:200],
+                )
+                return []
+            rows = [
+                row
+                for row in rows
+                if isinstance(row.get("event_doc"), Mapping)
+                and str(row["event_doc"].get("reason") or "") == CONFIRMATION_HOLD_REASON
+            ]
+        seen: set[tuple[str, str]] = set()
+        holds: list[dict[str, Any]] = []
+        for row in rows:
+            key = (
+                str(row.get("candidate_id") or ""),
+                str(row.get("source_score_bundle_id") or ""),
+            )
+            if not key[0] or not key[1] or key in seen:
+                continue
+            seen.add(key)
+            holds.append(dict(row))
+        return holds
+
+    async def _redrive_confirmation_decision(
+        self,
+        *,
+        candidate_id: str,
+        score_bundle_id: str,
+        context: str,
+    ) -> dict[str, Any] | None:
+        """Re-run the promotion decision for a held candidate. The promotion
+        controller re-checks every gate (including the recorded confirmation)
+        from events, so this is idempotent and crash-safe."""
+        candidate = await select_one(
+            "research_lab_candidate_evaluation_current",
+            filters=(("candidate_id", candidate_id),),
+        )
+        if not candidate:
+            logger.warning(
+                "research_lab_confirmation_redrive_candidate_missing candidate_id=%s",
+                compact_ref(candidate_id),
+            )
+            return None
+        bundle_row = await select_one(
+            "research_evaluation_score_bundle_current",
+            filters=(("score_bundle_id", score_bundle_id),),
+        )
+        score_bundle = (
+            bundle_row.get("score_bundle_doc") if isinstance(bundle_row, Mapping) else None
+        )
+        if not isinstance(score_bundle, Mapping):
+            logger.warning(
+                "research_lab_confirmation_redrive_bundle_missing candidate_id=%s score_bundle_id=%s",
+                compact_ref(candidate_id),
+                compact_ref(score_bundle_id),
+            )
+            return None
+        result = await self._maybe_promote_scored_candidate(
+            candidate=candidate,
+            score_bundle_row=bundle_row,
+            score_bundle=dict(score_bundle),
+        )
+        if str(result.get("status") or "") == "stale_parent_needs_rescore":
+            # Mirror _score_candidate's post-promotion handling: the champion
+            # moved while the candidate was held, so queue the rebase (deduped)
+            # instead of stranding a scored candidate at rebase_required.
+            rebase_result = await self._queue_confirmation_stale_parent_rebase(candidate)
+            if rebase_result is not None:
+                result = rebase_result
+        logger.info(
+            format_worker_block(
+                "RESEARCH LAB CONFIRMATION DECISION",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Candidate", compact_ref(candidate_id)),
+                    ("Score bundle", compact_ref(score_bundle_id)),
+                    ("Context", context),
+                    ("Promotion", result.get("status")),
+                ),
+            )
+        )
+        status = str(result.get("status") or "")
+        if status not in CONFIRMATION_NON_CLOSING_STATUSES:
+            # A terminal decision landed: close the confirmation so future
+            # passes stop re-driving this candidate+bundle. Best-effort — a
+            # lost close only costs one redundant re-drive next pass.
+            try:
+                await create_candidate_promotion_event(
+                    candidate_id=candidate_id,
+                    source_score_bundle_id=score_bundle_id,
+                    event_type="promotion_checked",
+                    promotion_status="checked",
+                    worker_ref=self.worker_ref,
+                    event_doc={
+                        "reason": CONFIRMATION_CLOSED_REASON,
+                        "decision_path": "confirmation_rerun_closed",
+                        "decision_status": status,
+                        "context": context,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("research_lab_confirmation_close_event_write_failed")
+        return result
+
+    async def _queue_confirmation_stale_parent_rebase(
+        self,
+        candidate: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Queue the stale-parent rebase for a held candidate whose champion
+        moved. Deduped on an existing rebase_queued event (the confirmation
+        re-drive can repeat after a crash); best-effort — a failure leaves the
+        recorded rebase_required promotion event for the operator."""
+        candidate_id = str(candidate.get("candidate_id") or "")
+        try:
+            existing = await select_many(
+                "research_lab_candidate_promotion_events",
+                columns="promotion_event_id",
+                filters=(("candidate_id", candidate_id), ("event_type", "rebase_queued")),
+                limit=1,
+            )
+            if existing:
+                return {"status": "stale_parent_rebase_already_queued"}
+            active = await load_active_private_model(self.config, register_bootstrap=True)
+            evaluation_epoch = await self._resolve_evaluation_epoch()
+            return await self._queue_stale_parent_rebase(
+                candidate,
+                active_artifact=active.artifact,
+                candidate_parent=str(candidate.get("parent_artifact_hash") or ""),
+                evaluation_epoch=evaluation_epoch,
+                elapsed_seconds=0.0,
+                stage="confirmation_redrive_parent_changed",
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort side effect
+            logger.warning(
+                "research_lab_confirmation_stale_parent_rebase_failed candidate_id=%s error=%s",
+                compact_ref(candidate_id),
+                str(exc)[:240],
+            )
+            return None
+
+    async def _run_confirmation_attempt(
+        self,
+        *,
+        hold: Mapping[str, Any],
+        state: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        candidate_id = str(hold.get("candidate_id") or "")
+        score_bundle_id = str(hold.get("source_score_bundle_id") or "")
+        candidate = await select_one(
+            "research_lab_candidate_evaluation_current",
+            filters=(("candidate_id", candidate_id),),
+        )
+        if not candidate:
+            return None
+        bundle_row = await select_one(
+            "research_evaluation_score_bundle_current",
+            filters=(("score_bundle_id", score_bundle_id),),
+        )
+        score_bundle = (
+            bundle_row.get("score_bundle_doc") if isinstance(bundle_row, Mapping) else None
+        )
+        if not isinstance(score_bundle, Mapping):
+            return None
+        attempt = int(state.get("attempts") or 0) + 1
+        candidate_parent = str(candidate.get("parent_artifact_hash") or "")
+        first_pass_points = _safe_float(hold.get("improvement_points"), default=0.0)
+        threshold_points = _safe_float(
+            hold.get("threshold_points"),
+            default=float(self.config.improvement_threshold_points),
+        )
+        started_event = await create_candidate_promotion_event(
+            candidate_id=candidate_id,
+            source_score_bundle_id=score_bundle_id,
+            event_type="promotion_checked",
+            promotion_status="checked",
+            active_parent_artifact_hash=candidate_parent or None,
+            candidate_parent_artifact_hash=candidate_parent or None,
+            rolling_window_hash=str(hold.get("rolling_window_hash") or "") or None,
+            improvement_points=first_pass_points,
+            threshold_points=threshold_points,
+            worker_ref=self.worker_ref,
+            event_doc={
+                "reason": CONFIRMATION_STARTED_REASON,
+                "decision_path": "confirmation_rerun_attempt",
+                "attempt": attempt,
+                "worker_ref": self.worker_ref,
+                "proxy_ref_hash": self.proxy_ref_hash,
+            },
+        )
+        # Post-write claim confirm (write-then-verify, like
+        # _claim_next_candidate): events are append-only with no unique claim
+        # constraint, so two workers racing past the pre-check both land a
+        # started event. The OLDEST unexpired claim in the contiguous head run
+        # of started events wins (ties break on promotion_event_id); the later
+        # writer backs off before measuring. Expired claims (dead workers)
+        # are ignored, so a stale claim can always be reclaimed.
+        fresh = await load_confirmation_state(
+            candidate_id=candidate_id,
+            score_bundle_id=score_bundle_id,
+        )
+        if str(fresh.get("latest_reason") or "") != CONFIRMATION_STARTED_REASON:
+            # Someone recorded/failed an attempt between our write and this
+            # read — the state moved on without us.
+            logger.info(
+                "research_lab_confirmation_claim_lost candidate_id=%s worker_ref=%s (state advanced)",
+                compact_ref(candidate_id),
+                self.worker_ref,
+            )
+            return {"processed": False, "status": "confirmation_claim_lost", "candidate_id": candidate_id}
+        lease_seconds = _confirmation_lease_seconds()
+        open_claims = []
+        for claim in fresh.get("open_claim_events") or []:
+            age = _status_age_seconds(claim.get("created_at"))
+            if age is not None and age > lease_seconds:
+                continue
+            open_claims.append(claim)
+        my_event_id = str(started_event.get("promotion_event_id") or "")
+        winner = min(
+            open_claims,
+            key=lambda row: (str(row.get("created_at") or ""), str(row.get("promotion_event_id") or "")),
+            default=None,
+        )
+        if winner is None or str(winner.get("promotion_event_id") or "") != my_event_id:
+            logger.info(
+                "research_lab_confirmation_claim_lost candidate_id=%s worker_ref=%s winner_worker=%s",
+                compact_ref(candidate_id),
+                self.worker_ref,
+                (winner or {}).get("worker_ref"),
+            )
+            return {"processed": False, "status": "confirmation_claim_lost", "candidate_id": candidate_id}
+        start = time.time()
+        logger.info(
+            format_worker_block(
+                "RESEARCH LAB CONFIRMATION RERUN STARTED",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Candidate", compact_ref(candidate_id)),
+                    ("Score bundle", compact_ref(score_bundle_id)),
+                    ("Attempt", f"{attempt}/{confirmation_attempt_budget(self.config)}"),
+                    ("First-pass delta", f"{first_pass_points:.4f}"),
+                ),
+            )
+        )
+        try:
+            measurement = await self._run_confirmation_measurement(
+                candidate=candidate,
+                score_bundle=score_bundle,
+                hold=hold,
+                attempt=attempt,
+                start=start,
+            )
+        except Exception as exc:  # noqa: BLE001 - infra failure re-holds, bounded by budget
+            try:
+                await create_candidate_promotion_event(
+                    candidate_id=candidate_id,
+                    source_score_bundle_id=score_bundle_id,
+                    event_type="promotion_checked",
+                    promotion_status="checked",
+                    active_parent_artifact_hash=candidate_parent or None,
+                    candidate_parent_artifact_hash=candidate_parent or None,
+                    rolling_window_hash=str(hold.get("rolling_window_hash") or "") or None,
+                    improvement_points=first_pass_points,
+                    threshold_points=threshold_points,
+                    worker_ref=self.worker_ref,
+                    event_doc={
+                        "reason": CONFIRMATION_ATTEMPT_FAILED_REASON,
+                        "decision_path": "confirmation_rerun_attempt",
+                        "attempt": attempt,
+                        "retryable": True,
+                        "unhealthy_measurement": isinstance(exc, ConfirmationMeasurementUnhealthy),
+                        "error_diagnostics": _event_error_diagnostics(exc),
+                        "elapsed_seconds": round(time.time() - start, 3),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("research_lab_confirmation_attempt_failed_event_write_failed")
+            logger.warning(
+                format_worker_block(
+                    "RESEARCH LAB CONFIRMATION RERUN ATTEMPT FAILED",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Candidate", compact_ref(candidate_id)),
+                        ("Attempt", attempt),
+                        ("Error", str(exc)[:300]),
+                        ("Elapsed", f"{time.time() - start:.1f}s"),
+                    ),
+                )
+            )
+            return {
+                "processed": True,
+                "status": "confirmation_attempt_failed",
+                "candidate_id": candidate_id,
+                "attempt": attempt,
+            }
+        if measurement.get("status") == "skipped_stale_parent":
+            # The champion moved while the candidate was held: the fresh delta
+            # would be against the wrong parent. Re-drive so the stale-parent
+            # path records the proper rebase decision.
+            result = await self._redrive_confirmation_decision(
+                candidate_id=candidate_id,
+                score_bundle_id=score_bundle_id,
+                context="confirmation_skipped_stale_parent",
+            )
+            return {
+                "processed": True,
+                "status": "confirmation_skipped_stale_parent",
+                "candidate_id": candidate_id,
+                "promotion_status": str((result or {}).get("status") or ""),
+            }
+        confirmation_doc = dict(measurement.get("confirmation") or {})
+        await create_candidate_promotion_event(
+            candidate_id=candidate_id,
+            source_score_bundle_id=score_bundle_id,
+            event_type="promotion_checked",
+            promotion_status="checked",
+            active_parent_artifact_hash=candidate_parent or None,
+            candidate_parent_artifact_hash=candidate_parent or None,
+            rolling_window_hash=str(confirmation_doc.get("rolling_window_hash") or "") or None,
+            improvement_points=first_pass_points,
+            threshold_points=threshold_points,
+            worker_ref=self.worker_ref,
+            event_doc={
+                "reason": CONFIRMATION_RESULT_REASON,
+                "decision_path": "confirmation_rerun_result",
+                "attempt": attempt,
+                "confirmation": confirmation_doc,
+            },
+        )
+        logger.info(
+            format_worker_block(
+                "RESEARCH LAB CONFIRMATION RERUN RECORDED",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Candidate", compact_ref(candidate_id)),
+                    ("Attempt", attempt),
+                    ("First-pass delta", f"{first_pass_points:.4f}"),
+                    ("Confirmation delta", f"{_safe_float(confirmation_doc.get('confirmation_delta'), default=0.0):.4f}"),
+                    ("Window match", confirmation_doc.get("window_match")),
+                    ("Excluded ICPs", len(confirmation_doc.get("provider_excluded_icp_refs") or [])),
+                    ("Elapsed", f"{time.time() - start:.1f}s"),
+                ),
+            )
+        )
+        result = await self._redrive_confirmation_decision(
+            candidate_id=candidate_id,
+            score_bundle_id=score_bundle_id,
+            context="confirmation_recorded",
+        )
+        return {
+            "processed": True,
+            "status": "confirmation_recorded",
+            "candidate_id": candidate_id,
+            "attempt": attempt,
+            "confirmation_delta": confirmation_doc.get("confirmation_delta"),
+            "promotion_status": str((result or {}).get("status") or ""),
+        }
+
+    async def _run_confirmation_measurement(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle: Mapping[str, Any],
+        hold: Mapping[str, Any],
+        attempt: int,
+        start: float,
+    ) -> dict[str, Any]:
+        """Fresh baseline + fresh candidate evaluation over the same window.
+
+        A side measurement only: nothing here writes a benchmark bundle or a
+        public report, so the day's promotion reference is never replaced.
+        Provider-errored ICPs (after the batch retry rounds) are excluded
+        SYMMETRICALLY from both sides; too many exclusions make the attempt
+        unhealthy (raise) instead of producing a skewed verdict.
+        """
+        active = await load_active_private_model(self.config, register_bootstrap=True)
+        candidate_parent = str(candidate.get("parent_artifact_hash") or "")
+        if active.artifact.model_artifact_hash != candidate_parent:
+            return {"status": "skipped_stale_parent"}
+        candidate_manifest_doc = candidate.get("candidate_model_manifest_doc")
+        if not isinstance(candidate_manifest_doc, Mapping):
+            raise RuntimeError("confirmation requires candidate_model_manifest_doc")
+        candidate_artifact = PrivateModelArtifactManifest.from_mapping(candidate_manifest_doc)
+
+        original_window_hash = str(
+            score_bundle.get("icp_set_hash") or hold.get("rolling_window_hash") or ""
+        )
+        window = await fetch_rolling_icp_window(
+            days=self.config.lab_champion_eval_days,
+            icps_per_day=self.config.lab_champion_icps_per_day,
+            allow_partial=self.config.scoring_worker_allow_partial_icp_window,
+        )
+        window_match = bool(original_window_hash) and window.window_hash == original_window_hash
+        if original_window_hash and not window_match:
+            reconstructed = await self._reconstruct_rolling_window(original_window_hash)
+            if reconstructed is not None:
+                window = reconstructed
+                window_match = True
+        # Idempotent; also satisfies the promotion-event FK when the
+        # confirmation ran on a newly rotated window.
+        await create_rolling_icp_window(window)
+
+        # Trace scope (§5.4 + in-container capture): keyed per candidate,
+        # attempt, and side so confirmation docs never collide across attempts
+        # or candidates. Carried via an instance attribute (not a new call
+        # kwarg) so the side runner's call signature stays stable.
+        self._confirmation_trace_scope = {
+            "candidate_id": str(candidate.get("candidate_id") or "candidate"),
+            "attempt": int(attempt),
+            "manifest_uri": str(active.artifact.manifest_uri or ""),
+        }
+        try:
+            champion_summaries, champion_stats = await self._run_confirmation_side(
+                artifact=active.artifact,
+                window=window,
+                mode_label="confirmation_baseline",
+                run_start=start,
+            )
+            candidate_summaries, candidate_stats = await self._run_confirmation_side(
+                artifact=candidate_artifact,
+                window=window,
+                mode_label="confirmation_candidate",
+                run_start=start,
+            )
+        finally:
+            self._confirmation_trace_scope = None
+        baseline_scores, baseline_unresolved, baseline_nonempty = _collect_confirmation_scores(
+            champion_summaries
+        )
+        candidate_scores, candidate_unresolved, candidate_nonempty = _collect_confirmation_scores(
+            candidate_summaries
+        )
+        if baseline_nonempty <= 0:
+            raise PrivateModelRuntimeError(
+                f"confirmation baseline returned zero companies across all {len(window.benchmark_items)} ICPs"
+            )
+        if candidate_nonempty <= 0:
+            raise PrivateModelRuntimeError(
+                f"confirmation candidate returned zero companies across all {len(window.benchmark_items)} ICPs"
+            )
+        excluded = sorted(set(baseline_unresolved) | set(candidate_unresolved))
+        max_unresolved = _baseline_max_unresolved_icps()
+        if len(excluded) > max_unresolved:
+            raise ConfirmationMeasurementUnhealthy(
+                "confirmation_measurement_unresolved_provider_errors: "
+                f"unresolved={len(excluded)} max={max_unresolved} "
+                f"baseline_unresolved={len(baseline_unresolved)} candidate_unresolved={len(candidate_unresolved)}"
+            )
+        excluded_set = set(excluded)
+        included_refs = [
+            ref
+            for ref in baseline_scores
+            if ref in candidate_scores and ref not in excluded_set
+        ]
+        if not included_refs:
+            raise ConfirmationMeasurementUnhealthy(
+                "confirmation_measurement_no_icps_left_after_exclusions"
+            )
+        baseline_aggregate = _average([baseline_scores[ref] for ref in included_refs])
+        candidate_total = _average([candidate_scores[ref] for ref in included_refs])
+        confirmation_delta = candidate_total - baseline_aggregate
+        confirmation = {
+            "schema_version": "1.0",
+            "measurement_type": "confirmation_rerun_side_measurement",
+            "rolling_window_hash": window.window_hash,
+            "original_window_hash": original_window_hash,
+            "window_match": window_match,
+            "selected_icp_count": len(window.item_refs),
+            "included_icp_count": len(included_refs),
+            "provider_excluded_icp_refs": excluded,
+            "baseline_aggregate_score": round(baseline_aggregate, 6),
+            "candidate_total_score": round(candidate_total, 6),
+            "confirmation_delta": round(confirmation_delta, 6),
+            "per_icp_baseline_scores": {
+                ref: round(baseline_scores[ref], 6) for ref in sorted(baseline_scores)
+            },
+            "per_icp_candidate_scores": {
+                ref: round(candidate_scores[ref], 6) for ref in sorted(candidate_scores)
+            },
+            "baseline_retry": champion_stats,
+            "candidate_retry": candidate_stats,
+            "champion_artifact_hash": active.artifact.model_artifact_hash,
+            "candidate_artifact_hash": candidate_artifact.model_artifact_hash,
+            "attempt": attempt,
+            "worker_ref": self.worker_ref,
+            "elapsed_seconds": round(time.time() - start, 3),
+        }
+        return {"status": "measured", "confirmation": confirmation}
+
+    async def _run_confirmation_side(
+        self,
+        *,
+        artifact: PrivateModelArtifactManifest,
+        window: Any,
+        mode_label: str,
+        run_start: float,
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        """One side (champion or candidate) of a confirmation measurement,
+        through the same batch machinery as the parallel baseline — provider
+        retry rounds, benchmark Exa isolation, and §0-N6 scorer isolation
+        included, so both sides run under the identical execution regime."""
+        runner = DockerPrivateModelRunner(
+            DockerPrivateModelSpec(
+                image_digest=artifact.image_digest,
+                timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
+                env_passthrough=self._private_model_env_passthrough(),
+                extra_env=self._private_baseline_scoring_env(),
+            )
+        )
+        retry_runner = DockerPrivateModelRunner(
+            DockerPrivateModelSpec(
+                image_digest=artifact.image_digest,
+                timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
+                env_passthrough=self._private_model_env_passthrough(),
+                extra_env=self._private_baseline_retry_scoring_env(),
+                # The first-pass runner already pulled this digest.
+                pull_before_run=False,
+            )
+        )
+        scorer = QualificationStyleCompanyScorer()
+        summaries, stats = await self._run_baseline_batch(
+            runner=runner,
+            retry_runner=retry_runner,
+            scorer=scorer,
+            window=window,
+            run_start=run_start,
+            mode_label=mode_label,
+            trace_context=self._confirmation_side_trace_context(mode_label=mode_label),
+        )
+        return summaries, {
+            "retried": int(stats.get("retried") or 0),
+            "recovered": int(stats.get("recovered") or 0),
+            "unresolved": int(stats.get("unresolved") or 0),
+        }
+
+    def _confirmation_side_trace_context(self, *, mode_label: str) -> dict[str, Any] | None:
+        """Trace scope for one confirmation side, derived from the pending
+        confirmation's candidate/attempt (set by _run_confirmation_measurement).
+        None outside a confirmation measurement — capture then stays off."""
+        scope = getattr(self, "_confirmation_trace_scope", None)
+        if not isinstance(scope, Mapping):
+            return None
+        side = "champion" if mode_label == "confirmation_baseline" else "candidate"
+        candidate_ref = _trace_path_segment(scope.get("candidate_id"), fallback="candidate")
+        return self._baseline_trace_context(
+            context_ref=f"confirmation-{candidate_ref}-a{int(scope.get('attempt') or 0)}-{side}",
+            manifest_uri=str(scope.get("manifest_uri") or ""),
+        )
+
+    async def _reconstruct_rolling_window(self, window_hash: str) -> Any | None:
+        """Best-effort re-materialization of a stored rolling window.
+
+        The window selection is deterministic over its set rows, so re-fetching
+        the original set_ids reproduces the identical window unless the set
+        contents changed — verified by requiring the reconstructed hash to
+        match. Any failure falls back to the caller's current window (the
+        confirmation stays a same-window paired comparison either way)."""
+        try:
+            row = await select_one(
+                "research_lab_rolling_icp_windows",
+                filters=(("rolling_window_hash", window_hash),),
+            )
+            doc = row.get("window_doc") if isinstance(row, Mapping) else None
+            if not isinstance(doc, Mapping):
+                return None
+            set_ids = [
+                int(entry.get("set_id"))
+                for entry in (doc.get("sets") or [])
+                if isinstance(entry, Mapping) and entry.get("set_id") is not None
+            ]
+            days = int(doc.get("required_days") or 0)
+            icps_per_day = int(doc.get("icps_per_day") or 0)
+            if not set_ids or days <= 0 or icps_per_day <= 0:
+                return None
+            rows = await select_many(
+                "qualification_private_icp_sets",
+                columns="set_id,icps,icp_set_hash,active_from,active_until,is_active",
+                filters=(("set_id", "in", tuple(set_ids)),),
+                limit=max(len(set_ids), 10),
+            )
+            if len(rows) < len(set_ids):
+                return None
+            window = select_rolling_icp_window_from_sets(
+                rows,
+                days=days,
+                icps_per_day=icps_per_day,
+                allow_partial=False,
+            )
+            if window.window_hash != window_hash:
+                logger.info(
+                    "research_lab_confirmation_window_reconstruct_hash_mismatch expected=%s got=%s",
+                    compact_ref(window_hash),
+                    compact_ref(window.window_hash),
+                )
+                return None
+            return window
+        except Exception as exc:  # noqa: BLE001 - best-effort; caller keeps the current window
+            logger.warning(
+                "research_lab_confirmation_window_reconstruct_failed error=%s",
+                str(exc)[:200],
+            )
+            return None
+
     async def _maybe_rebase_stale_candidate_before_scoring(
         self,
         candidate: Mapping[str, Any],
@@ -2802,12 +4173,20 @@ class ResearchLabGatewayScoringWorker:
             )
         )
         scorer = QualificationStyleCompanyScorer()
+        # Trace scope (§5.4 + in-container capture): keyed per day, attempt,
+        # and window so a deliberate same-day replacement never overwrites the
+        # prior attempt's docs.
+        baseline_window_tag = str(window.window_hash or "").removeprefix("sha256:")[:16] or "window"
+        baseline_trace_context = self._baseline_trace_context(
+            context_ref=f"daily-{today}-a{benchmark_attempt}-{baseline_window_tag}",
+            manifest_uri=artifact.manifest_uri,
+        )
         per_icp_summaries: list[dict[str, Any]] = []
         nonempty_output_count = 0
         retried_total = 0
         recovered_total = 0
         try:
-            await create_scoring_dispatch_event(
+            lease_event = await create_scoring_dispatch_event(
                 dispatch_type="private_baseline_rebenchmark",
                 dispatch_status="assigned",
                 worker_ref=self.worker_ref,
@@ -2819,6 +4198,28 @@ class ResearchLabGatewayScoringWorker:
                     "selected_icp_count": len(window.item_refs),
                 },
             )
+            # Post-write lease confirm (claim-guard pattern, like
+            # _claim_next_candidate's write-then-verify): two workers can both
+            # pass the pre-check before either's `assigned` event lands. The
+            # earliest unexpired open lease wins; the loser backs off silently
+            # (writing a failed/completed release here would clear the
+            # winner's lease for third-party observers). Only meaningful when
+            # any-worker baselines are enabled — worker 0 has no peers.
+            if _env_flag("RESEARCH_LAB_BASELINE_ANY_WORKER") and not await self._confirm_baseline_lease(
+                today=today,
+                lease_event=lease_event,
+            ):
+                logger.info(
+                    format_worker_block(
+                        "RESEARCH LAB PRIVATE BASELINE LEASE LOST",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("Benchmark date", today),
+                            ("Action", "another worker holds the earlier lease; backing off"),
+                        ),
+                    )
+                )
+                return {"status": "baseline_leased_elsewhere", "benchmark_date": today}
             total_icps = len(window.benchmark_items)
             parallel_mode = self.config.private_baseline_concurrency > 1
             if parallel_mode:
@@ -2838,6 +4239,7 @@ class ResearchLabGatewayScoringWorker:
                     scorer=scorer,
                     window=window,
                     run_start=start,
+                    trace_context=baseline_trace_context,
                 )
                 retried_total = int(retry_stats.get("retried") or 0)
                 recovered_total = int(retry_stats.get("recovered") or 0)
@@ -2866,6 +4268,13 @@ class ResearchLabGatewayScoringWorker:
                     )
                 )
                 runtime_error = ""
+                # In-container trace collection (§9.1): asyncio.to_thread copies
+                # the contextvars context, so the runner thread sees the
+                # collector installed here.
+                serial_trace_entries: list[dict[str, Any]] | None = None
+                serial_trace_token: contextvars.Token | None = None
+                if incontainer_trace_capture_enabled():
+                    serial_trace_entries, serial_trace_token = begin_incontainer_trace_collection()
                 try:
                     outputs = ensure_private_model_outputs(
                         await asyncio.to_thread(runner, item["icp"], {"mode": "private_baseline"}),
@@ -2887,14 +4296,36 @@ class ResearchLabGatewayScoringWorker:
                             ),
                         )
                     )
+                finally:
+                    if serial_trace_token is not None:
+                        end_incontainer_trace_collection(serial_trace_token)
                 item_elapsed = time.time() - item_start
                 if outputs:
                     nonempty_output_count += 1
-                score_breakdowns = (
-                    await scorer.score_with_breakdowns(outputs, item["icp"], True)
-                    if outputs
-                    else []
-                )
+                score_breakdowns: list[dict[str, Any]] = []
+                scorer_error = ""
+                if outputs:
+                    try:
+                        score_breakdowns = await self._score_baseline_outputs(
+                            scorer=scorer,
+                            outputs=outputs,
+                            icp=item["icp"],
+                            apply_isolation=True,
+                        )
+                    except Exception as scorer_exc:  # noqa: BLE001 - §0-N6: non-fatal per ICP
+                        scorer_error = _short_error(scorer_exc)
+                        logger.warning(
+                            format_worker_block(
+                                "RESEARCH LAB PRIVATE BASELINE ICP SCORER ERROR",
+                                (
+                                    ("Worker", self.worker_ref),
+                                    ("ICP", f"{item_index}/{total_icps}"),
+                                    ("ICP ref", compact_ref(label)),
+                                    ("ICP hash", compact_ref(item.get("icp_hash"))),
+                                    ("Error", scorer_error),
+                                ),
+                            )
+                        )
                 scores = [float(row.get("final_score", 0.0) or 0.0) for row in score_breakdowns]
                 icp_score = _average(scores)
                 logger.info(
@@ -2912,6 +4343,7 @@ class ResearchLabGatewayScoringWorker:
                             ("Companies", len(scores)),
                             ("Non-empty output", bool(outputs)),
                             ("Runtime error", runtime_error or "-"),
+                            ("Scorer error", scorer_error or "-"),
                             ("ICP runtime", f"{item_elapsed:.1f}s"),
                             ("Elapsed", f"{time.time() - start:.1f}s"),
                         ),
@@ -2938,15 +4370,26 @@ class ResearchLabGatewayScoringWorker:
                     # "companies discovered" number.
                     sourced_count=len(outputs),
                 )
-                if runtime_error:
+                if runtime_error or scorer_error:
                     diagnostics = dict(item_summary.get("diagnostics") or {})
-                    runtime_diagnostics = _runtime_error_diagnostics(runtime_error)
+                    runtime_diagnostics = _runtime_error_diagnostics(runtime_error or scorer_error)
                     categories = set(diagnostics.get("failure_categories") or [])
-                    categories.add("runtime_provider_error")
+                    if runtime_error:
+                        categories.add("runtime_provider_error")
+                    if scorer_error:
+                        categories.add("scorer_provider_error")
                     categories.add(str(runtime_diagnostics["category"]))
                     diagnostics["failure_categories"] = sorted(categories)
                     diagnostics["runtime_error"] = runtime_diagnostics
                     item_summary["diagnostics"] = diagnostics
+                await self._record_baseline_icp_traces(
+                    item=item,
+                    item_summary=item_summary,
+                    outputs=outputs,
+                    score_breakdowns=score_breakdowns,
+                    trace_entries=serial_trace_entries,
+                    trace_context=baseline_trace_context,
+                )
                 per_icp_summaries.append(item_summary)
             if nonempty_output_count <= 0:
                 raise PrivateModelRuntimeError(
@@ -3162,6 +4605,112 @@ class ResearchLabGatewayScoringWorker:
             "rolling_window_hash": window.window_hash,
         }
 
+    def _get_scorer_trace_recorder(self) -> _ScorerTraceRecorder:
+        recorder = getattr(self, "_scorer_trace_recorder", None)
+        if recorder is None:
+            recorder = _ScorerTraceRecorder(self.config)
+            self._scorer_trace_recorder = recorder
+        return recorder
+
+    def _baseline_trace_context(self, *, context_ref: str, manifest_uri: str) -> dict[str, Any]:
+        """Shared trace scope for one baseline/champion batch: keys the §5.4
+        scorer-trace docs and the in-container trace docs, and carries the
+        batch's log-once drop state for unconfigured S3."""
+        return {
+            "context_ref": str(context_ref),
+            "manifest_uri": str(manifest_uri or ""),
+            "incontainer_drop_state": {"logged": False, "dropped_entries": 0},
+        }
+
+    async def _record_baseline_icp_traces(
+        self,
+        *,
+        item: Mapping[str, Any],
+        item_summary: dict[str, Any],
+        outputs: list[Any],
+        score_breakdowns: list[dict[str, Any]],
+        trace_entries: list[dict[str, Any]] | None,
+        trace_context: Mapping[str, Any] | None,
+    ) -> None:
+        """Best-effort §5.4 scorer-trace capture plus in-container trace
+        publication for one baseline/champion ICP.
+
+        Mutates ONLY ``item_summary['diagnostics']`` with pointer fields
+        (``scorer_trace_ref``/``scorer_trace_sha256`` and the
+        ``incontainer_trace_*`` trio) — never content — and never raises.
+        With capture flags off (or ``trace_context`` unset) the summary stays
+        byte-identical to the pre-capture shape.
+        """
+        if trace_context is None:
+            return
+        try:
+            label = str(item.get("icp_ref") or item.get("icp_hash") or "unknown_icp")
+            context_ref = str(trace_context.get("context_ref") or "baseline")
+            diagnostics_updates: dict[str, Any] = {}
+            if score_breakdowns:
+                pointer = self._get_scorer_trace_recorder().capture(
+                    context_ref=context_ref,
+                    icp_ref=label,
+                    icp_hash=str(item.get("icp_hash") or ""),
+                    outputs=outputs,
+                    breakdowns=score_breakdowns,
+                    is_reference_model=True,
+                    manifest_uri=str(trace_context.get("manifest_uri") or ""),
+                )
+                if pointer:
+                    diagnostics_updates["scorer_trace_ref"] = pointer["s3_ref"]
+                    diagnostics_updates["scorer_trace_sha256"] = pointer["sha256"]
+            if trace_entries:
+                drop_state = trace_context.get("incontainer_drop_state")
+                diagnostics_updates.update(
+                    await _publish_baseline_incontainer_trace(
+                        context_ref=context_ref,
+                        icp_ref=label,
+                        entries=trace_entries,
+                        drop_state=drop_state if isinstance(drop_state, dict) else {},
+                    )
+                )
+            if diagnostics_updates:
+                diagnostics = dict(item_summary.get("diagnostics") or {})
+                diagnostics.update(diagnostics_updates)
+                item_summary["diagnostics"] = diagnostics
+        except Exception:  # noqa: BLE001 - capture can never affect the batch
+            logger.warning(
+                "research_lab_baseline_trace_record_failed icp_ref=%s",
+                compact_ref(str(item.get("icp_ref") or "")),
+                exc_info=True,
+            )
+
+    def _candidate_incontainer_trace_sink(self, candidate_id: str) -> Any:
+        """Candidate-scoped in-container trace sink for the evaluator.
+
+        Uploads key by candidate (``{prefix}/{candidate_id}/{icp_ref}.json``)
+        instead of the default run-scoped ref, so one candidate's traces stay
+        enumerable under a single prefix; the evaluator places the returned uri
+        into the row's ``incontainer_trace_ref``. Returns None when no S3
+        prefix is configured — the evaluator's default count-and-drop sink
+        (logged once) then applies — and the
+        ``RESEARCH_LAB_INCONTAINER_TRACE_CAPTURE`` kill switch still overrides
+        injected sinks inside the evaluator.
+        """
+        prefix = str(os.getenv(INCONTAINER_TRACE_S3_PREFIX_ENV) or "").strip().rstrip("/")
+        if not prefix.startswith("s3://"):
+            return None
+        kms_key_id = str(os.getenv(INCONTAINER_TRACE_KMS_KEY_ENV) or "").strip()
+        safe_candidate = _trace_path_segment(candidate_id, fallback="candidate")
+
+        async def _sink(icp_ref: str, entries: list[dict[str, Any]]) -> str:
+            return await asyncio.to_thread(
+                _upload_incontainer_trace_doc,
+                prefix,
+                safe_candidate,
+                str(icp_ref),
+                list(entries),
+                kms_key_id,
+            )
+
+        return _sink
+
     async def _run_baseline_icp(
         self,
         *,
@@ -3172,6 +4721,9 @@ class ResearchLabGatewayScoringWorker:
         total_icps: int,
         run_start: float,
         executor: concurrent.futures.Executor,
+        scorer_semaphore: asyncio.Semaphore | None = None,
+        mode_label: str = "private_baseline",
+        trace_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run one benchmark ICP (docker sourcing + scoring) and build its summary.
 
@@ -3180,6 +4732,11 @@ class ResearchLabGatewayScoringWorker:
         blocking docker wait runs on the dedicated baseline executor instead of
         asyncio.to_thread so many concurrent ~10-minute subprocess waits cannot
         starve the loop's default executor (which the KMS signing call uses).
+
+        A scorer-side provider failure is NOT fatal for the batch (§0-N6): the
+        scorer call is retried once inline, then the ICP is marked unresolved
+        (retryable per the runner-error classifier) so the retry rounds and the
+        baseline health gate see it instead of the whole batch dying.
 
         The returned summary carries underscore-prefixed orchestration fields
         (_item_index, _retryable, _nonempty, _runtime_error) that MUST be popped
@@ -3203,14 +4760,24 @@ class ResearchLabGatewayScoringWorker:
             )
         )
         runtime_error = ""
+        scorer_error = ""
         retryable = False
+        # In-container trace collection (§9.1): install a per-task collector so
+        # the runner's stderr trace markers are published instead of dropped.
+        # run_in_executor does NOT copy contextvars (asyncio.to_thread does), so
+        # the context is copied explicitly AFTER the collector is installed —
+        # the executor thread then appends to the same list object.
+        trace_entries: list[dict[str, Any]] | None = None
+        trace_token: contextvars.Token | None = None
+        if trace_context is not None and incontainer_trace_capture_enabled():
+            trace_entries, trace_token = begin_incontainer_trace_collection()
         try:
+            runner_call: Any = functools.partial(runner, item["icp"], {"mode": mode_label})
+            if trace_token is not None:
+                runner_call = functools.partial(contextvars.copy_context().run, runner_call)
             outputs = ensure_private_model_outputs(
-                await loop.run_in_executor(
-                    executor,
-                    functools.partial(runner, item["icp"], {"mode": "private_baseline"}),
-                ),
-                context_label=f"private baseline for {label}",
+                await loop.run_in_executor(executor, runner_call),
+                context_label=f"{mode_label} for {label}",
                 require_non_empty=False,
             )
         except PrivateModelRuntimeError as exc:
@@ -3232,12 +4799,35 @@ class ResearchLabGatewayScoringWorker:
                     ),
                 )
             )
+        finally:
+            if trace_token is not None:
+                end_incontainer_trace_collection(trace_token)
         item_elapsed = time.time() - item_start
-        score_breakdowns = (
-            await scorer.score_with_breakdowns(outputs, item["icp"], True)
-            if outputs
-            else []
-        )
+        score_breakdowns: list[dict[str, Any]] = []
+        if outputs:
+            try:
+                score_breakdowns = await self._score_baseline_outputs(
+                    scorer=scorer,
+                    outputs=outputs,
+                    icp=item["icp"],
+                    scorer_semaphore=scorer_semaphore,
+                )
+            except Exception as scorer_exc:  # noqa: BLE001 - §0-N6: non-fatal for the batch
+                scorer_error = _short_error(scorer_exc)
+                retryable = retryable or _baseline_error_is_retryable(str(scorer_exc))
+                logger.warning(
+                    format_worker_block(
+                        "RESEARCH LAB PRIVATE BASELINE ICP SCORER ERROR",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("ICP", f"{item_index}/{total_icps}"),
+                            ("ICP ref", compact_ref(label)),
+                            ("ICP hash", compact_ref(item.get("icp_hash"))),
+                            ("Retryable", retryable),
+                            ("Error", scorer_error),
+                        ),
+                    )
+                )
         scores = [float(row.get("final_score", 0.0) or 0.0) for row in score_breakdowns]
         icp_score = _average(scores)
         logger.info(
@@ -3255,6 +4845,7 @@ class ResearchLabGatewayScoringWorker:
                     ("Companies", len(scores)),
                     ("Non-empty output", bool(outputs)),
                     ("Runtime error", runtime_error or "-"),
+                    ("Scorer error", scorer_error or "-"),
                     ("ICP runtime", f"{item_elapsed:.1f}s"),
                     ("Elapsed", f"{time.time() - run_start:.1f}s"),
                 ),
@@ -3270,20 +4861,78 @@ class ResearchLabGatewayScoringWorker:
             # "companies discovered" number.
             sourced_count=len(outputs),
         )
-        if runtime_error:
+        if runtime_error or scorer_error:
             diagnostics = dict(item_summary.get("diagnostics") or {})
-            runtime_diagnostics = _runtime_error_diagnostics(runtime_error)
+            runtime_diagnostics = _runtime_error_diagnostics(runtime_error or scorer_error)
             categories = set(diagnostics.get("failure_categories") or [])
-            categories.add("runtime_provider_error")
+            if runtime_error:
+                categories.add("runtime_provider_error")
+            if scorer_error:
+                categories.add("scorer_provider_error")
             categories.add(str(runtime_diagnostics["category"]))
             diagnostics["failure_categories"] = sorted(categories)
             diagnostics["runtime_error"] = runtime_diagnostics
             item_summary["diagnostics"] = diagnostics
+        await self._record_baseline_icp_traces(
+            item=item,
+            item_summary=item_summary,
+            outputs=outputs,
+            score_breakdowns=score_breakdowns,
+            trace_entries=trace_entries,
+            trace_context=trace_context,
+        )
         item_summary["_item_index"] = item_index
         item_summary["_retryable"] = retryable
         item_summary["_nonempty"] = bool(outputs)
-        item_summary["_runtime_error"] = runtime_error
+        item_summary["_runtime_error"] = runtime_error or scorer_error
         return item_summary
+
+    async def _score_baseline_outputs(
+        self,
+        *,
+        scorer: QualificationStyleCompanyScorer,
+        outputs: list[Any],
+        icp: Mapping[str, Any],
+        scorer_semaphore: asyncio.Semaphore | None = None,
+        apply_isolation: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Baseline-batch scorer call with the §0-N6 semantics.
+
+        * optional benchmark scorer-key isolation (``apply_isolation`` — the
+          serial loop applies it per call; the parallel batch applies ONE
+          batch-wide scope instead, because per-call enter/exit under
+          concurrency would restore prod keys mid-flight for sibling tasks);
+        * optional burst semaphore (RESEARCH_LAB_BENCHMARK_SCORER_MAX_CONCURRENCY);
+        * one inline retry for transient scorer provider errors (classified by
+          the same rules as runner errors).
+        """
+
+        async def _call() -> list[dict[str, Any]]:
+            if scorer_semaphore is None:
+                return await scorer.score_with_breakdowns(outputs, icp, True)
+            async with scorer_semaphore:
+                return await scorer.score_with_breakdowns(outputs, icp, True)
+
+        async def _guarded() -> list[dict[str, Any]]:
+            try:
+                return await _call()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if not _baseline_error_is_retryable(str(exc)):
+                    raise
+                logger.warning(
+                    "research_lab_baseline_scorer_retry worker_ref=%s error=%s",
+                    self.worker_ref,
+                    _short_error(exc),
+                )
+                await asyncio.sleep(2.0)
+                return await _call()
+
+        if not apply_isolation:
+            return await _guarded()
+        with _benchmark_scorer_isolation():
+            return await _guarded()
 
     async def _run_baseline_batch(
         self,
@@ -3293,6 +4942,37 @@ class ResearchLabGatewayScoringWorker:
         scorer: QualificationStyleCompanyScorer,
         window: Any,
         run_start: float,
+        mode_label: str = "private_baseline",
+        trace_context: Mapping[str, Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        """Run all benchmark ICPs concurrently, then retry transient failures.
+
+        The whole batch (first pass + retry rounds) runs inside ONE benchmark
+        scorer-key isolation scope (§0-N6): scorer calls burst on the dedicated
+        benchmark Scrapingdog/OpenRouter keys when configured, container runs
+        keep their construction-time prod keys via extra_env.
+        """
+        with _benchmark_scorer_isolation():
+            return await self._run_baseline_batch_inner(
+                runner=runner,
+                retry_runner=retry_runner,
+                scorer=scorer,
+                window=window,
+                run_start=run_start,
+                mode_label=mode_label,
+                trace_context=trace_context,
+            )
+
+    async def _run_baseline_batch_inner(
+        self,
+        *,
+        runner: DockerPrivateModelRunner,
+        retry_runner: DockerPrivateModelRunner,
+        scorer: QualificationStyleCompanyScorer,
+        window: Any,
+        run_start: float,
+        mode_label: str = "private_baseline",
+        trace_context: Mapping[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Run all benchmark ICPs concurrently, then retry transient failures.
 
@@ -3313,6 +4993,8 @@ class ResearchLabGatewayScoringWorker:
         concurrency = self.config.private_baseline_concurrency
         items = list(enumerate(window.benchmark_items, start=1))
         total_icps = len(items)
+        scorer_limit = _benchmark_scorer_max_concurrency()
+        scorer_semaphore = asyncio.Semaphore(scorer_limit) if scorer_limit > 0 else None
         executor = concurrent.futures.ThreadPoolExecutor(
             # Retry rounds reuse this pool — size for whichever phase is wider.
             max_workers=max(concurrency, self.config.private_baseline_retry_concurrency),
@@ -3331,6 +5013,9 @@ class ResearchLabGatewayScoringWorker:
                         total_icps=total_icps,
                         run_start=run_start,
                         executor=executor,
+                        scorer_semaphore=scorer_semaphore,
+                        mode_label=mode_label,
+                        trace_context=trace_context,
                     )
 
             # Settle-then-raise: blocking docker waits cannot be cancelled, so a
@@ -3378,6 +5063,9 @@ class ResearchLabGatewayScoringWorker:
                             total_icps=total_icps,
                             run_start=run_start,
                             executor=executor,
+                            scorer_semaphore=scorer_semaphore,
+                            mode_label=mode_label,
+                            trace_context=trace_context,
                         )
 
                 retried = await asyncio.gather(
@@ -3566,6 +5254,75 @@ class ResearchLabGatewayScoringWorker:
                     )
                     return True
             return False
+        return False
+
+    async def _confirm_baseline_lease(
+        self,
+        *,
+        today: str,
+        lease_event: Mapping[str, Any] | None,
+    ) -> bool:
+        """Ownership confirm after writing our `assigned` lease marker.
+
+        The winner is the earliest unexpired open lease for today: per worker,
+        only its LATEST private_baseline_rebenchmark event counts (a later
+        completed/failed closes that worker's lease), leases older than
+        RESEARCH_LAB_BASELINE_LEASE_SECONDS are expired (dead worker), and ties
+        break on dispatch_event_id. Read failures confirm optimistically — the
+        same-day-reuse guard and the pre-record conflict check backstop
+        duplicate recordings; this confirm only avoids wasting a duplicate
+        multi-hour run.
+        """
+        try:
+            lease_seconds = max(600, int(os.getenv("RESEARCH_LAB_BASELINE_LEASE_SECONDS", "5400")))
+        except ValueError:
+            lease_seconds = 5400
+        try:
+            rows = await select_many(
+                "research_lab_scoring_dispatch_events",
+                columns="dispatch_event_id,dispatch_status,worker_ref,event_doc,created_at",
+                filters=(("dispatch_type", "private_baseline_rebenchmark"),),
+                order_by=(("created_at", True),),
+                limit=100,
+            )
+        except Exception as exc:
+            logger.warning("research_lab_baseline_lease_confirm_failed error=%s", str(exc)[:200])
+            return True
+        latest_by_worker: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
+            if str(doc.get("benchmark_date") or "") != today:
+                continue
+            worker = str(row.get("worker_ref") or "")
+            if worker and worker not in latest_by_worker:
+                # Rows are newest-first: the first row per worker is its
+                # current lease state for today.
+                latest_by_worker[worker] = row
+        open_leases: list[dict[str, Any]] = []
+        for row in latest_by_worker.values():
+            if str(row.get("dispatch_status") or "") != "assigned":
+                continue
+            age = _status_age_seconds(row.get("created_at"))
+            if age is None or age > lease_seconds:
+                continue
+            open_leases.append(row)
+        if not open_leases:
+            return True
+        winner = min(
+            open_leases,
+            key=lambda row: (str(row.get("created_at") or ""), str(row.get("dispatch_event_id") or "")),
+        )
+        if str(winner.get("worker_ref") or "") == self.worker_ref:
+            return True
+        lease_event_id = str((lease_event or {}).get("dispatch_event_id") or "")
+        if lease_event_id and str(winner.get("dispatch_event_id") or "") == lease_event_id:
+            return True
+        logger.info(
+            "research_lab_baseline_lease_lost worker_ref=%s winner_worker=%s winner_event=%s",
+            self.worker_ref,
+            winner.get("worker_ref"),
+            compact_ref(winner.get("dispatch_event_id")),
+        )
         return False
 
     def _is_private_baseline_owner(self) -> bool:

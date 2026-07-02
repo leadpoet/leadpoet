@@ -397,6 +397,11 @@ class CodeEditCandidateBuilder:
                     len(commit_excluded_paths),
                     ", ".join(commit_excluded_paths[:20]),
                 )
+            # §5.3: make sure the parent image is cached locally BEFORE the build
+            # command starts, so a cold registry pull never eats the build budget
+            # (matters especially on the source_context path, which touches no
+            # docker image until this point).
+            _prepull_parent_image_for_build(parent_artifact.image_digest)
             _run_private_build_cmd_with_infra_retry(
                 cmd=self.config.private_build_cmd,
                 cwd=repo_dir,
@@ -583,6 +588,18 @@ def _infra_retry_backoff_seconds() -> float:
         return 5.0
 
 
+def _parent_image_prepull_enabled() -> bool:
+    return _env_flag("RESEARCH_LAB_PARENT_IMAGE_PREPULL", True)
+
+
+def _parent_image_pull_timeout_seconds() -> int:
+    raw = str(os.getenv("RESEARCH_LAB_PARENT_IMAGE_PULL_TIMEOUT_SECONDS", "") or "").strip()
+    try:
+        return max(1, int(raw)) if raw else 900
+    except ValueError:
+        return 900
+
+
 _REQUIRED_PARENT_APP_DIRS = (
     "gateway",
     "qualification",
@@ -666,6 +683,68 @@ def _ensure_parent_image_available(image_ref: str, *, timeout_seconds: int) -> N
         except CodeEditBuildError as retry_exc:
             raise CodeEditInfraFailureError(
                 f"parent image pull failed after infra retry: {retry_exc}",
+                stderr=retry_exc.stderr,
+                stdout=retry_exc.stdout,
+                exit_code=retry_exc.exit_code,
+            ) from retry_exc
+
+
+def _parent_image_cached_locally(image_ref: str) -> bool:
+    try:
+        _run(["docker", "image", "inspect", image_ref], cwd=Path.cwd(), timeout_seconds=120)
+        return True
+    except CodeEditBuildError:
+        return False
+
+
+def _prepull_parent_image_for_build(image_ref: str) -> None:
+    """Pull the parent image as its own pre-step, outside the build-cmd budget (§5.3).
+
+    The private build script's ``docker build`` re-pulls the parent image when it
+    is not cached locally, and that cold pull used to burn a large slice of the
+    single ``code_edit_build_timeout_seconds`` budget the whole build command
+    shares — cold workers unfairly killed their first candidates. Pre-pulling
+    here with a dedicated generous timeout
+    (``RESEARCH_LAB_PARENT_IMAGE_PULL_TIMEOUT_SECONDS``, default 900) means the
+    script's own pull hits the local cache and the build budget pays for the
+    build only. A pull failure is a registry/auth/network problem the
+    candidate's diff cannot cause, so it always classifies as infra (bug #30):
+    retried once with the existing backoff, then surfaced as
+    ``CodeEditInfraFailureError`` so higher levels requeue instead of charging
+    the candidate. Disable via ``RESEARCH_LAB_PARENT_IMAGE_PREPULL=false`` to
+    restore the pull-inside-the-build-budget behavior.
+    """
+
+    if not _parent_image_prepull_enabled():
+        return
+    image = str(image_ref or "").strip()
+    if not image:
+        return
+    if _parent_image_cached_locally(image):
+        return
+    pull_cmd = ["docker", "pull", "--platform", _docker_platform(), image]
+    timeout_seconds = _parent_image_pull_timeout_seconds()
+    try:
+        _run(pull_cmd, cwd=Path.cwd(), timeout_seconds=timeout_seconds)
+        return
+    except CodeEditBuildError as exc:
+        if not _infra_retry_enabled():
+            raise CodeEditInfraFailureError(
+                f"parent image pre-pull failed: {exc}",
+                stderr=exc.stderr,
+                stdout=exc.stdout,
+                exit_code=exc.exit_code,
+            ) from exc
+        logger.warning(
+            "research-lab code-edit build: parent image pre-pull failed, retrying once after backoff: %s",
+            str(exc)[:300],
+        )
+        time.sleep(_infra_retry_backoff_seconds())
+        try:
+            _run(pull_cmd, cwd=Path.cwd(), timeout_seconds=timeout_seconds)
+        except CodeEditBuildError as retry_exc:
+            raise CodeEditInfraFailureError(
+                f"parent image pre-pull failed after infra retry: {retry_exc}",
                 stderr=retry_exc.stderr,
                 stdout=retry_exc.stdout,
                 exit_code=retry_exc.exit_code,

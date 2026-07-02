@@ -8,6 +8,12 @@ into the v5 corpus tables created by ``scripts/27-research-lab-v5-schemas.sql``:
 * ``research_trajectories``        -- one envelope row per run (no events array)
 * ``research_trajectory_events``   -- append-only canonical event log
 * ``research_lab_results_ledger``  -- one row per (run x drafted node)
+* ``execution_traces``             -- pointer aggregation rows: one "engine"
+  row per run (non-node-attributed raw LLM trace pointers) plus one row per
+  node with node-scoped pointers (draft-stage raw traces, in-container
+  sourcing-model trace refs) -- fablefollowup.md item 5.5
+* ``evidence_bundles``             -- one row per scored candidate node
+  pointing at its score bundle + per-ICP evidence summary (numbers/refs only)
 
 Design facts this module encodes (verified against the code/schemas):
 
@@ -38,6 +44,19 @@ Design facts this module encodes (verified against the code/schemas):
 Idempotency: trajectory ids are deterministic (uuid5 of the run id), and a run
 whose envelope row already exists is skipped, so the projector is safely
 re-runnable and can backfill every historical run from its existing events.
+``execution_traces`` / ``evidence_bundles`` row ids are equally deterministic
+(uuid5 over run/node + kind), and every row is existence-checked before insert,
+so trace/evidence population is upsert-or-skip idempotent too.
+
+Trajectory linkage is FORWARD-ONLY by design: ``research_trajectory_events``
+is append-only by grant (UPDATE is revoked from service_role) and by trigger,
+and ``anchored_hash`` covers the whole event body -- retrofitting refs into
+already-projected events is impossible without breaking both.  New projections
+embed ``execution_trace_ref`` (a real ``$defs/event`` field) on NODE_EVALUATED
+and ``evidence_bundle_ref`` inside the nested ``evaluation_context``; runs
+projected before this feature get their ``execution_traces`` /
+``evidence_bundles`` rows via ``--traces-backfill`` WITHOUT event retrofit
+(the deterministic row ids make the linkage recomputable from the run id).
 
 Flags / entry points:
 
@@ -47,11 +66,17 @@ Flags / entry points:
   worker periodic pass or cron (wiring is a follow-up, not done here).
 * CLI: ``python3 -m gateway.research_lab.trajectory_projector --backfill``
   (dry-run by default; pass ``--no-dry-run`` to write).
+* CLI: ``python3 -m gateway.research_lab.trajectory_projector
+  --traces-backfill`` adds missing ``execution_traces`` / ``evidence_bundles``
+  rows to ALREADY-projected runs (dry-run by default).  Historical runs
+  tolerate absent pointers everywhere: raw traces did not exist before item
+  5.1 landed, so old runs mostly gain evidence-bundle rows only.
 
-Follow-ups owned elsewhere: applying scripts/27, the worker-pass hook,
-code-edit-lane ``reflection_recorded`` emission, raw prompt/response capture
-(``execution_traces`` refs stay empty until that lands), and folding the store
-facade below into ``gateway/research_lab/store.py``.
+Follow-ups owned elsewhere: applying scripts/27, scorer-judge trace capture
+(item 5.4 -- ``judge_verdicts`` stays ``[]`` until it lands), in-container
+per-ICP trace refs reaching score-bundle docs (item 5.3 reader below is
+tolerant of their absence), and folding the store facade below into
+``gateway/research_lab/store.py``.
 """
 
 from __future__ import annotations
@@ -86,6 +111,33 @@ RESULTS_LEDGER_SCHEMA_NAME = "results_ledger_row.schema.json"
 TRAJECTORIES_TABLE = "research_trajectories"
 TRAJECTORY_EVENTS_TABLE = "research_trajectory_events"
 RESULTS_LEDGER_TABLE = "research_lab_results_ledger"
+EXECUTION_TRACES_TABLE = "execution_traces"
+EVIDENCE_BUNDLES_TABLE = "evidence_bundles"
+
+# scripts/27 CHECK-enforced enums (mirrored verbatim; tests re-parse the SQL).
+EXECUTION_TRACE_ROLES: tuple[str, ...] = (
+    "champion",
+    "candidate",
+    "shadow",
+    "baseline_arm",
+    "reference",
+)
+EXECUTION_TRACE_RUNGS: tuple[str, ...] = ("L0", "L1", "L2", "L3", "L4", "anchor")
+EXECUTION_TRACE_STATUSES: tuple[str, ...] = ("completed", "crash", "timeout")
+EVIDENCE_RETENTION_CLASSES: tuple[str, ...] = (
+    "live_verification",
+    "regression_anchor",
+    "general_snapshot",
+)
+EVIDENCE_VERIFICATION_STATES: tuple[str, ...] = (
+    "active",
+    "content_deleted",
+    "hash_attested",
+)
+
+# Caps keep pointer rows bounded on pathological runs (batch-capped writes).
+_EXECUTION_TRACE_CALL_CAP = 500
+_EVIDENCE_SNAPSHOT_CAP = 64
 
 LOOP_EVENTS_TABLE = "research_lab_auto_research_loop_events"
 RUN_QUEUE_TABLE = "research_loop_run_queue_current"
@@ -213,6 +265,29 @@ def _deterministic_uuid(*parts: Any) -> str:
 
 def trajectory_id_for_run(run_id: str) -> str:
     return _deterministic_uuid("research_trajectory", str(run_id))
+
+
+def execution_trace_id_for_run(run_id: str) -> str:
+    """Deterministic ``execution_traces.run_id`` for the run's engine row."""
+    return _deterministic_uuid("execution_trace", str(run_id), "engine")
+
+
+def execution_trace_id_for_node(run_id: str, node_id: str) -> str:
+    """Deterministic ``execution_traces.run_id`` for a node-scoped row."""
+    return _deterministic_uuid("execution_trace", str(run_id), "node", str(node_id))
+
+
+def evidence_bundle_id_for_node(run_id: str, node_id: str, score_bundle_id: str) -> str:
+    """Deterministic ``evidence_bundles.bundle_id`` for a scored node."""
+    return _deterministic_uuid(
+        "evidence_bundle", str(run_id), str(node_id), str(score_bundle_id)
+    )
+
+
+def _score_bundle_ref(score_bundle_id: str) -> str:
+    """Live bundle ids are already ``score_bundle:``-prefixed; normalize."""
+    text = str(score_bundle_id)
+    return text if text.startswith("score_bundle:") else f"score_bundle:{text}"
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +527,563 @@ def _node_metrics(
 
 
 # ---------------------------------------------------------------------------
+# Corpus pointer collectors (fablefollowup.md item 5.5 -- pointers only)
+# ---------------------------------------------------------------------------
+
+
+def _iter_raw_trace_pointers(value: Any, model: Any = None):
+    """Yield every ``raw_trace_ref``-shaped pointer in a live event row.
+
+    Item 5.1 pointers ride ``provider_usage[*].raw_trace_ref`` and
+    ``provider_usage[*].retry_attempts[*].raw_trace_ref`` today; the walk is
+    deliberately recursive+tolerant so event-doc-nested pointers (or future
+    shapes) are found too.  Yields ``(pointer_mapping, nearest_model)``.
+    """
+    if isinstance(value, Mapping):
+        current_model = value.get("model") or model
+        pointer = value.get("raw_trace_ref")
+        if isinstance(pointer, Mapping):
+            yield pointer, current_model
+        for key, item in value.items():
+            if str(key) == "raw_trace_ref":
+                continue
+            yield from _iter_raw_trace_pointers(item, current_model)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_raw_trace_pointers(item, model)
+
+
+def _collect_engine_trace_calls(
+    loop_events: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Engine-side raw LLM trace pointers grouped by stage/iteration/attempt.
+
+    One ``calls`` entry per distinct ``{s3_ref, sha256}`` pointer, tagged with
+    the emitting live event's stage (event_type), iteration, node and seq so
+    the run's execution can be replayed pointer-by-pointer.  Pointers only --
+    never request/response content.
+    """
+    calls: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in sorted(loop_events, key=lambda item: _i(item.get("seq"))):
+        doc = _doc(row)
+        stage = str(row.get("event_type") or "unknown_stage")
+        node_id = str(row.get("node_id") or "") or None
+        attempt = 0
+        for pointer, model in _iter_raw_trace_pointers(
+            [row.get("provider_usage"), doc]
+        ):
+            s3_ref = str(pointer.get("s3_ref") or "")
+            sha256 = str(pointer.get("sha256") or "")
+            if not s3_ref and not sha256:
+                continue
+            key = (s3_ref, sha256)
+            if key in seen:
+                continue
+            seen.add(key)
+            attempt += 1
+            calls.append(
+                sanitize_capture_payload(
+                    {
+                        "call_emitter": "model",
+                        "call_kind": "engine_raw_trace",
+                        "stage": stage[:128],
+                        "iteration": _i(doc.get("iteration")),
+                        "attempt": attempt,
+                        "node_id": node_id,
+                        "live_event_id": str(row.get("event_id") or ""),
+                        "live_seq": _i(row.get("seq")),
+                        "model": (str(model or "") or "unknown")[:128],
+                        "s3_ref": s3_ref,
+                        "sha256": sha256,
+                        "teacher_model_flag": False,
+                    }
+                )
+            )
+    return calls
+
+
+def _collect_incontainer_calls(
+    bundle_row: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Item 5.3 in-container sourcing-model trace pointers from a score bundle.
+
+    Per-ICP rows carry ``incontainer_trace_ref`` (S3 uri string) +
+    ``incontainer_trace_sha256`` + ``incontainer_trace_call_count``.  That
+    capture may still be landing, so the reader is a tolerant recursive scan
+    over the whole bundle row/doc: absent refs simply yield zero entries.
+    """
+    if not isinstance(bundle_row, Mapping):
+        return []
+    calls: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _walk(value: Any, icp_ref: str | None) -> None:
+        if isinstance(value, Mapping):
+            row_icp = (
+                str(value.get("icp_ref") or value.get("icp_hash") or "") or icp_ref
+            )
+            ref = value.get("incontainer_trace_ref")
+            s3_ref = ""
+            sha256 = str(value.get("incontainer_trace_sha256") or "")
+            if isinstance(ref, str) and ref.strip():
+                s3_ref = ref.strip()
+            elif isinstance(ref, Mapping):  # tolerate {s3_ref, sha256} shape
+                s3_ref = str(ref.get("s3_ref") or "")
+                sha256 = sha256 or str(ref.get("sha256") or "")
+            if s3_ref or sha256:
+                key = (s3_ref, sha256)
+                if key not in seen:
+                    seen.add(key)
+                    calls.append(
+                        sanitize_capture_payload(
+                            {
+                                "call_emitter": "code",
+                                "call_kind": "incontainer_trace",
+                                "icp_ref": (row_icp or "unknown_icp")[:256],
+                                "s3_ref": s3_ref,
+                                "sha256": sha256,
+                                "call_count": max(
+                                    0, _i(value.get("incontainer_trace_call_count"))
+                                ),
+                                "teacher_model_flag": False,
+                            }
+                        )
+                    )
+            for item in value.values():
+                _walk(item, row_icp)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                _walk(item, icp_ref)
+
+    _walk(bundle_row, None)
+    return calls
+
+
+def _cap_pointer_entries(
+    entries: Sequence[Mapping[str, Any]], cap: int, kind: str
+) -> list[dict[str, Any]]:
+    items = [dict(entry) for entry in entries]
+    if len(items) <= cap:
+        return items
+    omitted = len(items) - cap
+    return [*items[:cap], {"call_kind": kind, "omitted_count": omitted}]
+
+
+def _bundle_doc(bundle_row: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(bundle_row, Mapping):
+        return {}
+    doc = bundle_row.get("score_bundle_doc")
+    return dict(doc) if isinstance(doc, Mapping) else {}
+
+
+def _bundle_per_icp_rows(bundle_row: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
+    doc = _bundle_doc(bundle_row)
+    for holder in (doc.get("aggregates"), doc):
+        if isinstance(holder, Mapping):
+            rows = holder.get("per_icp_results")
+            if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes)):
+                found = [row for row in rows if isinstance(row, Mapping)]
+                if found:
+                    return found
+    return []
+
+
+def _score_count(row: Mapping[str, Any], key: str) -> int:
+    scores = row.get(key)
+    if isinstance(scores, Sequence) and not isinstance(scores, (str, bytes)):
+        return len(scores)
+    return 0
+
+
+def _per_icp_snapshot(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One evidence snapshot per scored ICP: numbers and refs only.
+
+    ``failure_reason`` free text is deliberately dropped (it can embed
+    provider error strings); status/exclusion booleans carry the signal.
+    """
+    snapshot: dict[str, Any] = {
+        "snapshot_kind": "per_icp_score_evidence",
+        "icp_ref": _sanitize_text(str(row.get("icp_ref") or ""))[:256],
+        "icp_hash": str(row.get("icp_hash") or "")[:256],
+        "status": _sanitize_text(str(row.get("status") or "unknown"))[:64],
+        "hard_failure": bool(row.get("hard_failure")),
+        "provider_excluded": bool(row.get("provider_excluded")),
+        "candidate_per_icp_score": _f(row.get("candidate_per_icp_score")),
+        "base_per_icp_score": _f(row.get("base_per_icp_score")),
+        "delta_vs_base": _f(row.get("delta_vs_base")),
+        "candidate_company_score_count": _score_count(row, "candidate_company_scores"),
+        "base_company_score_count": _score_count(row, "base_company_scores"),
+    }
+    incontainer_ref = row.get("incontainer_trace_ref")
+    if isinstance(incontainer_ref, str) and incontainer_ref.strip():
+        snapshot["incontainer_trace_ref"] = incontainer_ref.strip()
+        snapshot["incontainer_trace_sha256"] = str(
+            row.get("incontainer_trace_sha256") or ""
+        )
+        snapshot["incontainer_trace_call_count"] = max(
+            0, _i(row.get("incontainer_trace_call_count"))
+        )
+    return snapshot
+
+
+def _holdout_gate_summary(gate: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Numbers-and-refs projection of the private-holdout gate doc."""
+    if not isinstance(gate, Mapping) or not gate:
+        return {}
+    summary: dict[str, Any] = {
+        "gate_type": _sanitize_text(str(gate.get("gate_type") or ""))[:64],
+        "decision": _sanitize_text(str(gate.get("decision") or ""))[:64],
+        "public_icp_count": _i(gate.get("public_icp_count")),
+        "private_holdout_icp_count": _i(gate.get("private_holdout_icp_count")),
+        "private_holdout_evaluated": bool(gate.get("private_holdout_evaluated")),
+        "baseline_aggregate_score": _f(gate.get("baseline_aggregate_score")),
+        "candidate_total_score": _f(gate.get("candidate_total_score")),
+        "candidate_delta_vs_daily_baseline": _f(gate.get(TARGETED_METRIC)),
+        "provider_excluded_icp_ids": [
+            _sanitize_text(str(item))[:256]
+            for item in (
+                gate.get("provider_excluded_icp_ids")
+                if isinstance(gate.get("provider_excluded_icp_ids"), Sequence)
+                and not isinstance(gate.get("provider_excluded_icp_ids"), (str, bytes))
+                else []
+            )
+            if str(item)
+        ][:64],
+    }
+    baseline_bundle_id = str(gate.get("baseline_benchmark_bundle_id") or "")
+    if baseline_bundle_id:
+        summary["baseline_benchmark_bundle_ref"] = (
+            f"benchmark_bundle:{baseline_bundle_id}"[:256]
+        )
+    baseline_hash = str(gate.get("baseline_benchmark_hash") or "")
+    if baseline_hash:
+        summary["baseline_benchmark_hash"] = baseline_hash[:256]
+    return summary
+
+
+def _aggregates_summary(bundle_row: Mapping[str, Any] | None) -> dict[str, Any]:
+    doc = _bundle_doc(bundle_row)
+    aggregates = doc.get("aggregates")
+    if not isinstance(aggregates, Mapping):
+        return {}
+    summary: dict[str, Any] = {}
+    for key in ("icp_count", "successful_icp_count", "hard_failure_count"):
+        if aggregates.get(key) is not None:
+            summary[key] = _i(aggregates.get(key))
+    for key in (
+        "base_score",
+        "candidate_score",
+        "mean_delta",
+        "delta_lcb",
+        "total_cost_usd",
+    ):
+        if aggregates.get(key) is not None:
+            summary[key] = _f(aggregates.get(key))
+    return summary
+
+
+def _eval_version_doc(bundle_row: Mapping[str, Any] | None) -> dict[str, Any]:
+    out: dict[str, Any] = {"engine_version": ENGINE_VERSION}
+    if isinstance(bundle_row, Mapping):
+        doc = _bundle_doc(bundle_row)
+        for key in ("scoring_version", "evaluator_version"):
+            value = bundle_row.get(key) or doc.get(key)
+            if value:
+                out[key] = str(value)[:128]
+    return out
+
+
+def _node_execution_status(state: "_NodeState") -> str:
+    """Map node lifecycle onto execution_traces' completed/crash/timeout CHECK."""
+    if state.build_failed_row is not None and state.build_passed_row is None:
+        return "crash"
+    if state.gate_doc:
+        return "completed"
+    return "timeout"  # built-but-never-scored, or drafted-but-never-built
+
+
+def _engine_execution_status(
+    queue_status: str, terminal_row: Mapping[str, Any] | None
+) -> str:
+    terminal_type = str(terminal_row.get("event_type") or "") if terminal_row else ""
+    if queue_status == "completed" or terminal_type == "loop_completed":
+        return "completed"
+    if queue_status == "failed" or terminal_type == "loop_failed":
+        return "crash"
+    return "timeout"
+
+
+def _build_corpus_trace_rows(
+    *,
+    run_id: str,
+    trajectory_id: str,
+    champion_base: str,
+    nodes: Mapping[str, "_NodeState"],
+    node_order: Sequence[str],
+    engine_calls: Sequence[Mapping[str, Any]],
+    bundles_by_id: Mapping[str, Mapping[str, Any]],
+    reflections_by_node: Mapping[str, Sequence[Mapping[str, Any]]],
+    queue_status: str,
+    terminal_row: Mapping[str, Any] | None,
+    total_cost_usd: float,
+    fallback_ts: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build execution_traces + evidence_bundles rows (pointers only).
+
+    Row policy (absence-tolerant by construction):
+
+    * engine row  -- written iff the run has non-node-attributed raw-trace
+      pointers (historical runs have none and get no engine row);
+    * node row    -- written iff the node was scored (score bundle pointer
+      exists) OR node-attributed trace pointers exist;
+    * evidence row -- written iff the node was scored; ``snapshots`` falls
+      back to a single score-bundle summary entry when the bundle doc carries
+      no per-ICP rows (scripts/27 CHECKs snapshots non-empty).
+    """
+    execution_trace_rows: list[dict[str, Any]] = []
+    evidence_bundle_rows: list[dict[str, Any]] = []
+    run_ref = f"research_loop_run:{run_id}"
+    trajectory_ref = f"trajectory:{trajectory_id}"
+    cost_ledger_ref = f"cost_ledger:{run_id}"
+    default_icp_set_hash = next(
+        (
+            str(row.get("icp_set_hash"))
+            for row in bundles_by_id.values()
+            if isinstance(row, Mapping) and row.get("icp_set_hash")
+        ),
+        "",
+    ) or sha256_json({"icp_set_hash_unavailable_for_run": run_id})
+    first_bundle_id = next(iter(bundles_by_id), "")
+
+    for node_id in node_order:
+        state = nodes[node_id]
+        bundle_row = bundles_by_id.get(state.score_bundle_id or "")
+        node_calls = [
+            dict(call) for call in engine_calls if call.get("node_id") == node_id
+        ]
+        incontainer_calls = _collect_incontainer_calls(bundle_row)
+        if not state.score_bundle_id and not node_calls and not incontainer_calls:
+            continue  # nothing to point at for this node
+        trace_id = execution_trace_id_for_node(run_id, node_id)
+        anchor_row = state.build_passed_row or state.build_failed_row or state.drafted_row
+        created_at = _ts(anchor_row.get("created_at"), fallback_ts)
+        node_icp_set_hash = (
+            str(bundle_row.get("icp_set_hash"))
+            if isinstance(bundle_row, Mapping) and bundle_row.get("icp_set_hash")
+            else default_icp_set_hash
+        )
+        evidence_refs: list[str] = []
+        score_bundle_ref = "score_bundle:unavailable"
+        outputs_ref = (
+            f"candidate:{state.candidate_id}"
+            if state.candidate_id
+            else "outputs:unavailable"
+        )
+
+        if state.score_bundle_id:
+            score_bundle_ref = _score_bundle_ref(state.score_bundle_id)
+            outputs_ref = score_bundle_ref
+            evidence_id = evidence_bundle_id_for_node(
+                run_id, node_id, state.score_bundle_id
+            )
+            evidence_refs = [f"evidence_bundle:{evidence_id}"]
+            per_icp_rows = _bundle_per_icp_rows(bundle_row)
+            bundle_doc = _bundle_doc(bundle_row)
+            score_bundle_hash = str(
+                (bundle_row or {}).get("score_bundle_hash")
+                or bundle_doc.get("score_bundle_hash")
+                or ""
+            )
+            # The bundle doc's gate is canonical (the scored event's copy is a
+            # thinner derivative); fall back to the event gate for old bundles.
+            raw_bundle_gate = bundle_doc.get("private_holdout_gate")
+            gate = (
+                raw_bundle_gate
+                if isinstance(raw_bundle_gate, Mapping) and raw_bundle_gate
+                else state.gate_doc
+            )
+            if per_icp_rows:
+                snapshots = _cap_pointer_entries(
+                    [_per_icp_snapshot(row) for row in per_icp_rows],
+                    _EVIDENCE_SNAPSHOT_CAP,
+                    "per_icp_truncation_marker",
+                )
+            else:
+                gate_summary = _holdout_gate_summary(gate)
+                snapshots = [
+                    {
+                        "snapshot_kind": "score_bundle_summary",
+                        "score_bundle_ref": score_bundle_ref,
+                        "score_bundle_hash": score_bundle_hash,
+                        "icp_count": _i(
+                            _aggregates_summary(bundle_row).get("icp_count")
+                        )
+                        or (
+                            gate_summary.get("public_icp_count", 0)
+                            + gate_summary.get("private_holdout_icp_count", 0)
+                        ),
+                        "per_icp_rows_available": False,
+                    }
+                ]
+            evidence_doc = sanitize_capture_payload(
+                {
+                    "evidence_kind": "candidate_score_evidence",
+                    "node_id": node_id,
+                    "candidate_ref": (
+                        f"candidate:{state.candidate_id}" if state.candidate_id else None
+                    ),
+                    "lab_run_ref": run_ref,
+                    "trajectory_ref": trajectory_ref,
+                    "execution_trace_ref": f"execution_trace:{trace_id}",
+                    "score_bundle_ref": score_bundle_ref,
+                    "score_bundle_hash": score_bundle_hash,
+                    "evaluation_epoch": (
+                        _i(bundle_row.get("evaluation_epoch"))
+                        if isinstance(bundle_row, Mapping)
+                        and bundle_row.get("evaluation_epoch") is not None
+                        else None
+                    ),
+                    "icp_set_hash": node_icp_set_hash,
+                    "holdout_gate": _holdout_gate_summary(gate) or None,
+                    "aggregates": _aggregates_summary(bundle_row) or None,
+                    "reflections": [
+                        dict(item) for item in reflections_by_node.get(node_id, ())
+                    ],
+                    "per_icp_snapshot_count": len(snapshots),
+                    "incontainer_trace_count": len(incontainer_calls),
+                    "incontainer_call_count_total": sum(
+                        max(0, _i(call.get("call_count"))) for call in incontainer_calls
+                    ),
+                }
+            )
+            snapshots = sanitize_capture_payload(snapshots)
+            evidence_created_at = _ts(
+                (bundle_row or {}).get("created_at"), created_at
+            )
+            evidence_bundle_rows.append(
+                {
+                    "bundle_id": evidence_id,
+                    "schema_version": "1.0",
+                    "run_id": _coerce_uuid(run_id),
+                    "artifact_hash": state.candidate_artifact_hash
+                    or state.unified_diff_hash,
+                    "retention_class": "live_verification",
+                    "verification_state": "active",
+                    "bundle_hash": sha256_json(
+                        {
+                            "evidence_bundle_id": evidence_id,
+                            "snapshots": snapshots,
+                            "bundle_doc": evidence_doc,
+                        }
+                    ),
+                    "merkle_anchor_ref": None,
+                    "deletion_request_ref": None,
+                    "snapshots": snapshots,
+                    "bundle_doc": evidence_doc,
+                    "created_at": evidence_created_at,
+                }
+            )
+
+        trace_doc = sanitize_capture_payload(
+            {
+                "trace_kind": "candidate_node",
+                "node_id": node_id,
+                "lane": _sanitize_text(state.lane)[:128],
+                "plan_path_id": state.plan_path_id,
+                "lab_run_ref": run_ref,
+                "trajectory_ref": trajectory_ref,
+                "candidate_ref": (
+                    f"candidate:{state.candidate_id}" if state.candidate_id else None
+                ),
+                "engine_call_count": len(node_calls),
+                "incontainer_trace_count": len(incontainer_calls),
+                "reflection_count": len(reflections_by_node.get(node_id, ())),
+            }
+        )
+        execution_trace_rows.append(
+            {
+                "run_id": trace_id,
+                "schema_version": "1.0",
+                "artifact_hash": state.candidate_artifact_hash
+                or state.unified_diff_hash,
+                "role": "candidate",
+                "rung": "L0",
+                "status": _node_execution_status(state),
+                "lane_id": None,  # live lanes are labels, not UUIDs (see trace_doc)
+                "icp_set_hash": node_icp_set_hash,
+                "eval_version": _eval_version_doc(bundle_row),
+                "calls": _cap_pointer_entries(
+                    [*node_calls, *incontainer_calls],
+                    _EXECUTION_TRACE_CALL_CAP,
+                    "call_truncation_marker",
+                ),
+                "evidence_bundles": evidence_refs,
+                "judge_verdicts": [],  # scorer-judge traces are item 5.4
+                "outputs_ref": outputs_ref,
+                "score_bundle_ref": score_bundle_ref,
+                "cost_ledger": {
+                    "cost_ledger_ref": cost_ledger_ref,
+                    "node_cost_usd": round(max(0.0, state.cost_usd), 6),
+                },
+                "attestation_ref": None,
+                "trace_doc": trace_doc,
+                "created_at": created_at,
+            }
+        )
+
+    run_scoped_calls = [
+        dict(call) for call in engine_calls if not call.get("node_id")
+    ]
+    if run_scoped_calls:
+        execution_trace_rows.insert(
+            0,
+            {
+                "run_id": execution_trace_id_for_run(run_id),
+                "schema_version": "1.0",
+                "artifact_hash": champion_base,
+                "role": "candidate",
+                "rung": "L0",
+                "status": _engine_execution_status(queue_status, terminal_row),
+                "lane_id": None,
+                "icp_set_hash": default_icp_set_hash,
+                "eval_version": _eval_version_doc(bundles_by_id.get(first_bundle_id)),
+                "calls": _cap_pointer_entries(
+                    run_scoped_calls,
+                    _EXECUTION_TRACE_CALL_CAP,
+                    "call_truncation_marker",
+                ),
+                # Node-scoped evidence refs live on the node rows; the engine
+                # row's evidence is discoverable via evidence_bundles.run_id.
+                "evidence_bundles": [],
+                "judge_verdicts": [],  # scorer-judge traces are item 5.4
+                "outputs_ref": trajectory_ref,
+                "score_bundle_ref": (
+                    _score_bundle_ref(first_bundle_id)
+                    if first_bundle_id
+                    else "score_bundle:unavailable"
+                ),
+                "cost_ledger": {
+                    "cost_ledger_ref": cost_ledger_ref,
+                    "total_usd": round(max(0.0, total_cost_usd), 6),
+                },
+                "attestation_ref": None,
+                "trace_doc": sanitize_capture_payload(
+                    {
+                        "trace_kind": "engine_loop",
+                        "lab_run_ref": run_ref,
+                        "trajectory_ref": trajectory_ref,
+                        "engine_call_count": len(run_scoped_calls),
+                        "node_ids": [str(node_id) for node_id in node_order][:64],
+                    }
+                ),
+                "created_at": fallback_ts,
+            },
+        )
+    return execution_trace_rows, evidence_bundle_rows
+
+
+# ---------------------------------------------------------------------------
 # Projection dataclasses
 # ---------------------------------------------------------------------------
 
@@ -465,6 +1097,8 @@ class TrajectoryProjection:
     ledger_rows: list[dict[str, Any]]
     trajectory_doc: dict[str, Any]
     corpus_source_record: TrajectoryCorpusSourceRecord
+    execution_trace_rows: list[dict[str, Any]] = field(default_factory=list)
+    evidence_bundle_rows: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
@@ -472,10 +1106,14 @@ class TrajectoryProjection:
 class ProjectionResult:
     run_id: str
     status: str  # projected | dry_run | skipped_existing | skipped_disabled |
-    #             skipped_incomplete | failed
+    #             skipped_incomplete | failed | traces_backfilled |
+    #             traces_dry_run | skipped_traces_existing |
+    #             skipped_unprojected | skipped_no_trace_sources
     trajectory_id: str | None = None
     event_count: int = 0
     ledger_row_count: int = 0
+    execution_trace_count: int = 0
+    evidence_bundle_count: int = 0
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -485,6 +1123,8 @@ class ProjectionResult:
             "trajectory_id": self.trajectory_id,
             "event_count": self.event_count,
             "ledger_row_count": self.ledger_row_count,
+            "execution_trace_count": self.execution_trace_count,
+            "evidence_bundle_count": self.evidence_bundle_count,
             "errors": list(self.errors),
         }
 
@@ -583,6 +1223,15 @@ def build_trajectory_projection(
         ),
         0,
     )
+
+    # Engine raw-trace pointers (item 5.1) are collected up front so the
+    # NODE_EVALUATED emitter can embed each node's deterministic
+    # execution_trace ref only when a row will actually be written.
+    engine_calls = _collect_engine_trace_calls(ordered)
+    node_ids_with_engine_calls = frozenset(
+        str(call.get("node_id")) for call in engine_calls if call.get("node_id")
+    )
+    reflections_by_node: dict[str, list[dict[str, Any]]] = {}
 
     # -- walk the live loop event stream --------------------------------------
     canonical: list[dict[str, Any]] = []
@@ -763,6 +1412,8 @@ def build_trajectory_projection(
                 row,
                 scored_by_candidate,
                 bundles_by_id,
+                run_id=run_id,
+                node_ids_with_engine_calls=node_ids_with_engine_calls,
             )
         elif node_id and node_id in nodes and _is_build_failure(event_type):
             state = nodes[node_id]
@@ -784,6 +1435,8 @@ def build_trajectory_projection(
                 row,
                 scored_by_candidate,
                 bundles_by_id,
+                run_id=run_id,
+                node_ids_with_engine_calls=node_ids_with_engine_calls,
             )
         elif event_type in (
             "code_edit_validation_failed",
@@ -807,6 +1460,13 @@ def build_trajectory_projection(
         elif event_type == "reflection_recorded":
             reflected_node = node_id or (node_order[-1] if node_order else None)
             if reflected_node:
+                reflections_by_node.setdefault(reflected_node, []).append(
+                    {
+                        "live_event_id": str(row.get("event_id") or ""),
+                        "live_seq": _i(row.get("seq")),
+                        "iteration": _i(doc.get("iteration")),
+                    }
+                )
                 reflection = doc.get("reflection")
                 reflection = dict(reflection) if isinstance(reflection, Mapping) else {}
                 lane = nodes[reflected_node].lane if reflected_node in nodes else "auto_research"
@@ -1074,14 +1734,34 @@ def build_trajectory_projection(
         for event in canonical
     ]
 
+    # -- execution_traces / evidence_bundles pointer rows (item 5.5) -----------
+    execution_trace_rows, evidence_bundle_rows = _build_corpus_trace_rows(
+        run_id=run_id,
+        trajectory_id=tid,
+        champion_base=champion_base,
+        nodes=nodes,
+        node_order=node_order,
+        engine_calls=engine_calls,
+        bundles_by_id=bundles_by_id,
+        reflections_by_node=reflections_by_node,
+        queue_status=queue_status,
+        terminal_row=terminal_row,
+        total_cost_usd=last_anchor_total,
+        fallback_ts=ledger_created_at,
+    )
+
     corpus_source_record = TrajectoryCorpusSourceRecord(
         source_id=f"trajectory_source:{tid}",
         trajectory_id=tid,
         trajectory_hash=sha256_json(trajectory_doc),
         trajectory_schema_valid=True,
         event_count=len(canonical),
-        execution_trace_refs=(),  # raw-trace capture is a follow-up (section 9.1 item 5)
-        evidence_bundle_refs=(),
+        execution_trace_refs=tuple(
+            f"execution_trace:{row['run_id']}" for row in execution_trace_rows
+        ),
+        evidence_bundle_refs=tuple(
+            f"evidence_bundle:{row['bundle_id']}" for row in evidence_bundle_rows
+        ),
         results_ledger_refs=tuple(
             f"results_ledger:{row['ledger_row_id']}" for row in ledger_rows
         ),
@@ -1113,6 +1793,8 @@ def build_trajectory_projection(
         ledger_rows=ledger_rows,
         trajectory_doc=trajectory_doc,
         corpus_source_record=corpus_source_record,
+        execution_trace_rows=execution_trace_rows,
+        evidence_bundle_rows=evidence_bundle_rows,
     )
     projection.errors = validate_projection(projection)
     return projection
@@ -1132,6 +1814,9 @@ def _emit_node_evaluated(
     row: Mapping[str, Any],
     scored_by_candidate: Mapping[str, Mapping[str, Any]],
     bundles_by_id: Mapping[str, Mapping[str, Any]],
+    *,
+    run_id: str = "",
+    node_ids_with_engine_calls: frozenset[str] = frozenset(),
 ) -> None:
     if state.evaluated:
         return
@@ -1160,6 +1845,22 @@ def _emit_node_evaluated(
     else:
         status = "timeout"  # built but never scored
     proxy_score = _f(gate.get("candidate_delta_vs_daily_baseline")) if gate else 0.0
+    # Forward-only linkage (item 5.5): the deterministic execution-trace /
+    # evidence-bundle ids are embeddable BEFORE the rows are built.  The
+    # predicate mirrors _build_corpus_trace_rows' row policy so an embedded
+    # ref always resolves to a written row.
+    execution_trace_ref: str | None = None
+    if run_id and (
+        state.score_bundle_id or state.node_id in node_ids_with_engine_calls
+    ):
+        execution_trace_ref = (
+            f"execution_trace:{execution_trace_id_for_node(run_id, state.node_id)}"
+        )
+    evidence_bundle_ref: str | None = None
+    if run_id and state.score_bundle_id:
+        evidence_bundle_ref = "evidence_bundle:" + evidence_bundle_id_for_node(
+            run_id, state.node_id, state.score_bundle_id
+        )
     evaluation_context = sanitize_capture_payload(
         {
             "candidate_ref": (
@@ -1168,6 +1869,7 @@ def _emit_node_evaluated(
             "candidate_artifact_hash": state.candidate_artifact_hash,
             "candidate_source_diff_hash": state.candidate_source_diff_hash,
             "score_bundle_ref": score_bundle_id,
+            "evidence_bundle_ref": evidence_bundle_ref,
             "gate": gate or None,
             "build_event_doc": doc,
             "build_outcome": (
@@ -1190,7 +1892,7 @@ def _emit_node_evaluated(
             "paired_lcb_vs_parent": None,
             "fixtures": [],
             "cache_hits": {"snapshot": 0, "verdict": 0},
-            "execution_trace_ref": None,  # raw-trace capture is a follow-up
+            "execution_trace_ref": execution_trace_ref,
             "evaluation_context": evaluation_context,
         },
     )
@@ -1261,12 +1963,165 @@ def validate_projection(projection: TrajectoryProjection) -> list[str]:
             errors.append(
                 f"ledger[{row['node_id']}]: protected material at {sorted(protected)[:3]}"
             )
+    errors.extend(_validate_execution_trace_rows(projection.execution_trace_rows))
+    errors.extend(_validate_evidence_bundle_rows(projection.evidence_bundle_rows))
+    errors.extend(_validate_trace_linkage(projection))
+    return errors
+
+
+def _validate_execution_trace_rows(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Enforce scripts/27 execution_traces CHECK shapes before any write."""
+    errors: list[str] = []
+    seen_ids: set[str] = set()
+    for row in rows:
+        label = f"execution_trace[{row.get('run_id')}]"
+        row_id = str(row.get("run_id") or "")
+        if _coerce_uuid(row_id) is None:
+            errors.append(f"{label}: run_id must be a UUID")
+        if row_id in seen_ids:
+            errors.append(f"{label}: duplicate deterministic row id")
+        seen_ids.add(row_id)
+        if row.get("schema_version") != "1.0":
+            errors.append(f"{label}: schema_version must be '1.0'")
+        if row.get("role") not in EXECUTION_TRACE_ROLES:
+            errors.append(f"{label}: role {row.get('role')!r} violates CHECK")
+        if row.get("rung") not in EXECUTION_TRACE_RUNGS:
+            errors.append(f"{label}: rung {row.get('rung')!r} violates CHECK")
+        if row.get("status") not in EXECUTION_TRACE_STATUSES:
+            errors.append(f"{label}: status {row.get('status')!r} violates CHECK")
+        for key in ("artifact_hash", "icp_set_hash", "outputs_ref", "score_bundle_ref"):
+            if not str(row.get(key) or ""):
+                errors.append(f"{label}: {key} is NOT NULL in scripts/27")
+        for key in ("calls", "evidence_bundles", "judge_verdicts"):
+            if not isinstance(row.get(key), list):
+                errors.append(f"{label}: {key} must be a JSON array")
+        for key in ("eval_version", "cost_ledger"):
+            if not isinstance(row.get(key), Mapping):
+                errors.append(f"{label}: {key} must be a JSON object")
+        trace_doc = row.get("trace_doc")
+        if trace_doc is not None and not isinstance(trace_doc, Mapping):
+            errors.append(f"{label}: trace_doc must be NULL or a JSON object")
+        protected = find_protected_material(dict(row))
+        if protected:
+            errors.append(f"{label}: protected material at {sorted(protected)[:3]}")
+    return errors
+
+
+def _validate_evidence_bundle_rows(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Enforce scripts/27 evidence_bundles CHECK shapes before any write."""
+    errors: list[str] = []
+    seen_hashes: set[str] = set()
+    seen_ids: set[str] = set()
+    for row in rows:
+        label = f"evidence_bundle[{row.get('bundle_id')}]"
+        bundle_id = str(row.get("bundle_id") or "")
+        if _coerce_uuid(bundle_id) is None:
+            errors.append(f"{label}: bundle_id must be a UUID")
+        if bundle_id in seen_ids:
+            errors.append(f"{label}: duplicate deterministic bundle id")
+        seen_ids.add(bundle_id)
+        if row.get("schema_version") != "1.0":
+            errors.append(f"{label}: schema_version must be '1.0'")
+        if row.get("run_id") is not None and _coerce_uuid(row.get("run_id")) is None:
+            errors.append(f"{label}: run_id must be NULL or a UUID")
+        if not str(row.get("artifact_hash") or ""):
+            errors.append(f"{label}: artifact_hash is NOT NULL in scripts/27")
+        if row.get("retention_class") not in EVIDENCE_RETENTION_CLASSES:
+            errors.append(
+                f"{label}: retention_class {row.get('retention_class')!r} violates CHECK"
+            )
+        if row.get("verification_state") not in EVIDENCE_VERIFICATION_STATES:
+            errors.append(
+                f"{label}: verification_state {row.get('verification_state')!r} violates CHECK"
+            )
+        bundle_hash = str(row.get("bundle_hash") or "")
+        if not bundle_hash.startswith("sha256:"):
+            errors.append(f"{label}: bundle_hash must be sha256:-prefixed")
+        if bundle_hash in seen_hashes:
+            errors.append(f"{label}: bundle_hash violates UNIQUE")
+        seen_hashes.add(bundle_hash)
+        snapshots = row.get("snapshots")
+        if not isinstance(snapshots, list) or not snapshots:
+            errors.append(f"{label}: snapshots must be a non-empty JSON array")
+        bundle_doc = row.get("bundle_doc")
+        if bundle_doc is not None and not isinstance(bundle_doc, Mapping):
+            errors.append(f"{label}: bundle_doc must be NULL or a JSON object")
+        protected = find_protected_material(dict(row))
+        if protected:
+            errors.append(f"{label}: protected material at {sorted(protected)[:3]}")
+    return errors
+
+
+def _validate_trace_linkage(projection: TrajectoryProjection) -> list[str]:
+    """Every embedded forward-only ref must resolve to a row in this projection."""
+    errors: list[str] = []
+    trace_refs = {
+        f"execution_trace:{row['run_id']}" for row in projection.execution_trace_rows
+    }
+    evidence_refs = {
+        f"evidence_bundle:{row['bundle_id']}" for row in projection.evidence_bundle_rows
+    }
+    for row in projection.event_rows:
+        event = row["event"]
+        if event.get("type") != "NODE_EVALUATED":
+            continue
+        embedded_trace = event.get("execution_trace_ref")
+        if embedded_trace and embedded_trace not in trace_refs:
+            errors.append(
+                f"event seq={row['seq']}: execution_trace_ref {embedded_trace!r} "
+                "has no matching execution_traces row"
+            )
+        context = event.get("evaluation_context")
+        embedded_evidence = (
+            context.get("evidence_bundle_ref") if isinstance(context, Mapping) else None
+        )
+        if embedded_evidence and embedded_evidence not in evidence_refs:
+            errors.append(
+                f"event seq={row['seq']}: evidence_bundle_ref {embedded_evidence!r} "
+                "has no matching evidence_bundles row"
+            )
     return errors
 
 
 # ---------------------------------------------------------------------------
 # Entry points
 # ---------------------------------------------------------------------------
+
+
+async def _insert_missing(
+    store: Any, table: str, pk_field: str, row: Mapping[str, Any]
+) -> bool:
+    """Existence-checked insert: deterministic ids make this upsert-or-skip.
+
+    Returns True when the row was written, False when it already existed
+    (including the insert race where another writer lands the same PK first).
+    """
+    existing = await store.select_one(table, filters=((pk_field, row[pk_field]),))
+    if existing:
+        return False
+    try:
+        await store.insert_row(table, dict(row))
+    except Exception as exc:
+        message = str(exc).lower()
+        if "duplicate" in message or "unique" in message or "conflict" in message:
+            return False
+        raise
+    return True
+
+
+async def _write_missing_corpus_trace_rows(
+    store: Any, projection: TrajectoryProjection
+) -> tuple[int, int]:
+    """Write missing execution_traces / evidence_bundles rows; return counts."""
+    trace_written = 0
+    for row in projection.execution_trace_rows:
+        if await _insert_missing(store, EXECUTION_TRACES_TABLE, "run_id", row):
+            trace_written += 1
+    evidence_written = 0
+    for row in projection.evidence_bundle_rows:
+        if await _insert_missing(store, EVIDENCE_BUNDLES_TABLE, "bundle_id", row):
+            evidence_written += 1
+    return trace_written, evidence_written
 
 
 async def load_projection_inputs(
@@ -1393,20 +2248,29 @@ async def project_run(
                 trajectory_id=tid,
                 event_count=len(projection.event_rows),
                 ledger_row_count=len(projection.ledger_rows),
+                execution_trace_count=len(projection.execution_trace_rows),
+                evidence_bundle_count=len(projection.evidence_bundle_rows),
             )
         # Envelope first (events FK-reference it), then append-only events in
-        # seq order, then ledger rows.
+        # seq order, then ledger rows, then the pointer rows.  A crash between
+        # envelope and pointer writes is repaired by --traces-backfill.
         await store.insert_row(TRAJECTORIES_TABLE, projection.envelope_row)
         for row in projection.event_rows:
             await store.insert_row(TRAJECTORY_EVENTS_TABLE, row)
         for row in projection.ledger_rows:
             await store.insert_row(RESULTS_LEDGER_TABLE, row)
+        trace_written, evidence_written = await _write_missing_corpus_trace_rows(
+            store, projection
+        )
         logger.info(
-            "research_lab_trajectory_projected run_id=%s trajectory_id=%s events=%s ledger_rows=%s",
+            "research_lab_trajectory_projected run_id=%s trajectory_id=%s events=%s "
+            "ledger_rows=%s execution_traces=%s evidence_bundles=%s",
             run_id,
             tid,
             len(projection.event_rows),
             len(projection.ledger_rows),
+            trace_written,
+            evidence_written,
         )
         return ProjectionResult(
             run_id=run_id,
@@ -1414,6 +2278,8 @@ async def project_run(
             trajectory_id=tid,
             event_count=len(projection.event_rows),
             ledger_row_count=len(projection.ledger_rows),
+            execution_trace_count=trace_written,
+            evidence_bundle_count=evidence_written,
         )
     except Exception as exc:  # never raise out of a projection
         logger.warning(
@@ -1483,6 +2349,172 @@ async def project_completed_runs(
     return results
 
 
+async def backfill_run_corpus_trace_rows(
+    run_id: str,
+    *,
+    store: Any | None = None,
+    dry_run: bool = True,
+) -> ProjectionResult:
+    """Add missing execution_traces / evidence_bundles rows for ONE
+    already-projected run (fablefollowup.md item 5.5 re-projection command).
+
+    Forward-only: NEVER touches the run's envelope/events/ledger rows -- the
+    event log is append-only + hash-anchored, so historical runs get pointer
+    rows without event retrofit.  Absence-tolerant: a historical run with no
+    raw traces and no score bundles reports ``skipped_no_trace_sources``.
+    Best-effort: never raises.
+    """
+    run_id = str(run_id)
+    store = store or GatewayProjectorStore()
+    tid = trajectory_id_for_run(run_id)
+    try:
+        if not dry_run and not projector_enabled():
+            logger.warning(
+                "research_lab_trajectory_projector_disabled run_id=%s set %s=1 to enable writes",
+                run_id,
+                PROJECTOR_ENABLED_ENV,
+            )
+            return ProjectionResult(
+                run_id=run_id, status="skipped_disabled", trajectory_id=tid
+            )
+        envelope = await store.select_one(
+            TRAJECTORIES_TABLE, filters=(("trajectory_id", tid),)
+        )
+        if not envelope:
+            # Not projected yet: --backfill owns it (and writes traces inline).
+            return ProjectionResult(
+                run_id=run_id, status="skipped_unprojected", trajectory_id=tid
+            )
+        inputs = await load_projection_inputs(run_id, store)
+        if not inputs["loop_events"]:
+            return ProjectionResult(
+                run_id=run_id,
+                status="skipped_incomplete",
+                trajectory_id=tid,
+                errors=["no live loop events for run"],
+            )
+        projection = build_trajectory_projection(**inputs)
+        if projection.errors:
+            return ProjectionResult(
+                run_id=run_id,
+                status="failed",
+                trajectory_id=tid,
+                errors=projection.errors,
+            )
+        if not projection.execution_trace_rows and not projection.evidence_bundle_rows:
+            return ProjectionResult(
+                run_id=run_id, status="skipped_no_trace_sources", trajectory_id=tid
+            )
+        missing_traces = [
+            row
+            for row in projection.execution_trace_rows
+            if not await store.select_one(
+                EXECUTION_TRACES_TABLE, filters=(("run_id", row["run_id"]),)
+            )
+        ]
+        missing_evidence = [
+            row
+            for row in projection.evidence_bundle_rows
+            if not await store.select_one(
+                EVIDENCE_BUNDLES_TABLE, filters=(("bundle_id", row["bundle_id"]),)
+            )
+        ]
+        if not missing_traces and not missing_evidence:
+            return ProjectionResult(
+                run_id=run_id, status="skipped_traces_existing", trajectory_id=tid
+            )
+        if dry_run:
+            return ProjectionResult(
+                run_id=run_id,
+                status="traces_dry_run",
+                trajectory_id=tid,
+                execution_trace_count=len(missing_traces),
+                evidence_bundle_count=len(missing_evidence),
+            )
+        trace_written = 0
+        for row in missing_traces:
+            if await _insert_missing(store, EXECUTION_TRACES_TABLE, "run_id", row):
+                trace_written += 1
+        evidence_written = 0
+        for row in missing_evidence:
+            if await _insert_missing(store, EVIDENCE_BUNDLES_TABLE, "bundle_id", row):
+                evidence_written += 1
+        logger.info(
+            "research_lab_corpus_traces_backfilled run_id=%s trajectory_id=%s "
+            "execution_traces=%s evidence_bundles=%s",
+            run_id,
+            tid,
+            trace_written,
+            evidence_written,
+        )
+        return ProjectionResult(
+            run_id=run_id,
+            status="traces_backfilled",
+            trajectory_id=tid,
+            execution_trace_count=trace_written,
+            evidence_bundle_count=evidence_written,
+        )
+    except Exception as exc:  # never raise out of a backfill pass
+        logger.warning(
+            "research_lab_corpus_traces_backfill_failed run_id=%s error=%s",
+            run_id,
+            str(exc)[:500],
+        )
+        return ProjectionResult(
+            run_id=run_id, status="failed", trajectory_id=tid, errors=[str(exc)[:500]]
+        )
+
+
+async def backfill_corpus_trace_rows(
+    *,
+    batch_size: int = 25,
+    dry_run: bool = True,
+    store: Any | None = None,
+    max_candidates: int = 5000,
+) -> list[ProjectionResult]:
+    """Scan already-projected terminal runs and add missing pointer rows.
+
+    Batch-capped: stops after ``batch_size`` runs produced (or, in dry-run,
+    would produce) writes; runs whose rows all exist are skipped for free.
+    """
+    store = store or GatewayProjectorStore()
+    results: list[ProjectionResult] = []
+    if not dry_run and not projector_enabled():
+        logger.warning(
+            "research_lab_trajectory_projector_disabled set %s=1 to enable writes",
+            PROJECTOR_ENABLED_ENV,
+        )
+        return results
+    try:
+        queue_rows = await store.select_all(
+            RUN_QUEUE_TABLE,
+            columns="run_id,ticket_id,current_queue_status,current_status_at",
+            filters=(("current_queue_status", "in", list(_QUEUE_TERMINAL_STATUSES)),),
+            order_by=(("current_status_at", False),),
+            max_rows=max_candidates,
+        )
+    except Exception as exc:
+        logger.warning(
+            "research_lab_corpus_traces_backfill_discovery_failed error=%s",
+            str(exc)[:500],
+        )
+        return results
+    processed = 0
+    for row in queue_rows:
+        if processed >= max(1, int(batch_size)):
+            break
+        run_id = str(row.get("run_id") or "")
+        if not run_id:
+            continue
+        result = await backfill_run_corpus_trace_rows(
+            run_id, store=store, dry_run=dry_run
+        )
+        results.append(result)
+        if result.status in ("traces_backfilled", "traces_dry_run"):
+            processed += 1
+    return results
+
+
 # ---------------------------------------------------------------------------
 # CLI: python3 -m gateway.research_lab.trajectory_projector --backfill --dry-run
 # ---------------------------------------------------------------------------
@@ -1502,6 +2534,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="project every not-yet-projected completed/failed run",
     )
+    parser.add_argument(
+        "--traces-backfill",
+        action="store_true",
+        help=(
+            "add missing execution_traces/evidence_bundles pointer rows to "
+            "already-projected runs (append-only events are never touched); "
+            "combine with --run-id to target one run"
+        ),
+    )
     parser.add_argument("--run-id", default=None, help="project a single run id")
     parser.add_argument(
         "--batch-size",
@@ -1520,12 +2561,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 async def _cli_main(argv: Sequence[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv)
-    if not args.backfill and not args.run_id:
+    if not args.backfill and not args.run_id and not args.traces_backfill:
         _build_arg_parser().print_help()
         return 2
     store = GatewayProjectorStore()
     results: list[ProjectionResult] = []
-    if args.run_id:
+    if args.run_id and not args.traces_backfill:
         results.append(await project_run(args.run_id, store=store, dry_run=args.dry_run))
     if args.backfill:
         while True:
@@ -1540,6 +2581,30 @@ async def _cli_main(argv: Sequence[str] | None = None) -> int:
                 # A dry run writes nothing, so the discovery loop would find the
                 # same runs forever; one pass reports everything projectable.
                 break
+    if args.traces_backfill:
+        if args.run_id:
+            results.append(
+                await backfill_run_corpus_trace_rows(
+                    args.run_id, store=store, dry_run=args.dry_run
+                )
+            )
+        else:
+            while True:
+                batch = await backfill_corpus_trace_rows(
+                    batch_size=args.batch_size, dry_run=args.dry_run, store=store
+                )
+                results.extend(batch)
+                attempted = [
+                    r
+                    for r in batch
+                    if r.status in ("traces_backfilled", "traces_dry_run")
+                ]
+                if not attempted:
+                    break
+                if args.dry_run:
+                    # Dry-run writes nothing; one pass reports every run that
+                    # would gain pointer rows.
+                    break
     summary: dict[str, int] = {}
     for result in results:
         summary[result.status] = summary.get(result.status, 0) + 1

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,7 @@ import logging
 import os
 import re
 import socket
+import threading
 import time
 from typing import Any, Iterable, Mapping, Sequence
 from urllib import parse as urlparse
@@ -78,7 +80,7 @@ from research_lab.reimbursements import (
     compute_reimbursement_award,
 )
 from research_lab.auto_research_prompt import coerce_component_registry
-from research_lab.canonical import sha256_json
+from research_lab.canonical import canonical_json, sha256_bytes, sha256_json
 from research_lab.eval import (
     DockerPrivateModelRunner,
     DockerPrivateModelSpec,
@@ -108,6 +110,25 @@ def _openrouter_generation_attempts() -> int:
         return max(1, min(5, int(os.getenv("RESEARCH_LAB_OPENROUTER_GENERATION_ATTEMPTS", "3"))))
     except ValueError:
         return 3
+
+
+def _raw_trace_capture_enabled() -> bool:
+    """§9.1 item 5 raw prompt/response capture flag.
+
+    Default true (hosted runs capture by default per the plan); the write path
+    is additionally inert when no S3 destination or boto3 is available, so the
+    default is safe for local/dev processes too."""
+    return str(
+        os.getenv(_RAW_TRACE_CAPTURE_ENABLED_ENV, "true")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _llm_include_reasoning_enabled() -> bool:
+    """§9.1/5.6: request reasoning output on every chat call (default true) so
+    raw traces preserve chain-of-thought whenever the model produces it."""
+    return str(
+        os.getenv("RESEARCH_LAB_LLM_INCLUDE_REASONING", "true")
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _heartbeat_conflict_claim_lost_enabled() -> bool:
@@ -147,7 +168,11 @@ def _is_openrouter_reasoning_effort_unsupported(status_code: int, message: str) 
     text = str(message or "").lower()
     if int(status_code) not in {400, 404, 422}:
         return False
-    if "reasoning_effort" not in text and "reasoning effort" not in text:
+    if (
+        "reasoning_effort" not in text
+        and "reasoning effort" not in text
+        and "include_reasoning" not in text
+    ):
         return False
     return any(
         marker in text
@@ -227,7 +252,12 @@ class CreditBlockedHostedRunError(HostedResearchLabWorkerError):
 
 
 _RETRYABLE_HTTP_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+_OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
 _OPENROUTER_GENERATION_STATS_URL = "https://openrouter.ai/api/v1/generation"
+_RAW_TRACE_CAPTURE_ENABLED_ENV = "RESEARCH_LAB_RAW_TRACE_CAPTURE_ENABLED"
+_RAW_TRACE_S3_PREFIX_ENV = "RESEARCH_LAB_RAW_TRACE_S3_PREFIX"
+_RAW_TRACE_PUT_CONNECT_TIMEOUT_SECONDS = 5
+_RAW_TRACE_PUT_READ_TIMEOUT_SECONDS = 15
 _OPENROUTER_GENERATION_STATS_TIMEOUT_SECONDS = 5
 _OPENROUTER_GENERATION_STATS_ATTEMPTS = 3
 _OPENROUTER_GENERATION_STATS_RETRY_DELAYS_SECONDS = (0.5, 1.0)
@@ -560,6 +590,250 @@ def _redacted_ref(value: object) -> str:
     return f"{text[:10]}...{text[-6:]}"
 
 
+def _redact_raw_trace_value(value: Any) -> Any:
+    """Recursively strip credential-shaped strings from a raw-trace payload.
+
+    Mirrors the regex half of ``_redact_openrouter_diagnostic`` /
+    code_loop_engine's ``_diagnostic_text`` (OpenRouter keys, Supabase keys,
+    AWS access key ids, proxy-URL userinfo, ``api_key=`` query params).
+    Deliberately does NOT apply the whole-text marker nuke those helpers use:
+    prompts/completions legitimately contain source excerpts mentioning words
+    like "proxy" or "password", and the capture exists precisely to preserve
+    that text. Authorization headers / api keys are never placed in the payload
+    in the first place; this pass is the backstop for secrets echoed inside
+    message content or provider error bodies."""
+    if isinstance(value, Mapping):
+        return {str(key): _redact_raw_trace_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_raw_trace_value(item) for item in value]
+    if isinstance(value, str):
+        text = re.sub(r"sk-or-[A-Za-z0-9._:-]+", "[redacted-openrouter-key]", value)
+        text = re.sub(r"sb_secret_[A-Za-z0-9._:-]+", "[redacted-supabase-service-role-key]", text)
+        text = re.sub(r"sb_publishable_[A-Za-z0-9._:-]+", "[redacted-supabase-anon-key]", text)
+        text = re.sub(r"AKIA[A-Z0-9]{16}", "[redacted-aws-access-key-id]", text)
+        text = re.sub(r"https?://[^@\s]+@([^\s/]+)", r"[redacted-proxy-url]@\1", text)
+        text = re.sub(r"(?i)(api_key=)[^&\s]+", r"\1[redacted]", text)
+        return text
+    return value
+
+
+def _raw_trace_path_segment(value: object, *, fallback: str) -> str:
+    text = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(value or ""))[:80]
+    return text or fallback
+
+
+class _OpenRouterRawTraceRecorder:
+    """Best-effort KMS-encrypted S3 capture of raw OpenRouter request/response
+    JSON at the chat-completion boundary (fableanalysis §9.1 item 5).
+
+    Objects land under ``{prefix}/trajectories/{run_id}/{stage}/{seq}-{stage}.json.enc``
+    with SSE-KMS (the score-bundle signing key id), where ``{prefix}`` comes
+    from ``RESEARCH_LAB_RAW_TRACE_S3_PREFIX`` or falls back to the private
+    model manifest's bucket/prefix. Hard rules:
+
+      * a capture failure can NEVER fail or slow the LLM call — the S3 write is
+        fire-and-forget on a small background pool, every synchronous step is
+        exception-wrapped, and failures log once per run (not per call);
+      * loop-event / provider-usage docs receive ONLY ``{s3_ref, sha256}``
+        pointers — the trajectory-corpus protected-material scanner rejects any
+        record carrying raw ``prompt``/``llm_response``/``page_content`` text;
+      * request payloads are credential-redacted before write (Authorization
+        headers and api keys are never included; ``_redact_raw_trace_value``
+        backstops secrets echoed in content);
+      * the pointer is optimistic: it is returned while the write is in flight,
+        so a failed write leaves a dangling (never wrong) reference.
+
+    Local/dev inertness: with no resolvable ``s3://`` destination the recorder
+    logs once and stays silent; a missing boto3 disables it for the process
+    after one logged failure.
+    """
+
+    def __init__(self, config: ResearchLabGatewayConfig):
+        self.config = config
+        self._lock = threading.Lock()
+        self._executor: ThreadPoolExecutor | None = None
+        self._pending: set[Future[None]] = set()
+        self._run_seq: Counter[str] = Counter()
+        self._failure_logged_runs: set[str] = set()
+        self._destination: tuple[str, str] | None = None
+        self._destination_resolved = False
+        self._disabled = False
+
+    def capture(
+        self,
+        *,
+        run_id: str,
+        stage: str,
+        request_doc: Mapping[str, Any],
+        response_doc: Any,
+        outcome: str,
+    ) -> dict[str, str] | None:
+        """Queue one request/response trace for encrypted upload.
+
+        Returns the ``{s3_ref, sha256}`` pointer for event docs, or None when
+        capture is disabled/unconfigured. Never raises."""
+        try:
+            if self._disabled or not run_id or not _raw_trace_capture_enabled():
+                return None
+            destination = self._resolve_destination()
+            if destination is None:
+                return None
+            bucket, key_prefix = destination
+            safe_run = _raw_trace_path_segment(run_id, fallback="run")
+            safe_stage = _raw_trace_path_segment(stage, fallback="call")
+            with self._lock:
+                self._run_seq[safe_run] += 1
+                seq = self._run_seq[safe_run]
+            object_key = "/".join(
+                segment
+                for segment in (
+                    key_prefix,
+                    "trajectories",
+                    safe_run,
+                    safe_stage,
+                    f"{seq:04d}-{safe_stage}.json.enc",
+                )
+                if segment
+            )
+            payload = _redact_raw_trace_value(
+                {
+                    "schema_version": "1.0",
+                    "artifact_type": "research_lab_raw_llm_trace",
+                    "run_id": str(run_id),
+                    "stage": str(stage or ""),
+                    "seq": seq,
+                    "outcome": str(outcome or ""),
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                    "request": dict(request_doc),
+                    "response": response_doc,
+                }
+            )
+            body = canonical_json(payload).encode("utf-8")
+            digest = sha256_bytes(body)
+            self._submit(run_id=str(run_id), bucket=bucket, object_key=object_key, body=body)
+            return {"s3_ref": f"s3://{bucket}/{object_key}", "sha256": digest}
+        except Exception as exc:
+            self._log_failure_once(str(run_id or "unknown"), exc)
+            return None
+
+    def flush(self, timeout_seconds: float = 10.0) -> None:
+        """Wait for in-flight uploads (tests / orderly teardown only — the hot
+        path never calls this)."""
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        while True:
+            with self._lock:
+                pending = tuple(self._pending)
+            if not pending or time.monotonic() >= deadline:
+                return
+            for future in pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                try:
+                    future.exception(timeout=remaining)
+                except Exception:
+                    return
+
+    def _resolve_destination(self) -> tuple[str, str] | None:
+        with self._lock:
+            if self._destination_resolved:
+                return self._destination
+        prefix_uri = str(os.getenv(_RAW_TRACE_S3_PREFIX_ENV, "")).strip().rstrip("/")
+        if not prefix_uri:
+            manifest_uri = str(self.config.private_model_manifest_uri or "").strip()
+            if manifest_uri.startswith("s3://"):
+                bucket, _sep, key = manifest_uri[5:].partition("/")
+                base_prefix = key.rsplit("/", 1)[0] if "/" in key else ""
+                if bucket:
+                    prefix_uri = f"s3://{bucket}/{base_prefix}".rstrip("/")
+        destination: tuple[str, str] | None = None
+        if prefix_uri.startswith("s3://"):
+            bucket, _sep, key_prefix = prefix_uri[5:].partition("/")
+            if bucket:
+                destination = (bucket, key_prefix.strip("/"))
+        with self._lock:
+            self._destination = destination
+            self._destination_resolved = True
+            if destination is None:
+                self._disabled = True
+        if destination is None:
+            # Local/dev: no S3 destination — one log, then the path stays inert.
+            logger.info(
+                "research_lab_raw_trace_capture_disabled reason=missing_s3_prefix env=%s; "
+                "raw prompt/response capture is skipped for this process",
+                _RAW_TRACE_S3_PREFIX_ENV,
+            )
+        return destination
+
+    def _submit(self, *, run_id: str, bucket: str, object_key: str, body: bytes) -> None:
+        with self._lock:
+            if self._executor is None:
+                self._executor = ThreadPoolExecutor(
+                    max_workers=2,
+                    thread_name_prefix="research-lab-raw-trace",
+                )
+            executor = self._executor
+        future = executor.submit(self._put_object, bucket=bucket, object_key=object_key, body=body)
+        with self._lock:
+            self._pending.add(future)
+        future.add_done_callback(lambda done: self._consume_put_result(run_id, done))
+
+    def _put_object(self, *, bucket: str, object_key: str, body: bytes) -> None:
+        import boto3  # type: ignore
+
+        client_kwargs: dict[str, Any] = {}
+        try:
+            from botocore.config import Config as BotoClientConfig  # type: ignore
+
+            client_kwargs["config"] = BotoClientConfig(
+                connect_timeout=_RAW_TRACE_PUT_CONNECT_TIMEOUT_SECONDS,
+                read_timeout=_RAW_TRACE_PUT_READ_TIMEOUT_SECONDS,
+                retries={"max_attempts": 2},
+            )
+        except Exception:  # pragma: no cover - botocore ships with boto3
+            client_kwargs = {}
+        put_kwargs: dict[str, Any] = {
+            "Bucket": bucket,
+            "Key": object_key,
+            "Body": body,
+            "ContentType": "application/json",
+            # SSE-KMS at rest is the §9.1 encryption requirement; reuse the
+            # score-bundle signing key id already provisioned for the lab.
+            "ServerSideEncryption": "aws:kms",
+        }
+        kms_key_id = str(self.config.score_bundle_kms_key_id or "").strip()
+        if kms_key_id:
+            put_kwargs["SSEKMSKeyId"] = kms_key_id
+        boto3.client("s3", **client_kwargs).put_object(**put_kwargs)
+
+    def _consume_put_result(self, run_id: str, future: "Future[None]") -> None:
+        with self._lock:
+            self._pending.discard(future)
+        if future.cancelled():
+            return
+        exc = future.exception()
+        if exc is None:
+            return
+        if isinstance(exc, ImportError):
+            # boto3 absent: local/dev environment — go inert for the process.
+            with self._lock:
+                self._disabled = True
+        self._log_failure_once(run_id, exc)
+
+    def _log_failure_once(self, run_id: str, exc: BaseException) -> None:
+        run_key = str(run_id or "unknown")
+        with self._lock:
+            if run_key in self._failure_logged_runs:
+                return
+            self._failure_logged_runs.add(run_key)
+        logger.warning(
+            "research_lab_raw_trace_capture_failed run=%s error=%s; capture is "
+            "best-effort and the LLM call was not affected",
+            compact_ref(run_key),
+            _redact_openrouter_diagnostic(f"{exc.__class__.__name__}: {exc}", limit=240),
+        )
+
+
 @dataclass(frozen=True)
 class HostedWorkerOutcome:
     processed: bool
@@ -677,6 +951,8 @@ class ResearchLabHostedWorker:
             or f"research-lab-hosted-worker:{os.uname().nodename}:{os.getpid()}"
         )
         self.key_resolver = OpenRouterKeyResolver(self.config)
+        # §9.1 item 5: raw prompt/response capture at the OpenRouter boundary.
+        self._raw_trace_recorder = _OpenRouterRawTraceRecorder(self.config)
 
     async def run_forever(self) -> None:
         processed = 0
@@ -1402,6 +1678,8 @@ class ResearchLabHostedWorker:
                             max_tokens=effective_max_tokens,
                             temperature=stage_temperature,
                             allow_non_zdr=allow_non_zdr,
+                            capture_run_id=context.run_id,
+                            capture_stage=stage,
                         )
                         if fallback_usage:
                             provider_usage = dict(result.provider_usage or {})
@@ -3109,6 +3387,8 @@ class ResearchLabHostedWorker:
         max_tokens: int = 1800,
         temperature: float | None = None,
         allow_non_zdr: bool = False,
+        capture_run_id: str = "",
+        capture_stage: str = "",
     ) -> OpenRouterCallResult:
         if not api_key:
             raise HostedResearchLabWorkerError("OpenRouter key is required for hosted auto-research")
@@ -3141,6 +3421,14 @@ class ResearchLabHostedWorker:
                 body["reasoning_effort"] = requested_reasoning_effort
                 body["reasoning"] = {"effort": requested_reasoning_effort}
                 body["include_reasoning"] = True
+            elif _llm_include_reasoning_enabled() and include_reasoning_effort:
+                # §9.1/5.6: providers are the only source of chain-of-thought —
+                # ask for reasoning output on every call so the raw-trace
+                # capture preserves it whenever the model produces it.
+                # OpenRouter ignores this field for non-reasoning models; the
+                # reasoning-unsupported drop-and-retry (which clears
+                # include_reasoning_effort) is the backstop for strict models.
+                body["include_reasoning"] = True
             return body
 
         proxy_opener = _worker_llm_proxy_opener(self.config)
@@ -3151,8 +3439,27 @@ class ResearchLabHostedWorker:
                 effective_max_tokens,
                 include_reasoning_effort=include_reasoning_effort,
             )
+
+            def _record_raw_trace(response_doc: Any, *, outcome: str) -> dict[str, str] | None:
+                # §9.1 item 5: best-effort encrypted raw prompt/response
+                # capture — every attempt (success, HTTP error, length stop) is
+                # training signal. Never raises and never blocks: the recorder
+                # wraps itself and uploads on a background pool. Authorization
+                # headers / api keys are deliberately never part of the doc.
+                return self._raw_trace_recorder.capture(
+                    run_id=capture_run_id,
+                    stage=capture_stage,
+                    request_doc={
+                        "url": _OPENROUTER_CHAT_COMPLETIONS_URL,
+                        "method": "POST",
+                        "body": body,
+                    },
+                    response_doc=response_doc,
+                    outcome=outcome,
+                )
+
             req = urlrequest.Request(
-                "https://openrouter.ai/api/v1/chat/completions",
+                _OPENROUTER_CHAT_COMPLETIONS_URL,
                 data=json.dumps(body).encode("utf-8"),
                 headers={
                     "Authorization": f"Bearer {api_key}",
@@ -3166,8 +3473,16 @@ class ResearchLabHostedWorker:
                     decoded = json.loads(response.read().decode("utf-8"))
             except HTTPError as exc:
                 message = exc.read().decode("utf-8", errors="replace")[:500]
+                _record_raw_trace(
+                    {"http_status": int(exc.code), "error_excerpt": message},
+                    outcome="http_error",
+                )
                 error = f"OpenRouter candidate generation failed: HTTP {exc.code}: {message}"
-                if include_reasoning_effort and requested_reasoning_effort and _is_openrouter_reasoning_effort_unsupported(int(exc.code), message):
+                if (
+                    include_reasoning_effort
+                    and (requested_reasoning_effort or _llm_include_reasoning_enabled())
+                    and _is_openrouter_reasoning_effort_unsupported(int(exc.code), message)
+                ):
                     raise OpenRouterReasoningEffortUnsupportedError(error) from exc
                 if int(exc.code) == 402 or _is_openrouter_credit_block(None, error):
                     raise CreditBlockedHostedRunError(error) from exc
@@ -3175,9 +3490,11 @@ class ResearchLabHostedWorker:
                     raise RetryableHostedResearchLabWorkerError(error) from exc
                 raise HostedResearchLabWorkerError(error) from exc
             except URLError as exc:
+                _record_raw_trace({"error_excerpt": str(exc)[:500]}, outcome="transport_error")
                 raise RetryableHostedResearchLabWorkerError(
                     f"OpenRouter candidate generation failed: {exc}"
                 ) from exc
+            raw_trace_ref = _record_raw_trace(decoded, outcome="response")
             choices = decoded.get("choices") if isinstance(decoded, Mapping) else None
             if not isinstance(choices, list) or not choices:
                 _raise_openrouter_generation_response_error(
@@ -3196,6 +3513,11 @@ class ResearchLabHostedWorker:
                 api_key=api_key,
                 generation_stats_opener=proxy_opener.open if proxy_opener else None,
             )
+            if raw_trace_ref:
+                # Pointer only ({s3_ref, sha256}) — never raw prompt/response
+                # text: the trajectory-corpus protected-material scanner fails
+                # any event doc carrying content keys.
+                provider_usage = {**provider_usage, "raw_trace_ref": dict(raw_trace_ref)}
             if not content:
                 _raise_openrouter_generation_response_error(
                     decoded,
@@ -3222,7 +3544,9 @@ class ResearchLabHostedWorker:
             length_failures = 0
             retry_provider_usage: list[dict[str, Any]] = []
             retry_cost_microusd = 0
-            include_reasoning_effort = bool(requested_reasoning_effort)
+            # Also true for bare include_reasoning requests (§9.1/5.6) so the
+            # unsupported-drop retry can clear it for strict models.
+            include_reasoning_effort = bool(requested_reasoning_effort) or _llm_include_reasoning_enabled()
             reasoning_effort_drop_error_hash = ""
             for attempt in range(1, attempts + 1):
                 effective_max_tokens = _openrouter_generation_retry_max_tokens(

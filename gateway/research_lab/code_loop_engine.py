@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass, field, fields, replace
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -53,7 +54,9 @@ from research_lab.code_editing import (
     parse_code_edit_response,
     parse_code_edit_source_inspection_response,
 )
+from research_lab.engine_v1 import ReflectionRecord
 from research_lab.eval import PrivateModelArtifactManifest
+from research_lab.trajectory_corpus import PROTECTED_CORPUS_MARKERS
 
 
 CodeEditOpenRouterCaller = Callable[
@@ -129,6 +132,78 @@ def _build_heartbeat_enabled() -> bool:
     return _engine_env_flag("RESEARCH_LAB_LOOP_BUILD_HEARTBEAT", "true")
 
 
+def _reflection_emission_enabled() -> bool:
+    """§9.1 item 4 kill switch: emit a mechanical ``reflection_recorded`` loop event
+    after each iteration's judge/build outcome (pure capture, no extra LLM call)."""
+
+    return _engine_env_flag("RESEARCH_LAB_REFLECTION_EMISSION_ENABLED", "true")
+
+
+def _multi_candidate_drafts_enabled() -> bool:
+    """§6.2-8 kill switch: ask for and parse up to N>1 candidates per draft call,
+    bounded by the remaining candidate slots, instead of a flat
+    ``settings.max_candidates``. Inert at prod config: with
+    ``hosted_worker_max_candidates=1`` the remaining-slot bound keeps N at 1."""
+
+    return _engine_env_flag("RESEARCH_LAB_LOOP_MULTI_CANDIDATE_DRAFTS", "true")
+
+
+def _drafts_per_call_limit() -> int:
+    """§6.2-8: cap on candidates requested/parsed from one draft call (default 3, min 1)."""
+
+    raw = os.environ.get("RESEARCH_LAB_LOOP_DRAFTS_PER_CALL", "").strip()
+    try:
+        value = int(raw) if raw else 3
+    except ValueError:
+        value = 3
+    return max(1, value)
+
+
+def _dev_eval_enabled() -> bool:
+    """§6.3-1 L1 dev-eval rung flag (default OFF — no frozen snapshot set exists
+    yet): score built candidates through the wired ``dev_evaluator`` seam.
+    Dev scores are ranking-only within a run and strictly best-effort."""
+
+    return _engine_env_flag("RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED", "false")
+
+
+def _dev_snapshot_uri() -> str:
+    """The frozen provider-snapshot set URI dev-eval replays against
+    (``research_lab.eval.snapshot_store.SNAPSHOT_URI_ENV``). Empty = no set."""
+
+    return os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_URI", "").strip()
+
+
+def _dev_plateau_stop_enabled() -> bool:
+    """§6.3-4 lite flag (default OFF): stop iterating early when the recent dev
+    scores show no improvement over the run's best (requires dev-eval on)."""
+
+    return _engine_env_flag("RESEARCH_LAB_LOOP_DEV_PLATEAU_STOP", "false")
+
+
+def _dev_plateau_window() -> int:
+    """§6.3-4 lite: consecutive non-improving dev scores before stopping (default 2)."""
+
+    raw = os.environ.get("RESEARCH_LAB_LOOP_DEV_PLATEAU_WINDOW", "").strip()
+    try:
+        value = int(raw) if raw else 2
+    except ValueError:
+        value = 2
+    return max(1, value)
+
+
+def _dev_plateau_min_delta() -> float:
+    """§6.3-4 lite: a dev score must beat the run's best by more than this to
+    count as improvement (default 0.5 on the capped-top-5 dev-score scale)."""
+
+    raw = os.environ.get("RESEARCH_LAB_LOOP_DEV_PLATEAU_MIN_DELTA", "").strip()
+    try:
+        value = float(raw) if raw else 0.5
+    except ValueError:
+        value = 0.5
+    return max(0.0, value)
+
+
 @dataclass(frozen=True)
 class BuiltCodeEditCandidate:
     draft: CodeEditDraft
@@ -137,6 +212,30 @@ class BuiltCodeEditCandidate:
     iteration: int
     rehydration_artifact_uri: str = ""
     rehydration_artifact_hash: str = ""
+    # §6.3-1: ranking-only L1 dev-eval score (None = never dev-evaluated). The
+    # defaults keep pre-dev-eval checkpoints/rehydration artifacts loadable.
+    dev_score: float | None = None
+    dev_score_version: str = ""
+
+
+def _rank_selected_by_dev_score(
+    candidates: Sequence[BuiltCodeEditCandidate],
+) -> list[BuiltCodeEditCandidate]:
+    """Intra-run keep-best ordering (§6.3-1).
+
+    When 2+ candidates carry dev scores: scored candidates come first, ordered
+    by ``dev_score`` desc (stable, so ties keep build order), and unscored
+    candidates keep build order after the scored ones. With fewer than two
+    scored candidates the input order is preserved unchanged. Dev scores never
+    affect anything beyond this intra-run ranking."""
+
+    items = list(candidates)
+    scored = [candidate for candidate in items if candidate.dev_score is not None]
+    if len(scored) < 2:
+        return items
+    unscored = [candidate for candidate in items if candidate.dev_score is None]
+    scored.sort(key=lambda candidate: -float(candidate.dev_score or 0.0))
+    return scored + unscored
 
 
 @dataclass(frozen=True)
@@ -173,6 +272,73 @@ class CodeEditLoopEngine:
     call_openrouter: CodeEditOpenRouterCaller
     event_sink: Any
     builder: CodeEditCandidateBuilder
+    # §6.3-1 dev-eval seam: an optional caller-wired evaluator that receives one
+    # built candidate and returns a ``DevEvalResult.to_dict()``-shaped mapping
+    # (the engine reads ``aggregate_dev_score``/``dev_score`` +
+    # ``dev_score_version``). None (the default) means built candidates stay
+    # unscored even when ``RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED`` is on: the
+    # engine deliberately does not construct a docker dev runner itself — the
+    # worker wires a container runner (``snapshot_store.container_replay_env``
+    # + ``dev_eval.evaluate_dev``) here in a later wave.
+    dev_evaluator: Callable[[BuiltCodeEditCandidate], Awaitable[Mapping[str, Any]]] | None = None
+
+    async def _maybe_dev_eval_candidate(
+        self,
+        candidate: BuiltCodeEditCandidate,
+        *,
+        run_id: str,
+    ) -> BuiltCodeEditCandidate:
+        """§6.3-1: attach a ranking-only dev score to a just-built candidate.
+
+        Runs only when ``RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED`` is on AND a
+        frozen snapshot set is configured (``RESEARCH_LAB_DEV_SNAPSHOT_URI``)
+        AND a ``dev_evaluator`` seam is wired. Dev scores rank candidates
+        within this run and are never promotion evidence. Strictly
+        best-effort: any evaluator failure or malformed result logs and
+        returns the candidate unscored — dev-eval must never fail a run that
+        already built an image.
+        """
+        try:
+            if not _dev_eval_enabled():
+                return candidate
+            if not _dev_snapshot_uri():
+                return candidate
+            if self.dev_evaluator is None:
+                logger.info(
+                    "research_lab_loop_dev_eval_unwired run_id=%s node_id=%s "
+                    "(RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED is on but no dev_evaluator seam is wired)",
+                    run_id,
+                    str(candidate.node_id)[:80],
+                )
+                return candidate
+            result = await self.dev_evaluator(candidate)
+            if not isinstance(result, Mapping):
+                raise ValueError("dev_evaluator returned a non-mapping result")
+            raw_score = result.get("aggregate_dev_score", result.get("dev_score"))
+            if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+                raise ValueError("dev_evaluator result carried no numeric aggregate_dev_score")
+            score = float(raw_score)
+            if not math.isfinite(score):
+                raise ValueError("dev_evaluator returned a non-finite aggregate_dev_score")
+            version = str(result.get("dev_score_version") or "")
+            logger.info(
+                "research_lab_loop_dev_eval_scored run_id=%s node_id=%s dev_score=%s dev_score_version=%s",
+                run_id,
+                str(candidate.node_id)[:80],
+                round(score, 6),
+                version[:80],
+            )
+            return replace(candidate, dev_score=score, dev_score_version=version)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "research_lab_loop_dev_eval_failed run_id=%s node_id=%s error=%s",
+                run_id,
+                str(candidate.node_id)[:80],
+                str(exc)[:200],
+            )
+            return candidate
 
     async def _restore_selected_from_resume(
         self,
@@ -519,6 +685,10 @@ class CodeEditLoopEngine:
         within_run_memory_active = _within_run_memory_enabled()
         rejected_diff_hashes: set[str] = set()
         within_run_rejections: list[dict[str, Any]] = []
+        # §9.5 / §9.4 cross-run context (both flag-gated OFF by default; filled
+        # best-effort after the loop_started emission, injected into prompts only).
+        retrieved_lessons_doc: dict[str, Any] | None = None
+        cell_yield_priors_doc: dict[str, Any] | None = None
 
         def _record_within_run_rejection(
             *,
@@ -549,10 +719,41 @@ class CodeEditLoopEngine:
             )
             del within_run_rejections[:-25]
 
+        # §6.3-1 dev-eval state (flag default OFF): ranking-only dev scores of
+        # candidates built this run, surfaced into within-run memory, plus the
+        # §6.3-4-lite plateau tracker — the count of consecutive scored builds
+        # that failed to improve the run's best dev score by more than the
+        # configured delta.
+        dev_score_records: list[dict[str, Any]] = []
+        dev_best_score: float | None = None
+        dev_scores_since_improvement = 0
+
+        def _record_dev_score(
+            *, iteration_index: int, node_id: str, score: float, version: str
+        ) -> None:
+            nonlocal dev_best_score, dev_scores_since_improvement
+            prior_best = dev_best_score
+            dev_best_score = score if prior_best is None else max(prior_best, score)
+            if prior_best is None or score > prior_best + _dev_plateau_min_delta():
+                dev_scores_since_improvement = 0
+            else:
+                dev_scores_since_improvement += 1
+            dev_score_records.append(
+                {
+                    "iteration": int(iteration_index),
+                    "node_id": str(node_id)[:80],
+                    "dev_score": round(float(score), 6),
+                    "dev_score_version": str(version)[:120],
+                }
+            )
+            del dev_score_records[:-25]
+
         def _within_run_memory_doc() -> dict[str, Any] | None:
-            if not within_run_memory_active or not within_run_rejections:
+            if not within_run_memory_active:
                 return None
-            return {
+            if not within_run_rejections and not dev_score_records:
+                return None
+            memory_doc = {
                 "schema_version": "1.0",
                 "note": (
                     "Rejections recorded earlier in this run. Do not propose a diff identical to a "
@@ -562,12 +763,32 @@ class CodeEditLoopEngine:
                 "rejected_diff_hashes": sorted(rejected_diff_hashes)[:50],
                 "recent_rejections": [dict(item) for item in within_run_rejections[-10:]],
             }
+            if dev_score_records:
+                # §6.3-1: dev scores are ranking-only feedback for later drafts in
+                # THIS run; they are never promotion evidence.
+                memory_doc["dev_scores"] = {
+                    "note": (
+                        "Ranking-only dev scores (frozen snapshot-replay eval) for candidates "
+                        "already built in this run; higher is better. Aim the next draft at "
+                        "beating best_dev_score. Never promotion evidence."
+                    ),
+                    "best_dev_score": (
+                        round(float(dev_best_score), 6) if dev_best_score is not None else None
+                    ),
+                    "recent_scores": [dict(item) for item in dev_score_records[-10:]],
+                }
+            return memory_doc
 
-        def _memory_budget_context(base: dict[str, Any]) -> dict[str, Any]:
+        def _memory_budget_context(
+            base: dict[str, Any], *, include_lessons: bool = False
+        ) -> dict[str, Any]:
             memory_doc = _within_run_memory_doc()
-            if memory_doc is None:
-                return base
-            return {**base, "within_run_memory": memory_doc}
+            merged = dict(base)
+            if memory_doc is not None:
+                merged["within_run_memory"] = memory_doc
+            if include_lessons and retrieved_lessons_doc is not None:
+                merged["retrieved_lessons"] = retrieved_lessons_doc
+            return merged
 
         source_tmp = tempfile.TemporaryDirectory(prefix="research-lab-parent-image-source-")
 
@@ -611,6 +832,20 @@ class CodeEditLoopEngine:
                 selected = []
             restored_candidate_count = len(selected)
             built_candidate_total = max(built_candidate_total, restored_candidate_count)
+            # §6.3-1: re-seed dev-score memory from restored candidates so their
+            # ranking-only scores stay visible to later drafts. Plateau counting
+            # never spans a pause: restored candidates arrive in ranked (not
+            # build) order, so recomputing staleness over them would be spurious
+            # — resume conservatively with a fresh improvement window.
+            for restored_candidate in selected:
+                if restored_candidate.dev_score is not None:
+                    _record_dev_score(
+                        iteration_index=restored_candidate.iteration,
+                        node_id=restored_candidate.node_id,
+                        score=restored_candidate.dev_score,
+                        version=restored_candidate.dev_score_version,
+                    )
+            dev_scores_since_improvement = 0
 
         await self.event_sink(
             AutoResearchLoopEvent(
@@ -644,6 +879,44 @@ class CodeEditLoopEngine:
         )
 
         prior_attempts = _prior_attempts_from_budget_context(budget_context)
+        # §9.5 lesson retrieval (flag default OFF): compact cross-run lessons for the
+        # planner + draft prompt context. Strictly best-effort — a retrieval failure
+        # must never fail a paid run.
+        try:
+            from gateway.research_lab.lesson_store import (
+                build_lesson_prompt_context,
+                lesson_retrieval_enabled,
+            )
+
+            if lesson_retrieval_enabled():
+                retrieved_lessons_doc = await build_lesson_prompt_context(
+                    lane=None,
+                    components=(),
+                    active_parent_hash=artifact.model_artifact_hash,
+                )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_lesson_retrieval_failed run_id=%s error=%s",
+                run_id,
+                str(exc)[:200],
+            )
+        # §9.4 meta-allocator cell-yield priors (flag default OFF): deterministic
+        # seeded-Thompson ordering/weight hint for the planner context. Context
+        # reordering only — never a funding or promotion decision. Best-effort.
+        try:
+            from gateway.research_lab.allocator_priors import (
+                allocator_priors_enabled,
+                build_cell_yield_priors,
+            )
+
+            if allocator_priors_enabled():
+                cell_yield_priors_doc = await build_cell_yield_priors()
+        except Exception as exc:
+            logger.warning(
+                "research_lab_allocator_priors_failed run_id=%s error=%s",
+                run_id,
+                str(exc)[:200],
+            )
         loop_direction_plan_doc: dict[str, Any] | None = None
         if isinstance(resume.get("loop_direction_plan"), Mapping):
             try:
@@ -721,6 +994,16 @@ class CodeEditLoopEngine:
                                 **dict(budget_context),
                                 "candidate_kind": "image_build",
                                 "focus_signature_hash": _focus_signature_hash(ticket),
+                                **(
+                                    {"retrieved_lessons": retrieved_lessons_doc}
+                                    if retrieved_lessons_doc is not None
+                                    else {}
+                                ),
+                                **(
+                                    {"cell_yield_priors": cell_yield_priors_doc}
+                                    if cell_yield_priors_doc is not None
+                                    else {}
+                                ),
                             },
                             prior_attempts=prior_attempts,
                         ),
@@ -1145,6 +1428,18 @@ class CodeEditLoopEngine:
                 ):
                     stop_reason = "compute_budget_exhausted_before_code_edit"
                     break
+                # §6.2-8 multi-candidate drafts (flag default ON; inert at prod config
+                # because hosted_worker_max_candidates=1 bounds it to one): ask for and
+                # parse up to min(remaining candidate slots, RESEARCH_LAB_LOOP_DRAFTS_PER_CALL)
+                # candidates from ONE draft call instead of a flat settings.max_candidates,
+                # so a single call can fill several slots but never yields drafts past the
+                # bug-20 cap (never build-and-discard). The call still counts once in
+                # iteration/cost accounting; each build counts per built candidate.
+                if _multi_candidate_drafts_enabled():
+                    remaining_candidate_slots = max(1, settings.max_candidates - len(selected))
+                    draft_parse_limit = min(remaining_candidate_slots, _drafts_per_call_limit())
+                else:
+                    draft_parse_limit = settings.max_candidates
                 draft_result, draft_call_error = await self._call_stage_contained(
                     build_code_edit_auto_research_messages(
                         ticket={
@@ -1163,17 +1458,20 @@ class CodeEditLoopEngine:
                         runtime_source_context=source_context.prompt_context(),
                         source_inspection_context=source_inspection_context,
                         loop_direction_plan=loop_direction_plan_doc,
-                        budget_context=_memory_budget_context({
-                            **dict(budget_context),
-                            "loop_iteration": iteration,
-                            "candidate_kind": "image_build",
-                            "loop_direction_plan_hash": (
-                                (loop_direction_plan_doc or {}).get("plan_hash")
-                                if isinstance(loop_direction_plan_doc, Mapping)
-                                else None
-                            ),
-                        }),
-                        max_candidates=settings.max_candidates,
+                        budget_context=_memory_budget_context(
+                            {
+                                **dict(budget_context),
+                                "loop_iteration": iteration,
+                                "candidate_kind": "image_build",
+                                "loop_direction_plan_hash": (
+                                    (loop_direction_plan_doc or {}).get("plan_hash")
+                                    if isinstance(loop_direction_plan_doc, Mapping)
+                                    else None
+                                ),
+                            },
+                            include_lessons=True,
+                        ),
+                        max_candidates=draft_parse_limit,
                     ),
                     min(settings.draft_timeout_seconds, remaining_call_seconds),
                     3000,
@@ -1214,7 +1512,7 @@ class CodeEditLoopEngine:
                         budget_limit_microusd > 0 and actual_cost_microusd >= budget_limit_microusd
                     )
                     try:
-                        drafts = parse_code_edit_response(raw, max_candidates=settings.max_candidates)
+                        drafts = parse_code_edit_response(raw, max_candidates=draft_parse_limit)
                     except Exception as exc:
                         no_viable_reason = code_edit_no_viable_patch_reason(raw)
                         if no_viable_reason:
@@ -1340,6 +1638,20 @@ class CodeEditLoopEngine:
                         draft=draft,
                         diff_hash=draft_diff_hash,
                     )
+                    await self._emit_reflection_recorded(
+                        run_id=run_id,
+                        node_id=node_id,
+                        iteration=iteration,
+                        draft=draft,
+                        outcome="source_context_validation",
+                        detail="; ".join(source_errors),
+                        artifact=artifact,
+                        component_registry=component_registry,
+                        elapsed=elapsed,
+                        openrouter_calls=openrouter_calls,
+                        estimated_cost=estimated_cost,
+                        actual_cost_microusd=actual_cost_microusd,
+                    )
                     continue
                 await self.event_sink(
                     AutoResearchLoopEvent(
@@ -1406,6 +1718,20 @@ class CodeEditLoopEngine:
                         draft=draft,
                         diff_hash=draft_diff_hash,
                     )
+                    await self._emit_reflection_recorded(
+                        run_id=run_id,
+                        node_id=node_id,
+                        iteration=iteration,
+                        draft=draft,
+                        outcome="patch_apply_repair_exhausted",
+                        detail="patch did not apply after repair attempts",
+                        artifact=artifact,
+                        component_registry=component_registry,
+                        elapsed=elapsed,
+                        openrouter_calls=openrouter_calls,
+                        estimated_cost=estimated_cost,
+                        actual_cost_microusd=actual_cost_microusd,
+                    )
                     continue
                 (
                     alignment_ok,
@@ -1433,11 +1759,28 @@ class CodeEditLoopEngine:
                     continue
                 if not alignment_ok:
                     alignment_doc = dict(candidate_draft.plan_alignment or {})
+                    alignment_reason = str(
+                        alignment_doc.get("blocking_issue") or alignment_doc.get("reason") or "plan alignment rejected"
+                    )
                     _record_within_run_rejection(
                         stage="plan_alignment_rejected",
-                        reason=str(alignment_doc.get("blocking_issue") or alignment_doc.get("reason") or "plan alignment rejected"),
+                        reason=alignment_reason,
                         iteration_index=iteration,
                         draft=candidate_draft,
+                    )
+                    await self._emit_reflection_recorded(
+                        run_id=run_id,
+                        node_id=node_id,
+                        iteration=iteration,
+                        draft=candidate_draft,
+                        outcome="plan_alignment_rejected",
+                        detail=alignment_reason,
+                        artifact=artifact,
+                        component_registry=component_registry,
+                        elapsed=elapsed,
+                        openrouter_calls=openrouter_calls,
+                        estimated_cost=estimated_cost,
+                        actual_cost_microusd=actual_cost_microusd,
                     )
                     continue
                 build_completed = False
@@ -1479,6 +1822,25 @@ class CodeEditLoopEngine:
                     )
                     built_candidate_total += 1
                     build_completed = True
+                    built_candidate = BuiltCodeEditCandidate(
+                        draft=candidate_draft,
+                        build=build,
+                        node_id=node_id,
+                        iteration=iteration,
+                    )
+                    # §6.3-1 L1 dev-eval rung (flag default OFF): attach a ranking-only
+                    # dev score through the dev_evaluator seam. Best-effort — a dev-eval
+                    # failure leaves the candidate unscored and the run untouched.
+                    built_candidate = await self._maybe_dev_eval_candidate(
+                        built_candidate, run_id=run_id
+                    )
+                    if built_candidate.dev_score is not None:
+                        _record_dev_score(
+                            iteration_index=iteration,
+                            node_id=node_id,
+                            score=built_candidate.dev_score,
+                            version=built_candidate.dev_score_version,
+                        )
                     # Bug 5: persist a full rehydration doc so a paused/requeued run can restore
                     # this candidate on resume. Best-effort: failure only loses restorability.
                     rehydration_doc = await _write_private_loop_candidate_artifact(
@@ -1488,17 +1850,15 @@ class CodeEditLoopEngine:
                         iteration=iteration,
                         draft=candidate_draft,
                         build=build,
+                        dev_score=built_candidate.dev_score,
+                        dev_score_version=built_candidate.dev_score_version,
                     )
-                    selected.append(
-                        BuiltCodeEditCandidate(
-                            draft=candidate_draft,
-                            build=build,
-                            node_id=node_id,
-                            iteration=iteration,
-                            rehydration_artifact_uri=str(rehydration_doc.get("loop_candidate_artifact_uri") or ""),
-                            rehydration_artifact_hash=str(rehydration_doc.get("loop_candidate_artifact_hash") or ""),
-                        )
+                    built_candidate = replace(
+                        built_candidate,
+                        rehydration_artifact_uri=str(rehydration_doc.get("loop_candidate_artifact_uri") or ""),
+                        rehydration_artifact_hash=str(rehydration_doc.get("loop_candidate_artifact_hash") or ""),
                     )
+                    selected.append(built_candidate)
                     await self.event_sink(
                         AutoResearchLoopEvent(
                             event_type="candidate_build_passed",
@@ -1520,6 +1880,17 @@ class CodeEditLoopEngine:
                                     else None
                                 ),
                                 "plan_alignment": dict(candidate_draft.plan_alignment or {}),
+                                # §6.3-1: emitted only when a dev score was attached, so
+                                # dev-eval-off runs keep the exact pre-dev-eval doc shape.
+                                **(
+                                    {
+                                        "dev_score": built_candidate.dev_score,
+                                        "dev_score_version": built_candidate.dev_score_version,
+                                        "dev_score_ranking_only": True,
+                                    }
+                                    if built_candidate.dev_score is not None
+                                    else {}
+                                ),
                                 **{
                                     key: value
                                     for key, value in rehydration_doc.items()
@@ -1527,6 +1898,20 @@ class CodeEditLoopEngine:
                                 },
                             },
                         )
+                    )
+                    await self._emit_reflection_recorded(
+                        run_id=run_id,
+                        node_id=node_id,
+                        iteration=iteration,
+                        draft=candidate_draft,
+                        outcome="candidate_build_passed",
+                        detail="image built and private tests passed",
+                        artifact=artifact,
+                        component_registry=component_registry,
+                        elapsed=elapsed,
+                        openrouter_calls=openrouter_calls,
+                        estimated_cost=estimated_cost,
+                        actual_cost_microusd=actual_cost_microusd,
                     )
                 except (CodeEditPrivateTestError, CodeEditImageBuildError, CodeEditPatchApplyError) as exc:
                     event_type = str(getattr(exc, "failure_stage", "") or "candidate_build_failed")
@@ -1562,6 +1947,20 @@ class CodeEditLoopEngine:
                             },
                         )
                     )
+                    await self._emit_reflection_recorded(
+                        run_id=run_id,
+                        node_id=node_id,
+                        iteration=iteration,
+                        draft=candidate_draft,
+                        outcome=event_type,
+                        detail=str(exc),
+                        artifact=artifact,
+                        component_registry=component_registry,
+                        elapsed=elapsed,
+                        openrouter_calls=openrouter_calls,
+                        estimated_cost=estimated_cost,
+                        actual_cost_microusd=actual_cost_microusd,
+                    )
                 except CodeEditBuildError as exc:
                     _record_within_run_rejection(
                         stage="candidate_build_failed",
@@ -1584,6 +1983,20 @@ class CodeEditLoopEngine:
                                 "error_hash": sha256_json({"error": str(exc)}),
                             },
                         )
+                    )
+                    await self._emit_reflection_recorded(
+                        run_id=run_id,
+                        node_id=node_id,
+                        iteration=iteration,
+                        draft=candidate_draft,
+                        outcome="candidate_build_failed",
+                        detail=str(exc),
+                        artifact=artifact,
+                        component_registry=component_registry,
+                        elapsed=elapsed,
+                        openrouter_calls=openrouter_calls,
+                        estimated_cost=estimated_cost,
+                        actual_cost_microusd=actual_cost_microusd,
                     )
                 except Exception as exc:
                     # Bug 17: an unexpected infra error during build/event emission used to
@@ -1627,7 +2040,25 @@ class CodeEditLoopEngine:
                         )
                     except Exception:
                         pass
-            selected = selected[: settings.max_candidates]
+                    if not build_completed:
+                        await self._emit_reflection_recorded(
+                            run_id=run_id,
+                            node_id=node_id,
+                            iteration=iteration,
+                            draft=candidate_draft,
+                            outcome="candidate_build_unexpected_error",
+                            detail=str(exc),
+                            artifact=artifact,
+                            component_registry=component_registry,
+                            elapsed=elapsed,
+                            openrouter_calls=openrouter_calls,
+                            estimated_cost=estimated_cost,
+                            actual_cost_microusd=actual_cost_microusd,
+                        )
+            # §6.3-1 keep-best (bug-20 plumbing): rank by dev score before the cap
+            # truncation so the best-scoring builds survive; without 2+ dev scores
+            # this preserves build order byte-for-byte.
+            selected = _rank_selected_by_dev_score(selected)[: settings.max_candidates]
             try:
                 last_checkpoint = await self._emit_checkpoint(
                     run_id=run_id,
@@ -1667,6 +2098,16 @@ class CodeEditLoopEngine:
                 )
             if budget_exhausted_after_call:
                 stop_reason = "compute_budget_exhausted_after_code_edit"
+                break
+            if (
+                _dev_eval_enabled()
+                and _dev_plateau_stop_enabled()
+                and dev_scores_since_improvement >= _dev_plateau_window()
+            ):
+                # §6.3-4 lite: the last N dev-scored builds failed to improve the
+                # run's best dev score by more than the configured delta — stop
+                # paying for further iterations on a plateaued run.
+                stop_reason = "dev_score_plateau"
                 break
 
         if selected:
@@ -1719,6 +2160,10 @@ class CodeEditLoopEngine:
         if not selected:
             stop_reason = "no_valid_image_build_candidates"
 
+        # §6.3-1: final intra-run ranking — candidate_selected order and the
+        # result's selected_candidates agree, with dev-scored builds first
+        # (desc). A no-op unless 2+ candidates carry dev scores.
+        selected = _rank_selected_by_dev_score(selected)
         for index, candidate in enumerate(selected):
             await self.event_sink(
                 AutoResearchLoopEvent(
@@ -1747,6 +2192,15 @@ class CodeEditLoopEngine:
                             else candidate.draft.plan_path_id
                         ),
                         "plan_alignment": dict(candidate.draft.plan_alignment or {}),
+                        **(
+                            {
+                                "dev_score": candidate.dev_score,
+                                "dev_score_version": candidate.dev_score_version,
+                                "dev_score_ranking_only": True,
+                            }
+                            if candidate.dev_score is not None
+                            else {}
+                        ),
                     },
                 )
             )
@@ -1840,6 +2294,16 @@ class CodeEditLoopEngine:
                     "rehydration_artifact_hash": candidate.rehydration_artifact_hash or None,
                     "source_diff_artifact_uri": candidate.build.build_doc.get("source_diff_artifact_uri"),
                     "source_diff_artifact_hash": candidate.build.build_doc.get("source_diff_artifact_hash"),
+                    # §6.3-1: present only when dev-eval scored this candidate, so
+                    # dev-eval-off checkpoints keep the exact pre-dev-eval shape.
+                    **(
+                        {
+                            "dev_score": candidate.dev_score,
+                            "dev_score_version": candidate.dev_score_version,
+                        }
+                        if candidate.dev_score is not None
+                        else {}
+                    ),
                 }
                 for candidate in selected
             ],
@@ -1883,7 +2347,11 @@ class CodeEditLoopEngine:
         checkpoint: dict[str, Any] | None,
     ) -> CodeEditLoopResult:
         return CodeEditLoopResult(
-            selected_candidates=tuple(selected[: self.settings.normalized().max_candidates]),
+            # §6.3-1: rank-then-truncate so the kept candidates are the best
+            # dev-scored builds; unchanged ordering without 2+ dev scores.
+            selected_candidates=tuple(
+                _rank_selected_by_dev_score(selected)[: self.settings.normalized().max_candidates]
+            ),
             iterations_completed=int(iterations_completed),
             stop_reason=stop_reason,
             elapsed_seconds=round(float(elapsed_seconds), 3),
@@ -2171,6 +2639,68 @@ class CodeEditLoopEngine:
                 },
             )
         )
+
+    async def _emit_reflection_recorded(
+        self,
+        *,
+        run_id: str,
+        node_id: str | None,
+        iteration: int,
+        draft: CodeEditDraft | None,
+        outcome: str,
+        detail: str,
+        artifact: PrivateModelArtifactManifest,
+        component_registry: Mapping[str, Any],
+        elapsed: Callable[[], float],
+        openrouter_calls: int,
+        estimated_cost: float,
+        actual_cost_microusd: int,
+    ) -> None:
+        """§9.1 item 4: record a mechanical reflection after a judge/build outcome.
+
+        The reflection is derived mechanically from the judge verdict / build
+        error / within-run rejection reason — no extra LLM call — and doubles
+        as the §9.5 lesson-store input (`reflection_recorded` is already in the
+        scripts/34 event-type allowlist; the §9.1 projector maps it to
+        ``NODE_REFLECTED``). Strictly best-effort: any failure logs and the run
+        continues untouched.
+        """
+        if not _reflection_emission_enabled():
+            return
+        try:
+            event_doc = _mechanical_reflection_doc(
+                run_id=run_id,
+                node_id=str(node_id or ""),
+                iteration=iteration,
+                outcome=outcome,
+                detail=detail,
+                draft=draft,
+                artifact=artifact,
+                component_registry=component_registry,
+            )
+            await self.event_sink(
+                AutoResearchLoopEvent(
+                    event_type="reflection_recorded",
+                    loop_status="running",
+                    elapsed_seconds=elapsed(),
+                    node_id=node_id,
+                    cost_ledger=_running_cost_ledger(
+                        openrouter_calls,
+                        estimated_cost,
+                        actual_cost_microusd,
+                        "reflection_recorded",
+                    ),
+                    event_doc=event_doc,
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_reflection_emission_failed run_id=%s node_id=%s outcome=%s error=%s",
+                run_id,
+                str(node_id or "")[:80],
+                str(outcome)[:80],
+                str(exc)[:200],
+            )
 
     async def _ensure_patch_applies_or_repair(
         self,
@@ -2544,6 +3074,167 @@ def _memory_safe_text(value: str) -> str:
     return _diagnostic_text(str(value or ""), limit=280)
 
 
+# §9.1-5 hazard: the trajectory-corpus protected-material scanner fails any
+# record whose payload contains markers like "llm response"/"judge prompt"/
+# "page content", and the scripts/34 event-doc CHECK rejects terms like
+# "judge_prompt"/"hidden_icp". Reflection free text therefore gets the
+# diagnostic sanitizer PLUS marker redaction (space and underscore variants).
+_REFLECTION_MARKER_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(re.escape(marker), re.IGNORECASE)
+    for marker in sorted(
+        set(FORBIDDEN_CODE_EDIT_TERMS)
+        | set(PROTECTED_CORPUS_MARKERS)
+        | {marker.replace(" ", "_") for marker in PROTECTED_CORPUS_MARKERS},
+        key=len,
+        reverse=True,
+    )
+)
+_REFLECTION_REDACTED = "[protected-material-redacted]"
+
+
+def _reflection_safe_text(value: str, *, limit: int = 280) -> str:
+    """Sanitize reflection/lesson free text for event docs and prompt reinjection."""
+    text = _diagnostic_text(str(value or ""), limit=limit)
+    for pattern in _REFLECTION_MARKER_PATTERNS:
+        text = pattern.sub(_REFLECTION_REDACTED, text)
+    return text
+
+
+def _reflection_narrative(
+    *,
+    outcome: str,
+    detail: str,
+    component: str,
+    lane: str,
+    champion_base: str,
+) -> tuple[str, str, str, str]:
+    """Mechanical {worked, failed, why, next_question} per judge/build outcome."""
+    lane_label = lane or "code_edit"
+    if outcome == "candidate_build_passed":
+        return (
+            f"Code edit targeting {component} applied cleanly, built an image, and "
+            f"passed private tests in the {lane_label} lane.",
+            "No failure at the build stage; the live benchmark delta is still unmeasured.",
+            "Build and private tests validate structure only; the scored delta versus "
+            "the daily baseline decides keep or discard.",
+            "Does this candidate improve candidate_delta_vs_daily_baseline over parent "
+            f"{champion_base[:24]}?",
+        )
+    if outcome == "plan_alignment_rejected":
+        return (
+            "Draft parsed and its patch applied to the parent source tree.",
+            f"Plan alignment judge rejected the draft: {detail}",
+            "The judge verdict found the diff diverged from the selected plan path or "
+            "repeated an already-rejected approach.",
+            "What diff would satisfy the selected plan path without repeating a "
+            "rejected approach?",
+        )
+    if outcome == "patch_apply_repair_exhausted":
+        return (
+            "Draft parsed into a structured code-edit candidate.",
+            f"Patch did not apply after repair attempts: {detail}",
+            "The unified diff did not match the parent source tree at the targeted hunks.",
+            f"Which regions of {component} must be re-read to produce an applying diff?",
+        )
+    if outcome == "source_context_validation":
+        return (
+            "Draft parsed into a structured code-edit candidate.",
+            f"Source-context validation rejected the draft: {detail}",
+            "The draft referenced files or regions outside the inspected source context.",
+            f"Which files must be inspected before targeting {component} again?",
+        )
+    if outcome == "candidate_build_unexpected_error":
+        return (
+            "Draft parsed and its patch was accepted for building.",
+            f"Unexpected infrastructure error during the build stage: {detail}",
+            "The failure occurred in build infrastructure, so it is weak evidence "
+            "against the candidate diff itself.",
+            "Does the same diff build cleanly on retry, or does the error reproduce?",
+        )
+    # Build-stage failures (candidate_build_failed and typed failure_stage values).
+    stage_label = str(outcome or "candidate_build_failed").replace("_", " ")
+    return (
+        "Draft parsed, its patch applied, and the candidate reached the build stage.",
+        f"{stage_label}: {detail}" if detail else f"{stage_label} rejected the candidate.",
+        f"The {stage_label} stage rejected the candidate before it could be scored.",
+        f"What minimal change to the diff avoids the recorded failure in {component}?",
+    )
+
+
+def _mechanical_reflection_doc(
+    *,
+    run_id: str,
+    node_id: str,
+    iteration: int,
+    outcome: str,
+    detail: str,
+    draft: CodeEditDraft | None,
+    artifact: PrivateModelArtifactManifest,
+    component_registry: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the ``reflection_recorded`` event doc for one judge/build outcome.
+
+    The nested ``reflection`` follows ``engine_v1.build_reflection_record``
+    semantics — an engine-authored ``ReflectionRecord`` with ``{worked, failed,
+    why, next_question}`` plus provenance ``{champion_base: parent artifact
+    hash, component: primary target file/area, eval_version}`` — built
+    mechanically (no LLM call). ``basis_patch_seq`` is 0 because live code-edit
+    drafts are not typed per-component patches yet (§9.5 defers typed patches);
+    staleness is judged downstream by champion_base mismatch, mirroring
+    ``mark_lesson_staleness``.
+    """
+    lane = str(draft.lane if draft is not None else "")[:80]
+    target_files = [
+        str(path)[:240] for path in (draft.target_files if draft is not None else ())
+    ][:10]
+    component = str(target_files[0] if target_files else (lane or "code_edit"))[:128]
+    champion_base = str(artifact.model_artifact_hash)
+    eval_version = str(component_registry.get("eval_version") or "") or "unversioned"
+    safe_detail = _reflection_safe_text(detail, limit=200)
+    worked, failed, why, next_question = _reflection_narrative(
+        outcome=str(outcome),
+        detail=safe_detail,
+        component=component,
+        lane=lane,
+        champion_base=champion_base,
+    )
+    record = ReflectionRecord(
+        lesson_id="lesson:"
+        + sha256_json(
+            {
+                "run_id": str(run_id),
+                "node_id": str(node_id),
+                "iteration": int(iteration),
+                "outcome": str(outcome),
+            }
+        ).split(":", 1)[1][:16],
+        node_id=str(node_id),
+        worked=_reflection_safe_text(worked, limit=400),
+        failed=_reflection_safe_text(failed, limit=400),
+        why=_reflection_safe_text(why, limit=400),
+        next_question=_reflection_safe_text(next_question, limit=400),
+        champion_base=champion_base,
+        component=component,
+        eval_version=eval_version,
+        basis_patch_seq=0,
+        stale_basis=False,
+        engine_authored=True,
+    )
+    return {
+        "schema_version": "1.0",
+        "iteration": int(iteration),
+        "outcome": str(outcome)[:80],
+        "reflection_source": "mechanical",
+        "lane": lane,
+        "plan_path_id": str(draft.plan_path_id if draft is not None else "")[:120],
+        "target_files": target_files,
+        "unified_diff_hash": (
+            sha256_json({"unified_diff": draft.unified_diff}) if draft is not None else None
+        ),
+        "reflection": record.to_dict(),
+    }
+
+
 async def _write_private_loop_candidate_artifact(
     *,
     artifact: PrivateModelArtifactManifest,
@@ -2552,12 +3243,16 @@ async def _write_private_loop_candidate_artifact(
     iteration: int,
     draft: CodeEditDraft,
     build: CodeEditBuildResult,
+    dev_score: float | None = None,
+    dev_score_version: str = "",
 ) -> dict[str, Any]:
     """Persist a full rehydration doc for a built candidate (bug #5).
 
     The checkpoint keeps only URI + hash; this S3 artifact carries everything
     needed to reconstruct the ``BuiltCodeEditCandidate`` on resume. Best-effort:
-    a failed write only loses restorability for this candidate.
+    a failed write only loses restorability for this candidate. The §6.3-1
+    ranking-only dev score travels with the doc when present; unscored
+    candidates keep the exact pre-dev-eval payload shape (and hash arithmetic).
     """
     manifest_uri = str(getattr(artifact, "manifest_uri", "") or "")
     if not manifest_uri.startswith("s3://"):
@@ -2581,6 +3276,9 @@ async def _write_private_loop_candidate_artifact(
         "source_diff_hash": str(build.source_diff_hash),
         "build_doc": dict(build.build_doc),
     }
+    if dev_score is not None:
+        payload["dev_score"] = float(dev_score)
+        payload["dev_score_version"] = str(dev_score_version or "")
     payload_hash = sha256_json(payload)
 
     def _put() -> None:
@@ -2632,11 +3330,21 @@ def _rehydrated_candidate_from_artifact_payload(
         source_diff_hash=str(stored.get("source_diff_hash") or ""),
         build_doc=dict(stored.get("build_doc") or {}),
     )
+    # §6.3-1: dev fields are optional both ways — pre-dev-eval artifacts lack
+    # them (restore as unscored) and dev-scored artifacts restore their score.
+    raw_dev_score = stored.get("dev_score")
+    dev_score = (
+        float(raw_dev_score)
+        if isinstance(raw_dev_score, (int, float)) and not isinstance(raw_dev_score, bool)
+        else None
+    )
     return BuiltCodeEditCandidate(
         draft=draft,
         build=build,
         node_id=str(stored.get("node_id") or ""),
         iteration=int(stored.get("iteration") or 0),
+        dev_score=dev_score,
+        dev_score_version=str(stored.get("dev_score_version") or ""),
     )
 
 

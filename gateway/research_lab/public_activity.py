@@ -492,7 +492,6 @@ def derive_public_loop_outcome(
         row for row in promotion_event_rows if not _is_post_score_side_effect_event(row)
     ]
     latest_promotion = _latest_row(effective_promotion_rows, "created_at")
-    latest_score = _latest_row(score_bundle_rows, "current_status_at")
 
     run_id = _first_non_empty(
         latest_queue.get("run_id") if latest_queue else None,
@@ -516,6 +515,13 @@ def derive_public_loop_outcome(
 
     queue_status = str(latest_queue.get("current_queue_status") or "") if latest_queue else ""
     queue_reason = str(latest_queue.get("current_reason") or "") if latest_queue else ""
+    # The capacity-guard park (bug 28) writes `paused/requeue_capacity_conflict_parked`
+    # and stays recoverable: the stale-paused reaper requeues the run once loop
+    # capacity frees up. For the public projection it is a wait state, so it maps
+    # onto the existing allowlisted `queued` outcome instead of falling through
+    # the generic paused paths (which surfaced it as `failed` when every candidate
+    # was terminal, or `running` via the ticket status).
+    queue_parked_waiting = queue_status == "paused" and queue_reason == "requeue_capacity_conflict_parked"
 
     event_doc = {
         "queue_status": queue_status,
@@ -525,6 +531,11 @@ def derive_public_loop_outcome(
         "score_bundle_count": len(score_bundle_rows),
         "promotion_event_count": len(promotion_event_rows),
     }
+    if queue_parked_waiting:
+        # Truthful detail for the public card: the run is parked waiting for a
+        # free loop slot — neither actively running nor failed.
+        event_doc["queue_parked"] = True
+        event_doc["queue_parked_detail"] = "requeue parked until loop capacity frees; requeued automatically"
 
     def _result(event_type: str, outcome_label: str, outcome_band: str) -> PublicLoopOutcome:
         return PublicLoopOutcome(
@@ -604,13 +615,15 @@ def derive_public_loop_outcome(
         return _result("needs_rescore", "needs_rescore", "blocked")
     if (
         queue_status not in {"queued", "started", "running"}
+        and not queue_parked_waiting
         and _all_candidates_terminal(candidate_rows)
         and scored_candidate_count == 0
     ):
         # The loop is over (no run still active) and every candidate reached a terminal
         # status (failed/rejected/tombstoned) without a score. A fresh re-run, if any,
         # would make the latest queue status active and take precedence over this
-        # terminal outcome.
+        # terminal outcome — and a capacity-parked run has exactly such a re-run
+        # pending, so it is excluded above.
         return _result("failed", "failed", "failed")
     if _has_candidate_reason(candidate_rows, "baseline_not_ready") or (
         queue_status == "queued" and queue_reason == "baseline_not_ready"
@@ -619,6 +632,7 @@ def derive_public_loop_outcome(
 
     if (
         queue_status not in {"queued", "started", "running"}
+        and not queue_parked_waiting
         and status_counts.get("failed", 0)
         and not _has_active_candidate(status_counts)
         and not scored_candidate_count
@@ -693,7 +707,9 @@ def derive_public_loop_outcome(
         # A re-queued/re-started run is live again: it must not fall through to the
         # completed outcomes below just because earlier candidates exist.
         return _result("running", "running", "pending")
-    if queue_status == "queued":
+    if queue_status == "queued" or queue_parked_waiting:
+        # Capacity-parked runs surface as `queued` (allowlisted) with the parked
+        # detail recorded in event_doc; the reaper requeues them for real.
         return _result("queued", "queued", "pending")
     if queue_status == "completed" and candidate_count == 0:
         # Queue completed but produced no candidate: ops should investigate,
@@ -957,7 +973,10 @@ async def fetch_public_loop_summary(
         "research_lab_public_loop_card_current",
         filters=(),
         order_by=(("current_last_activity_at", True), ("created_at", True)),
-        limit=1000,
+        # Same behavior-visible cap as the list path: summary counts are computed
+        # over at most this many cards, so both views stay consistent when ops
+        # raise the cap as the card count grows.
+        limit=_env_positive_int(PUBLIC_LOOP_LIST_MAX_CARDS_ENV, DEFAULT_PUBLIC_LOOP_LIST_MAX_CARDS),
     )
     cutoff = 0.0 if since_days == 0 else datetime.now(timezone.utc).timestamp() - max(0, since_days) * 86400
     filtered = [

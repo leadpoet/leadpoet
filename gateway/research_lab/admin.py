@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from .config import ResearchLabGatewayConfig
+from .house_arm import build_house_arm_comparison_report
 from .maintenance import (
     autoresearch_queue_status_counts,
     default_actor_ref,
@@ -25,8 +27,12 @@ from .maintenance import (
     wait_until_autoresearch_drained,
 )
 from .promotion import (
+    CONFIRMATION_REJECTED_REASON,
     ResearchLabPromotionController,
+    confirmation_doc_from_event,
     load_baseline_summary_doc_for_gate,
+    load_confirmation_state,
+    promotion_confirmation_rerun_enabled,
     promotion_improvement_metric,
     reconcile_active_private_model_lineage,
     reconcile_pending_champion_rewards,
@@ -247,9 +253,9 @@ def build_parser() -> argparse.ArgumentParser:
     promote_scored.add_argument(
         "--force",
         action="store_true",
-        help="Replay past the already-promoted, scoring-health-quarantine, and "
-        "baseline-health gates (each bypass is logged explicitly); the "
-        "unavailable-basis rejection is never bypassed",
+        help="Replay past the already-promoted, scoring-health-quarantine, "
+        "baseline-health, and confirmation-rerun gates (each bypass is logged "
+        "explicitly); the unavailable-basis rejection is never bypassed",
     )
 
     sub.add_parser(
@@ -291,6 +297,18 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_rewards.add_argument("--actor-ref", default=default_actor_ref())
     reconcile_rewards.add_argument(
         "--apply", action="store_true", help="Apply the reward creation (default is dry-run)"
+    )
+
+    house_comparison = sub.add_parser(
+        "house-arm-comparison",
+        help="Read-only §9.3 honesty report: matched-budget house-vs-miner arm "
+        "yield per dollar (candidates scored, deltas, keeps) over a date range",
+    )
+    house_comparison.add_argument(
+        "--start-date", help="Window start (YYYY-MM-DD, inclusive; default 30 days ago)"
+    )
+    house_comparison.add_argument(
+        "--end-date", help="Window end (YYYY-MM-DD, inclusive; default today)"
     )
 
     return parser
@@ -411,13 +429,16 @@ async def _promote_scored_candidate(
             force_bypassed_gates.append("already_promoted")
         if quarantine_events:
             force_bypassed_gates.append("scoring_health_quarantine")
-        bypass_gates = frozenset({"scoring_health_quarantine", "baseline_health"})
+        bypass_gates = frozenset(
+            {"scoring_health_quarantine", "baseline_health", "confirmation_rerun"}
+        )
         logger.warning(
             "promote-scored-candidate --force candidate=%s bypassing gates: %s "
-            "(baseline_health bypass applies only if the gate would have held; "
-            "the unavailable-basis rejection is never bypassed)",
+            "(baseline_health and confirmation_rerun bypasses apply only if the "
+            "gate would have held; the unavailable-basis rejection is never "
+            "bypassed)",
             candidate_id,
-            ", ".join(force_bypassed_gates + ["baseline_health"]),
+            ", ".join(force_bypassed_gates + ["baseline_health", "confirmation_rerun"]),
         )
 
     aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
@@ -430,6 +451,10 @@ async def _promote_scored_candidate(
     metric = promotion_improvement_metric(
         score_bundle,
         baseline_score_summary_doc=baseline_summary_doc,
+    )
+    confirmation_state = await _confirmation_state_summary(
+        candidate_id=candidate_id,
+        score_bundle_id=str(bundle_row.get("score_bundle_id") or ""),
     )
     planned = {
         "candidate_id": candidate_id,
@@ -445,6 +470,7 @@ async def _promote_scored_candidate(
         "promotion_rejection_status": metric.rejection_status,
         "baseline_summary_doc_status": baseline_doc_status,
         "scoring_health_quarantined": bool(quarantine_events),
+        "confirmation": confirmation_state,
         "force_bypassed_gates": force_bypassed_gates,
         "threshold_points": ResearchLabGatewayConfig.from_env().improvement_threshold_points,
         "reason": reason,
@@ -474,6 +500,99 @@ async def _promote_scored_candidate(
         "planned": planned,
         "promotion_result": result,
     }
+
+
+async def _confirmation_state_summary(
+    *,
+    candidate_id: str,
+    score_bundle_id: str,
+) -> dict[str, Any]:
+    """Operator-visible §5.2-2 confirmation state for one candidate+bundle.
+
+    Derived from ``promotion.load_confirmation_state`` (hold / recorded
+    measurement / attempts) plus the terminal ``below_threshold`` rejection
+    event, so replay and dry-run output show whether a replay would hold for
+    confirmation, decide from a recorded delta, or has already been rejected —
+    with both deltas — before anything is written.
+    """
+    state = await load_confirmation_state(
+        candidate_id=candidate_id,
+        score_bundle_id=score_bundle_id,
+    )
+    held_event = state.get("held_event")
+    result_event = state.get("result_event")
+    summary: dict[str, Any] = {
+        "confirmation_rerun_enabled": promotion_confirmation_rerun_enabled(),
+        "latest_reason": str(state.get("latest_reason") or ""),
+        "attempts": int(state.get("attempts") or 0),
+        "held_pending_confirmation": held_event is not None and result_event is None,
+    }
+    if held_event is not None:
+        held_doc = held_event.get("event_doc") if isinstance(held_event.get("event_doc"), Mapping) else {}
+        summary["held_event"] = {
+            "promotion_event_id": str(held_event.get("promotion_event_id") or ""),
+            "created_at": held_event.get("created_at"),
+            "first_pass_improvement_points": held_doc.get("first_pass_improvement_points"),
+            "confirmation_min_delta": held_doc.get("confirmation_min_delta"),
+            "baseline_benchmark_bundle_id": held_doc.get("baseline_benchmark_bundle_id"),
+        }
+    if result_event is not None:
+        confirmation_doc = confirmation_doc_from_event(result_event)
+        summary["recorded_confirmation"] = {
+            "promotion_event_id": str(result_event.get("promotion_event_id") or ""),
+            "created_at": result_event.get("created_at"),
+            "confirmation_delta": confirmation_doc.get("confirmation_delta"),
+            "window_match": confirmation_doc.get("window_match"),
+            "rolling_window_hash": confirmation_doc.get("rolling_window_hash"),
+        }
+    rejection = await _confirmation_rejection_event(
+        candidate_id=candidate_id,
+        score_bundle_id=score_bundle_id,
+    )
+    if rejection is not None:
+        rejection_doc = rejection.get("event_doc") if isinstance(rejection.get("event_doc"), Mapping) else {}
+        summary["rejected_confirmation_failed"] = {
+            "promotion_event_id": str(rejection.get("promotion_event_id") or ""),
+            "created_at": rejection.get("created_at"),
+            "failure_mode": rejection_doc.get("failure_mode"),
+            "first_pass_improvement_points": rejection_doc.get("first_pass_improvement_points"),
+            "confirmation_delta": rejection_doc.get("confirmation_delta"),
+            "confirmation_min_delta": rejection_doc.get("confirmation_min_delta"),
+        }
+    return summary
+
+
+async def _confirmation_rejection_event(
+    *,
+    candidate_id: str,
+    score_bundle_id: str,
+) -> dict[str, Any] | None:
+    """The terminal ``rejected_confirmation_failed`` promotion event, if any.
+
+    The rejection is written as a ``below_threshold`` event (not
+    ``promotion_checked``), so it lives outside ``load_confirmation_state``'s
+    event set; the reason match happens client-side to stay portable across
+    stores without JSON-path filters.
+    """
+    rows = await select_many(
+        "research_lab_candidate_promotion_events",
+        columns=(
+            "promotion_event_id,candidate_id,event_type,promotion_status,"
+            "source_score_bundle_id,event_doc,created_at"
+        ),
+        filters=(
+            ("candidate_id", candidate_id),
+            ("source_score_bundle_id", score_bundle_id),
+            ("event_type", "below_threshold"),
+        ),
+        order_by=(("created_at", True),),
+        limit=25,
+    )
+    for row in rows:
+        doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
+        if str(doc.get("reason") or "") == CONFIRMATION_REJECTED_REASON:
+            return dict(row)
+    return None
 
 
 async def _resolve_score_bundle_for_candidate(
@@ -669,6 +788,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.command == "check-duplicate-active":
         return await _check_duplicate_active_versions()
+    if args.command == "house-arm-comparison":
+        today = datetime.now(timezone.utc).date()
+        end_date = args.end_date or today.isoformat()
+        start_date = args.start_date or (today - timedelta(days=30)).isoformat()
+        return await build_house_arm_comparison_report(
+            start_date=start_date,
+            end_date=end_date,
+        )
     if args.command == "reregister-active-manifest":
         return await reregister_active_manifest(
             ResearchLabGatewayConfig.from_env(),

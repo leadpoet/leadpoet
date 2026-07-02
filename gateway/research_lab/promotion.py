@@ -50,9 +50,203 @@ ALLOW_BOOTSTRAP_REGISTER_ENV = "RESEARCH_LAB_ALLOW_BOOTSTRAP_REGISTER"
 # noise-merges (§8.3). Enable only after the baseline health gate is live.
 AUTO_COMMIT_HEAD_MISMATCH_RECOVER_ENV = "RESEARCH_LAB_AUTO_COMMIT_HEAD_MISMATCH_RECOVER"
 
+# §5.2-2 confirmation re-run before merges: an apparent winner is NOT merged on
+# its first measurement. The scoring worker re-measures a fresh baseline AND a
+# fresh candidate evaluation over the same rolling window, and promotion
+# proceeds only if that confirmation delta also clears the confirmation bar.
+# This is the deliberate noise control for the merge decision (same-model sd is
+# 1.9-3.4 points against a 1.0-point bar, §5.1) and it also cancels the
+# shared-daily-baseline correlated error (§0-N1) that no per-candidate
+# statistic can see. Default ON per the §5.2-2 recommendation.
+PROMOTION_CONFIRMATION_RERUN_ENV = "RESEARCH_LAB_PROMOTION_CONFIRMATION_RERUN"
+# Confirmation pass bar; unset/invalid falls back to the promotion threshold.
+CONFIRMATION_MIN_DELTA_ENV = "RESEARCH_LAB_CONFIRMATION_MIN_DELTA"
+
+# Confirmation state machine markers. promotion_status/event_type stay within
+# the DB CHECK allowlists (scripts/62); these free-text reasons live in
+# event_doc.reason and are the queryable confirmation state:
+#   held_pending_confirmation      -> candidate cleared every merge gate on the
+#                                     first measurement; awaiting confirmation
+#   confirmation_rerun_started     -> a scoring worker claimed the measurement
+#   confirmation_rerun_recorded    -> measurement doc recorded (side artifact;
+#                                     never replaces the day's benchmark)
+#   confirmation_rerun_attempt_failed -> infra failure; re-held, bounded by the
+#                                     claim-attempt budget
+#   rejected_confirmation_failed   -> terminal: confirmation delta below the
+#                                     bar (or attempts exhausted); both deltas
+#                                     recorded in the rejection event_doc
+#   confirmation_rerun_closed      -> a terminal promotion decision landed for
+#                                     this candidate+bundle; the worker stops
+#                                     re-driving it
+CONFIRMATION_HOLD_REASON = "held_pending_confirmation"
+CONFIRMATION_STARTED_REASON = "confirmation_rerun_started"
+CONFIRMATION_RESULT_REASON = "confirmation_rerun_recorded"
+CONFIRMATION_ATTEMPT_FAILED_REASON = "confirmation_rerun_attempt_failed"
+CONFIRMATION_CLOSED_REASON = "confirmation_rerun_closed"
+CONFIRMATION_REJECTED_REASON = "rejected_confirmation_failed"
+_CONFIRMATION_STATE_REASONS = frozenset(
+    {
+        CONFIRMATION_HOLD_REASON,
+        CONFIRMATION_STARTED_REASON,
+        CONFIRMATION_RESULT_REASON,
+        CONFIRMATION_ATTEMPT_FAILED_REASON,
+        CONFIRMATION_CLOSED_REASON,
+    }
+)
+
+# Promotion outcomes that do NOT settle a held candidate: retryable holds and
+# temporarily-disabled promotion keep the confirmation open for a later
+# re-drive; anything else closes it.
+CONFIRMATION_NON_CLOSING_STATUSES = frozenset(
+    {
+        "",
+        "held_pending_confirmation",
+        "held_baseline_doc_unavailable",
+        "held_baseline_health_gate_failed",
+        "disabled",
+        "failed",
+    }
+)
+
 
 def _env_flag(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).strip().lower() in TRUTHY
+
+
+def promotion_confirmation_rerun_enabled() -> bool:
+    """§5.2-2 flag, default true. Disable to restore single-measurement merges
+    (e.g. for an operator replay that must merge without a confirmation run)."""
+    return _env_flag(PROMOTION_CONFIRMATION_RERUN_ENV, "true")
+
+
+def confirmation_min_delta(threshold_points: float) -> float:
+    raw = os.getenv(CONFIRMATION_MIN_DELTA_ENV, "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            logger.warning(
+                "research_lab_confirmation_min_delta_invalid value=%r falling back to threshold=%s",
+                raw,
+                threshold_points,
+            )
+    return float(threshold_points)
+
+
+def confirmation_attempt_budget(config: Any) -> int:
+    """Confirmation infra-failures re-hold, bounded by the existing
+    claim-attempt budget (scoring_worker_max_claim_requeues)."""
+    try:
+        return max(1, int(getattr(config, "scoring_worker_max_claim_requeues", 3) or 3))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _confirmation_event_reason(row: Mapping[str, Any]) -> str:
+    doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
+    return str(doc.get("reason") or "")
+
+
+def confirmation_doc_from_event(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The recorded measurement doc inside a confirmation_rerun_recorded event."""
+    if not isinstance(row, Mapping):
+        return {}
+    doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
+    confirmation = doc.get("confirmation") if isinstance(doc, Mapping) else None
+    return dict(confirmation) if isinstance(confirmation, Mapping) else {}
+
+
+async def load_confirmation_state(
+    *,
+    candidate_id: str,
+    score_bundle_id: str,
+) -> dict[str, Any]:
+    """Derive the candidate+bundle confirmation state from promotion events.
+
+    The state machine is event-sourced (no in-memory-only state): every
+    transition is a ``promotion_checked``/``checked`` event whose
+    ``event_doc.reason`` is one of the confirmation reasons above, scoped to
+    the source score bundle. Rows are newest-first; ``latest_reason`` is the
+    current phase, ``attempts`` counts started measurement claims.
+    """
+
+    rows = await select_many(
+        "research_lab_candidate_promotion_events",
+        columns=(
+            "promotion_event_id,candidate_id,event_type,promotion_status,"
+            "source_score_bundle_id,worker_ref,event_doc,created_at"
+        ),
+        filters=(
+            ("candidate_id", candidate_id),
+            ("source_score_bundle_id", score_bundle_id),
+            ("event_type", "promotion_checked"),
+        ),
+        order_by=(("created_at", True),),
+        limit=200,
+    )
+    latest_event: dict[str, Any] | None = None
+    held_event: dict[str, Any] | None = None
+    result_event: dict[str, Any] | None = None
+    started_events: list[dict[str, Any]] = []
+    attempt_failed_events: list[dict[str, Any]] = []
+    open_claim_events: list[dict[str, Any]] = []
+    open_claim_run = True
+    for row in rows:
+        reason = _confirmation_event_reason(row)
+        if reason not in _CONFIRMATION_STATE_REASONS:
+            continue
+        if latest_event is None:
+            latest_event = dict(row)
+        if reason == CONFIRMATION_STARTED_REASON:
+            # The contiguous newest-first run of started events (before any
+            # other confirmation event) is the set of competing measurement
+            # claims: earlier attempts are separated by their
+            # recorded/attempt_failed/hold events.
+            if open_claim_run:
+                open_claim_events.append(dict(row))
+        else:
+            open_claim_run = False
+        if reason == CONFIRMATION_RESULT_REASON:
+            if result_event is None:
+                result_event = dict(row)
+        elif reason == CONFIRMATION_HOLD_REASON:
+            if held_event is None:
+                held_event = dict(row)
+        elif reason == CONFIRMATION_STARTED_REASON:
+            started_events.append(dict(row))
+        elif reason == CONFIRMATION_ATTEMPT_FAILED_REASON:
+            attempt_failed_events.append(dict(row))
+    return {
+        "latest_event": latest_event,
+        "latest_reason": _confirmation_event_reason(latest_event) if latest_event else "",
+        "held_event": held_event,
+        "result_event": result_event,
+        "started_events": started_events,
+        "attempt_failed_events": attempt_failed_events,
+        "open_claim_events": open_claim_events,
+        "attempts": len(started_events),
+    }
+
+
+async def candidate_already_promoted(candidate_id: str) -> dict[str, Any] | None:
+    """The candidate's ``active_version_created`` event, if it ever merged.
+
+    Crash/race guard for confirmation re-drives: a worker crash mid-confirmation
+    (or two workers racing a recorded confirmation) must never double-merge —
+    the one-active DB trigger is the backstop, not the mechanism.
+    """
+
+    rows = await select_many(
+        "research_lab_candidate_promotion_events",
+        columns="promotion_event_id,event_type,promotion_status,private_model_version_id,created_at",
+        filters=(
+            ("candidate_id", candidate_id),
+            ("event_type", "active_version_created"),
+        ),
+        order_by=(("created_at", True),),
+        limit=1,
+    )
+    return dict(rows[0]) if rows else None
 
 
 class PromotionPausedError(RuntimeError):
@@ -974,6 +1168,27 @@ class ResearchLabPromotionController:
             )
             return {"status": "rejected_below_threshold"}
 
+        # §5.2-2 re-drive idempotency: a candidate that already merged must
+        # never merge again (worker crash mid-confirmation, racing recorded
+        # confirmations, or a replay). Checked before the stale-parent branch
+        # because a merged candidate's own merge makes its parent stale — a
+        # re-drive would otherwise queue a pointless self-rebase.
+        confirmation_enabled = promotion_confirmation_rerun_enabled()
+        confirmation_bypassed = "confirmation_rerun" in bypass_gates
+        if confirmation_enabled and not confirmation_bypassed:
+            merged_event = await candidate_already_promoted(str(candidate["candidate_id"]))
+            if merged_event is not None:
+                logger.info(
+                    "research_lab_promotion_already_promoted candidate=%s promotion_event=%s",
+                    _short_ref(candidate["candidate_id"]),
+                    _short_ref(merged_event.get("promotion_event_id")),
+                )
+                return {
+                    "status": "already_promoted",
+                    "promotion_event_id": str(merged_event.get("promotion_event_id") or ""),
+                    "private_model_version_id": str(merged_event.get("private_model_version_id") or ""),
+                }
+
         if candidate_parent != active_parent:
             await create_candidate_promotion_event(
                 candidate_id=str(candidate["candidate_id"]),
@@ -994,6 +1209,41 @@ class ResearchLabPromotionController:
             )
             return {"status": "stale_parent_needs_rescore"}
 
+        # --- §5.2-2 confirmation re-run gate: the candidate has now cleared
+        # every merge gate on its FIRST measurement (holdout approved, not
+        # quarantined, baseline_health passed, above threshold, parent
+        # current). Do not merge on that single noisy number — hold for a
+        # confirmation measurement, or decide from a recorded one.
+        confirmation_summary: dict[str, Any] | None = None
+        if confirmation_bypassed:
+            if "confirmation_rerun" not in bypassed_gates:
+                bypassed_gates.append("confirmation_rerun")
+            logger.warning(
+                "research_lab_promotion_gate_bypassed: gate=confirmation_rerun candidate=%s",
+                _short_ref(candidate["candidate_id"]),
+            )
+        elif confirmation_enabled and holdout_gate is not None:
+            gate_outcome = await self._confirmation_rerun_gate(
+                candidate=candidate,
+                score_bundle_id=score_bundle_id,
+                metric=metric,
+                improvement_points=improvement_points,
+                threshold=threshold,
+                active_parent=active_parent,
+                candidate_parent=candidate_parent,
+                rolling_window_hash=rolling_window_hash,
+                holdout_gate=holdout_gate,
+            )
+            if gate_outcome.get("decision") != "confirmed":
+                result = {
+                    "status": str(gate_outcome.get("status") or "held_pending_confirmation"),
+                    **{k: v for k, v in gate_outcome.items() if k not in {"decision", "status"}},
+                }
+                if bypassed_gates:
+                    result["bypassed_gates"] = bypassed_gates
+                return result
+            confirmation_summary = gate_outcome.get("confirmation_summary") or None
+
         await create_candidate_promotion_event(
             candidate_id=str(candidate["candidate_id"]),
             source_score_bundle_id=score_bundle_id,
@@ -1008,6 +1258,7 @@ class ResearchLabPromotionController:
             event_doc={
                 "auto_commit_enabled": self.config.auto_commit_enabled,
                 "promotion_metric": metric.event_doc(),
+                **({"confirmation": confirmation_summary} if confirmation_summary else {}),
             },
         )
 
@@ -1022,6 +1273,8 @@ class ResearchLabPromotionController:
             improvement_points=improvement_points,
             threshold=threshold,
         )
+        if confirmation_summary:
+            result = {**result, "confirmation": confirmation_summary}
         if bypassed_gates:
             result = {**result, "bypassed_gates": bypassed_gates}
         return result
@@ -1054,6 +1307,196 @@ class ResearchLabPromotionController:
             limit=1,
         )
         return rows[0] if rows else None
+
+    async def _confirmation_rerun_gate(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_id: str,
+        metric: PromotionImprovementMetric,
+        improvement_points: float,
+        threshold: float,
+        active_parent: str,
+        candidate_parent: str,
+        rolling_window_hash: str,
+        holdout_gate: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """§5.2-2 confirmation decision for a candidate that cleared every gate.
+
+        Event-sourced (state derives from promotion events, never memory):
+
+        * no confirmation state -> write ``held_pending_confirmation`` (status
+          ``checked`` — retryable hold, candidate stays scored) recording the
+          first-pass delta and the benchmark bundle it was measured against;
+        * recorded measurement -> promote only if its delta also clears
+          ``RESEARCH_LAB_CONFIRMATION_MIN_DELTA``; otherwise a terminal
+          ``rejected_confirmation_failed`` recording BOTH deltas;
+        * measurement attempts exhausted (infra failures, bounded by the
+          claim-attempt budget) -> terminal ``rejected_confirmation_failed``
+          with ``failure_mode: confirmation_attempts_exhausted``.
+        """
+
+        candidate_id = str(candidate["candidate_id"])
+        state = await load_confirmation_state(
+            candidate_id=candidate_id,
+            score_bundle_id=score_bundle_id,
+        )
+        min_delta = confirmation_min_delta(threshold)
+        budget = confirmation_attempt_budget(self.config)
+        result_event = state.get("result_event")
+        if result_event is not None:
+            confirmation_doc = confirmation_doc_from_event(result_event)
+            confirmation_delta = _optional_float(confirmation_doc.get("confirmation_delta"))
+            if confirmation_delta is not None and confirmation_delta >= min_delta:
+                summary = {
+                    "decision": "confirmation_passed",
+                    "confirmation_delta": round(confirmation_delta, 6),
+                    "confirmation_min_delta": round(min_delta, 6),
+                    "first_pass_improvement_points": round(improvement_points, 6),
+                    "recorded_promotion_event_id": str(result_event.get("promotion_event_id") or ""),
+                    "rolling_window_hash": str(confirmation_doc.get("rolling_window_hash") or ""),
+                    "window_match": bool(confirmation_doc.get("window_match", True)),
+                    "attempts": int(state.get("attempts") or 0),
+                }
+                logger.info(
+                    "research_lab_promotion_confirmation_passed candidate=%s delta=%.4f min_delta=%.4f first_pass=%.4f",
+                    _short_ref(candidate_id),
+                    confirmation_delta,
+                    min_delta,
+                    improvement_points,
+                )
+                return {"decision": "confirmed", "confirmation_summary": summary}
+            failure_mode = (
+                "confirmation_delta_below_min"
+                if confirmation_delta is not None
+                else "confirmation_delta_missing_from_recorded_measurement"
+            )
+            await create_candidate_promotion_event(
+                candidate_id=candidate_id,
+                source_score_bundle_id=score_bundle_id,
+                event_type="below_threshold",
+                promotion_status="rejected",
+                active_parent_artifact_hash=active_parent,
+                candidate_parent_artifact_hash=candidate_parent,
+                rolling_window_hash=rolling_window_hash,
+                improvement_points=improvement_points,
+                threshold_points=threshold,
+                worker_ref=self.worker_ref,
+                event_doc={
+                    "reason": CONFIRMATION_REJECTED_REASON,
+                    "decision_path": "confirmation_rerun_gate",
+                    "failure_mode": failure_mode,
+                    "first_pass_improvement_points": round(improvement_points, 6),
+                    "confirmation_delta": (
+                        round(confirmation_delta, 6) if confirmation_delta is not None else None
+                    ),
+                    "confirmation_min_delta": round(min_delta, 6),
+                    "recorded_promotion_event_id": str(result_event.get("promotion_event_id") or ""),
+                    "confirmation": confirmation_doc,
+                    "promotion_metric": metric.event_doc(),
+                },
+            )
+            logger.warning(
+                "research_lab_promotion_confirmation_failed candidate=%s first_pass=%.4f confirmation=%s min_delta=%.4f",
+                _short_ref(candidate_id),
+                improvement_points,
+                f"{confirmation_delta:.4f}" if confirmation_delta is not None else "missing",
+                min_delta,
+            )
+            return {
+                "decision": "rejected",
+                "status": CONFIRMATION_REJECTED_REASON,
+                "first_pass_improvement_points": round(improvement_points, 6),
+                "confirmation_delta": (
+                    round(confirmation_delta, 6) if confirmation_delta is not None else None
+                ),
+                "confirmation_min_delta": round(min_delta, 6),
+            }
+
+        attempts = int(state.get("attempts") or 0)
+        if attempts >= budget:
+            await create_candidate_promotion_event(
+                candidate_id=candidate_id,
+                source_score_bundle_id=score_bundle_id,
+                event_type="below_threshold",
+                promotion_status="rejected",
+                active_parent_artifact_hash=active_parent,
+                candidate_parent_artifact_hash=candidate_parent,
+                rolling_window_hash=rolling_window_hash,
+                improvement_points=improvement_points,
+                threshold_points=threshold,
+                worker_ref=self.worker_ref,
+                event_doc={
+                    "reason": CONFIRMATION_REJECTED_REASON,
+                    "decision_path": "confirmation_rerun_gate",
+                    "failure_mode": "confirmation_attempts_exhausted",
+                    "first_pass_improvement_points": round(improvement_points, 6),
+                    "confirmation_delta": None,
+                    "confirmation_min_delta": round(min_delta, 6),
+                    "confirmation_attempts": attempts,
+                    "confirmation_attempt_budget": budget,
+                    "promotion_metric": metric.event_doc(),
+                },
+            )
+            logger.warning(
+                "research_lab_promotion_confirmation_attempts_exhausted candidate=%s attempts=%s budget=%s",
+                _short_ref(candidate_id),
+                attempts,
+                budget,
+            )
+            return {
+                "decision": "rejected",
+                "status": CONFIRMATION_REJECTED_REASON,
+                "failure_mode": "confirmation_attempts_exhausted",
+                "first_pass_improvement_points": round(improvement_points, 6),
+                "confirmation_delta": None,
+                "confirmation_min_delta": round(min_delta, 6),
+            }
+
+        if state.get("held_event") is None:
+            # Written exactly once per candidate+bundle: the hold event is the
+            # worker's discovery marker and never goes away, so re-drives that
+            # land back here (e.g. an admin replay while a measurement is in
+            # flight) must not spam duplicate holds — and must not reset the
+            # state machine under a live started claim.
+            await create_candidate_promotion_event(
+                candidate_id=candidate_id,
+                source_score_bundle_id=score_bundle_id,
+                event_type="promotion_checked",
+                promotion_status="checked",
+                active_parent_artifact_hash=active_parent,
+                candidate_parent_artifact_hash=candidate_parent,
+                rolling_window_hash=rolling_window_hash,
+                improvement_points=improvement_points,
+                threshold_points=threshold,
+                worker_ref=self.worker_ref,
+                event_doc={
+                    "reason": CONFIRMATION_HOLD_REASON,
+                    "decision_path": "confirmation_rerun_hold",
+                    "first_pass_improvement_points": round(improvement_points, 6),
+                    "confirmation_min_delta": round(min_delta, 6),
+                    "confirmation_attempts": attempts,
+                    "confirmation_attempt_budget": budget,
+                    "baseline_benchmark_bundle_id": str(
+                        holdout_gate.get("baseline_benchmark_bundle_id") or ""
+                    ),
+                    "promotion_metric": metric.event_doc(),
+                },
+            )
+        logger.info(
+            "research_lab_promotion_held_pending_confirmation candidate=%s first_pass=%.4f min_delta=%.4f attempts=%s/%s",
+            _short_ref(candidate_id),
+            improvement_points,
+            min_delta,
+            attempts,
+            budget,
+        )
+        return {
+            "decision": "held",
+            "status": "held_pending_confirmation",
+            "first_pass_improvement_points": round(improvement_points, 6),
+            "confirmation_min_delta": round(min_delta, 6),
+        }
 
     async def _promote_built_image_candidate(
         self,

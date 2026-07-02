@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import base64
+import contextvars
 import json
 import os
 from pathlib import Path
@@ -34,6 +35,25 @@ SECRET_MARKERS = (
     "service_role",
 )
 PROVIDER_ERROR_MARKER = "research_lab_private_runtime_provider_error"
+# In-container trace capture (training-data tee): the diagnostics bootstrap
+# emits one single-line marker per hooked HTTP call (success AND failure) so
+# the host can reconstruct the sourcing model's own LLM/search/fetch behavior.
+# Pure observation: emission never changes what the hooked calls return, and
+# any capture failure is swallowed.
+INCONTAINER_TRACE_MARKER = "research_lab_private_runtime_trace"
+INCONTAINER_TRACE_CAPTURE_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_CAPTURE"
+INCONTAINER_TRACE_MAX_CALL_BYTES_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_MAX_CALL_BYTES"
+INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_MAX_TOTAL_BYTES"
+INCONTAINER_TRACE_DEFAULT_MAX_CALL_BYTES = 16384
+INCONTAINER_TRACE_DEFAULT_MAX_TOTAL_BYTES = 524288
+# Forwarded into model containers so operators can disable/tune capture
+# per-fleet. Capture defaults ON when the env is absent, so forwarding only
+# matters for opting out or resizing the caps.
+INCONTAINER_TRACE_ENV_PASSTHROUGH = (
+    INCONTAINER_TRACE_CAPTURE_ENV,
+    INCONTAINER_TRACE_MAX_CALL_BYTES_ENV,
+    INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV,
+)
 DEFAULT_DOCKER_PLATFORM = "linux/amd64"
 DEFAULT_ENV_PASSTHROUGH = (
     "EXA_API_KEY",
@@ -48,7 +68,7 @@ DEFAULT_ENV_PASSTHROUGH = (
     "http_proxy",
     "https_proxy",
     "no_proxy",
-)
+) + INCONTAINER_TRACE_ENV_PASSTHROUGH
 PROVIDER_KEY_ENV_PASSTHROUGH = (
     "EXA_API_KEY",
     "SCRAPINGDOG_API_KEY",
@@ -78,10 +98,13 @@ def private_model_env_passthrough(*, include_proxy: bool = False) -> tuple[str, 
     Exa, ScrapingDog, and OpenRouter are API services, and ScrapingDog performs
     its own upstream proxying. Operators can opt in when testing a proxy-specific
     provider path.
+
+    The in-container trace-capture controls always ride along so operators can
+    disable or resize the capture per-fleet without a code change.
     """
     if include_proxy:
-        return PROVIDER_KEY_ENV_PASSTHROUGH + PROVIDER_PROXY_ENV_PASSTHROUGH
-    return PROVIDER_KEY_ENV_PASSTHROUGH
+        return PROVIDER_KEY_ENV_PASSTHROUGH + PROVIDER_PROXY_ENV_PASSTHROUGH + INCONTAINER_TRACE_ENV_PASSTHROUGH
+    return PROVIDER_KEY_ENV_PASSTHROUGH + INCONTAINER_TRACE_ENV_PASSTHROUGH
 
 
 def _default_docker_platform() -> str:
@@ -286,21 +309,25 @@ class SubprocessPrivateModelRunner:
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
+            # Harvest whatever trace the container emitted before the kill;
+            # timeouts are exactly where the in-flight behavior matters.
+            _collect_incontainer_trace(_timeout_stderr_text(exc))
             raise PrivateModelRuntimeError("private model adapter timed out") from exc
 
+        stderr_text = _collect_incontainer_trace(completed.stderr)
         if completed.returncode != 0:
-            stderr = _sanitize_text(completed.stderr)[-1200:]
+            stderr = _sanitize_text(stderr_text)[-1200:]
             raise PrivateModelRuntimeError(f"private model adapter failed with code {completed.returncode}: {stderr}")
 
         try:
             decoded = _loads_adapter_stdout(completed.stdout)
         except json.JSONDecodeError as exc:
             stdout = _sanitize_text(completed.stdout)[-800:]
-            stderr = _sanitize_text(completed.stderr)[-800:]
+            stderr = _sanitize_text(stderr_text)[-800:]
             raise PrivateModelRuntimeError(
                 f"private model adapter returned invalid JSON: stdout={stdout!r} stderr={stderr!r}"
             ) from exc
-        _raise_on_empty_provider_error(decoded, completed.stderr, context_label="private model")
+        _raise_on_empty_provider_error(decoded, stderr_text, context_label="private model")
         return ensure_private_model_outputs(
             decoded,
             context_label="private model",
@@ -445,19 +472,23 @@ class DockerPrivateModelRunner:
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
+            # Harvest whatever trace the container emitted before the kill;
+            # timeouts are exactly where the in-flight behavior matters.
+            _collect_incontainer_trace(_timeout_stderr_text(exc))
             raise PrivateModelRuntimeError("docker private model adapter timed out") from exc
+        stderr_text = _collect_incontainer_trace(completed.stderr)
         if completed.returncode != 0:
-            stderr = _sanitize_text(completed.stderr)[-1200:]
+            stderr = _sanitize_text(stderr_text)[-1200:]
             raise PrivateModelRuntimeError(f"docker private model adapter failed with code {completed.returncode}: {stderr}")
         try:
             decoded = _loads_adapter_stdout(completed.stdout)
         except json.JSONDecodeError as exc:
             stdout = _sanitize_text(completed.stdout)[-800:]
-            stderr = _sanitize_text(completed.stderr)[-800:]
+            stderr = _sanitize_text(stderr_text)[-800:]
             raise PrivateModelRuntimeError(
                 f"docker private model adapter returned invalid JSON: stdout={stdout!r} stderr={stderr!r}"
             ) from exc
-        _raise_on_empty_provider_error(decoded, completed.stderr, context_label="docker private model")
+        _raise_on_empty_provider_error(decoded, stderr_text, context_label="docker private model")
         return decoded
 
 
@@ -642,6 +673,107 @@ def _provider_error_text(stderr: str) -> str:
     if not lines:
         return ""
     return "\n".join(lines)[-1200:]
+
+
+def incontainer_trace_capture_enabled() -> bool:
+    """Host-side mirror of the bootstrap's capture gate (default ON)."""
+    raw = str(os.getenv(INCONTAINER_TRACE_CAPTURE_ENV) or "").strip().lower()
+    if not raw:
+        return True
+    return raw in {"1", "true", "yes", "on"}
+
+
+# Ambient per-task collector for in-container trace entries. The evaluator
+# installs a list before invoking a model runner (asyncio.to_thread copies the
+# context into the worker thread, so sync runners see the same list object);
+# runners publish parsed entries into it. When no collector is installed —
+# e.g. direct gateway runner calls outside the evaluator — publishing is a
+# no-op so nothing accumulates.
+_INCONTAINER_TRACE_COLLECTOR: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars.ContextVar(
+    "research_lab_incontainer_trace_collector",
+    default=None,
+)
+
+
+def begin_incontainer_trace_collection() -> tuple[list[dict[str, Any]], contextvars.Token]:
+    """Install an in-container trace collector for the current context."""
+    entries: list[dict[str, Any]] = []
+    token = _INCONTAINER_TRACE_COLLECTOR.set(entries)
+    return entries, token
+
+
+def end_incontainer_trace_collection(token: contextvars.Token) -> None:
+    _INCONTAINER_TRACE_COLLECTOR.reset(token)
+
+
+def publish_incontainer_trace_entries(entries: Sequence[Mapping[str, Any]]) -> None:
+    """Append decoded trace entries to the ambient collector, if any."""
+    collector = _INCONTAINER_TRACE_COLLECTOR.get()
+    if collector is None:
+        return
+    collector.extend(dict(entry) for entry in entries if isinstance(entry, Mapping))
+
+
+def parse_incontainer_trace_lines(stderr: str) -> list[dict[str, Any]]:
+    """Decode ``INCONTAINER_TRACE_MARKER`` lines from captured runner stderr.
+
+    Malformed lines are skipped; entries keep stderr emission order (each also
+    carries an in-process ``seq``).
+    """
+    entries: list[dict[str, Any]] = []
+    for line in (stderr or "").splitlines():
+        marker_index = line.find(INCONTAINER_TRACE_MARKER)
+        if marker_index < 0:
+            continue
+        payload = line[marker_index + len(INCONTAINER_TRACE_MARKER):].strip()
+        if not payload:
+            continue
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(decoded, Mapping):
+            entries.append(dict(decoded))
+    return entries
+
+
+def strip_incontainer_trace_lines(text: str) -> str:
+    """Remove trace marker lines from stderr bound for diagnostics/error fields.
+
+    Trace lines carry base64 payload material; letting them flow into exception
+    messages or audit-visible diagnostics would bloat them and could trip the
+    protected-material scanners. Non-trace lines (including provider-error
+    marker lines) are preserved.
+    """
+    if not text or INCONTAINER_TRACE_MARKER not in text:
+        return text or ""
+    return "\n".join(line for line in text.splitlines() if INCONTAINER_TRACE_MARKER not in line)
+
+
+def _collect_incontainer_trace(stderr: str) -> str:
+    """Publish trace entries from runner stderr and return the stripped text.
+
+    Publishing is gated on the host-side capture flag; stripping is
+    unconditional so trace payloads never leak into diagnostics even when a
+    container emitted them while the host has capture disabled. Never raises.
+    """
+    if not stderr or INCONTAINER_TRACE_MARKER not in stderr:
+        return stderr or ""
+    if incontainer_trace_capture_enabled():
+        try:
+            publish_incontainer_trace_entries(parse_incontainer_trace_lines(stderr))
+        except Exception:
+            # Capture is pure observation: a parse/publish failure must never
+            # fail the run.
+            pass
+    return strip_incontainer_trace_lines(stderr)
+
+
+def _timeout_stderr_text(exc: subprocess.TimeoutExpired) -> str:
+    stderr = getattr(exc, "stderr", None)
+    if isinstance(stderr, bytes):
+        return stderr.decode("utf-8", "replace")
+    return str(stderr or "")
 
 
 def _loads_adapter_stdout(stdout: str) -> Any:
@@ -921,13 +1053,212 @@ def _research_lab_emit_provider_error(details, target):
     message = _research_lab_sanitize(f"{details}; url={target}").replace("\n", " ")
     sys.stderr.write("research_lab_private_runtime_provider_error " + message[-900:] + "\n")
 
-def _research_lab_urlopen(req, *args, **kwargs):
+# ---------------------------------------------------------------------------
+# In-container trace capture: tee every hooked HTTP call (success AND failure)
+# to stderr as a single-line marker so the host can collect the sourcing
+# model's own provider traffic as training data. Pure observation — emission
+# never changes what a hooked call returns, and every capture step is wrapped
+# so a failure inside the tee can never break the model's request.
+# ---------------------------------------------------------------------------
+import base64 as _research_lab_base64
+import hashlib as _research_lab_hashlib
+import json as _research_lab_json
+
+_research_lab_trace_flag_raw = (os.environ.get("RESEARCH_LAB_INCONTAINER_TRACE_CAPTURE") or "").strip().lower()
+_research_lab_trace_enabled = True if not _research_lab_trace_flag_raw else _research_lab_trace_flag_raw in ("1", "true", "yes", "on")
+
+def _research_lab_trace_env_int(name, default):
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
     try:
-        return _research_lab_original_urlopen(req, *args, **kwargs)
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+_research_lab_trace_max_call_bytes = _research_lab_trace_env_int("RESEARCH_LAB_INCONTAINER_TRACE_MAX_CALL_BYTES", 16384)
+_research_lab_trace_max_total_bytes = _research_lab_trace_env_int("RESEARCH_LAB_INCONTAINER_TRACE_MAX_TOTAL_BYTES", 524288)
+# Metadata guard: bodies are budgeted by the caps above, but a pathological
+# call loop could still grow stderr through per-entry overhead alone. Stop
+# emitting entirely after this many entries (~350B each => ~1.75MB worst case).
+_research_lab_trace_max_entries = 5000
+_research_lab_trace_state = {"seq": 0, "body_bytes_emitted": 0}
+
+def _research_lab_trace_sanitize_text(text):
+    text = _research_lab_sanitize(text)
+    # Defense in depth for key-shaped strings echoed inside bodies that are
+    # not present in this process env.
+    return re.sub(r"sk-or-[A-Za-z0-9_\-]+", "[REDACTED]", text)
+
+def _research_lab_trace_provider_class(url):
+    try:
+        host = ""
+        try:
+            import urllib.parse as _research_lab_urlparse
+            host = (_research_lab_urlparse.urlsplit(str(url)).hostname or "").lower()
+        except Exception:
+            host = ""
+        blob = host or str(url).lower()
+        if "openrouter" in blob:
+            return "llm"
+        if "exa" in blob:
+            return "search"
+        if "scrapingdog" in blob:
+            return "fetch"
+        return "other"
+    except Exception:
+        return "other"
+
+def _research_lab_trace_url(url):
+    try:
+        text = _research_lab_trace_sanitize_text(str(url))
+        text = re.sub(r"://[^/@\s]+@", "://[REDACTED]@", text)
+        return text.replace("\n", " ")[:2000]
+    except Exception:
+        return ""
+
+def _research_lab_trace_body_to_bytes(body):
+    # Returns sanitized utf-8 bytes, or None when the body is absent or not
+    # capturable without touching a live stream. Bodies are text-decoded with
+    # replacement so redaction always runs; provider payloads are JSON/text.
+    try:
+        if body is None:
+            return None
+        if isinstance(body, (bytes, bytearray)):
+            text = bytes(body).decode("utf-8", "replace")
+        else:
+            text = str(body)
+        return _research_lab_trace_sanitize_text(text).encode("utf-8")
+    except Exception:
+        return None
+
+def _research_lab_emit_trace(
+    method,
+    url,
+    request_body,
+    response_status,
+    response_body,
+    outcome,
+    error_text="",
+    request_capture_incomplete=False,
+    response_capture_incomplete=False,
+    phase="call",
+):
+    if not _research_lab_trace_enabled:
+        return
+    try:
+        state = _research_lab_trace_state
+        if state["seq"] >= _research_lab_trace_max_entries:
+            return
+        state["seq"] += 1
+        entry = {
+            "seq": state["seq"],
+            "phase": str(phase),
+            "provider_class": _research_lab_trace_provider_class(url),
+            "method": str(method or "").upper()[:16],
+            "url_redacted": _research_lab_trace_url(url),
+            "outcome": str(outcome),
+            "error": _research_lab_trace_sanitize_text(str(error_text or "")).replace("\n", " ")[:300],
+        }
+        truncated = bool(request_capture_incomplete or response_capture_incomplete)
+        for label, body in (("request", request_body), ("response", response_body)):
+            raw = _research_lab_trace_body_to_bytes(body)
+            if raw is None:
+                entry[label + "_body_b64"] = ""
+                entry[label + "_sha256"] = ""
+                entry[label + "_byte_len"] = 0
+                continue
+            byte_len = len(raw)
+            entry[label + "_sha256"] = _research_lab_hashlib.sha256(raw).hexdigest() if byte_len else ""
+            entry[label + "_byte_len"] = byte_len
+            kept = raw
+            if byte_len > _research_lab_trace_max_call_bytes:
+                kept = raw[:_research_lab_trace_max_call_bytes]
+                truncated = True
+            if kept and state["body_bytes_emitted"] + len(kept) > _research_lab_trace_max_total_bytes:
+                # Per-run budget exhausted: drop the body, keep hash/length.
+                kept = b""
+                truncated = True
+            state["body_bytes_emitted"] += len(kept)
+            entry[label + "_body_b64"] = _research_lab_base64.b64encode(kept).decode("ascii") if kept else ""
+        try:
+            entry["response_status"] = int(response_status) if response_status is not None else None
+        except Exception:
+            entry["response_status"] = None
+        entry["truncated"] = truncated
+        # Single line: base64 has no newlines and json.dumps escapes the rest,
+        # so the host-side per-line parser always sees one complete record.
+        sys.stderr.write(
+            "research_lab_private_runtime_trace "
+            + _research_lab_json.dumps(entry, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        )
+    except Exception:
+        pass
+
+def _research_lab_urlopen(req, *args, **kwargs):
+    target = getattr(req, "full_url", req if isinstance(req, str) else "")
+    method = "GET"
+    request_body = None
+    request_incomplete = False
+    try:
+        if hasattr(req, "get_method"):
+            method = req.get_method()
+            raw_data = getattr(req, "data", None)
+        else:
+            raw_data = args[0] if args else kwargs.get("data")
+            if raw_data is not None:
+                method = "POST"
+        if isinstance(raw_data, (bytes, bytearray, str)):
+            request_body = raw_data
+        elif raw_data is not None:
+            request_incomplete = True
+    except Exception:
+        request_incomplete = True
+    try:
+        response = _research_lab_original_urlopen(req, *args, **kwargs)
     except Exception as exc:
-        target = getattr(req, "full_url", req if isinstance(req, str) else "")
         _research_lab_emit_provider_error(_research_lab_http_error_details(exc), target)
+        _research_lab_emit_trace(
+            method,
+            target,
+            request_body,
+            getattr(exc, "code", None) or getattr(exc, "status", None),
+            None,
+            "error",
+            "%s: %s" % (type(exc).__name__, exc),
+            request_capture_incomplete=request_incomplete,
+            response_capture_incomplete=True,
+        )
         raise
+    response_body = None
+    response_incomplete = True
+    try:
+        # peek() never consumes the stream the model will read. It returns at
+        # most one buffer's worth, so mark the capture complete only when it
+        # provably covers the whole body (Content-Length match).
+        peeked = response.peek() if hasattr(response, "peek") else b""
+        response_body = peeked or b""
+        headers = getattr(response, "headers", None)
+        content_length = headers.get("Content-Length") if headers is not None else None
+        if content_length is not None and int(content_length) == len(response_body):
+            response_incomplete = False
+    except Exception:
+        response_body = None
+        response_incomplete = True
+    _research_lab_emit_trace(
+        method,
+        target,
+        request_body,
+        getattr(response, "status", None) or getattr(response, "code", None),
+        response_body,
+        "success",
+        "",
+        request_capture_incomplete=request_incomplete,
+        response_capture_incomplete=response_incomplete,
+    )
+    return response
 
 urllib.request.urlopen = _research_lab_urlopen
 
@@ -965,6 +1296,22 @@ def _research_lab_generic_error_details(exc):
             parts.append(f"body_unavailable={type(body_exc).__name__}")
     return "; ".join(parts)
 
+def _research_lab_httpx_request_body(request):
+    # request.content raises for streaming bodies; never force-read those.
+    try:
+        return request.content, False
+    except Exception:
+        return None, True
+
+def _research_lab_httpx_response_body(response):
+    # For stream=False (the default) httpx has already buffered the body, so
+    # .content is a cache read. For streaming responses it raises and we skip
+    # the body rather than consume the model's stream.
+    try:
+        return response.content, False
+    except Exception:
+        return None, True
+
 def _research_lab_patch_httpx():
     # Bug #35: httpx failures previously read as "model returned nothing".
     try:
@@ -975,14 +1322,39 @@ def _research_lab_patch_httpx():
         _research_lab_original_httpx_send = httpx.Client.send
 
         def _research_lab_httpx_send(self, request, *args, **kwargs):
+            request_body, request_incomplete = _research_lab_httpx_request_body(request)
             try:
-                return _research_lab_original_httpx_send(self, request, *args, **kwargs)
+                response = _research_lab_original_httpx_send(self, request, *args, **kwargs)
             except Exception as exc:
                 _research_lab_emit_provider_error(
                     _research_lab_generic_error_details(exc),
                     getattr(request, "url", ""),
                 )
+                _research_lab_emit_trace(
+                    getattr(request, "method", ""),
+                    getattr(request, "url", ""),
+                    request_body,
+                    None,
+                    None,
+                    "error",
+                    "%s: %s" % (type(exc).__name__, exc),
+                    request_capture_incomplete=request_incomplete,
+                    response_capture_incomplete=True,
+                )
                 raise
+            response_body, response_incomplete = _research_lab_httpx_response_body(response)
+            _research_lab_emit_trace(
+                getattr(request, "method", ""),
+                getattr(request, "url", ""),
+                request_body,
+                getattr(response, "status_code", None),
+                response_body,
+                "success",
+                "",
+                request_capture_incomplete=request_incomplete,
+                response_capture_incomplete=response_incomplete,
+            )
+            return response
 
         httpx.Client.send = _research_lab_httpx_send
     except Exception:
@@ -991,14 +1363,39 @@ def _research_lab_patch_httpx():
         _research_lab_original_httpx_async_send = httpx.AsyncClient.send
 
         async def _research_lab_httpx_async_send(self, request, *args, **kwargs):
+            request_body, request_incomplete = _research_lab_httpx_request_body(request)
             try:
-                return await _research_lab_original_httpx_async_send(self, request, *args, **kwargs)
+                response = await _research_lab_original_httpx_async_send(self, request, *args, **kwargs)
             except Exception as exc:
                 _research_lab_emit_provider_error(
                     _research_lab_generic_error_details(exc),
                     getattr(request, "url", ""),
                 )
+                _research_lab_emit_trace(
+                    getattr(request, "method", ""),
+                    getattr(request, "url", ""),
+                    request_body,
+                    None,
+                    None,
+                    "error",
+                    "%s: %s" % (type(exc).__name__, exc),
+                    request_capture_incomplete=request_incomplete,
+                    response_capture_incomplete=True,
+                )
                 raise
+            response_body, response_incomplete = _research_lab_httpx_response_body(response)
+            _research_lab_emit_trace(
+                getattr(request, "method", ""),
+                getattr(request, "url", ""),
+                request_body,
+                getattr(response, "status_code", None),
+                response_body,
+                "success",
+                "",
+                request_capture_incomplete=request_incomplete,
+                response_capture_incomplete=response_incomplete,
+            )
+            return response
 
         httpx.AsyncClient.send = _research_lab_httpx_async_send
     except Exception:
@@ -1031,14 +1428,57 @@ def _research_lab_patch_requests():
         _research_lab_original_requests_send = requests.Session.send
 
         def _research_lab_requests_send(self, request, *args, **kwargs):
+            request_body = getattr(request, "body", None)
+            request_incomplete = request_body is not None and not isinstance(
+                request_body, (bytes, bytearray, str)
+            )
+            if request_incomplete:
+                # File-like/generator bodies cannot be captured without
+                # consuming them.
+                request_body = None
+            stream = bool(kwargs.get("stream"))
             try:
-                return _research_lab_original_requests_send(self, request, *args, **kwargs)
+                response = _research_lab_original_requests_send(self, request, *args, **kwargs)
             except Exception as exc:
                 _research_lab_emit_provider_error(
                     _research_lab_generic_error_details(exc),
                     getattr(request, "url", ""),
                 )
+                _research_lab_emit_trace(
+                    getattr(request, "method", ""),
+                    getattr(request, "url", ""),
+                    request_body,
+                    None,
+                    None,
+                    "error",
+                    "%s: %s" % (type(exc).__name__, exc),
+                    request_capture_incomplete=request_incomplete,
+                    response_capture_incomplete=True,
+                )
                 raise
+            response_body = None
+            response_incomplete = True
+            if not stream:
+                # Non-streaming sends already buffered .content inside
+                # Session.send, so this is a cache read, never a consume.
+                try:
+                    response_body = response.content
+                    response_incomplete = False
+                except Exception:
+                    response_body = None
+                    response_incomplete = True
+            _research_lab_emit_trace(
+                getattr(request, "method", ""),
+                getattr(request, "url", ""),
+                request_body,
+                getattr(response, "status_code", None),
+                response_body,
+                "success",
+                "",
+                request_capture_incomplete=request_incomplete,
+                response_capture_incomplete=response_incomplete,
+            )
+            return response
 
         requests.Session.send = _research_lab_requests_send
     except Exception:
@@ -1070,16 +1510,81 @@ def _research_lab_patch_aiohttp():
         _research_lab_original_aiohttp_request = aiohttp.ClientSession._request
 
         async def _research_lab_aiohttp_request(self, method, str_or_url, *args, **kwargs):
+            request_body = None
+            request_incomplete = False
             try:
-                return await _research_lab_original_aiohttp_request(self, method, str_or_url, *args, **kwargs)
+                data = kwargs.get("data")
+                json_payload = kwargs.get("json")
+                if isinstance(data, (bytes, bytearray, str)):
+                    request_body = data
+                elif json_payload is not None:
+                    request_body = _research_lab_json.dumps(json_payload, sort_keys=True)
+                elif data is not None:
+                    request_incomplete = True
+            except Exception:
+                request_incomplete = True
+            try:
+                response = await _research_lab_original_aiohttp_request(self, method, str_or_url, *args, **kwargs)
             except Exception as exc:
                 _research_lab_emit_provider_error(
                     _research_lab_generic_error_details(exc),
                     str_or_url,
                 )
+                _research_lab_emit_trace(
+                    method,
+                    str_or_url,
+                    request_body,
+                    None,
+                    None,
+                    "error",
+                    "%s: %s" % (type(exc).__name__, exc),
+                    request_capture_incomplete=request_incomplete,
+                    response_capture_incomplete=True,
+                )
                 raise
+            # The response body has not been read at this boundary and reading
+            # it here would consume the model's stream; the ClientResponse.read
+            # hook below emits a paired phase="response_body" entry once the
+            # model itself reads it.
+            _research_lab_emit_trace(
+                method,
+                str_or_url,
+                request_body,
+                getattr(response, "status", None),
+                None,
+                "success",
+                "",
+                request_capture_incomplete=request_incomplete,
+                response_capture_incomplete=True,
+            )
+            return response
 
         aiohttp.ClientSession._request = _research_lab_aiohttp_request
+    except Exception:
+        pass
+    try:
+        _research_lab_original_aiohttp_read = aiohttp.ClientResponse.read
+
+        async def _research_lab_aiohttp_read(self, *args, **kwargs):
+            # aiohttp caches the payload in _body on first read; only the first
+            # materialization emits, and the returned bytes are teed after the
+            # fact so the model sees exactly what it would have seen.
+            already_cached = getattr(self, "_body", None) is not None
+            body = await _research_lab_original_aiohttp_read(self, *args, **kwargs)
+            if not already_cached:
+                _research_lab_emit_trace(
+                    getattr(self, "method", ""),
+                    getattr(self, "url", ""),
+                    None,
+                    getattr(self, "status", None),
+                    body,
+                    "success",
+                    "",
+                    phase="response_body",
+                )
+            return body
+
+        aiohttp.ClientResponse.read = _research_lab_aiohttp_read
     except Exception:
         pass
     try:

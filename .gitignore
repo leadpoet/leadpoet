@@ -3,7 +3,6 @@ bittensor
 .replit
 replit.md
 .cursor/
-tests/
 path/
 validation_artifacts/
 data/

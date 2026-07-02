@@ -350,7 +350,6 @@ def _build_scored_visibility_rows(
         for row in [*public_weak_rows, *public_strong_rows]
     }
     weak_refs = {str(row["icp_ref"]) for row in weak_pool}
-    strong_refs = {str(row["icp_ref"]) for row in strong_pool}
 
     for row in rows:
         ref = str(row["icp_ref"])

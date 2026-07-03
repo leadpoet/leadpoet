@@ -22,6 +22,37 @@ echo "============================================================"
 echo "📊 Lead distribution: FULLY DYNAMIC (adapts to gateway setting)"
 echo ""
 
+terminate_stale_validator_builds() {
+    local reason="${1:-preflight}"
+    echo "🧹 Cleaning stale validator Docker build processes ($reason)..."
+
+    if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+        sudo -n pkill -TERM -f "docker build -f .*/validator_models/containerizing/Dockerfile" 2>/dev/null || true
+        sudo -n pkill -TERM -f "pip install --no-cache-dir -r requirements.txt" 2>/dev/null || true
+        sleep 3
+        sudo -n pkill -KILL -f "docker build -f .*/validator_models/containerizing/Dockerfile" 2>/dev/null || true
+        sudo -n pkill -KILL -f "pip install --no-cache-dir -r requirements.txt" 2>/dev/null || true
+    else
+        pkill -TERM -f "docker build -f .*/validator_models/containerizing/Dockerfile" 2>/dev/null || true
+        pkill -TERM -f "pip install --no-cache-dir -r requirements.txt" 2>/dev/null || true
+        sleep 3
+        pkill -KILL -f "docker build -f .*/validator_models/containerizing/Dockerfile" 2>/dev/null || true
+        pkill -KILL -f "pip install --no-cache-dir -r requirements.txt" 2>/dev/null || true
+    fi
+    sleep 2
+}
+
+docker_build_validator_image() {
+    local timeout_seconds="${VALIDATOR_DOCKER_BUILD_TIMEOUT_SECONDS:-1800}"
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$timeout_seconds" docker build -f "$SCRIPT_DIR/Dockerfile" -t leadpoet-validator:latest "$REPO_ROOT"
+    else
+        echo "⚠️  timeout command unavailable; running Docker build without timeout"
+        docker build -f "$SCRIPT_DIR/Dockerfile" -t leadpoet-validator:latest "$REPO_ROOT"
+    fi
+}
+
 # ============================================================
 # SAFEGUARD: pull latest from GitHub origin/main before deploy
 # ============================================================
@@ -189,10 +220,18 @@ cd "$(dirname "$0")"  # Go to script directory
 SCRIPT_DIR=$(pwd)
 REPO_ROOT=$(cd ../.. && pwd)  # Go to repo root
 
-if docker build -f "$SCRIPT_DIR/Dockerfile" -t leadpoet-validator:latest "$REPO_ROOT"; then
+terminate_stale_validator_builds "before-build"
+
+if docker_build_validator_image; then
     echo "✅ Docker image built successfully"
 else
+    BUILD_EXIT_CODE=$?
+    terminate_stale_validator_builds "after-build-failure"
     echo "❌ ERROR: Docker build failed"
+    if [ "$BUILD_EXIT_CODE" -eq 124 ]; then
+        echo "   Docker build timed out after ${VALIDATOR_DOCKER_BUILD_TIMEOUT_SECONDS:-1800} seconds."
+        echo "   Stale docker/pip build processes were terminated."
+    fi
     echo "   This usually means:"
     echo "   1. Dockerfile syntax error"
     echo "   2. Missing dependencies in requirements.txt"

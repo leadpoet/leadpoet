@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable, Mapping, Sequence, Union
 
 from gateway.research_lab.code_build import (
     CodeEditBuildError,
+    CodeEditInfraFailureError,
     CodeEditImageBuildError,
     CodeEditPatchApplyError,
     CodeEditPrivateTestError,
@@ -2055,6 +2056,10 @@ class CodeEditLoopEngine:
                         estimated_cost=estimated_cost,
                         actual_cost_microusd=actual_cost_microusd,
                     )
+                except CodeEditInfraFailureError:
+                    # Registry/auth/network failures are not candidate-quality
+                    # failures. Let the hosted worker requeue the paid run.
+                    raise
                 except (CodeEditPrivateTestError, CodeEditImageBuildError, CodeEditPatchApplyError) as exc:
                     event_type = str(getattr(exc, "failure_stage", "") or "candidate_build_failed")
                     _record_within_run_rejection(

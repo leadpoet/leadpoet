@@ -24,10 +24,12 @@ import pytest
 
 import gateway.research_lab.code_build as code_build
 import gateway.research_lab.public_activity as public_activity
+import gateway.research_lab.worker as worker
 from gateway.research_lab.public_activity import derive_public_loop_outcome
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CODE_BUILD_SOURCE = REPO_ROOT / "gateway" / "research_lab" / "code_build.py"
+CODE_LOOP_ENGINE_SOURCE = REPO_ROOT / "gateway" / "research_lab" / "code_loop_engine.py"
 
 IMAGE_REF = "public.ecr.aws/example/sourcing-model@sha256:" + "a" * 64
 
@@ -242,6 +244,62 @@ class TestParentImagePrepull:
             call_linenos["_prepull_parent_image_for_build"]
             < call_linenos["_run_private_build_cmd_with_infra_retry"]
         )
+
+
+# --------------------------------------------------------------------------- #
+# ECR auth/push failures are infra, not candidate failures
+# --------------------------------------------------------------------------- #
+class TestEcrPushInfraClassification:
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        monkeypatch.delenv("RESEARCH_LAB_BUILD_INFRA_RETRY_ENABLED", raising=False)
+        monkeypatch.setattr(code_build, "_infra_retry_backoff_seconds", lambda: 0.0)
+
+    def test_ecr_initiate_layer_upload_denial_is_infra_marker(self):
+        message = (
+            "User: arn:aws:sts::493765492819:assumed-role/"
+            "leadpoet-gateway-s3-cloudwatch-role/i-123 is not authorized to perform: "
+            "ecr:InitiateLayerUpload on resource: "
+            "arn:aws:ecr:us-east-1:493765492819:repository/leadpoet/sourcing-model"
+        )
+        assert code_build._is_infra_failure_text(message)
+
+    def test_private_build_ecr_denial_raises_retryable_infra_after_retry(self, monkeypatch, tmp_path):
+        attempts = {"count": 0}
+
+        def fake_run_shell(cmd, *, cwd, env, timeout_seconds):
+            attempts["count"] += 1
+            raise code_build.CodeEditBuildError(
+                "docker push failed",
+                stderr="denied: User is not authorized to perform: ecr:InitiateLayerUpload",
+                exit_code=1,
+            )
+
+        monkeypatch.setattr(code_build, "_run_shell", fake_run_shell)
+        with pytest.raises(code_build.CodeEditInfraFailureError) as exc_info:
+            code_build._run_private_build_cmd_with_infra_retry(
+                cmd="docker push example",
+                cwd=tmp_path,
+                env={},
+                timeout_seconds=30,
+            )
+        assert attempts["count"] == 2
+        assert exc_info.value.failure_stage == "candidate_build_infra_failed"
+        assert exc_info.value.retryable is True
+
+    def test_loop_engine_propagates_infra_before_candidate_rejection(self):
+        source = CODE_LOOP_ENGINE_SOURCE.read_text()
+        assert "except CodeEditInfraFailureError" in source
+        assert (
+            source.index("except CodeEditInfraFailureError")
+            < source.index("except (CodeEditPrivateTestError, CodeEditImageBuildError, CodeEditPatchApplyError)")
+        )
+
+    def test_worker_requeues_typed_infra_even_when_message_contains_auth_denial(self):
+        exc = code_build.CodeEditInfraFailureError(
+            "not authorized to perform: ecr:InitiateLayerUpload"
+        )
+        assert worker._is_retryable_worker_exception(exc) is True
 
 
 # --------------------------------------------------------------------------- #

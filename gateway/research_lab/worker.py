@@ -22,7 +22,7 @@ from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
-from gateway.research_lab.code_build import CodeEditCandidateBuilder
+from gateway.research_lab.code_build import CodeEditCandidateBuilder, CodeEditInfraFailureError
 from gateway.research_lab.code_loop_engine import CodeEditLoopEngine
 from gateway.research_lab.config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
 from gateway.research_lab.key_vault import (
@@ -418,6 +418,8 @@ def _is_retryable_worker_exception(exc: BaseException) -> bool:
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         if isinstance(current, RetryableHostedResearchLabWorkerError):
+            return True
+        if isinstance(current, CodeEditInfraFailureError):
             return True
         if isinstance(current, PromotionPausedError):
             # Fail-closed lineage/promotion pauses (bug #2): retry, never

@@ -9,6 +9,7 @@ scoping), and the same-day baseline replacement guard.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -281,6 +282,18 @@ def test_failure_class_baseline_not_ready():
     assert retryable is True
 
 
+def test_failure_class_candidate_window_changed_is_baseline_not_ready():
+    category, retryable = sw._candidate_scoring_failure_class(
+        sw.CandidateBaselineWindowChanged(
+            candidate_window_hash="sha256:" + "1" * 64,
+            current_window_hash="sha256:" + "2" * 64,
+            progress={"phase": "before_icp", "completed_icp_count": 16},
+        )
+    )
+    assert category == "baseline_not_ready"
+    assert retryable is True
+
+
 def test_failure_class_provider_4xx_uses_baseline_classifier():
     class ProviderError(RuntimeError):
         pass
@@ -348,6 +361,154 @@ def test_baseline_gate_env_parsing(monkeypatch):
     assert sw._baseline_max_day_jump_points() is None
     monkeypatch.setenv("RESEARCH_LAB_BASELINE_MAX_DAY_JUMP_POINTS", "-4.5")
     assert sw._baseline_max_day_jump_points() == 4.5
+
+
+def _artifact(artifact_hash: str = "sha256:" + "1" * 64) -> sw.PrivateModelArtifactManifest:
+    return sw.PrivateModelArtifactManifest(
+        model_artifact_hash=artifact_hash,
+        git_commit_sha="abcdef123456",
+        image_digest=(
+            "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model"
+            "@sha256:" + "a" * 64
+        ),
+        config_hash="sha256:" + "b" * 64,
+        component_registry_version="component-registry:v1",
+        scoring_adapter_version="scoring-adapter:v1",
+        manifest_uri="s3://bucket/manifest.json",
+        manifest_hash="sha256:" + "c" * 64,
+        signature_ref="s3://bucket/signature.sig",
+    )
+
+
+@pytest.mark.asyncio
+async def test_candidate_freshness_passes_when_parent_and_window_match(monkeypatch):
+    artifact = _artifact()
+    window_hash = "sha256:" + "2" * 64
+    worker = sw.ResearchLabGatewayScoringWorker(sw.ResearchLabGatewayConfig())
+
+    async def fake_load_active(_config, *, register_bootstrap):
+        return SimpleNamespace(artifact=artifact)
+
+    async def fake_fetch_window(**_kwargs):
+        return SimpleNamespace(window_hash=window_hash)
+
+    monkeypatch.setattr(sw, "load_active_private_model", fake_load_active)
+    monkeypatch.setattr(sw, "fetch_rolling_icp_window", fake_fetch_window)
+
+    await worker._check_candidate_scoring_freshness(
+        parent_artifact=artifact,
+        candidate_window_hash=window_hash,
+        progress={"phase": "before_icp", "completed_icp_count": 3},
+    )
+
+
+@pytest.mark.asyncio
+async def test_candidate_freshness_stale_parent_takes_precedence(monkeypatch):
+    artifact = _artifact("sha256:" + "1" * 64)
+    active_artifact = _artifact("sha256:" + "9" * 64)
+    worker = sw.ResearchLabGatewayScoringWorker(sw.ResearchLabGatewayConfig())
+
+    async def fake_load_active(_config, *, register_bootstrap):
+        return SimpleNamespace(artifact=active_artifact)
+
+    async def fake_fetch_window(**_kwargs):  # pragma: no cover - parent check should win first
+        raise AssertionError("window fetch should not run after stale parent")
+
+    monkeypatch.setattr(sw, "load_active_private_model", fake_load_active)
+    monkeypatch.setattr(sw, "fetch_rolling_icp_window", fake_fetch_window)
+
+    with pytest.raises(sw.StaleParentDuringScoring) as raised:
+        await worker._check_candidate_scoring_freshness(
+            parent_artifact=artifact,
+            candidate_window_hash="sha256:" + "2" * 64,
+            progress={"phase": "before_icp", "completed_icp_count": 16},
+        )
+
+    assert raised.value.active_artifact == active_artifact
+    assert raised.value.candidate_parent == artifact.model_artifact_hash
+    assert raised.value.progress["completed_icp_count"] == 16
+
+
+@pytest.mark.asyncio
+async def test_candidate_freshness_requeues_when_rolling_window_changes(monkeypatch):
+    artifact = _artifact()
+    candidate_window = "sha256:" + "2" * 64
+    current_window = "sha256:" + "3" * 64
+    worker = sw.ResearchLabGatewayScoringWorker(sw.ResearchLabGatewayConfig())
+
+    async def fake_load_active(_config, *, register_bootstrap):
+        return SimpleNamespace(artifact=artifact)
+
+    async def fake_fetch_window(**_kwargs):
+        return SimpleNamespace(window_hash=current_window)
+
+    monkeypatch.setattr(sw, "load_active_private_model", fake_load_active)
+    monkeypatch.setattr(sw, "fetch_rolling_icp_window", fake_fetch_window)
+
+    with pytest.raises(sw.CandidateBaselineWindowChanged) as raised:
+        await worker._check_candidate_scoring_freshness(
+            parent_artifact=artifact,
+            candidate_window_hash=candidate_window,
+            progress={
+                "phase": "before_icp",
+                "next_icp_index": 16,
+                "completed_icp_count": 16,
+                "icp_ref": "icp-16",
+            },
+        )
+
+    assert raised.value.candidate_window_hash == candidate_window
+    assert raised.value.current_window_hash == current_window
+    assert raised.value.progress["next_icp_index"] == 16
+
+
+@pytest.mark.asyncio
+async def test_candidate_freshness_waits_when_current_window_unavailable(monkeypatch):
+    artifact = _artifact()
+    worker = sw.ResearchLabGatewayScoringWorker(sw.ResearchLabGatewayConfig())
+
+    async def fake_load_active(_config, *, register_bootstrap):
+        return SimpleNamespace(artifact=artifact)
+
+    async def fake_fetch_window(**_kwargs):
+        raise RuntimeError("rolling window unavailable")
+
+    monkeypatch.setattr(sw, "load_active_private_model", fake_load_active)
+    monkeypatch.setattr(sw, "fetch_rolling_icp_window", fake_fetch_window)
+
+    with pytest.raises(sw.CandidateBaselineNotReady) as raised:
+        await worker._check_candidate_scoring_freshness(
+            parent_artifact=artifact,
+            candidate_window_hash="sha256:" + "2" * 64,
+            progress={"phase": "before_icp", "completed_icp_count": 7},
+        )
+
+    assert "current_rolling_window_unavailable_during_candidate_scoring" in str(raised.value)
+
+
+def test_candidate_baseline_wait_event_doc_includes_window_progress():
+    exc = sw.CandidateBaselineWindowChanged(
+        candidate_window_hash="sha256:" + "2" * 64,
+        current_window_hash="sha256:" + "3" * 64,
+        progress={
+            "phase": "before_icp",
+            "next_icp_index": 16,
+            "completed_icp_count": 16,
+            "icp_ref": "icp-16",
+        },
+    )
+
+    doc = sw._candidate_baseline_wait_event_doc(exc)
+
+    assert doc["baseline_wait_reason"] == "rolling_window_changed_during_candidate_scoring"
+    assert doc["candidate_window_hash"] == "sha256:" + "2" * 64
+    assert doc["current_window_hash"] == "sha256:" + "3" * 64
+    assert doc["stale_window_progress"] == {
+        "phase": "before_icp",
+        "completed_icp_count": 16,
+        "next_icp_index": 16,
+        "icp_ref": "icp-16",
+    }
 
 
 # --- bug #9: audit event fetches are window-scoped ---

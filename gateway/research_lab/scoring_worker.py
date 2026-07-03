@@ -1174,6 +1174,28 @@ class CandidateBaselineNotReady(RuntimeError):
     """Raised when candidate scoring must wait for a matching private baseline."""
 
 
+class CandidateBaselineWindowChanged(CandidateBaselineNotReady):
+    """Raised when an in-flight candidate is scoring against an old ICP window."""
+
+    def __init__(
+        self,
+        *,
+        candidate_window_hash: str,
+        current_window_hash: str,
+        progress: Mapping[str, Any],
+    ) -> None:
+        self.candidate_window_hash = candidate_window_hash
+        self.current_window_hash = current_window_hash
+        self.progress = dict(progress)
+        completed = int(self.progress.get("completed_icp_count") or 0)
+        super().__init__(
+            "rolling ICP window changed during candidate scoring: "
+            f"candidate_window={compact_ref(candidate_window_hash)} "
+            f"current_window={compact_ref(current_window_hash)} "
+            f"completed_icps={completed}"
+        )
+
+
 class ClaimLostDuringScoring(RuntimeError):
     """Raised at an ICP boundary when this worker's claim was lost mid-scoring."""
 
@@ -1301,6 +1323,17 @@ def _stale_parent_progress_doc(progress: Mapping[str, Any]) -> dict[str, Any]:
         if value:
             doc[key] = value[:160]
     return doc
+
+
+def _candidate_baseline_wait_event_doc(exc: BaseException) -> dict[str, Any]:
+    if not isinstance(exc, CandidateBaselineWindowChanged):
+        return {}
+    return {
+        "baseline_wait_reason": "rolling_window_changed_during_candidate_scoring",
+        "candidate_window_hash": exc.candidate_window_hash,
+        "current_window_hash": exc.current_window_hash,
+        "stale_window_progress": _stale_parent_progress_doc(exc.progress),
+    }
 
 
 def _load_private_json_artifact(uri: str) -> dict[str, Any]:
@@ -2254,11 +2287,11 @@ class ResearchLabGatewayScoringWorker:
                 candidate_id=candidate_id,
                 candidate_model_manifest_hash=getattr(artifact, "manifest_hash", None),
             )
-            last_parent_check_at = 0.0
+            last_freshness_check_at = 0.0
             claim_lost_event = asyncio.Event()
 
             async def parent_freshness_check(progress: Mapping[str, Any]) -> None:
-                nonlocal last_parent_check_at
+                nonlocal last_freshness_check_at
                 if claim_lost_event.is_set() and _env_flag("RESEARCH_LAB_SCORING_ABORT_ON_CLAIM_LOSS"):
                     raise ClaimLostDuringScoring(
                         f"scoring claim lost for candidate {compact_ref(candidate_id)}; "
@@ -2268,19 +2301,16 @@ class ResearchLabGatewayScoringWorker:
                 phase = str(progress.get("phase") or "")
                 if (
                     phase != "before_icp"
-                    and last_parent_check_at
-                    and now - last_parent_check_at < self.config.stale_parent_check_interval_seconds
+                    and last_freshness_check_at
+                    and now - last_freshness_check_at < self.config.stale_parent_check_interval_seconds
                 ):
                     return
-                last_parent_check_at = now
-                active = await load_active_private_model(self.config, register_bootstrap=True)
-                active_parent = active.artifact.model_artifact_hash
-                if active_parent != artifact.model_artifact_hash:
-                    raise StaleParentDuringScoring(
-                        active_artifact=active.artifact,
-                        candidate_parent=artifact.model_artifact_hash,
-                        progress=progress,
-                    )
+                last_freshness_check_at = now
+                await self._check_candidate_scoring_freshness(
+                    parent_artifact=artifact,
+                    candidate_window_hash=window.window_hash,
+                    progress=progress,
+                )
 
             # Bug #31: resume already-completed ICPs from the persisted progress
             # artifact and checkpoint each new ICP result, so a requeue at ICP
@@ -2585,6 +2615,7 @@ class ResearchLabGatewayScoringWorker:
                         "worker_ref": self.worker_ref,
                         "proxy_ref_hash": self.proxy_ref_hash,
                         "claim_attempts": claim_attempts,
+                        **_candidate_baseline_wait_event_doc(exc),
                     },
                 )
                 logger.warning(
@@ -4308,6 +4339,41 @@ class ResearchLabGatewayScoringWorker:
             "matching_completed_private_baseline_required_before_candidate_private_holdout: "
             f"manifest={compact_ref(artifact.manifest_hash)} window={compact_ref(window_hash)}"
         )
+
+    async def _check_candidate_scoring_freshness(
+        self,
+        *,
+        parent_artifact: PrivateModelArtifactManifest,
+        candidate_window_hash: str,
+        progress: Mapping[str, Any],
+    ) -> None:
+        active = await load_active_private_model(self.config, register_bootstrap=True)
+        active_parent = active.artifact.model_artifact_hash
+        if active_parent != parent_artifact.model_artifact_hash:
+            raise StaleParentDuringScoring(
+                active_artifact=active.artifact,
+                candidate_parent=parent_artifact.model_artifact_hash,
+                progress=progress,
+            )
+        try:
+            current_window = await fetch_rolling_icp_window(
+                days=self.config.lab_champion_eval_days,
+                icps_per_day=self.config.lab_champion_icps_per_day,
+                **_rolling_window_fetch_kwargs(self.config),
+                allow_partial=self.config.scoring_worker_allow_partial_icp_window,
+            )
+        except Exception as exc:
+            raise CandidateBaselineNotReady(
+                "current_rolling_window_unavailable_during_candidate_scoring: "
+                f"candidate_window={compact_ref(candidate_window_hash)}"
+            ) from exc
+        current_window_hash = str(current_window.window_hash)
+        if current_window_hash != candidate_window_hash:
+            raise CandidateBaselineWindowChanged(
+                candidate_window_hash=candidate_window_hash,
+                current_window_hash=current_window_hash,
+                progress=progress,
+            )
 
     async def _maybe_run_private_baseline(self) -> dict[str, Any] | None:
         today = datetime.now(timezone.utc).date().isoformat()

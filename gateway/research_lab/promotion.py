@@ -991,7 +991,7 @@ async def sync_active_model_to_repo_head(
         "current_json_git_sha": current_artifact.git_commit_sha,
         "current_json_manifest_hash": current_artifact.manifest_hash,
         "current_json_model_artifact_hash": current_artifact.model_artifact_hash,
-        "current_json_image_digest": current_artifact.image_digest,
+        "current_json_image_ref_hash": _image_ref_hash(current_artifact.image_digest),
         "current_json_pointer_uri": config.private_model_manifest_uri,
         "current_json_manifest_uri": current_artifact.manifest_uri,
         "active_model_git_sha": active_model_git_sha,
@@ -1041,23 +1041,19 @@ async def sync_active_model_to_repo_head(
         version_row, _event = await create_private_model_version(
             artifact_manifest=current_artifact.to_dict(),
             manifest_uri=current_artifact.manifest_uri,
-            redacted_version_doc={
-                "source": "repo_head_sync",
-                "actor_ref": actor_ref,
-                "repo_branch": branch_name,
-                "repo_main_sha": repo_main_sha,
-                "current_json_git_sha": current_artifact.git_commit_sha,
-                "current_json_pointer_uri": config.private_model_manifest_uri,
-                "current_json_manifest_uri": current_artifact.manifest_uri,
-                "model_artifact_hash": current_artifact.model_artifact_hash,
-                "private_model_manifest_hash": current_artifact.manifest_hash,
-                "image_digest": current_artifact.image_digest,
-                "previous_active_model_version_id": (
+            redacted_version_doc=_private_model_version_doc(
+                source="repo_head_sync",
+                actor_ref=actor_ref,
+                repo_branch=branch_name,
+                repo_main_sha=repo_main_sha,
+                current_json_pointer_uri=config.private_model_manifest_uri,
+                previous_active_model_version_id=(
                     str(active_row.get("private_model_version_id") or "") if active_row else ""
                 ),
-                "previous_active_git_sha": active_model_git_sha,
-                "previous_active_manifest_hash": active_model_manifest_hash,
-            },
+                previous_active_git_sha=active_model_git_sha,
+                previous_active_manifest_hash=active_model_manifest_hash,
+                artifact=current_artifact,
+            ),
             version_status="active",
             reason="repo_head_sync",
         )
@@ -1142,7 +1138,7 @@ async def wait_for_current_manifest_git_sha(
                     "current_json_git_sha": current_sha,
                     "current_json_manifest_hash": artifact.manifest_hash,
                     "current_json_model_artifact_hash": artifact.model_artifact_hash,
-                    "current_json_image_digest": artifact.image_digest,
+                    "current_json_image_ref_hash": _image_ref_hash(artifact.image_digest),
                     "manifest_uri": config.private_model_manifest_uri,
                 }
             last_status = {
@@ -1891,13 +1887,13 @@ class ResearchLabPromotionController:
                     improvement_points=improvement_points,
                     threshold_points=threshold,
                     worker_ref=self.worker_ref,
-                    event_doc={
+                    event_doc=_db_safe_doc({
                         "reason": "source_pushed_manifest_pending",
                         "candidate_status_preserved": "scored",
                         "private_source_status": private_repo_result,
                         "manifest_wait_status": manifest_wait_status,
                         "action": "leave_previous_active_model_active_until_current_json_matches_pushed_commit",
-                    },
+                    }),
                 )
                 logger.warning(
                     "research_lab_private_source_manifest_pending candidate=%s expected_git=%s status=%s",
@@ -1948,21 +1944,16 @@ class ResearchLabPromotionController:
                 source_candidate_id=str(candidate["candidate_id"]),
                 source_score_bundle_id=str(score_bundle_row["score_bundle_id"]),
                 source_benchmark_bundle_id=source_benchmark_bundle_id,
-                redacted_version_doc={
-                    "source": "gateway_code_edit_image_build_repo_head_manifest",
-                    "model_artifact_hash": activation_artifact.model_artifact_hash,
-                    "private_model_manifest_hash": activation_artifact.manifest_hash,
-                    "git_commit_sha": activation_artifact.git_commit_sha,
-                    "image_digest": activation_artifact.image_digest,
-                    "component_registry_version": activation_artifact.component_registry_version,
-                    "scoring_adapter_version": activation_artifact.scoring_adapter_version,
-                    "candidate_source_diff_hash": candidate.get("candidate_source_diff_hash"),
-                    "scored_candidate_model_artifact_hash": new_artifact.model_artifact_hash,
-                    "scored_candidate_manifest_hash": new_artifact.manifest_hash,
-                    "private_source_status": private_repo_result,
-                    "manifest_wait_status": manifest_wait_status,
-                    "source_benchmark_bundle_id": source_benchmark_bundle_id,
-                },
+                redacted_version_doc=_private_model_version_doc(
+                    source="gateway_code_edit_image_build_repo_head_manifest",
+                    candidate_source_diff_hash=candidate.get("candidate_source_diff_hash"),
+                    scored_candidate_model_artifact_hash=new_artifact.model_artifact_hash,
+                    scored_candidate_manifest_hash=new_artifact.manifest_hash,
+                    private_source_status=private_repo_result,
+                    manifest_wait_status=manifest_wait_status,
+                    source_benchmark_bundle_id=source_benchmark_bundle_id,
+                    artifact=activation_artifact,
+                ),
                 version_status="active",
                 reason="research_lab_image_build_candidate_repo_head_manifest_promoted",
             )
@@ -1995,11 +1986,11 @@ class ResearchLabPromotionController:
             improvement_points=improvement_points,
             threshold_points=threshold,
             worker_ref=self.worker_ref,
-            event_doc={
+            event_doc=_db_safe_doc({
                 "new_model_artifact_hash": activation_artifact.model_artifact_hash,
                 "new_private_model_manifest_hash": activation_artifact.manifest_hash,
                 "new_git_commit_sha": activation_artifact.git_commit_sha,
-                "new_image_digest": activation_artifact.image_digest,
+                "new_image_ref_hash": _image_ref_hash(activation_artifact.image_digest),
                 "scored_candidate_model_artifact_hash": new_artifact.model_artifact_hash,
                 "scored_candidate_manifest_hash": new_artifact.manifest_hash,
                 "private_source_status": private_repo_result,
@@ -2012,7 +2003,7 @@ class ResearchLabPromotionController:
                     else ""
                 ),
                 "source_score_bundle_id": str(score_bundle_row["score_bundle_id"]),
-            },
+            }),
         )
         reward_status = await self._maybe_create_champion_reward(
             candidate=candidate,
@@ -3479,6 +3470,71 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _image_ref_hash(image_ref: Any) -> str:
+    """Hash an immutable image ref without storing the ECR URI/digest string."""
+
+    value = str(image_ref or "")
+    return canonical_hash({"private_model_image_ref": value}) if value else ""
+
+
+_DB_DOC_FORBIDDEN_RE = re.compile(
+    r"(sk-or-|openrouter_api_key|raw_openrouter_key|raw_secret|service_role|"
+    r"private_repo|judge_prompt|hidden_icp|icp_plaintext|intent_signals|"
+    r"\.dkr\.ecr\.|image_digest|private_model_manifest_doc|"
+    r"candidate_patch_manifest|proxy[_-]?url|://[^/]+:[^/@]+@)",
+    re.IGNORECASE,
+)
+
+
+def _db_safe_doc(value: Any) -> Any:
+    """Return a JSON value safe for constrained Research Lab audit columns."""
+
+    if isinstance(value, Mapping):
+        safe: dict[str, Any] = {}
+        for raw_key, raw_nested in value.items():
+            key = _db_safe_key(raw_key)
+            if not key:
+                continue
+            safe[key] = _db_safe_doc(raw_nested)
+        return safe
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_db_safe_doc(item) for item in value]
+    if isinstance(value, str) and _DB_DOC_FORBIDDEN_RE.search(value):
+        return canonical_hash({"value": value})
+    return value
+
+
+def _db_safe_key(value: Any) -> str:
+    key = str(value or "")
+    # The DB checks reject the literal key substring image_digest. Preserve the
+    # lineage meaning using a hash-only image_ref_hash key.
+    key = re.sub(r"image[_-]?digest", "image_ref_hash", key, flags=re.IGNORECASE)
+    return "" if _DB_DOC_FORBIDDEN_RE.search(key) else key
+
+
+def _private_model_version_doc(*, artifact: PrivateModelArtifactManifest, **extra: Any) -> dict[str, Any]:
+    """Build DB-safe private model version metadata.
+
+    The Supabase CHECK constraints intentionally reject raw ECR image refs and
+    keys containing ``image_digest``. The signed private manifest remains the
+    source of truth for the immutable image; lineage/event docs store only
+    hashes and non-secret version metadata.
+    """
+
+    doc = {
+        **extra,
+        "model_artifact_hash": artifact.model_artifact_hash,
+        "private_model_manifest_hash": artifact.manifest_hash,
+        "git_commit_sha": artifact.git_commit_sha,
+        "component_registry_version": artifact.component_registry_version,
+        "scoring_adapter_version": artifact.scoring_adapter_version,
+        "image_ref_hash": _image_ref_hash(artifact.image_digest),
+    }
+    if "image_digest" in doc:
+        doc.pop("image_digest", None)
+    return _db_safe_doc(doc)
 
 
 def _run_command(

@@ -21,6 +21,7 @@ Covers, with fake store rows (no live Supabase):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from types import SimpleNamespace
 from typing import Any, Mapping
 
@@ -37,6 +38,7 @@ from gateway.research_lab.promotion import (
     promotion_improvement_metric,
     reconcile_active_private_model_lineage,
     reconcile_pending_champion_rewards,
+    sync_active_model_to_repo_head,
 )
 from research_lab.canonical import sha256_json
 
@@ -195,6 +197,11 @@ def _active_row(artifact: FakeArtifact) -> dict[str, Any]:
         "current_version_status": "active",
         "current_status_at": "2026-07-01T00:00:00+00:00",
     }
+
+
+def _assert_db_doc_safe(doc: Mapping[str, Any]) -> None:
+    encoded = json.dumps(doc, sort_keys=True, default=str)
+    assert not promotion._DB_DOC_FORBIDDEN_RE.search(encoded)
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +508,59 @@ def _score_bundle(gate: Mapping[str, Any], aggregates: Mapping[str, Any] | None 
         "aggregates": dict(aggregates or {}),
         "icp_set_hash": "sha256:" + "3" * 64,
     }
+
+
+async def test_repo_head_sync_registers_current_json_with_db_safe_doc(store, monkeypatch):
+    current_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "9" * 64,
+        git_commit_sha="e" * 40,
+        image_digest=(
+            "493765492819.dkr.ecr.us-east-1.amazonaws.com/research-lab/test@sha256:"
+            + "9" * 64
+        ),
+    )
+    previous_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "8" * 64,
+        git_commit_sha="d" * 40,
+    )
+    previous_row = {
+        **_active_row(previous_artifact),
+        "git_commit_sha": previous_artifact.git_commit_sha,
+    }
+    store.select_many_results["research_lab_private_model_version_current:active"] = [previous_row]
+
+    monkeypatch.setattr(
+        promotion,
+        "_resolve_private_repo_head_sha",
+        lambda *, repo_url, branch_name: current_artifact.git_commit_sha,
+    )
+
+    async def _fake_current_manifest(config: Any, **kwargs: Any) -> tuple[FakeArtifact, dict[str, Any]]:
+        return current_artifact, {
+            "status": "manifest_ready",
+            "current_json_git_sha": current_artifact.git_commit_sha,
+            "current_json_manifest_hash": current_artifact.manifest_hash,
+            "current_json_model_artifact_hash": current_artifact.model_artifact_hash,
+            "current_json_image_digest": current_artifact.image_digest,
+        }
+
+    monkeypatch.setattr(promotion, "_load_repo_head_current_manifest", _fake_current_manifest)
+
+    result = await sync_active_model_to_repo_head(
+        _controller_config(
+            private_repo_url="git@github.com:tasnimuldatascience/Sourcing_model.git",
+            private_repo_branch="main",
+        ),
+        actor_ref="test",
+        dry_run=False,
+    )
+
+    assert result["status"] == "synced_active_model_to_repo_head"
+    assert len(store.version_writes) == 1
+    version_doc = store.version_writes[0]["redacted_version_doc"]
+    _assert_db_doc_safe(version_doc)
+    assert version_doc["image_ref_hash"].startswith("sha256:")
+    assert "image_digest" not in json.dumps(version_doc, sort_keys=True, default=str)
 
 
 def _bridge_baseline_row(window_hash: str, baseline_bundle_id: str) -> dict[str, Any]:
@@ -918,12 +978,18 @@ async def test_promoted_candidate_writes_derived_benchmark_and_links_active_vers
     assert store.version_writes[0]["artifact_manifest"]["model_artifact_hash"] == (
         activation_artifact.model_artifact_hash
     )
+    version_doc = store.version_writes[0]["redacted_version_doc"]
+    _assert_db_doc_safe(version_doc)
+    assert version_doc["image_ref_hash"].startswith("sha256:")
+    assert version_doc["manifest_wait_status"]["current_json_image_ref_hash"].startswith("sha256:")
     active_events = [event for event in store.promotion_event_writes if event["event_type"] == "active_version_created"]
+    _assert_db_doc_safe(active_events[0]["event_doc"])
     assert active_events[0]["event_doc"]["derived_benchmark_bundle_id"] == "private_benchmark:" + "8" * 64
     assert active_events[0]["event_doc"]["scored_candidate_model_artifact_hash"] == (
         candidate_artifact.model_artifact_hash
     )
     assert active_events[0]["event_doc"]["new_model_artifact_hash"] == activation_artifact.model_artifact_hash
+    assert active_events[0]["event_doc"]["new_image_ref_hash"].startswith("sha256:")
 
 
 async def test_promoted_candidate_source_push_pending_leaves_previous_active_model_active(store, monkeypatch):

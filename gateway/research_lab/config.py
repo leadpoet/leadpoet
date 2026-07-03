@@ -332,6 +332,8 @@ class ResearchLabGatewayConfig:
     scoring_worker_poll_seconds: int = 15
     scoring_worker_max_candidates: int = 1
     scoring_worker_max_active_claims: int = 8
+    scoring_worker_min_available_memory_mb: int = 4096
+    scoring_worker_max_load_per_cpu: float = 4.0
     scoring_worker_id: str = ""
     scoring_worker_index: int = 0
     scoring_worker_total_workers: int = 1
@@ -575,6 +577,14 @@ class ResearchLabGatewayConfig:
             scoring_worker_max_active_claims=max(
                 0,
                 _int("RESEARCH_LAB_SCORING_WORKER_MAX_ACTIVE_CLAIMS", 8),
+            ),
+            scoring_worker_min_available_memory_mb=max(
+                0,
+                _int("RESEARCH_LAB_SCORING_WORKER_MIN_AVAILABLE_MEMORY_MB", 4096),
+            ),
+            scoring_worker_max_load_per_cpu=max(
+                0.0,
+                _float("RESEARCH_LAB_SCORING_WORKER_MAX_LOAD_PER_CPU", 4.0),
             ),
             scoring_worker_id=os.getenv("RESEARCH_LAB_SCORING_WORKER_ID", ""),
             scoring_worker_index=scoring_worker_index,
@@ -1235,6 +1245,8 @@ class ResearchLabGatewayConfig:
                 "scoring_worker_poll_seconds": self.scoring_worker_poll_seconds,
                 "scoring_worker_max_candidates": self.scoring_worker_max_candidates,
                 "scoring_worker_max_active_claims": self.scoring_worker_max_active_claims,
+                "scoring_worker_min_available_memory_mb": self.scoring_worker_min_available_memory_mb,
+                "scoring_worker_max_load_per_cpu": self.scoring_worker_max_load_per_cpu,
                 "scoring_worker_id": self.scoring_worker_id,
                 "scoring_worker_index": self.scoring_worker_index,
                 "scoring_worker_total_workers": self.scoring_worker_total_workers,

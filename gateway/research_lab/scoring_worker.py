@@ -1572,6 +1572,61 @@ def _active_claim_capacity_available(active_count: int, max_active_claims: int) 
     return count < cap
 
 
+def _scoring_host_pressure_capacity(
+    *,
+    min_available_memory_mb: int,
+    max_load_per_cpu: float,
+    available_memory_mb: int | None = None,
+    load_per_cpu: float | None = None,
+) -> dict[str, Any]:
+    """Return whether this host is healthy enough to start another heavy score."""
+    try:
+        memory_floor = max(0, int(min_available_memory_mb or 0))
+    except (TypeError, ValueError):
+        memory_floor = 0
+    try:
+        load_ceiling = max(0.0, float(max_load_per_cpu or 0.0))
+    except (TypeError, ValueError):
+        load_ceiling = 0.0
+    result: dict[str, Any] = {
+        "available": True,
+        "min_available_memory_mb": memory_floor,
+        "max_load_per_cpu": load_ceiling,
+    }
+    if available_memory_mb is not None:
+        result["available_memory_mb"] = int(available_memory_mb)
+    if load_per_cpu is not None:
+        result["load_per_cpu"] = round(float(load_per_cpu), 3)
+    if memory_floor > 0 and available_memory_mb is not None and available_memory_mb < memory_floor:
+        return {**result, "available": False, "reason": "host_memory_pressure"}
+    if load_ceiling > 0 and load_per_cpu is not None and load_per_cpu > load_ceiling:
+        return {**result, "available": False, "reason": "host_load_pressure"}
+    return result
+
+
+def _read_mem_available_mb(meminfo_path: str = "/proc/meminfo") -> int | None:
+    try:
+        with open(meminfo_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.startswith("MemAvailable:"):
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    return None
+                return int(parts[1]) // 1024
+    except Exception:
+        return None
+    return None
+
+
+def _load_average_per_cpu() -> float | None:
+    try:
+        cpu_count = max(1, int(os.cpu_count() or 1))
+        return float(os.getloadavg()[0]) / float(cpu_count)
+    except Exception:
+        return None
+
+
 class ResearchLabGatewayScoringWorker:
     """Scores Research Lab candidates inside the gateway trust boundary."""
 
@@ -1723,12 +1778,23 @@ class ResearchLabGatewayScoringWorker:
         for _ in range(max(1, self.config.scoring_worker_max_candidates)):
             claim_capacity = await self._candidate_claim_capacity()
             if not claim_capacity.get("available"):
-                if claim_capacity.get("reason") == "active_claim_capacity_full":
+                reason = str(claim_capacity.get("reason") or "")
+                if reason == "active_claim_capacity_full":
                     logger.info(
                         "research_lab_candidate_claim_capacity_full worker_ref=%s active_claims=%s max_active_claims=%s",
                         self.worker_ref,
                         claim_capacity.get("active_claims"),
                         claim_capacity.get("max_active_claims"),
+                    )
+                elif reason in {"host_memory_pressure", "host_load_pressure"}:
+                    logger.info(
+                        "research_lab_candidate_claim_host_pressure worker_ref=%s reason=%s available_memory_mb=%s min_available_memory_mb=%s load_per_cpu=%s max_load_per_cpu=%s",
+                        self.worker_ref,
+                        reason,
+                        claim_capacity.get("available_memory_mb"),
+                        claim_capacity.get("min_available_memory_mb"),
+                        claim_capacity.get("load_per_cpu"),
+                        claim_capacity.get("max_load_per_cpu"),
                     )
                 break
             candidate = await self._claim_next_candidate()
@@ -1765,15 +1831,29 @@ class ResearchLabGatewayScoringWorker:
         }
 
     async def _candidate_claim_capacity(self) -> dict[str, Any]:
+        host_pressure = _scoring_host_pressure_capacity(
+            min_available_memory_mb=getattr(self.config, "scoring_worker_min_available_memory_mb", 0),
+            max_load_per_cpu=getattr(self.config, "scoring_worker_max_load_per_cpu", 0.0),
+            available_memory_mb=_read_mem_available_mb(),
+            load_per_cpu=_load_average_per_cpu(),
+        )
+        if not host_pressure.get("available"):
+            return host_pressure
         max_active = int(getattr(self.config, "scoring_worker_max_active_claims", 0) or 0)
         if max_active <= 0:
-            return {"available": True, "max_active_claims": 0, "cap_disabled": True}
+            return {
+                "available": True,
+                "max_active_claims": 0,
+                "cap_disabled": True,
+                "host_pressure": host_pressure,
+            }
         if not _worker_can_claim_candidate_slot(self.config.scoring_worker_index, max_active):
             return {
                 "available": False,
                 "reason": "claim_slot_disabled",
                 "worker_index": self.config.scoring_worker_index,
                 "max_active_claims": max_active,
+                "host_pressure": host_pressure,
             }
         active = await select_many(
             "research_lab_candidate_evaluation_current",
@@ -1789,6 +1869,7 @@ class ResearchLabGatewayScoringWorker:
             "active_claims": active_count,
             "max_active_claims": max_active,
             "worker_index": self.config.scoring_worker_index,
+            "host_pressure": host_pressure,
         }
 
     async def _claim_next_candidate(self) -> dict[str, Any] | None:

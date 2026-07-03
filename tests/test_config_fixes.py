@@ -133,14 +133,24 @@ def test_deliberately_unchanged_defaults(clean_env):
 def test_scoring_active_claim_cap_defaults_and_override(clean_env):
     config = ResearchLabGatewayConfig.from_env()
     assert config.scoring_worker_max_active_claims == 8
+    assert config.scoring_worker_min_available_memory_mb == 4096
+    assert config.scoring_worker_max_load_per_cpu == pytest.approx(4.0)
 
     clean_env.setenv("RESEARCH_LAB_SCORING_WORKER_MAX_ACTIVE_CLAIMS", "4")
+    clean_env.setenv("RESEARCH_LAB_SCORING_WORKER_MIN_AVAILABLE_MEMORY_MB", "8192")
+    clean_env.setenv("RESEARCH_LAB_SCORING_WORKER_MAX_LOAD_PER_CPU", "2.5")
     config = ResearchLabGatewayConfig.from_env()
     assert config.scoring_worker_max_active_claims == 4
+    assert config.scoring_worker_min_available_memory_mb == 8192
+    assert config.scoring_worker_max_load_per_cpu == pytest.approx(2.5)
 
     clean_env.setenv("RESEARCH_LAB_SCORING_WORKER_MAX_ACTIVE_CLAIMS", "0")
+    clean_env.setenv("RESEARCH_LAB_SCORING_WORKER_MIN_AVAILABLE_MEMORY_MB", "0")
+    clean_env.setenv("RESEARCH_LAB_SCORING_WORKER_MAX_LOAD_PER_CPU", "0")
     config = ResearchLabGatewayConfig.from_env()
     assert config.scoring_worker_max_active_claims == 0
+    assert config.scoring_worker_min_available_memory_mb == 0
+    assert config.scoring_worker_max_load_per_cpu == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize("raw", ["0", "0.0", "-2.5", "0.05"])

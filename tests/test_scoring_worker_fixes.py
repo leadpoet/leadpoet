@@ -109,6 +109,49 @@ def test_active_claim_capacity_gate_blocks_at_cap():
     assert sw._active_claim_capacity_available(12, 0)
 
 
+def test_scoring_host_pressure_gate_blocks_new_claims():
+    memory_pressure = sw._scoring_host_pressure_capacity(
+        min_available_memory_mb=4096,
+        max_load_per_cpu=4.0,
+        available_memory_mb=1024,
+        load_per_cpu=1.0,
+    )
+    assert memory_pressure["available"] is False
+    assert memory_pressure["reason"] == "host_memory_pressure"
+
+    load_pressure = sw._scoring_host_pressure_capacity(
+        min_available_memory_mb=4096,
+        max_load_per_cpu=4.0,
+        available_memory_mb=8192,
+        load_per_cpu=5.5,
+    )
+    assert load_pressure["available"] is False
+    assert load_pressure["reason"] == "host_load_pressure"
+
+    healthy = sw._scoring_host_pressure_capacity(
+        min_available_memory_mb=4096,
+        max_load_per_cpu=4.0,
+        available_memory_mb=8192,
+        load_per_cpu=2.0,
+    )
+    assert healthy["available"] is True
+
+
+def test_scoring_host_pressure_gate_disables_individual_thresholds():
+    assert sw._scoring_host_pressure_capacity(
+        min_available_memory_mb=0,
+        max_load_per_cpu=0.0,
+        available_memory_mb=1,
+        load_per_cpu=99.0,
+    )["available"]
+    assert sw._scoring_host_pressure_capacity(
+        min_available_memory_mb=4096,
+        max_load_per_cpu=4.0,
+        available_memory_mb=None,
+        load_per_cpu=None,
+    )["available"]
+
+
 def test_restart_orphan_recovery_is_not_blocked_by_stale_owner():
     candidate_id = "candidate:97a10903d96c91880b35a423aa9d44d9a9593c9bc68b2e776fb531a18cb75eb0"
     non_owner_index = (sw._stale_claim_recovery_owner_index(candidate_id, 25) + 1) % 25

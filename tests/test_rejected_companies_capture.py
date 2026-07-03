@@ -215,3 +215,38 @@ async def test_non_mapping_breakdown_skipped(collector):
         breakdowns=["not-a-dict", {"final_score": 0.0, "failure_reason": "r"}])
     assert n == 1  # index-0 pair skipped (non-mapping), index-1 stored
     assert collector.rows[0]["company_name"] == "Y"
+
+
+# ---------- model-native key spellings (subindustry / hq_* / company_stage) ----------
+
+async def test_model_native_identity_keys_captured(collector):
+    # exactly the company dict shape the sourcing model emits (core.py output):
+    # subindustry (no underscore), hq_city/hq_state/hq_country, company_stage.
+    model_output = {
+        "company_name": "FullCo", "company_website": "https://fullco.com",
+        "company_linkedin": "https://linkedin.com/company/fullco",
+        "industry": "Software Development", "subindustry": "SaaS",
+        "hq_city": "Austin", "hq_state": "Texas", "hq_country": "United States",
+        "employee_count": "51-200 employees", "company_stage": "Series B",
+    }
+    n = await sw._persist_rejected_companies(
+        context_ref="r", icp_ref="i", icp_hash="h", is_reference_model=True,
+        outputs=[model_output], breakdowns=[{"final_score": 0.0, "failure_reason": "r"}])
+    assert n == 1
+    row = collector.rows[0]
+    assert row["sub_industry"] == "SaaS"
+    assert row["city"] == "Austin"
+    assert row["state"] == "Texas"
+    assert row["country"] == "United States"
+    assert row["company_stage"] == "Series B"
+
+
+async def test_canonical_keys_still_win(collector):
+    # canonical spellings take precedence over model-native fallbacks
+    out = {"company_name": "X", "sub_industry": "CRM", "subindustry": "ignored",
+           "country": "Germany", "hq_country": "ignored"}
+    await sw._persist_rejected_companies(
+        context_ref="r", icp_ref="i", icp_hash="h", is_reference_model=True,
+        outputs=[out], breakdowns=[{"final_score": 0.0, "failure_reason": "r"}])
+    assert collector.rows[0]["sub_industry"] == "CRM"
+    assert collector.rows[0]["country"] == "Germany"

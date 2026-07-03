@@ -478,15 +478,19 @@ _SCORER_TRACE_COMPANY_IDENTITY_FIELDS = (
     "industry",
     "sub_industry",
     "employee_count",
+    "city",
+    "state",
     "country",
 )
 
 # The sourcing model emits some identity fields under different key names
 # than the canonical ones above ("subindustry" without the underscore,
-# "hq_country" instead of "country").  Read those as fallbacks so identity
-# capture doesn't silently null those columns out.
+# "hq_city"/"hq_state"/"hq_country" for the HQ location).  Read those as
+# fallbacks so identity capture doesn't silently null those columns out.
 _SCORER_TRACE_IDENTITY_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "sub_industry": ("sub_industry", "subindustry"),
+    "city": ("city", "hq_city"),
+    "state": ("state", "hq_state"),
     "country": ("country", "hq_country"),
 }
 
@@ -628,6 +632,8 @@ async def _persist_rejected_companies(
                 "industry": identity.get("industry") or None,
                 "sub_industry": identity.get("sub_industry") or None,
                 "employee_count": identity.get("employee_count") or None,
+                "city": identity.get("city") or None,
+                "state": identity.get("state") or None,
                 "country": identity.get("country") or None,
                 "final_score": final_score,
                 "failure_reason": failure_reason or None,

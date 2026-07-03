@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS research_lab_rejected_companies (
     industry             TEXT,
     sub_industry         TEXT,
     employee_count       TEXT,
+    city                 TEXT,
+    state                TEXT,
     country              TEXT,
 
     -- harness scoring outcome (why it was rejected)

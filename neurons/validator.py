@@ -9401,9 +9401,26 @@ def run_lightweight_worker(config):
             from validator_models.automated_checks import run_automated_checks, run_batch_automated_checks
             
             print("🔄 Worker validation loop started")
-            
+
             while not self.should_exit:
                 try:
+                    # Legacy sourcing is retired. The coordinator branch of
+                    # process_gateway_validation_workflow marks each epoch
+                    # processed WITHOUT writing epoch_{N}_leads.json when
+                    # ENABLE_LEGACY_SOURCING is off, so waiting for that file
+                    # here can never succeed — the worker just burns the epoch
+                    # and logs "Too late to start validation" every cycle.
+                    # Park quietly instead; re-enable via ENABLE_LEGACY_SOURCING.
+                    if not _env_flag("ENABLE_LEGACY_SOURCING"):
+                        if not getattr(self, "_legacy_sourcing_park_logged", False):
+                            print(
+                                "🚫 Legacy sourcing disabled; worker lead-validation "
+                                "loop parked (set ENABLE_LEGACY_SOURCING=true to re-enable)"
+                            )
+                            self._legacy_sourcing_park_logged = True
+                        await asyncio.sleep(300)
+                        continue
+
                     # Read current epoch from coordinator's shared file
                     try:
                         current_block, current_epoch, blocks_into_epoch = self._read_shared_block_file()

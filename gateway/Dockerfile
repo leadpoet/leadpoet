@@ -53,9 +53,8 @@ COPY --from=builder /root/.local /home/gateway/.local
 # Copy gateway application code
 COPY gateway/ ./gateway/
 
-# Copy .env file (ensure it's in .dockerignore if sensitive)
-# In production, use environment variables instead
-COPY .env .env
+# Do not bake local .env files into images. Configure the container with
+# runtime environment variables or mount a GATEWAY_ENV_FILE fallback.
 
 # Set ownership to non-root user
 RUN chown -R gateway:gateway /app

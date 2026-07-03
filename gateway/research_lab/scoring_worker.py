@@ -57,6 +57,7 @@ from gateway.research_lab.promotion import (
     load_confirmation_state,
     promotion_confirmation_rerun_enabled,
     promotion_improvement_metric,
+    sync_active_model_to_repo_head,
 )
 from gateway.research_lab.public_activity import safe_project_public_loop_activity
 from gateway.research_lab.public_benchmarks import (
@@ -4080,6 +4081,38 @@ class ResearchLabGatewayScoringWorker:
                 ),
             )
         )
+        repo_head_sync = await sync_active_model_to_repo_head(
+            self.config,
+            actor_ref=self.worker_ref,
+            dry_run=False,
+            wait_for_repo_head=False,
+        )
+        if not bool(repo_head_sync.get("ok")):
+            logger.warning(
+                format_worker_block(
+                    "RESEARCH LAB PRIVATE BASELINE BLOCKED: REPO HEAD MANIFEST NOT READY",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Benchmark date", today),
+                        ("Status", repo_head_sync.get("status")),
+                        ("Repo main SHA", str(repo_head_sync.get("repo_main_sha") or "")[:12] or "-"),
+                        (
+                            "current.json SHA",
+                            str(repo_head_sync.get("current_json_git_sha") or "")[:12] or "-",
+                        ),
+                        (
+                            "Active model SHA",
+                            str(repo_head_sync.get("active_model_git_sha") or "")[:12] or "-",
+                        ),
+                        ("Action", "deferring daily benchmark; stale active lineage will not be benchmarked"),
+                    ),
+                )
+            )
+            return {
+                "status": str(repo_head_sync.get("status") or "repo_head_sync_failed"),
+                "benchmark_date": today,
+                "repo_head_sync": repo_head_sync,
+            }
         window = await fetch_rolling_icp_window(
             days=self.config.lab_champion_eval_days,
             icps_per_day=self.config.lab_champion_icps_per_day,
@@ -4172,6 +4205,10 @@ class ResearchLabGatewayScoringWorker:
                     ("Selected sets", len(window.set_ids)),
                     ("Selected ICPs", len(window.item_refs)),
                     ("Private model", compact_ref(artifact.model_artifact_hash)),
+                    ("Active model SHA", str(repo_head_sync.get("active_model_git_sha") or "")[:12] or "-"),
+                    ("Repo main SHA", str(repo_head_sync.get("repo_main_sha") or "")[:12] or "-"),
+                    ("current.json SHA", str(repo_head_sync.get("current_json_git_sha") or "")[:12] or "-"),
+                    ("Active is repo head", repo_head_sync.get("active_is_repo_head")),
                     ("Concurrency", self.config.private_baseline_concurrency),
                     ("Benchmark Exa key", "dedicated" if self.config.benchmark_exa_api_key else "inherited"),
                     ("Exa RPS per container", self.config.benchmark_exa_max_rps or "inherited"),

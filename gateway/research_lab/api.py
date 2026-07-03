@@ -66,6 +66,7 @@ from .public_activity import (
     fetch_public_loop_summary,
     safe_project_public_loop_activity,
 )
+from .promotion import private_repo_head_alignment_status
 from .store import (
     canonical_hash,
     create_candidate_evaluation_event,
@@ -113,6 +114,7 @@ async def research_lab_status() -> dict[str, object]:
         if key in maintenance
     }
     latest_public_benchmark = None
+    private_model_repo_head = None
     if config.api_enabled and config.reports_enabled:
         try:
             rows = await select_many(
@@ -131,12 +133,18 @@ async def research_lab_status() -> dict[str, object]:
         except Exception as exc:
             logger.warning("research_lab_public_benchmark_status_unavailable: %s", str(exc)[:200])
             latest_public_benchmark = {"status": "unavailable"}
+    try:
+        private_model_repo_head = await private_repo_head_alignment_status(config)
+    except Exception as exc:
+        logger.warning("research_lab_private_model_repo_head_status_unavailable: %s", str(exc)[:200])
+        private_model_repo_head = {"status": "unavailable"}
     return {
         "service": "leadpoet-research-lab-gateway",
         "status": "configured" if config.api_enabled else "disabled",
         **config.public_status(),
         "maintenance": maintenance_public,
         "latest_public_benchmark": latest_public_benchmark,
+        "private_model_repo_head": private_model_repo_head,
     }
 
 

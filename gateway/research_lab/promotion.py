@@ -56,6 +56,14 @@ ALLOW_BOOTSTRAP_REGISTER_ENV = "RESEARCH_LAB_ALLOW_BOOTSTRAP_REGISTER"
 # noise-merges (§8.3). Enable only after the baseline health gate is live.
 AUTO_COMMIT_HEAD_MISMATCH_RECOVER_ENV = "RESEARCH_LAB_AUTO_COMMIT_HEAD_MISMATCH_RECOVER"
 
+REPO_HEAD_SYNC_ENABLED_ENV = "RESEARCH_LAB_SYNC_ACTIVE_MODEL_TO_REPO_HEAD"
+REPO_HEAD_MANIFEST_WAIT_SECONDS_ENV = "RESEARCH_LAB_REPO_HEAD_MANIFEST_WAIT_SECONDS"
+REPO_HEAD_MANIFEST_POLL_SECONDS_ENV = "RESEARCH_LAB_REPO_HEAD_MANIFEST_POLL_SECONDS"
+REPO_HEAD_GIT_TIMEOUT_SECONDS_ENV = "RESEARCH_LAB_REPO_HEAD_GIT_TIMEOUT_SECONDS"
+DEFAULT_REPO_HEAD_MANIFEST_WAIT_SECONDS = 600
+DEFAULT_REPO_HEAD_MANIFEST_POLL_SECONDS = 15
+DEFAULT_REPO_HEAD_GIT_TIMEOUT_SECONDS = 20
+
 # Historical confirmation re-run support remains for reading old events, but
 # automatic promotion is score-only against the stored daily baseline.
 PROMOTION_CONFIRMATION_RERUN_ENV = "RESEARCH_LAB_PROMOTION_CONFIRMATION_RERUN"
@@ -298,6 +306,19 @@ class RepoHeadMismatchError(RuntimeError):
             "the active manifest records a commit sha the branch head has moved past "
             f"(auto-commit wedge). Set {AUTO_COMMIT_HEAD_MISMATCH_RECOVER_ENV}=true to "
             "re-resolve against the current head — only after the baseline health gate is live"
+        )
+
+
+class RepoHeadManifestNotReadyError(PromotionPausedError):
+    """GitHub main is ahead of the signed current.json manifest."""
+
+    def __init__(self, *, repo_main_sha: str, current_json_git_sha: str):
+        self.repo_main_sha = str(repo_main_sha or "")
+        self.current_json_git_sha = str(current_json_git_sha or "")
+        super().__init__(
+            "repo_head_manifest_not_ready: private repo main is ahead of current.json "
+            f"(repo_main={self.repo_main_sha[:12]}, current_json={self.current_json_git_sha[:12]}); "
+            "daily benchmark deferred so it cannot run a stale active artifact"
         )
 
 
@@ -660,6 +681,489 @@ async def load_active_private_model(
             except Exception as exc:
                 logger.warning("research_lab_active_model_bootstrap_write_failed: %s", str(exc)[:200])
     return ActivePrivateModel(artifact=artifact, version_row=version_row)
+
+
+def repo_head_sync_enabled() -> bool:
+    return _env_flag(REPO_HEAD_SYNC_ENABLED_ENV, "true")
+
+
+def _repo_head_git_timeout_seconds() -> int:
+    try:
+        return max(1, int(os.getenv(REPO_HEAD_GIT_TIMEOUT_SECONDS_ENV, DEFAULT_REPO_HEAD_GIT_TIMEOUT_SECONDS)))
+    except ValueError:
+        return DEFAULT_REPO_HEAD_GIT_TIMEOUT_SECONDS
+
+
+def _repo_head_manifest_wait_seconds(default: int = DEFAULT_REPO_HEAD_MANIFEST_WAIT_SECONDS) -> int:
+    try:
+        return max(0, int(os.getenv(REPO_HEAD_MANIFEST_WAIT_SECONDS_ENV, default)))
+    except ValueError:
+        return int(default)
+
+
+def _repo_head_manifest_poll_seconds() -> int:
+    try:
+        return max(1, int(os.getenv(REPO_HEAD_MANIFEST_POLL_SECONDS_ENV, DEFAULT_REPO_HEAD_MANIFEST_POLL_SECONDS)))
+    except ValueError:
+        return DEFAULT_REPO_HEAD_MANIFEST_POLL_SECONDS
+
+
+def _git_sha_matches(left: Any, right: Any) -> bool:
+    a = str(left or "").strip()
+    b = str(right or "").strip()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if len(a) < len(b):
+        return b.startswith(a)
+    if len(b) < len(a):
+        return a.startswith(b)
+    return False
+
+
+def _resolve_private_repo_head_sha(
+    *,
+    repo_url: str,
+    branch_name: str,
+    timeout_seconds: int | None = None,
+) -> str:
+    """Resolve the exact private repo branch SHA without cloning the repo."""
+
+    output = _run_command(
+        ["git", "ls-remote", repo_url, f"refs/heads/{branch_name}"],
+        cwd=None,
+        timeout_seconds=timeout_seconds or _repo_head_git_timeout_seconds(),
+        redact=True,
+    ).strip()
+    if not output:
+        raise RuntimeError(f"private repo branch not found: {branch_name}")
+    first = output.splitlines()[0].split()
+    sha = first[0] if first else ""
+    if not re.match(r"^[0-9a-f]{40}$", sha):
+        raise RuntimeError(f"private repo branch returned invalid sha for {branch_name}")
+    return sha
+
+
+async def _active_private_model_version_rows() -> list[dict[str, Any]]:
+    rows = await select_many(
+        "research_lab_private_model_version_current",
+        columns=(
+            "private_model_version_id,model_artifact_hash,private_model_manifest_hash,"
+            "private_model_manifest_uri,git_commit_sha,current_version_status,current_status_at,"
+            "source_candidate_id,source_score_bundle_id,source_benchmark_bundle_id,created_at"
+        ),
+        filters=(("current_version_status", "active"),),
+        order_by=(("current_status_at", True),),
+        limit=5,
+    )
+    return [dict(row) for row in rows]
+
+
+async def private_repo_head_alignment_status(
+    config: ResearchLabGatewayConfig,
+    *,
+    current_artifact: PrivateModelArtifactManifest | None = None,
+) -> dict[str, Any]:
+    """Read-only status for active lineage vs private repo main/current.json."""
+
+    if not config.private_repo_url:
+        return {
+            "ok": False,
+            "status": "private_repo_not_configured",
+            "active_is_repo_head": False,
+        }
+    branch_name = str(config.private_repo_branch or "main")
+    try:
+        repo_main_sha = await asyncio.to_thread(
+            _resolve_private_repo_head_sha,
+            repo_url=config.private_repo_url,
+            branch_name=branch_name,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "repo_head_unavailable",
+            "repo_branch": branch_name,
+            "active_is_repo_head": False,
+            "error": _safe_text(str(exc))[:200],
+        }
+    try:
+        artifact = current_artifact or await asyncio.to_thread(_load_valid_artifact, config.private_model_manifest_uri)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "current_json_unavailable",
+            "repo_branch": branch_name,
+            "repo_main_sha": repo_main_sha,
+            "active_is_repo_head": False,
+            "error": _safe_text(str(exc))[:200],
+        }
+    active_rows = await _active_private_model_version_rows()
+    active_row = active_rows[0] if active_rows else {}
+    active_git_sha = str(active_row.get("git_commit_sha") or "")
+    active_manifest_hash = str(active_row.get("private_model_manifest_hash") or "")
+    current_json_git_sha = str(artifact.git_commit_sha or "")
+    current_json_matches_repo_head = _git_sha_matches(current_json_git_sha, repo_main_sha)
+    active_manifest_matches_current_json = bool(active_manifest_hash and active_manifest_hash == artifact.manifest_hash)
+    active_is_repo_head = bool(
+        current_json_matches_repo_head
+        and active_manifest_matches_current_json
+        and _git_sha_matches(active_git_sha, repo_main_sha)
+    )
+    status = "active_is_repo_head" if active_is_repo_head else "active_not_repo_head"
+    if not current_json_matches_repo_head:
+        status = "repo_head_manifest_not_ready"
+    elif len(active_rows) > 1:
+        status = "duplicate_active_versions"
+    return {
+        "ok": status == "active_is_repo_head",
+        "status": status,
+        "repo_branch": branch_name,
+        "repo_main_sha": repo_main_sha,
+        "current_json_git_sha": current_json_git_sha,
+        "current_json_manifest_hash": artifact.manifest_hash,
+        "current_json_model_artifact_hash": artifact.model_artifact_hash,
+        "current_json_pointer_uri": config.private_model_manifest_uri,
+        "current_json_manifest_uri": artifact.manifest_uri,
+        "current_json_matches_repo_head": current_json_matches_repo_head,
+        "active_model_git_sha": active_git_sha,
+        "active_model_manifest_hash": active_manifest_hash,
+        "active_model_artifact_hash": str(active_row.get("model_artifact_hash") or ""),
+        "active_model_version_id": str(active_row.get("private_model_version_id") or ""),
+        "active_manifest_uri": str(active_row.get("private_model_manifest_uri") or ""),
+        "active_manifest_matches_current_json": active_manifest_matches_current_json,
+        "active_is_repo_head": active_is_repo_head,
+        "active_version_count": len(active_rows),
+        "benchmark_blocked_reason": "" if active_is_repo_head else status,
+    }
+
+
+async def _load_repo_head_current_manifest(
+    config: ResearchLabGatewayConfig,
+    *,
+    repo_main_sha: str,
+    wait_for_repo_head: bool,
+    wait_timeout_seconds: int,
+    poll_seconds: int,
+) -> tuple[PrivateModelArtifactManifest, dict[str, Any]]:
+    deadline = asyncio.get_running_loop().time() + max(0, wait_timeout_seconds)
+    attempts = 0
+    while True:
+        attempts += 1
+        artifact = await asyncio.to_thread(_load_valid_artifact, config.private_model_manifest_uri)
+        current_json_git_sha = str(artifact.git_commit_sha or "")
+        if _git_sha_matches(current_json_git_sha, repo_main_sha):
+            return artifact, {
+                "status": "current_json_matches_repo_head",
+                "attempts": attempts,
+                "current_json_git_sha": current_json_git_sha,
+            }
+        if not wait_for_repo_head or asyncio.get_running_loop().time() >= deadline:
+            raise RepoHeadManifestNotReadyError(
+                repo_main_sha=repo_main_sha,
+                current_json_git_sha=current_json_git_sha,
+            )
+        logger.warning(
+            "research_lab_repo_head_manifest_waiting repo_main=%s current_json=%s attempts=%s poll=%ss",
+            repo_main_sha[:12],
+            current_json_git_sha[:12],
+            attempts,
+            poll_seconds,
+        )
+        await asyncio.sleep(poll_seconds)
+
+
+async def sync_active_model_to_repo_head(
+    config: ResearchLabGatewayConfig,
+    *,
+    actor_ref: str = "maintenance",
+    dry_run: bool = True,
+    wait_for_repo_head: bool = False,
+    wait_timeout_seconds: int | None = None,
+    poll_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Make the active lineage row point at private repo main's current.json.
+
+    This is the safety gate for daily rebenchmark: GitHub main is the source of
+    truth for source, S3 current.json is the source of truth for the immutable
+    built/signed image. If they disagree, do not benchmark stale lineage.
+    """
+
+    action = "sync-active-model-to-repo-head"
+    if not repo_head_sync_enabled():
+        return {
+            "ok": True,
+            "action": action,
+            "dry_run": dry_run,
+            "status": "disabled",
+            "active_is_repo_head": None,
+            "disabled_env": REPO_HEAD_SYNC_ENABLED_ENV,
+        }
+    if not config.private_repo_url:
+        return {
+            "ok": False,
+            "action": action,
+            "dry_run": dry_run,
+            "status": "private_repo_not_configured",
+            "active_is_repo_head": False,
+        }
+    branch_name = str(config.private_repo_branch or "main")
+    try:
+        repo_main_sha = await asyncio.to_thread(
+            _resolve_private_repo_head_sha,
+            repo_url=config.private_repo_url,
+            branch_name=branch_name,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "action": action,
+            "dry_run": dry_run,
+            "status": "repo_head_unavailable",
+            "repo_branch": branch_name,
+            "active_is_repo_head": False,
+            "error": _safe_text(str(exc))[:200],
+        }
+    try:
+        current_artifact, manifest_status = await _load_repo_head_current_manifest(
+            config,
+            repo_main_sha=repo_main_sha,
+            wait_for_repo_head=wait_for_repo_head,
+            wait_timeout_seconds=(
+                _repo_head_manifest_wait_seconds() if wait_timeout_seconds is None else wait_timeout_seconds
+            ),
+            poll_seconds=poll_seconds or _repo_head_manifest_poll_seconds(),
+        )
+    except RepoHeadManifestNotReadyError as exc:
+        return {
+            "ok": False,
+            "action": action,
+            "dry_run": dry_run,
+            "status": "repo_head_manifest_not_ready",
+            "repo_branch": branch_name,
+            "repo_main_sha": repo_main_sha,
+            "current_json_git_sha": exc.current_json_git_sha,
+            "active_is_repo_head": False,
+            "benchmark_blocked_reason": "repo_head_manifest_not_ready",
+            "manifest_uri": config.private_model_manifest_uri,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "action": action,
+            "dry_run": dry_run,
+            "status": "current_json_unavailable",
+            "repo_branch": branch_name,
+            "repo_main_sha": repo_main_sha,
+            "active_is_repo_head": False,
+            "error": _safe_text(str(exc))[:200],
+        }
+
+    active_rows = await _active_private_model_version_rows()
+    if len(active_rows) > 1:
+        return {
+            "ok": False,
+            "action": action,
+            "dry_run": dry_run,
+            "status": "duplicate_active_versions",
+            "repo_branch": branch_name,
+            "repo_main_sha": repo_main_sha,
+            "current_json_git_sha": current_artifact.git_commit_sha,
+            "active_is_repo_head": False,
+            "active_version_ids": [
+                str(row.get("private_model_version_id") or "") for row in active_rows
+            ],
+        }
+    active_row = active_rows[0] if active_rows else None
+    active_model_git_sha = str(active_row.get("git_commit_sha") or "") if active_row else ""
+    active_model_manifest_hash = (
+        str(active_row.get("private_model_manifest_hash") or "") if active_row else ""
+    )
+    active_is_repo_head = bool(
+        active_row
+        and _git_sha_matches(active_model_git_sha, repo_main_sha)
+        and active_model_manifest_hash == current_artifact.manifest_hash
+    )
+    planned = {
+        "repo_branch": branch_name,
+        "repo_main_sha": repo_main_sha,
+        "current_json_git_sha": current_artifact.git_commit_sha,
+        "current_json_manifest_hash": current_artifact.manifest_hash,
+        "current_json_model_artifact_hash": current_artifact.model_artifact_hash,
+        "current_json_image_digest": current_artifact.image_digest,
+        "current_json_pointer_uri": config.private_model_manifest_uri,
+        "current_json_manifest_uri": current_artifact.manifest_uri,
+        "active_model_git_sha": active_model_git_sha,
+        "active_model_manifest_hash": active_model_manifest_hash,
+        "active_model_artifact_hash": str(active_row.get("model_artifact_hash") or "") if active_row else "",
+        "active_model_version_id": str(active_row.get("private_model_version_id") or "") if active_row else "",
+        "active_manifest_uri": str(active_row.get("private_model_manifest_uri") or "") if active_row else "",
+        "active_is_repo_head": active_is_repo_head,
+        "manifest_status": manifest_status,
+    }
+    if active_is_repo_head:
+        return {
+            "ok": True,
+            "action": action,
+            "dry_run": dry_run,
+            "status": "active_is_repo_head",
+            **planned,
+        }
+    if dry_run:
+        return {
+            "ok": True,
+            "action": action,
+            "dry_run": True,
+            "status": "would_sync_active_model_to_repo_head",
+            **planned,
+        }
+
+    if active_row:
+        await create_private_model_version_event(
+            private_model_version_id=str(active_row["private_model_version_id"]),
+            event_type="superseded",
+            version_status="superseded",
+            reason="superseded_by_repo_head_sync",
+            event_doc={
+                "source": "repo_head_sync",
+                "actor_ref": actor_ref,
+                "repo_branch": branch_name,
+                "repo_main_sha": repo_main_sha,
+                "current_json_manifest_hash": current_artifact.manifest_hash,
+                "current_json_pointer_uri": config.private_model_manifest_uri,
+                "current_json_manifest_uri": current_artifact.manifest_uri,
+                "previous_active_git_sha": active_model_git_sha,
+                "previous_active_manifest_hash": active_model_manifest_hash,
+            },
+        )
+    try:
+        version_row, _event = await create_private_model_version(
+            artifact_manifest=current_artifact.to_dict(),
+            manifest_uri=current_artifact.manifest_uri,
+            redacted_version_doc={
+                "source": "repo_head_sync",
+                "actor_ref": actor_ref,
+                "repo_branch": branch_name,
+                "repo_main_sha": repo_main_sha,
+                "current_json_git_sha": current_artifact.git_commit_sha,
+                "current_json_pointer_uri": config.private_model_manifest_uri,
+                "current_json_manifest_uri": current_artifact.manifest_uri,
+                "model_artifact_hash": current_artifact.model_artifact_hash,
+                "private_model_manifest_hash": current_artifact.manifest_hash,
+                "image_digest": current_artifact.image_digest,
+                "previous_active_model_version_id": (
+                    str(active_row.get("private_model_version_id") or "") if active_row else ""
+                ),
+                "previous_active_git_sha": active_model_git_sha,
+                "previous_active_manifest_hash": active_model_manifest_hash,
+            },
+            version_status="active",
+            reason="repo_head_sync",
+        )
+    except Exception:
+        if active_row:
+            try:
+                await create_private_model_version_event(
+                    private_model_version_id=str(active_row["private_model_version_id"]),
+                    event_type="active",
+                    version_status="active",
+                    reason="repo_head_sync_create_failed_reactivate_previous",
+                    event_doc={
+                        "source": "repo_head_sync",
+                        "actor_ref": actor_ref,
+                        "repo_branch": branch_name,
+                        "repo_main_sha": repo_main_sha,
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "research_lab_repo_head_sync_previous_reactivate_failed version=%s",
+                    _short_ref(active_row.get("private_model_version_id")),
+                )
+        raise
+    logger.warning(
+        "research_lab_repo_head_sync_active_model_synced repo_main=%s old_active=%s new_version=%s new_manifest=%s",
+        repo_main_sha[:12],
+        _short_ref(active_model_manifest_hash),
+        _short_ref(version_row.get("private_model_version_id")),
+        _short_ref(current_artifact.manifest_hash),
+    )
+    return {
+        "ok": True,
+        "action": action,
+        "dry_run": False,
+        "status": "synced_active_model_to_repo_head",
+        "private_model_version_id": str(version_row.get("private_model_version_id") or ""),
+        **planned,
+        "active_is_repo_head": True,
+    }
+
+
+async def wait_for_current_manifest_git_sha(
+    config: ResearchLabGatewayConfig,
+    *,
+    expected_git_sha: str,
+    timeout_seconds: int | None = None,
+    poll_seconds: int | None = None,
+) -> tuple[PrivateModelArtifactManifest | None, dict[str, Any]]:
+    """Wait for configured current.json to point at the expected private repo SHA."""
+
+    expected = str(expected_git_sha or "").strip()
+    if not expected:
+        return None, {"status": "expected_git_sha_missing"}
+    deadline = asyncio.get_running_loop().time() + max(
+        0,
+        _repo_head_manifest_wait_seconds()
+        if timeout_seconds is None
+        else int(timeout_seconds),
+    )
+    poll = poll_seconds or _repo_head_manifest_poll_seconds()
+    attempts = 0
+    last_status: dict[str, Any] = {}
+    while True:
+        attempts += 1
+        try:
+            artifact = await asyncio.to_thread(_load_valid_artifact, config.private_model_manifest_uri)
+        except Exception as exc:
+            last_status = {
+                "status": "current_json_unavailable",
+                "attempts": attempts,
+                "expected_git_sha": expected,
+                "error": _safe_text(str(exc))[:200],
+            }
+        else:
+            current_sha = str(artifact.git_commit_sha or "")
+            if _git_sha_matches(current_sha, expected):
+                return artifact, {
+                    "status": "manifest_ready",
+                    "attempts": attempts,
+                    "expected_git_sha": expected,
+                    "current_json_git_sha": current_sha,
+                    "current_json_manifest_hash": artifact.manifest_hash,
+                    "current_json_model_artifact_hash": artifact.model_artifact_hash,
+                    "current_json_image_digest": artifact.image_digest,
+                    "manifest_uri": config.private_model_manifest_uri,
+                }
+            last_status = {
+                "status": "source_pushed_manifest_pending",
+                "attempts": attempts,
+                "expected_git_sha": expected,
+                "current_json_git_sha": current_sha,
+                "current_json_manifest_hash": artifact.manifest_hash,
+                "current_json_model_artifact_hash": artifact.model_artifact_hash,
+                "manifest_uri": config.private_model_manifest_uri,
+            }
+        if asyncio.get_running_loop().time() >= deadline:
+            return None, last_status
+        logger.warning(
+            "research_lab_private_source_manifest_waiting expected=%s current=%s attempts=%s poll=%ss",
+            expected[:12],
+            str(last_status.get("current_json_git_sha") or "")[:12],
+            attempts,
+            poll,
+        )
+        await asyncio.sleep(poll)
 
 
 async def reconcile_active_private_model_lineage(
@@ -1365,11 +1869,53 @@ class ResearchLabPromotionController:
         )
         if private_repo_result.get("status") == "failed":
             return private_repo_result
+        activation_artifact = new_artifact
+        activation_manifest_uri = new_artifact.manifest_uri
+        manifest_wait_status: dict[str, Any] = {"status": "not_required"}
+        source_push_status = str(private_repo_result.get("status") or "")
+        if source_push_status in {"pushed", "already_applied", "private_source_pushed"}:
+            pushed_commit_sha = str(private_repo_result.get("git_commit_sha") or "")
+            activation_artifact, manifest_wait_status = await wait_for_current_manifest_git_sha(
+                self.config,
+                expected_git_sha=pushed_commit_sha,
+            )
+            if activation_artifact is None:
+                await create_candidate_promotion_event(
+                    candidate_id=str(candidate["candidate_id"]),
+                    source_score_bundle_id=str(score_bundle_row["score_bundle_id"]),
+                    event_type="promotion_checked",
+                    promotion_status="checked",
+                    active_parent_artifact_hash=active_parent,
+                    candidate_parent_artifact_hash=candidate_parent,
+                    rolling_window_hash=rolling_window_hash,
+                    improvement_points=improvement_points,
+                    threshold_points=threshold,
+                    worker_ref=self.worker_ref,
+                    event_doc={
+                        "reason": "source_pushed_manifest_pending",
+                        "candidate_status_preserved": "scored",
+                        "private_source_status": private_repo_result,
+                        "manifest_wait_status": manifest_wait_status,
+                        "action": "leave_previous_active_model_active_until_current_json_matches_pushed_commit",
+                    },
+                )
+                logger.warning(
+                    "research_lab_private_source_manifest_pending candidate=%s expected_git=%s status=%s",
+                    _short_ref(candidate["candidate_id"]),
+                    pushed_commit_sha[:12],
+                    manifest_wait_status.get("status"),
+                )
+                return {
+                    "status": "source_pushed_manifest_pending",
+                    "private_source_status": private_repo_result,
+                    "manifest_wait_status": manifest_wait_status,
+                }
+            activation_manifest_uri = activation_artifact.manifest_uri
         benchmark_bridge = await self._create_promoted_candidate_benchmark_bridge(
             candidate=candidate,
             score_bundle_row=score_bundle_row,
             score_bundle=score_bundle,
-            new_artifact=new_artifact,
+            new_artifact=activation_artifact,
             rolling_window_hash=rolling_window_hash,
             improvement_points=improvement_points,
             threshold=threshold,
@@ -1397,23 +1943,28 @@ class ResearchLabPromotionController:
             )
         try:
             version_row, _version_event = await create_private_model_version(
-                artifact_manifest=new_artifact.to_dict(),
-                manifest_uri=new_artifact.manifest_uri,
+                artifact_manifest=activation_artifact.to_dict(),
+                manifest_uri=activation_manifest_uri,
                 source_candidate_id=str(candidate["candidate_id"]),
                 source_score_bundle_id=str(score_bundle_row["score_bundle_id"]),
                 source_benchmark_bundle_id=source_benchmark_bundle_id,
                 redacted_version_doc={
-                    "source": "gateway_code_edit_image_build",
-                    "model_artifact_hash": new_artifact.model_artifact_hash,
-                    "private_model_manifest_hash": new_artifact.manifest_hash,
-                    "git_commit_sha": new_artifact.git_commit_sha,
-                    "component_registry_version": new_artifact.component_registry_version,
-                    "scoring_adapter_version": new_artifact.scoring_adapter_version,
+                    "source": "gateway_code_edit_image_build_repo_head_manifest",
+                    "model_artifact_hash": activation_artifact.model_artifact_hash,
+                    "private_model_manifest_hash": activation_artifact.manifest_hash,
+                    "git_commit_sha": activation_artifact.git_commit_sha,
+                    "image_digest": activation_artifact.image_digest,
+                    "component_registry_version": activation_artifact.component_registry_version,
+                    "scoring_adapter_version": activation_artifact.scoring_adapter_version,
                     "candidate_source_diff_hash": candidate.get("candidate_source_diff_hash"),
+                    "scored_candidate_model_artifact_hash": new_artifact.model_artifact_hash,
+                    "scored_candidate_manifest_hash": new_artifact.manifest_hash,
+                    "private_source_status": private_repo_result,
+                    "manifest_wait_status": manifest_wait_status,
                     "source_benchmark_bundle_id": source_benchmark_bundle_id,
                 },
                 version_status="active",
-                reason="research_lab_image_build_candidate_promoted",
+                reason="research_lab_image_build_candidate_repo_head_manifest_promoted",
             )
         except Exception:
             if active.version_row:
@@ -1445,7 +1996,14 @@ class ResearchLabPromotionController:
             threshold_points=threshold,
             worker_ref=self.worker_ref,
             event_doc={
-                "new_model_artifact_hash": new_artifact.model_artifact_hash,
+                "new_model_artifact_hash": activation_artifact.model_artifact_hash,
+                "new_private_model_manifest_hash": activation_artifact.manifest_hash,
+                "new_git_commit_sha": activation_artifact.git_commit_sha,
+                "new_image_digest": activation_artifact.image_digest,
+                "scored_candidate_model_artifact_hash": new_artifact.model_artifact_hash,
+                "scored_candidate_manifest_hash": new_artifact.manifest_hash,
+                "private_source_status": private_repo_result,
+                "manifest_wait_status": manifest_wait_status,
                 "candidate_kind": "image_build",
                 "derived_benchmark_bundle_id": source_benchmark_bundle_id,
                 "derived_public_report_id": (
@@ -1493,7 +2051,14 @@ class ResearchLabPromotionController:
         ):
             return {"status": "skipped_private_holdout_not_approved"}
         if str(score_bundle.get("candidate_artifact_hash") or "") != new_artifact.model_artifact_hash:
-            raise RuntimeError("promoted benchmark bridge candidate artifact mismatch")
+            return {
+                "status": "skipped_activation_artifact_differs_from_scored_candidate",
+                "source_score_bundle_candidate_artifact_hash": str(
+                    score_bundle.get("candidate_artifact_hash") or ""
+                ),
+                "activation_model_artifact_hash": new_artifact.model_artifact_hash,
+                "activation_manifest_hash": new_artifact.manifest_hash,
+            }
 
         baseline_bundle_id = str(gate.get("baseline_benchmark_bundle_id") or "")
         if not baseline_bundle_id:

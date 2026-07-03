@@ -37,6 +37,7 @@ from .promotion import (
     reconcile_active_private_model_lineage,
     reconcile_pending_champion_rewards,
     reregister_active_manifest,
+    sync_active_model_to_repo_head,
 )
 from .recovery import (
     award_failed_run_reimbursements,
@@ -282,6 +283,22 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_lineage.add_argument("--actor-ref", default=default_actor_ref())
     reconcile_lineage.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
     reconcile_lineage.add_argument("--write", dest="dry_run", action="store_false")
+
+    sync_repo_head = sub.add_parser(
+        "sync-active-model-to-repo-head",
+        help="Sync active private model lineage to the signed current.json for private repo main; "
+        "dry-run reports repo/head/current active SHA state",
+    )
+    sync_repo_head.add_argument("--actor-ref", default=default_actor_ref())
+    sync_repo_head.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
+    sync_repo_head.add_argument("--write", dest="dry_run", action="store_false")
+    sync_repo_head.add_argument(
+        "--wait-for-current-json",
+        action="store_true",
+        help="Poll current.json until it matches repo main before writing",
+    )
+    sync_repo_head.add_argument("--timeout-seconds", type=int, default=None)
+    sync_repo_head.add_argument("--poll-seconds", type=int, default=None)
 
     reconcile_rewards = sub.add_parser(
         "reconcile-champion-rewards",
@@ -775,6 +792,15 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         return await reconcile_active_private_model_lineage(
             actor_ref=args.actor_ref,
             dry_run=args.dry_run,
+        )
+    if args.command == "sync-active-model-to-repo-head":
+        return await sync_active_model_to_repo_head(
+            ResearchLabGatewayConfig.from_env(),
+            actor_ref=args.actor_ref,
+            dry_run=args.dry_run,
+            wait_for_repo_head=args.wait_for_current_json,
+            wait_timeout_seconds=args.timeout_seconds,
+            poll_seconds=args.poll_seconds,
         )
     if args.command == "reconcile-champion-rewards":
         return await reconcile_pending_champion_rewards(

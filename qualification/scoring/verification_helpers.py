@@ -1932,11 +1932,14 @@ async def scrapingdog_linkedin(url: str) -> str:
     
     link_id = extract_linkedin_id(url)
     
-    api_url = "https://api.scrapingdog.com/linkedin"
+    # /profile replaces the deprecated /linkedin endpoint (SD support: /linkedin
+    # "no longer maintained"); same type=company|profile switch, param renamed
+    # linkId -> id, identical response shape.
+    api_url = "https://api.scrapingdog.com/profile"
     params = {
         "api_key": SCRAPINGDOG_API_KEY,
         "type": url_type,
-        "linkId": link_id,
+        "id": link_id,
     }
     
     async with httpx.AsyncClient() as client:

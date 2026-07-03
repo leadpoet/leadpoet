@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS research_lab_rejected_companies (
     industry             TEXT,
     sub_industry         TEXT,
     employee_count       TEXT,
+    company_stage        TEXT,
     city                 TEXT,
     state                TEXT,
     country              TEXT,

@@ -44,11 +44,11 @@ async def resolve_research_lab_evaluation_epoch(configured_epoch: int | str | No
         block = None
         source = "gateway_epoch_utils"
     except Exception as exc:
-        logger.warning("research_lab_epoch_gateway_utils_failed_fallback_hint: %s", str(exc)[:200])
         hint = _read_gateway_epoch_hint(require_fresh=True)
         if hint is not None:
             epoch, block, source = hint
         else:
+            logger.warning("research_lab_epoch_gateway_utils_failed_fallback_hint: %s", str(exc)[:200])
             try:
                 epoch, block, network = await asyncio.wait_for(
                     asyncio.to_thread(_fetch_current_chain_epoch_direct),

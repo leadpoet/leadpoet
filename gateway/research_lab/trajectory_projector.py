@@ -90,7 +90,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -110,6 +110,18 @@ logger = logging.getLogger(__name__)
 PROJECTOR_ENABLED_ENV = "RESEARCH_LAB_TRAJECTORY_PROJECTOR_ENABLED"
 
 TRAJECTORY_SCHEMA_NAME = "research_trajectory.schema.json"
+
+
+def _build_corpus_source_record(data: Mapping[str, Any]) -> TrajectoryCorpusSourceRecord:
+    """Create a corpus source record across staged runtime schema versions."""
+    if hasattr(TrajectoryCorpusSourceRecord, "from_mapping"):
+        return TrajectoryCorpusSourceRecord.from_mapping(data)
+    allowed = {item.name for item in fields(TrajectoryCorpusSourceRecord)}
+    return TrajectoryCorpusSourceRecord(
+        **{key: value for key, value in dict(data).items() if key in allowed}
+    )
+
+
 RESULTS_LEDGER_SCHEMA_NAME = "results_ledger_row.schema.json"
 
 TRAJECTORIES_TABLE = "research_trajectories"
@@ -2515,48 +2527,50 @@ def build_trajectory_projection(
         }
     )
 
-    corpus_source_record = TrajectoryCorpusSourceRecord(
-        source_id=f"trajectory_source:{tid}",
-        trajectory_id=tid,
-        trajectory_hash=sha256_json(trajectory_doc),
-        trajectory_schema_valid=True,
-        event_count=len(canonical),
-        execution_trace_refs=tuple(
-            f"execution_trace:{row['run_id']}" for row in execution_trace_rows
-        ),
-        evidence_bundle_refs=tuple(
-            f"evidence_bundle:{row['bundle_id']}" for row in evidence_bundle_rows
-        ),
-        results_ledger_refs=tuple(
-            f"results_ledger:{row['ledger_row_id']}" for row in ledger_rows
-        ),
-        receipt_refs=(f"receipt:{receipt_id}",) if receipt_id else (),
-        cost_ledger_refs=(f"cost_ledger:{run_id}",),
-        release_policy_ref="release_policy:unassigned",
-        trajectory_rights_ref="trajectory_rights:unassigned",
-        distillation_rights_ref="distillation_rights:unassigned",
-        pii_review_ref="pii_review:unassigned",
-        legal_gate_ref="legal_gate:unassigned",
-        island=island,
-        # P15 leak-guard keys: paraphrased ICPs from the same brief share the
-        # cluster key (sanitized-brief signature) and can never straddle splits.
-        brief_id=brief_id,
-        customer_ref=CUSTOMER_REF_STAND_IN,
-        split_cluster_key=brief_sanitized_ref or brief_id,
-        token_count=total_tokens,
-        over_token_budget=bool(trainer_max_tokens and total_tokens > trainer_max_tokens),
-        split="train",
-        data_state="production_measured",
-        measured_data=True,
-        rights_verified=False,
-        distillation_rights_verified=False,
-        pii_review_passed=False,
-        legal_gate_passed=False,
-        # P10: computed from the scan that actually ran, not self-declared.
-        protected_data_scanned=True,
-        contains_raw_evidence_snapshot=bool(protected_hits),
-        eligible_for_training=False,  # readiness stays BLOCKED by design
-        eligible_for_distillation=False,
+    corpus_source_record = _build_corpus_source_record(
+        {
+            "source_id": f"trajectory_source:{tid}",
+            "trajectory_id": tid,
+            "trajectory_hash": sha256_json(trajectory_doc),
+            "trajectory_schema_valid": True,
+            "event_count": len(canonical),
+            "execution_trace_refs": tuple(
+                f"execution_trace:{row['run_id']}" for row in execution_trace_rows
+            ),
+            "evidence_bundle_refs": tuple(
+                f"evidence_bundle:{row['bundle_id']}" for row in evidence_bundle_rows
+            ),
+            "results_ledger_refs": tuple(
+                f"results_ledger:{row['ledger_row_id']}" for row in ledger_rows
+            ),
+            "receipt_refs": (f"receipt:{receipt_id}",) if receipt_id else (),
+            "cost_ledger_refs": (f"cost_ledger:{run_id}",),
+            "release_policy_ref": "release_policy:unassigned",
+            "trajectory_rights_ref": "trajectory_rights:unassigned",
+            "distillation_rights_ref": "distillation_rights:unassigned",
+            "pii_review_ref": "pii_review:unassigned",
+            "legal_gate_ref": "legal_gate:unassigned",
+            "island": island,
+            # P15 leak-guard keys: paraphrased ICPs from the same brief share the
+            # cluster key (sanitized-brief signature) and can never straddle splits.
+            "brief_id": brief_id,
+            "customer_ref": CUSTOMER_REF_STAND_IN,
+            "split_cluster_key": brief_sanitized_ref or brief_id,
+            "token_count": total_tokens,
+            "over_token_budget": bool(trainer_max_tokens and total_tokens > trainer_max_tokens),
+            "split": "train",
+            "data_state": "production_measured",
+            "measured_data": True,
+            "rights_verified": False,
+            "distillation_rights_verified": False,
+            "pii_review_passed": False,
+            "legal_gate_passed": False,
+            # P10: computed from the scan that actually ran, not self-declared.
+            "protected_data_scanned": True,
+            "contains_raw_evidence_snapshot": bool(protected_hits),
+            "eligible_for_training": False,  # readiness stays BLOCKED by design
+            "eligible_for_distillation": False,
+        }
     )
 
     projection = TrajectoryProjection(
@@ -3359,11 +3373,13 @@ async def backfill_corpus_trace_rows(
     dry_run: bool = True,
     store: Any | None = None,
     max_candidates: int = 5000,
+    max_attempts: int | None = None,
 ) -> list[ProjectionResult]:
     """Scan already-projected terminal runs and add missing pointer rows.
 
     Batch-capped: stops after ``batch_size`` runs produced (or, in dry-run,
-    would produce) writes; runs whose rows all exist are skipped for free.
+    would produce) writes. ``max_attempts`` separately caps row inspections so
+    persistent per-run failures cannot flood every worker maintenance pass.
     """
     store = store or GatewayProjectorStore()
     results: list[ProjectionResult] = []
@@ -3388,12 +3404,17 @@ async def backfill_corpus_trace_rows(
         )
         return results
     processed = 0
+    attempted = 0
+    attempt_limit = max(1, int(max_attempts if max_attempts is not None else max_candidates))
     for row in queue_rows:
         if processed >= max(1, int(batch_size)):
+            break
+        if attempted >= attempt_limit:
             break
         run_id = str(row.get("run_id") or "")
         if not run_id:
             continue
+        attempted += 1
         result = await backfill_run_corpus_trace_rows(
             run_id, store=store, dry_run=dry_run
         )

@@ -8,7 +8,7 @@ import os
 import logging
 import base64
 import time as _time
-from uuid import uuid4
+from uuid import UUID, uuid4
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Set
 
@@ -51,6 +51,14 @@ def _enable_fulfillment() -> bool:
 def _get_supabase():
     from gateway.db.client import get_write_client
     return get_write_client()
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        UUID(str(value))
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _get_tempo(supabase) -> int:
@@ -1631,6 +1639,8 @@ async def submit_scores(
 async def get_results(request_id: str):
     if not _enable_fulfillment():
         raise HTTPException(503, detail="Fulfillment system is not enabled")
+    if not _is_uuid(request_id):
+        raise HTTPException(404, detail="Request not found")
 
     supabase = _get_supabase()
 

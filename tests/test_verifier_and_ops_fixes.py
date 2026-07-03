@@ -21,6 +21,7 @@ import importlib.util
 import math
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -588,6 +589,61 @@ class TestHealthScript:
         ]
         stale = health._stale_scoring_cards(cards, candidates)
         assert {card["card_id"] for card in stale} == {"public_loop_card:2", "public_loop_card:4"}
+
+    def test_queue_and_loop_health_flags_stale_active_rows(self, health):
+        stale_at = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
+
+        def fake_fetch(table, params):
+            if table == "research_loop_run_queue_current":
+                return [
+                    {
+                        "run_id": "run-stale",
+                        "ticket_id": "ticket-1",
+                        "current_queue_status": "started",
+                        "worker_ref": "worker-9",
+                        "current_status_at": stale_at,
+                    }
+                ]
+            if table == "research_lab_auto_research_loop_current":
+                return [
+                    {
+                        "run_id": "run-stale",
+                        "current_loop_status": "running",
+                        "current_event_type": "source_inspection_requested",
+                        "current_worker_ref": "worker-9",
+                        "current_status_at": stale_at,
+                    }
+                ]
+            return []
+
+        lines = health.check_queue_and_loops(fetch=fake_fetch)
+        assert "alert_stale_started_queue_count=1" in lines
+        assert "alert_stale_running_loop_count=1" in lines
+        assert any("stale_started_queue run=run-stale" in line for line in lines)
+        assert any("stale_running_loop run=run-stale" in line for line in lines)
+
+    def test_candidate_health_flags_stale_active_scoring(self, health):
+        stale_at = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
+
+        def fake_fetch(table, params):
+            if table == "research_lab_candidate_evaluation_current":
+                return [
+                    {
+                        "candidate_id": "candidate:stale",
+                        "run_id": "run-stale",
+                        "current_candidate_status": "evaluating",
+                        "current_status_at": stale_at,
+                        "candidate_patch_manifest": {},
+                    }
+                ]
+            if table == "research_lab_candidate_evaluation_events":
+                return []
+            return []
+
+        lines = health.check_candidates(fetch=fake_fetch)
+        assert "active_scoring_count=1" in lines
+        assert "alert_stale_active_scoring_count=1" in lines
+        assert any("stale_active_scoring candidate=candidate:stale" in line for line in lines)
 
     def test_baseline_day_jumps_and_duplicates(self, health):
         rows = [

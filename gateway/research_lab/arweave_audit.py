@@ -5,8 +5,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping, Sequence
 
-from gateway.utils.logger import log_event
-
 from .bundles import contains_secret_material, sha256_json
 from .config import ResearchLabGatewayConfig
 from .store import (
@@ -57,6 +55,8 @@ async def publish_research_lab_epoch_audit(
     )
     if existing:
         return existing
+
+    from gateway.utils.logger import log_event
 
     log_entry = await log_event(RESEARCH_LAB_EPOCH_AUDIT_EVENT_TYPE, payload)
     signed_event = log_entry.get("signed_event") if isinstance(log_entry.get("signed_event"), Mapping) else {}
@@ -230,6 +230,78 @@ async def record_research_lab_checkpointed_events(
         )
         recorded += 1
     return recorded
+
+
+async def rebuffer_research_lab_buffered_audit_events(*, limit: int = 200) -> int:
+    """Rehydrate DB-buffered Research Lab audit events into an empty TEE buffer.
+
+    The enclave buffer is process/runtime state. If the gateway restarts after
+    ``publish_research_lab_epoch_audit`` records a buffered anchor but before
+    the hourly checkpoint includes it, the DB still says "buffered" while the
+    TEE buffer can be empty. Re-append the exact signed transparency-log event
+    so the next checkpoint can mark the anchor ``checkpointed``.
+    """
+    rows = await select_many(
+        "research_lab_arweave_epoch_audit_anchor_current",
+        columns="anchor_id,payload_hash,transparency_event_hash,current_transparency_event_hash,current_anchor_status,current_status_at",
+        filters=(("current_anchor_status", "eq", "buffered"),),
+        order_by=(("current_status_at", False),),
+        limit=max(1, int(limit)),
+    )
+    if not rows:
+        return 0
+
+    try:
+        from gateway.utils.tee_client import tee_client
+    except ImportError:
+        from utils.tee_client import tee_client
+
+    rebuffered = 0
+    for row in rows:
+        event_hash = str(
+            row.get("current_transparency_event_hash")
+            or row.get("transparency_event_hash")
+            or ""
+        )
+        if not event_hash:
+            continue
+        log_row = await select_one(
+            "transparency_log",
+            columns="event_type,event_hash,payload_hash,signed_log_entry",
+            filters=(("event_hash", event_hash),),
+        )
+        if not log_row:
+            logger.warning(
+                "research_lab_arweave_rebuffer_missing_transparency_event anchor_id=%s event_hash=%s",
+                row.get("anchor_id"),
+                event_hash[:16],
+            )
+            continue
+        signed_log_entry = log_row.get("signed_log_entry")
+        if not isinstance(signed_log_entry, Mapping):
+            logger.warning(
+                "research_lab_arweave_rebuffer_missing_signed_log_entry anchor_id=%s event_hash=%s",
+                row.get("anchor_id"),
+                event_hash[:16],
+            )
+            continue
+        event_type = str(log_row.get("event_type") or RESEARCH_LAB_EPOCH_AUDIT_EVENT_TYPE)
+        await tee_client.append_event(
+            {
+                "event_type": event_type,
+                "event_hash": event_hash,
+                "payload_hash": log_row.get("payload_hash") or row.get("payload_hash"),
+                "signed_log_entry": signed_log_entry,
+            }
+        )
+        rebuffered += 1
+    if rebuffered:
+        logger.info(
+            "research_lab_arweave_audit_events_rebuffered count=%s limit=%s",
+            rebuffered,
+            limit,
+        )
+    return rebuffered
 
 
 async def latest_arweave_anchor(epoch: int, netuid: int | None = None) -> dict[str, Any] | None:

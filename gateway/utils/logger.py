@@ -235,11 +235,16 @@ async def _log_event_legacy_format(event: Dict[str, Any]) -> Dict[str, Any]:
             if payload and isinstance(payload, dict):
                 email_hash = payload.get("email_hash")
                 linkedin_combo_hash = payload.get("linkedin_combo_hash")
+                arweave_tx_id = payload.get("arweave_tx_id")
+            else:
+                arweave_tx_id = None
             
             if not email_hash:
                 email_hash = event.get("email_hash")
             if not linkedin_combo_hash:
                 linkedin_combo_hash = event.get("linkedin_combo_hash")
+            if not arweave_tx_id:
+                arweave_tx_id = event.get("arweave_tx_id")
             
             supabase_entry = {
                 "event_type": event.get("event_type"),
@@ -252,6 +257,7 @@ async def _log_event_legacy_format(event: Dict[str, Any]) -> Dict[str, Any]:
                 "payload": payload,
                 "email_hash": email_hash,
                 "linkedin_combo_hash": linkedin_combo_hash,
+                "arweave_tx_id": arweave_tx_id,
             }
             
             supabase_entry = {k: v for k, v in supabase_entry.items() if v is not None}
@@ -327,6 +333,7 @@ async def _log_event_signed_format(event_type: str, payload: Dict[str, Any]) -> 
         try:
             email_hash = payload.get("email_hash") if isinstance(payload, dict) else None
             linkedin_combo_hash = payload.get("linkedin_combo_hash") if isinstance(payload, dict) else None
+            arweave_tx_id = payload.get("arweave_tx_id") if isinstance(payload, dict) else None
             actor_hotkey = payload.get("actor_hotkey") or payload.get("validator_hotkey") or payload.get("miner_hotkey")
 
             supabase_entry = {
@@ -346,6 +353,7 @@ async def _log_event_signed_format(event_type: str, payload: Dict[str, Any]) -> 
                 "actor_hotkey": actor_hotkey,
                 "email_hash": email_hash,
                 "linkedin_combo_hash": linkedin_combo_hash,
+                "arweave_tx_id": arweave_tx_id,
                 "build_id": BUILD_ID,
             }
             

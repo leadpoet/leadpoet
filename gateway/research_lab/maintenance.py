@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -25,6 +26,10 @@ from .store import (
 
 
 logger = logging.getLogger(__name__)
+_POSTGREST_TIMESTAMP_RE = re.compile(
+    r"^(?P<prefix>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"
+    r"\.(?P<fraction>\d{1,9})(?P<suffix>Z|[+-]\d{2}(?::?\d{2})?)?$"
+)
 
 AUTORESEARCH_MAINTENANCE_CONTROL_KEY = "autoresearch_maintenance"
 AUTORESEARCH_PROXY_PREFIXES = (
@@ -495,10 +500,25 @@ RECOVERABLE_CANDIDATE_FAILURE_MARKERS = ("matching_completed_private_baseline_re
 def _parse_iso(value: object) -> datetime | None:
     if not value:
         return None
+    text = str(value).strip().replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return datetime.fromisoformat(text)
     except ValueError:
-        return None
+        match = _POSTGREST_TIMESTAMP_RE.match(text)
+        if not match:
+            return None
+        suffix = match.group("suffix") or ""
+        if suffix == "Z":
+            suffix = "+00:00"
+        elif re.fullmatch(r"[+-]\d{2}", suffix):
+            suffix = f"{suffix}:00"
+        elif re.fullmatch(r"[+-]\d{4}", suffix):
+            suffix = f"{suffix[:3]}:{suffix[3:]}"
+        fraction = (match.group("fraction") + "000000")[:6]
+        try:
+            return datetime.fromisoformat(f"{match.group('prefix')}.{fraction}{suffix}")
+        except ValueError:
+            return None
 
 
 async def requeue_failed_candidate(
@@ -743,6 +763,82 @@ async def requeue_failed_loop(
         "requeued_event_id": event.get("event_id"),
         "requeued_event_seq": event.get("seq"),
         "requeued_event_hash": event.get("anchored_hash"),
+    }
+
+
+async def requeue_stale_started_autoresearch_runs(
+    *,
+    reason: str = "operator_requeue_stale_started",
+    actor_ref: str | None = None,
+    dry_run: bool = True,
+    max_batch_size: int = 25,
+) -> dict[str, Any]:
+    """Dry-run-first recovery for queue rows wedged in ``started``.
+
+    This is the operator wrapper around the worker stale reaper: it discovers
+    stale ``started`` queue rows, skips rows whose loop has already completed,
+    then delegates to ``requeue_failed_loop(force=True)`` so every write remains
+    append-only and uses the existing checkpoint/resume planning logic.
+    """
+    config = ResearchLabGatewayConfig.from_env()
+    stale_after_seconds = _stale_after_seconds(config)
+    rows = await select_all(
+        "research_loop_run_queue_current",
+        columns=(
+            "run_id,ticket_id,current_queue_status,current_status_at,"
+            "current_event_hash,queue_priority,worker_ref"
+        ),
+        filters=(("current_queue_status", "started"),),
+        order_by=(("current_status_at", False),),
+        max_rows=max(1, int(max_batch_size)),
+    )
+    stale_rows = [
+        row
+        for row in rows
+        if _status_is_stale(row.get("current_status_at"), stale_after_seconds)
+    ]
+    results: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for row in stale_rows:
+        run_id = str(row.get("run_id") or "")
+        if not run_id:
+            continue
+        loop = await select_one(
+            "research_lab_auto_research_loop_current",
+            columns="run_id,current_loop_status,current_status_at,current_event_type,current_worker_ref",
+            filters=(("run_id", run_id),),
+        )
+        loop_status = str(loop.get("current_loop_status") or "") if loop else ""
+        if loop_status == "completed":
+            skipped.append(
+                {
+                    "run_id": run_id,
+                    "ticket_id": row.get("ticket_id"),
+                    "skipped": "loop_already_completed",
+                    "loop_status": loop_status,
+                    "loop_event_type": loop.get("current_event_type") if loop else None,
+                }
+            )
+            continue
+        results.append(
+            await requeue_failed_loop(
+                run_id=run_id,
+                reason=reason,
+                actor_ref=actor_ref,
+                dry_run=dry_run,
+                force=True,
+            )
+        )
+    return {
+        "ok": True,
+        "action": "requeue-stale-started-runs",
+        "dry_run": bool(dry_run),
+        "stale_after_seconds": stale_after_seconds,
+        "discovered_started": len(rows),
+        "stale_started": len(stale_rows),
+        "planned_or_requeued": len(results),
+        "skipped": skipped,
+        "results": results,
     }
 
 

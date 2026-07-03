@@ -8,6 +8,7 @@ scoping), and the same-day baseline replacement guard.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -16,6 +17,109 @@ from gateway.research_lab.promotion import (
     PrivateModelLineageUnavailableError,
     PromotionPausedError,
 )
+
+
+def test_scoring_worker_short_fraction_timestamps_count_as_stale():
+    base_status_at = (
+        datetime.now(timezone.utc) - timedelta(minutes=20)
+    ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-1]
+    values = (
+        base_status_at + "+00:00",
+        base_status_at + "+0000",
+        base_status_at + "+00",
+        (base_status_at + "+00:00").replace("T", " ", 1),
+    )
+
+    for value in values:
+        assert sw._status_age_seconds(value) > 19 * 60
+        assert sw._status_is_stale(value, 300)
+
+
+def test_scoring_claim_predating_worker_boot_is_restart_orphan():
+    worker_started_at = datetime(2026, 7, 3, 16, 24, 0, tzinfo=timezone.utc)
+    row = {
+        "current_evaluator_ref": "research-lab-scorer-8",
+        "current_status_at": "2026-07-03T16:23:20.12345+00:00",
+    }
+
+    assert sw._claim_predates_worker_boot(
+        row,
+        worker_ref="research-lab-scorer-8",
+        worker_started_at=worker_started_at,
+        grace_seconds=30,
+    )
+    assert not sw._claim_predates_worker_boot(
+        row,
+        worker_ref="research-lab-scorer-7",
+        worker_started_at=worker_started_at,
+        grace_seconds=30,
+    )
+    assert not sw._claim_predates_worker_boot(
+        {**row, "current_status_at": "2026-07-03T16:23:45.12345+00:00"},
+        worker_ref="research-lab-scorer-8",
+        worker_started_at=worker_started_at,
+        grace_seconds=30,
+    )
+
+
+def test_stale_claim_recovery_owner_is_stable_and_bounded():
+    candidate_id = "candidate:97a10903d96c91880b35a423aa9d44d9a9593c9bc68b2e776fb531a18cb75eb0"
+    owner = sw._stale_claim_recovery_owner_index(candidate_id, 25)
+
+    assert 0 <= owner < 25
+    assert sw._stale_claim_recovery_owner_index(candidate_id, 25) == owner
+    assert sw._stale_claim_recovery_owner_index(candidate_id, 0) == 0
+
+
+def test_restart_orphan_recovery_is_not_blocked_by_stale_owner():
+    candidate_id = "candidate:97a10903d96c91880b35a423aa9d44d9a9593c9bc68b2e776fb531a18cb75eb0"
+    non_owner_index = (sw._stale_claim_recovery_owner_index(candidate_id, 25) + 1) % 25
+    worker_started_at = datetime.now(timezone.utc) + timedelta(minutes=1)
+    status_at = worker_started_at - timedelta(seconds=40)
+    worker_ref = f"research-lab-scorer-{non_owner_index + 1}"
+    row = {
+        "current_evaluator_ref": worker_ref,
+        "current_status_at": status_at.isoformat(),
+    }
+
+    assert (
+        sw._candidate_claim_recovery_reason(
+            row,
+            candidate_id=candidate_id,
+            worker_ref=worker_ref,
+            worker_index=non_owner_index,
+            total_workers=25,
+            worker_started_at=worker_started_at,
+            stale_after_seconds=900,
+            restart_orphan_grace_seconds=30,
+        )
+        == "restart_orphan"
+    )
+
+
+def test_stale_claim_recovery_is_limited_to_owner_worker():
+    candidate_id = "candidate:2eceb2a9574ff577d014ac8a8a285799891dd0470e433af3a88ca6d7e48169e4"
+    owner_index = sw._stale_claim_recovery_owner_index(candidate_id, 25)
+    non_owner_index = (owner_index + 1) % 25
+    row = {
+        "current_evaluator_ref": "research-lab-scorer-3",
+        "current_status_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+    }
+
+    common = {
+        "row": row,
+        "candidate_id": candidate_id,
+        "worker_ref": "research-lab-scorer-3",
+        "total_workers": 25,
+        "worker_started_at": datetime.now(timezone.utc),
+        "stale_after_seconds": 900,
+        "restart_orphan_grace_seconds": 30,
+    }
+    assert (
+        sw._candidate_claim_recovery_reason(**common, worker_index=owner_index)
+        == "stale_claim"
+    )
+    assert sw._candidate_claim_recovery_reason(**common, worker_index=non_owner_index) is None
 
 
 # --- bug #37: _baseline_error_is_retryable / _runtime_error_diagnostics ---

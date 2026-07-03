@@ -77,6 +77,10 @@ class _FakeHTTPResponse:
         self._payload = payload
 
     def read(self):
+        if isinstance(self._payload, bytes):
+            return self._payload
+        if isinstance(self._payload, str):
+            return self._payload.encode("utf-8")
         return json.dumps(self._payload).encode("utf-8")
 
     def __enter__(self):
@@ -368,6 +372,23 @@ def test_http_error_attempt_captured(fake_boto3, trace_env, monkeypatch):
     assert first_payload["response"]["error_excerpt"] == "upstream exploded"
     # Failed attempts keep the prompt: that is the training signal.
     assert first_payload["request"]["body"]["messages"][0]["content"] == PROMPT_TEXT
+
+
+def test_non_json_openrouter_response_is_retryable_and_captured(fake_boto3, trace_env, monkeypatch):
+    worker = _worker()
+    monkeypatch.setattr(
+        worker_mod.urlrequest,
+        "urlopen",
+        _fake_urlopen([b"<html>temporary upstream failure</html>", _chat_response()]),
+    )
+    result = _call(worker)
+    worker._raw_trace_recorder.flush()
+
+    assert result.content == '{"ok": true}'
+    assert len(fake_boto3) == 2
+    first_payload = json.loads(fake_boto3[0]["Body"])
+    assert first_payload["outcome"] == "invalid_json_response"
+    assert "temporary upstream failure" in first_payload["response"]["error_excerpt"]
 
 
 def test_transport_error_attempt_captured_with_proxy_redaction(fake_boto3, trace_env, monkeypatch):

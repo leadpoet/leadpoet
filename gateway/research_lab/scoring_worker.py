@@ -8,6 +8,7 @@ import contextlib
 import contextvars
 from datetime import datetime, timedelta, timezone
 import functools
+import hashlib
 import importlib
 import json
 import logging
@@ -124,8 +125,8 @@ logger = logging.getLogger(__name__)
 PRIVATE_BASELINE_FAST_EMPTY_ABORT_AFTER = 6
 PRIVATE_BASELINE_FAST_EMPTY_ABORT_SECONDS = 90.0
 _POSTGREST_TIMESTAMP_RE = re.compile(
-    r"^(?P<prefix>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
-    r"\.(?P<fraction>\d{1,9})(?P<suffix>Z|[+-]\d{2}:\d{2})?$"
+    r"^(?P<prefix>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"
+    r"\.(?P<fraction>\d{1,9})(?P<suffix>Z|[+-]\d{2}(?::?\d{2})?)?$"
 )
 
 
@@ -171,6 +172,13 @@ def _short_error(exc: BaseException) -> str:
 
 def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return int(default)
 
 
 # Event-doc error sanitizers (bug #36) moved to logging_utils so the loop
@@ -1350,7 +1358,7 @@ async def _call_operator_openrouter_json(
     return str(result.content)
 
 
-def _status_age_seconds(raw_status_at: object) -> float | None:
+def _status_datetime(raw_status_at: object) -> datetime | None:
     if not raw_status_at:
         return None
     text = str(raw_status_at).strip().replace("Z", "+00:00")
@@ -1363,6 +1371,10 @@ def _status_age_seconds(raw_status_at: object) -> float | None:
         suffix = match.group("suffix") or ""
         if suffix == "Z":
             suffix = "+00:00"
+        elif re.fullmatch(r"[+-]\d{2}", suffix):
+            suffix = f"{suffix}:00"
+        elif re.fullmatch(r"[+-]\d{4}", suffix):
+            suffix = f"{suffix[:3]}:{suffix[3:]}"
         fraction = (match.group("fraction") + "000000")[:6]
         try:
             status_at = datetime.fromisoformat(f"{match.group('prefix')}.{fraction}{suffix}")
@@ -1370,12 +1382,67 @@ def _status_age_seconds(raw_status_at: object) -> float | None:
             return None
     if status_at.tzinfo is None:
         status_at = status_at.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - status_at.astimezone(timezone.utc)).total_seconds()
+    return status_at.astimezone(timezone.utc)
+
+
+def _status_age_seconds(raw_status_at: object) -> float | None:
+    status_at = _status_datetime(raw_status_at)
+    if status_at is None:
+        return None
+    return (datetime.now(timezone.utc) - status_at).total_seconds()
 
 
 def _status_is_stale(raw_status_at: object, stale_after_seconds: int) -> bool:
     age_seconds = _status_age_seconds(raw_status_at)
     return age_seconds is not None and age_seconds > max(60, int(stale_after_seconds))
+
+
+def _claim_predates_worker_boot(
+    row: Mapping[str, Any],
+    *,
+    worker_ref: str,
+    worker_started_at: datetime,
+    grace_seconds: int,
+) -> bool:
+    status_at = _status_datetime(row.get("current_status_at"))
+    return (
+        row.get("current_evaluator_ref") == worker_ref
+        and status_at is not None
+        and status_at
+        < worker_started_at - timedelta(seconds=max(0, int(grace_seconds)))
+    )
+
+
+def _stale_claim_recovery_owner_index(candidate_id: str, total_workers: int) -> int:
+    total = max(1, int(total_workers or 1))
+    digest = hashlib.sha256(str(candidate_id).encode("utf-8")).hexdigest()
+    return int(digest[:12], 16) % total
+
+
+def _candidate_claim_recovery_reason(
+    row: Mapping[str, Any],
+    *,
+    candidate_id: str,
+    worker_ref: str,
+    worker_index: int,
+    total_workers: int,
+    worker_started_at: datetime,
+    stale_after_seconds: int,
+    restart_orphan_grace_seconds: int,
+) -> str | None:
+    if not candidate_id:
+        return None
+    if _status_is_stale(row.get("current_status_at"), stale_after_seconds):
+        owner_index = _stale_claim_recovery_owner_index(candidate_id, total_workers)
+        return "stale_claim" if int(worker_index) == owner_index else None
+    if _claim_predates_worker_boot(
+        row,
+        worker_ref=worker_ref,
+        worker_started_at=worker_started_at,
+        grace_seconds=restart_orphan_grace_seconds,
+    ):
+        return "restart_orphan"
+    return None
 
 
 # Requeue reasons that mean the claim cycle only waited (no scoring happened);
@@ -1419,6 +1486,7 @@ class ResearchLabGatewayScoringWorker:
         self._resolved_epoch_cache: tuple[int, float] | None = None
         self._scorer_trace_recorder = _ScorerTraceRecorder(config)
         self._confirmation_trace_scope: dict[str, Any] | None = None
+        self._worker_started_at = datetime.now(timezone.utc)
 
     async def run_forever(self) -> None:
         # trajectoryimprovements.md P5: one structured capture health block at
@@ -1794,12 +1862,25 @@ class ResearchLabGatewayScoringWorker:
             )
         recovered = 0
         for row in rows:
-            if not _status_is_stale(row.get("current_status_at"), stale_after_seconds):
-                continue
             candidate_id = str(row.get("candidate_id") or "")
             run_id = str(row.get("run_id") or "")
             ticket_id = str(row.get("ticket_id") or "")
             if not candidate_id or not run_id or not ticket_id:
+                continue
+            recovery_reason = _candidate_claim_recovery_reason(
+                row,
+                candidate_id=candidate_id,
+                worker_ref=self.worker_ref,
+                worker_index=self.config.scoring_worker_index,
+                total_workers=self.config.scoring_worker_total_workers,
+                worker_started_at=self._worker_started_at,
+                stale_after_seconds=stale_after_seconds,
+                restart_orphan_grace_seconds=_env_int(
+                    "RESEARCH_LAB_SCORING_RESTART_ORPHAN_GRACE_SECONDS",
+                    30,
+                ),
+            )
+            if recovery_reason is None:
                 continue
             claim_attempts = await self._candidate_claim_attempt_count(candidate_id)
             max_attempts = int(self.config.scoring_worker_max_claim_requeues)
@@ -1822,6 +1903,8 @@ class ResearchLabGatewayScoringWorker:
                             "previous_event_hash": row.get("current_event_hash"),
                             "previous_status_at": row.get("current_status_at"),
                             "stale_after_seconds": stale_after_seconds,
+                            "worker_started_at": self._worker_started_at.isoformat(),
+                            "recovery_reason": recovery_reason,
                             "claim_attempts": claim_attempts,
                             "max_claim_attempts": max_attempts,
                         },
@@ -1841,6 +1924,7 @@ class ResearchLabGatewayScoringWorker:
                             "dispatch_context": "candidate_scoring_recovery",
                             "failure_class": "stale_claim_retry_limit_exceeded",
                             "retryable": False,
+                            "recovery_reason": recovery_reason,
                             "claim_attempts": claim_attempts,
                             "max_claim_attempts": max_attempts,
                         },
@@ -1892,6 +1976,8 @@ class ResearchLabGatewayScoringWorker:
                         "previous_event_hash": row.get("current_event_hash"),
                         "previous_status_at": row.get("current_status_at"),
                         "stale_after_seconds": stale_after_seconds,
+                        "worker_started_at": self._worker_started_at.isoformat(),
+                        "recovery_reason": recovery_reason,
                     },
                 )
                 recovered += 1

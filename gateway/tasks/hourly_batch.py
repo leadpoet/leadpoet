@@ -27,13 +27,51 @@ from gateway.utils.tee_client import tee_client
 from gateway.utils.arweave_client import upload_checkpoint, get_wallet_balance
 from gateway.utils.logger import log_event
 from gateway.config import BUILD_ID
-from gateway.research_lab.arweave_audit import record_research_lab_checkpointed_events
+from gateway.research_lab.arweave_audit import (
+    rebuffer_research_lab_buffered_audit_events,
+    record_research_lab_checkpointed_events,
+)
 
 
 # Configuration
 BATCH_INTERVAL = 10800  # 3 hours in seconds
 EMERGENCY_BATCH_THRESHOLD = 8000  # Trigger early batch if buffer hits this size
 MAX_UPLOAD_RETRIES = 3  # Retry failed uploads
+
+
+def build_arweave_checkpoint_log_event(
+    *,
+    tx_id: str,
+    header: Dict,
+    compressed_size_bytes: int,
+) -> Dict:
+    """Build the append-only transparency event for a successful Arweave upload."""
+    import hashlib
+    import uuid
+
+    payload_data = {
+        "arweave_tx_id": tx_id,
+        "checkpoint_number": header["checkpoint_number"],
+        "event_count": header["event_count"],
+        "merkle_root": header["merkle_root"],
+        "time_range": header["time_range"],
+        "compressed_size_bytes": compressed_size_bytes,
+        "viewblock_url": f"https://viewblock.io/arweave/tx/{tx_id}",
+    }
+    payload_json = json.dumps(payload_data, sort_keys=True, default=str)
+    payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
+
+    return {
+        "event_type": "ARWEAVE_CHECKPOINT",
+        "actor_hotkey": "system",
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "nonce": str(uuid.uuid4()),
+        "payload_hash": payload_hash,
+        "signature": "system",
+        "build_id": BUILD_ID,
+        "payload": payload_data,
+        "arweave_tx_id": tx_id,
+    }
 
 
 async def hourly_batch_task():
@@ -150,6 +188,17 @@ async def hourly_batch_task():
             except Exception as e:
                 print(f"⚠️  Could not get buffer stats: {e}")
                 buffer_size = 0
+
+            if buffer_size == 0:
+                try:
+                    rebuffered_lab_events = await rebuffer_research_lab_buffered_audit_events()
+                    if rebuffered_lab_events:
+                        print(
+                            "✅ Research Lab audit events rebuffered before checkpoint: "
+                            f"{rebuffered_lab_events}"
+                        )
+                except Exception as e:
+                    print(f"⚠️  Failed to rebuffer Research Lab audit events: {e}")
             
             # Step 2: Request checkpoint from TEE
             print(f"\n🔄 Requesting checkpoint from TEE...")
@@ -276,62 +325,14 @@ async def hourly_batch_task():
             # Step 6: Log checkpoint to transparency log
             print(f"\n📝 Logging checkpoint to transparency log...")
             try:
-                import uuid
-                
-                # Compute payload hash for transparency
-                payload_data = {
-                    "arweave_tx_id": tx_id,
-                    "checkpoint_number": header['checkpoint_number'],
-                    "event_count": header['event_count'],
-                    "merkle_root": header['merkle_root'],
-                    "time_range": header['time_range'],
-                    "compressed_size_bytes": len(compressed_events),
-                    "viewblock_url": f"https://viewblock.io/arweave/tx/{tx_id}"
-                }
-                
-                # json and hashlib already imported at top of file
-                import hashlib
-                payload_json = json.dumps(payload_data, sort_keys=True, default=str)  # Handle datetime objects
-                payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
-                
-                checkpoint_log = {
-                    "event_type": "ARWEAVE_CHECKPOINT",
-                    "actor_hotkey": "system",
-                    "ts": datetime.utcnow().isoformat() + "Z",  # Required timestamp field
-                    "nonce": str(uuid.uuid4()),  # Required field
-                    "payload_hash": payload_hash,  # Required field
-                    "signature": "system",  # System-generated events use "system" as signature
-                    "build_id": BUILD_ID,  # Required field
-                    "payload": payload_data
-                }
-                
+                checkpoint_log = build_arweave_checkpoint_log_event(
+                    tx_id=tx_id,
+                    header=header,
+                    compressed_size_bytes=len(compressed_events),
+                )
                 result = await log_event(checkpoint_log)
                 tee_sequence = result.get("sequence")
-                print(f"✅ Checkpoint logged (seq={tee_sequence})")
-                
-                # Also update transparency_log table with arweave_tx_id
-                # This allows miners to query for TX IDs easily
-                from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-                import httpx
-                
-                async with httpx.AsyncClient() as client:
-                    # Update the checkpoint event we just logged
-                    update_response = await client.patch(
-                        f"{SUPABASE_URL}/rest/v1/transparency_log",
-                        params={"tee_sequence": f"eq.{tee_sequence}"},
-                        headers={
-                            "apikey": SUPABASE_SERVICE_ROLE_KEY,
-                            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-                            "Content-Type": "application/json",
-                            "Prefer": "return=minimal"
-                        },
-                        json={"arweave_tx_id": tx_id}
-                    )
-                    
-                    if update_response.status_code in [200, 204]:
-                        print(f"✅ Arweave TX ID saved to database")
-                    else:
-                        print(f"⚠️  Failed to save TX ID to database: {update_response.status_code}")
+                print(f"✅ Checkpoint logged (seq={tee_sequence}, tx={tx_id})")
                         
             except Exception as e:
                 print(f"⚠️  Failed to log checkpoint: {e}")

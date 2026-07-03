@@ -7,18 +7,30 @@ import asyncio
 import copy
 from pathlib import Path
 import sys
+import types
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from gateway.research_lab import arweave_audit
 from gateway.research_lab.bundles import sha256_json
+
+store_stub = types.ModuleType("gateway.research_lab.store")
+store_stub.canonical_hash = lambda payload: sha256_json(payload)  # type: ignore[attr-defined]
+store_stub.create_arweave_epoch_audit_anchor = None
+store_stub.create_arweave_epoch_audit_anchor_event = None
+store_stub.select_all = None
+store_stub.select_many = None
+store_stub.select_one = None
+sys.modules.setdefault("gateway.research_lab.store", store_stub)
+
+from gateway.research_lab import arweave_audit
 
 
 async def main() -> int:
     original_select_many = arweave_audit.select_many
     original_select_all = arweave_audit.select_all
+    original_select_one = arweave_audit.select_one
     original_existing_anchor = arweave_audit._existing_anchor_for_payload
     original_create_event = arweave_audit.create_arweave_epoch_audit_anchor_event
     try:
@@ -80,9 +92,28 @@ async def main() -> int:
         assert captured_events[0]["event_type"] == "checkpointed"
         assert captured_events[0]["event_doc"]["arweave_tx_id"] == "arweave_tx_fixture"
 
+        appended_events: list[dict[str, Any]] = []
+        arweave_audit.select_many = _fake_rebuffer_select_many  # type: ignore[assignment]
+        arweave_audit.select_one = _fake_rebuffer_select_one  # type: ignore[assignment]
+        tee_stub = types.SimpleNamespace(
+            append_event=lambda event: _capture_append_event(appended_events, event)
+        )
+        sys.modules["gateway.utils.tee_client"] = types.SimpleNamespace(tee_client=tee_stub)
+        rebuffered = await arweave_audit.rebuffer_research_lab_buffered_audit_events(limit=10)
+        assert rebuffered == 1
+        assert appended_events == [
+            {
+                "event_type": "RESEARCH_LAB_EPOCH_AUDIT",
+                "event_hash": "f" * 64,
+                "payload_hash": "sha256:" + "9" * 64,
+                "signed_log_entry": {"signed_event": {"payload": {"ok": True}}},
+            }
+        ]
+
     finally:
         arweave_audit.select_many = original_select_many  # type: ignore[assignment]
         arweave_audit.select_all = original_select_all  # type: ignore[assignment]
+        arweave_audit.select_one = original_select_one  # type: ignore[assignment]
         arweave_audit._existing_anchor_for_payload = original_existing_anchor  # type: ignore[assignment]
         arweave_audit.create_arweave_epoch_audit_anchor_event = original_create_event  # type: ignore[assignment]
 
@@ -112,6 +143,35 @@ async def _fake_select_many(table: str, **kwargs: Any) -> list[dict[str, Any]]:
     if table == "research_reimbursement_award_current":
         return [_reimbursement()]
     return []
+
+
+async def _fake_rebuffer_select_many(table: str, **kwargs: Any) -> list[dict[str, Any]]:
+    if table == "research_lab_arweave_epoch_audit_anchor_current":
+        return [
+            {
+                "anchor_id": "research_lab_arweave_anchor:" + "f" * 64,
+                "payload_hash": "sha256:" + "8" * 64,
+                "current_transparency_event_hash": "f" * 64,
+                "current_anchor_status": "buffered",
+            }
+        ]
+    return []
+
+
+async def _fake_rebuffer_select_one(table: str, **kwargs: Any) -> dict[str, Any] | None:
+    if table == "transparency_log":
+        return {
+            "event_type": "RESEARCH_LAB_EPOCH_AUDIT",
+            "event_hash": "f" * 64,
+            "payload_hash": "sha256:" + "9" * 64,
+            "signed_log_entry": {"signed_event": {"payload": {"ok": True}}},
+        }
+    return None
+
+
+async def _capture_append_event(appended_events: list[dict[str, Any]], event: dict[str, Any]) -> dict[str, Any]:
+    appended_events.append(dict(event))
+    return {"status": "buffered", "sequence": len(appended_events)}
 
 
 def _weight_bundle() -> dict[str, Any]:

@@ -16,12 +16,14 @@ from collections import Counter
 from datetime import datetime, timezone
 import json
 import os
+import re
 import sys
 from typing import Any, Callable
 from urllib import parse, request
 
 
 DEFAULT_BASELINE_JUMP_THRESHOLD = 3.0
+DEFAULT_ACTIVE_STALE_SECONDS = 10 * 60
 ACTIVE_CANDIDATE_STATUSES = {"queued", "assigned", "evaluating"}
 PROVIDER_FAILURE_CATEGORIES = {
     "runtime_provider_error",
@@ -66,8 +68,15 @@ def _counts(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
 def _parse_ts(value: object) -> datetime | None:
     if not value:
         return None
+    text = str(value).replace("Z", "+00:00")
+    text = re.sub(r"([+-]\d{2})$", r"\1:00", text)
+    text = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", text)
+    match = re.match(r"^(.*[ T]\d{2}:\d{2}:\d{2})\.(\d+)([+-]\d{2}:\d{2})$", text)
+    if match:
+        fraction = (match.group(2) + "000000")[:6]
+        text = f"{match.group(1)}.{fraction}{match.group(3)}"
     try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
     if parsed.tzinfo is None:
@@ -81,6 +90,35 @@ def _oldest_age_hours(rows: list[dict[str, Any]], field: str = "current_status_a
     if not parsed:
         return None
     return round((datetime.now(timezone.utc) - min(parsed)).total_seconds() / 3600.0, 2)
+
+
+def _age_seconds(row: dict[str, Any], field: str = "current_status_at") -> float | None:
+    parsed = _parse_ts(row.get(field))
+    if parsed is None:
+        return None
+    return (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+
+
+def _age_minutes(row: dict[str, Any], field: str = "current_status_at") -> float | None:
+    age = _age_seconds(row, field)
+    return None if age is None else round(age / 60.0, 1)
+
+
+def _stale_active_rows(
+    rows: list[dict[str, Any]],
+    *,
+    status_field: str,
+    active_statuses: set[str],
+    stale_after_seconds: int = DEFAULT_ACTIVE_STALE_SECONDS,
+) -> list[dict[str, Any]]:
+    stale = []
+    for row in rows:
+        if str(row.get(status_field) or "") not in active_statuses:
+            continue
+        age = _age_seconds(row)
+        if age is None or age >= stale_after_seconds:
+            stale.append(row)
+    return stale
 
 
 def _failure_class(row: dict[str, Any]) -> str:
@@ -278,14 +316,18 @@ def check_queue_and_loops(fetch: Callable[..., list[dict[str, Any]]] = _get) -> 
     queue = fetch(
         "research_loop_run_queue_current",
         {
-            "select": "run_id,ticket_id,current_queue_status,current_reason,current_status_at",
+            "select": "run_id,ticket_id,current_queue_status,current_reason,worker_ref,current_status_at",
             "order": "current_status_at.desc",
             "limit": "1000",
         },
     )
     loops = fetch(
         "research_lab_auto_research_loop_current",
-        {"select": "run_id,current_loop_status,current_event_type,current_status_at", "order": "current_status_at.desc", "limit": "1000"},
+        {
+            "select": "run_id,current_loop_status,current_event_type,current_worker_ref,current_status_at",
+            "order": "current_status_at.desc",
+            "limit": "1000",
+        },
     )
     queue_by_run = {str(row.get("run_id")): row for row in queue}
     mismatches = []
@@ -304,13 +346,43 @@ def check_queue_and_loops(fetch: Callable[..., list[dict[str, Any]]] = _get) -> 
         if str(row.get("current_queue_status") or "") == "paused"
         and str(row.get("current_reason") or "") == "blocked_for_credit"
     ]
+    stale_started_queue = _stale_active_rows(
+        queue,
+        status_field="current_queue_status",
+        active_statuses={"started"},
+    )
+    stale_running_loops = _stale_active_rows(
+        loops,
+        status_field="current_loop_status",
+        active_statuses={"running", "paused"},
+    )
     lines = [
         f"queue_status_counts={_counts(queue, 'current_queue_status')}",
         f"loop_status_counts={_counts(loops, 'current_loop_status')}",
         f"terminal_queue_nonterminal_loop_mismatches={len(mismatches)}",
+        f"alert_stale_started_queue_count={len(stale_started_queue)}",
+        f"alert_stale_running_loop_count={len(stale_running_loops)}",
     ]
     for run_id, queue_status, loop_status, event_type in mismatches[:10]:
         lines.append(f"  mismatch run={_compact(run_id)} queue={queue_status} loop={loop_status} loop_event={event_type}")
+    for row in stale_started_queue[:10]:
+        lines.append(
+            "  stale_started_queue"
+            f" run={_compact(row.get('run_id'))}"
+            f" ticket={_compact(row.get('ticket_id'))}"
+            f" worker={_compact(row.get('worker_ref'))}"
+            f" age_minutes={_age_minutes(row)}"
+            f" at={row.get('current_status_at')}"
+        )
+    for row in stale_running_loops[:10]:
+        lines.append(
+            "  stale_running_loop"
+            f" run={_compact(row.get('run_id'))}"
+            f" worker={_compact(row.get('current_worker_ref'))}"
+            f" event={row.get('current_event_type')}"
+            f" age_minutes={_age_minutes(row)}"
+            f" at={row.get('current_status_at')}"
+        )
     lines.append(f"credit_blocked_paused_count={len(credit_blocked)}")
     for row in credit_blocked[:10]:
         lines.append(
@@ -355,6 +427,11 @@ def check_candidates(fetch: Callable[..., list[dict[str, Any]]] = _get) -> list[
         for row in candidates
         if str(row.get("current_candidate_status") or "") in {"assigned", "evaluating"}
     ]
+    stale_active_scoring = _stale_active_rows(
+        active_scoring,
+        status_field="current_candidate_status",
+        active_statuses={"assigned", "evaluating"},
+    )
     lane_counts: Counter[str] = Counter()
     target_file_counts: Counter[str] = Counter()
     for row in candidates:
@@ -381,6 +458,16 @@ def check_candidates(fetch: Callable[..., list[dict[str, Any]]] = _get) -> list[
         f"{len(baseline_not_ready)} oldest_age_hours={_oldest_age_hours(baseline_not_ready)}"
     )
     lines.append(f"active_scoring_count={len(active_scoring)}")
+    lines.append(f"alert_stale_active_scoring_count={len(stale_active_scoring)}")
+    for row in stale_active_scoring[:10]:
+        lines.append(
+            "  stale_active_scoring"
+            f" candidate={_compact(row.get('candidate_id'))}"
+            f" run={_compact(row.get('run_id'))}"
+            f" status={row.get('current_candidate_status')}"
+            f" age_minutes={_age_minutes(row)}"
+            f" at={row.get('current_status_at')}"
+        )
     return lines
 
 

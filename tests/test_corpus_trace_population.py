@@ -25,6 +25,7 @@ from typing import Any, Mapping, Sequence
 
 import pytest
 
+import gateway.research_lab.trajectory_projector as projector_mod
 from gateway.research_lab.trajectory_projector import (
     EVIDENCE_BUNDLES_TABLE,
     EVIDENCE_RETENTION_CLASSES,
@@ -1044,6 +1045,39 @@ async def test_traces_backfill_batch_cap(tables, enabled):
     trace_ids = {row["run_id"] for row in store.tables[EXECUTION_TRACES_TABLE]}
     assert execution_trace_id_for_node(RUN_ID, "node-1") in trace_ids
     assert execution_trace_id_for_node(RUN_ID_2, "node-1") in trace_ids
+
+
+async def test_traces_backfill_attempt_cap_limits_failed_rows(enabled, monkeypatch):
+    class Store:
+        async def select_all(self, table, **kwargs):
+            return [
+                {"run_id": f"run-{idx}", "current_queue_status": "completed"}
+                for idx in range(5)
+            ]
+
+    attempted: list[str] = []
+
+    async def fake_backfill_run(run_id, *, store, dry_run):
+        attempted.append(run_id)
+        return projector_mod.ProjectionResult(
+            run_id=run_id,
+            status="failed",
+            trajectory_id=trajectory_id_for_run(run_id),
+            errors=["boom"],
+        )
+
+    monkeypatch.setattr(projector_mod, "backfill_run_corpus_trace_rows", fake_backfill_run)
+
+    results = await backfill_corpus_trace_rows(
+        batch_size=10,
+        dry_run=False,
+        store=Store(),
+        max_candidates=5,
+        max_attempts=2,
+    )
+
+    assert [result.run_id for result in results] == ["run-0", "run-1"]
+    assert attempted == ["run-0", "run-1"]
 
 
 # ---------------------------------------------------------------------------

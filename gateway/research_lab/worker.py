@@ -94,6 +94,10 @@ from research_lab.eval import (
 
 
 logger = logging.getLogger(__name__)
+_POSTGREST_TIMESTAMP_RE = re.compile(
+    r"^(?P<prefix>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"
+    r"\.(?P<fraction>\d{1,9})(?P<suffix>Z|[+-]\d{2}(?::?\d{2})?)?$"
+)
 
 
 def _idle_log_seconds() -> float:
@@ -202,10 +206,25 @@ def _is_openrouter_reasoning_effort_unsupported(status_code: int, message: str) 
 def _status_age_seconds(raw_status_at: object) -> float | None:
     if not raw_status_at:
         return None
+    text = str(raw_status_at).strip().replace("Z", "+00:00")
     try:
-        status_at = datetime.fromisoformat(str(raw_status_at).replace("Z", "+00:00"))
+        status_at = datetime.fromisoformat(text)
     except ValueError:
-        return None
+        match = _POSTGREST_TIMESTAMP_RE.match(text)
+        if not match:
+            return None
+        suffix = match.group("suffix") or ""
+        if suffix == "Z":
+            suffix = "+00:00"
+        elif re.fullmatch(r"[+-]\d{2}", suffix):
+            suffix = f"{suffix}:00"
+        elif re.fullmatch(r"[+-]\d{4}", suffix):
+            suffix = f"{suffix[:3]}:{suffix[3:]}"
+        fraction = (match.group("fraction") + "000000")[:6]
+        try:
+            status_at = datetime.fromisoformat(f"{match.group('prefix')}.{fraction}{suffix}")
+        except ValueError:
+            return None
     if status_at.tzinfo is None:
         status_at = status_at.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - status_at.astimezone(timezone.utc)).total_seconds()
@@ -217,6 +236,13 @@ def _status_is_stale(raw_status_at: object, stale_after_seconds: int) -> bool:
         60,
         int(stale_after_seconds or DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS),
     )
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 class HostedResearchLabWorkerError(RuntimeError):
@@ -1358,9 +1384,10 @@ class ResearchLabHostedWorker:
             if projector_enabled():
                 await project_completed_runs(dry_run=False)
                 await backfill_corpus_trace_rows(
-                    batch_size=10,
+                    batch_size=_env_int("RESEARCH_LAB_TRAJECTORY_BACKFILL_BATCH_SIZE", 2),
                     dry_run=False,
-                    max_candidates=250,
+                    max_candidates=_env_int("RESEARCH_LAB_TRAJECTORY_BACKFILL_MAX_CANDIDATES", 50),
+                    max_attempts=_env_int("RESEARCH_LAB_TRAJECTORY_BACKFILL_MAX_ATTEMPTS", 10),
                 )
         except Exception as exc:
             logger.warning(
@@ -3562,7 +3589,21 @@ class ResearchLabHostedWorker:
             )
             try:
                 with open_fn(req, timeout=int(timeout_seconds)) as response:
-                    decoded = json.loads(response.read().decode("utf-8"))
+                    response_status = getattr(response, "status", None) or getattr(response, "code", None)
+                    response_text = response.read().decode("utf-8", errors="replace")
+                    try:
+                        decoded = json.loads(response_text)
+                    except json.JSONDecodeError as exc:
+                        excerpt = response_text[:500]
+                        trace_doc = {"error_excerpt": excerpt}
+                        if response_status is not None:
+                            trace_doc["http_status"] = response_status
+                        _record_raw_trace(trace_doc, outcome="invalid_json_response")
+                        error = (
+                            "OpenRouter candidate generation failed: non-JSON response"
+                            f" status={response_status or 'unknown'} excerpt={excerpt[:200]}"
+                        )
+                        raise RetryableHostedResearchLabWorkerError(error) from exc
             except HTTPError as exc:
                 message = exc.read().decode("utf-8", errors="replace")[:500]
                 _record_raw_trace(

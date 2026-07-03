@@ -9,7 +9,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from .config import ResearchLabGatewayConfig
-from .house_arm import build_house_arm_comparison_report
 from .maintenance import (
     autoresearch_queue_status_counts,
     default_actor_ref,
@@ -21,6 +20,7 @@ from .maintenance import (
     repair_public_loop_cards,
     requeue_failed_candidate,
     requeue_failed_loop,
+    requeue_stale_started_autoresearch_runs,
     requeue_paused_autoresearch_runs,
     resume_credit_blocked_run,
     set_autoresearch_maintenance_paused,
@@ -38,13 +38,6 @@ from .promotion import (
     reconcile_pending_champion_rewards,
     reregister_active_manifest,
     sync_active_model_to_repo_head,
-)
-from .recovery import (
-    award_failed_run_reimbursements,
-    rebase_stale_parent_candidates as recovery_rebase_stale_parent_candidates,
-    recover_rebase_failed_candidates,
-    requeue_baseline_not_ready_candidates,
-    resume_failed_runs_from_checkpoint,
 )
 from .store import select_many, select_one
 
@@ -100,6 +93,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the failed-state and not-completed safety checks",
     )
+
+    requeue_stale_started = sub.add_parser(
+        "requeue-stale-started-runs",
+        help="Discover stale hosted auto-research runs stuck in started and requeue them append-only",
+    )
+    requeue_stale_started.add_argument("--reason", default="operator_requeue_stale_started")
+    requeue_stale_started.add_argument("--actor-ref", default=default_actor_ref())
+    requeue_stale_started.add_argument("--max-batch-size", type=int, default=25)
+    requeue_stale_started.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
+    requeue_stale_started.add_argument("--write", dest="dry_run", action="store_false")
 
     # --- Lifecycle recovery operators (default dry-run; pass --apply to write) ---
     resume_runs = sub.add_parser(
@@ -685,7 +688,16 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             dry_run=args.dry_run,
             force=args.force,
         )
+    if args.command == "requeue-stale-started-runs":
+        return await requeue_stale_started_autoresearch_runs(
+            reason=args.reason,
+            actor_ref=args.actor_ref,
+            dry_run=args.dry_run,
+            max_batch_size=args.max_batch_size,
+        )
     if args.command == "resume-failed-runs":
+        from .recovery import resume_failed_runs_from_checkpoint
+
         return await resume_failed_runs_from_checkpoint(
             run_ids=args.run_ids,
             dry_run=not args.apply,
@@ -693,12 +705,16 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             actor_ref=args.actor_ref,
         )
     if args.command == "requeue-baseline-not-ready":
+        from .recovery import requeue_baseline_not_ready_candidates
+
         return await requeue_baseline_not_ready_candidates(
             candidate_ids=args.candidate_ids,
             dry_run=not args.apply,
             actor_ref=args.actor_ref,
         )
     if args.command == "rebase-stale-parents":
+        from .recovery import rebase_stale_parent_candidates as recovery_rebase_stale_parent_candidates
+
         return await recovery_rebase_stale_parent_candidates(
             candidate_ids=args.candidate_ids,
             dry_run=not args.apply,
@@ -706,6 +722,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             actor_ref=args.actor_ref,
         )
     if args.command == "recover-rebase-failed":
+        from .recovery import recover_rebase_failed_candidates
+
         return await recover_rebase_failed_candidates(
             candidate_ids=args.candidate_ids,
             dry_run=not args.apply,
@@ -756,6 +774,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             dry_run=args.dry_run,
         )
     if args.command == "award-failed-run-reimbursements":
+        from .recovery import award_failed_run_reimbursements
+
         return await award_failed_run_reimbursements(
             run_id=args.run_id,
             limit=args.limit,
@@ -775,6 +795,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "check-duplicate-active":
         return await _check_duplicate_active_versions()
     if args.command == "house-arm-comparison":
+        from .house_arm import build_house_arm_comparison_report
+
         today = datetime.now(timezone.utc).date()
         end_date = args.end_date or today.isoformat()
         start_date = args.start_date or (today - timedelta(days=30)).isoformat()

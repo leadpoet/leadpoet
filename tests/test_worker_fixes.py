@@ -23,6 +23,7 @@ from urllib.error import URLError
 
 import pytest
 
+import gateway.research_lab.maintenance as maintenance_mod
 import gateway.research_lab.worker as worker_mod
 from gateway.research_lab.config import ResearchLabGatewayConfig
 
@@ -76,6 +77,24 @@ def _own_started_row():
         "current_event_seq": 5,
         "queue_priority": 0,
     }
+
+
+def test_postgrest_short_fraction_timestamps_count_as_stale():
+    base_status_at = (
+        datetime.now(timezone.utc) - timedelta(minutes=20)
+    ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-1]
+    values = (
+        base_status_at + "+00:00",
+        base_status_at + "+0000",
+        base_status_at + "+00",
+        (base_status_at + "+00:00").replace("T", " ", 1),
+    )
+
+    for value in values:
+        assert worker_mod._status_age_seconds(value) > 19 * 60
+        assert worker_mod._status_is_stale(value, 300)
+        assert maintenance_mod._parse_iso(value) is not None
+        assert maintenance_mod._status_is_stale(value, 300)
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +409,73 @@ def test_blocked_for_credit_is_the_only_reaper_exclusion():
     # requeue_capacity_conflict_parked (bug #28) must stay revivable by the
     # reaper — it is that run's recovery path.
     assert worker_mod._STALE_PAUSED_REAPER_EXCLUDED_REASONS == frozenset({"blocked_for_credit"})
+
+
+async def test_requeue_stale_started_runs_discovers_and_dry_runs(monkeypatch):
+    stale_at = (
+        datetime.now(timezone.utc) - timedelta(minutes=20)
+    ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-1] + "+00:00"
+    fresh_at = datetime.now(timezone.utc).isoformat()
+    rows = [
+        {
+            "run_id": "run-stale-1",
+            "ticket_id": "ticket-1",
+            "current_queue_status": "started",
+            "current_status_at": stale_at,
+        },
+        {
+            "run_id": "run-fresh",
+            "ticket_id": "ticket-2",
+            "current_queue_status": "started",
+            "current_status_at": fresh_at,
+        },
+        {
+            "run_id": "run-completed",
+            "ticket_id": "ticket-3",
+            "current_queue_status": "started",
+            "current_status_at": stale_at,
+        },
+    ]
+    requeue_calls = []
+
+    async def fake_select_all(table, **kwargs):
+        assert table == "research_loop_run_queue_current"
+        return rows
+
+    async def fake_select_one(table, **kwargs):
+        run_id = kwargs["filters"][0][1]
+        if run_id == "run-completed":
+            return {"run_id": run_id, "current_loop_status": "completed", "current_event_type": "loop_completed"}
+        return {"run_id": run_id, "current_loop_status": "running"}
+
+    async def fake_requeue_failed_loop(**kwargs):
+        requeue_calls.append(kwargs)
+        return {"ok": True, "run_id": kwargs["run_id"], "dry_run": kwargs["dry_run"]}
+
+    monkeypatch.setattr(maintenance_mod, "select_all", fake_select_all)
+    monkeypatch.setattr(maintenance_mod, "select_one", fake_select_one)
+    monkeypatch.setattr(maintenance_mod, "requeue_failed_loop", fake_requeue_failed_loop)
+
+    result = await maintenance_mod.requeue_stale_started_autoresearch_runs(
+        dry_run=True,
+        actor_ref="operator:test",
+        max_batch_size=10,
+    )
+
+    assert result["dry_run"] is True
+    assert result["discovered_started"] == 3
+    assert result["stale_started"] == 2
+    assert result["planned_or_requeued"] == 1
+    assert result["skipped"][0]["run_id"] == "run-completed"
+    assert requeue_calls == [
+        {
+            "run_id": "run-stale-1",
+            "reason": "operator_requeue_stale_started",
+            "actor_ref": "operator:test",
+            "dry_run": True,
+            "force": True,
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------

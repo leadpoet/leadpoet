@@ -3025,27 +3025,60 @@ class CodeEditLoopEngine:
                 )
 
                 remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
-                repair_result = _coerce_call_result(
-                    await self.call_openrouter(
-                        build_code_edit_repair_messages(
-                            draft=candidate_draft,
-                            apply_error=str(exc),
-                            source_inspection_context=source_inspection_context,
-                            runtime_source_context=source_context.prompt_context(),
-                            budget_context={
-                                **dict(budget_context),
-                                "loop_iteration": iteration,
-                                "repair_attempt": repair_attempt + 1,
-                                "candidate_kind": "image_build",
-                            },
-                            repair_attempt=repair_attempt + 1,
-                            max_candidates=1,
-                        ),
-                        min(settings.draft_timeout_seconds, remaining_call_seconds),
-                        3000,
-                        "code_edit_repair",
-                    )
+                repair_result, repair_call_error = await self._call_stage_contained(
+                    build_code_edit_repair_messages(
+                        draft=candidate_draft,
+                        apply_error=str(exc),
+                        source_inspection_context=source_inspection_context,
+                        runtime_source_context=source_context.prompt_context(),
+                        budget_context={
+                            **dict(budget_context),
+                            "loop_iteration": iteration,
+                            "repair_attempt": repair_attempt + 1,
+                            "candidate_kind": "image_build",
+                        },
+                        repair_attempt=repair_attempt + 1,
+                        max_candidates=1,
+                    ),
+                    min(settings.draft_timeout_seconds, remaining_call_seconds),
+                    3000,
+                    "code_edit_repair",
                 )
+                if repair_result is None:
+                    failure_usage = (
+                        repair_call_error.failure_usage_entries()
+                        if isinstance(repair_call_error, ContainedStageFailure)
+                        else []
+                    )
+                    if isinstance(repair_call_error, ContainedStageFailure):
+                        actual_cost_microusd += repair_call_error.cost_microusd
+                        provider_usage.extend(failure_usage)
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="code_edit_repair_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            node_id=node_id,
+                            provider_usage=failure_usage,
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "code_edit_repair_call_failed",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "repair_attempt": repair_attempt + 1,
+                                "stage": "code_edit_repair_call_failed",
+                                "target_files": list(candidate_draft.target_files),
+                                "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
+                                "error": repair_call_error or "code_edit_repair_call_failed",
+                            },
+                        )
+                    )
+                    if repair_attempt + 1 >= max_repairs:
+                        return None, openrouter_calls, estimated_cost, actual_cost_microusd, False
+                    continue
                 openrouter_calls += 1
                 estimated_cost += settings.estimated_iteration_cost_usd
                 actual_cost_microusd += max(0, int(repair_result.cost_microusd))

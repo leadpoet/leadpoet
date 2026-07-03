@@ -318,6 +318,71 @@ async def test_heartbeat_non_conflict_insert_error_still_warns_and_skips(hosted_
     assert context.claim_lost is False
 
 
+async def test_terminal_loop_projection_carries_failed_run_cost_ledger(hosted_worker, monkeypatch):
+    context = _make_context(receipt_id="55555555-5555-4555-8555-555555555555")
+    captured = []
+
+    async def fake_select_one(table, **kwargs):
+        assert table == "research_lab_auto_research_loop_current"
+        return None
+
+    async def fake_create_auto_research_loop_event(**kwargs):
+        captured.append(kwargs)
+        return {"seq": 7, "anchored_hash": "sha256:" + "e" * 64}
+
+    monkeypatch.setattr(worker_mod, "select_one", fake_select_one)
+    monkeypatch.setattr(worker_mod, "create_auto_research_loop_event", fake_create_auto_research_loop_event)
+
+    await hosted_worker._ensure_terminal_loop_projection(
+        context,
+        event_type="loop_failed",
+        loop_status="failed",
+        reason="system_error_after_spend",
+        event_doc={
+            "final_cost_ledger": {
+                "schema_version": "1.0",
+                "status": "failed",
+                "actual_openrouter_cost_microusd": 123456,
+                "actual_openrouter_cost_usd": 0.123456,
+                "total_usd": 0.123456,
+            },
+            "provider_usage": [{"provider": "openrouter", "response_id": "spent-before-error"}],
+        },
+    )
+
+    assert len(captured) == 1
+    assert captured[0]["event_type"] == "loop_failed"
+    assert captured[0]["cost_ledger"]["actual_openrouter_cost_microusd"] == 123456
+    assert captured[0]["provider_usage"][0]["response_id"] == "spent-before-error"
+
+
+def test_failure_exception_cost_evidence_merges_unpersisted_spend():
+    class CostedFailure(RuntimeError):
+        cost_microusd = 2500
+        provider_usage = {"provider": "openrouter", "response_id": "failed-generation"}
+
+    evidence = worker_mod._merge_failure_exception_cost_evidence(
+        {
+            "source": "loop_event",
+            "trusted_cost_ledger": True,
+            "cost_ledger": {
+                "schema_version": "1.0",
+                "actual_openrouter_cost_microusd": 1000,
+                "actual_openrouter_cost_usd": 0.001,
+                "total_usd": 0.001,
+                "openrouter_call_count": 1,
+            },
+            "provider_usage": [{"provider": "openrouter", "response_id": "persisted-generation"}],
+        },
+        CostedFailure("provider charged before failure"),
+    )
+
+    assert evidence["actual_openrouter_cost_microusd"] == 3500
+    assert evidence["cost_ledger"]["failure_exception_cost_microusd"] == 2500
+    assert evidence["provider_usage"][0]["response_id"] == "persisted-generation"
+    assert evidence["provider_usage"][1]["response_id"] == "failed-generation"
+
+
 async def test_to_thread_heartbeat_claim_lost_aborts_before_running_phase(hosted_worker, monkeypatch):
     context = _make_context()
 

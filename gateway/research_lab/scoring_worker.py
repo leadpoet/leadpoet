@@ -232,8 +232,7 @@ def _baseline_error_is_retryable(error_text: str) -> bool:
 
 
 class BaselineHealthGateFailure(RuntimeError):
-    """Raised when a completed baseline run fails its health gate and must not
-    be recorded as the day's promotion reference (§5.2-1)."""
+    """Raised when an explicitly configured baseline quality guard blocks a run."""
 
     def __init__(self, message: str, *, baseline_health: Mapping[str, Any]) -> None:
         super().__init__(message)
@@ -1125,14 +1124,18 @@ def _build_baseline_health(
     recovered: int,
     max_unresolved_icps: int,
 ) -> dict[str, Any]:
-    """Health verdict for a completed baseline run. ``gate_passed`` is consumed
-    by the promotion gate (legacy benchmark docs simply lack the key)."""
+    """Observe-only health summary for a completed baseline run.
+
+    Retry-exhausted provider errors are scored as zero ICPs and recorded here
+    for audit; they must not reject and re-run the whole benchmark.
+    """
     unresolved = sum(
         1 for summary in per_icp_summaries if _summary_has_unresolved_runtime_error(summary)
     )
     return {
         "unresolved_provider_errors": unresolved,
         "gate_passed": unresolved <= max_unresolved_icps,
+        "decision": "observe_only",
         "retried": int(retried),
         "recovered": int(recovered),
         "max_unresolved_icps": int(max_unresolved_icps),
@@ -4602,17 +4605,6 @@ class ResearchLabGatewayScoringWorker:
             )
             if day_jump_points is not None:
                 baseline_health["day_jump_points"] = round(day_jump_points, 4)
-            if not baseline_health["gate_passed"]:
-                # §5.2-1: a still-degraded run must never become the day's
-                # promotion reference — auto-promotion runs against it.
-                raise BaselineHealthGateFailure(
-                    "baseline_unresolved_provider_errors_gate_failed: "
-                    f"unresolved={baseline_health['unresolved_provider_errors']} "
-                    f"max={baseline_health['max_unresolved_icps']} "
-                    f"retried={retried_total} recovered={recovered_total}; "
-                    "refusing to record this run as the day's benchmark reference",
-                    baseline_health=baseline_health,
-                )
             max_day_jump = _baseline_max_day_jump_points()
             if (
                 max_day_jump is not None
@@ -4785,7 +4777,8 @@ class ResearchLabGatewayScoringWorker:
                     ("Private strength", visibility_split.get("private_strength_counts")),
                     ("Aggregate score", f"{aggregate_score:.4f}"),
                     ("Unresolved provider errors", baseline_health.get("unresolved_provider_errors")),
-                    ("Baseline gate", "passed" if baseline_health.get("gate_passed") else "FAILED"),
+                    ("Baseline health", "healthy" if baseline_health.get("gate_passed") else "degraded"),
+                    ("Health decision", baseline_health.get("decision") or "observe_only"),
                     ("Day jump", f"{day_jump_points:+.4f}" if day_jump_points is not None else "-"),
                     ("Elapsed", f"{time.time() - start:.1f}s"),
                 ),
@@ -4949,8 +4942,9 @@ class ResearchLabGatewayScoringWorker:
 
         A scorer-side provider failure is NOT fatal for the batch (§0-N6): the
         scorer call is retried once inline, then the ICP is marked unresolved
-        (retryable per the runner-error classifier) so the retry rounds and the
-        baseline health gate see it instead of the whole batch dying.
+        (retryable per the runner-error classifier) so retry rounds and
+        observe-only baseline health diagnostics see it instead of the whole
+        batch dying.
 
         The returned summary carries underscore-prefixed orchestration fields
         (_item_index, _retryable, _nonempty, _runtime_error) that MUST be popped
@@ -5191,7 +5185,7 @@ class ResearchLabGatewayScoringWorker:
         """Run all benchmark ICPs concurrently, then retry transient failures.
 
         Returns the ordered per-ICP summaries plus retry stats
-        (``retried``/``recovered``/``unresolved``) for the baseline health gate.
+        (``retried``/``recovered``/``unresolved``) for baseline health diagnostics.
 
         First pass fans out at private_baseline_concurrency. Provider/infra
         errors classified retryable are re-run for up to

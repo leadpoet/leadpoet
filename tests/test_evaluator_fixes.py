@@ -2,7 +2,7 @@
 
 Covers bugs #8/#14/#15/#31/#35 from the pre-launch audit:
 - timeout retry + 2-consecutive-timeout skip latch (and the legacy latch flag),
-- provider-flake retry with symmetric ICP exclusion (`provider_excluded_icp_ids`),
+- provider-flake retry with symmetric zero-score ICP accounting,
 - the local retryable-error classifier (Scrapingdog 400/410 retryable, auth permanent),
 - the `sourced_zero_no_error` silent-zero flag and in-container detection for
   httpx/requests/aiohttp,
@@ -32,6 +32,7 @@ EVAL_ENV_FLAGS = (
     "RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE",
     "RESEARCH_LAB_EVAL_MAX_SCORED_COMPANIES",
     "RESEARCH_LAB_EVAL_CANDIDATE_CONCURRENCY",
+    "RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS",
 )
 
 TIMEOUT_MSG = "docker private model adapter timed out"
@@ -133,8 +134,8 @@ async def test_latch_requires_two_consecutive_timeouts():
     timeout = lambda: PrivateModelRuntimeError(TIMEOUT_MSG)  # noqa: E731
     runner = ScriptedRunner(
         script={
-            "icp-0": [timeout(), timeout()],
-            "icp-1": [timeout(), timeout()],
+            "icp-0": [timeout(), timeout(), timeout()],
+            "icp-1": [timeout(), timeout(), timeout()],
         }
     )
     rows = await _score_items(runner, _benchmark_items(4))
@@ -144,8 +145,8 @@ async def test_latch_requires_two_consecutive_timeouts():
     # skipped without running.
     assert "candidate_model_runtime_skipped_after_timeout" in rows[2]["failure_reason"]
     assert "candidate_model_runtime_skipped_after_timeout" in rows[3]["failure_reason"]
-    assert runner.call_count("icp-0") == 2  # first attempt + one retry
-    assert runner.call_count("icp-1") == 2
+    assert runner.call_count("icp-0") == 3  # first attempt + two retry rounds
+    assert runner.call_count("icp-1") == 3
     assert runner.call_count("icp-2") == 0
     assert runner.call_count("icp-3") == 0
 
@@ -154,8 +155,8 @@ async def test_non_consecutive_timeouts_do_not_latch():
     timeout = lambda: PrivateModelRuntimeError(TIMEOUT_MSG)  # noqa: E731
     runner = ScriptedRunner(
         script={
-            "icp-0": [timeout(), timeout()],
-            "icp-2": [timeout(), timeout()],
+            "icp-0": [timeout(), timeout(), timeout()],
+            "icp-2": [timeout(), timeout(), timeout()],
         }
     )
     rows = await _score_items(runner, _benchmark_items(4))
@@ -179,28 +180,30 @@ async def test_legacy_timeout_latch_flag_restores_first_timeout_latch(monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# Bug #15 — provider-flake retry + symmetric exclusion
+# Bug #15 — provider-flake retry + symmetric zero-score accounting
 # ---------------------------------------------------------------------------
 
 
-async def test_retryable_provider_error_is_retried_then_excluded():
+async def test_retryable_provider_error_is_retried_then_scored_zero():
     runner = ScriptedRunner(
         script={
             "icp-1": [
+                PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG),
                 PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG),
                 PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG),
             ]
         }
     )
     rows = await _score_items(runner, _benchmark_items(3))
-    assert runner.call_count("icp-1") == 2
-    assert rows[1]["provider_excluded"] is True
+    assert runner.call_count("icp-1") == 3
+    assert rows[1]["provider_excluded"] is False
     assert "candidate_model_runtime_provider_error" in rows[1]["failure_reason"]
     assert rows[1]["candidate_company_scores"] == []
-    # Excluded from the aggregate instead of booking a hard 0: the mean covers
-    # only the two clean ICPs (50.0 each).
-    assert evaluator._benchmark_style_score(rows, "candidate_company_scores") == pytest.approx(50.0)
-    assert evaluator._provider_excluded_icp_ids(rows) == ["icp-1"]
+    # Retry-exhausted provider failures stay in the aggregate as zero-score ICPs.
+    assert evaluator._benchmark_style_score(rows, "candidate_company_scores") == pytest.approx(
+        (50.0 + 0.0 + 50.0) / 3
+    )
+    assert evaluator._provider_excluded_icp_ids(rows) == []
 
 
 async def test_provider_error_recovered_on_retry_scores_normally():
@@ -214,13 +217,14 @@ async def test_provider_error_recovered_on_retry_scores_normally():
     assert rows[0]["failure_reason"] == ""
 
 
-async def test_permanent_provider_error_not_retried_but_excluded():
+async def test_permanent_provider_error_not_retried_and_scores_zero():
     runner = ScriptedRunner(script={"icp-0": [PrivateModelRuntimeError(PROVIDER_PERMANENT_MSG)]})
     rows = await _score_items(runner, _benchmark_items(2))
-    # Permanent (auth) errors get no retry, but a final provider error is still
-    # infra noise, so the ICP is excluded rather than booked 0.
     assert runner.call_count("icp-0") == 1
-    assert rows[0]["provider_excluded"] is True
+    assert rows[0]["provider_excluded"] is False
+    assert evaluator._benchmark_style_score(rows, "candidate_company_scores") == pytest.approx(
+        (0.0 + 50.0) / 2
+    )
 
 
 async def test_provider_flake_retry_flag_off_restores_legacy_zeroing(monkeypatch):
@@ -230,7 +234,7 @@ async def test_provider_flake_retry_flag_off_restores_legacy_zeroing(monkeypatch
     assert runner.call_count("icp-1") == 1  # no retry
     assert rows[1]["provider_excluded"] is False
     assert evaluator._provider_excluded_icp_ids(rows) == []
-    # Legacy: the flaked ICP contributes a hard 0 to the mean.
+    # Retry flag off skips retries, but the failed ICP still contributes 0.
     assert evaluator._benchmark_style_score(rows, "candidate_company_scores") == pytest.approx(
         (50.0 + 0.0 + 50.0) / 3
     )
@@ -242,19 +246,22 @@ async def test_provider_error_never_latches_remaining_icps():
             "icp-0": [
                 PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG),
                 PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG),
+                PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG),
             ]
         }
     )
     rows = await _score_items(runner, _benchmark_items(3))
+    assert runner.call_count("icp-0") == 3
     assert runner.call_count("icp-1") == 1
     assert runner.call_count("icp-2") == 1
     assert all("skipped_after" not in row["failure_reason"] for row in rows)
 
 
-async def test_gate_records_provider_excluded_icp_ids_and_excludes_from_totals():
+async def test_gate_keeps_retry_exhausted_provider_failures_in_totals():
     runner = ScriptedRunner(
         script={
             "icp-1": [
+                PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG),
                 PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG),
                 PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG),
             ]
@@ -278,12 +285,11 @@ async def test_gate_records_provider_excluded_icp_ids_and_excludes_from_totals()
         gate=gate,
     )
     assert gate_result["decision"] == "private_holdout_approved"
-    # Public score covers only the clean public ICP (icp-0 at 50.0).
-    assert gate_result["candidate_public_score"] == pytest.approx(50.0)
-    # Total covers icp-0/icp-2/icp-3; the excluded icp-1 is dropped, not zeroed.
-    assert gate_result["candidate_total_score"] == pytest.approx(50.0)
-    assert gate_result["provider_excluded_icp_ids"] == ["icp-1"]
-    assert gate_result["candidate_delta_vs_daily_baseline"] == pytest.approx(30.0)
+    # Public and total scores include the retry-exhausted provider failure as 0.
+    assert gate_result["candidate_public_score"] == pytest.approx((50.0 + 0.0) / 2)
+    assert gate_result["candidate_total_score"] == pytest.approx((50.0 + 0.0 + 50.0 + 50.0) / 4)
+    assert gate_result["provider_excluded_icp_ids"] == []
+    assert gate_result["candidate_delta_vs_daily_baseline"] == pytest.approx(17.5)
     assert len(all_results) == 4
 
 
@@ -326,6 +332,7 @@ async def test_sourced_zero_no_error_flag():
             "icp-1": [
                 PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG),
                 PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG),
+                PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG),
             ],
         }
     )
@@ -339,7 +346,7 @@ async def test_sourced_zero_no_error_flag():
 
     health = evaluator.build_scoring_health_doc(rows)
     assert health["sourced_zero_no_error_count"] == 1
-    assert health["provider_excluded_icp_count"] == 1
+    assert health["provider_excluded_icp_count"] == 0
     assert health["health_status"] == "degraded"
 
 
@@ -663,7 +670,7 @@ async def test_concurrent_candidate_scoring_orders_results_deterministically(mon
 
 
 # ---------------------------------------------------------------------------
-# Bundle surface — provider_excluded_icp_ids rides the score bundle
+# Bundle surface — legacy provider_excluded_icp_ids remains empty for new bundles
 # ---------------------------------------------------------------------------
 
 
@@ -684,10 +691,11 @@ def _artifact_manifest(seed: str) -> dict:
     return {**payload, "manifest_hash": sha256_json(payload)}
 
 
-async def test_bundle_carries_provider_excluded_icp_ids_and_health_counts():
+async def test_bundle_keeps_retry_exhausted_provider_failures_in_aggregate_and_health():
     runner = ScriptedRunner(
         script={
             "icp-1": [
+                PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG),
                 PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG),
                 PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG),
             ]
@@ -720,7 +728,12 @@ async def test_bundle_carries_provider_excluded_icp_ids_and_health_counts():
             "signature_ref": "pending",
         },
     )
-    assert bundle["provider_excluded_icp_ids"] == ["icp-1"]
-    assert bundle["scoring_health"]["provider_excluded_icp_count"] == 1
-    assert bundle["scoring_health"]["provider_excluded_icp_rate"] == pytest.approx(1 / 3)
+    assert bundle["provider_excluded_icp_ids"] == []
+    assert bundle["scoring_health"]["provider_excluded_icp_count"] == 0
+    assert bundle["scoring_health"]["provider_excluded_icp_rate"] == pytest.approx(0.0)
+    assert bundle["scoring_health"]["provider_error_count"] == 1
+    expected_clean_icp = aggregation.per_icp_normalized_score([50.0], max_leads=5)
+    assert bundle["aggregates"]["candidate_score"] == pytest.approx(
+        (expected_clean_icp + 0.0 + expected_clean_icp) / 3
+    )
     assert bundle["score_bundle_hash"] == bundle["anchored_hash"]

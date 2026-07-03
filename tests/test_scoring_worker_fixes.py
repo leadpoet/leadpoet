@@ -1,6 +1,6 @@
 """Tests for the scoring_worker fixes from fableanalysis.md.
 
-Covers: bug #37 (retry classifier), §5.2-1 (baseline health gate), bug #6
+Covers: bug #37 (retry classifier), §5.2-1 (baseline health diagnostics), bug #6
 (claim-attempt accounting), bug #10 (unknown errors default retryable),
 bug #36 write side (sanitized event error docs), bug #9 (audit event window
 scoping), and the same-day baseline replacement guard.
@@ -193,7 +193,7 @@ def test_failure_class_provider_4xx_uses_baseline_classifier():
     assert retryable is False
 
 
-# --- §5.2-1: baseline health gate ---
+# --- §5.2-1: observe-only baseline health diagnostics ---
 
 
 def _summaries(*runtime_errors):
@@ -212,6 +212,7 @@ def test_build_baseline_health_counts_unresolved_and_gates():
     )
     assert health["unresolved_provider_errors"] == 3
     assert health["gate_passed"] is False
+    assert health["decision"] == "observe_only"
     assert health["retried"] == 3
     assert health["recovered"] == 1
     assert health["max_unresolved_icps"] == 2
@@ -225,6 +226,7 @@ def test_build_baseline_health_passes_at_threshold():
         max_unresolved_icps=2,
     )
     assert health["gate_passed"] is True
+    assert health["decision"] == "observe_only"
 
 
 def test_baseline_health_gate_failure_carries_health():

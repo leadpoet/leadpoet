@@ -94,9 +94,10 @@ def _timeout_latch_legacy_enabled() -> bool:
 
 
 def _provider_flake_retry_enabled() -> bool:
-    """Bug #15 fairness fix: retry retryable candidate provider errors once and
-    exclude still-failing ICPs from the candidate aggregate instead of booking
-    a hard 0 for infra noise. Default ON; flip off to restore legacy zeroing.
+    """Retry retryable candidate provider errors before scoring them as misses.
+
+    Default ON; flip off only to skip provider retries. Retry-exhausted provider
+    failures are never excluded from aggregates in the current scoring contract.
     """
     return _env_flag("RESEARCH_LAB_EVAL_PROVIDER_FLAKE_RETRY", True)
 
@@ -129,6 +130,15 @@ def _candidate_scoring_concurrency() -> int:
     so summary hashing stays deterministic regardless of completion order.
     """
     return max(1, _env_int("RESEARCH_LAB_EVAL_CANDIDATE_CONCURRENCY", 1))
+
+
+def _candidate_provider_retry_rounds() -> int:
+    """Candidate retry rounds mirror daily-baseline provider retries.
+
+    The shared env keeps candidate and rebenchmark scoring comparable:
+    initial attempt + N retry rounds for retryable provider/timeouts.
+    """
+    return max(0, _env_int("RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS", 2))
 
 
 class RealEvaluatorRequired(RuntimeError):
@@ -286,11 +296,9 @@ async def score_private_model_pair_items(
       only engages after 2+ consecutive post-retry timeouts
       (``RESEARCH_LAB_EVAL_TIMEOUT_LATCH_LEGACY=true`` restores first-timeout
       latching with no retry).
-    - Retryable candidate provider errors are retried once; ICPs that still
-      provider-error are marked ``provider_excluded`` and dropped from
-      ``_benchmark_style_score`` aggregates instead of booking a hard 0
-      (``RESEARCH_LAB_EVAL_PROVIDER_FLAKE_RETRY=false`` restores legacy
-      zeroing).
+    - Retryable candidate provider errors are retried for the same number of
+      rounds as daily baseline rebenchmarks; retry-exhausted failures score 0
+      and remain in the aggregate.
     - Any candidate ICP that returns zero companies without a recorded runtime
       error is flagged ``sourced_zero_no_error`` (bug #35) so health gates and
       unresolved-error counters can see silent zeros.
@@ -572,15 +580,14 @@ async def _run_candidate_with_retries(
     legacy_timeout_latch: bool,
     provider_flake_retry: bool,
 ) -> tuple[list[Mapping[str, Any]], str, bool]:
-    """Run the candidate for one ICP with at most one fairness retry.
+    """Run the candidate for one ICP with baseline-matched retry rounds.
 
-    Returns ``(outputs, failure_reason, provider_excluded)``. Timeouts retry
-    once unless the legacy latch flag is on (bug #14); provider errors the
-    local classifier deems retryable retry once, and an ICP that still
-    provider-errors afterwards is excluded from aggregates instead of booking
-    a hard 0 (bug #15). Non-scoreable runtime failures re-raise as before.
+    Returns ``(outputs, failure_reason, provider_excluded)``. The third value is
+    retained for legacy row shape compatibility, but newly scored rows always
+    return ``False`` so retry-exhausted provider failures contribute a zero ICP.
     """
     attempts = 0
+    max_attempts = 1 + _candidate_provider_retry_rounds()
     while True:
         attempts += 1
         try:
@@ -594,18 +601,14 @@ async def _run_candidate_with_retries(
             failure_reason = _scoreable_candidate_runtime_failure_reason(exc)
             if not failure_reason:
                 raise
-            if attempts == 1 and _candidate_failure_should_retry(
+            if attempts < max_attempts and _candidate_failure_should_retry(
                 failure_reason,
                 str(exc),
                 legacy_timeout_latch=legacy_timeout_latch,
                 provider_flake_retry=provider_flake_retry,
             ):
                 continue
-            provider_excluded = (
-                provider_flake_retry
-                and failure_reason == "candidate_model_runtime_provider_error"
-            )
-            return [], failure_reason, provider_excluded
+            return [], failure_reason, False
 
 
 def _candidate_failure_should_retry(
@@ -1027,9 +1030,8 @@ async def _score_with_private_holdout_gate(
         "public_icp_count": len(public_items),
         "private_holdout_icp_count": len(private_items),
         "private_holdout_evaluated": bool(passed_public_gate),
-        # Fixed promotion contract (bug #15): ICPs excluded for unresolved
-        # provider errors; the promotion-side merge metric drops the matching
-        # baseline ICPs so the exclusion stays symmetric.
+        # Legacy field retained for old/resumed bundles. New candidate scoring
+        # keeps retry-exhausted provider failures in the aggregate as zero ICPs.
         "provider_excluded_icp_ids": _provider_excluded_icp_ids(public_results),
     }
     if not passed_public_gate:
@@ -1087,19 +1089,13 @@ def _benchmark_style_score(
     # model (one failed company is skipped, not fatal), so this 0 only happens when the
     # whole ICP yielded nothing.
     #
-    # Two deliberate deviations:
-    # - Rows marked provider_excluded (unresolved provider flakes after retry,
-    #   bug #15) are dropped from the aggregate entirely instead of booking 0;
-    #   their ids ride the provider_excluded_icp_ids contract so the promotion
-    #   side drops the matching baseline ICPs.
+    # One deliberate deviation:
     # - With RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE on (bug #8), the per-ICP score
     #   is the verifier's capped sum(top-5 company scores)/5 instead of the
     #   unweighted mean, closing the truncate-to-best-company exploit.
     capped_top5 = _capped_top5_score_enabled()
     per_icp_scores: list[float] = []
     for row in per_icp_results:
-        if row.get("provider_excluded"):
-            continue
         scores = row.get(score_field)
         if not isinstance(scores, Sequence) or isinstance(scores, (str, bytes, bytearray)):
             per_icp_scores.append(0.0)
@@ -1132,12 +1128,10 @@ def _benchmark_icp_score(values: list[float], *, capped_top5: bool) -> float:
 
 
 def _provider_excluded_icp_ids(per_icp_results: Sequence[Mapping[str, Any]]) -> list[str]:
-    """Identifiers of ICPs excluded for unresolved provider errors (bug #15).
+    """Legacy identifiers of ICPs excluded for unresolved provider errors.
 
-    KEY NAME IS A FIXED CONTRACT: the promotion-side merge metric reads
-    ``provider_excluded_icp_ids`` and drops the matching baseline ICPs so
-    exclusion stays symmetric. Ids are the per-ICP ``icp_ref`` (falling back to
-    ``icp_hash``), deduplicated and sorted.
+    New scoring no longer sets ``provider_excluded``; this remains so older
+    score bundles and resumed progress rows can still be inspected.
     """
     ids = {
         str(row.get("icp_ref") or row.get("icp_hash") or "")
@@ -1245,8 +1239,8 @@ def build_score_bundle_from_scored_icps(
         **bundle,
         **extra_fields,
         "scoring_health": scoring_health,
-        # Fixed promotion contract (bug #15): also surfaced at bundle top level
-        # so non-holdout-gate callers can consume it.
+        # Legacy surface for old/resumed provider-exclusion rows. New scoring
+        # should leave this empty and include retry-exhausted ICPs as zero.
         "provider_excluded_icp_ids": _provider_excluded_icp_ids(per_icp_results),
         "score_bundle_hash": "",
         "anchored_hash": "",

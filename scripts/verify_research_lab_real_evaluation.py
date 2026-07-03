@@ -238,12 +238,20 @@ def main() -> int:
         timeout_results = timeout_bundle["aggregates"]["per_icp_results"]
         if "candidate_model_runtime_timeout" not in timeout_results[0]["failure_reason"]:
             errors.append("candidate timeout failure reason was not recorded")
-        # Bug #14: the first timeout is retried once and the skip latch only
-        # engages after 2+ consecutive post-retry timeouts, so ICPs a and b are
-        # each attempted twice and only ICP c is skipped.
+        # Bug #14 + symmetric retry semantics: candidate timeouts use initial
+        # attempt plus two retry rounds, and the skip latch engages only after
+        # 2+ consecutive retry-exhausted timeouts. ICPs a and b are each
+        # attempted three times and only ICP c is skipped.
         if "candidate_model_runtime_skipped_after_timeout" not in timeout_results[2]["failure_reason"]:
             errors.append("candidate timeout did not skip remaining public ICP candidate calls after 2 consecutive timeouts")
-        if timeout_candidate_calls != ["public-a", "public-a", "public-b", "public-b"]:
+        if timeout_candidate_calls != [
+            "public-a",
+            "public-a",
+            "public-a",
+            "public-b",
+            "public-b",
+            "public-b",
+        ]:
             errors.append(f"candidate timeout retry/latch call pattern unexpected: {timeout_candidate_calls}")
         timeout_gate = timeout_bundle.get("private_holdout_gate") or {}
         if timeout_gate.get("decision") != "rejected_before_private_holdout":

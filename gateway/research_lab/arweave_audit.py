@@ -21,6 +21,13 @@ RESEARCH_LAB_EPOCH_AUDIT_EVENT_TYPE = "RESEARCH_LAB_EPOCH_AUDIT"
 logger = logging.getLogger(__name__)
 
 
+def _normalize_sha256_ref(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return raw if raw.startswith("sha256:") else f"sha256:{raw}"
+
+
 async def publish_research_lab_epoch_audit(
     *,
     epoch: int,
@@ -206,18 +213,44 @@ async def record_research_lab_checkpointed_events(
         log_entry = event.get("signed_log_entry") if isinstance(event.get("signed_log_entry"), Mapping) else {}
         signed_event = log_entry.get("signed_event") if isinstance(log_entry.get("signed_event"), Mapping) else {}
         payload = signed_event.get("payload") if isinstance(signed_event.get("payload"), Mapping) else {}
-        anchor = await _existing_anchor_for_payload(
-            epoch=int(payload.get("epoch", 0)),
-            netuid=int(payload.get("netuid", 0)),
-            audit_kind=str(payload.get("audit_kind", "")),
-            payload_hash=str(payload.get("payload_hash") or sha256_json(payload)),
-        )
+        transparency_event_hash = str(event.get("event_hash") or log_entry.get("event_hash") or "")
+        anchor = None
+        if transparency_event_hash:
+            anchor = await select_one(
+                "research_lab_arweave_epoch_audit_anchor_current",
+                filters=(("current_transparency_event_hash", transparency_event_hash),),
+            )
+        if not anchor:
+            payload_hash_candidates: list[str] = []
+            for candidate in (
+                event.get("payload_hash"),
+                log_entry.get("payload_hash"),
+                payload.get("payload_hash"),
+                sha256_json(payload) if payload else "",
+            ):
+                payload_hash = _normalize_sha256_ref(candidate)
+                if payload_hash and payload_hash not in payload_hash_candidates:
+                    payload_hash_candidates.append(payload_hash)
+            for payload_hash in payload_hash_candidates:
+                anchor = await _existing_anchor_for_payload(
+                    epoch=int(payload.get("epoch", 0)),
+                    netuid=int(payload.get("netuid", 0)),
+                    audit_kind=str(payload.get("audit_kind", "")),
+                    payload_hash=payload_hash,
+                )
+                if anchor:
+                    break
         if not anchor:
             continue
         await create_arweave_epoch_audit_anchor_event(
             anchor_id=str(anchor["anchor_id"]),
             event_type="checkpointed",
             anchor_status="checkpointed",
+            transparency_event_hash=transparency_event_hash or None,
+            tee_sequence=event.get("sequence"),
+            checkpoint_number=header.get("checkpoint_number"),
+            checkpoint_merkle_root=header.get("merkle_root"),
+            arweave_tx_id=arweave_tx_id,
             event_doc={
                 "arweave_tx_id": arweave_tx_id,
                 "checkpoint_number": header.get("checkpoint_number"),
@@ -225,7 +258,7 @@ async def record_research_lab_checkpointed_events(
                 "checkpoint_sequence_range": header.get("sequence_range"),
                 "checkpoint_event_count": header.get("event_count"),
                 "tee_sequence": event.get("sequence"),
-                "transparency_event_hash": log_entry.get("event_hash"),
+                "transparency_event_hash": transparency_event_hash,
             },
         )
         recorded += 1

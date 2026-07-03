@@ -72,10 +72,15 @@ async def main() -> int:
 
         captured_events: list[dict[str, Any]] = []
         async def fake_existing_anchor(**kwargs: Any) -> dict[str, Any] | None:
+            raise AssertionError(f"payload-hash fallback should not be needed: {kwargs}")
+        async def fake_anchor_select_one(table: str, **kwargs: Any) -> dict[str, Any] | None:
+            assert table == "research_lab_arweave_epoch_audit_anchor_current"
+            assert ("current_transparency_event_hash", "e" * 64) in kwargs["filters"]
             return {"anchor_id": "research_lab_arweave_anchor:" + "2" * 64}
         async def fake_create_event(**kwargs: Any) -> dict[str, Any]:
             captured_events.append(dict(kwargs))
             return dict(kwargs)
+        arweave_audit.select_one = fake_anchor_select_one  # type: ignore[assignment]
         arweave_audit._existing_anchor_for_payload = fake_existing_anchor  # type: ignore[assignment]
         arweave_audit.create_arweave_epoch_audit_anchor_event = fake_create_event  # type: ignore[assignment]
         recorded = await arweave_audit.record_research_lab_checkpointed_events(
@@ -90,6 +95,11 @@ async def main() -> int:
         )
         assert recorded == 1
         assert captured_events[0]["event_type"] == "checkpointed"
+        assert captured_events[0]["arweave_tx_id"] == "arweave_tx_fixture"
+        assert captured_events[0]["checkpoint_number"] == 7
+        assert captured_events[0]["checkpoint_merkle_root"] == "3" * 64
+        assert captured_events[0]["tee_sequence"] == 11
+        assert captured_events[0]["transparency_event_hash"] == "e" * 64
         assert captured_events[0]["event_doc"]["arweave_tx_id"] == "arweave_tx_fixture"
 
         appended_events: list[dict[str, Any]] = []

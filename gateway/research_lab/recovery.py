@@ -608,6 +608,10 @@ async def requeue_baseline_not_ready_candidates(
                 window = await fetch_rolling_icp_window(
                     days=config.lab_champion_eval_days,
                     icps_per_day=config.lab_champion_icps_per_day,
+                    window_mode=config.lab_champion_window_mode,
+                    fresh_icp_count=config.lab_champion_fresh_icp_count,
+                    retained_icp_count=config.lab_champion_retained_icp_count,
+                    min_new_icp_count=config.lab_champion_fresh_icp_count,
                     allow_partial=config.scoring_worker_allow_partial_icp_window,
                 )
             except RollingIcpWindowUnavailable as exc:

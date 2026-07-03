@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify deterministic Research Lab 10-day / 60-ICP window selection."""
+"""Verify deterministic Research Lab hybrid fresh/retained ICP window selection."""
 
 from __future__ import annotations
 
@@ -12,43 +12,67 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway.research_lab.bundles import contains_secret_material
-from gateway.research_lab.icp_window import intent_signal_signature, select_rolling_icp_window_from_sets
+from gateway.research_lab.icp_window import (
+    SELECTION_POLICY_HYBRID,
+    WINDOW_MODE_HYBRID_FRESH_RETAINED,
+    intent_signal_signature,
+    reconstruct_icp_window_from_doc,
+    select_rolling_icp_window_from_sets,
+)
 from research_lab.canonical import sha256_json
 
 
 def main() -> int:
     rows = [_fake_set(20260601 + day) for day in range(10)]
-    first = select_rolling_icp_window_from_sets(rows, days=10, icps_per_day=6)
-    second = select_rolling_icp_window_from_sets(list(reversed(rows)), days=10, icps_per_day=6)
+    first = select_rolling_icp_window_from_sets(rows)
+    second = select_rolling_icp_window_from_sets(list(reversed(rows)))
+    next_day = select_rolling_icp_window_from_sets([_fake_set(20260602 + day) for day in range(10)])
+    reconstructed = reconstruct_icp_window_from_doc(rows, first.public_doc)
 
     errors: list[str] = []
     if first.window_hash != second.window_hash:
         errors.append("selection must be deterministic independent of input row order")
-    if len(first.set_ids) != 10:
-        errors.append(f"expected 10 sets, got {len(first.set_ids)}")
-    if len(first.benchmark_items) != 60:
-        errors.append(f"expected 60 selected ICPs, got {len(first.benchmark_items)}")
+    if reconstructed.window_hash != first.window_hash:
+        errors.append("stored hybrid window doc must reconstruct to the same hash")
+    if len(first.benchmark_items) != 20:
+        errors.append(f"expected 20 selected ICPs, got {len(first.benchmark_items)}")
+    fresh = [item for item in first.benchmark_items if item.get("cohort") == "fresh"]
+    retained = [item for item in first.benchmark_items if item.get("cohort") == "retained"]
+    if len(fresh) != 10:
+        errors.append(f"expected 10 fresh ICPs, got {len(fresh)}")
+    if len(retained) != 10:
+        errors.append(f"expected 10 retained ICPs, got {len(retained)}")
+    retained_set_count = len({int(item["set_id"]) for item in retained})
+    if retained_set_count < 5:
+        errors.append(f"expected retained ICPs to spread across recent prior sets, got {retained_set_count}")
+    overlap = len(set(first.item_refs) & set(next_day.item_refs))
+    if len(next_day.item_refs) - overlap < 10:
+        errors.append(f"expected at least 10 new day-over-day ICPs, got {len(next_day.item_refs) - overlap}")
     if any(not item["icp_hash"].startswith("sha256:") for item in first.benchmark_items):
         errors.append("all selected ICPs must have sha256 hashes")
     if any("icp" in selected for day in first.public_doc["sets"] for selected in day["selected_icps"]):
         errors.append("public window doc must not include hidden ICP plaintext")
     if contains_secret_material(first.public_doc):
         errors.append("public window doc contains forbidden secret/private markers")
-    if first.public_doc["selection_policy"] != "diverse_intent_industry_stable_hash:v2":
-        errors.append("selection policy did not use v2 diverse selector")
+    if first.public_doc["schema_version"] != "1.1":
+        errors.append("hybrid public window doc must be schema_version 1.1")
+    if first.public_doc["window_mode"] != WINDOW_MODE_HYBRID_FRESH_RETAINED:
+        errors.append("hybrid public window doc must record window_mode")
+    if first.public_doc["selection_policy"] != SELECTION_POLICY_HYBRID:
+        errors.append("selection policy did not use hybrid fresh/retained selector")
+    if first.public_doc.get("fresh_icp_count") != 10 or first.public_doc.get("retained_icp_count") != 10:
+        errors.append("hybrid public window doc must record 10 fresh and 10 retained ICPs")
     for day in first.public_doc["sets"]:
-        if len(day["selected_icps"]) != 6:
-            errors.append(f"set {day['set_id']} expected 6 ICPs, got {len(day['selected_icps'])}")
-        signatures = [item["intent_signal_signature"] for item in day["selected_icps"]]
-        if len(signatures) != len(set(signatures)):
-            errors.append(f"set {day['set_id']} did not prefer unique intent signatures")
-    if len({item["icp_ref"] for item in first.benchmark_items}) != 60:
+        signatures = [item["intent_signal_signature"] for item in day["selected_icps"] if item.get("cohort") == "fresh"]
+        if signatures and len(signatures) != len(set(signatures)):
+            errors.append(f"set {day['set_id']} did not prefer unique fresh intent signatures")
+    if len({item["icp_ref"] for item in first.benchmark_items}) != 20:
         errors.append("selected ICP refs must be unique")
 
-    old_score = _old_selection_diversity(rows[0]["icps"], 6)
-    new_score = _selection_diversity(first.benchmark_items[:6])
-    if new_score <= old_score:
-        errors.append(f"v2 selector did not improve first-day diversity: old={old_score}, new={new_score}")
+    fresh_score = _selection_diversity(fresh)
+    retained_score = _selection_diversity(retained)
+    if fresh_score <= 0 or retained_score <= 0:
+        errors.append("hybrid selector did not produce diversity-checkable fresh and retained cohorts")
 
     if errors:
         for error in errors:
@@ -56,6 +80,7 @@ def main() -> int:
         return 1
     print(
         "Research Lab ICP window verified: "
+        f"mode={first.public_doc['window_mode']} fresh={len(fresh)} retained={len(retained)} "
         f"sets={len(first.set_ids)}, icps={len(first.benchmark_items)}, hash={first.window_hash}"
     )
     return 0
@@ -94,25 +119,6 @@ def _fake_set(set_id: int) -> dict[str, object]:
         "icps": icps,
         "icp_set_hash": sha256_json(icps).split(":", 1)[1],
     }
-
-
-def _old_selection_diversity(icps: list[dict[str, object]], icps_per_day: int) -> int:
-    ranked = sorted(
-        icps,
-        key=lambda icp: (
-            intent_signal_signature(icp),
-            sha256_json(
-                {
-                    "icp_id": icp.get("icp_id"),
-                    "industry": icp.get("industry"),
-                    "sub_industry": icp.get("sub_industry"),
-                    "intent_signals": icp.get("intent_signals"),
-                    "prompt": icp.get("prompt"),
-                }
-            ),
-        ),
-    )
-    return _icp_diversity(ranked[:icps_per_day])
 
 
 def _selection_diversity(items: list[dict[str, object]] | tuple[dict[str, object], ...]) -> int:

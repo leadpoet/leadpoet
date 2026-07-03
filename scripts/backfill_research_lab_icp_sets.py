@@ -79,6 +79,7 @@ async def main_async() -> int:
             [row],
             days=1,
             icps_per_day=6,
+            window_mode="legacy_rolling",
             allow_partial=False,
         )
         print(
@@ -105,6 +106,7 @@ async def main_async() -> int:
         generated_rows,
         days=min(args.days, 10),
         icps_per_day=6,
+        window_mode="legacy_rolling",
         allow_partial=False,
     )
     print(

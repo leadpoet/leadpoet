@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only Supabase dry run for the Research Lab 60-ICP rolling window."""
+"""Read-only Supabase dry run for the Research Lab hybrid ICP window."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def main() -> int:
         .execute()
     )
     rows = getattr(response, "data", None) or []
-    window = select_rolling_icp_window_from_sets(rows, days=10, icps_per_day=6, allow_partial=False)
+    window = select_rolling_icp_window_from_sets(rows, days=10, icps_per_day=2, allow_partial=False)
 
     industries = set()
     sub_industries = set()
@@ -50,6 +50,9 @@ def main() -> int:
 
     print(
         "Research Lab Supabase ICP window dry run: "
+        f"mode={window.public_doc.get('window_mode')} "
+        f"fresh={window.public_doc.get('fresh_icp_count')} "
+        f"retained={window.public_doc.get('retained_icp_count')} "
         f"sets={len(window.set_ids)} icps={len(window.benchmark_items)} "
         f"industries={len(industries)} sub_industries={len(sub_industries)} "
         f"intent_signatures={len(signatures)} hash={window.window_hash}"

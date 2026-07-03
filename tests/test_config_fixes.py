@@ -60,8 +60,10 @@ def test_bug_32_reconciled_contradictions(clean_env):
     # planner tokens: was 2400 (dataclass) vs 12000 (env default).
     assert declared.loop_planner_max_tokens == 12000
     assert from_env.loop_planner_max_tokens == 12000
-    # public split totals: were None (dataclass) vs 10/7 (env defaults), and 10
-    # exposed half the 20-ICP private window; both sides now 6/4.
+    # Hybrid benchmark defaults: 10 fresh + 10 retained, public 7 weak / 3 strong.
+    assert declared.lab_champion_window_mode == from_env.lab_champion_window_mode == "hybrid_fresh_retained"
+    assert declared.lab_champion_fresh_icp_count == from_env.lab_champion_fresh_icp_count == 10
+    assert declared.lab_champion_retained_icp_count == from_env.lab_champion_retained_icp_count == 10
     assert declared.public_benchmark_public_total_icps == from_env.public_benchmark_public_total_icps
     assert declared.public_benchmark_public_weak_total == from_env.public_benchmark_public_weak_total
 
@@ -81,17 +83,27 @@ def test_section_6_4_recommended_defaults(clean_env):
     assert config.code_edit_source_inspection_max_files == 12
 
 
-def test_public_split_ratio_rule(clean_env):
-    """§6.4: the default public split exposes at most 1/3 of the private window."""
+def test_hybrid_window_and_public_split_defaults(clean_env):
+    """Hybrid benchmark defaults to 10 fresh / 10 retained and 7/3 public."""
     config = ResearchLabGatewayConfig.from_env()
     window = config.lab_champion_eval_days * config.lab_champion_icps_per_day
     assert window == 20
-    assert config.public_benchmark_public_total_icps == 6
-    assert config.public_benchmark_public_total_icps * 3 <= window
-    assert config.public_benchmark_public_weak_total == 4
+    assert config.lab_champion_window_mode == "hybrid_fresh_retained"
+    assert config.lab_champion_fresh_icp_count == 10
+    assert config.lab_champion_retained_icp_count == 10
+    assert config.lab_champion_fresh_icp_count + config.lab_champion_retained_icp_count == window
+    assert config.public_benchmark_public_total_icps == 10
+    assert config.public_benchmark_public_weak_total == 7
     assert config.public_benchmark_public_weak_total <= config.public_benchmark_public_total_icps
     # The default configuration must satisfy its own split validation.
     config.validate_public_benchmark_split()
+
+
+def test_hybrid_window_total_validation(clean_env):
+    config = ResearchLabGatewayConfig.from_env()
+    bad = dataclasses.replace(config, lab_champion_retained_icp_count=9)
+    with pytest.raises(ValueError, match="FRESH_ICP_COUNT"):
+        bad.validate_public_benchmark_split()
 
 
 def test_public_split_env_overrides_still_respected(clean_env):

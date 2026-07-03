@@ -34,7 +34,7 @@ from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.icp_window import (
     RollingIcpWindowUnavailable,
     fetch_rolling_icp_window,
-    select_rolling_icp_window_from_sets,
+    reconstruct_icp_window_from_doc,
 )
 from gateway.research_lab.logging_utils import (
     compact_ref,
@@ -2161,6 +2161,7 @@ class ResearchLabGatewayScoringWorker:
             window = await fetch_rolling_icp_window(
                 days=self.config.lab_champion_eval_days,
                 icps_per_day=self.config.lab_champion_icps_per_day,
+                **_rolling_window_fetch_kwargs(self.config),
                 allow_partial=self.config.scoring_worker_allow_partial_icp_window,
             )
             await create_rolling_icp_window(window)
@@ -3637,6 +3638,7 @@ class ResearchLabGatewayScoringWorker:
         window = await fetch_rolling_icp_window(
             days=self.config.lab_champion_eval_days,
             icps_per_day=self.config.lab_champion_icps_per_day,
+            **_rolling_window_fetch_kwargs(self.config),
             allow_partial=self.config.scoring_worker_allow_partial_icp_window,
         )
         window_match = bool(original_window_hash) and window.window_hash == original_window_hash
@@ -3817,9 +3819,7 @@ class ResearchLabGatewayScoringWorker:
                 for entry in (doc.get("sets") or [])
                 if isinstance(entry, Mapping) and entry.get("set_id") is not None
             ]
-            days = int(doc.get("required_days") or 0)
-            icps_per_day = int(doc.get("icps_per_day") or 0)
-            if not set_ids or days <= 0 or icps_per_day <= 0:
+            if not set_ids:
                 return None
             rows = await select_many(
                 "qualification_private_icp_sets",
@@ -3829,12 +3829,7 @@ class ResearchLabGatewayScoringWorker:
             )
             if len(rows) < len(set_ids):
                 return None
-            window = select_rolling_icp_window_from_sets(
-                rows,
-                days=days,
-                icps_per_day=icps_per_day,
-                allow_partial=False,
-            )
+            window = reconstruct_icp_window_from_doc(rows, doc)
             if window.window_hash != window_hash:
                 logger.info(
                     "research_lab_confirmation_window_reconstruct_hash_mismatch expected=%s got=%s",
@@ -4348,6 +4343,7 @@ class ResearchLabGatewayScoringWorker:
         window = await fetch_rolling_icp_window(
             days=self.config.lab_champion_eval_days,
             icps_per_day=self.config.lab_champion_icps_per_day,
+            **_rolling_window_fetch_kwargs(self.config),
             allow_partial=self.config.scoring_worker_allow_partial_icp_window,
         )
         active = await load_active_private_model(self.config, register_bootstrap=True)
@@ -6062,6 +6058,39 @@ def _private_benchmark_row_is_valid(row: Mapping[str, Any]) -> bool:
         return int(row.get("evaluation_epoch") or 0) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _rolling_window_fetch_kwargs(config: Any) -> dict[str, Any]:
+    total = max(
+        1,
+        _safe_int(getattr(config, "lab_champion_eval_days", 10), default=10)
+        * _safe_int(getattr(config, "lab_champion_icps_per_day", 2), default=2),
+    )
+    if total == 20:
+        default_fresh = 10
+    else:
+        default_fresh = max(1, total // 2)
+    default_retained = max(1, total - default_fresh)
+    fresh = max(
+        1,
+        _safe_int(getattr(config, "lab_champion_fresh_icp_count", default_fresh), default=default_fresh),
+    )
+    retained = max(
+        1,
+        _safe_int(
+            getattr(config, "lab_champion_retained_icp_count", default_retained),
+            default=default_retained,
+        ),
+    )
+    return {
+        "window_mode": str(
+            getattr(config, "lab_champion_window_mode", "hybrid_fresh_retained")
+            or "hybrid_fresh_retained"
+        ).strip().lower(),
+        "fresh_icp_count": fresh,
+        "retained_icp_count": retained,
+        "min_new_icp_count": fresh,
+    }
 
 
 def _benchmark_summary_has_companies(item: Any) -> bool:

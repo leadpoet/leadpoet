@@ -750,8 +750,14 @@ async def create_rolling_icp_window(window: Any) -> dict[str, Any]:
         "window_doc": public_doc,
     }
     row = {
-        "schema_version": "1.0",
+        "schema_version": str(public_doc.get("schema_version") or "1.0"),
         **payload,
+        "window_mode": public_doc.get("window_mode"),
+        "selection_policy": public_doc.get("selection_policy"),
+        "fresh_set_id": public_doc.get("fresh_set_id"),
+        "fresh_icp_count": public_doc.get("fresh_icp_count"),
+        "retained_icp_count": public_doc.get("retained_icp_count"),
+        "min_new_icp_count": public_doc.get("min_new_icp_count"),
         "anchored_hash": canonical_hash(payload),
     }
     return await insert_row("research_lab_rolling_icp_windows", row)

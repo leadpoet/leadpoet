@@ -417,16 +417,16 @@ class ResearchLabGatewayConfig:
     # 2 matches the from_env default (fableanalysis bug #32); §6.4 recommends
     # raising to 4-6 only after benchmark-concurrency parity is verified.
     lab_champion_icps_per_day: int = 2
+    lab_champion_window_mode: str = "hybrid_fresh_retained"
+    lab_champion_fresh_icp_count: int = 10
+    lab_champion_retained_icp_count: int = 10
     public_benchmark_public_icps_per_day: int = 3
     public_benchmark_public_weak_per_day: int = 2
-    # Ratio rule (fableanalysis §6.4): the public split must expose at most 1/3
-    # of the private scoring window (lab_champion_eval_days *
-    # lab_champion_icps_per_day = 10 * 2 = 20 ICPs by default), so the default
-    # public total is 6 (was 10, i.e. half the sealed set exposed daily). The
-    # weak share keeps roughly the per-day 2/3 proportion and must stay <=
-    # public_benchmark_public_total_icps (validate_public_benchmark_split).
-    public_benchmark_public_total_icps: Optional[int] = 6
-    public_benchmark_public_weak_total: Optional[int] = 4
+    # Hybrid benchmark default: 20 ICPs total (10 fresh + 10 retained), with a
+    # 10/10 public/private split. Public is weak-heavy (7 weak / 3 strong);
+    # private is the inverse regression holdout.
+    public_benchmark_public_total_icps: Optional[int] = 10
+    public_benchmark_public_weak_total: Optional[int] = 7
     improvement_threshold_points: float = 1.0
     private_model_manifest_uri: str = (
         "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json"
@@ -779,6 +779,18 @@ class ResearchLabGatewayConfig:
             lab_champion_threshold_points=improvement_threshold_points,
             lab_champion_eval_days=max(1, _int("RESEARCH_LAB_CHAMPION_EVAL_DAYS", 10)),
             lab_champion_icps_per_day=max(1, _int("RESEARCH_LAB_CHAMPION_ICPS_PER_DAY", 2)),
+            lab_champion_window_mode=os.getenv(
+                "RESEARCH_LAB_CHAMPION_WINDOW_MODE",
+                "hybrid_fresh_retained",
+            ).strip().lower() or "hybrid_fresh_retained",
+            lab_champion_fresh_icp_count=max(
+                1,
+                _int("RESEARCH_LAB_CHAMPION_FRESH_ICP_COUNT", 10),
+            ),
+            lab_champion_retained_icp_count=max(
+                1,
+                _int("RESEARCH_LAB_CHAMPION_RETAINED_ICP_COUNT", 10),
+            ),
             public_benchmark_public_icps_per_day=max(
                 1,
                 _int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_ICPS_PER_DAY", 3),
@@ -787,20 +799,15 @@ class ResearchLabGatewayConfig:
                 0,
                 _int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_PER_DAY", 2),
             ),
-            # Ratio rule (fableanalysis §6.4): expose at most 1/3 of the private
-            # window (eval_days * icps_per_day = 10 * 2 = 20 by default), hence 6
-            # (the old default of 10 exposed half the sealed set daily). The weak
-            # fallback keeps roughly the per-day 2/3 proportion and must stay <=
-            # the public total (validate_public_benchmark_split enforces this).
             public_benchmark_public_total_icps=(
                 max(1, value)
                 if (value := _optional_int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_TOTAL_ICPS")) is not None
-                else 6
+                else 10
             ),
             public_benchmark_public_weak_total=(
                 max(0, value)
                 if (value := _optional_int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_TOTAL")) is not None
-                else 4
+                else 7
             ),
             improvement_threshold_points=improvement_threshold_points,
             private_model_manifest_uri=os.getenv(
@@ -1059,6 +1066,9 @@ class ResearchLabGatewayConfig:
             "champion_threshold_points": self.lab_champion_threshold_points,
             "champion_eval_days": self.lab_champion_eval_days,
             "champion_icps_per_day": self.lab_champion_icps_per_day,
+            "champion_window_mode": self.lab_champion_window_mode,
+            "champion_fresh_icp_count": self.lab_champion_fresh_icp_count,
+            "champion_retained_icp_count": self.lab_champion_retained_icp_count,
             "public_benchmark_public_icps_per_day": self.public_benchmark_public_icps_per_day,
             "public_benchmark_public_weak_per_day": self.public_benchmark_public_weak_per_day,
             "public_benchmark_public_total_icps": self.public_benchmark_public_total_icps,
@@ -1067,6 +1077,16 @@ class ResearchLabGatewayConfig:
 
     def validate_public_benchmark_split(self) -> None:
         total_icps = self.lab_champion_eval_days * self.lab_champion_icps_per_day
+        if self.lab_champion_window_mode not in {"hybrid_fresh_retained", "legacy_rolling", "rolling", "legacy"}:
+            raise ValueError("RESEARCH_LAB_CHAMPION_WINDOW_MODE must be hybrid_fresh_retained or legacy_rolling")
+        if self.lab_champion_window_mode == "hybrid_fresh_retained":
+            hybrid_total = self.lab_champion_fresh_icp_count + self.lab_champion_retained_icp_count
+            if hybrid_total != total_icps:
+                raise ValueError(
+                    "RESEARCH_LAB_CHAMPION_FRESH_ICP_COUNT + "
+                    "RESEARCH_LAB_CHAMPION_RETAINED_ICP_COUNT must equal "
+                    "RESEARCH_LAB_CHAMPION_EVAL_DAYS * RESEARCH_LAB_CHAMPION_ICPS_PER_DAY"
+                )
         if self.public_benchmark_public_total_icps is not None:
             if self.public_benchmark_public_total_icps >= total_icps:
                 raise ValueError("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_TOTAL_ICPS must leave private holdout ICPs")
@@ -1143,6 +1163,9 @@ class ResearchLabGatewayConfig:
                 "champion_threshold_points": self.lab_champion_threshold_points,
                 "champion_eval_days": self.lab_champion_eval_days,
                 "champion_icps_per_day": self.lab_champion_icps_per_day,
+                "champion_window_mode": self.lab_champion_window_mode,
+                "champion_fresh_icp_count": self.lab_champion_fresh_icp_count,
+                "champion_retained_icp_count": self.lab_champion_retained_icp_count,
                 "public_benchmark_public_icps_per_day": self.public_benchmark_public_icps_per_day,
                 "public_benchmark_public_weak_per_day": self.public_benchmark_public_weak_per_day,
                 "public_benchmark_public_total_icps": self.public_benchmark_public_total_icps,

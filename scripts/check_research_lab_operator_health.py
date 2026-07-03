@@ -462,7 +462,7 @@ def check_candidates(fetch: Callable[..., list[dict[str, Any]]] = _get) -> list[
     for row in stale_active_scoring[:10]:
         lines.append(
             "  stale_active_scoring"
-            f" candidate={_compact(row.get('candidate_id'))}"
+            f" candidate={_compact(row.get('candidate_id'), 24)}"
             f" run={_compact(row.get('run_id'))}"
             f" status={row.get('current_candidate_status')}"
             f" age_minutes={_age_minutes(row)}"

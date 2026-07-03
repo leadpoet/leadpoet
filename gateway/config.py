@@ -56,7 +56,7 @@ def _load_gateway_env_file(path: Path) -> None:
         print(f"Loaded {loaded} fallback env var(s) from {path}", flush=True)
 
 
-_gateway_env_file = os.getenv("GATEWAY_ENV_FILE", "/home/ec2-user/gw.environ")
+_gateway_env_file = os.getenv("GATEWAY_ENV_FILE", "/home/ec2-user/.config/leadpoet/gateway.env")
 _load_gateway_env_file(Path(_gateway_env_file).expanduser())
 
 if os.getenv("AWS_PROFILE") and os.getenv("LEADPOET_AWS_PROFILE_OVERRIDES_ENV_KEYS", "true").lower() == "true":

@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
 
 def main() -> int:
     with TemporaryDirectory() as tmp:
-        env_path = Path(tmp) / "gw.environ"
+        env_path = Path(tmp) / "gateway.env"
         env_path.write_bytes(
             b"\0".join(
                 [

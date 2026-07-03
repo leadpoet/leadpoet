@@ -202,14 +202,13 @@ def _baseline_error_is_retryable(error_text: str) -> bool:
     provider = str(diagnostics.get("provider") or "unknown")
     if status in (408, 429) or status >= 500:
         return True
-    # Scrapingdog's 400 "Something went wrong or profile not found" and its
-    # 410s are empirically transient/data-shaped, not auth or request
-    # validation — they recover on retry (bug #37).
-    if status == 410:
-        return True
+    # Scrapingdog's 400 "Something went wrong or profile not found" is
+    # transient/data-shaped, not auth or request validation, and can recover on
+    # retry. Production evidence showed 410 Gone retries did not produce usable
+    # content, so 410 is treated as a terminal provider/data miss.
     if status == 400 and (provider == "scrapingdog" or "something went wrong" in lowered):
         return True
-    if status in (400, 401, 403, 404, 409):
+    if status in (400, 401, 403, 404, 409, 410):
         return False
     if any(
         marker in lowered
@@ -1261,8 +1260,8 @@ def _candidate_scoring_failure_class(exc: BaseException) -> tuple[str, bool]:
     if category in {"provider_http_5xx", "runtime_provider_error"}:
         return category, True
     if category == "provider_http_4xx":
-        # Same status-level verdicts as the baseline classifier: 408/429/410
-        # and Scrapingdog 400s retry; genuine auth/request errors stay terminal.
+        # Same status-level verdicts as the baseline classifier: 408/429 and
+        # Scrapingdog 400s retry; genuine auth/request/410 errors stay terminal.
         return category, _baseline_error_is_retryable(text)
     if isinstance(exc, PrivateModelRuntimeError):
         return "candidate_runtime_error", False

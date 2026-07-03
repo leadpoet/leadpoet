@@ -3,7 +3,7 @@
 Covers bugs #8/#14/#15/#31/#35 from the pre-launch audit:
 - timeout retry + 2-consecutive-timeout skip latch (and the legacy latch flag),
 - provider-flake retry with symmetric zero-score ICP accounting,
-- the local retryable-error classifier (Scrapingdog 400/410 retryable, auth permanent),
+- the local retryable-error classifier (Scrapingdog 400 retryable, 410/auth permanent),
 - the `sourced_zero_no_error` silent-zero flag and in-container detection for
   httpx/requests/aiohttp,
 - capped top-5 per-ICP scoring matching leadpoet_verifier.aggregation exactly,
@@ -302,7 +302,7 @@ async def test_gate_keeps_retry_exhausted_provider_failures_in_totals():
     "message,expected",
     (
         (SCRAPINGDOG_400_MSG, True),
-        (SCRAPINGDOG_410_MSG, True),
+        (SCRAPINGDOG_410_MSG, False),
         (PROVIDER_RETRYABLE_MSG, True),  # 429
         ("HTTPError: request timeout; status=408", True),
         ("HTTPError: internal error; status=500", True),

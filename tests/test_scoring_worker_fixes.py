@@ -154,9 +154,9 @@ def test_stale_claim_recovery_is_limited_to_owner_worker():
         ("HTTPError: HTTP Error 400: scrapingdog Something went wrong or profile not found", True),
         # 400 with the scrapingdog provider marker alone.
         ("RuntimeError: scrapingdog request failed status=400", True),
-        # 410 is retryable and must be recognized at all.
-        ("HTTPError: HTTP Error 410: Gone scrapingdog profile", True),
-        ("RuntimeError: provider fetch status=410 gone", True),
+        # 410 is recognized but terminal: retries did not produce usable content.
+        ("HTTPError: HTTP Error 410: Gone scrapingdog profile", False),
+        ("RuntimeError: provider fetch status=410 gone", False),
         # Rate limits / timeouts / 5xx retry.
         ("HTTPError: HTTP Error 429: Too Many Requests", True),
         ("HTTPError: HTTP Error 408: Request Timeout", True),

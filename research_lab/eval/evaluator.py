@@ -632,16 +632,17 @@ def _candidate_error_is_retryable(error_text: str) -> bool:
     dependency. Transient provider/infra failures — 408/429/5xx, timeouts,
     connection resets, OOM kills — are retryable; auth and request-validation
     errors are not. Scrapingdog's 400 "Something went wrong or profile not
-    found" and 410 responses are empirically transient-or-data-shaped, so they
-    are retryable too (bug #37 semantics).
+    found" is empirically transient-or-data-shaped, so it remains retryable.
+    Production evidence showed 410 Gone retries do not produce usable content,
+    so 410 is terminal.
     """
     lowered = error_text.lower()
     status = _provider_error_status_code(lowered)
-    if status in (408, 410, 429) or status >= 500:
+    if status in (408, 429) or status >= 500:
         return True
     if status == 400 and "something went wrong" in lowered:
         return True
-    if status in (400, 401, 403, 404, 409):
+    if status in (400, 401, 403, 404, 409, 410):
         return False
     if any(
         marker in lowered
@@ -672,8 +673,8 @@ def _candidate_error_is_retryable(error_text: str) -> bool:
 
 
 def _provider_error_status_code(lowered_error_text: str) -> int:
-    # 410 is matched here even though the gateway diagnostics status list
-    # omits it (bug #37).
+    # Keep this in sync with gateway logging diagnostics so candidate and
+    # baseline retry verdicts see the same provider status codes.
     for code in (400, 401, 403, 404, 408, 409, 410, 429, 500, 502, 503, 504):
         if (
             f"http error {code}" in lowered_error_text

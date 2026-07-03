@@ -50,11 +50,13 @@ from gateway.research_lab.public_activity import (
     safe_project_public_loop_activity,
 )
 from gateway.research_lab.reimbursement_awards import (
+    cost_evidence_actual_microusd,
     cost_evidence_cost_ledger,
     cost_evidence_from_loop_result,
     cost_evidence_provider_usage,
     create_reimbursement_decision,
     latest_reimbursable_loop_cost_evidence,
+    normalize_cost_evidence,
 )
 from gateway.research_lab.store import (
     canonical_hash,
@@ -975,6 +977,9 @@ class HostedRunContext:
     # (see _resolve_loop_start_credit_id).
     resolved_loop_start_credit_id: str | None = None
     loop_start_credit_id_resolved: bool = False
+    # Latest cumulative loop cost evidence observed in-process before writing
+    # the loop event. Used if the store write itself fails after miner spend.
+    latest_loop_cost_evidence: dict[str, Any] = field(default_factory=dict)
 
     @property
     def run_id(self) -> str:
@@ -1261,7 +1266,7 @@ class ResearchLabHostedWorker:
                     ),
                 )
             )
-            return await self._mark_failed(context, str(exc))
+            return await self._mark_failed(context, str(exc), failure_exception=exc)
 
     def _require_enabled(self) -> None:
         if not self.config.hosted_worker_enabled:
@@ -1688,6 +1693,16 @@ class ResearchLabHostedWorker:
                     checkpoint_doc = event.event_doc.get("checkpoint") if isinstance(event.event_doc, Mapping) else None
                     if isinstance(checkpoint_doc, dict):
                         latest_checkpoint = dict(checkpoint_doc)
+                event_provider_usage = event.provider_usage or self._provider_usage(context)
+                context.latest_loop_cost_evidence = normalize_cost_evidence(
+                    {
+                        "source": "loop_event_in_memory",
+                        "source_event_type": event.event_type,
+                        "provider_usage": event_provider_usage,
+                        "cost_ledger": event.cost_ledger,
+                        "elapsed_seconds": event.elapsed_seconds,
+                    }
+                )
                 loop_event_row = await create_auto_research_loop_event(
                     run_id=context.run_id,
                     ticket_id=context.ticket_id,
@@ -1699,7 +1714,7 @@ class ResearchLabHostedWorker:
                     elapsed_seconds=event.elapsed_seconds,
                     candidate_artifact_hash=event.candidate_artifact_hash,
                     candidate_patch_hash=event.candidate_patch_hash,
-                    provider_usage=event.provider_usage or self._provider_usage(context),
+                    provider_usage=event_provider_usage,
                     cost_ledger=event.cost_ledger,
                     event_doc=event.event_doc,
                 )
@@ -2267,6 +2282,15 @@ class ResearchLabHostedWorker:
             provider_usage = self._provider_usage(context)
         except HostedResearchLabWorkerError:
             provider_usage = []
+        projection_cost_ledger: Mapping[str, Any] | None = None
+        projection_provider_usage: list[dict[str, Any]] | None = None
+        if isinstance(event_doc, Mapping):
+            maybe_ledger = event_doc.get("final_cost_ledger") or event_doc.get("cost_ledger")
+            if isinstance(maybe_ledger, Mapping):
+                projection_cost_ledger = maybe_ledger
+            maybe_usage = event_doc.get("provider_usage")
+            if isinstance(maybe_usage, Sequence) and not isinstance(maybe_usage, (str, bytes, bytearray)):
+                projection_provider_usage = [dict(item) for item in maybe_usage if isinstance(item, Mapping)]
         projection_event_doc = {
             "schema_version": "1.0",
             "reason": reason,
@@ -2289,7 +2313,8 @@ class ResearchLabHostedWorker:
                     event_type=event_type,
                     loop_status=loop_status,
                     worker_ref=self.worker_ref,
-                    provider_usage=provider_usage,
+                    provider_usage=projection_provider_usage or provider_usage,
+                    cost_ledger=dict(projection_cost_ledger or {}),
                     event_doc=projection_event_doc,
                 ),
             )
@@ -3053,10 +3078,13 @@ class ResearchLabHostedWorker:
         error: str,
         *,
         loop_result: Any | None = None,
+        failure_exception: BaseException | None = None,
         reason: str = "hosted_research_lab_run_failed",
     ) -> HostedWorkerOutcome:
         if loop_result is not None:
             cost_evidence = cost_evidence_from_loop_result(loop_result)
+        elif context.latest_loop_cost_evidence:
+            cost_evidence = dict(context.latest_loop_cost_evidence)
         else:
             try:
                 cost_evidence = await latest_reimbursable_loop_cost_evidence(context.run_id)
@@ -3067,6 +3095,7 @@ class ResearchLabHostedWorker:
                     str(exc)[:240],
                 )
                 cost_evidence = {}
+        cost_evidence = _merge_failure_exception_cost_evidence(cost_evidence, failure_exception)
         cost_ledger = cost_evidence_cost_ledger(cost_evidence)
         provider_usage = cost_evidence_provider_usage(cost_evidence)
         receipt_id = context.receipt_id
@@ -4053,6 +4082,70 @@ def _sum_award_usd(rows: Iterable[Mapping[str, Any]]) -> float:
         except Exception:
             continue
     return float(total.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP))
+
+
+def _merge_failure_exception_cost_evidence(
+    cost_evidence: Mapping[str, Any] | None,
+    failure_exception: BaseException | None,
+) -> dict[str, Any]:
+    evidence = normalize_cost_evidence(cost_evidence)
+    if failure_exception is None:
+        return evidence
+    exception_cost_microusd = max(0, int(getattr(failure_exception, "cost_microusd", 0) or 0))
+    exception_usage = _failure_exception_provider_usage(failure_exception)
+    if exception_cost_microusd <= 0 and not exception_usage:
+        return evidence
+
+    prior_cost_microusd = cost_evidence_actual_microusd(evidence)
+    merged_cost_microusd = prior_cost_microusd + exception_cost_microusd
+    prior_ledger = cost_evidence_cost_ledger(evidence)
+    merged_ledger = {
+        **prior_ledger,
+        "schema_version": "1.0",
+        "status": "failed",
+        "stage": "failure_exception_after_latest_loop_evidence",
+        "total_usd": round(merged_cost_microusd / 1_000_000, 6),
+        "actual_openrouter_cost_usd": round(merged_cost_microusd / 1_000_000, 6),
+        "actual_openrouter_cost_microusd": merged_cost_microusd,
+        "previous_actual_openrouter_cost_microusd": prior_cost_microusd,
+        "failure_exception_cost_microusd": exception_cost_microusd,
+    }
+    if "openrouter_call_count" not in merged_ledger:
+        merged_ledger["openrouter_call_count"] = int(evidence.get("openrouter_call_count") or 0)
+    if "estimated_cost_usd" not in merged_ledger:
+        merged_ledger["estimated_cost_usd"] = float(evidence.get("estimated_cost_usd") or 0.0)
+
+    return normalize_cost_evidence(
+        {
+            "source": (
+                "loop_event_plus_failure_exception"
+                if prior_cost_microusd > 0 or prior_ledger
+                else "failure_exception"
+            ),
+            "trusted_cost_ledger": bool(prior_ledger) or exception_cost_microusd > 0,
+            "provider_usage": cost_evidence_provider_usage(evidence) + exception_usage,
+            "cost_ledger": merged_ledger,
+            "actual_openrouter_cost_microusd": merged_cost_microusd,
+            "estimated_cost_usd": evidence.get("estimated_cost_usd"),
+            "openrouter_call_count": evidence.get("openrouter_call_count"),
+            "iterations_completed": evidence.get("iterations_completed"),
+            "stop_reason": str(evidence.get("stop_reason") or "") or str(failure_exception)[:160],
+            "elapsed_seconds": evidence.get("elapsed_seconds"),
+        }
+    )
+
+
+def _failure_exception_provider_usage(exc: BaseException) -> list[dict[str, Any]]:
+    usage = getattr(exc, "provider_usage", None)
+    if isinstance(usage, Mapping):
+        return [{**dict(usage), "call_outcome": "failure_exception"}]
+    if isinstance(usage, Sequence) and not isinstance(usage, (str, bytes, bytearray)):
+        return [
+            {**dict(item), "call_outcome": str(dict(item).get("call_outcome") or "failure_exception")}
+            for item in usage
+            if isinstance(item, Mapping)
+        ]
+    return []
 
 
 def _redacted_reimbursement_run_cost(value: Mapping[str, Any]) -> dict[str, Any]:

@@ -15,7 +15,12 @@ import types
 import pytest
 
 from gateway.research_lab import code_loop_engine as engine
-from gateway.research_lab.code_build import CodeEditBuildResult
+from gateway.research_lab.code_build import (
+    CodeEditBuildResult,
+    CodeEditPatchApplyError,
+    ParentImageSourceContext,
+)
+from gateway.research_lab.loop_engine import AutoResearchLoopSettings, OpenRouterCallResult
 from research_lab.code_editing import CodeEditDraft
 from research_lab.eval import PrivateModelArtifactManifest
 
@@ -61,6 +66,21 @@ def _build_result():
         code_edit_manifest={"target_files": ["sourcing_model.py"], "kind": "code_edit"},
         source_diff_hash="sha256:" + "f" * 64,
         build_doc={"build_doc_hash": "sha256:" + "1" * 64, "source_diff_artifact_uri": "s3://test-bucket/diff.json"},
+    )
+
+
+def _source_context(tmp_path):
+    source_root = tmp_path / "source"
+    source_root.mkdir(exist_ok=True)
+    (source_root / "sourcing_model.py").write_text("x = 1\n", encoding="utf-8")
+    return ParentImageSourceContext(
+        source_root=source_root,
+        source_mode="extracted",
+        parent_image_digest_hash="sha256:" + "9" * 64,
+        source_tree_hash="sha256:" + "8" * 64,
+        top_level_paths=("sourcing_model.py",),
+        editable_files=("sourcing_model.py",),
+        file_previews=(),
     )
 
 
@@ -292,3 +312,175 @@ def test_node_id_unique_per_candidate_index():
     second = engine._node_id("run-1", 1, 1, draft)
     assert first != second
     assert first == engine._node_id("run-1", 1, 0, draft)
+
+
+# --- reimbursement cost evidence: failed/no-candidate exits keep miner spend ---
+
+
+class _NoCandidateBuilder:
+    def __init__(self, source_context):
+        self._source_context = source_context
+        self.config = types.SimpleNamespace(
+            loop_planner_enabled=False,
+            loop_planner_max_tokens=2000,
+            loop_alignment_judge_enabled=False,
+            loop_alignment_judge_max_tokens=800,
+            loop_novelty_strict=False,
+            code_edit_source_inspection_rounds=1,
+            code_edit_source_inspection_max_files=4,
+            code_edit_source_inspection_file_bytes=4000,
+            code_edit_source_inspection_total_bytes=16000,
+            code_edit_source_inspection_search_matches=5,
+            code_edit_patch_repair_attempts=0,
+        )
+
+    def prepare_parent_source_context(self, *, parent_artifact, workspace_dir):
+        return self._source_context
+
+    def validate_draft_against_source_context(self, draft, source_context, *, read_paths, require_read):
+        return []
+
+    def check_patch_applies(self, *, draft, parent_artifact, source_context):
+        return None
+
+    def build(self, *, draft, parent_artifact, run_id, candidate_index, source_context):
+        raise AssertionError("no-candidate test should not build")
+
+
+async def test_no_candidate_loop_failed_carries_final_cost_ledger(tmp_path):
+    events = []
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        if stage == "source_inspection":
+            return OpenRouterCallResult(
+                content='{"requests":[{"operation":"read_file","path":"sourcing_model.py"}]}',
+                provider_usage={"provider": "openrouter", "response_id": "inspect", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        if stage == "code_edit_draft":
+            return OpenRouterCallResult(
+                content='{"no_viable_patch":true,"reason":"loop found no safe candidate"}',
+                provider_usage={"provider": "openrouter", "response_id": "draft", "cost_microusd": 2000},
+                cost_microusd=2000,
+            )
+        raise AssertionError(f"unexpected stage: {stage}")
+
+    async def event_sink(event):
+        events.append(event)
+
+    result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=1,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=_NoCandidateBuilder(_source_context(tmp_path)),
+    ).run(
+        run_id="run-no-candidate",
+        ticket={
+            "ticket_id": "ticket-no-candidate",
+            "miner_hotkey": "hotkey",
+            "island": "generalist",
+            "brief_sanitized_ref": "brief",
+            "ticket_doc": {"brief_public_summary": "test"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+        requested_loop_count=1,
+    )
+
+    assert result.status == "failed"
+    assert result.selected_candidates == ()
+    assert result.actual_openrouter_cost_microusd == 3000
+    terminal = events[-1]
+    assert terminal.event_type == "loop_failed"
+    assert terminal.cost_ledger["actual_openrouter_cost_microusd"] == 3000
+    assert terminal.event_doc["run_summary"]["cost_ledger"]["actual_openrouter_cost_microusd"] == 3000
+
+
+class _RepairFailureBuilder(_NoCandidateBuilder):
+    def __init__(self, source_context):
+        super().__init__(source_context)
+        self.config.code_edit_patch_repair_attempts = 1
+
+    def check_patch_applies(self, *, draft, parent_artifact, source_context):
+        raise CodeEditPatchApplyError("patch does not apply")
+
+
+class _CostedRepairError(RuntimeError):
+    provider_usage = {
+        "provider": "openrouter",
+        "response_id": "repair-failed",
+        "raw_trace_ref": {"s3_ref": "s3://bucket/repair.json", "sha256": "sha256:" + "1" * 64},
+    }
+    cost_microusd = 4321
+
+
+async def test_repair_call_failure_records_exception_cost_in_running_ledger(tmp_path):
+    events = []
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        assert stage == "code_edit_repair"
+        raise _CostedRepairError("repair model failed after provider spend")
+
+    async def event_sink(event):
+        events.append(event)
+
+    loop = engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=1,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=_RepairFailureBuilder(_source_context(tmp_path)),
+    )
+
+    repaired, openrouter_calls, estimated_cost, actual_cost_microusd, budget_exhausted = (
+        await loop._ensure_patch_applies_or_repair(
+            draft=_draft(),
+            run_id="run-repair-failed",
+            node_id="node-repair-failed",
+            iteration=1,
+            settings=loop.settings,
+            artifact=_manifest(),
+            source_context=_source_context(tmp_path),
+            source_inspection_context={},
+            read_paths=("sourcing_model.py",),
+            budget_context={"requested_compute_budget_usd": 5.0},
+            budget_limit_microusd=5_000_000,
+            elapsed=lambda: 0.0,
+            openrouter_calls=0,
+            estimated_cost=0.0,
+            actual_cost_microusd=0,
+            provider_usage=[],
+        )
+    )
+
+    assert repaired is None
+    assert openrouter_calls == 0
+    assert estimated_cost == 0.0
+    assert actual_cost_microusd == 4321
+    assert budget_exhausted is False
+    repair_failure = [event for event in events if event.event_doc.get("stage") == "code_edit_repair_call_failed"][-1]
+    assert repair_failure.event_type == "code_edit_repair_failed"
+    assert repair_failure.cost_ledger["actual_openrouter_cost_microusd"] == 4321
+    assert repair_failure.provider_usage[0]["call_outcome"] == "contained_failure"
+    assert repair_failure.provider_usage[0]["raw_trace_ref"]["s3_ref"] == "s3://bucket/repair.json"

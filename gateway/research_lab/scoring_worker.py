@@ -481,6 +481,15 @@ _SCORER_TRACE_COMPANY_IDENTITY_FIELDS = (
     "country",
 )
 
+# The sourcing model emits some identity fields under different key names
+# than the canonical ones above ("subindustry" without the underscore,
+# "hq_country" instead of "country").  Read those as fallbacks so identity
+# capture doesn't silently null those columns out.
+_SCORER_TRACE_IDENTITY_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "sub_industry": ("sub_industry", "subindustry"),
+    "country": ("country", "hq_country"),
+}
+
 
 def _scorer_trace_capture_enabled() -> bool:
     return os.getenv(_SCORER_TRACE_CAPTURE_ENV, "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -508,11 +517,14 @@ def _trace_path_segment(value: object, *, fallback: str) -> str:
 def _scorer_trace_company_identity(output: Any) -> dict[str, Any]:
     if not isinstance(output, Mapping):
         return {}
-    return {
-        field: str(output.get(field) or "")
-        for field in _SCORER_TRACE_COMPANY_IDENTITY_FIELDS
-        if str(output.get(field) or "").strip()
-    }
+    identity: dict[str, Any] = {}
+    for field in _SCORER_TRACE_COMPANY_IDENTITY_FIELDS:
+        for key in _SCORER_TRACE_IDENTITY_FIELD_ALIASES.get(field, (field,)):
+            value = str(output.get(key) or "").strip()
+            if value:
+                identity[field] = value
+                break
+    return identity
 
 
 _REJECTED_COMPANIES_CAPTURE_ENV = "RESEARCH_LAB_REJECTED_COMPANIES_CAPTURE"

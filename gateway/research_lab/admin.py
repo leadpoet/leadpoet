@@ -104,6 +104,15 @@ def build_parser() -> argparse.ArgumentParser:
     requeue_stale_started.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
     requeue_stale_started.add_argument("--write", dest="dry_run", action="store_false")
 
+    recover_stale_candidate_claims = sub.add_parser(
+        "recover-stale-candidate-claims",
+        help="Discover stale candidate scoring claims and recover them append-only across all scoring shards",
+    )
+    recover_stale_candidate_claims.add_argument("--actor-ref", default=default_actor_ref())
+    recover_stale_candidate_claims.add_argument("--max-batch-size", type=int, default=200)
+    recover_stale_candidate_claims.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
+    recover_stale_candidate_claims.add_argument("--write", dest="dry_run", action="store_false")
+
     # --- Lifecycle recovery operators (default dry-run; pass --apply to write) ---
     resume_runs = sub.add_parser(
         "resume-failed-runs",
@@ -618,6 +627,126 @@ async def _resolve_score_bundle_for_candidate(
     return rows[0] if rows else None
 
 
+async def _recover_stale_candidate_claims_operator(
+    *,
+    dry_run: bool,
+    actor_ref: str,
+    max_batch_size: int,
+) -> dict[str, Any]:
+    from dataclasses import replace
+
+    from .scoring_worker import (
+        ResearchLabGatewayScoringWorker,
+        _count_claim_attempts,
+        _stale_claim_recovery_owner_index,
+        _status_is_stale,
+    )
+
+    config = ResearchLabGatewayConfig.from_env()
+    total_workers = max(1, int(config.scoring_worker_total_workers or 1))
+    stale_after_seconds = max(120, int(config.scoring_worker_model_timeout_seconds or 900) + 60)
+    max_attempts = int(config.scoring_worker_max_claim_requeues)
+    limit = max(1, int(max_batch_size or 1))
+
+    rows: list[dict[str, Any]] = []
+    for status in ("assigned", "evaluating"):
+        rows.extend(
+            await select_many(
+                "research_lab_candidate_evaluation_current",
+                columns=(
+                    "candidate_id,run_id,ticket_id,receipt_id,current_candidate_status,current_status_at,"
+                    "current_evaluator_ref,current_event_hash"
+                ),
+                filters=(("current_candidate_status", status),),
+                order_by=(("current_status_at", False),),
+                limit=limit,
+            )
+        )
+
+    planned: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in sorted(rows, key=lambda item: str(item.get("current_status_at") or "")):
+        candidate_id = str(row.get("candidate_id") or "")
+        if not candidate_id or candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        if not _status_is_stale(row.get("current_status_at"), stale_after_seconds):
+            continue
+        event_rows = await select_many(
+            "research_lab_candidate_evaluation_events",
+            columns="candidate_id,event_type,candidate_status,reason,seq",
+            filters=(
+                ("candidate_id", candidate_id),
+                ("event_type", "in", ("assigned", "queued")),
+            ),
+            order_by=(("seq", False),),
+            limit=200,
+        )
+        claim_attempts = _count_claim_attempts(event_rows)
+        owner_index = _stale_claim_recovery_owner_index(candidate_id, total_workers)
+        action = "fail_retry_limit" if claim_attempts >= max_attempts else "requeue"
+        planned.append(
+            {
+                "candidate_id": candidate_id,
+                "current_candidate_status": row.get("current_candidate_status"),
+                "current_evaluator_ref": row.get("current_evaluator_ref"),
+                "current_status_at": row.get("current_status_at"),
+                "recovery_reason": "stale_claim",
+                "recovery_owner_worker_index": owner_index + 1,
+                "claim_attempts": claim_attempts,
+                "max_claim_attempts": max_attempts,
+                "action": action,
+            }
+        )
+        if len(planned) >= limit:
+            break
+
+    summary = {
+        "found": len(planned),
+        "would_requeue": sum(1 for item in planned if item.get("action") == "requeue"),
+        "would_fail_retry_limit": sum(
+            1 for item in planned if item.get("action") == "fail_retry_limit"
+        ),
+    }
+    if dry_run:
+        return {
+            "ok": True,
+            "action": "recover-stale-candidate-claims",
+            "dry_run": True,
+            "stale_after_seconds": stale_after_seconds,
+            "total_workers": total_workers,
+            "summary": summary,
+            "planned": planned,
+        }
+
+    results: list[dict[str, int]] = []
+    for index in range(total_workers):
+        worker_config = replace(
+            config,
+            scoring_worker_index=index,
+            scoring_worker_total_workers=total_workers,
+        )
+        worker = ResearchLabGatewayScoringWorker(
+            worker_config,
+            worker_ref=f"{actor_ref}:candidate-claim-recovery-{index + 1}",
+        )
+        recovered = await worker._recover_stale_candidate_claims()
+        if recovered:
+            results.append({"worker_index": index + 1, "recovered": recovered})
+
+    return {
+        "ok": True,
+        "action": "recover-stale-candidate-claims",
+        "dry_run": False,
+        "stale_after_seconds": stale_after_seconds,
+        "total_workers": total_workers,
+        "planned_before_write": planned,
+        "summary_before_write": summary,
+        "recovered": sum(item["recovered"] for item in results),
+        "by_worker": results,
+    }
+
+
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "pause-autoresearch":
         event = await set_autoresearch_maintenance_paused(
@@ -693,6 +822,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             reason=args.reason,
             actor_ref=args.actor_ref,
             dry_run=args.dry_run,
+            max_batch_size=args.max_batch_size,
+        )
+    if args.command == "recover-stale-candidate-claims":
+        return await _recover_stale_candidate_claims_operator(
+            dry_run=args.dry_run,
+            actor_ref=args.actor_ref,
             max_batch_size=args.max_batch_size,
         )
     if args.command == "resume-failed-runs":

@@ -1930,7 +1930,7 @@ class ResearchLabGatewayScoringWorker:
                 stale_after_seconds=stale_after_seconds,
                 restart_orphan_grace_seconds=_env_int(
                     "RESEARCH_LAB_SCORING_RESTART_ORPHAN_GRACE_SECONDS",
-                    30,
+                    5,
                 ),
             )
             if recovery_reason is None:

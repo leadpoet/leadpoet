@@ -39,6 +39,10 @@ def _test_admin_command_parser() -> None:
         ("repair-public-cards", ["repair-public-cards", "--dry-run"]),
         ("rebase-stale-candidates", ["rebase-stale-candidates", "--dry-run", "--limit", "1"]),
         ("resume-credit-blocked-run", ["resume-credit-blocked-run", "--run-id", "run-a", "--dry-run"]),
+        (
+            "recover-stale-candidate-claims",
+            ["recover-stale-candidate-claims", "--dry-run", "--max-batch-size", "1"],
+        ),
     )
     for expected, argv in cases:
         parsed = parser.parse_args(argv)

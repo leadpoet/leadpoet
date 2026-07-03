@@ -63,6 +63,27 @@ def test_scoring_claim_predating_worker_boot_is_restart_orphan():
     )
 
 
+def test_restart_orphan_short_grace_catches_recent_pre_boot_heartbeat():
+    worker_started_at = datetime(2026, 7, 3, 16, 24, 0, tzinfo=timezone.utc)
+    row = {
+        "current_evaluator_ref": "research-lab-scorer-8",
+        "current_status_at": "2026-07-03T16:23:40+00:00",
+    }
+
+    assert not sw._claim_predates_worker_boot(
+        row,
+        worker_ref="research-lab-scorer-8",
+        worker_started_at=worker_started_at,
+        grace_seconds=30,
+    )
+    assert sw._claim_predates_worker_boot(
+        row,
+        worker_ref="research-lab-scorer-8",
+        worker_started_at=worker_started_at,
+        grace_seconds=5,
+    )
+
+
 def test_stale_claim_recovery_owner_is_stable_and_bounded():
     candidate_id = "candidate:97a10903d96c91880b35a423aa9d44d9a9593c9bc68b2e776fb531a18cb75eb0"
     owner = sw._stale_claim_recovery_owner_index(candidate_id, 25)

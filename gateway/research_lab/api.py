@@ -289,6 +289,7 @@ async def resume_research_lab_credit_blocked(payload: ResearchLabResumeCreditBlo
     _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
     _require_enabled(config.miner_submissions_enabled, "Research Lab miner submissions are disabled")
     await _verify_signed_miner(payload)
+    await _require_autoresearch_not_paused()
 
     from .recovery import resume_credit_blocked_runs_for_miner
 
@@ -381,6 +382,7 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
             _raise_storage_error(exc)
 
     try:
+        await _require_autoresearch_not_paused()
         await create_ticket_event(
             ticket_id=str(payload.ticket_id),
             event_type="funded",
@@ -562,6 +564,7 @@ async def top_up_research_lab_paid_loop(payload: ResearchLabLoopTopUpRequest):
         _raise_storage_error(exc)
 
     try:
+        await _require_autoresearch_not_paused()
         await create_ticket_event(
             ticket_id=str(payload.ticket_id),
             event_type="funded",

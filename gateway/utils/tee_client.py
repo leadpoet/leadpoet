@@ -204,7 +204,12 @@ class TEEClient:
             List of event dicts
         """
         result = await self._send_rpc("get_buffer", {})
-        return result.get("events", [])
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            events = result.get("events", [])
+            return events if isinstance(events, list) else []
+        return []
     
     async def get_buffer_size(self) -> int:
         """
@@ -290,4 +295,3 @@ class TEEClient:
 
 # Global TEE client instance
 tee_client = TEEClient()
-

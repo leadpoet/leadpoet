@@ -189,16 +189,15 @@ async def hourly_batch_task():
                 print(f"⚠️  Could not get buffer stats: {e}")
                 buffer_size = 0
 
-            if buffer_size == 0:
-                try:
-                    rebuffered_lab_events = await rebuffer_research_lab_buffered_audit_events()
-                    if rebuffered_lab_events:
-                        print(
-                            "✅ Research Lab audit events rebuffered before checkpoint: "
-                            f"{rebuffered_lab_events}"
-                        )
-                except Exception as e:
-                    print(f"⚠️  Failed to rebuffer Research Lab audit events: {e}")
+            try:
+                rebuffered_lab_events = await rebuffer_research_lab_buffered_audit_events()
+                if rebuffered_lab_events:
+                    print(
+                        "✅ Research Lab audit events rebuffered before checkpoint: "
+                        f"{rebuffered_lab_events}"
+                    )
+            except Exception as e:
+                print(f"⚠️  Failed to rebuffer Research Lab audit events: {e}")
             
             # Step 2: Request checkpoint from TEE
             print(f"\n🔄 Requesting checkpoint from TEE...")

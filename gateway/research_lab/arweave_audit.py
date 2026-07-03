@@ -233,13 +233,13 @@ async def record_research_lab_checkpointed_events(
 
 
 async def rebuffer_research_lab_buffered_audit_events(*, limit: int = 200) -> int:
-    """Rehydrate DB-buffered Research Lab audit events into an empty TEE buffer.
+    """Rehydrate DB-buffered Research Lab audit events into the TEE buffer.
 
     The enclave buffer is process/runtime state. If the gateway restarts after
     ``publish_research_lab_epoch_audit`` records a buffered anchor but before
     the hourly checkpoint includes it, the DB still says "buffered" while the
-    TEE buffer can be empty. Re-append the exact signed transparency-log event
-    so the next checkpoint can mark the anchor ``checkpointed``.
+    TEE buffer can lose that event. Re-append missing signed transparency-log
+    events so the next checkpoint can mark the anchors ``checkpointed``.
     """
     rows = await select_many(
         "research_lab_arweave_epoch_audit_anchor_current",
@@ -256,6 +256,21 @@ async def rebuffer_research_lab_buffered_audit_events(*, limit: int = 200) -> in
     except ImportError:
         from utils.tee_client import tee_client
 
+    existing_event_hashes: set[str] = set()
+    try:
+        current_buffer = await tee_client.get_buffer()
+        if isinstance(current_buffer, list):
+            for event in current_buffer:
+                if isinstance(event, Mapping):
+                    event_hash = str(event.get("event_hash") or "")
+                    if event_hash:
+                        existing_event_hashes.add(event_hash)
+    except Exception as exc:  # noqa: BLE001 - rebuffering is best-effort
+        logger.warning(
+            "research_lab_arweave_rebuffer_existing_buffer_scan_failed error=%s",
+            str(exc)[:240],
+        )
+
     rebuffered = 0
     for row in rows:
         event_hash = str(
@@ -264,6 +279,8 @@ async def rebuffer_research_lab_buffered_audit_events(*, limit: int = 200) -> in
             or ""
         )
         if not event_hash:
+            continue
+        if event_hash in existing_event_hashes:
             continue
         log_row = await select_one(
             "transparency_log",
@@ -294,6 +311,7 @@ async def rebuffer_research_lab_buffered_audit_events(*, limit: int = 200) -> in
                 "signed_log_entry": signed_log_entry,
             }
         )
+        existing_event_hashes.add(event_hash)
         rebuffered += 1
     if rebuffered:
         logger.info(

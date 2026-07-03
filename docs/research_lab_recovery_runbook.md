@@ -23,7 +23,7 @@ The bundle includes only the runtime files needed for:
 - admin CLI import stability for flat EC2 deployments;
 - trajectory backfill compatibility and attempt limiting;
 - Arweave checkpoint TX id persistence on insert;
-- Research Lab audit event rebuffering before an empty checkpoint;
+- idempotent Research Lab audit event rebuffering before each checkpoint;
 - invalid fulfillment result id handling;
 - reduced epoch-fallback warning noise in scoring subprocesses.
 
@@ -70,6 +70,7 @@ python3 -m py_compile \
   research_lab/worker.py \
   tasks/hourly_batch.py \
   utils/logger.py \
+  utils/tee_client.py \
   gateway/__init__.py
 ```
 
@@ -115,5 +116,5 @@ Expected recovery signals:
 - `alert_stale_active_scoring_count=0` or only fresh active work under the stale threshold
 - no repeating `research_lab_corpus_traces_backfill_failed ... brief_id` flood after restart
 - next successful Arweave checkpoint logs `ARWEAVE_CHECKPOINT` with `arweave_tx_id` populated
-- buffered Research Lab Arweave audit anchors start clearing after the next checkpoint that rehydrates buffered audit events
+- buffered Research Lab Arweave audit anchors start clearing after the next checkpoint rehydrates missing buffered audit events
 - malformed fulfillment result ids return 404 instead of surfacing a PostgREST UUID parse failure

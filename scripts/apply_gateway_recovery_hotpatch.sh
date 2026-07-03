@@ -61,6 +61,7 @@ python3 -m py_compile \
   research_lab/worker.py \
   tasks/hourly_batch.py \
   utils/logger.py \
+  utils/tee_client.py \
   gateway/__init__.py
 
 echo "Applied gateway recovery hotpatch."

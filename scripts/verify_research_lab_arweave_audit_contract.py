@@ -96,6 +96,7 @@ async def main() -> int:
         arweave_audit.select_many = _fake_rebuffer_select_many  # type: ignore[assignment]
         arweave_audit.select_one = _fake_rebuffer_select_one  # type: ignore[assignment]
         tee_stub = types.SimpleNamespace(
+            get_buffer=lambda: _fake_get_buffer([]),
             append_event=lambda event: _capture_append_event(appended_events, event)
         )
         sys.modules["gateway.utils.tee_client"] = types.SimpleNamespace(tee_client=tee_stub)
@@ -109,6 +110,16 @@ async def main() -> int:
                 "signed_log_entry": {"signed_event": {"payload": {"ok": True}}},
             }
         ]
+
+        appended_events.clear()
+        tee_stub = types.SimpleNamespace(
+            get_buffer=lambda: _fake_get_buffer([{"event_hash": "f" * 64}]),
+            append_event=lambda event: _capture_append_event(appended_events, event),
+        )
+        sys.modules["gateway.utils.tee_client"] = types.SimpleNamespace(tee_client=tee_stub)
+        rebuffered = await arweave_audit.rebuffer_research_lab_buffered_audit_events(limit=10)
+        assert rebuffered == 0
+        assert appended_events == []
 
     finally:
         arweave_audit.select_many = original_select_many  # type: ignore[assignment]
@@ -172,6 +183,10 @@ async def _fake_rebuffer_select_one(table: str, **kwargs: Any) -> dict[str, Any]
 async def _capture_append_event(appended_events: list[dict[str, Any]], event: dict[str, Any]) -> dict[str, Any]:
     appended_events.append(dict(event))
     return {"status": "buffered", "sequence": len(appended_events)}
+
+
+async def _fake_get_buffer(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return events
 
 
 def _weight_bundle() -> dict[str, Any]:

@@ -2050,15 +2050,11 @@ class ResearchLabPromotionController:
             gate.get("private_holdout_evaluated")
         ):
             return {"status": "skipped_private_holdout_not_approved"}
-        if str(score_bundle.get("candidate_artifact_hash") or "") != new_artifact.model_artifact_hash:
-            return {
-                "status": "skipped_activation_artifact_differs_from_scored_candidate",
-                "source_score_bundle_candidate_artifact_hash": str(
-                    score_bundle.get("candidate_artifact_hash") or ""
-                ),
-                "activation_model_artifact_hash": new_artifact.model_artifact_hash,
-                "activation_manifest_hash": new_artifact.manifest_hash,
-            }
+        source_candidate_artifact_hash = str(score_bundle.get("candidate_artifact_hash") or "")
+        activation_differs_from_scored_candidate = bool(
+            source_candidate_artifact_hash
+            and source_candidate_artifact_hash != new_artifact.model_artifact_hash
+        )
 
         baseline_bundle_id = str(gate.get("baseline_benchmark_bundle_id") or "")
         if not baseline_bundle_id:
@@ -2132,6 +2128,13 @@ class ResearchLabPromotionController:
             "source_candidate_id": str(candidate["candidate_id"]),
             "source_baseline_benchmark_bundle_id": baseline_bundle_id,
             "source_baseline_score_summary_hash": canonical_hash(baseline_doc),
+            "source_candidate_artifact_hash": source_candidate_artifact_hash,
+            "activation_model_artifact_hash": new_artifact.model_artifact_hash,
+            "activation_manifest_hash": new_artifact.manifest_hash,
+            "activation_git_commit_sha": new_artifact.git_commit_sha,
+            "activation_artifact_differs_from_scored_candidate": (
+                activation_differs_from_scored_candidate
+            ),
             "reimbursement_preserved": True,
             "supersedes_until_daily_rebenchmark": True,
             "promotion_metric": promotion_metric,
@@ -2181,6 +2184,13 @@ class ResearchLabPromotionController:
             baseline_bundle_id=baseline_bundle_id,
             source_score_bundle_id=source_score_bundle_id,
             source_candidate_id=str(candidate["candidate_id"]),
+            source_candidate_artifact_hash=source_candidate_artifact_hash,
+            activation_model_artifact_hash=new_artifact.model_artifact_hash,
+            activation_manifest_hash=new_artifact.manifest_hash,
+            activation_git_commit_sha=new_artifact.git_commit_sha,
+            activation_artifact_differs_from_scored_candidate=(
+                activation_differs_from_scored_candidate
+            ),
             promotion_metric=promotion_metric,
         )
         return {
@@ -2236,6 +2246,11 @@ class ResearchLabPromotionController:
         baseline_bundle_id: str,
         source_score_bundle_id: str,
         source_candidate_id: str,
+        source_candidate_artifact_hash: str,
+        activation_model_artifact_hash: str,
+        activation_manifest_hash: str,
+        activation_git_commit_sha: str,
+        activation_artifact_differs_from_scored_candidate: bool,
         promotion_metric: Mapping[str, Any],
     ) -> dict[str, Any]:
         existing_reports = await select_many(
@@ -2281,6 +2296,13 @@ class ResearchLabPromotionController:
             source_score_bundle_id=source_score_bundle_id,
             source_candidate_id=source_candidate_id,
             source_baseline_benchmark_bundle_id=baseline_bundle_id,
+            source_candidate_artifact_hash=source_candidate_artifact_hash,
+            activation_model_artifact_hash=activation_model_artifact_hash,
+            activation_manifest_hash=activation_manifest_hash,
+            activation_git_commit_sha=activation_git_commit_sha,
+            activation_artifact_differs_from_scored_candidate=(
+                activation_artifact_differs_from_scored_candidate
+            ),
             promotion_metric=promotion_metric,
         )
         report, _report_event = await create_public_benchmark_report(
@@ -3083,6 +3105,11 @@ def _build_promoted_public_benchmark_report_doc(
     source_score_bundle_id: str,
     source_candidate_id: str,
     source_baseline_benchmark_bundle_id: str,
+    source_candidate_artifact_hash: str,
+    activation_model_artifact_hash: str,
+    activation_manifest_hash: str,
+    activation_git_commit_sha: str,
+    activation_artifact_differs_from_scored_candidate: bool,
     promotion_metric: Mapping[str, Any],
 ) -> dict[str, Any]:
     report = build_public_benchmark_report(
@@ -3110,6 +3137,13 @@ def _build_promoted_public_benchmark_report_doc(
             "source_score_bundle_id": source_score_bundle_id,
             "source_candidate_id": source_candidate_id,
             "source_baseline_benchmark_bundle_id": source_baseline_benchmark_bundle_id,
+            "source_candidate_artifact_hash": source_candidate_artifact_hash,
+            "activation_model_artifact_hash": activation_model_artifact_hash,
+            "activation_manifest_hash": activation_manifest_hash,
+            "activation_git_commit_sha": activation_git_commit_sha,
+            "activation_artifact_differs_from_scored_candidate": (
+                activation_artifact_differs_from_scored_candidate
+            ),
             "supersedes_until_daily_rebenchmark": True,
             "promotion_metric": dict(promotion_metric),
             "public_icps": public_icps,

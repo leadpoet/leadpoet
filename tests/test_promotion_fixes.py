@@ -812,6 +812,15 @@ async def test_promoted_candidate_writes_derived_benchmark_and_links_active_vers
         model_artifact_hash="sha256:" + "c" * 64,
         git_commit_sha="d" * 40,
     )
+    activation_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "e" * 64,
+        git_commit_sha="e" * 40,
+        manifest_uri="s3://bucket/research-lab/sourcing-model/current.json",
+        image_digest=(
+            "493765492819.dkr.ecr.us-east-1.amazonaws.com/research-lab/test@sha256:"
+            + "e" * 64
+        ),
+    )
     window_hash = "sha256:" + "3" * 64
     baseline_bundle_id = "private_benchmark:" + "6" * 64
     store.select_one_results["research_lab_private_model_benchmark_current"] = _bridge_baseline_row(
@@ -830,11 +839,30 @@ async def test_promoted_candidate_writes_derived_benchmark_and_links_active_vers
     async def _fake_push(self: Any, **kwargs: Any) -> dict[str, Any]:
         return {"status": "private_source_pushed", "git_commit_sha": "e" * 40}
 
+    async def _fake_wait(
+        config: Any,
+        *,
+        expected_git_sha: str,
+        timeout_seconds: int | None = None,
+        poll_seconds: int | None = None,
+    ) -> tuple[FakeArtifact, dict[str, Any]]:
+        assert expected_git_sha == "e" * 40
+        return activation_artifact, {
+            "status": "manifest_ready",
+            "expected_git_sha": expected_git_sha,
+            "current_json_git_sha": activation_artifact.git_commit_sha,
+            "current_json_manifest_hash": activation_artifact.manifest_hash,
+            "current_json_model_artifact_hash": activation_artifact.model_artifact_hash,
+            "current_json_image_digest": activation_artifact.image_digest,
+            "manifest_uri": activation_artifact.manifest_uri,
+        }
+
     async def _fake_reward(self: Any, **kwargs: Any) -> dict[str, Any]:
         return {"champion_reward_status": "created", "champion_reward_id": "cr-1"}
 
     monkeypatch.setattr(ResearchLabPromotionController, "_maybe_push_private_repo_candidate", _fake_push)
     monkeypatch.setattr(ResearchLabPromotionController, "_maybe_create_champion_reward", _fake_reward)
+    monkeypatch.setattr(promotion, "wait_for_current_manifest_git_sha", _fake_wait)
 
     controller = ResearchLabPromotionController(_controller_config(auto_commit_enabled=True), worker_ref="test-worker")
     candidate = {
@@ -862,23 +890,114 @@ async def test_promoted_candidate_writes_derived_benchmark_and_links_active_vers
     assert result["status"] == "merged"
     assert len(store.private_benchmark_writes) == 1
     benchmark_write = store.private_benchmark_writes[0]
-    assert benchmark_write["private_model_artifact_hash"] == candidate_artifact.model_artifact_hash
-    assert benchmark_write["private_model_manifest_hash"] == candidate_artifact.manifest_hash
+    assert benchmark_write["private_model_artifact_hash"] == activation_artifact.model_artifact_hash
+    assert benchmark_write["private_model_manifest_hash"] == activation_artifact.manifest_hash
     assert benchmark_write["aggregate_score"] == pytest.approx(28.472727)
     assert benchmark_write["benchmark_quality"] == "passed"
     summary_doc = benchmark_write["score_summary_doc"]
     assert summary_doc["source"] == "promoted_candidate_score_bundle"
     assert summary_doc["derived_from_candidate_score"] is True
     assert summary_doc["source_score_bundle_id"] == "score_bundle:" + "7" * 64
+    assert summary_doc["source_candidate_artifact_hash"] == candidate_artifact.model_artifact_hash
+    assert summary_doc["activation_model_artifact_hash"] == activation_artifact.model_artifact_hash
+    assert summary_doc["activation_manifest_hash"] == activation_artifact.manifest_hash
+    assert summary_doc["activation_git_commit_sha"] == "e" * 40
+    assert summary_doc["activation_artifact_differs_from_scored_candidate"] is True
     assert len(store.public_report_writes) == 1
     report_doc = store.public_report_writes[0]["report_doc"]
     assert report_doc["aggregate_score"] == pytest.approx(28.472727)
     assert report_doc["source"] == "promoted_candidate_score_bundle"
+    assert report_doc["source_candidate_artifact_hash"] == candidate_artifact.model_artifact_hash
+    assert report_doc["activation_model_artifact_hash"] == activation_artifact.model_artifact_hash
+    assert report_doc["activation_artifact_differs_from_scored_candidate"] is True
     assert report_doc["public_icps"][0]["score"] == pytest.approx(25.0)
     assert len(store.version_writes) == 1
     assert store.version_writes[0]["source_benchmark_bundle_id"] == "private_benchmark:" + "8" * 64
+    assert store.version_writes[0]["manifest_uri"] == activation_artifact.manifest_uri
+    assert store.version_writes[0]["artifact_manifest"]["git_commit_sha"] == "e" * 40
+    assert store.version_writes[0]["artifact_manifest"]["model_artifact_hash"] == (
+        activation_artifact.model_artifact_hash
+    )
     active_events = [event for event in store.promotion_event_writes if event["event_type"] == "active_version_created"]
     assert active_events[0]["event_doc"]["derived_benchmark_bundle_id"] == "private_benchmark:" + "8" * 64
+    assert active_events[0]["event_doc"]["scored_candidate_model_artifact_hash"] == (
+        candidate_artifact.model_artifact_hash
+    )
+    assert active_events[0]["event_doc"]["new_model_artifact_hash"] == activation_artifact.model_artifact_hash
+
+
+async def test_promoted_candidate_source_push_pending_leaves_previous_active_model_active(store, monkeypatch):
+    parent = FakeArtifact()
+    candidate_artifact = _valid_fake_artifact(
+        model_artifact_hash="sha256:" + "c" * 64,
+        git_commit_sha="d" * 40,
+    )
+    window_hash = "sha256:" + "3" * 64
+    baseline_bundle_id = "private_benchmark:" + "6" * 64
+    store.select_one_results["research_lab_private_model_benchmark_current"] = _bridge_baseline_row(
+        window_hash,
+        baseline_bundle_id,
+    )
+
+    async def _fake_push(self: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"status": "private_source_pushed", "git_commit_sha": "e" * 40}
+
+    async def _fake_wait(
+        config: Any,
+        *,
+        expected_git_sha: str,
+        timeout_seconds: int | None = None,
+        poll_seconds: int | None = None,
+    ) -> tuple[None, dict[str, Any]]:
+        assert expected_git_sha == "e" * 40
+        return None, {
+            "status": "source_pushed_manifest_pending",
+            "expected_git_sha": expected_git_sha,
+            "current_json_git_sha": "d" * 40,
+        }
+
+    async def _fake_reward(self: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("champion reward must not be created while source manifest is pending")
+
+    monkeypatch.setattr(ResearchLabPromotionController, "_maybe_push_private_repo_candidate", _fake_push)
+    monkeypatch.setattr(ResearchLabPromotionController, "_maybe_create_champion_reward", _fake_reward)
+    monkeypatch.setattr(promotion, "wait_for_current_manifest_git_sha", _fake_wait)
+
+    controller = ResearchLabPromotionController(_controller_config(auto_commit_enabled=True), worker_ref="test-worker")
+    candidate = {
+        "candidate_id": "candidate:" + "1" * 64,
+        "parent_artifact_hash": parent.model_artifact_hash,
+        "candidate_kind": "image_build",
+        "candidate_model_manifest_doc": candidate_artifact.to_dict(),
+        "candidate_source_diff_hash": "sha256:" + "2" * 64,
+        "miner_hotkey": "hk-1",
+        "ticket_id": "ticket-1",
+        "run_id": "run-1",
+    }
+    result = await controller._promote_built_image_candidate(
+        candidate=candidate,
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle=_bridge_score_bundle(candidate_artifact, window_hash, baseline_bundle_id),
+        active=ActivePrivateModel(artifact=parent, version_row=_active_row(parent)),
+        active_parent=parent.model_artifact_hash,
+        candidate_parent=parent.model_artifact_hash,
+        rolling_window_hash=window_hash,
+        improvement_points=12.119394,
+        threshold=1.0,
+    )
+    assert result["status"] == "source_pushed_manifest_pending"
+    assert store.private_benchmark_writes == []
+    assert store.public_report_writes == []
+    assert store.version_writes == []
+    pending_events = [
+        event
+        for event in store.promotion_event_writes
+        if (event.get("event_doc") or {}).get("reason") == "source_pushed_manifest_pending"
+    ]
+    assert len(pending_events) == 1
+    assert pending_events[0]["event_doc"]["action"] == (
+        "leave_previous_active_model_active_until_current_json_matches_pushed_commit"
+    )
 
 
 async def test_promoted_candidate_bridge_reuses_existing_rows_without_duplicate_writes(store):

@@ -40,11 +40,18 @@ def get_langfuse_client() -> Any | None:
         return None
     try:
         from langfuse import get_client  # type: ignore
-    except Exception as exc:
-        logger.warning("langfuse_import_unavailable error=%s", str(exc)[:200])
-        return None
+    except Exception:
+        get_client = None
+    if get_client is not None:
+        try:
+            return get_client()
+        except Exception as exc:
+            logger.warning("langfuse_client_unavailable error=%s", str(exc)[:200])
+            return None
     try:
-        return get_client()
+        from langfuse import Langfuse  # type: ignore
+
+        return Langfuse()
     except Exception as exc:
         logger.warning("langfuse_client_unavailable error=%s", str(exc)[:200])
         return None
@@ -82,8 +89,29 @@ def observation(
         }
         if input is not None:
             kwargs["input"] = redact_for_langfuse(input, mode=redaction_mode())
-        with client.start_as_current_observation(**kwargs) as span:
+        if hasattr(client, "start_as_current_observation"):
+            with client.start_as_current_observation(**kwargs) as span:
+                yield span
+            return
+
+        factory_name = "generation" if as_type == "generation" else "trace" if as_type == "trace" else "span"
+        factory = getattr(client, factory_name, None) or getattr(client, "span", None)
+        if factory is None:
+            yield None
+            return
+        span = factory(
+            name=name,
+            metadata=kwargs.get("metadata"),
+            input=kwargs.get("input"),
+        )
+        try:
             yield span
+        finally:
+            try:
+                if hasattr(span, "end"):
+                    span.end()
+            except Exception as exc:
+                logger.warning("langfuse_observation_end_failed trace_name=%s error=%s", name, str(exc)[:200])
     except RedactionBlocked as exc:
         logger.warning(
             "langfuse_redaction_blocked_event=true trace_name=%s blocked_reason=%s",

@@ -42,10 +42,13 @@ arweave-python-client>=1.0.19
 # Monitoring and metrics
 prometheus_client>=0.19.0
 structlog>=23.2.0
-langfuse>=3,<4
-opentelemetry-api>=1.25.0
-opentelemetry-sdk>=1.25.0
-opentelemetry-exporter-otlp-proto-http>=1.25.0
+# Keep these pinned for Python 3.9 Docker builds. Langfuse 3.x requires
+# OpenTelemetry >=1.33, whose proto exporter requires protobuf >=5; the
+# validator Firestore stack is pinned to protobuf <5.
+langfuse==2.60.10
+opentelemetry-api==1.27.0
+opentelemetry-sdk==1.27.0
+opentelemetry-exporter-otlp-proto-http==1.27.0
 
 # Retry and resilience
 tenacity>=8.2.0

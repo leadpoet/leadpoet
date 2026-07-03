@@ -60,6 +60,7 @@ SCRAPINGDOG_410_MSG = (
 def _clear_eval_env_flags(monkeypatch):
     for name in EVAL_ENV_FLAGS:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(evaluator, "_PROVIDER_429_RETRY_BACKOFF_SECONDS", 0.0)
 
 
 def _benchmark_items(count: int) -> list[dict]:
@@ -318,6 +319,16 @@ async def test_gate_keeps_retry_exhausted_provider_failures_in_totals():
 )
 def test_candidate_error_classifier_verdicts(message, expected):
     assert evaluator._candidate_error_is_retryable(message) is expected
+
+
+def test_candidate_429_backoff_only_for_explicit_429(monkeypatch):
+    monkeypatch.setattr(evaluator, "_PROVIDER_429_RETRY_BACKOFF_SECONDS", 15.0)
+
+    assert evaluator._candidate_429_retry_backoff_seconds(PROVIDER_RETRYABLE_MSG) == 15.0
+    assert evaluator._candidate_429_retry_backoff_seconds("HTTPError: request timeout; status=408") == 0.0
+    assert evaluator._candidate_429_retry_backoff_seconds("HTTPError: internal error; status=500") == 0.0
+    assert evaluator._candidate_429_retry_backoff_seconds("HTTPError: too many requests without status") == 0.0
+    assert evaluator._candidate_429_retry_backoff_seconds(SCRAPINGDOG_410_MSG) == 0.0
 
 
 # ---------------------------------------------------------------------------

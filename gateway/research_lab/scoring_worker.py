@@ -185,6 +185,8 @@ def _env_int(name: str, default: int) -> int:
 # engine shares them; imported at the top with underscore aliases to keep
 # existing call sites and tests stable.
 
+_PROVIDER_429_RETRY_BACKOFF_SECONDS = 15.0
+
 
 def _baseline_error_is_retryable(error_text: str) -> bool:
     """Transient provider/infra failures are retryable; model code bugs and
@@ -236,6 +238,19 @@ def _baseline_error_is_retryable(error_text: str) -> bool:
         # run fewer containers at once.
         return True
     return False
+
+
+def _baseline_429_retry_backoff_seconds(error_text: str) -> float:
+    """Return a short backoff only for explicit provider HTTP 429 errors."""
+
+    diagnostics = _runtime_error_diagnostics(error_text)
+    try:
+        status = int(diagnostics.get("status") or 0)
+    except (TypeError, ValueError):
+        status = 0
+    if status == 429:
+        return _PROVIDER_429_RETRY_BACKOFF_SECONDS
+    return 0.0
 
 
 class BaselineHealthGateFailure(RuntimeError):
@@ -4613,6 +4628,7 @@ class ResearchLabGatewayScoringWorker:
                     item_summary.pop("_item_index", None)
                     item_summary.pop("_retryable", None)
                     item_summary.pop("_runtime_error", None)
+                    item_summary.pop("_retry_backoff_seconds", None)
                     per_icp_summaries.append(item_summary)
             for item_index, item in enumerate([] if parallel_mode else window.benchmark_items, start=1):
                 item_start = time.time()
@@ -5114,8 +5130,9 @@ class ResearchLabGatewayScoringWorker:
         batch dying.
 
         The returned summary carries underscore-prefixed orchestration fields
-        (_item_index, _retryable, _nonempty, _runtime_error) that MUST be popped
-        before the summary enters score_summary_doc.
+        (_item_index, _retryable, _nonempty, _runtime_error,
+        _retry_backoff_seconds) that MUST be popped before the summary enters
+        score_summary_doc.
         """
         loop = asyncio.get_running_loop()
         item_start = time.time()
@@ -5137,6 +5154,7 @@ class ResearchLabGatewayScoringWorker:
         runtime_error = ""
         scorer_error = ""
         retryable = False
+        retry_backoff_seconds = 0.0
         # In-container trace collection (§9.1): install a per-task collector so
         # the runner's stderr trace markers are published instead of dropped.
         # run_in_executor does NOT copy contextvars (asyncio.to_thread does), so
@@ -5161,6 +5179,10 @@ class ResearchLabGatewayScoringWorker:
             # Classify from the full exception text: _short_error truncates to
             # 300 chars and can drop the status marker the classifier needs.
             retryable = _baseline_error_is_retryable(str(exc))
+            retry_backoff_seconds = max(
+                retry_backoff_seconds,
+                _baseline_429_retry_backoff_seconds(str(exc)),
+            )
             logger.warning(
                 format_worker_block(
                     "RESEARCH LAB PRIVATE BASELINE ICP RUNTIME ERROR",
@@ -5190,6 +5212,10 @@ class ResearchLabGatewayScoringWorker:
             except Exception as scorer_exc:  # noqa: BLE001 - §0-N6: non-fatal for the batch
                 scorer_error = _short_error(scorer_exc)
                 retryable = retryable or _baseline_error_is_retryable(str(scorer_exc))
+                retry_backoff_seconds = max(
+                    retry_backoff_seconds,
+                    _baseline_429_retry_backoff_seconds(str(scorer_exc)),
+                )
                 logger.warning(
                     format_worker_block(
                         "RESEARCH LAB PRIVATE BASELINE ICP SCORER ERROR",
@@ -5260,6 +5286,7 @@ class ResearchLabGatewayScoringWorker:
         item_summary["_retryable"] = retryable
         item_summary["_nonempty"] = bool(outputs)
         item_summary["_runtime_error"] = runtime_error or scorer_error
+        item_summary["_retry_backoff_seconds"] = retry_backoff_seconds
         return item_summary
 
     async def _score_baseline_outputs(
@@ -5301,7 +5328,17 @@ class ResearchLabGatewayScoringWorker:
                     self.worker_ref,
                     _short_error(exc),
                 )
-                await asyncio.sleep(2.0)
+                backoff_seconds = _baseline_429_retry_backoff_seconds(str(exc))
+                if backoff_seconds > 0:
+                    logger.warning(
+                        "research_lab_baseline_scorer_rate_limit_backoff worker_ref=%s backoff_seconds=%.1f error=%s",
+                        self.worker_ref,
+                        backoff_seconds,
+                        _short_error(exc),
+                    )
+                    await asyncio.sleep(backoff_seconds)
+                else:
+                    await asyncio.sleep(2.0)
                 return await _call()
 
         if not apply_isolation:
@@ -5430,6 +5467,18 @@ class ResearchLabGatewayScoringWorker:
 
                 async def retry_one(item_index: int) -> dict[str, Any]:
                     async with retry_semaphore:
+                        backoff_seconds = float(
+                            results.get(item_index, {}).get("_retry_backoff_seconds") or 0.0
+                        )
+                        if backoff_seconds > 0:
+                            logger.warning(
+                                "research_lab_baseline_icp_rate_limit_backoff worker_ref=%s round=%s icp_index=%s backoff_seconds=%.1f",
+                                self.worker_ref,
+                                round_no,
+                                item_index,
+                                backoff_seconds,
+                            )
+                            await asyncio.sleep(backoff_seconds)
                         return await self._run_baseline_icp(
                             runner=retry_runner,
                             scorer=scorer,

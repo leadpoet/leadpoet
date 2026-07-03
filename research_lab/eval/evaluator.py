@@ -65,6 +65,7 @@ INCONTAINER_TRACE_KMS_KEY_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID"
 # (leadpoet_verifier.research_evaluation.DEFAULT_LEADS_PER_ICP_NORMALIZER).
 _TOP5_LEADS_PER_ICP = 5
 _EVAL_ENV_TRUTHY = {"1", "true", "yes", "on"}
+_PROVIDER_429_RETRY_BACKOFF_SECONDS = 15.0
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -607,6 +608,16 @@ async def _run_candidate_with_retries(
                 legacy_timeout_latch=legacy_timeout_latch,
                 provider_flake_retry=provider_flake_retry,
             ):
+                backoff_seconds = _candidate_429_retry_backoff_seconds(str(exc))
+                if backoff_seconds > 0:
+                    logger.warning(
+                        "research_lab_candidate_rate_limit_retry_backoff item_ref=%s attempt=%s/%s backoff_seconds=%.1f",
+                        item_label,
+                        attempts,
+                        max_attempts,
+                        backoff_seconds,
+                    )
+                    await asyncio.sleep(backoff_seconds)
                 continue
             return [], failure_reason, False
 
@@ -670,6 +681,14 @@ def _candidate_error_is_retryable(error_text: str) -> bool:
         # run at once on the retry.
         return True
     return False
+
+
+def _candidate_429_retry_backoff_seconds(error_text: str) -> float:
+    """Return a short backoff only for explicit provider HTTP 429 errors."""
+
+    if _provider_error_status_code(error_text.lower()) == 429:
+        return _PROVIDER_429_RETRY_BACKOFF_SECONDS
+    return 0.0
 
 
 def _provider_error_status_code(lowered_error_text: str) -> int:

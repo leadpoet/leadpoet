@@ -181,6 +181,16 @@ def test_baseline_error_is_retryable(text: str, expected: bool):
     assert sw._baseline_error_is_retryable(text) is expected
 
 
+def test_baseline_429_backoff_only_for_explicit_429(monkeypatch):
+    monkeypatch.setattr(sw, "_PROVIDER_429_RETRY_BACKOFF_SECONDS", 15.0)
+
+    assert sw._baseline_429_retry_backoff_seconds("HTTPError: status=429 too many requests") == 15.0
+    assert sw._baseline_429_retry_backoff_seconds("HTTPError: status=408 request timeout") == 0.0
+    assert sw._baseline_429_retry_backoff_seconds("HTTPError: status=500 internal error") == 0.0
+    assert sw._baseline_429_retry_backoff_seconds("HTTPError: too many requests without status") == 0.0
+    assert sw._baseline_429_retry_backoff_seconds("HTTPError: status=410 gone") == 0.0
+
+
 def test_runtime_error_diagnostics_recognizes_410_and_shape():
     diagnostics = sw._runtime_error_diagnostics("HTTP Error 410: Gone scrapingdog")
     assert diagnostics["status"] == 410

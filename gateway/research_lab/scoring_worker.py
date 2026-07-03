@@ -1538,6 +1538,40 @@ def _count_claim_attempts(rows: list[Mapping[str, Any]]) -> int:
     return max(0, attempts)
 
 
+def _worker_can_claim_candidate_slot(worker_index: int, max_active_claims: int) -> bool:
+    """Return whether this scoring worker may start new heavy candidate claims.
+
+    ``max_active_claims=0`` disables the slot gate. Otherwise only the first N
+    scoring worker slots can claim new candidates, preventing a large worker
+    fleet from stampeding one gateway host with simultaneous Docker evaluations.
+    """
+    try:
+        cap = int(max_active_claims)
+    except (TypeError, ValueError):
+        cap = 0
+    if cap <= 0:
+        return True
+    try:
+        index = int(worker_index)
+    except (TypeError, ValueError):
+        index = 0
+    return index < cap
+
+
+def _active_claim_capacity_available(active_count: int, max_active_claims: int) -> bool:
+    try:
+        cap = int(max_active_claims)
+    except (TypeError, ValueError):
+        cap = 0
+    if cap <= 0:
+        return True
+    try:
+        count = int(active_count)
+    except (TypeError, ValueError):
+        count = 0
+    return count < cap
+
+
 class ResearchLabGatewayScoringWorker:
     """Scores Research Lab candidates inside the gateway trust boundary."""
 
@@ -1685,7 +1719,18 @@ class ResearchLabGatewayScoringWorker:
                 )
 
         processed: list[str] = []
+        claim_capacity: dict[str, Any] = {"available": True}
         for _ in range(max(1, self.config.scoring_worker_max_candidates)):
+            claim_capacity = await self._candidate_claim_capacity()
+            if not claim_capacity.get("available"):
+                if claim_capacity.get("reason") == "active_claim_capacity_full":
+                    logger.info(
+                        "research_lab_candidate_claim_capacity_full worker_ref=%s active_claims=%s max_active_claims=%s",
+                        self.worker_ref,
+                        claim_capacity.get("active_claims"),
+                        claim_capacity.get("max_active_claims"),
+                    )
+                break
             candidate = await self._claim_next_candidate()
             if not candidate:
                 break
@@ -1706,6 +1751,8 @@ class ResearchLabGatewayScoringWorker:
             status = "baseline_completed"
         elif confirmation_processed:
             status = "confirmation_processed"
+        elif not claim_capacity.get("available"):
+            status = str(claim_capacity.get("reason") or "candidate_claim_capacity_limited")
         else:
             status = "idle"
         return {
@@ -1714,6 +1761,34 @@ class ResearchLabGatewayScoringWorker:
             "candidate_ids": processed,
             "baseline": baseline_result,
             "confirmation": confirmation_result,
+            "candidate_claim_capacity": claim_capacity,
+        }
+
+    async def _candidate_claim_capacity(self) -> dict[str, Any]:
+        max_active = int(getattr(self.config, "scoring_worker_max_active_claims", 0) or 0)
+        if max_active <= 0:
+            return {"available": True, "max_active_claims": 0, "cap_disabled": True}
+        if not _worker_can_claim_candidate_slot(self.config.scoring_worker_index, max_active):
+            return {
+                "available": False,
+                "reason": "claim_slot_disabled",
+                "worker_index": self.config.scoring_worker_index,
+                "max_active_claims": max_active,
+            }
+        active = await select_many(
+            "research_lab_candidate_evaluation_current",
+            columns="candidate_id,current_candidate_status,current_status_at,current_evaluator_ref",
+            filters=(("current_candidate_status", "in", ("assigned", "evaluating")),),
+            order_by=(("current_status_at", False),),
+            limit=max_active,
+        )
+        active_count = len(active)
+        return {
+            "available": _active_claim_capacity_available(active_count, max_active),
+            "reason": "" if active_count < max_active else "active_claim_capacity_full",
+            "active_claims": active_count,
+            "max_active_claims": max_active,
+            "worker_index": self.config.scoring_worker_index,
         }
 
     async def _claim_next_candidate(self) -> dict[str, Any] | None:

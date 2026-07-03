@@ -93,6 +93,22 @@ def test_stale_claim_recovery_owner_is_stable_and_bounded():
     assert sw._stale_claim_recovery_owner_index(candidate_id, 0) == 0
 
 
+def test_candidate_claim_slot_gate_limits_claiming_workers():
+    assert sw._worker_can_claim_candidate_slot(0, 8)
+    assert sw._worker_can_claim_candidate_slot(7, 8)
+    assert not sw._worker_can_claim_candidate_slot(8, 8)
+    assert not sw._worker_can_claim_candidate_slot(24, 8)
+    assert sw._worker_can_claim_candidate_slot(24, 0)
+
+
+def test_active_claim_capacity_gate_blocks_at_cap():
+    assert sw._active_claim_capacity_available(0, 8)
+    assert sw._active_claim_capacity_available(7, 8)
+    assert not sw._active_claim_capacity_available(8, 8)
+    assert not sw._active_claim_capacity_available(12, 8)
+    assert sw._active_claim_capacity_available(12, 0)
+
+
 def test_restart_orphan_recovery_is_not_blocked_by_stale_owner():
     candidate_id = "candidate:97a10903d96c91880b35a423aa9d44d9a9593c9bc68b2e776fb531a18cb75eb0"
     non_owner_index = (sw._stale_claim_recovery_owner_index(candidate_id, 25) + 1) % 25

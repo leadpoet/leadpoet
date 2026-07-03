@@ -130,6 +130,19 @@ def test_deliberately_unchanged_defaults(clean_env):
     assert config.auto_promotion_enabled is True
 
 
+def test_scoring_active_claim_cap_defaults_and_override(clean_env):
+    config = ResearchLabGatewayConfig.from_env()
+    assert config.scoring_worker_max_active_claims == 8
+
+    clean_env.setenv("RESEARCH_LAB_SCORING_WORKER_MAX_ACTIVE_CLAIMS", "4")
+    config = ResearchLabGatewayConfig.from_env()
+    assert config.scoring_worker_max_active_claims == 4
+
+    clean_env.setenv("RESEARCH_LAB_SCORING_WORKER_MAX_ACTIVE_CLAIMS", "0")
+    config = ResearchLabGatewayConfig.from_env()
+    assert config.scoring_worker_max_active_claims == 0
+
+
 @pytest.mark.parametrize("raw", ["0", "0.0", "-2.5", "0.05"])
 def test_improvement_threshold_clamps_low_values_with_warning(clean_env, caplog, raw):
     clean_env.setenv("RESEARCH_LAB_IMPROVEMENT_THRESHOLD_POINTS", raw)

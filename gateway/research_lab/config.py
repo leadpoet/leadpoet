@@ -331,6 +331,7 @@ class ResearchLabGatewayConfig:
     scoring_worker_enabled: bool = False
     scoring_worker_poll_seconds: int = 15
     scoring_worker_max_candidates: int = 1
+    scoring_worker_max_active_claims: int = 8
     scoring_worker_id: str = ""
     scoring_worker_index: int = 0
     scoring_worker_total_workers: int = 1
@@ -571,6 +572,10 @@ class ResearchLabGatewayConfig:
             scoring_worker_enabled=_truthy("RESEARCH_LAB_SCORING_WORKER_ENABLED"),
             scoring_worker_poll_seconds=max(1, _int("RESEARCH_LAB_SCORING_WORKER_POLL_SECONDS", 15)),
             scoring_worker_max_candidates=max(1, _int("RESEARCH_LAB_SCORING_WORKER_MAX_CANDIDATES", 1)),
+            scoring_worker_max_active_claims=max(
+                0,
+                _int("RESEARCH_LAB_SCORING_WORKER_MAX_ACTIVE_CLAIMS", 8),
+            ),
             scoring_worker_id=os.getenv("RESEARCH_LAB_SCORING_WORKER_ID", ""),
             scoring_worker_index=scoring_worker_index,
             scoring_worker_total_workers=scoring_total_workers,
@@ -1229,6 +1234,7 @@ class ResearchLabGatewayConfig:
                 "scoring_worker_enabled": self.scoring_worker_enabled,
                 "scoring_worker_poll_seconds": self.scoring_worker_poll_seconds,
                 "scoring_worker_max_candidates": self.scoring_worker_max_candidates,
+                "scoring_worker_max_active_claims": self.scoring_worker_max_active_claims,
                 "scoring_worker_id": self.scoring_worker_id,
                 "scoring_worker_index": self.scoring_worker_index,
                 "scoring_worker_total_workers": self.scoring_worker_total_workers,

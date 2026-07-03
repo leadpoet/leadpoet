@@ -508,6 +508,129 @@ def _scorer_trace_company_identity(output: Any) -> dict[str, Any]:
     }
 
 
+_REJECTED_COMPANIES_CAPTURE_ENV = "RESEARCH_LAB_REJECTED_COMPANIES_CAPTURE"
+_REJECTED_COMPANIES_TABLE = "research_lab_rejected_companies"
+
+
+def _rejected_companies_capture_enabled() -> bool:
+    return os.getenv(_REJECTED_COMPANIES_CAPTURE_ENV, "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _optional_score(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return None
+
+
+async def _persist_rejected_companies(
+    *,
+    context_ref: str,
+    icp_ref: str,
+    icp_hash: str,
+    is_reference_model: bool,
+    outputs: Any,
+    breakdowns: Any,
+    candidate_id: str | None = None,
+    model_manifest_hash: str | None = None,
+) -> int:
+    """Best-effort: persist model-sourced companies the harness REJECTED
+    (final_score 0 / an explicit failure_reason) to
+    ``research_lab_rejected_companies`` for later false-rejection analysis.
+
+    Company identity only (name / site / linkedin / industry / size / country) —
+    never page content or evidence text. Dedup: each unique rejection (icp_hash |
+    company | failure_reason | model) is stored once via ``dedup_key`` + the
+    table's UNIQUE constraint (a conflicting insert is swallowed). Never raises
+    and never blocks scoring. Returns the number of rows written.
+    """
+    if not _rejected_companies_capture_enabled() or not breakdowns:
+        return 0
+    written = 0
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        for output, breakdown in zip(outputs or (), breakdowns or ()):
+            if not isinstance(breakdown, Mapping):
+                continue
+            final_score = float(breakdown.get("final_score", 0.0) or 0.0)
+            failure_reason = str(breakdown.get("failure_reason") or "").strip()
+            if final_score > 0.0 and not failure_reason:
+                continue  # accepted / scored — not a rejection
+            identity = _scorer_trace_company_identity(output)
+            # Dedup identity: SAME company + SAME error + SAME icp -> one row
+            # (regardless of baseline vs candidate). Key on the company NAME,
+            # normalized to alphanumerics so case / punctuation / spacing / a
+            # linkedin-slug present one run but not the next never splits it.
+            company_key = "".join(
+                ch
+                for ch in (
+                    identity.get("company_name")
+                    or identity.get("company_website")
+                    or identity.get("company_linkedin")
+                    or ""
+                ).lower()
+                if ch.isalnum()
+            )
+            dedup_key = sha256_json(
+                {
+                    "icp_hash": str(icp_hash or ""),
+                    "company": company_key,
+                    "failure_reason": failure_reason,
+                }
+            )
+            row = {
+                "context_ref": str(context_ref),
+                "is_reference_model": bool(is_reference_model),
+                "candidate_id": (str(candidate_id) if candidate_id else None),
+                "model_manifest_hash": (str(model_manifest_hash) if model_manifest_hash else None),
+                "icp_ref": str(icp_ref),
+                "icp_hash": str(icp_hash or ""),
+                "company_name": identity.get("company_name") or None,
+                "company_website": identity.get("company_website") or None,
+                "company_linkedin": identity.get("company_linkedin") or None,
+                "industry": identity.get("industry") or None,
+                "sub_industry": identity.get("sub_industry") or None,
+                "employee_count": identity.get("employee_count") or None,
+                "country": identity.get("country") or None,
+                "final_score": final_score,
+                "failure_reason": failure_reason or None,
+                "failure_stage": (str(breakdown.get("stage_failed") or "").strip() or None),
+                "fit_passed": _optional_bool(breakdown.get("fit_passed")),
+                "attribute_passed": _optional_bool(breakdown.get("attribute_passed")),
+                "intent_passed": _optional_bool(breakdown.get("intent_passed")),
+                "icp_fit": _optional_score(breakdown.get("icp_fit")),
+                "intent_signal": _optional_score(breakdown.get("intent_signal_final")),
+                "captured_at": now,
+                "dedup_key": dedup_key,
+            }
+            try:
+                await insert_row(_REJECTED_COMPANIES_TABLE, row)
+                written += 1
+            except Exception:
+                pass  # duplicate (UNIQUE dedup_key) or transient — best-effort
+    except Exception:
+        pass
+    return written
+
+
 class _ScorerTraceRecorder:
     """Best-effort SSE-KMS S3 capture of the qualification scorer's per-company
     judgments at the ``score_with_breakdowns`` boundary (§5.4).
@@ -763,11 +886,17 @@ class _TraceCapturingCompanyScorer:
         benchmark_items: Any = (),
         pointer_map: dict[str, dict[str, str]] | None = None,
         inner: Any = None,
+        candidate_id: str | None = None,
+        candidate_model_manifest_hash: str | None = None,
     ):
         self._inner = inner if inner is not None else QualificationStyleCompanyScorer()
         self._recorder = recorder
         self._context_ref = str(context_ref)
         self._manifest_uri = str(manifest_uri or "")
+        self._candidate_id = str(candidate_id) if candidate_id else None
+        self._candidate_model_manifest_hash = (
+            str(candidate_model_manifest_hash) if candidate_model_manifest_hash else None
+        )
         self._pointer_map = pointer_map
         # The evaluator hands the scorer the raw ICP payload, not the benchmark
         # item, so refs are recovered via the payload's canonical hash.
@@ -815,6 +944,18 @@ class _TraceCapturingCompanyScorer:
             )
             if pointer and self._pointer_map is not None:
                 self._pointer_map[icp_ref] = dict(pointer)
+            # Persist rejected companies for false-rejection analysis (candidate
+            # path). Best-effort; never affects scoring.
+            await _persist_rejected_companies(
+                context_ref=self._context_ref,
+                icp_ref=icp_ref,
+                icp_hash=icp_hash,
+                is_reference_model=bool(is_reference_model),
+                outputs=list(companies or ()),
+                breakdowns=breakdowns,
+                candidate_id=getattr(self, "_candidate_id", None),
+                model_manifest_hash=getattr(self, "_candidate_model_manifest_hash", None),
+            )
         except Exception:  # noqa: BLE001 - capture can never affect scoring
             logger.warning(
                 "research_lab_scorer_trace_wrapper_failed context=%s",
@@ -2000,6 +2141,8 @@ class ResearchLabGatewayScoringWorker:
                 manifest_uri=artifact.manifest_uri,
                 benchmark_items=window.benchmark_items,
                 pointer_map=scorer_trace_pointers,
+                candidate_id=candidate_id,
+                candidate_model_manifest_hash=getattr(artifact, "manifest_hash", None),
             )
             last_parent_check_at = 0.0
             claim_lost_event = asyncio.Event()
@@ -4711,6 +4854,16 @@ class ResearchLabGatewayScoringWorker:
                 if pointer:
                     diagnostics_updates["scorer_trace_ref"] = pointer["s3_ref"]
                     diagnostics_updates["scorer_trace_sha256"] = pointer["sha256"]
+                # Persist model-sourced companies the harness rejected, for later
+                # false-rejection analysis (best-effort; never blocks scoring).
+                await _persist_rejected_companies(
+                    context_ref=context_ref,
+                    icp_ref=label,
+                    icp_hash=str(item.get("icp_hash") or ""),
+                    is_reference_model=True,
+                    outputs=outputs,
+                    breakdowns=score_breakdowns,
+                )
             if trace_entries:
                 drop_state = trace_context.get("incontainer_drop_state")
                 diagnostics_updates.update(

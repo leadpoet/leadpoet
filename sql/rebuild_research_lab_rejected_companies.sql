@@ -1,11 +1,14 @@
--- Sourced-but-rejected companies: companies the private model SOURCED but the
--- harness scorer REJECTED. Persisted (best-effort, gateway-side) for
--- false-rejection analysis. Column groups: run context -> company identity ->
--- MODEL claims -> HARNESS outcome -> dedup.
--- Dedup: sha256(icp_hash, normalized company_name, failure_reason) UNIQUE —
--- same company + same error + same ICP stored once across re-runs and models.
+-- Rebuild research_lab_rejected_companies with (a) model-claim + decay columns
+-- for false-rejection analysis and (b) a readable column order:
+--   run context -> company identity -> MODEL claims -> HARNESS outcome -> dedup.
+--
+-- Prod-safe: single transaction (create shadow -> copy -> drop old -> rename),
+-- writers insert by column NAME via PostgREST so the reordered superset stays
+-- compatible; RLS + unique dedup constraint + indexes are recreated.
 
-CREATE TABLE IF NOT EXISTS research_lab_rejected_companies (
+BEGIN;
+
+CREATE TABLE research_lab_rejected_companies_rebuild (
     -- ── run context ─────────────────────────────────────────────
     id                    BIGSERIAL PRIMARY KEY,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -53,17 +56,41 @@ CREATE TABLE IF NOT EXISTS research_lab_rejected_companies (
     --    SAME company + SAME error + SAME icp => one row (across re-runs AND
     --    across baseline/candidate).
     dedup_key             TEXT NOT NULL,
-    CONSTRAINT uq_rlrc_dedup UNIQUE (dedup_key)
+    CONSTRAINT uq_rlrc_dedup_rebuild UNIQUE (dedup_key)
 );
 
-CREATE INDEX IF NOT EXISTS idx_rlrc_icp        ON research_lab_rejected_companies (icp_ref);
-CREATE INDEX IF NOT EXISTS idx_rlrc_reason     ON research_lab_rejected_companies (failure_reason);
-CREATE INDEX IF NOT EXISTS idx_rlrc_created    ON research_lab_rejected_companies (created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_rlrc_refmodel   ON research_lab_rejected_companies (is_reference_model);
-CREATE INDEX IF NOT EXISTS idx_rlrc_candidate  ON research_lab_rejected_companies (candidate_id);
+INSERT INTO research_lab_rejected_companies_rebuild (
+    created_at, captured_at, context_ref, is_reference_model, candidate_id,
+    model_manifest_hash, icp_ref, icp_hash,
+    company_name, company_website, company_linkedin, industry, sub_industry,
+    employee_count, company_stage, city, state, country,
+    final_score, failure_reason, failure_stage, fit_passed, attribute_passed,
+    intent_passed, icp_fit, intent_signal, dedup_key
+)
+SELECT
+    created_at, captured_at, context_ref, is_reference_model, candidate_id,
+    model_manifest_hash, icp_ref, icp_hash,
+    company_name, company_website, company_linkedin, industry, sub_industry,
+    employee_count, company_stage, city, state, country,
+    final_score, failure_reason, failure_stage, fit_passed, attribute_passed,
+    intent_passed, icp_fit, intent_signal, dedup_key
+FROM research_lab_rejected_companies;
+
+DROP TABLE research_lab_rejected_companies;
+ALTER TABLE research_lab_rejected_companies_rebuild RENAME TO research_lab_rejected_companies;
+ALTER TABLE research_lab_rejected_companies RENAME CONSTRAINT uq_rlrc_dedup_rebuild TO uq_rlrc_dedup;
+
+CREATE INDEX idx_rlrc_icp        ON research_lab_rejected_companies (icp_ref);
+CREATE INDEX idx_rlrc_reason     ON research_lab_rejected_companies (failure_reason);
+CREATE INDEX idx_rlrc_created    ON research_lab_rejected_companies (created_at DESC);
+CREATE INDEX idx_rlrc_refmodel   ON research_lab_rejected_companies (is_reference_model);
+CREATE INDEX idx_rlrc_candidate  ON research_lab_rejected_companies (candidate_id);
+
 ALTER TABLE research_lab_rejected_companies ENABLE ROW LEVEL SECURITY;
 
--- False-rejection audit — model confident, harness zeroed:
+COMMIT;
+
+-- Example false-rejection audit — model was confident, harness zeroed it:
 --   SELECT company_name, model_claimed_score, final_score, failure_reason,
 --          intent_evidence_url, intent_evidence_date, time_decay_multiplier
 --   FROM research_lab_rejected_companies

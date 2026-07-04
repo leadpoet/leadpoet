@@ -250,3 +250,43 @@ async def test_canonical_keys_still_win(collector):
         outputs=[out], breakdowns=[{"final_score": 0.0, "failure_reason": "r"}])
     assert collector.rows[0]["sub_industry"] == "CRM"
     assert collector.rows[0]["country"] == "Germany"
+
+
+# ───────── model-claim + decay fields (false-rejection analysis) ─────────
+
+async def test_model_claims_and_decay_captured(collector):
+    out = {"company_name": "Acme",
+           "intent": {"source": "news", "url": "https://n.example/a", "date": "2026-06-12",
+                      "signal": "raised funding", "why_valid": "x"},
+           "required_attribute": {"text": "SEALED", "passed": True,
+                                  "evidence_url": "https://acme.com/soc2",
+                                  "evidence_quote": "PAGE QUOTE"},
+           "description": "not stored",
+           "score": 78.5}
+    bd = {"final_score": 0.0, "failure_reason": "r", "intent_signal_raw": 24.0,
+          "time_decay_multiplier": 0.5, "intent_signal_final": 12.0}
+    await sw._persist_rejected_companies(
+        context_ref="r", icp_ref="i", icp_hash="h", is_reference_model=True,
+        outputs=[out], breakdowns=[bd])
+    row = collector.rows[0]
+    assert row["model_claimed_score"] == 78.5
+    assert row["intent_evidence_url"] == "https://n.example/a"
+    assert row["intent_evidence_date"] == "2026-06-12"
+    assert row["intent_claimed_signal"] == "raised funding"
+    assert row["intent_source"] == "news"
+    assert row["attribute_evidence_url"] == "https://acme.com/soc2"
+    assert row["intent_signal_raw"] == 24.0
+    assert row["time_decay_multiplier"] == 0.5
+    # sealed-ICP text / page quotes / description must NEVER be stored
+    import json as _j
+    blob = _j.dumps(row)
+    assert "SEALED" not in blob and "PAGE QUOTE" not in blob and "not stored" not in blob
+
+
+async def test_intent_non_mapping_tolerated(collector):
+    n = await sw._persist_rejected_companies(
+        context_ref="r", icp_ref="i", icp_hash="h", is_reference_model=True,
+        outputs=[{"company_name": "X", "intent": "junk", "required_attribute": 5, "score": "bad"}],
+        breakdowns=[{"final_score": 0.0, "failure_reason": "r"}])
+    assert n == 1
+    assert collector.rows[0]["intent_evidence_url"] is None

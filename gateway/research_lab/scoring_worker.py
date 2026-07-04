@@ -637,6 +637,21 @@ async def _persist_rejected_companies(
                     "failure_reason": failure_reason,
                 }
             )
+            # Model-side claims: what the model itself asserted about this
+            # company (nested intent / required_attribute docs + its own score).
+            # Deliberately EXCLUDED: required_attribute.text (sealed-ICP
+            # content) and evidence_quote (scraped page text).
+            intent_doc = output.get("intent") if isinstance(output.get("intent"), Mapping) else {}
+            attr_doc = (
+                output.get("required_attribute")
+                if isinstance(output.get("required_attribute"), Mapping)
+                else {}
+            )
+
+            def _opt_text(value: Any, limit: int = 500) -> str | None:
+                text = str(value or "").strip()
+                return text[:limit] if text else None
+
             row = {
                 "context_ref": str(context_ref),
                 "is_reference_model": bool(is_reference_model),
@@ -654,6 +669,14 @@ async def _persist_rejected_companies(
                 "city": identity.get("city") or None,
                 "state": identity.get("state") or None,
                 "country": identity.get("country") or None,
+                # model claims (for model-confidence vs harness-verdict analysis)
+                "model_claimed_score": _optional_score(output.get("score")),
+                "intent_source": _opt_text(intent_doc.get("source"), 80),
+                "intent_claimed_signal": _opt_text(intent_doc.get("signal"), 200),
+                "intent_evidence_url": _opt_text(intent_doc.get("url")),
+                "intent_evidence_date": _opt_text(intent_doc.get("date"), 40),
+                "attribute_evidence_url": _opt_text(attr_doc.get("evidence_url")),
+                # harness outcome
                 "final_score": final_score,
                 "failure_reason": failure_reason or None,
                 "failure_stage": (str(breakdown.get("stage_failed") or "").strip() or None),
@@ -661,6 +684,8 @@ async def _persist_rejected_companies(
                 "attribute_passed": _optional_bool(breakdown.get("attribute_passed")),
                 "intent_passed": _optional_bool(breakdown.get("intent_passed")),
                 "icp_fit": _optional_score(breakdown.get("icp_fit")),
+                "intent_signal_raw": _optional_score(breakdown.get("intent_signal_raw")),
+                "time_decay_multiplier": _optional_score(breakdown.get("time_decay_multiplier")),
                 "intent_signal": _optional_score(breakdown.get("intent_signal_final")),
                 "captured_at": now,
                 "dedup_key": dedup_key,

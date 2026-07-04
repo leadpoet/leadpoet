@@ -127,12 +127,15 @@ with open(sys.argv[1], "rb") as f:
 PY
 )"
 EXISTING_BASE_STAMP=""
+EXISTING_BASE_IMAGE_ID=""
 if [ -f "$BASE_IMAGE_STAMP_FILE" ]; then
-    EXISTING_BASE_STAMP="$(tr -d '[:space:]' < "$BASE_IMAGE_STAMP_FILE")"
+    read -r EXISTING_BASE_STAMP EXISTING_BASE_IMAGE_ID < "$BASE_IMAGE_STAMP_FILE" || true
 fi
 BASE_IMAGE_EXISTS=false
+CURRENT_BASE_IMAGE_ID=""
 if docker images -q validator-base:v1 | grep -q .; then
     BASE_IMAGE_EXISTS=true
+    CURRENT_BASE_IMAGE_ID="$(docker image inspect -f '{{.Id}}' validator-base:v1 2>/dev/null || true)"
 fi
 
 if [ "$BASE_IMAGE_EXISTS" != "true" ]; then
@@ -141,17 +144,23 @@ if [ "$BASE_IMAGE_EXISTS" != "true" ]; then
         -f "$VALIDATOR_TEE_DIR/Dockerfile.base" \
         -t validator-base:v1 \
         "$REPO_ROOT"
-    printf "%s\n" "$DOCKERFILE_BASE_HASH" > "$BASE_IMAGE_STAMP_FILE"
+    CURRENT_BASE_IMAGE_ID="$(docker image inspect -f '{{.Id}}' validator-base:v1)"
+    printf "%s %s\n" "$DOCKERFILE_BASE_HASH" "$CURRENT_BASE_IMAGE_ID" > "$BASE_IMAGE_STAMP_FILE"
     echo "   ✓ Base image built"
-elif [ "$EXISTING_BASE_STAMP" != "$DOCKERFILE_BASE_HASH" ]; then
-    echo "   Base image stamp stale or absent (existing: ${EXISTING_BASE_STAMP:-none}, expected: $DOCKERFILE_BASE_HASH)"
+elif [ "$EXISTING_BASE_STAMP" != "$DOCKERFILE_BASE_HASH" ] || [ "$EXISTING_BASE_IMAGE_ID" != "$CURRENT_BASE_IMAGE_ID" ]; then
+    echo "   Base image stamp stale or absent"
+    echo "      existing hash: ${EXISTING_BASE_STAMP:-none}"
+    echo "      expected hash: $DOCKERFILE_BASE_HASH"
+    echo "      stamped image: ${EXISTING_BASE_IMAGE_ID:-none}"
+    echo "      current image: ${CURRENT_BASE_IMAGE_ID:-none}"
     echo "   Rebuilding base image so validator PCR0 matches gateway GitHub rebuilds..."
     docker rmi -f validator-base:v1 >/dev/null 2>&1 || true
     docker build --no-cache \
         -f "$VALIDATOR_TEE_DIR/Dockerfile.base" \
         -t validator-base:v1 \
         "$REPO_ROOT"
-    printf "%s\n" "$DOCKERFILE_BASE_HASH" > "$BASE_IMAGE_STAMP_FILE"
+    CURRENT_BASE_IMAGE_ID="$(docker image inspect -f '{{.Id}}' validator-base:v1)"
+    printf "%s %s\n" "$DOCKERFILE_BASE_HASH" "$CURRENT_BASE_IMAGE_ID" > "$BASE_IMAGE_STAMP_FILE"
     echo "   ✓ Base image rebuilt"
 else
     echo "   ✓ Base image already exists and matches Dockerfile.base hash: $DOCKERFILE_BASE_HASH"

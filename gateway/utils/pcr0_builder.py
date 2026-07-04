@@ -589,26 +589,44 @@ def get_base_image_stamp_path(repo_dir: str) -> str:
     return os.path.join(repo_dir, BASE_IMAGE_STAMP_FILENAME)
 
 
-def read_base_image_stamp(repo_dir: str) -> Optional[str]:
-    """Read the Dockerfile.base content hash stamp, if present."""
+def read_base_image_stamp(repo_dir: str) -> tuple[Optional[str], Optional[str]]:
+    """Read the Dockerfile.base content hash and image id stamp, if present."""
     try:
         with open(get_base_image_stamp_path(repo_dir), "r", encoding="utf-8") as f:
             value = f.read().strip()
-        return value or None
+        if not value:
+            return None, None
+        parts = value.split(maxsplit=1)
+        if len(parts) == 1:
+            return parts[0], None
+        return parts[0], parts[1]
     except FileNotFoundError:
-        return None
+        return None, None
     except Exception as e:
         logger.warning(f"[PCR0] Could not read base image stamp: {e}")
-        return None
+        return None, None
 
 
-def write_base_image_stamp(repo_dir: str, dockerfile_hash: str) -> None:
-    """Write the Dockerfile.base content hash stamp outside Docker metadata."""
+def write_base_image_stamp(repo_dir: str, dockerfile_hash: str, image_id: str) -> None:
+    """Write the Dockerfile.base content hash and local image id stamp."""
     try:
         with open(get_base_image_stamp_path(repo_dir), "w", encoding="utf-8") as f:
-            f.write(dockerfile_hash + "\n")
+            f.write(f"{dockerfile_hash} {image_id}\n")
     except Exception as e:
         logger.warning(f"[PCR0] Could not write base image stamp: {e}")
+
+
+async def inspect_base_image_id() -> Optional[str]:
+    """Return the local Docker image id for the validator base image, if present."""
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "image", "inspect", "-f", "{{.Id}}", BASE_IMAGE_NAME,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _stderr = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+    return stdout.decode().strip() or None
 
 
 async def ensure_base_image_exists(repo_dir: str) -> bool:
@@ -637,19 +655,27 @@ async def ensure_base_image_exists(repo_dir: str) -> bool:
     )
     stdout, stderr = await proc.communicate()
     image_exists = bool(stdout.decode().strip())
+    current_image_id = await inspect_base_image_id() if image_exists else None
     
     if image_exists:
         # Check if the existing image matches current Dockerfile.base.
         # The hash is tracked outside Docker image config to keep gateway and
         # validator base builds byte/config equivalent.
-        existing_hash = read_base_image_stamp(repo_dir)
+        existing_hash, existing_image_id = read_base_image_stamp(repo_dir)
         
-        if existing_hash == current_hash:
-            logger.info(f"[PCR0] Base image {BASE_IMAGE_NAME} up-to-date (hash: {current_hash})")
+        if existing_hash == current_hash and existing_image_id == current_image_id:
+            logger.info(
+                f"[PCR0] Base image {BASE_IMAGE_NAME} up-to-date "
+                f"(hash: {current_hash}, image: {str(current_image_id)[:32]})"
+            )
             return True
         
-        # Hash mismatch - Dockerfile.base changed, need to rebuild
-        logger.info(f"[PCR0] Dockerfile.base changed! Old hash: {existing_hash}, New hash: {current_hash}")
+        # Hash, old one-field stamp, or image mismatch - rebuild.
+        logger.info(
+            "[PCR0] Base image stamp stale. "
+            f"old_hash={existing_hash} new_hash={current_hash} "
+            f"stamped_image={existing_image_id} current_image={current_image_id}"
+        )
         logger.info(f"[PCR0] Deleting stale base image {BASE_IMAGE_NAME}...")
         
         # Delete the old base image
@@ -682,8 +708,12 @@ async def ensure_base_image_exists(repo_dir: str) -> bool:
         logger.error(f"[PCR0] Failed to build base image: {stderr.decode()[-500:]}")
         return False
     
-    write_base_image_stamp(repo_dir, current_hash)
-    logger.info(f"[PCR0] ✓ Base image {BASE_IMAGE_NAME} built successfully (hash: {current_hash})")
+    built_image_id = await inspect_base_image_id()
+    write_base_image_stamp(repo_dir, current_hash, built_image_id or "")
+    logger.info(
+        f"[PCR0] ✓ Base image {BASE_IMAGE_NAME} built successfully "
+        f"(hash: {current_hash}, image: {str(built_image_id)[:32]})"
+    )
     return True
 
 

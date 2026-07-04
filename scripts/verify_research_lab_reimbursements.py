@@ -279,6 +279,41 @@ def _run_lab_allocator_simulations() -> None:
     if blocked["status"] != "blocked":
         raise AssertionError("missing daily ICP window should block champion obligation")
 
+    hybrid_policy = {
+        **policy,
+        "champion_window_mode": "hybrid_fresh_retained",
+        "champion_icps_per_day": 2,
+        "champion_fresh_icp_count": 10,
+        "champion_retained_icp_count": 10,
+    }
+    hybrid_candidate = {
+        **good_candidate,
+        "candidate_id": "candidate:hybrid",
+        "daily_icp_counts": {
+            "20260625": 1,
+            "20260626": 1,
+            "20260627": 1,
+            "20260628": 1,
+            "20260629": 1,
+            "20260630": 1,
+            "20260701": 1,
+            "20260702": 2,
+            "20260703": 1,
+            "20260704": 10,
+        },
+    }
+    hybrid_obligation = build_champion_reward_obligation(hybrid_candidate, hybrid_policy)
+    if hybrid_obligation["status"] != "active":
+        raise AssertionError(f"hybrid total-count champion obligation was not active: {hybrid_obligation}")
+    hybrid_bad = {
+        **hybrid_candidate,
+        "candidate_id": "candidate:hybrid-bad",
+        "daily_icp_counts": {"20260704": 19},
+    }
+    hybrid_blocked = build_champion_reward_obligation(hybrid_bad, hybrid_policy)
+    if hybrid_blocked["status"] != "blocked" or "wrong_total_icp_count" not in hybrid_blocked["reasons"]:
+        raise AssertionError("hybrid champion obligation must block wrong total ICP count")
+
     lab_allocation = allocate_research_lab_epoch(100, policy, three_reimbursements, two_champions)
     vector = compose_final_weight_vector(
         epoch=100,

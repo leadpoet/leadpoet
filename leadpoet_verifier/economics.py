@@ -241,14 +241,30 @@ def build_champion_reward_obligation(candidate: Mapping[str, Any], policy: Mappi
         raise ValueError("champion evaluation window must be positive")
 
     daily_counts = _daily_icp_counts(candidate)
-    total_required = eval_days * icps_per_day
+    window_mode = str(policy.get("champion_window_mode") or "legacy_rolling").strip().lower()
+    if window_mode == "hybrid_fresh_retained":
+        fresh_count = int(policy.get("champion_fresh_icp_count", 0) or 0)
+        retained_count = int(policy.get("champion_retained_icp_count", 0) or 0)
+        total_required = fresh_count + retained_count if fresh_count > 0 or retained_count > 0 else eval_days * icps_per_day
+    else:
+        total_required = eval_days * icps_per_day
     reasons: list[str] = []
-    if len(daily_counts) != eval_days:
-        reasons.append("wrong_daily_icp_window")
-    for day, count in sorted(daily_counts.items()):
-        if count != icps_per_day:
-            reasons.append(f"wrong_icp_count_for_day:{day}")
-    if sum(daily_counts.values()) != total_required:
+    observed_total = sum(daily_counts.values())
+    if window_mode == "hybrid_fresh_retained":
+        # Hybrid windows intentionally mix retained historical ICPs with fresh
+        # same-day ICPs, so the day distribution is not expected to be uniform.
+        # Eligibility is based on the configured total window size.
+        if observed_total != total_required:
+            reasons.append("wrong_total_icp_count")
+    else:
+        if len(daily_counts) != eval_days:
+            reasons.append("wrong_daily_icp_window")
+        for day, count in sorted(daily_counts.items()):
+            if count != icps_per_day:
+                reasons.append(f"wrong_icp_count_for_day:{day}")
+        if observed_total != total_required:
+            reasons.append("wrong_total_icp_count")
+    if total_required <= 0:
         reasons.append("wrong_total_icp_count")
 
     threshold = _decimal(policy.get("champion_threshold_points", DEFAULT_RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS))

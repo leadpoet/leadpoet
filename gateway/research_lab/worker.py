@@ -1388,11 +1388,17 @@ class ResearchLabHostedWorker:
             # RESEARCH_LAB_TRAJECTORY_PROJECTOR_ENABLED=true.
             if projector_enabled():
                 await project_completed_runs(dry_run=False)
+                trace_backfill_max_candidates = _env_int(
+                    "RESEARCH_LAB_TRAJECTORY_BACKFILL_MAX_CANDIDATES", 50
+                )
                 await backfill_corpus_trace_rows(
                     batch_size=_env_int("RESEARCH_LAB_TRAJECTORY_BACKFILL_BATCH_SIZE", 2),
                     dry_run=False,
-                    max_candidates=_env_int("RESEARCH_LAB_TRAJECTORY_BACKFILL_MAX_CANDIDATES", 50),
-                    max_attempts=_env_int("RESEARCH_LAB_TRAJECTORY_BACKFILL_MAX_ATTEMPTS", 10),
+                    max_candidates=trace_backfill_max_candidates,
+                    max_attempts=_env_int(
+                        "RESEARCH_LAB_TRAJECTORY_BACKFILL_MAX_ATTEMPTS",
+                        trace_backfill_max_candidates,
+                    ),
                 )
         except Exception as exc:
             logger.warning(

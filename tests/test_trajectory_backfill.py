@@ -13,9 +13,12 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+import gateway.research_lab.trajectory_projector as trajectory_projector
 from gateway.research_lab.scoring_worker import ResearchLabGatewayScoringWorker
 from gateway.research_lab.trajectory_projector import (
     PROJECTOR_ENABLED_ENV,
+    ProjectionResult,
+    backfill_corpus_trace_rows,
     backfill_run_corpus_trace_rows,
     evidence_bundle_id_for_node,
     execution_trace_id_for_node,
@@ -161,3 +164,66 @@ async def test_backfill_is_best_effort_on_store_errors() -> None:
         RUN_ID, store=BrokenStore(), dry_run=True
     )
     assert result.status == "failed"
+
+
+async def test_periodic_trace_backfill_discovers_recent_terminal_runs_first(
+    monkeypatch,
+) -> None:
+    run_ids = (
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+    )
+
+    class DiscoveryStore:
+        calls: list[dict[str, Any]]
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def select_all(self, table: str, **kwargs: Any) -> list[dict[str, Any]]:
+            self.calls.append({"table": table, **kwargs})
+            return [{"run_id": run_id} for run_id in run_ids]
+
+    seen: list[str] = []
+
+    async def fake_backfill_run(
+        run_id: str,
+        *,
+        store: Any | None = None,
+        dry_run: bool = True,
+    ) -> ProjectionResult:
+        seen.append(run_id)
+        status = (
+            "traces_backfilled"
+            if run_id == run_ids[-1]
+            else "skipped_traces_existing"
+        )
+        return ProjectionResult(
+            run_id=run_id,
+            status=status,
+            trajectory_id=trajectory_id_for_run(run_id),
+        )
+
+    monkeypatch.setattr(
+        trajectory_projector,
+        "backfill_run_corpus_trace_rows",
+        fake_backfill_run,
+    )
+    monkeypatch.setenv(PROJECTOR_ENABLED_ENV, "true")
+
+    store = DiscoveryStore()
+    results = await backfill_corpus_trace_rows(
+        batch_size=1,
+        dry_run=False,
+        store=store,
+        max_candidates=3,
+    )
+
+    assert store.calls[0]["order_by"] == (("current_status_at", True),)
+    assert seen == list(run_ids)
+    assert [result.status for result in results] == [
+        "skipped_traces_existing",
+        "skipped_traces_existing",
+        "traces_backfilled",
+    ]

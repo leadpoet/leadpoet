@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_LOOP_START_FEE_USD = 2.0
 DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS = 300
 DEFAULT_HOSTED_WORKER_RETRYABLE_FAILURE_LIMIT = 3
+STALE_PARENT_REBASE_REPAIR_MODEL_ID = "anthropic/claude-opus-4.8"
+STALE_PARENT_REBASE_REPAIR_TIMEOUT_SECONDS = 1200
 DEFAULT_PRIVATE_REPO_URL = ""
 DEFAULT_PRIVATE_TEST_CMD = r"""
 python3 - <<'PY'
@@ -458,8 +460,8 @@ class ResearchLabGatewayConfig:
     code_edit_patch_repair_attempts: int = 2
     stale_parent_rebase_enabled: bool = True
     stale_parent_rebase_repair_enabled: bool = True
-    stale_parent_rebase_repair_model: str = "anthropic/claude-sonnet-4.6"
-    stale_parent_rebase_repair_timeout_seconds: int = 120
+    stale_parent_rebase_repair_model: str = STALE_PARENT_REBASE_REPAIR_MODEL_ID
+    stale_parent_rebase_repair_timeout_seconds: int = STALE_PARENT_REBASE_REPAIR_TIMEOUT_SECONDS
     stale_parent_check_interval_seconds: int = 30
     stale_parent_rebase_max_depth: int = 3
     score_bundle_kms_key_id: str = "alias/leadpoet-research-lab-artifact-signing"
@@ -873,13 +875,13 @@ class ResearchLabGatewayConfig:
             ),
             stale_parent_rebase_enabled=_truthy("RESEARCH_LAB_STALE_PARENT_REBASE_ENABLED", "true"),
             stale_parent_rebase_repair_enabled=_truthy("RESEARCH_LAB_STALE_PARENT_REBASE_REPAIR_ENABLED", "true"),
-            stale_parent_rebase_repair_model=os.getenv(
-                "RESEARCH_LAB_STALE_PARENT_REBASE_REPAIR_MODEL",
-                "anthropic/claude-sonnet-4.6",
-            ),
+            stale_parent_rebase_repair_model=STALE_PARENT_REBASE_REPAIR_MODEL_ID,
             stale_parent_rebase_repair_timeout_seconds=max(
-                30,
-                _int("RESEARCH_LAB_STALE_PARENT_REBASE_REPAIR_TIMEOUT_SECONDS", 120),
+                STALE_PARENT_REBASE_REPAIR_TIMEOUT_SECONDS,
+                _int(
+                    "RESEARCH_LAB_STALE_PARENT_REBASE_REPAIR_TIMEOUT_SECONDS",
+                    STALE_PARENT_REBASE_REPAIR_TIMEOUT_SECONDS,
+                ),
             ),
             stale_parent_check_interval_seconds=max(
                 1,

@@ -578,6 +578,7 @@ def build_code_edit_repair_messages(
         "target files listed in source_inspection_context.read_files.\n\n"
         "Rules:\n"
         "- Output the same candidates JSON shape used by the original code-edit draft.\n"
+        "- Reserve enough output budget for the final JSON; never return reasoning without a JSON repair payload.\n"
         "- If you cannot safely restate the hypothesis, return a direct repair object instead: "
         "{\"code_edit\":{\"target_files\":[...],\"unified_diff\":\"diff --git ...\","
         "\"redacted_summary\":\"...\",\"test_plan\":\"...\",\"rollback_plan\":\"...\"}}.\n"

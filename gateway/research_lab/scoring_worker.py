@@ -122,6 +122,9 @@ from research_lab.observability.tracing import finish_score_bundle_observation
 
 
 logger = logging.getLogger(__name__)
+
+STALE_PARENT_REBASE_REPAIR_MAX_TOKENS = 32_768
+STALE_PARENT_REBASE_REPAIR_REASONING_BODY = {"enabled": True, "effort": "max"}
 PRIVATE_BASELINE_FAST_EMPTY_ABORT_AFTER = 6
 PRIVATE_BASELINE_FAST_EMPTY_ABORT_SECONDS = 90.0
 _POSTGREST_TIMESTAMP_RE = re.compile(
@@ -1412,11 +1415,12 @@ async def _call_operator_openrouter_json(
             channel="research_lab_operator",
             purpose="operator_stale_parent_repair",
             stage="operator_repair",
-            max_tokens=2200,
+            max_tokens=STALE_PARENT_REBASE_REPAIR_MAX_TOKENS,
             temperature=0.1,
             timeout_seconds=max(1, int(timeout_seconds)),
             response_format={"type": "json_object"},
-            include_reasoning=_openrouter_include_reasoning_enabled(),
+            include_reasoning=True,
+            extra_body={"reasoning": STALE_PARENT_REBASE_REPAIR_REASONING_BODY},
         )
     except OpenRouterTelemetryError as exc:
         raise CodeEditBuildError(f"operator stale-parent repair failed: {exc}") from exc

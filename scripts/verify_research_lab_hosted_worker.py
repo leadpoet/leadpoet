@@ -112,7 +112,38 @@ def main() -> int:
         cfg = ResearchLabGatewayConfig(auto_research_model="test/model")
         hosted_worker = ResearchLabHostedWorker(cfg, worker_ref="test-worker-openrouter")
         original_urlopen = worker_module.urlrequest.urlopen
+        original_privacy_verify = worker_module.verify_openrouter_workspace_privacy
+        original_privacy_insert = worker_module.create_openrouter_privacy_proof_event_sync
         fake_key = "sk-or-" + "v1-test-key"
+        privacy_kwargs = {
+            "capture_run_id": "00000000-0000-0000-0000-000000000001",
+            "capture_stage": "contract_test",
+            "privacy_key_ref": "encrypted_ref:openrouter:" + "a" * 32,
+            "privacy_miner_hotkey": "5F" + "x" * 46,
+            "privacy_management_key": "sk-or-v1-" + "b" * 48,
+        }
+
+        def _fake_privacy_verify(**kwargs):
+            return {
+                "source": "openrouter_workspace_privacy_guard",
+                "stage": kwargs.get("stage") or "contract_test",
+                "workspace_id_hash": "a" * 64,
+                "runtime_key_hash": "b" * 64,
+                "management_key_hash": "c" * 64,
+                "logging_flags": {
+                    "is_observability_io_logging_enabled": False,
+                    "is_data_discount_logging_enabled": False,
+                    "is_observability_broadcast_enabled": False,
+                },
+                "request_policy": kwargs.get("request_policy") or {},
+                "verified_at": "2026-07-04T00:00:00+00:00",
+                "proof_hash": "sha256:" + "d" * 64,
+            }
+
+        worker_module.verify_openrouter_workspace_privacy = _fake_privacy_verify
+        worker_module.create_openrouter_privacy_proof_event_sync = (
+            lambda **_kwargs: {"event_id": "00000000-0000-0000-0000-000000000002"}
+        )
 
         def _fake_no_choices(_request, timeout: int):
             if timeout != 7:
@@ -128,6 +159,7 @@ def main() -> int:
                     model_id="test/model",
                     timeout_seconds=7,
                     max_tokens=16,
+                    **privacy_kwargs,
                 )
                 errors.append("OpenRouter no-choices response did not raise")
             except RetryableHostedResearchLabWorkerError as exc:
@@ -171,6 +203,7 @@ def main() -> int:
                 model_id="test/model",
                 timeout_seconds=7,
                 max_tokens=16,
+                **privacy_kwargs,
             )
             if flaky_calls["count"] != 2:
                 errors.append("OpenRouter retry did not retry transient no-choices response exactly once")
@@ -206,6 +239,7 @@ def main() -> int:
                 reasoning_effort="xhigh",
                 timeout_seconds=7,
                 max_tokens=16,
+                **privacy_kwargs,
             )
             if captured_reasoning_body.get("reasoning_effort") != "xhigh":
                 errors.append("OpenRouter reasoning_effort was not forwarded")
@@ -261,6 +295,7 @@ def main() -> int:
                 reasoning_effort="high",
                 timeout_seconds=7,
                 max_tokens=16,
+                **privacy_kwargs,
             )
             if len(reasoning_fallback_bodies) != 2:
                 errors.append("OpenRouter reasoning_effort fallback did not retry exactly once")
@@ -287,6 +322,7 @@ def main() -> int:
                     model_id="test/model",
                     timeout_seconds=7,
                     max_tokens=16,
+                    **privacy_kwargs,
                 )
                 errors.append("OpenRouter permanent error did not raise")
             except RetryableHostedResearchLabWorkerError as exc:
@@ -296,6 +332,8 @@ def main() -> int:
                     errors.append("OpenRouter permanent error leaked API key")
         finally:
             worker_module.urlrequest.urlopen = original_urlopen
+            worker_module.verify_openrouter_workspace_privacy = original_privacy_verify
+            worker_module.create_openrouter_privacy_proof_event_sync = original_privacy_insert
 
     async def _verify_worker_retry_classification() -> None:
         retryable_messages = (
@@ -565,8 +603,12 @@ def main() -> int:
     worker_text = (ROOT / "gateway" / "research_lab" / "worker.py").read_text(encoding="utf-8")
     scoring_worker_text = (ROOT / "gateway" / "research_lab" / "scoring_worker.py").read_text(encoding="utf-8")
     local_proxy_text = (ROOT / "qualification" / "validator" / "local_proxy.py").read_text(encoding="utf-8")
-    if '"data_collection": "deny"' not in worker_text or '"zdr": True' not in worker_text:
-        errors.append("hosted worker OpenRouter calls must enforce data_collection=deny and ZDR")
+    if (
+        "strict_openrouter_provider_policy()" not in worker_text
+        or '"allow_fallbacks": False' not in (ROOT / "gateway" / "research_lab" / "key_vault.py").read_text(encoding="utf-8")
+        or '"require_parameters": True' not in (ROOT / "gateway" / "research_lab" / "key_vault.py").read_text(encoding="utf-8")
+    ):
+        errors.append("hosted worker OpenRouter calls must enforce strict OpenRouter provider privacy policy")
     if '"data_collection": "deny"' not in local_proxy_text or '"zdr": True' not in local_proxy_text:
         errors.append("local proxy must inject OpenRouter data_collection=deny and ZDR")
     if "_maybe_rebase_stale_candidate_before_scoring" not in scoring_worker_text:

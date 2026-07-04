@@ -29,6 +29,8 @@ from gateway.research_lab.key_vault import (
     OpenRouterKeyVaultError,
     decrypt_openrouter_key,
     preflight_openrouter_key,
+    strict_openrouter_provider_policy,
+    verify_openrouter_workspace_privacy,
 )
 from gateway.research_lab.logging_utils import compact_ref, format_worker_block, format_worker_line
 from gateway.research_lab.loop_engine import (
@@ -69,6 +71,7 @@ from gateway.research_lab.store import (
     create_reimbursement_award,
     create_reimbursement_schedule,
     create_ticket_event,
+    create_openrouter_privacy_proof_event_sync,
     find_queued_receipt_for_run,
     latest_auto_research_checkpoint,
     select_all,
@@ -977,6 +980,8 @@ class HostedRunContext:
     # (see _resolve_loop_start_credit_id).
     resolved_loop_start_credit_id: str | None = None
     loop_start_credit_id_resolved: bool = False
+    openrouter_key_ref: str = ""
+    openrouter_management_key: str = ""
     # Latest cumulative loop cost evidence observed in-process before writing
     # the loop event. Used if the store write itself fails after miner spend.
     latest_loop_cost_evidence: dict[str, Any] = field(default_factory=dict)
@@ -1003,6 +1008,30 @@ class OpenRouterKeyResolver:
             "QUALIFICATION_OPENROUTER_API_KEY": value,
             "OPENROUTER_KEY": value,
         }
+
+    async def resolve_management_key(self, key_ref: str, *, miner_hotkey: str) -> str:
+        if not str(key_ref).startswith("encrypted_ref:openrouter:"):
+            raise HostedResearchLabWorkerError("encrypted OpenRouter key ref with management proof is required")
+        row = await select_one(
+            "research_lab_openrouter_key_refs",
+            filters=(("key_ref", key_ref), ("miner_hotkey", miner_hotkey)),
+        )
+        if not row:
+            raise HostedResearchLabWorkerError("encrypted OpenRouter key ref was not found for miner")
+        if str(row.get("privacy_status") or "") != "verified":
+            raise HostedResearchLabWorkerError("encrypted OpenRouter key ref has not passed privacy verification")
+        ciphertext = str(row.get("encrypted_management_key_ciphertext") or "").strip()
+        if not ciphertext:
+            raise HostedResearchLabWorkerError("encrypted OpenRouter management key is missing")
+        try:
+            return await asyncio.to_thread(
+                decrypt_openrouter_key,
+                ciphertext_b64=ciphertext,
+                miner_hotkey=miner_hotkey,
+                key_ref=key_ref,
+            )
+        except OpenRouterKeyVaultError as exc:
+            raise HostedResearchLabWorkerError(str(exc)) from exc
 
     async def _resolve_key_value(self, key_ref: str, *, miner_hotkey: str) -> str:
         if str(key_ref).startswith("encrypted_ref:openrouter:"):
@@ -1624,8 +1653,14 @@ class ResearchLabHostedWorker:
                 checkpoint_doc=None,
                 reason="maintenance_pause_before_execution",
             )
+        openrouter_key_ref = _miner_openrouter_key_ref(context)
         resolved_openrouter_env = await self.key_resolver.resolve(
-            _miner_openrouter_key_ref(context),
+            openrouter_key_ref,
+            miner_hotkey=str(context.ticket["miner_hotkey"]),
+        )
+        context.openrouter_key_ref = openrouter_key_ref
+        context.openrouter_management_key = await self.key_resolver.resolve_management_key(
+            openrouter_key_ref,
             miner_hotkey=str(context.ticket["miner_hotkey"]),
         )
         provider_env = dict(resolved_openrouter_env)
@@ -1812,6 +1847,9 @@ class ResearchLabHostedWorker:
                             allow_non_zdr=allow_non_zdr,
                             capture_run_id=context.run_id,
                             capture_stage=stage,
+                            privacy_key_ref=context.openrouter_key_ref,
+                            privacy_miner_hotkey=str(context.ticket["miner_hotkey"]),
+                            privacy_management_key=context.openrouter_management_key,
                         )
                         if fallback_usage:
                             provider_usage = dict(result.provider_usage or {})
@@ -3543,11 +3581,18 @@ class ResearchLabHostedWorker:
         allow_non_zdr: bool = False,
         capture_run_id: str = "",
         capture_stage: str = "",
+        privacy_key_ref: str = "",
+        privacy_miner_hotkey: str = "",
+        privacy_management_key: str = "",
     ) -> OpenRouterCallResult:
         if not api_key:
             raise HostedResearchLabWorkerError("OpenRouter key is required for hosted auto-research")
         if not model_id:
             raise HostedResearchLabWorkerError("OpenRouter auto-research model is required")
+        if not (privacy_key_ref and privacy_miner_hotkey and privacy_management_key):
+            raise HostedResearchLabWorkerError(
+                "OpenRouter workspace privacy proof context is required for hosted auto-research"
+            )
         base_max_tokens = max(1, int(max_tokens or 0))
         requested_reasoning_effort = str(reasoning_effort or "").strip()
         request_temperature = min(
@@ -3566,11 +3611,7 @@ class ResearchLabHostedWorker:
                 "max_tokens": int(effective_max_tokens),
                 "response_format": {"type": "json_object"},
             }
-            if not allow_non_zdr:
-                body["provider"] = {
-                    "data_collection": "deny",
-                    "zdr": True,
-                }
+            body["provider"] = strict_openrouter_provider_policy()
             if requested_reasoning_effort and include_reasoning_effort:
                 body["reasoning_effort"] = requested_reasoning_effort
                 body["reasoning"] = {"effort": requested_reasoning_effort}
@@ -3587,6 +3628,53 @@ class ResearchLabHostedWorker:
 
         proxy_opener = _worker_llm_proxy_opener(self.config)
         open_fn = proxy_opener.open if proxy_opener else urlrequest.urlopen
+
+        def _record_privacy_proof() -> None:
+            try:
+                proof_doc = verify_openrouter_workspace_privacy(
+                    runtime_key=api_key,
+                    management_key=privacy_management_key,
+                    stage=capture_stage or "openrouter_call",
+                    request_policy=strict_openrouter_provider_policy(),
+                )
+                create_openrouter_privacy_proof_event_sync(
+                    key_ref=privacy_key_ref,
+                    miner_hotkey=privacy_miner_hotkey,
+                    run_id=capture_run_id or None,
+                    stage=capture_stage or "openrouter_call",
+                    proof_status="passed",
+                    proof_doc=proof_doc,
+                )
+            except Exception as exc:
+                failure_doc = {
+                    "source": "openrouter_workspace_privacy_guard",
+                    "stage": capture_stage or "openrouter_call",
+                    "error": exc.__class__.__name__,
+                    "request_policy": strict_openrouter_provider_policy(),
+                    "verified_at": datetime.now(timezone.utc).isoformat(),
+                }
+                failure_doc["proof_hash"] = canonical_hash(failure_doc)
+                try:
+                    create_openrouter_privacy_proof_event_sync(
+                        key_ref=privacy_key_ref,
+                        miner_hotkey=privacy_miner_hotkey,
+                        run_id=capture_run_id or None,
+                        stage=capture_stage or "openrouter_call",
+                        proof_status="failed",
+                        proof_doc=failure_doc,
+                    )
+                except Exception:
+                    logger.warning(
+                        "research_lab_openrouter_privacy_proof_failed_to_record",
+                        extra={
+                            "run_id": capture_run_id,
+                            "stage": capture_stage,
+                            "key_ref": privacy_key_ref,
+                        },
+                    )
+                raise HostedResearchLabWorkerError(
+                    "OpenRouter workspace privacy verification failed before hidden prompt"
+                ) from exc
 
         def _call_once(*, effective_max_tokens: int, include_reasoning_effort: bool) -> OpenRouterCallResult:
             body = _request_body(
@@ -3612,6 +3700,7 @@ class ResearchLabHostedWorker:
                     outcome=outcome,
                 )
 
+            _record_privacy_proof()
             req = urlrequest.Request(
                 _OPENROUTER_CHAT_COMPLETIONS_URL,
                 data=json.dumps(body).encode("utf-8"),

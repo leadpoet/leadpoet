@@ -2311,7 +2311,17 @@ async def _grpc_ready_check(addr: str, timeout: float = 5.0) -> bool:
 
 def _looks_like_raw_research_lab_secret(value: str) -> bool:
     lowered = (value or "").lower()
-    return any(marker in lowered for marker in ("sk-or-", "openrouter_api_key", "raw_openrouter", "raw_secret", "service_role"))
+    return any(
+        marker in lowered
+        for marker in (
+            "sk-or-",
+            "openrouter_api_key",
+            "openrouter_management_key",
+            "raw_openrouter",
+            "raw_secret",
+            "service_role",
+        )
+    )
 
 
 def _research_lab_signed_payload(wallet, payload: dict) -> dict:
@@ -2366,10 +2376,20 @@ def _register_research_lab_openrouter_key(wallet, status: dict) -> tuple[str, st
         if not raw_key:
             print("❌ OpenRouter API key is required for paid auto-research loops.")
             return None
-        if not raw_key.startswith("sk-or-v1-"):
+        if not raw_key.lower().startswith("sk-or-v1-"):
             print("❌ OpenRouter API key must start with sk-or-v1-.")
             return None
+        raw_management_key = getpass.getpass("   OpenRouter management key (hidden; encrypted by gateway): ").strip()
+        if not raw_management_key:
+            print("❌ OpenRouter management key is required for paid auto-research loops.")
+            return None
+        if not raw_management_key.lower().startswith("sk-or-v1-"):
+            print("❌ OpenRouter management key must start with sk-or-v1-.")
+            return None
         import time
+        key_fingerprint = hashlib.sha256(
+            f"{raw_key}:{raw_management_key}".encode("utf-8")
+        ).hexdigest()[:24]
         payload = _research_lab_signed_payload(
             wallet,
             {
@@ -2378,9 +2398,10 @@ def _register_research_lab_openrouter_key(wallet, status: dict) -> tuple[str, st
                 "idempotency_key": (
                     "research-openrouter-key:"
                     f"{wallet.hotkey.ss58_address}:"
-                    f"{hashlib.sha256(raw_key.encode('utf-8')).hexdigest()[:24]}"
+                    f"{key_fingerprint}"
                 ),
                 "openrouter_api_key": raw_key,
+                "openrouter_management_key": raw_management_key,
                 "key_label": "research-lab-miner-key",
             },
         )

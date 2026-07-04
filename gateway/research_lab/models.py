@@ -17,6 +17,7 @@ from gateway.research_lab.config import DEFAULT_LOOP_START_FEE_USD
 SECRET_MARKERS = (
     "sk-or-",
     "openrouter_api_key",
+    "openrouter_management_key",
     "raw_openrouter_key",
     "raw_secret",
     "service_role",
@@ -93,6 +94,7 @@ class ResearchLabLoopDiagnosticsRequest(SignedResearchLabRequest):
 
 class ResearchLabOpenRouterKeyRegisterRequest(SignedResearchLabRequest):
     openrouter_api_key: str = Field(min_length=1, max_length=512)
+    openrouter_management_key: str = Field(min_length=1, max_length=512)
     key_label: Optional[str] = Field(default=None, max_length=120)
 
     @field_validator("key_label")

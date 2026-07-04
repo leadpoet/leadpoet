@@ -77,6 +77,14 @@ async def insert_row(table: str, row: dict[str, Any]) -> dict[str, Any]:
     return dict(data[0])
 
 
+def insert_row_sync(table: str, row: dict[str, Any]) -> dict[str, Any]:
+    response = get_write_client().table(table).insert(row).execute()
+    data = getattr(response, "data", None) or []
+    if not data:
+        raise RuntimeError(f"{table}: insert returned no rows")
+    return dict(data[0])
+
+
 async def update_row(
     table: str,
     values: dict[str, Any],
@@ -291,6 +299,14 @@ async def create_openrouter_key_ref(
     kms_key_id: str,
     encryption_context_hash: str,
     preflight_doc: dict[str, Any],
+    encrypted_management_key_ciphertext: str | None = None,
+    management_key_hash: str | None = None,
+    management_kms_key_id: str | None = None,
+    management_encryption_context_hash: str | None = None,
+    openrouter_workspace_hash: str | None = None,
+    privacy_status: str = "not_configured",
+    privacy_verified_at: str | None = None,
+    privacy_proof_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     existing = await select_one("research_lab_openrouter_key_refs", filters=(("key_ref", key_ref),))
     if existing:
@@ -305,9 +321,41 @@ async def create_openrouter_key_ref(
         "encryption_context_hash": encryption_context_hash,
         "preflight_status": "passed",
         "preflight_doc": preflight_doc,
+        "encrypted_management_key_ciphertext": encrypted_management_key_ciphertext,
+        "management_key_hash": management_key_hash,
+        "management_kms_key_id": management_kms_key_id,
+        "management_encryption_context_hash": management_encryption_context_hash,
+        "openrouter_workspace_hash": openrouter_workspace_hash,
+        "privacy_status": privacy_status,
+        "privacy_verified_at": privacy_verified_at,
+        "privacy_proof_doc": privacy_proof_doc or {},
     }
     row["anchored_hash"] = canonical_hash(row)
     return await insert_row("research_lab_openrouter_key_refs", row)
+
+
+def create_openrouter_privacy_proof_event_sync(
+    *,
+    key_ref: str,
+    miner_hotkey: str,
+    proof_status: str,
+    proof_doc: dict[str, Any],
+    run_id: str | None = None,
+    stage: str = "",
+) -> dict[str, Any]:
+    row = {
+        "event_id": str(uuid4()),
+        "schema_version": "1.0",
+        "key_ref": key_ref,
+        "miner_hotkey": miner_hotkey,
+        "run_id": run_id,
+        "stage": str(stage or "unknown"),
+        "proof_status": proof_status,
+        "proof_doc": proof_doc,
+        "created_at": now_iso(),
+    }
+    row["anchored_hash"] = canonical_hash(row)
+    return insert_row_sync("research_lab_openrouter_privacy_proof_events", row)
 
 
 async def create_ticket(request: Any) -> tuple[dict[str, Any], dict[str, Any]]:

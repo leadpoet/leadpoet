@@ -38,6 +38,7 @@ from .key_vault import (
     encrypt_openrouter_key,
     openrouter_key_ref,
     preflight_openrouter_key,
+    verify_openrouter_workspace_privacy,
 )
 from .maintenance import get_autoresearch_maintenance_state
 from .miner_diagnostics import (
@@ -403,10 +404,28 @@ async def register_research_lab_openrouter_key(payload: ResearchLabOpenRouterKey
     try:
         preflight_doc = await asyncio.to_thread(preflight_openrouter_key, payload.openrouter_api_key)
         key_hash = str(preflight_doc["key_hash"])
-        key_ref = openrouter_key_ref(miner_hotkey=payload.miner_hotkey, key_hash=key_hash)
+        privacy_proof_doc = await asyncio.to_thread(
+            verify_openrouter_workspace_privacy,
+            runtime_key=payload.openrouter_api_key,
+            management_key=payload.openrouter_management_key,
+            stage="key_registration",
+        )
+        management_key_hash = str(privacy_proof_doc["management_key_hash"])
+        key_ref = openrouter_key_ref(
+            miner_hotkey=payload.miner_hotkey,
+            key_hash=key_hash,
+            management_key_hash=management_key_hash,
+        )
         encrypted = await asyncio.to_thread(
             encrypt_openrouter_key,
             raw_key=payload.openrouter_api_key,
+            kms_key_id=config.openrouter_key_kms_key_id,
+            miner_hotkey=payload.miner_hotkey,
+            key_ref=key_ref,
+        )
+        encrypted_management = await asyncio.to_thread(
+            encrypt_openrouter_key,
+            raw_key=payload.openrouter_management_key,
             kms_key_id=config.openrouter_key_kms_key_id,
             miner_hotkey=payload.miner_hotkey,
             key_ref=key_ref,
@@ -418,6 +437,14 @@ async def register_research_lab_openrouter_key(payload: ResearchLabOpenRouterKey
             encrypted_key_ciphertext=encrypted["ciphertext_b64"],
             kms_key_id=encrypted["kms_key_id"],
             encryption_context_hash=encrypted["encryption_context_hash"],
+            encrypted_management_key_ciphertext=encrypted_management["ciphertext_b64"],
+            management_key_hash=management_key_hash,
+            management_kms_key_id=encrypted_management["kms_key_id"],
+            management_encryption_context_hash=encrypted_management["encryption_context_hash"],
+            openrouter_workspace_hash=str(privacy_proof_doc["workspace_id_hash"]),
+            privacy_status="verified",
+            privacy_verified_at=str(privacy_proof_doc["verified_at"]),
+            privacy_proof_doc=privacy_proof_doc,
             preflight_doc={
                 "source": "openrouter_current_key",
                 "limit": preflight_doc.get("limit"),
@@ -427,6 +454,8 @@ async def register_research_lab_openrouter_key(payload: ResearchLabOpenRouterKey
                 "is_free_tier": preflight_doc.get("is_free_tier"),
                 "is_management_key": preflight_doc.get("is_management_key"),
                 "expires_at": preflight_doc.get("expires_at"),
+                "key_label_hash": preflight_doc.get("key_label_hash"),
+                "creator_user_id_hash": preflight_doc.get("creator_user_id_hash"),
                 "key_label": payload.key_label,
             },
         )
@@ -1502,21 +1531,27 @@ async def _validate_miner_openrouter_key_ref(
             raise HTTPException(status_code=400, detail="encrypted OpenRouter key ref is required")
         row = await select_one(
             "research_lab_openrouter_key_refs",
-            columns="key_ref,miner_hotkey,preflight_status",
+            columns=(
+                "key_ref,miner_hotkey,preflight_status,privacy_status,"
+                "encrypted_management_key_ciphertext,management_key_hash,openrouter_workspace_hash"
+            ),
             filters=(("key_ref", normalized_ref), ("miner_hotkey", normalized_hotkey)),
         )
         if not row:
             raise HTTPException(status_code=400, detail="miner OpenRouter key ref was not found for this hotkey")
         if str(row.get("preflight_status") or "") != "passed":
             raise HTTPException(status_code=400, detail="miner OpenRouter key ref has not passed preflight")
+        if str(row.get("privacy_status") or "") != "verified":
+            raise HTTPException(status_code=400, detail="miner OpenRouter key ref has not passed privacy verification")
+        if not str(row.get("encrypted_management_key_ciphertext") or "").strip():
+            raise HTTPException(status_code=400, detail="miner OpenRouter management key is required")
+        if not str(row.get("management_key_hash") or "").strip():
+            raise HTTPException(status_code=400, detail="miner OpenRouter management key metadata is missing")
+        if not str(row.get("openrouter_workspace_hash") or "").strip():
+            raise HTTPException(status_code=400, detail="miner OpenRouter workspace privacy proof is missing")
         return
     if normalized_handling == "ephemeral_ref":
-        env_name = _openrouter_env_name_for_ref(config, normalized_ref)
-        if not env_name:
-            raise HTTPException(status_code=400, detail="ephemeral OpenRouter key refs are not configured")
-        if not os.getenv(env_name):
-            raise HTTPException(status_code=400, detail="configured OpenRouter key env var is empty")
-        return
+        raise HTTPException(status_code=400, detail="encrypted OpenRouter key ref with management proof is required")
     raise HTTPException(status_code=400, detail="unsupported miner OpenRouter key handling")
 
 

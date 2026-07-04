@@ -185,6 +185,7 @@ def main() -> int:
         timestamp=now,
         idempotency_key="openrouter-key-idempotency-001",
         openrouter_api_key="sk-or-v1-" + "a" * 48,
+        openrouter_management_key="sk-or-v1-" + "b" * 48,
         key_label="research-lab-test-key",
     )
     reparsed_key_registration = ResearchLabOpenRouterKeyRegisterRequest.model_validate(
@@ -194,7 +195,7 @@ def main() -> int:
         errors.append("OpenRouter key registration request failed json round-trip")
     try:
         validate_openrouter_key_format(key_registration.openrouter_api_key)
-    except ValueError:
+    except Exception:
         errors.append("valid OpenRouter key format was rejected")
     ref = openrouter_key_ref(miner_hotkey=ticket.miner_hotkey, key_hash="a" * 64)
     if not ref.startswith("encrypted_ref:openrouter:") or len(ref.rsplit(":", 1)[-1]) != 32:
@@ -442,6 +443,10 @@ async def _verify_openrouter_key_ref_validation(miner_hotkey: str, key_ref: str)
         "key_ref": key_ref,
         "miner_hotkey": miner_hotkey,
         "preflight_status": "passed",
+        "privacy_status": "verified",
+        "encrypted_management_key_ciphertext": "kms-ciphertext-b64",
+        "management_key_hash": "f" * 64,
+        "openrouter_workspace_hash": "e" * 64,
     }
 
     async def fake_select_one(table: str, **kwargs):

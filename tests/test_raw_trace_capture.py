@@ -72,6 +72,33 @@ def trace_env(monkeypatch):
     monkeypatch.delenv(worker_mod._RAW_TRACE_CAPTURE_ENABLED_ENV, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def openrouter_privacy_guard(monkeypatch):
+    def fake_verify(**kwargs):
+        return {
+            "source": "openrouter_workspace_privacy_guard",
+            "stage": kwargs.get("stage") or "test",
+            "workspace_id_hash": "a" * 64,
+            "runtime_key_hash": "b" * 64,
+            "management_key_hash": "c" * 64,
+            "logging_flags": {
+                "is_observability_io_logging_enabled": False,
+                "is_data_discount_logging_enabled": False,
+                "is_observability_broadcast_enabled": False,
+            },
+            "request_policy": kwargs.get("request_policy") or {},
+            "verified_at": "2026-07-04T00:00:00+00:00",
+            "proof_hash": "sha256:" + "d" * 64,
+        }
+
+    monkeypatch.setattr(worker_mod, "verify_openrouter_workspace_privacy", fake_verify)
+    monkeypatch.setattr(
+        worker_mod,
+        "create_openrouter_privacy_proof_event_sync",
+        lambda **_kwargs: {"event_id": "00000000-0000-0000-0000-000000000001"},
+    )
+
+
 class _FakeHTTPResponse:
     def __init__(self, payload):
         self._payload = payload
@@ -132,6 +159,9 @@ def _call(worker, *, capture_run_id=RUN_ID, capture_stage="code_edit_draft"):
             max_tokens=100,
             capture_run_id=capture_run_id,
             capture_stage=capture_stage,
+            privacy_key_ref="encrypted_ref:openrouter:" + "a" * 32,
+            privacy_miner_hotkey="5F" + "x" * 46,
+            privacy_management_key="sk-or-test-management-key-123",
         )
     )
 

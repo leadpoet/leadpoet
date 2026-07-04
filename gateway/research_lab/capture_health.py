@@ -213,7 +213,7 @@ async def check_projector_tables() -> dict[str, str]:
     out: dict[str, str] = {}
     for table in tables:
         try:
-            await select_many(table, columns="id", limit=1)
+            await select_many(table, columns="*", filters=(), limit=1)
             out[table] = "present"
         except Exception as exc:  # noqa: BLE001 - reporting only
             out[table] = f"error:{str(exc)[:80]}"

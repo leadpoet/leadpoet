@@ -174,3 +174,20 @@ def test_healthy_production_start_passes(monkeypatch):
     config = _config(production_writes_enabled=True)
     health = ch.enforce_capture_health(config, worker_kind="hosted_worker")
     assert health["violations"] == []
+
+
+@pytest.mark.asyncio
+async def test_check_projector_tables_uses_current_store_contract(monkeypatch):
+    calls = []
+
+    async def fake_select_many(table, **kwargs):
+        calls.append((table, kwargs))
+        return []
+
+    monkeypatch.setattr("gateway.research_lab.store.select_many", fake_select_many)
+    statuses = await ch.check_projector_tables()
+
+    assert set(statuses.values()) == {"present"}
+    assert calls
+    assert all(kwargs["columns"] == "*" for _table, kwargs in calls)
+    assert all(kwargs["filters"] == () for _table, kwargs in calls)

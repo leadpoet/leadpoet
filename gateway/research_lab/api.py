@@ -297,6 +297,23 @@ async def get_research_lab_loop_diagnostics(payload: ResearchLabLoopDiagnosticsR
             )
             if brow:
                 bundle_doc = _as_mapping(brow.get("score_bundle_doc"))
+        # Fallback: rejected/failed candidates carry no current_score_bundle_id,
+        # but a candidate rejected AT the scoring gate still produced a bundle
+        # linked by candidate_artifact_hash — recover it so the miner gets the
+        # per-ICP deltas + gate result (their most valuable "ran but lost" case).
+        if not bundle_doc.get("aggregates"):
+            art = str(cand.get("candidate_artifact_hash") or "")
+            if art:
+                brows = await select_many(
+                    "research_evaluation_score_bundles",
+                    filters=(("candidate_artifact_hash", art),),
+                    order_by=(("created_at", True),),
+                    limit=1,
+                )
+                if brows:
+                    fallback = _as_mapping(brows[0].get("score_bundle_doc"))
+                    if fallback.get("aggregates"):
+                        bundle_doc = fallback
         window = str(bundle_doc.get("icp_set_hash") or "")
         if window and window not in vis_cache:
             bm = await select_one(
@@ -313,6 +330,7 @@ async def get_research_lab_loop_diagnostics(payload: ResearchLabLoopDiagnosticsR
                 patch_manifest=_as_mapping(cand.get("candidate_patch_manifest")),
                 visibility_by_ref=vis_cache.get(window, {}),
                 candidate_status=str(cand.get("current_candidate_status") or ""),
+                rejection_reason=str(cand.get("current_reason") or ""),
             )
         )
 

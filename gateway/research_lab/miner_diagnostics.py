@@ -24,10 +24,11 @@ projection module (no I/O) so it is fully unit-testable.
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from typing import Any, Mapping, Optional, Sequence
 
-from gateway.research_lab.bundles import contains_secret_material
+from gateway.research_lab.bundles import contains_secret_material, redact_secret_material
 
 
 SCHEMA_VERSION = "1.0"
@@ -72,7 +73,7 @@ def visibility_map_from_benchmark_split(
         return out
     split = benchmark_score_summary_doc.get("visibility_split")
     items = split.get("items") if isinstance(split, Mapping) else None
-    if not isinstance(items, Sequence):
+    if not _is_list_like(items):
         return out
     for item in items:
         if not isinstance(item, Mapping):
@@ -100,11 +101,23 @@ def _delta_band(delta: float, flat_band: float) -> str:
     return "flat"
 
 
+def _is_list_like(value: Any) -> bool:
+    """A real sequence of items — a list/tuple, but NOT a str/bytes (which are
+    Sequences and would otherwise iterate as characters)."""
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
+
 def _num(value: Any, default: float = 0.0) -> float:
+    """Coerce to a FINITE float. Non-finite (NaN/inf) → default, so the
+    diagnostics doc is always strict-JSON-serializable (json.dumps otherwise
+    emits bare NaN/Infinity tokens that non-Python clients reject)."""
     try:
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError):
         return default
+    if not math.isfinite(result):
+        return default
+    return result
 
 
 _WITHHELD = "[summary withheld: contained a redacted token]"
@@ -133,13 +146,16 @@ def _emitted_patch(patch_manifest: Mapping[str, Any] | None) -> dict[str, Any]:
     lane = ""
     if isinstance(patch_doc, Mapping):
         lane = str(patch_doc.get("lane") or "").strip()
-    return {
+    out = {
         "target_component": _safe_text(patch_manifest.get("target_component_id")),
         "patch_type": _safe_text(patch_manifest.get("patch_type")),
         "candidate_kind": _safe_text(patch_manifest.get("candidate_kind")),
         "lane": _safe_text(lane),
         "redacted_summary": _safe_text(patch_manifest.get("redacted_summary")),
     }
+    # An empty/absent manifest yields all-blank fields — omit the block entirely
+    # rather than hand the miner a hollow emitted_patch.
+    return out if any(out.values()) else {}
 
 
 def build_candidate_diagnostics(
@@ -149,6 +165,7 @@ def build_candidate_diagnostics(
     patch_manifest: Mapping[str, Any] | None,
     visibility_by_ref: Mapping[str, str] | None,
     candidate_status: str = "",
+    rejection_reason: str = "",
     flat_band: float = DEFAULT_FLAT_BAND,
     infra_rerun_fraction: float = DEFAULT_INFRA_RERUN_FRACTION,
 ) -> dict[str, Any]:
@@ -166,8 +183,8 @@ def build_candidate_diagnostics(
             PRIVATE (conservative — never over-expose a sealed ICP).
         candidate_status: terminal status label (scored/rejected/failed).
 
-    The output is validated against ``contains_secret_material`` before return;
-    a positive hit raises (a capture bug must never leak secrets to a miner).
+    The output is redacted through ``redact_secret_material`` before return, so
+    a stray secret marker is scrubbed rather than raising (fail-safe, no 500).
     """
     vis = {str(k): str(v).lower() for k, v in (visibility_by_ref or {}).items()}
 
@@ -178,27 +195,30 @@ def build_candidate_diagnostics(
     emitted_patch = _emitted_patch(patch_manifest)
 
     aggregates = bundle_doc.get("aggregates") if isinstance(bundle_doc, Mapping) else None
-    per_icp = (
-        aggregates.get("per_icp_results")
-        if isinstance(aggregates, Mapping) and isinstance(aggregates.get("per_icp_results"), Sequence)
-        else []
-    )
+    raw_per_icp = aggregates.get("per_icp_results") if isinstance(aggregates, Mapping) else None
+    # NB: str/bytes are Sequences too — exclude them so a stray string can't be
+    # iterated as characters and inflate icp_count.
+    per_icp = raw_per_icp if _is_list_like(raw_per_icp) else []
 
-    # --- Reduced doc: candidate produced no scored bundle (e.g. runtime death).
+    # --- Reduced doc: candidate produced no scored bundle (rejected before
+    # scoring, or runtime death). rejection_reason is the key signal here — many
+    # such rejections are lineage/infra ("stale_parent_*"), NOT a bad patch, so
+    # the miner must see WHY before abandoning a direction.
     if not per_icp:
         doc = {
             "schema_version": SCHEMA_VERSION,
             "candidate_id": str(candidate_id),
             "candidate_status": str(candidate_status or ""),
+            "rejection_reason": _safe_text(rejection_reason),
+            "scored": False,
             "emitted_patch": emitted_patch,
             "aggregate": {},
             "public_icps": [],
             "private_pool": {},
             "scored_companies": {"count": 0, "avg_final_score": 0.0},
-            "note": "No scored ICP results available for this run.",
+            "note": "This candidate was not scored (rejected before scoring or runtime failure); see rejection_reason.",
         }
-        _assert_clean(doc)
-        return doc
+        return _finalize(doc)
 
     # bundle_doc is guaranteed a Mapping here (per_icp is non-empty above).
     raw_excluded = bundle_doc.get("provider_excluded_icp_ids")
@@ -220,7 +240,8 @@ def build_candidate_diagnostics(
         base_score = _num(row.get("base_per_icp_score"))
 
         # scored-company stats (count + avg ONLY — never the raw vector)
-        for s in row.get("candidate_company_scores") or []:
+        raw_scores = row.get("candidate_company_scores")
+        for s in (raw_scores if _is_list_like(raw_scores) else []):
             sv = _num(s, default=-1.0)
             if sv > 0:
                 scored_score_sum += sv
@@ -292,24 +313,29 @@ def build_candidate_diagnostics(
 
     scored_companies = {
         "count": scored_score_count,
-        "avg_final_score": round(scored_score_sum / scored_score_count, 4) if scored_score_count else 0.0,
+        "avg_final_score": round(_num(scored_score_sum / scored_score_count), 4) if scored_score_count else 0.0,
     }
 
     doc = {
         "schema_version": SCHEMA_VERSION,
         "candidate_id": str(candidate_id),
         "candidate_status": str(candidate_status or ""),
+        "rejection_reason": _safe_text(rejection_reason),
+        "scored": True,
         "emitted_patch": emitted_patch,
         "aggregate": aggregate_out,
         "public_icps": public_icps,
         "private_pool": private_pool,
         "scored_companies": scored_companies,
     }
-    _assert_clean(doc)
-    return doc
+    return _finalize(doc)
 
 
-def _assert_clean(doc: Mapping[str, Any]) -> None:
-    """Fail closed: a diagnostics doc must never carry secret material."""
-    if contains_secret_material(doc):
-        raise ValueError("miner diagnostics doc failed secret-material check")
+def _finalize(doc: dict[str, Any]) -> dict[str, Any]:
+    """Fail-SAFE backstop: redact any residual secret-marker strings so the doc
+    is ALWAYS returnable to the miner — never raise (a stray marker in a benign
+    field must not 500 the request), never leak. The redacted copy passes
+    ``contains_secret_material`` by construction.
+    """
+    redacted, _summary = redact_secret_material(doc)
+    return redacted

@@ -205,10 +205,11 @@ def test_visibility_map_parse_and_degrade():
     assert md.visibility_map_from_benchmark_split({"visibility_split": {}}) == {}
 
 
-def test_assert_clean_rejects_secret():
-    import pytest
-    with pytest.raises(ValueError):
-        md._assert_clean({"api_key": "sk-secret"})
+def test_finalize_redacts_secret_never_raises():
+    # fail-SAFE: a stray secret anywhere gets redacted, doc still returned
+    out = md._finalize({"x": "sk-or-leakme", "y": {"z": "private_repo/path"}})
+    import json as _j
+    assert "sk-or-leakme" not in _j.dumps(out)
 
 
 # ───────────────────────── SUMMARY SANITIZATION ─────────────────────────
@@ -231,3 +232,32 @@ def test_summary_with_secret_marker_is_withheld_not_raised():
 def test_clean_summary_passes_through():
     doc = _build()
     assert doc["emitted_patch"]["redacted_summary"].startswith("Add fallback")
+
+
+# ───────────────────────── REJECTION REASON (rejected/failed) ─────────────────────────
+
+def test_reduced_doc_carries_rejection_reason():
+    doc = md.build_candidate_diagnostics(
+        candidate_id="c", bundle_doc=None, patch_manifest=_patch_manifest(),
+        visibility_by_ref={}, candidate_status="rejected",
+        rejection_reason="stale_parent_rebase_unavailable")
+    assert doc["scored"] is False
+    assert doc["rejection_reason"] == "stale_parent_rebase_unavailable"
+    assert doc["emitted_patch"]["patch_type"] == "IMAGE_BUILD"
+
+
+def test_full_doc_marks_scored_true_and_reason():
+    doc = md.build_candidate_diagnostics(
+        candidate_id="c", bundle_doc=_bundle(), patch_manifest=_patch_manifest(),
+        visibility_by_ref=_vis(), candidate_status="scored", rejection_reason="")
+    assert doc["scored"] is True
+    assert doc["rejection_reason"] == ""
+
+
+def test_rejection_reason_with_secret_is_withheld():
+    doc = md.build_candidate_diagnostics(
+        candidate_id="c", bundle_doc=None, patch_manifest={},
+        visibility_by_ref={}, candidate_status="failed",
+        rejection_reason="died: sk-or-abc123 leaked")
+    assert "sk-or-" not in json.dumps(doc)
+    assert doc["rejection_reason"] == md._WITHHELD

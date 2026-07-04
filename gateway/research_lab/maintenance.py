@@ -32,6 +32,7 @@ _POSTGREST_TIMESTAMP_RE = re.compile(
 )
 
 AUTORESEARCH_MAINTENANCE_CONTROL_KEY = "autoresearch_maintenance"
+SCORING_MAINTENANCE_CONTROL_KEY = "scoring_maintenance"
 AUTORESEARCH_PROXY_PREFIXES = (
     "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY",
     "RESEARCH_LAB_WORKER_PROXY",
@@ -58,6 +59,25 @@ async def get_autoresearch_maintenance_state() -> dict[str, Any]:
     return normalize_autoresearch_maintenance_state(row)
 
 
+async def get_scoring_maintenance_state() -> dict[str, Any]:
+    try:
+        row = await select_one(
+            "research_lab_gateway_control_current",
+            filters=(("control_key", SCORING_MAINTENANCE_CONTROL_KEY),),
+        )
+    except Exception as exc:
+        logger.warning("research_lab_scoring_maintenance_state_unavailable: %s", str(exc)[:240])
+        return {
+            "control_key": SCORING_MAINTENANCE_CONTROL_KEY,
+            "paused": True,
+            "status": "unavailable_fail_closed",
+            "unavailable": True,
+            "fail_closed": True,
+            "error": str(exc)[:240],
+        }
+    return normalize_scoring_maintenance_state(row)
+
+
 def normalize_autoresearch_maintenance_state(row: Mapping[str, Any] | None) -> dict[str, Any]:
     if not row:
         return {
@@ -81,8 +101,35 @@ def normalize_autoresearch_maintenance_state(row: Mapping[str, Any] | None) -> d
     }
 
 
+def normalize_scoring_maintenance_state(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not row:
+        return {
+            "control_key": SCORING_MAINTENANCE_CONTROL_KEY,
+            "paused": False,
+            "status": "inactive",
+        }
+    status = str(row.get("current_control_status") or row.get("control_status") or "inactive")
+    event_doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
+    return {
+        "control_key": str(row.get("control_key") or SCORING_MAINTENANCE_CONTROL_KEY),
+        "paused": status == "active",
+        "status": status,
+        "event_type": row.get("current_event_type") or row.get("event_type"),
+        "reason": row.get("current_reason") or row.get("reason"),
+        "actor_ref": row.get("actor_ref"),
+        "event_seq": row.get("current_event_seq") or row.get("seq"),
+        "event_hash": row.get("current_event_hash") or row.get("anchored_hash"),
+        "status_at": row.get("current_status_at") or row.get("created_at"),
+        "event_doc": dict(event_doc),
+    }
+
+
 async def is_autoresearch_maintenance_paused() -> bool:
     return bool((await get_autoresearch_maintenance_state()).get("paused"))
+
+
+async def is_scoring_maintenance_paused() -> bool:
+    return bool((await get_scoring_maintenance_state()).get("paused"))
 
 
 async def set_autoresearch_maintenance_paused(
@@ -106,6 +153,27 @@ async def set_autoresearch_maintenance_paused(
     )
 
 
+async def set_scoring_maintenance_paused(
+    *,
+    paused: bool,
+    reason: str,
+    actor_ref: str | None = None,
+    event_doc: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return await create_gateway_control_event(
+        control_key=SCORING_MAINTENANCE_CONTROL_KEY,
+        event_type="pause_requested" if paused else "resume_requested",
+        control_status="active" if paused else "inactive",
+        actor_ref=actor_ref,
+        reason=reason,
+        event_doc={
+            "schema_version": "1.0",
+            "maintenance_mode": "cooperative_scoring_pause",
+            **(event_doc or {}),
+        },
+    )
+
+
 async def autoresearch_queue_status_counts() -> dict[str, int]:
     counts: dict[str, int] = {}
     for status in ("queued", "started", "paused"):
@@ -113,6 +181,19 @@ async def autoresearch_queue_status_counts() -> dict[str, int]:
             "research_loop_run_queue_current",
             columns="run_id,current_queue_status",
             filters=(("current_queue_status", status),),
+            max_rows=10000,
+        )
+        counts[status] = len(rows)
+    return counts
+
+
+async def candidate_scoring_status_counts() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for status in ("queued", "assigned", "evaluating"):
+        rows = await select_all(
+            "research_lab_candidate_evaluation_current",
+            columns="candidate_id,current_candidate_status",
+            filters=(("current_candidate_status", status),),
             max_rows=10000,
         )
         counts[status] = len(rows)

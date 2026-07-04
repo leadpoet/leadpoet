@@ -11,9 +11,11 @@ from typing import Any, Mapping
 from .config import ResearchLabGatewayConfig
 from .maintenance import (
     autoresearch_queue_status_counts,
+    candidate_scoring_status_counts,
     default_actor_ref,
     dumps_status,
     get_autoresearch_maintenance_state,
+    get_scoring_maintenance_state,
     pause_pending_autoresearch_runs,
     rebase_stale_parent_candidates as maintenance_rebase_stale_parent_candidates,
     reconcile_terminal_loop_projections,
@@ -24,6 +26,7 @@ from .maintenance import (
     requeue_paused_autoresearch_runs,
     resume_credit_blocked_run,
     set_autoresearch_maintenance_paused,
+    set_scoring_maintenance_paused,
     wait_until_autoresearch_drained,
 )
 from .promotion import (
@@ -57,6 +60,14 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--reason", default="maintenance complete")
     resume.add_argument("--actor-ref", default=default_actor_ref())
     resume.add_argument("--no-requeue", action="store_true")
+
+    pause_scoring = sub.add_parser("pause-scoring", help="Pause new candidate scoring claims")
+    pause_scoring.add_argument("--reason", required=True)
+    pause_scoring.add_argument("--actor-ref", default=default_actor_ref())
+
+    resume_scoring = sub.add_parser("resume-scoring", help="Resume candidate scoring claims")
+    resume_scoring.add_argument("--reason", default="maintenance complete")
+    resume_scoring.add_argument("--actor-ref", default=default_actor_ref())
 
     requeue_candidate = sub.add_parser(
         "requeue-candidate",
@@ -800,6 +811,38 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "state": await get_autoresearch_maintenance_state(),
             "queue_counts": queue_counts,
         }
+    if args.command == "pause-scoring":
+        event = await set_scoring_maintenance_paused(
+            paused=True,
+            reason=args.reason,
+            actor_ref=args.actor_ref,
+            event_doc={"operator_action": "pause-scoring"},
+        )
+        return {
+            "ok": True,
+            "action": "pause-scoring",
+            "event_id": event.get("event_id"),
+            "event_seq": event.get("seq"),
+            "event_hash": event.get("anchored_hash"),
+            "state": await get_scoring_maintenance_state(),
+            "candidate_counts": await candidate_scoring_status_counts(),
+        }
+    if args.command == "resume-scoring":
+        event = await set_scoring_maintenance_paused(
+            paused=False,
+            reason=args.reason,
+            actor_ref=args.actor_ref,
+            event_doc={"operator_action": "resume-scoring"},
+        )
+        return {
+            "ok": True,
+            "action": "resume-scoring",
+            "event_id": event.get("event_id"),
+            "event_seq": event.get("seq"),
+            "event_hash": event.get("anchored_hash"),
+            "state": await get_scoring_maintenance_state(),
+            "candidate_counts": await candidate_scoring_status_counts(),
+        }
     if args.command == "requeue-candidate":
         return await requeue_failed_candidate(
             candidate_id=args.candidate_id,
@@ -870,7 +913,9 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         return {
             "ok": True,
             "state": await get_autoresearch_maintenance_state(),
+            "scoring_state": await get_scoring_maintenance_state(),
             "queue_counts": await autoresearch_queue_status_counts(),
+            "candidate_counts": await candidate_scoring_status_counts(),
         }
     if args.command == "wait-drained":
         result = await wait_until_autoresearch_drained(

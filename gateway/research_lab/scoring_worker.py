@@ -43,6 +43,7 @@ from gateway.research_lab.logging_utils import (
     runtime_error_diagnostics as _runtime_error_diagnostics,
     safe_event_error_text as _safe_event_error_text,
 )
+from gateway.research_lab.maintenance import is_scoring_maintenance_paused
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabScoreBundleCreateRequest
 from gateway.research_lab.promotion import (
     CONFIRMATION_ATTEMPT_FAILED_REASON,
@@ -1734,6 +1735,8 @@ class ResearchLabGatewayScoringWorker:
             return {"processed": False, "status": "writes_or_eval_disabled"}
         if self.config.scoring_worker_require_proxy and not self.proxy_url:
             return {"processed": False, "status": "scoring_worker_proxy_required"}
+        if await is_scoring_maintenance_paused():
+            return {"processed": False, "status": "maintenance_paused"}
 
         missing_private_env = self._missing_private_scoring_env()
         if missing_private_env:

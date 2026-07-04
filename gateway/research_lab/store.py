@@ -924,13 +924,43 @@ async def create_private_model_version(
         "research_lab_private_model_versions",
         filters=(("private_model_version_id", version_id),),
     )
+    reused_by_artifact_hash = False
+    if not existing:
+        existing = await select_one(
+            "research_lab_private_model_versions",
+            filters=(("model_artifact_hash", payload["model_artifact_hash"]),),
+        )
+        if existing:
+            mismatches = []
+            for field in (
+                "private_model_manifest_hash",
+                "git_commit_sha",
+                "config_hash",
+                "component_registry_version",
+                "scoring_adapter_version",
+                "signature_ref",
+            ):
+                existing_value = str(existing.get(field) or "")
+                payload_value = str(payload.get(field) or "")
+                if existing_value != payload_value:
+                    mismatches.append(field)
+            if mismatches:
+                raise RuntimeError(
+                    "research_lab_private_model_versions: existing model_artifact_hash "
+                    f"{payload['model_artifact_hash']} conflicts on {', '.join(mismatches)}"
+                )
+            reused_by_artifact_hash = True
     if existing:
         event = await create_private_model_version_event(
-            private_model_version_id=version_id,
+            private_model_version_id=str(existing["private_model_version_id"]),
             event_type=version_status,
             version_status=version_status,
             reason=reason,
-            event_doc={"version_hash": version_hash},
+            event_doc={
+                "version_hash": version_hash,
+                "requested_private_model_version_id": version_id,
+                "reused_existing_model_artifact_hash": reused_by_artifact_hash,
+            },
         )
         return existing, event
     row = {

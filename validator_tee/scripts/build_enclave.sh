@@ -16,6 +16,7 @@ set -e  # Exit on error
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VALIDATOR_TEE_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_ROOT="$(dirname "$VALIDATOR_TEE_DIR")"
+BASE_IMAGE_STAMP_FILE="$REPO_ROOT/.validator-base.dockerfile.sha256"
 
 echo "=========================================="
 echo "🔨 Building Validator Nitro Enclave Image"
@@ -117,15 +118,43 @@ PY
 # Step 1: Ensure base image exists (built once, cached)
 echo ""
 echo "📦 Step 1: Checking base image..."
-if ! docker images -q validator-base:v1 | grep -q .; then
-    echo "   Building base image (one-time operation)..."
+DOCKERFILE_BASE_HASH="$(python3 - "$VALIDATOR_TEE_DIR/Dockerfile.base" <<'PY'
+import hashlib
+import sys
+
+with open(sys.argv[1], "rb") as f:
+    print(hashlib.sha256(f.read()).hexdigest()[:16])
+PY
+)"
+EXISTING_BASE_STAMP=""
+if [ -f "$BASE_IMAGE_STAMP_FILE" ]; then
+    EXISTING_BASE_STAMP="$(tr -d '[:space:]' < "$BASE_IMAGE_STAMP_FILE")"
+fi
+BASE_IMAGE_EXISTS=false
+if docker images -q validator-base:v1 | grep -q .; then
+    BASE_IMAGE_EXISTS=true
+fi
+
+if [ "$BASE_IMAGE_EXISTS" != "true" ]; then
+    echo "   Building base image (missing; hash: $DOCKERFILE_BASE_HASH)..."
     docker build --no-cache \
         -f "$VALIDATOR_TEE_DIR/Dockerfile.base" \
         -t validator-base:v1 \
         "$REPO_ROOT"
+    printf "%s\n" "$DOCKERFILE_BASE_HASH" > "$BASE_IMAGE_STAMP_FILE"
     echo "   ✓ Base image built"
+elif [ "$EXISTING_BASE_STAMP" != "$DOCKERFILE_BASE_HASH" ]; then
+    echo "   Base image stamp stale or absent (existing: ${EXISTING_BASE_STAMP:-none}, expected: $DOCKERFILE_BASE_HASH)"
+    echo "   Rebuilding base image so validator PCR0 matches gateway GitHub rebuilds..."
+    docker rmi -f validator-base:v1 >/dev/null 2>&1 || true
+    docker build --no-cache \
+        -f "$VALIDATOR_TEE_DIR/Dockerfile.base" \
+        -t validator-base:v1 \
+        "$REPO_ROOT"
+    printf "%s\n" "$DOCKERFILE_BASE_HASH" > "$BASE_IMAGE_STAMP_FILE"
+    echo "   ✓ Base image rebuilt"
 else
-    echo "   ✓ Base image already exists"
+    echo "   ✓ Base image already exists and matches Dockerfile.base hash: $DOCKERFILE_BASE_HASH"
 fi
 
 # Step 2: Build enclave Docker image

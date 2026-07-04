@@ -3668,7 +3668,10 @@ async def backfill_corpus_trace_rows(
             RUN_QUEUE_TABLE,
             columns="run_id,ticket_id,current_queue_status,current_status_at",
             filters=(("current_queue_status", "in", list(_QUEUE_TERMINAL_STATUSES)),),
-            order_by=(("current_status_at", False),),
+            # Late scorer/in-container traces usually arrive after run
+            # completion, so the maintenance pass should prioritize recent
+            # terminal runs. Historical deep repairs remain the CLI's job.
+            order_by=(("current_status_at", True),),
             max_rows=max_candidates,
         )
     except Exception as exc:

@@ -52,9 +52,8 @@ OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions
 OPENROUTER_EMBEDDINGS_URL = "https://openrouter.ai/api/v1/embeddings"
 
 RAW_TRACE_S3_PREFIX_ENV = "RESEARCH_LAB_RAW_TRACE_S3_PREFIX"
-RAW_TRACE_KMS_KEY_ENV = "RESEARCH_LAB_RAW_TRACE_KMS_KEY_ID"
+RAW_TRACE_KMS_KEY_ENV = "RESEARCH_LAB_TRACE_KMS_KEY_ID"
 INCLUDE_REASONING_ENV = "RESEARCH_LAB_LLM_INCLUDE_REASONING"
-_DEFAULT_KMS_KEY = "alias/leadpoet-research-lab-artifact-signing"
 
 _SECRET_PATTERNS = (
     re.compile(r"sk-or-[A-Za-z0-9\-_]+"),
@@ -166,6 +165,13 @@ class _TelemetryTraceUploader:
             bucket, _sep, key_prefix = prefix[5:].partition("/")
             if not bucket:
                 return None
+            kms_key_id = str(os.getenv(RAW_TRACE_KMS_KEY_ENV, "")).strip()
+            if not kms_key_id:
+                self._warn_once(
+                    f"set {RAW_TRACE_KMS_KEY_ENV}=alias/leadpoet-research-lab-trace-encryption "
+                    "to capture legacy-channel OpenRouter traces"
+                )
+                return None
             safe_channel = _path_segment(channel, "channel")
             safe_purpose = _path_segment(purpose, "call")
             date_segment = datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -188,7 +194,7 @@ class _TelemetryTraceUploader:
                 default=str,
             ).encode("utf-8")
             digest = "sha256:" + hashlib.sha256(body).hexdigest()
-            self._submit(bucket=bucket, object_key=object_key, body=body)
+            self._submit(bucket=bucket, object_key=object_key, body=body, kms_key_id=kms_key_id)
             return {"s3_ref": f"s3://{bucket}/{object_key}", "sha256": digest}
         except Exception as exc:  # noqa: BLE001 - capture never fails the call
             logger.warning(
@@ -223,19 +229,19 @@ class _TelemetryTraceUploader:
             self._warned = True
         logger.warning("openrouter_telemetry_capture_unavailable hint=%s", hint)
 
-    def _submit(self, *, bucket: str, object_key: str, body: bytes) -> None:
+    def _submit(self, *, bucket: str, object_key: str, body: bytes, kms_key_id: str) -> None:
         with self._lock:
             if self._executor is None:
                 self._executor = ThreadPoolExecutor(
                     max_workers=2, thread_name_prefix="openrouter-telemetry-trace"
                 )
             executor = self._executor
-        future = executor.submit(self._put_object, bucket, object_key, body)
+        future = executor.submit(self._put_object, bucket, object_key, body, kms_key_id)
         with self._lock:
             self._pending.add(future)
         future.add_done_callback(self._consume)
 
-    def _put_object(self, bucket: str, object_key: str, body: bytes) -> None:
+    def _put_object(self, bucket: str, object_key: str, body: bytes, kms_key_id: str) -> None:
         import boto3  # type: ignore
 
         put_kwargs: dict[str, Any] = {
@@ -244,10 +250,8 @@ class _TelemetryTraceUploader:
             "Body": body,
             "ContentType": "application/json",
             "ServerSideEncryption": "aws:kms",
+            "SSEKMSKeyId": kms_key_id,
         }
-        kms_key_id = str(os.getenv(RAW_TRACE_KMS_KEY_ENV, "") or _DEFAULT_KMS_KEY).strip()
-        if kms_key_id:
-            put_kwargs["SSEKMSKeyId"] = kms_key_id
         boto3.client("s3").put_object(**put_kwargs)
 
     def _consume(self, future: "Future[None]") -> None:

@@ -61,6 +61,7 @@ def test_env_names_match_recorder_modules():
     from gateway.research_lab import worker as w
     from gateway.research_lab import scoring_worker as sw
     from gateway.research_lab import trajectory_projector as tp
+    from research_lab import openrouter_telemetry as ot
     from research_lab.eval import evaluator as ev
 
     assert ch.RAW_TRACE_CAPTURE_ENABLED_ENV == w._RAW_TRACE_CAPTURE_ENABLED_ENV
@@ -69,6 +70,7 @@ def test_env_names_match_recorder_modules():
     assert ch.SCORER_TRACE_S3_PREFIX_ENV == sw._SCORER_TRACE_S3_PREFIX_ENV
     assert ch.TRACE_KMS_KEY_ENV == w._TRACE_KMS_KEY_ENV
     assert ch.TRACE_KMS_KEY_ENV == sw._TRACE_KMS_KEY_ENV
+    assert ch.TRACE_KMS_KEY_ENV == ot.RAW_TRACE_KMS_KEY_ENV
     assert ch.INCONTAINER_TRACE_S3_PREFIX_ENV == ev.INCONTAINER_TRACE_S3_PREFIX_ENV
     assert ch.INCONTAINER_TRACE_KMS_KEY_ENV == ev.INCONTAINER_TRACE_KMS_KEY_ENV
     assert ch.PROJECTOR_ENABLED_ENV == tp.PROJECTOR_ENABLED_ENV

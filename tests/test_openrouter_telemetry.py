@@ -175,6 +175,17 @@ def test_no_s3_prefix_is_inert_but_call_succeeds(fake_boto3, monkeypatch):
     assert fake_boto3 == []
 
 
+def test_s3_prefix_without_kms_does_not_create_dangling_pointer(fake_boto3, monkeypatch):
+    monkeypatch.setenv(ot.RAW_TRACE_S3_PREFIX_ENV, TRACE_PREFIX)
+    monkeypatch.delenv(ot.RAW_TRACE_KMS_KEY_ENV, raising=False)
+    result = _call(opener=_opener([_chat_response()]))
+    ot.flush_telemetry_traces()
+    assert result.content == '{"ok": true}'
+    assert result.raw_trace_ref is None
+    assert result.provider_usage["reasoning_capture"]["storage_state"] == "metadata_only"
+    assert fake_boto3 == []
+
+
 def test_record_openrouter_trace_hook(fake_boto3, trace_env):
     usage = ot.record_openrouter_trace(
         channel="qualification",

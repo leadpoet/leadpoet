@@ -85,6 +85,7 @@ class FakeStore:
             name: [dict(row) for row in rows] for name, rows in tables.items()
         }
         self.inserted: dict[str, list[dict[str, Any]]] = {}
+        self.updated: dict[str, list[dict[str, Any]]] = {}
 
     @staticmethod
     def _matches(row: Mapping[str, Any], filters: Any) -> bool:
@@ -166,10 +167,31 @@ class FakeStore:
         self.inserted.setdefault(table, []).append(dict(row))
         return dict(row)
 
+    async def update_row(self, table: str, values: dict[str, Any], *, filters: Any):
+        rows = self._select(table, filters)
+        if not rows:
+            raise RuntimeError(f"{table}: update returned no rows")
+        target = rows[0]
+        stored = self.tables.setdefault(table, [])
+        for index, row in enumerate(stored):
+            if row is target or all(
+                str(row.get(spec[0])) == str(spec[1])
+                for spec in filters
+                if len(spec) == 2
+            ):
+                updated = dict(row)
+                updated.update(copy.deepcopy(values))
+                stored[index] = updated
+                self.updated.setdefault(table, []).append(updated)
+                return dict(updated)
+        raise RuntimeError(f"{table}: update returned no rows")
+
     def write_count(self, table: str | None = None) -> int:
         if table is not None:
-            return len(self.inserted.get(table, []))
-        return sum(len(rows) for rows in self.inserted.values())
+            return len(self.inserted.get(table, [])) + len(self.updated.get(table, []))
+        return sum(len(rows) for rows in self.inserted.values()) + sum(
+            len(rows) for rows in self.updated.values()
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -982,6 +1004,88 @@ async def test_traces_backfill_adds_rows_without_touching_events(tables, enabled
     # forward-only: append-only tables untouched
     assert store.write_count(TRAJECTORY_EVENTS_TABLE) == event_writes
     assert store.write_count(TRAJECTORIES_TABLE) == envelope_writes
+
+
+async def test_traces_backfill_repairs_existing_stale_pointer_rows(tables, enabled):
+    store = FakeStore(tables)
+    await project_run(RUN_ID, store=store, dry_run=False)
+
+    for index, row in enumerate(store.tables[EXECUTION_TRACES_TABLE]):
+        if row["run_id"] != NODE1_TRACE_ID:
+            continue
+        stale = dict(row)
+        stale["calls"] = [
+            call for call in row["calls"] if call.get("call_kind") == "engine_raw_trace"
+        ]
+        stale["judge_verdicts"] = []
+        stale["evidence_bundles"] = []
+        stale["trace_doc"] = {
+            **dict(row["trace_doc"]),
+            "incontainer_trace_count": 0,
+            "judge_verdict_count": 0,
+        }
+        store.tables[EXECUTION_TRACES_TABLE][index] = stale
+        break
+
+    for index, row in enumerate(store.tables[EVIDENCE_BUNDLES_TABLE]):
+        if row["bundle_id"] != EVIDENCE_ID:
+            continue
+        stale_snapshots = []
+        for snapshot in row["snapshots"]:
+            stale = {
+                key: value
+                for key, value in snapshot.items()
+                if key
+                not in {
+                    "scorer_trace_ref",
+                    "scorer_trace_sha256",
+                    "incontainer_trace_ref",
+                    "incontainer_trace_sha256",
+                    "incontainer_trace_call_count",
+                }
+            }
+            stale_snapshots.append(stale)
+        stale_row = dict(row)
+        stale_row["snapshots"] = stale_snapshots
+        stale_row["bundle_doc"] = {
+            **dict(row["bundle_doc"]),
+            "incontainer_trace_count": 0,
+            "incontainer_call_count_total": 0,
+        }
+        store.tables[EVIDENCE_BUNDLES_TABLE][index] = stale_row
+        break
+
+    result = await backfill_run_corpus_trace_rows(RUN_ID, store=store, dry_run=False)
+    assert result.status == "traces_backfilled"
+    assert result.execution_trace_count == 1
+    assert result.evidence_bundle_count == 1
+
+    repaired_trace = {
+        row["run_id"]: row for row in store.tables[EXECUTION_TRACES_TABLE]
+    }[NODE1_TRACE_ID]
+    assert repaired_trace["evidence_bundles"] == [f"evidence_bundle:{EVIDENCE_ID}"]
+    assert len(
+        [call for call in repaired_trace["calls"] if call["call_kind"] == "incontainer_trace"]
+    ) == 2
+    assert len(repaired_trace["judge_verdicts"]) == 2
+    assert repaired_trace["trace_doc"]["incontainer_trace_count"] == 2
+    assert repaired_trace["trace_doc"]["judge_verdict_count"] == 2
+
+    repaired_evidence = {
+        row["bundle_id"]: row for row in store.tables[EVIDENCE_BUNDLES_TABLE]
+    }[EVIDENCE_ID]
+    assert any(snapshot.get("scorer_trace_ref") for snapshot in repaired_evidence["snapshots"])
+    assert any(
+        snapshot.get("incontainer_trace_ref") for snapshot in repaired_evidence["snapshots"]
+    )
+    assert repaired_evidence["bundle_doc"]["incontainer_trace_count"] == 2
+    assert repaired_evidence["bundle_hash"] == sha256_json(
+        {
+            "evidence_bundle_id": EVIDENCE_ID,
+            "snapshots": repaired_evidence["snapshots"],
+            "bundle_doc": repaired_evidence["bundle_doc"],
+        }
+    )
 
 
 async def test_traces_backfill_dry_run_writes_nothing(tables, disabled):

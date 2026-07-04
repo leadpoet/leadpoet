@@ -80,6 +80,17 @@ class ResearchLabProbeRequest(SignedResearchLabRequest):
         return value
 
 
+class ResearchLabLoopDiagnosticsRequest(SignedResearchLabRequest):
+    """Signed request for a miner's OWN per-candidate diagnostics.
+
+    Ownership is enforced server-side (ticket must belong to the signing
+    hotkey), so a miner can only read diagnostics for loops they paid for.
+    """
+
+    ticket_id: UUID
+    candidate_id: Optional[str] = Field(default=None, min_length=8, max_length=256)
+
+
 class ResearchLabOpenRouterKeyRegisterRequest(SignedResearchLabRequest):
     openrouter_api_key: str = Field(min_length=1, max_length=512)
     key_label: Optional[str] = Field(default=None, max_length=120)

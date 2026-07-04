@@ -40,6 +40,10 @@ from .key_vault import (
     preflight_openrouter_key,
 )
 from .maintenance import get_autoresearch_maintenance_state
+from .miner_diagnostics import (
+    build_candidate_diagnostics,
+    visibility_map_from_benchmark_split,
+)
 from .models import (
     ResearchLabCandidateEvaluationResultRequest,
     ResearchLabCandidateEvaluationResultResponse,
@@ -49,6 +53,7 @@ from .models import (
     ResearchLabLoopTopUpResponse,
     ResearchLabOpenRouterKeyRegisterRequest,
     ResearchLabOpenRouterKeyRegisterResponse,
+    ResearchLabLoopDiagnosticsRequest,
     ResearchLabProbeRequest,
     ResearchLabReceiptCreateRequest,
     ResearchLabReceiptResponse,
@@ -228,6 +233,90 @@ async def create_research_lab_probe(payload: ResearchLabProbeRequest):
         "event_id": event["event_id"],
         "event_seq": int(event["seq"]),
     }
+
+
+_TERMINAL_CANDIDATE_STATUSES = {"scored", "rejected", "failed"}
+
+
+def _as_mapping(value: object) -> dict[str, object]:
+    """Coerce a possibly-JSON-string DB column into a dict (empty on failure)."""
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return {}
+        return dict(parsed) if isinstance(parsed, Mapping) else {}
+    return {}
+
+
+@router.post("/loop-diagnostics")
+async def get_research_lab_loop_diagnostics(payload: ResearchLabLoopDiagnosticsRequest):
+    """Sanitized own-run diagnostics for the miner who paid for the loop.
+
+    Ownership-gated: the ticket must belong to the signing hotkey, so a miner
+    can only read diagnostics for their own runs. Returns one diagnostics doc
+    per TERMINAL candidate on the ticket (scored / rejected / failed).
+    """
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    await _verify_signed_miner(payload)
+    # Ownership: 404 unless the ticket belongs to this hotkey.
+    await _get_ticket_for_miner(str(payload.ticket_id), payload.miner_hotkey)
+
+    rows = await select_many(
+        "research_lab_candidate_evaluation_current",
+        filters=(("ticket_id", str(payload.ticket_id)),),
+    )
+    candidates = [
+        row
+        for row in (rows or [])
+        if str(row.get("current_candidate_status") or "") in _TERMINAL_CANDIDATE_STATUSES
+        and (not payload.candidate_id or str(row.get("candidate_id")) == payload.candidate_id)
+    ]
+    if not candidates:
+        raise HTTPException(status_code=404, detail="no terminal candidate diagnostics for this ticket yet")
+
+    # Visibility split is deterministic per rolling window; cache across
+    # candidates. CRITICAL: each candidate is classified by ITS OWN window's
+    # split (keyed by the candidate bundle's icp_set_hash). A multi-day ticket
+    # can hold candidates from different windows, and the same ICP can be public
+    # in one window and sealed in another — so we must never reuse one window's
+    # split for a candidate scored against a different window.
+    vis_cache: dict[str, dict[str, str]] = {}
+    diagnostics: list[dict[str, object]] = []
+    for cand in candidates:
+        bundle_doc: dict[str, object] = {}
+        bundle_id = str(cand.get("current_score_bundle_id") or "")
+        if bundle_id:
+            brow = await select_one(
+                "research_evaluation_score_bundle_current",
+                filters=(("score_bundle_id", bundle_id),),
+            )
+            if brow:
+                bundle_doc = _as_mapping(brow.get("score_bundle_doc"))
+        window = str(bundle_doc.get("icp_set_hash") or "")
+        if window and window not in vis_cache:
+            bm = await select_one(
+                "research_lab_private_model_benchmark_bundles",
+                filters=(("rolling_window_hash", window),),
+            )
+            vis_cache[window] = visibility_map_from_benchmark_split(
+                _as_mapping(bm.get("score_summary_doc")) if bm else None
+            )
+        diagnostics.append(
+            build_candidate_diagnostics(
+                candidate_id=str(cand.get("candidate_id") or ""),
+                bundle_doc=bundle_doc,
+                patch_manifest=_as_mapping(cand.get("candidate_patch_manifest")),
+                visibility_by_ref=vis_cache.get(window, {}),
+                candidate_status=str(cand.get("current_candidate_status") or ""),
+            )
+        )
+
+    return {"ticket_id": str(payload.ticket_id), "diagnostics": diagnostics}
 
 
 @router.post("/openrouter-keys", response_model=ResearchLabOpenRouterKeyRegisterResponse)

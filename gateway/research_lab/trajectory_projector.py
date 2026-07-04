@@ -2977,8 +2977,150 @@ def _merge_trace_calls(
     return changed, merged
 
 
+def _merge_doc_values(
+    existing: Mapping[str, Any], proposed: Mapping[str, Any]
+) -> tuple[bool, dict[str, Any]]:
+    """Merge projector metadata docs, preferring newly derived safe values."""
+    merged = dict(existing)
+    changed = False
+    for key, value in proposed.items():
+        if value is None:
+            continue
+        current = merged.get(key)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            nested_changed, nested = _merge_doc_values(current, value)
+            if nested_changed:
+                merged[key] = nested
+                changed = True
+            continue
+        if current != value:
+            merged[key] = value
+            changed = True
+    return changed, merged
+
+
+def _judge_verdict_key(verdict: Mapping[str, Any]) -> tuple[str, str, str, str, str, str]:
+    s3_ref = str(verdict.get("s3_ref") or "")
+    sha256 = str(verdict.get("sha256") or "")
+    if s3_ref or sha256:
+        return ("raw", s3_ref, sha256, "", "", "")
+    return (
+        "metadata",
+        str(verdict.get("verdict_kind") or ""),
+        str(verdict.get("icp_ref") or ""),
+        str(verdict.get("score_bundle_ref") or ""),
+        str(verdict.get("candidate_ref") or ""),
+        str(verdict.get("source") or ""),
+    )
+
+
+def _merge_judge_verdicts(
+    existing_verdicts: Any,
+    proposed_verdicts: Any,
+) -> tuple[bool, list[dict[str, Any]]]:
+    merged: list[dict[str, Any]] = [
+        dict(item)
+        for item in (existing_verdicts if isinstance(existing_verdicts, list) else [])
+        if isinstance(item, Mapping)
+    ]
+    by_key = {_judge_verdict_key(item): index for index, item in enumerate(merged)}
+    changed = False
+    for item in proposed_verdicts if isinstance(proposed_verdicts, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        key = _judge_verdict_key(item)
+        if key in by_key:
+            index = by_key[key]
+            item_changed, merged_item = _merge_doc_values(merged[index], item)
+            if item_changed:
+                merged[index] = merged_item
+                changed = True
+            continue
+        by_key[key] = len(merged)
+        merged.append(dict(item))
+        changed = True
+    if len(merged) > _EXECUTION_TRACE_CALL_CAP:
+        merged = _cap_pointer_entries(
+            merged,
+            _EXECUTION_TRACE_CALL_CAP,
+            "judge_verdict_truncation_marker",
+        )
+        changed = True
+    return changed, merged
+
+
+def _merge_string_refs(existing_refs: Any, proposed_refs: Any) -> tuple[bool, list[str]]:
+    merged: list[str] = [
+        str(item)
+        for item in (existing_refs if isinstance(existing_refs, list) else [])
+        if str(item or "")
+    ]
+    seen = set(merged)
+    changed = False
+    for item in proposed_refs if isinstance(proposed_refs, list) else []:
+        ref = str(item or "")
+        if not ref or ref in seen:
+            continue
+        seen.add(ref)
+        merged.append(ref)
+        changed = True
+    return changed, merged
+
+
+def _snapshot_key(snapshot: Mapping[str, Any]) -> tuple[str, str, str]:
+    kind = str(snapshot.get("snapshot_kind") or "")
+    icp_ref = str(snapshot.get("icp_ref") or "")
+    if kind == "per_icp_score_evidence" and icp_ref:
+        return (kind, "icp", icp_ref)
+    score_bundle_ref = str(snapshot.get("score_bundle_ref") or "")
+    if score_bundle_ref:
+        return (kind, "score_bundle", score_bundle_ref)
+    scorer_ref = str(snapshot.get("scorer_trace_ref") or "")
+    if scorer_ref:
+        return (kind, "scorer_trace", scorer_ref)
+    incontainer_ref = str(snapshot.get("incontainer_trace_ref") or "")
+    if incontainer_ref:
+        return (kind, "incontainer_trace", incontainer_ref)
+    return (kind, "fallback", sha256_json(snapshot))
+
+
+def _merge_evidence_snapshots(
+    existing_snapshots: Any,
+    proposed_snapshots: Any,
+) -> tuple[bool, list[dict[str, Any]]]:
+    merged: list[dict[str, Any]] = [
+        dict(item)
+        for item in (existing_snapshots if isinstance(existing_snapshots, list) else [])
+        if isinstance(item, Mapping)
+    ]
+    by_key = {_snapshot_key(item): index for index, item in enumerate(merged)}
+    changed = False
+    for item in proposed_snapshots if isinstance(proposed_snapshots, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        key = _snapshot_key(item)
+        if key in by_key:
+            index = by_key[key]
+            item_changed, merged_item = _merge_doc_values(merged[index], item)
+            if item_changed:
+                merged[index] = merged_item
+                changed = True
+            continue
+        by_key[key] = len(merged)
+        merged.append(dict(item))
+        changed = True
+    if len(merged) > _EVIDENCE_SNAPSHOT_CAP:
+        merged = _cap_pointer_entries(
+            merged,
+            _EVIDENCE_SNAPSHOT_CAP,
+            "per_icp_truncation_marker",
+        )
+        changed = True
+    return changed, merged
+
+
 async def _upsert_execution_trace_row(store: Any, row: Mapping[str, Any]) -> str:
-    """Insert a trace row, or merge newly discovered calls into an existing row."""
+    """Insert a trace row, or merge newly discovered pointer metadata."""
     existing = await store.select_one(
         EXECUTION_TRACES_TABLE, filters=(("run_id", row["run_id"]),)
     )
@@ -2991,11 +3133,45 @@ async def _upsert_execution_trace_row(store: Any, row: Mapping[str, Any]) -> str
     if not existing:
         return "unchanged"
     changed, calls = _merge_trace_calls(existing.get("calls"), row.get("calls"))
-    if not changed:
+    verdicts_changed, judge_verdicts = _merge_judge_verdicts(
+        existing.get("judge_verdicts"), row.get("judge_verdicts")
+    )
+    evidence_changed, evidence_refs = _merge_string_refs(
+        existing.get("evidence_bundles"), row.get("evidence_bundles")
+    )
+    trace_doc_changed = False
+    trace_doc: dict[str, Any] | None = None
+    if isinstance(row.get("trace_doc"), Mapping):
+        trace_doc_changed, trace_doc = _merge_doc_values(
+            existing.get("trace_doc")
+            if isinstance(existing.get("trace_doc"), Mapping)
+            else {},
+            row["trace_doc"],
+        )
+    trajectory_id = row.get("trajectory_id")
+    trajectory_changed = bool(trajectory_id and not existing.get("trajectory_id"))
+    if not (
+        changed
+        or verdicts_changed
+        or evidence_changed
+        or trace_doc_changed
+        or trajectory_changed
+    ):
         return "unchanged"
+    values: dict[str, Any] = {}
+    if changed:
+        values["calls"] = calls
+    if verdicts_changed:
+        values["judge_verdicts"] = judge_verdicts
+    if evidence_changed:
+        values["evidence_bundles"] = evidence_refs
+    if trace_doc_changed and trace_doc is not None:
+        values["trace_doc"] = trace_doc
+    if trajectory_changed:
+        values["trajectory_id"] = trajectory_id
     await store.update_row(
         EXECUTION_TRACES_TABLE,
-        {"calls": calls},
+        values,
         filters=(("run_id", row["run_id"]),),
     )
     return "updated"
@@ -3008,7 +3184,105 @@ async def _execution_trace_row_needs_write(store: Any, row: Mapping[str, Any]) -
     if not existing:
         return True
     changed, _calls = _merge_trace_calls(existing.get("calls"), row.get("calls"))
-    return changed
+    verdicts_changed, _verdicts = _merge_judge_verdicts(
+        existing.get("judge_verdicts"), row.get("judge_verdicts")
+    )
+    evidence_changed, _refs = _merge_string_refs(
+        existing.get("evidence_bundles"), row.get("evidence_bundles")
+    )
+    trace_doc_changed = False
+    if isinstance(row.get("trace_doc"), Mapping):
+        trace_doc_changed, _trace_doc = _merge_doc_values(
+            existing.get("trace_doc")
+            if isinstance(existing.get("trace_doc"), Mapping)
+            else {},
+            row["trace_doc"],
+        )
+    trajectory_changed = bool(
+        row.get("trajectory_id") and not existing.get("trajectory_id")
+    )
+    return (
+        changed
+        or verdicts_changed
+        or evidence_changed
+        or trace_doc_changed
+        or trajectory_changed
+    )
+
+
+async def _upsert_evidence_bundle_row(store: Any, row: Mapping[str, Any]) -> str:
+    """Insert evidence row, or merge newly discovered safe snapshots/docs."""
+    existing = await store.select_one(
+        EVIDENCE_BUNDLES_TABLE, filters=(("bundle_id", row["bundle_id"]),)
+    )
+    if not existing:
+        if await _insert_missing(store, EVIDENCE_BUNDLES_TABLE, "bundle_id", row):
+            return "inserted"
+        existing = await store.select_one(
+            EVIDENCE_BUNDLES_TABLE, filters=(("bundle_id", row["bundle_id"]),)
+        )
+    if not existing or existing.get("verification_state") == "content_deleted":
+        return "unchanged"
+    snapshots_changed, snapshots = _merge_evidence_snapshots(
+        existing.get("snapshots"), row.get("snapshots")
+    )
+    bundle_doc_changed = False
+    bundle_doc: dict[str, Any] | None = None
+    if isinstance(row.get("bundle_doc"), Mapping):
+        bundle_doc_changed, bundle_doc = _merge_doc_values(
+            existing.get("bundle_doc")
+            if isinstance(existing.get("bundle_doc"), Mapping)
+            else {},
+            row["bundle_doc"],
+        )
+    if not snapshots_changed and not bundle_doc_changed:
+        return "unchanged"
+    values: dict[str, Any] = {}
+    final_snapshots = snapshots if snapshots_changed else existing.get("snapshots")
+    final_doc = (
+        bundle_doc
+        if bundle_doc_changed and bundle_doc is not None
+        else existing.get("bundle_doc")
+    )
+    if snapshots_changed:
+        values["snapshots"] = snapshots
+    if bundle_doc_changed and bundle_doc is not None:
+        values["bundle_doc"] = bundle_doc
+    values["bundle_hash"] = sha256_json(
+        {
+            "evidence_bundle_id": row["bundle_id"],
+            "snapshots": final_snapshots,
+            "bundle_doc": final_doc,
+        }
+    )
+    await store.update_row(
+        EVIDENCE_BUNDLES_TABLE,
+        values,
+        filters=(("bundle_id", row["bundle_id"]),),
+    )
+    return "updated"
+
+
+async def _evidence_bundle_row_needs_write(store: Any, row: Mapping[str, Any]) -> bool:
+    existing = await store.select_one(
+        EVIDENCE_BUNDLES_TABLE, filters=(("bundle_id", row["bundle_id"]),)
+    )
+    if not existing:
+        return True
+    if existing.get("verification_state") == "content_deleted":
+        return False
+    snapshots_changed, _snapshots = _merge_evidence_snapshots(
+        existing.get("snapshots"), row.get("snapshots")
+    )
+    bundle_doc_changed = False
+    if isinstance(row.get("bundle_doc"), Mapping):
+        bundle_doc_changed, _bundle_doc = _merge_doc_values(
+            existing.get("bundle_doc")
+            if isinstance(existing.get("bundle_doc"), Mapping)
+            else {},
+            row["bundle_doc"],
+        )
+    return snapshots_changed or bundle_doc_changed
 
 
 async def _write_missing_corpus_trace_rows(
@@ -3022,7 +3296,8 @@ async def _write_missing_corpus_trace_rows(
             trace_changed += 1
     evidence_written = 0
     for row in projection.evidence_bundle_rows:
-        if await _insert_missing(store, EVIDENCE_BUNDLES_TABLE, "bundle_id", row):
+        evidence_status = await _upsert_evidence_bundle_row(store, row)
+        if evidence_status in {"inserted", "updated"}:
             evidence_written += 1
     return trace_changed, evidence_written
 
@@ -3316,9 +3591,7 @@ async def backfill_run_corpus_trace_rows(
         missing_evidence = [
             row
             for row in projection.evidence_bundle_rows
-            if not await store.select_one(
-                EVIDENCE_BUNDLES_TABLE, filters=(("bundle_id", row["bundle_id"]),)
-            )
+            if await _evidence_bundle_row_needs_write(store, row)
         ]
         if not missing_traces and not missing_evidence:
             return ProjectionResult(
@@ -3339,7 +3612,8 @@ async def backfill_run_corpus_trace_rows(
                 trace_written += 1
         evidence_written = 0
         for row in missing_evidence:
-            if await _insert_missing(store, EVIDENCE_BUNDLES_TABLE, "bundle_id", row):
+            evidence_status = await _upsert_evidence_bundle_row(store, row)
+            if evidence_status in {"inserted", "updated"}:
                 evidence_written += 1
         logger.info(
             "research_lab_corpus_traces_backfilled run_id=%s trajectory_id=%s "

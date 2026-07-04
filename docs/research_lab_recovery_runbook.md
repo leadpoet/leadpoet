@@ -40,6 +40,27 @@ The script copies the bundle, backs up each replaced file under
 and compiles the touched Python files. It does not restart the gateway and does
 not requeue runs.
 
+## Admin CLI Wrapper
+
+Install the production wrapper once per gateway host:
+
+```bash
+LEADPOET_PROD_WRITE_APPROVED=yes scripts/install_research_lab_admin_wrapper.sh
+```
+
+On the EC2 host, prefer this wrapper for Research Lab admin commands:
+
+```bash
+/home/ec2-user/bin/research-lab-admin --help
+```
+
+The wrapper runs admin commands from `/home/ec2-user/leadpoet_repo`, sets
+`PYTHONPATH` to include the full repo and flat gateway runtime, and preloads
+parseable values from `/home/ec2-user/gw.environ` without printing the gateway
+env-loader banner. Direct `python3 -m gateway.research_lab.admin ...` from
+`/home/ec2-user/gateway` can fail because that flat runtime has a partial
+top-level `research_lab` package that shadows the full repo package.
+
 Manual equivalent, if the guarded script is unavailable:
 
 ```bash
@@ -81,21 +102,56 @@ Restart using the same supervisor/manual command currently used for the gateway 
 After restart, wait one stale-reaper interval and re-run health. If the two stale rows are still `started`, dry-run append-only requeue:
 
 ```bash
-cd /home/ec2-user/gateway
-python3 -m gateway.research_lab.admin requeue-stale-started-runs --dry-run
+/home/ec2-user/bin/research-lab-admin requeue-stale-started-runs --dry-run
 ```
 
 If the discovered plans are correct, apply:
 
 ```bash
-python3 -m gateway.research_lab.admin requeue-stale-started-runs --write
+/home/ec2-user/bin/research-lab-admin requeue-stale-started-runs --write
 ```
 
 If discovery is unavailable on an older deploy, use the exact-run fallback:
 
 ```bash
-python3 -m gateway.research_lab.admin requeue-loop --run-id 452f4a0f-acbb-426a-9102-8b2f24addfb2 --reason operator_requeue_stale_started --force --dry-run
-python3 -m gateway.research_lab.admin requeue-loop --run-id 0b99bcda-ce90-49b5-a715-391ad7fce632 --reason operator_requeue_stale_started --force --dry-run
+/home/ec2-user/bin/research-lab-admin requeue-loop --run-id 452f4a0f-acbb-426a-9102-8b2f24addfb2 --reason operator_requeue_stale_started --force --dry-run
+/home/ec2-user/bin/research-lab-admin requeue-loop --run-id 0b99bcda-ce90-49b5-a715-391ad7fce632 --reason operator_requeue_stale_started --force --dry-run
+```
+
+## Stale Candidate Claim Recovery
+
+Candidate scoring claims are separate from hosted run queue rows. If the
+dashboard shows candidates stuck in `evaluating` after a worker restart, or if
+stale candidate rows are older than the scoring timeout plus 60 seconds, dry-run
+recovery across all scoring shards:
+
+```bash
+/home/ec2-user/bin/research-lab-admin recover-stale-candidate-claims --dry-run
+```
+
+If the plan only contains expected stale claims, apply the append-only recovery:
+
+```bash
+/home/ec2-user/bin/research-lab-admin recover-stale-candidate-claims --write
+```
+
+This command reuses the gateway scoring worker's stale-claim recovery path, so
+recovered candidates requeue and resume from per-ICP checkpoints where
+available.
+
+## Rebase-Failed Candidate Recovery
+
+For candidates stuck at `stale_parent_rebase_failed`, use the recovery command
+instead of manually requeueing the old candidate. Dry-run first:
+
+```bash
+/home/ec2-user/bin/research-lab-admin recover-rebase-failed --max-batch-size 20
+```
+
+If the plan is correct, apply:
+
+```bash
+/home/ec2-user/bin/research-lab-admin recover-rebase-failed --max-batch-size 20 --apply
 ```
 
 ## Verification

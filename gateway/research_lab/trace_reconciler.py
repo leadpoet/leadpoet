@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
 from gateway.research_lab.trajectory_projector import (
@@ -39,6 +40,8 @@ from gateway.research_lab.trajectory_projector import (
 )
 
 logger = logging.getLogger(__name__)
+
+TRACE_POINTER_QUARANTINE_TABLE = "research_lab_trace_pointer_quarantine"
 
 _POINTER_KEY_PAIRS = (
     ("raw_trace_ref", None),  # nested {s3_ref, sha256}
@@ -105,6 +108,44 @@ async def collect_trace_pointers(
     return list(out.values())
 
 
+def _pointer_key(pointer: Mapping[str, Any]) -> tuple[str, str]:
+    return (str(pointer.get("s3_ref") or ""), str(pointer.get("sha256") or ""))
+
+
+async def collect_quarantined_trace_pointers(
+    *,
+    store: Any | None = None,
+    max_rows: int = 50000,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Load operator-marked unrecoverable trace pointers.
+
+    The table is optional during rolling deploys. If scripts/66 is not applied
+    yet, reconciliation stays conservative and reports pointers as missing.
+    """
+    store = store or GatewayProjectorStore()
+    try:
+        rows = await store.select_all(
+            TRACE_POINTER_QUARANTINE_TABLE,
+            columns="s3_ref,sha256,source,status,reason,marked_at,quarantine_doc",
+            filters=(("status", "unrecoverable"),),
+            order_by=(("marked_at", True),),
+            max_rows=max(1, int(max_rows)),
+        )
+    except Exception as exc:  # noqa: BLE001 - optional operator metadata
+        logger.warning(
+            "trace_pointer_quarantine_unavailable table=%s error=%s",
+            TRACE_POINTER_QUARANTINE_TABLE,
+            str(exc)[:160],
+        )
+        return {}
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = _pointer_key(row)
+        if key[0]:
+            out[key] = dict(row)
+    return out
+
+
 def _head_object(s3_client: Any, s3_ref: str) -> str:
     bucket, _sep, key = s3_ref[5:].partition("/")
     if not bucket or not key:
@@ -131,7 +172,9 @@ async def reconcile_trace_pointers(
     store: Any | None = None,
     s3_client: Any | None = None,
     verify_hash: bool = False,
+    include_quarantine: bool = True,
     max_rows: int = 2000,
+    max_problems: int | None = 50,
 ) -> dict[str, Any]:
     """P6: verify pointer→object integrity for recent corpus pointers.
 
@@ -139,6 +182,11 @@ async def reconcile_trace_pointers(
     missing/mismatched refs for operator output; alerts are the caller's job.
     """
     pointers = await collect_trace_pointers(store=store, max_rows=max_rows)
+    quarantined = (
+        await collect_quarantined_trace_pointers(store=store, max_rows=max_rows * 5)
+        if include_quarantine
+        else {}
+    )
     if s3_client is None:
         try:
             import boto3  # type: ignore
@@ -152,9 +200,17 @@ async def reconcile_trace_pointers(
                 "pointer_count": len(pointers),
             }
 
-    counts = {"verified": 0, "missing": 0, "hash_mismatch": 0, "unchecked": 0, "invalid_ref": 0}
+    counts = {
+        "verified": 0,
+        "missing": 0,
+        "unrecoverable": 0,
+        "hash_mismatch": 0,
+        "unchecked": 0,
+        "invalid_ref": 0,
+    }
     by_source: dict[str, dict[str, int]] = {}
     problems: list[dict[str, Any]] = []
+    unrecoverable: list[dict[str, Any]] = []
 
     def _check(pointer: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
         status = _head_object(s3_client, pointer["s3_ref"])
@@ -169,11 +225,22 @@ async def reconcile_trace_pointers(
 
     for pointer in pointers:
         checked, status = await asyncio.to_thread(_check, pointer)
+        if status == "missing" and _pointer_key(checked) in quarantined:
+            status = "unrecoverable"
+            checked["quarantine"] = quarantined[_pointer_key(checked)]
         counts[status] = counts.get(status, 0) + 1
         source_counts = by_source.setdefault(str(checked.get("source")), {})
         source_counts[status] = source_counts.get(status, 0) + 1
-        if status in {"missing", "hash_mismatch"} and len(problems) < 50:
+        if (
+            status in {"missing", "hash_mismatch"}
+            and (max_problems is None or len(problems) < max_problems)
+        ):
             problems.append({**checked, "status": status})
+        if (
+            status == "unrecoverable"
+            and (max_problems is None or len(unrecoverable) < max_problems)
+        ):
+            unrecoverable.append({**checked, "status": status})
     if counts["missing"] or counts["hash_mismatch"]:
         logger.error(
             "research_lab_trace_pointer_reconcile_problems missing=%s hash_mismatch=%s "
@@ -187,9 +254,100 @@ async def reconcile_trace_pointers(
         "status": "completed",
         "pointer_count": len(pointers),
         "verify_hash": bool(verify_hash),
+        "quarantine_enabled": bool(include_quarantine),
+        "quarantined_pointer_count": len(quarantined),
         "counts": counts,
         "by_source": by_source,
         "problems": problems,
+        "unrecoverable": unrecoverable,
+    }
+
+
+async def quarantine_missing_trace_pointers(
+    *,
+    store: Any | None = None,
+    s3_client: Any | None = None,
+    max_rows: int = 2000,
+    reason: str = "historical_beta_optimistic_upload_missing",
+    operator_note: str = "",
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Mark currently missing trace pointers as intentionally unrecoverable.
+
+    This is an operator action for known historical beta gaps. It does not
+    delete or mutate source corpus rows; it writes a separate audit row so
+    future reconciliation can keep new misses loud.
+    """
+    store = store or GatewayProjectorStore()
+    if s3_client is None:
+        try:
+            import boto3  # type: ignore
+
+            s3_client = boto3.client("s3")
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "schema_version": "1.0",
+                "status": "s3_unavailable",
+                "error": str(exc)[:200],
+                "dry_run": bool(dry_run),
+            }
+    pointers = await collect_trace_pointers(store=store, max_rows=max_rows)
+    existing = await collect_quarantined_trace_pointers(store=store, max_rows=max_rows * 5)
+    now = datetime.now(timezone.utc).isoformat()
+    rows: list[dict[str, Any]] = []
+    for pointer in pointers:
+        status = await asyncio.to_thread(_head_object, s3_client, pointer["s3_ref"])
+        if status != "missing":
+            continue
+        key = _pointer_key(pointer)
+        if key in existing:
+            continue
+        rows.append(
+            {
+                "s3_ref": key[0],
+                "sha256": key[1],
+                "source": str(pointer.get("source") or ""),
+                "status": "unrecoverable",
+                "reason": str(reason or "historical_beta_optimistic_upload_missing"),
+                "operator_note": str(operator_note or ""),
+                "marked_at": now,
+                "quarantine_doc": {
+                    "source": str(pointer.get("source") or ""),
+                    "marked_by": "gateway.research_lab.trace_reconciler",
+                    "pointer": dict(pointer),
+                },
+            }
+        )
+    inserted = 0
+    skipped_existing = len([p for p in pointers if _pointer_key(p) in existing])
+    failed = 0
+    if not dry_run:
+        for row in rows:
+            try:
+                await store.insert_row(TRACE_POINTER_QUARANTINE_TABLE, row)
+                inserted += 1
+            except Exception as exc:  # noqa: BLE001 - duplicate races are benign
+                if "duplicate" in str(exc).lower() or "unique" in str(exc).lower():
+                    skipped_existing += 1
+                    continue
+                failed += 1
+                logger.warning(
+                    "trace_pointer_quarantine_insert_failed ref=%s error=%s",
+                    row["s3_ref"],
+                    str(exc)[:160],
+                )
+    return {
+        "schema_version": "1.0",
+        "status": "completed" if not failed else "completed_with_errors",
+        "dry_run": bool(dry_run),
+        "reason": str(reason or ""),
+        "pointers_scanned": len(pointers),
+        "already_quarantined": len(existing),
+        "missing_to_quarantine": len(rows),
+        "quarantined": inserted if not dry_run else 0,
+        "skipped_existing": skipped_existing,
+        "failed": failed,
+        "sample": rows[:50],
     }
 
 

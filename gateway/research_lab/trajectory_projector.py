@@ -3866,6 +3866,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="P6: HEAD every recent S3 trace pointer and report verified/missing/hash_mismatch",
     )
     parser.add_argument(
+        "--quarantine-missing-pointers",
+        action="store_true",
+        help=(
+            "operator action: mark currently missing S3 trace pointers as "
+            "unrecoverable in the private quarantine table (dry-run by default)"
+        ),
+    )
+    parser.add_argument(
+        "--quarantine-reason",
+        default="historical_beta_optimistic_upload_missing",
+        help="reason stored when --quarantine-missing-pointers writes rows",
+    )
+    parser.add_argument(
+        "--operator-note",
+        default="",
+        help="operator note stored when --quarantine-missing-pointers writes rows",
+    )
+    parser.add_argument(
         "--verify-hash",
         action="store_true",
         help="with --reconcile-pointers: fetch objects and verify sha256 (slow)",
@@ -3915,14 +3933,21 @@ async def _cli_main(argv: Sequence[str] | None = None) -> int:
         and not args.reasoning_coverage
         and not args.capture_coverage
         and not args.reconcile_pointers
+        and not args.quarantine_missing_pointers
         and not args.import_shadow_windows
     ):
         _build_arg_parser().print_help()
         return 2
     store = GatewayProjectorStore()
-    if args.capture_coverage or args.reconcile_pointers or args.import_shadow_windows:
+    if (
+        args.capture_coverage
+        or args.reconcile_pointers
+        or args.quarantine_missing_pointers
+        or args.import_shadow_windows
+    ):
         from gateway.research_lab.trace_reconciler import (
             import_shadow_windows,
+            quarantine_missing_trace_pointers,
             reconcile_trace_pointers,
             summarize_capture_coverage,
         )
@@ -3935,6 +3960,14 @@ async def _cli_main(argv: Sequence[str] | None = None) -> int:
         if args.reconcile_pointers:
             report["pointer_reconciliation"] = await reconcile_trace_pointers(
                 store=store, verify_hash=args.verify_hash, max_rows=args.max_events
+            )
+        if args.quarantine_missing_pointers:
+            report["trace_pointer_quarantine"] = await quarantine_missing_trace_pointers(
+                store=store,
+                max_rows=args.max_events,
+                reason=args.quarantine_reason,
+                operator_note=args.operator_note,
+                dry_run=args.dry_run,
             )
         if args.import_shadow_windows:
             report["dry_run"] = False

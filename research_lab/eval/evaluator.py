@@ -636,12 +636,13 @@ async def _score_single_icp(
             candidate_context["patch"] = runtime_patch.to_dict()
         markers = {"timed_out": False, "latch_reason": "", "skipped": False}
         provider_excluded = False
+        provider_error_detail: dict[str, Any] | None = None
         if candidate_runtime_skip_reason:
             candidate_outputs = []
             failure_reasons.append(candidate_runtime_skip_reason)
             markers["skipped"] = True
         else:
-            candidate_outputs, candidate_failure_reason, provider_excluded = await _run_candidate_with_retries(
+            candidate_outputs, candidate_failure_reason, provider_excluded, provider_error_detail = await _run_candidate_with_retries(
                 candidate_runner=candidate_runner,
                 icp=icp,
                 candidate_context=candidate_context,
@@ -679,6 +680,11 @@ async def _score_single_icp(
         "candidate_company_scores": candidate_scores,
         "failure_reason": ";".join(failure_reasons),
         "provider_excluded": provider_excluded,
+        # Specific provider/endpoint/status for a candidate provider failure
+        # (e.g. {provider: scrapingdog, endpoint: /google/ai_mode, status: 410,
+        # kind: timeout, fault: provider}); None when there was none. Lets the
+        # miner diagnostics show the real provider error, not a generic one.
+        **({"provider_error_detail": provider_error_detail} if provider_error_detail else {}),
         # Bug #35: a zero-company result with no recorded runtime error is the
         # silent-zero blind spot — flag it so gates/counters can see it.
         "sourced_zero_no_error": (
@@ -736,9 +742,11 @@ async def _run_candidate_with_retries(
 ) -> tuple[list[Mapping[str, Any]], str, bool]:
     """Run the candidate for one ICP with baseline-matched retry rounds.
 
-    Returns ``(outputs, failure_reason, provider_excluded)``. The third value is
-    retained for legacy row shape compatibility, but newly scored rows always
-    return ``False`` so retry-exhausted provider failures contribute a zero ICP.
+    Returns ``(outputs, failure_reason, provider_excluded, provider_error_detail)``.
+    The third value is retained for legacy row shape compatibility, but newly
+    scored rows always return ``False`` so retry-exhausted provider failures
+    contribute a zero ICP. The fourth is the parsed provider/endpoint/status of
+    a provider failure (or ``None``) so diagnostics can name the real error.
     """
     attempts = 0
     max_attempts = 1 + _candidate_provider_retry_rounds()
@@ -750,7 +758,7 @@ async def _run_candidate_with_retries(
                 context_label=f"candidate model for ICP {item_label}",
                 require_non_empty=False,
             )
-            return list(outputs), "", False
+            return list(outputs), "", False, None
         except PrivateModelRuntimeError as exc:
             failure_reason = _scoreable_candidate_runtime_failure_reason(exc)
             if not failure_reason:
@@ -772,7 +780,15 @@ async def _run_candidate_with_retries(
                     )
                     await asyncio.sleep(backoff_seconds)
                 continue
-            return [], failure_reason, False
+            # Retry-exhausted (or terminal) provider failure: surface the
+            # specific provider/endpoint/status so diagnostics can show the real
+            # provider error rather than a generic one.
+            detail = (
+                _provider_error_detail(str(exc))
+                if failure_reason == "candidate_model_runtime_provider_error"
+                else None
+            )
+            return [], failure_reason, False, detail
 
 
 def _candidate_failure_should_retry(
@@ -855,6 +871,70 @@ def _provider_error_status_code(lowered_error_text: str) -> int:
         ):
             return code
     return 0
+
+
+# HTTP-status -> a short, miner-readable label. Lets a miner tell "the provider
+# timed out" (not their fault) from "the profile does not exist" (their model
+# guessed a bad slug) instead of one opaque "provider error".
+_PROVIDER_STATUS_KIND = {
+    400: "bad_request",
+    401: "auth",
+    403: "forbidden",
+    404: "not_found",
+    408: "timeout",
+    409: "conflict",
+    410: "timeout",  # ScrapingDog returns 410 "request timed out, you will not be charged"
+    429: "rate_limited",
+    500: "server_error",
+    502: "bad_gateway",
+    503: "unavailable",
+    504: "timeout",
+}
+
+
+def _provider_error_detail(error_text: str) -> dict[str, Any] | None:
+    """Extract provider + endpoint + HTTP status from a provider-error string.
+
+    The container emits provider failures as a single sanitized marker line
+    (``research_lab_private_runtime_provider_error ... status=410 ... url=...``),
+    which the classifier otherwise flattens to a generic reason. Recovering the
+    provider host, endpoint, and status lets the miner diagnostics show e.g.
+    "ScrapingDog /google/ai_mode HTTP 410 (timeout)" instead of "provider
+    error". Returns ``None`` when nothing recognizable is present.
+
+    ``fault`` is a coarse attribution: provider-side (timeouts / gateway / rate
+    limits / 5xx) versus request-side (404 profile-not-found = the model's own
+    slug, 401/403 = auth). It informs how the outcome is presented, not scoring.
+    """
+    lowered = str(error_text or "").lower()
+    status = _provider_error_status_code(lowered)
+    host_match = re.search(r"url=https?://(?:api\.)?([a-z0-9.-]+)", lowered)
+    host = host_match.group(1) if host_match else ""
+    provider = ""
+    for known in ("scrapingdog", "exa", "openrouter"):
+        if known in host or known in lowered:
+            provider = known
+            break
+    endpoint = ""
+    ep_match = re.search(r"(scrapingdog|exa|openrouter)[a-z.]*\.[a-z]+(/[a-z0-9/_-]+)", lowered)
+    if ep_match:
+        endpoint = ep_match.group(2)
+    if not (status or provider):
+        return None
+    kind = _PROVIDER_STATUS_KIND.get(status, "error" if status else "")
+    # 404/401/403 are shaped by the request we sent (a bad slug / bad auth) — the
+    # model's own doing; everything else here is the provider faltering.
+    fault = "request" if status in (400, 401, 403, 404, 409) else "provider"
+    detail: dict[str, Any] = {"fault": fault}
+    if provider:
+        detail["provider"] = provider
+    if endpoint:
+        detail["endpoint"] = endpoint
+    if status:
+        detail["status"] = status
+    if kind:
+        detail["kind"] = kind
+    return detail
 
 
 def _resume_rows_by_ref(

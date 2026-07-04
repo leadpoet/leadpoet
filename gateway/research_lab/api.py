@@ -251,33 +251,26 @@ def _as_mapping(value: object) -> dict[str, object]:
     return {}
 
 
-@router.post("/loop-diagnostics")
-async def get_research_lab_loop_diagnostics(payload: ResearchLabLoopDiagnosticsRequest):
-    """Sanitized own-run diagnostics for the miner who paid for the loop.
+async def _build_ticket_candidate_diagnostics(
+    ticket_id: str, candidate_id: str | None = None
+) -> list[dict[str, object]]:
+    """One sanitized diagnostics doc per TERMINAL candidate on the ticket.
 
-    Ownership-gated: the ticket must belong to the signing hotkey, so a miner
-    can only read diagnostics for their own runs. Returns one diagnostics doc
-    per TERMINAL candidate on the ticket (scored / rejected / failed).
+    Shared by the signed miner endpoint (own-run) and the internal admin
+    dashboard endpoint (any loop). Same builder, same sanitization — the ONLY
+    difference between the two callers is the auth gate, so the exact same
+    sanitized projection is returned regardless of who asks.
     """
-    config = ResearchLabGatewayConfig.from_env()
-    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
-    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
-    await _verify_signed_miner(payload)
-    # Ownership: 404 unless the ticket belongs to this hotkey.
-    await _get_ticket_for_miner(str(payload.ticket_id), payload.miner_hotkey)
-
     rows = await select_many(
         "research_lab_candidate_evaluation_current",
-        filters=(("ticket_id", str(payload.ticket_id)),),
+        filters=(("ticket_id", ticket_id),),
     )
     candidates = [
         row
         for row in (rows or [])
         if str(row.get("current_candidate_status") or "") in _TERMINAL_CANDIDATE_STATUSES
-        and (not payload.candidate_id or str(row.get("candidate_id")) == payload.candidate_id)
+        and (not candidate_id or str(row.get("candidate_id")) == candidate_id)
     ]
-    if not candidates:
-        raise HTTPException(status_code=404, detail="no terminal candidate diagnostics for this ticket yet")
 
     # Visibility split is deterministic per rolling window; cache across
     # candidates. CRITICAL: each candidate is classified by ITS OWN window's
@@ -333,8 +326,67 @@ async def get_research_lab_loop_diagnostics(payload: ResearchLabLoopDiagnosticsR
                 rejection_reason=str(cand.get("current_reason") or ""),
             )
         )
+    return diagnostics
 
+
+@router.post("/loop-diagnostics")
+async def get_research_lab_loop_diagnostics(payload: ResearchLabLoopDiagnosticsRequest):
+    """Sanitized own-run diagnostics for the miner who paid for the loop.
+
+    Ownership-gated: the ticket must belong to the signing hotkey, so a miner
+    can only read diagnostics for their own runs. Returns one diagnostics doc
+    per TERMINAL candidate on the ticket (scored / rejected / failed).
+    """
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    await _verify_signed_miner(payload)
+    # Ownership: 404 unless the ticket belongs to this hotkey.
+    await _get_ticket_for_miner(str(payload.ticket_id), payload.miner_hotkey)
+
+    diagnostics = await _build_ticket_candidate_diagnostics(
+        str(payload.ticket_id), payload.candidate_id
+    )
+    if not diagnostics:
+        raise HTTPException(status_code=404, detail="no terminal candidate diagnostics for this ticket yet")
     return {"ticket_id": str(payload.ticket_id), "diagnostics": diagnostics}
+
+
+@router.get("/admin/loops/{ticket_id}/diagnostics")
+async def get_research_lab_admin_loop_diagnostics(
+    ticket_id: str,
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
+    """Loop-detail diagnostics for the internal admin dashboard.
+
+    Internal-key gated (team-only), so unlike the public activity feed this may
+    carry the full per-candidate diagnostics. Combines the loop's event
+    timeline (the timestamps already shown when a loop is clicked) with the
+    per-candidate diagnostics the scorer now captures — one payload the
+    dashboard renders in the loop-detail panel, in line with the benchmark
+    report. Reuses the exact sanitized builder used by the miner endpoint.
+    """
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    _require_internal_key(config, x_leadpoet_internal_key)
+
+    try:
+        detail = await fetch_public_loop_detail(ticket_id)
+        diagnostics = await _build_ticket_candidate_diagnostics(ticket_id)
+    except Exception as exc:
+        _raise_storage_error(exc)
+    if not detail and not diagnostics:
+        raise HTTPException(status_code=404, detail="Research Lab loop not found")
+    return {
+        "schema_version": "1.0",
+        "ticket_id": ticket_id,
+        # event timeline the loop-click view already renders (timestamps)
+        "card": (detail or {}).get("card"),
+        "events": (detail or {}).get("events", []),
+        # the per-candidate diagnostics now captured (funnel, patch, delta)
+        "candidate_diagnostics": diagnostics,
+    }
 
 
 @router.post("/openrouter-keys", response_model=ResearchLabOpenRouterKeyRegisterResponse)

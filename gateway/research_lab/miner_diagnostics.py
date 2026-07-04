@@ -101,6 +101,60 @@ def _delta_band(delta: float, flat_band: float) -> str:
     return "flat"
 
 
+_PROVIDER_DISPLAY = {"scrapingdog": "ScrapingDog", "exa": "Exa", "openrouter": "OpenRouter"}
+
+
+def _provider_error_detail_from_row(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The evaluator's parsed provider error for this ICP, if present + safe.
+
+    Carries no company/ICP content — only provider host, endpoint path, HTTP
+    status, a kind label, and a coarse fault attribution — so it is safe to
+    surface (including in whole-pool private aggregates)."""
+    detail = row.get("provider_error_detail")
+    if not isinstance(detail, Mapping):
+        return None
+    out: dict[str, Any] = {}
+    provider = str(detail.get("provider") or "").strip().lower()
+    if provider:
+        out["provider"] = provider
+    endpoint = str(detail.get("endpoint") or "").strip()
+    if endpoint:
+        out["endpoint"] = endpoint[:60]
+    status = detail.get("status")
+    if isinstance(status, (int, float)) and 100 <= int(status) <= 599:
+        out["status"] = int(status)
+    kind = str(detail.get("kind") or "").strip()
+    if kind:
+        out["kind"] = kind[:40]
+    fault = str(detail.get("fault") or "").strip()
+    if fault in {"provider", "request"}:
+        out["fault"] = fault
+    return out or None
+
+
+def _provider_error_label(detail: Mapping[str, Any]) -> str:
+    """Human string, e.g. 'ScrapingDog /google/ai_mode — HTTP 410 (timeout)'."""
+    provider = _PROVIDER_DISPLAY.get(str(detail.get("provider") or ""), str(detail.get("provider") or "provider"))
+    parts = [provider]
+    if detail.get("endpoint"):
+        parts.append(str(detail["endpoint"]))
+    tail = ""
+    if detail.get("status"):
+        tail = f"HTTP {detail['status']}"
+        if detail.get("kind"):
+            tail += f" ({detail['kind']})"
+    label = " ".join(parts)
+    return f"{label} — {tail}" if tail else label
+
+
+def _provider_error_key(detail: Mapping[str, Any]) -> str:
+    return ":".join(
+        str(detail.get(k))
+        for k in ("provider", "status", "kind")
+        if detail.get(k)
+    ) or "unknown"
+
+
 def _is_list_like(value: Any) -> bool:
     """A real sequence of items — a list/tuple, but NOT a str/bytes (which are
     Sequences and would otherwise iterate as characters)."""
@@ -229,12 +283,21 @@ def build_candidate_diagnostics(
     pub_infra = 0
     scored_score_sum = 0.0
     scored_score_count = 0
+    # Whole-run provider-error tally (both visibilities). Aggregate only, so
+    # naming the provider never identifies a sealed ICP.
+    provider_error_counts: dict[str, int] = {}
+    provider_error_labels: dict[str, str] = {}
 
     for row in per_icp:
         if not isinstance(row, Mapping):
             continue
         ref = str(row.get("icp_ref") or "")
         is_infra = _is_infra_row(row, provider_excluded)
+        pe_detail = _provider_error_detail_from_row(row)
+        if pe_detail:
+            key = _provider_error_key(pe_detail)
+            provider_error_counts[key] = provider_error_counts.get(key, 0) + 1
+            provider_error_labels.setdefault(key, _provider_error_label(pe_detail))
         delta = _num(row.get("delta_vs_base"))
         cand_score = _num(row.get("candidate_per_icp_score"))
         base_score = _num(row.get("base_per_icp_score"))
@@ -256,7 +319,18 @@ def build_candidate_diagnostics(
             }
             if is_infra:
                 entry["status"] = "infra_excluded"
-                entry["note"] = "provider/runtime error — not attributable to your patch"
+                if pe_detail:
+                    # Name the actual provider error, e.g.
+                    # "ScrapingDog /google/ai_mode — HTTP 410 (timeout)".
+                    entry["provider_error"] = pe_detail
+                    fault_note = (
+                        "provider was down — not attributable to your patch"
+                        if pe_detail.get("fault") == "provider"
+                        else "the request your model sent failed (e.g. profile not found)"
+                    )
+                    entry["note"] = f"{_provider_error_label(pe_detail)} — {fault_note}"
+                else:
+                    entry["note"] = "provider/runtime error — not attributable to your patch"
                 pub_infra += 1
             elif row.get("status") and str(row.get("status")) != "completed":
                 entry["status"] = str(row.get("status"))
@@ -300,6 +374,18 @@ def build_candidate_diagnostics(
             "excluded_icps": infra_total,
             "rerun_credit_eligible": infra_fraction > infra_rerun_fraction,
             "note": "ICPs killed by provider/runtime errors, not by your patch",
+            # Whole-run breakdown of which provider errors occurred, e.g.
+            # [{"error":"ScrapingDog /google/ai_mode — HTTP 410 (timeout)",
+            #   "count":6,"fault":"provider"}] — lets a miner see "the provider
+            # timed out" vs "my model queried a bad slug (404)".
+            "provider_errors": [
+                {
+                    "error": provider_error_labels.get(key, key),
+                    "count": count,
+                    "fault": "request" if ":404:" in key or ":401:" in key or ":403:" in key else "provider",
+                }
+                for key, count in sorted(provider_error_counts.items(), key=lambda kv: -kv[1])
+            ],
         },
     }
 

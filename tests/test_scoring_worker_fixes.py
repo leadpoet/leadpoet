@@ -109,6 +109,41 @@ def test_active_claim_capacity_gate_blocks_at_cap():
     assert sw._active_claim_capacity_available(12, 0)
 
 
+def test_progress_doc_completed_icp_count_variants():
+    assert sw._completed_icp_count_from_progress_doc({"completed_icp_count": 3}) == 3
+    assert sw._completed_icp_count_from_progress_doc({"completed_icps": "4"}) == 4
+    assert (
+        sw._completed_icp_count_from_progress_doc(
+            {"scoring_progress": {"completed_icp_count": 5}}
+        )
+        == 5
+    )
+    assert sw._completed_icp_count_from_progress_doc({"per_icp_results": [{}, {}]}) == 2
+    assert sw._completed_icp_count_from_progress_doc({"completed_icp_count": "bad"}) == 0
+
+
+def test_latest_scoring_progress_from_events_prefers_largest_safe_count():
+    rows = [
+        {"event_doc": {"completed_icp_count": 1, "rolling_window_hash": "sha256:" + "1" * 64}},
+        {
+            "event_doc": {
+                "scoring_progress": {
+                    "completed_icp_count": 7,
+                    "rolling_window_hash": "sha256:" + "2" * 64,
+                }
+            }
+        },
+        {"event_doc": {"completed_icp_count": 3}},
+    ]
+
+    summary = sw._latest_scoring_progress_from_events(rows)
+
+    assert summary["source"] == "candidate_events"
+    assert summary["checkpoint_found"] is True
+    assert summary["completed_icp_count"] == 7
+    assert summary["rolling_window_hash"] == "sha256:" + "2" * 64
+
+
 def test_scoring_host_pressure_gate_blocks_new_claims():
     memory_pressure = sw._scoring_host_pressure_capacity(
         min_available_memory_mb=4096,
@@ -622,6 +657,21 @@ def test_audit_event_window_filters_opt_out(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_AUDIT_EVENT_WINDOW_DAYS", "0")
     filters = sw.ResearchLabGatewayScoringWorker._audit_event_window_filters(_worker_stub())
     assert filters == ()
+
+
+def test_audit_select_limits_default_and_env(monkeypatch):
+    worker = _worker_stub()
+    monkeypatch.delenv("RESEARCH_LAB_AUDIT_SELECT_MAX_ROWS", raising=False)
+    monkeypatch.delenv("RESEARCH_LAB_AUDIT_SELECT_BATCH_SIZE", raising=False)
+    assert sw.ResearchLabGatewayScoringWorker._audit_select_limits(worker) == (10000, 500)
+
+    monkeypatch.setenv("RESEARCH_LAB_AUDIT_SELECT_MAX_ROWS", "2500")
+    monkeypatch.setenv("RESEARCH_LAB_AUDIT_SELECT_BATCH_SIZE", "800")
+    assert sw.ResearchLabGatewayScoringWorker._audit_select_limits(worker) == (2500, 800)
+
+    monkeypatch.setenv("RESEARCH_LAB_AUDIT_SELECT_MAX_ROWS", "20")
+    monkeypatch.setenv("RESEARCH_LAB_AUDIT_SELECT_BATCH_SIZE", "99999")
+    assert sw.ResearchLabGatewayScoringWorker._audit_select_limits(worker) == (1000, 1000)
 
 
 # --- gate contract: holdout gate carries per-ICP baseline scores (§0-N2) ---

@@ -648,6 +648,7 @@ async def _recover_stale_candidate_claims_operator(
 
     from .scoring_worker import (
         ResearchLabGatewayScoringWorker,
+        _completed_icp_count_from_progress_doc,
         _count_claim_attempts,
         _stale_claim_recovery_owner_index,
         _status_is_stale,
@@ -658,6 +659,10 @@ async def _recover_stale_candidate_claims_operator(
     stale_after_seconds = max(120, int(config.scoring_worker_model_timeout_seconds or 900) + 60)
     max_attempts = int(config.scoring_worker_max_claim_requeues)
     limit = max(1, int(max_batch_size or 1))
+    inspector = ResearchLabGatewayScoringWorker(
+        config,
+        worker_ref=f"{actor_ref}:candidate-claim-recovery-inspect",
+    )
 
     rows: list[dict[str, Any]] = []
     for status in ("assigned", "evaluating"):
@@ -666,7 +671,8 @@ async def _recover_stale_candidate_claims_operator(
                 "research_lab_candidate_evaluation_current",
                 columns=(
                     "candidate_id,run_id,ticket_id,receipt_id,current_candidate_status,current_status_at,"
-                    "current_evaluator_ref,current_event_hash"
+                    "current_evaluator_ref,current_event_hash,private_model_manifest_doc,"
+                    "candidate_model_manifest_doc,candidate_artifact_hash"
                 ),
                 filters=(("current_candidate_status", status),),
                 order_by=(("current_status_at", False),),
@@ -695,7 +701,17 @@ async def _recover_stale_candidate_claims_operator(
         )
         claim_attempts = _count_claim_attempts(event_rows)
         owner_index = _stale_claim_recovery_owner_index(candidate_id, total_workers)
-        action = "fail_retry_limit" if claim_attempts >= max_attempts else "requeue"
+        progress_summary: dict[str, Any] = {}
+        if claim_attempts >= max_attempts:
+            progress_summary = await inspector._candidate_scoring_progress_summary(row)
+        completed_icps = _completed_icp_count_from_progress_doc(progress_summary)
+        action = (
+            "requeue_progress_preserved"
+            if claim_attempts >= max_attempts and completed_icps > 0
+            else "fail_retry_limit"
+            if claim_attempts >= max_attempts
+            else "requeue"
+        )
         planned.append(
             {
                 "candidate_id": candidate_id,
@@ -706,6 +722,8 @@ async def _recover_stale_candidate_claims_operator(
                 "recovery_owner_worker_index": owner_index + 1,
                 "claim_attempts": claim_attempts,
                 "max_claim_attempts": max_attempts,
+                "completed_icp_count": completed_icps,
+                "scoring_progress": progress_summary if completed_icps > 0 else {},
                 "action": action,
             }
         )
@@ -715,6 +733,9 @@ async def _recover_stale_candidate_claims_operator(
     summary = {
         "found": len(planned),
         "would_requeue": sum(1 for item in planned if item.get("action") == "requeue"),
+        "would_requeue_progress_preserved": sum(
+            1 for item in planned if item.get("action") == "requeue_progress_preserved"
+        ),
         "would_fail_retry_limit": sum(
             1 for item in planned if item.get("action") == "fail_retry_limit"
         ),

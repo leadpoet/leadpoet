@@ -18,7 +18,7 @@ import re
 import tempfile
 import threading
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
@@ -403,9 +403,7 @@ def _per_icp_checkpoint_enabled() -> bool:
     ).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _scoring_progress_s3_location(
-    manifest_uri: str, candidate_id: str, window_hash: str
-) -> tuple[str, str] | None:
+def _scoring_progress_s3_prefix(manifest_uri: str, candidate_id: str) -> tuple[str, str] | None:
     uri = str(manifest_uri or "")
     if not uri.startswith("s3://"):
         return None
@@ -417,9 +415,86 @@ def _scoring_progress_s3_location(
     safe_candidate = "".join(
         ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(candidate_id or "candidate")
     )[:96]
+    return bucket, f"{base_prefix}/candidates/{safe_candidate}/scoring-progress/"
+
+
+def _scoring_progress_s3_location(
+    manifest_uri: str, candidate_id: str, window_hash: str
+) -> tuple[str, str] | None:
+    prefix = _scoring_progress_s3_prefix(manifest_uri, candidate_id)
+    if prefix is None:
+        return None
+    bucket, object_prefix = prefix
     window_tag = str(window_hash or "").removeprefix("sha256:")[:16] or "window"
-    object_key = f"{base_prefix}/candidates/{safe_candidate}/scoring-progress/{window_tag}.json"
-    return bucket, object_key
+    return bucket, f"{object_prefix}{window_tag}.json"
+
+
+def _completed_icp_count_from_progress_doc(doc: Mapping[str, Any] | None) -> int:
+    if not isinstance(doc, Mapping):
+        return 0
+    candidates: list[Any] = [
+        doc.get("completed_icp_count"),
+        doc.get("completed_icps"),
+    ]
+    for nested_key in ("scoring_progress", "stale_progress", "progress"):
+        nested = doc.get(nested_key)
+        if isinstance(nested, Mapping):
+            candidates.extend(
+                [
+                    nested.get("completed_icp_count"),
+                    nested.get("completed_icps"),
+                ]
+            )
+    for value in candidates:
+        try:
+            count = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            return count
+    rows = doc.get("per_icp_results")
+    return len(rows) if isinstance(rows, list) else 0
+
+
+def _safe_scoring_progress_summary(
+    *,
+    source: str,
+    completed_icp_count: int,
+    rolling_window_hash: str = "",
+) -> dict[str, Any]:
+    count = max(0, int(completed_icp_count or 0))
+    summary: dict[str, Any] = {
+        "source": str(source or "unknown")[:80],
+        "completed_icp_count": count,
+        "checkpoint_found": count > 0,
+    }
+    if rolling_window_hash:
+        summary["rolling_window_hash"] = str(rolling_window_hash)
+    return summary
+
+
+def _latest_scoring_progress_from_events(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    best: dict[str, Any] = _safe_scoring_progress_summary(
+        source="candidate_events",
+        completed_icp_count=0,
+    )
+    for row in rows:
+        doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
+        completed = _completed_icp_count_from_progress_doc(doc)
+        if completed <= best["completed_icp_count"]:
+            continue
+        rolling_window_hash = ""
+        if isinstance(doc, Mapping):
+            progress_doc = doc.get("scoring_progress")
+            rolling_window_hash = str(doc.get("rolling_window_hash") or "")
+            if not rolling_window_hash and isinstance(progress_doc, Mapping):
+                rolling_window_hash = str(progress_doc.get("rolling_window_hash") or "")
+        best = _safe_scoring_progress_summary(
+            source="candidate_events",
+            completed_icp_count=completed,
+            rolling_window_hash=rolling_window_hash,
+        )
+    return best
 
 
 def _load_scoring_progress(
@@ -446,6 +521,52 @@ def _load_scoring_progress(
     if not isinstance(rows, list):
         return []
     return [dict(row) for row in rows if isinstance(row, Mapping)]
+
+
+def _load_latest_scoring_progress_summary(
+    bucket: str,
+    object_prefix: str,
+    *,
+    candidate_artifact_hash: str = "",
+) -> dict[str, Any]:
+    import boto3  # type: ignore
+
+    try:
+        s3 = boto3.client("s3")
+        listing = s3.list_objects_v2(Bucket=bucket, Prefix=object_prefix, MaxKeys=25)
+    except Exception:
+        return _safe_scoring_progress_summary(source="s3", completed_icp_count=0)
+    contents = listing.get("Contents") if isinstance(listing, Mapping) else None
+    if not isinstance(contents, list):
+        return _safe_scoring_progress_summary(source="s3", completed_icp_count=0)
+    ordered = sorted(
+        (
+            item for item in contents
+            if isinstance(item, Mapping) and str(item.get("Key") or "").endswith(".json")
+        ),
+        key=lambda item: item.get("LastModified") or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    for item in ordered:
+        object_key = str(item.get("Key") or "")
+        try:
+            body = s3.get_object(Bucket=bucket, Key=object_key)["Body"].read()
+            doc = json.loads(body.decode("utf-8"))
+        except Exception:
+            continue
+        if not isinstance(doc, Mapping):
+            continue
+        if candidate_artifact_hash and str(doc.get("candidate_artifact_hash") or "") != candidate_artifact_hash:
+            continue
+        completed = _completed_icp_count_from_progress_doc(doc)
+        if completed <= 0:
+            continue
+        return _safe_scoring_progress_summary(
+            source="s3",
+            completed_icp_count=completed,
+            rolling_window_hash=str(doc.get("rolling_window_hash") or ""),
+        )
+    return _safe_scoring_progress_summary(source="s3", completed_icp_count=0)
 
 
 def _store_scoring_progress(
@@ -2106,7 +2227,8 @@ class ResearchLabGatewayScoringWorker:
                     "research_lab_candidate_evaluation_current",
                     columns=(
                         "candidate_id,run_id,ticket_id,receipt_id,current_candidate_status,current_status_at,"
-                        "current_evaluator_ref,current_event_hash"
+                        "current_evaluator_ref,current_event_hash,private_model_manifest_doc,"
+                        "candidate_model_manifest_doc,candidate_artifact_hash"
                     ),
                     filters=(("current_candidate_status", status),),
                     # Oldest first: under backlog the stalest claims must be
@@ -2140,6 +2262,67 @@ class ResearchLabGatewayScoringWorker:
             claim_attempts = await self._candidate_claim_attempt_count(candidate_id)
             max_attempts = int(self.config.scoring_worker_max_claim_requeues)
             if claim_attempts >= max_attempts:
+                progress_summary = await self._candidate_scoring_progress_summary(row)
+                completed_icps = _completed_icp_count_from_progress_doc(progress_summary)
+                if completed_icps > 0:
+                    try:
+                        await create_candidate_evaluation_event(
+                            candidate_id=candidate_id,
+                            run_id=run_id,
+                            ticket_id=ticket_id,
+                            event_type="queued",
+                            candidate_status="queued",
+                            evaluator_ref=self.worker_ref,
+                            reason="stale_gateway_scoring_progress_requeued",
+                            event_doc={
+                                "recovering_worker_ref": self.worker_ref,
+                                "previous_evaluator_ref": row.get("current_evaluator_ref"),
+                                "previous_candidate_status": row.get("current_candidate_status"),
+                                "previous_event_hash": row.get("current_event_hash"),
+                                "previous_status_at": row.get("current_status_at"),
+                                "stale_after_seconds": stale_after_seconds,
+                                "worker_started_at": self._worker_started_at.isoformat(),
+                                "recovery_reason": recovery_reason,
+                                "claim_attempts": claim_attempts,
+                                "max_claim_attempts": max_attempts,
+                                "retry_budget_preserved": True,
+                                "scoring_progress": progress_summary,
+                            },
+                        )
+                        await create_scoring_dispatch_event(
+                            dispatch_type="candidate_scoring",
+                            dispatch_status="completed",
+                            worker_ref=self.worker_ref,
+                            proxy_ref_hash=self.proxy_ref_hash,
+                            candidate_id=candidate_id,
+                            run_id=run_id,
+                            ticket_id=ticket_id,
+                            event_doc={
+                                "reason": "stale_gateway_scoring_progress_requeued",
+                                "dispatch_context": "candidate_scoring_recovery",
+                                "retry_budget_preserved": True,
+                                "recovery_reason": recovery_reason,
+                                "claim_attempts": claim_attempts,
+                                "max_claim_attempts": max_attempts,
+                                "scoring_progress": progress_summary,
+                            },
+                        )
+                        recovered += 1
+                    except Exception as exc:
+                        logger.warning(
+                            "research_lab_stale_candidate_progress_requeue_failed candidate_id=%s error=%s",
+                            compact_ref(candidate_id),
+                            str(exc)[:240],
+                        )
+                        continue
+                    logger.info(
+                        "research_lab_stale_candidate_progress_requeued candidate_id=%s completed_icps=%s claim_attempts=%s/%s",
+                        compact_ref(candidate_id),
+                        completed_icps,
+                        claim_attempts,
+                        max_attempts,
+                    )
+                    continue
                 try:
                     await create_candidate_evaluation_event(
                         candidate_id=candidate_id,
@@ -2267,6 +2450,60 @@ class ResearchLabGatewayScoringWorker:
         )
         return _count_claim_attempts(rows)
 
+    async def _candidate_scoring_progress_summary(
+        self,
+        candidate: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        candidate_id = str(candidate.get("candidate_id") or "")
+        if not candidate_id:
+            return _safe_scoring_progress_summary(source="none", completed_icp_count=0)
+        event_rows = await select_many(
+            "research_lab_candidate_evaluation_events",
+            columns="candidate_id,event_type,reason,event_doc,seq",
+            filters=(
+                ("candidate_id", candidate_id),
+                ("event_type", "in", ("evaluating", "queued", "failed", "rejected")),
+            ),
+            order_by=(("seq", True),),
+            limit=80,
+        )
+        from_events = _latest_scoring_progress_from_events(event_rows)
+        if _completed_icp_count_from_progress_doc(from_events) > 0:
+            return from_events
+
+        private_manifest = candidate.get("private_model_manifest_doc")
+        manifest_uri = (
+            str(private_manifest.get("manifest_uri") or "")
+            if isinstance(private_manifest, Mapping)
+            else ""
+        )
+        location = _scoring_progress_s3_prefix(manifest_uri, candidate_id)
+        if location is None:
+            return from_events
+
+        candidate_manifest = candidate.get("candidate_model_manifest_doc")
+        candidate_artifact_hash = (
+            str(candidate_manifest.get("model_artifact_hash") or "")
+            if isinstance(candidate_manifest, Mapping)
+            else str(candidate.get("candidate_artifact_hash") or "")
+        )
+        bucket, object_prefix = location
+        try:
+            from_s3 = await asyncio.to_thread(
+                _load_latest_scoring_progress_summary,
+                bucket,
+                object_prefix,
+                candidate_artifact_hash=candidate_artifact_hash,
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_scoring_progress_inspect_failed candidate_id=%s error=%s",
+                compact_ref(candidate_id),
+                str(exc)[:200],
+            )
+            return from_events
+        return from_s3
+
     async def _candidate_scoring_heartbeat(
         self,
         *,
@@ -2274,6 +2511,7 @@ class ResearchLabGatewayScoringWorker:
         candidate_id: str,
         started_at: float,
         claim_lost: asyncio.Event | None = None,
+        progress_snapshot: Callable[[], Mapping[str, Any]] | None = None,
     ) -> None:
         try:
             interval = max(
@@ -2303,6 +2541,24 @@ class ResearchLabGatewayScoringWorker:
                     if claim_lost is not None:
                         claim_lost.set()
                     return
+                event_doc: dict[str, Any] = {
+                    "worker_ref": self.worker_ref,
+                    "proxy_ref_hash": self.proxy_ref_hash,
+                    "elapsed_seconds": round(time.time() - started_at, 3),
+                }
+                if progress_snapshot is not None:
+                    try:
+                        progress_doc = dict(progress_snapshot())
+                    except Exception:
+                        progress_doc = {}
+                    completed_icps = _completed_icp_count_from_progress_doc(progress_doc)
+                    if completed_icps > 0:
+                        event_doc["completed_icp_count"] = completed_icps
+                        event_doc["scoring_progress"] = _safe_scoring_progress_summary(
+                            source="heartbeat",
+                            completed_icp_count=completed_icps,
+                            rolling_window_hash=str(progress_doc.get("rolling_window_hash") or ""),
+                        )
                 await create_candidate_evaluation_event(
                     candidate_id=candidate_id,
                     run_id=str(candidate["run_id"]),
@@ -2311,11 +2567,7 @@ class ResearchLabGatewayScoringWorker:
                     candidate_status="evaluating",
                     evaluator_ref=self.worker_ref,
                     reason="gateway_qualification_worker_heartbeat",
-                    event_doc={
-                        "worker_ref": self.worker_ref,
-                        "proxy_ref_hash": self.proxy_ref_hash,
-                        "elapsed_seconds": round(time.time() - started_at, 3),
-                    },
+                    event_doc=event_doc,
                 )
             except asyncio.CancelledError:
                 raise
@@ -2520,6 +2772,7 @@ class ResearchLabGatewayScoringWorker:
             # checkpoint failure only loses resumability.
             resume_results: list[dict[str, Any]] | None = None
             icp_checkpoint = None
+            progress_rows: list[dict[str, Any]] = []
             progress_location = (
                 _scoring_progress_s3_location(
                     artifact.manifest_uri, candidate_id, window.window_hash
@@ -2550,7 +2803,7 @@ class ResearchLabGatewayScoringWorker:
                         compact_ref(candidate_id),
                         len(resume_results),
                     )
-                progress_rows: list[dict[str, Any]] = [dict(row) for row in resume_results or []]
+                progress_rows = [dict(row) for row in resume_results or []]
 
                 async def _checkpoint_completed_icp(row: Mapping[str, Any]) -> None:
                     progress_rows.append(dict(row))
@@ -2573,12 +2826,19 @@ class ResearchLabGatewayScoringWorker:
 
                 icp_checkpoint = _checkpoint_completed_icp
 
+            def _heartbeat_progress_snapshot() -> Mapping[str, Any]:
+                return {
+                    "completed_icp_count": len(progress_rows),
+                    "rolling_window_hash": window.window_hash,
+                }
+
             heartbeat_task = asyncio.create_task(
                 self._candidate_scoring_heartbeat(
                     candidate=candidate,
                     candidate_id=candidate_id,
                     started_at=start,
                     claim_lost=claim_lost_event,
+                    progress_snapshot=_heartbeat_progress_snapshot,
                 )
             )
             langfuse_obs = None
@@ -6071,14 +6331,19 @@ class ResearchLabGatewayScoringWorker:
 
     def _audit_event_window_filters(self) -> tuple[tuple[Any, ...], ...]:
         try:
-            days = float(os.getenv("RESEARCH_LAB_AUDIT_EVENT_WINDOW_DAYS", "14"))
+            days = float(os.getenv("RESEARCH_LAB_AUDIT_EVENT_WINDOW_DAYS", "3"))
         except ValueError:
-            days = 14.0
+            days = 3.0
         if days <= 0:
             # Explicit opt-out restores unscoped full-history fetches.
             return ()
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         return (("created_at", "gte", cutoff.isoformat()),)
+
+    def _audit_select_limits(self) -> tuple[int, int]:
+        max_rows = max(1000, _env_int("RESEARCH_LAB_AUDIT_SELECT_MAX_ROWS", 10000))
+        batch_size = max(100, min(max_rows, _env_int("RESEARCH_LAB_AUDIT_SELECT_BATCH_SIZE", 500)))
+        return max_rows, batch_size
 
     async def _audit_select_all(
         self,
@@ -6088,8 +6353,16 @@ class ResearchLabGatewayScoringWorker:
         current_view: bool = False,
     ) -> list[dict[str, Any]]:
         primary_order = (("current_status_at", True),) if current_view else (("created_at", True),)
+        max_rows, batch_size = self._audit_select_limits()
         try:
-            return await select_all(table, filters=filters, order_by=primary_order, max_rows=50000)
+            return await select_all(
+                table,
+                filters=filters,
+                order_by=primary_order,
+                max_rows=max_rows,
+                batch_size=batch_size,
+                allow_partial=True,
+            )
         except Exception as exc:
             logger.warning(
                 "research_lab_audit_select_order_fallback table=%s order=%s error=%s",
@@ -6097,7 +6370,13 @@ class ResearchLabGatewayScoringWorker:
                 primary_order,
                 str(exc)[:200],
             )
-            return await select_all(table, filters=filters, max_rows=50000)
+            return await select_all(
+                table,
+                filters=filters,
+                max_rows=max_rows,
+                batch_size=batch_size,
+                allow_partial=True,
+            )
 
     async def _maybe_finalize_candidate_receipt(self, candidate: Mapping[str, Any]) -> bool:
         receipt_id = candidate.get("receipt_id")

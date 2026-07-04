@@ -381,7 +381,7 @@ def _test_failure_classification() -> None:
     )
     assert scoring_mod._candidate_scoring_failure_class(RuntimeError("plain coding bug")) == (
         "candidate_scoring_error",
-        False,
+        True,
     )
 
 

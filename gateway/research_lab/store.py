@@ -138,6 +138,7 @@ async def select_all(
     order_by: Iterable[tuple[str, bool]] = (),
     batch_size: int = 1000,
     max_rows: int = 10000,
+    allow_partial: bool = False,
 ) -> list[dict[str, Any]]:
     """Fetch rows with explicit PostgREST pagination for weight-critical paths."""
     if batch_size <= 0:
@@ -162,6 +163,8 @@ async def select_all(
         if len(batch) < batch_size:
             return rows
         offset += batch_size
+    if allow_partial:
+        return rows
     raise RuntimeError(f"{table}: paginated select exceeded max_rows={max_rows}")
 
 

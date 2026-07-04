@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Mapping, Sequence
 
 from .bundles import contains_secret_material, sha256_json
@@ -19,6 +20,22 @@ from .store import (
 
 RESEARCH_LAB_EPOCH_AUDIT_EVENT_TYPE = "RESEARCH_LAB_EPOCH_AUDIT"
 logger = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return int(default)
+
+
+def _audit_select_limits() -> tuple[int, int]:
+    max_rows = max(1000, _env_int("RESEARCH_LAB_ARWEAVE_AUDIT_SELECT_MAX_ROWS", 10000))
+    batch_size = max(
+        100,
+        min(max_rows, _env_int("RESEARCH_LAB_ARWEAVE_AUDIT_SELECT_BATCH_SIZE", 500)),
+    )
+    return max_rows, batch_size
 
 
 def _normalize_sha256_ref(value: object) -> str:
@@ -188,8 +205,16 @@ async def _audit_select_all(
 ) -> list[dict[str, Any]]:
     """Fetch audit rows with deterministic pagination instead of PostgREST defaults."""
 
+    max_rows, batch_size = _audit_select_limits()
     try:
-        return await select_all(table, filters=filters, order_by=order_by, max_rows=50000)
+        return await select_all(
+            table,
+            filters=filters,
+            order_by=order_by,
+            max_rows=max_rows,
+            batch_size=batch_size,
+            allow_partial=True,
+        )
     except Exception as exc:
         logger.warning(
             "research_lab_arweave_audit_select_order_fallback table=%s order=%s error=%s",
@@ -197,7 +222,13 @@ async def _audit_select_all(
             order_by,
             str(exc)[:200],
         )
-        return await select_all(table, filters=filters, max_rows=50000)
+        return await select_all(
+            table,
+            filters=filters,
+            max_rows=max_rows,
+            batch_size=batch_size,
+            allow_partial=True,
+        )
 
 
 async def record_research_lab_checkpointed_events(

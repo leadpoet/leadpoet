@@ -13,9 +13,34 @@ from research_lab.canonical import sha256_json
 class FakeStore:
     def __init__(self, tables: Mapping[str, Sequence[Mapping[str, Any]]]) -> None:
         self.tables = {name: [dict(row) for row in rows] for name, rows in tables.items()}
+        self.inserted: dict[str, list[dict[str, Any]]] = {}
 
     async def select_all(self, table, *, columns="*", filters=(), order_by=(), max_rows=1000):
-        return [dict(row) for row in self.tables.get(table, [])][:max_rows]
+        rows = []
+        for row in self.tables.get(table, []):
+            keep = True
+            for spec in filters:
+                if len(spec) == 2 and row.get(spec[0]) != spec[1]:
+                    keep = False
+                elif len(spec) == 3:
+                    field, operator, value = spec
+                    if operator == "eq" and row.get(field) != value:
+                        keep = False
+            if keep:
+                rows.append(dict(row))
+        return rows[:max_rows]
+
+    async def insert_row(self, table, row):
+        stored = self.tables.setdefault(table, [])
+        if any(
+            existing.get("s3_ref") == row.get("s3_ref")
+            and existing.get("sha256") == row.get("sha256")
+            for existing in stored
+        ):
+            raise RuntimeError("duplicate key value violates unique constraint")
+        stored.append(dict(row))
+        self.inserted.setdefault(table, []).append(dict(row))
+        return dict(row)
 
 
 class FakeS3:
@@ -178,6 +203,38 @@ async def test_reconcile_classifies_verified_and_missing():
     assert "s3://bucket/incontainer/cand-1/icp-1.json" in missing_refs
 
 
+async def test_reconcile_classifies_quarantined_missing_as_unrecoverable():
+    tables = _tables()
+    tables[tr.TRACE_POINTER_QUARANTINE_TABLE] = [
+        {
+            "s3_ref": "s3://bucket/incontainer/cand-1/icp-1.json",
+            "sha256": "sha256:iiii",
+            "source": "score_bundle",
+            "status": "unrecoverable",
+            "reason": "historical_beta_optimistic_upload_missing",
+            "marked_at": "2026-07-04T00:00:00Z",
+            "quarantine_doc": {},
+        }
+    ]
+    s3 = FakeS3(
+        {
+            "s3://bucket/traces/0001.json.enc": b"x",
+            "s3://bucket/scorer-traces/cand-1/icp-1.json": b"y",
+            # diagnostics + incontainer objects deliberately missing
+        }
+    )
+
+    report = await tr.reconcile_trace_pointers(store=FakeStore(tables), s3_client=s3)
+
+    assert report["counts"]["verified"] == 2
+    assert report["counts"]["missing"] == 1
+    assert report["counts"]["unrecoverable"] == 1
+    problem_refs = {problem["s3_ref"] for problem in report["problems"]}
+    assert "s3://bucket/incontainer/cand-1/icp-1.json" not in problem_refs
+    unrecoverable_refs = {item["s3_ref"] for item in report["unrecoverable"]}
+    assert "s3://bucket/incontainer/cand-1/icp-1.json" in unrecoverable_refs
+
+
 async def test_reconcile_hash_mismatch_detected():
     body = b'{"doc": 1}'
     good_hash = "sha256:" + __import__("hashlib").sha256(body).hexdigest()
@@ -210,6 +267,46 @@ async def test_reconcile_hash_mismatch_detected():
     )
     assert report["counts"]["verified"] == 1
     assert report["counts"]["hash_mismatch"] == 1
+
+
+async def test_quarantine_missing_trace_pointers_inserts_only_missing():
+    s3 = FakeS3(
+        {
+            "s3://bucket/traces/0001.json.enc": b"x",
+            "s3://bucket/scorer-traces/cand-1/icp-1.json": b"y",
+            # diagnostics + incontainer objects deliberately missing
+        }
+    )
+    store = FakeStore(_tables())
+
+    report = await tr.quarantine_missing_trace_pointers(
+        store=store,
+        s3_client=s3,
+        dry_run=False,
+        reason="historical_beta_optimistic_upload_missing",
+        operator_note="beta cleanup",
+    )
+
+    assert report["status"] == "completed"
+    assert report["missing_to_quarantine"] == 2
+    assert report["quarantined"] == 2
+    rows = store.inserted[tr.TRACE_POINTER_QUARANTINE_TABLE]
+    assert {row["status"] for row in rows} == {"unrecoverable"}
+    assert {row["reason"] for row in rows} == {"historical_beta_optimistic_upload_missing"}
+    assert {row["operator_note"] for row in rows} == {"beta cleanup"}
+
+
+async def test_quarantine_missing_trace_pointers_dry_run_does_not_insert():
+    store = FakeStore(_tables())
+    report = await tr.quarantine_missing_trace_pointers(
+        store=store,
+        s3_client=FakeS3({}),
+        dry_run=True,
+    )
+
+    assert report["dry_run"] is True
+    assert report["missing_to_quarantine"] == 4
+    assert tr.TRACE_POINTER_QUARANTINE_TABLE not in store.inserted
 
 
 async def test_capture_coverage_counts_all_channels():

@@ -123,45 +123,53 @@ class ResearchLabValidatorFlags:
         data = data or {}
         prod_default = _default_for_prod(data)
         return cls(
-            fetch_enabled=_truthy(
-                data.get("RESEARCH_LAB_VALIDATOR_FETCH_ENABLED", data.get("fetch_enabled", prod_default))
+            fetch_enabled=_truthy_with_default(
+                data.get("RESEARCH_LAB_VALIDATOR_FETCH_ENABLED", data.get("fetch_enabled")),
+                prod_default,
             ),
-            shadow_verify_enabled=_truthy(
-                data.get("RESEARCH_LAB_VALIDATOR_SHADOW_VERIFY_ENABLED", data.get("shadow_verify_enabled", prod_default))
+            shadow_verify_enabled=_truthy_with_default(
+                data.get("RESEARCH_LAB_VALIDATOR_SHADOW_VERIFY_ENABLED", data.get("shadow_verify_enabled")),
+                prod_default,
             ),
-            evaluation_verify_enabled=_truthy(
+            evaluation_verify_enabled=_truthy_with_default(
                 data.get(
                     "RESEARCH_LAB_VALIDATOR_EVALUATION_VERIFY_ENABLED",
-                    data.get("evaluation_verify_enabled", prod_default),
-                )
+                    data.get("evaluation_verify_enabled"),
+                ),
+                prod_default,
             ),
             audit_verify_enabled=_truthy(
                 data.get("RESEARCH_LAB_VALIDATOR_AUDIT_VERIFY_ENABLED", data.get("audit_verify_enabled", False))
             ),
-            require_shadow_verification_before_submit=_truthy(
+            require_shadow_verification_before_submit=_truthy_with_default(
                 data.get(
                     "RESEARCH_LAB_REQUIRE_SHADOW_VERIFICATION_BEFORE_SUBMIT",
-                    data.get("require_shadow_verification_before_submit", prod_default),
-                )
+                    data.get("require_shadow_verification_before_submit"),
+                ),
+                prod_default,
             ),
-            require_evaluation_verification_before_submit=_truthy(
+            require_evaluation_verification_before_submit=_truthy_with_default(
                 data.get(
                     "RESEARCH_LAB_REQUIRE_EVALUATION_VERIFICATION_BEFORE_SUBMIT",
-                    data.get("require_evaluation_verification_before_submit", prod_default),
-                )
+                    data.get("require_evaluation_verification_before_submit"),
+                ),
+                prod_default,
             ),
             reimbursements_enabled=_truthy_with_default(
                 data.get("RESEARCH_LAB_REIMBURSEMENTS_ENABLED", data.get("reimbursements_enabled", True)),
                 True,
             ),
-            weight_mutation_enabled=_truthy(
-                data.get("RESEARCH_LAB_WEIGHT_MUTATION_ENABLED", data.get("weight_mutation_enabled", prod_default))
+            weight_mutation_enabled=_truthy_with_default(
+                data.get("RESEARCH_LAB_WEIGHT_MUTATION_ENABLED", data.get("weight_mutation_enabled")),
+                prod_default,
             ),
-            production_writes_enabled=_truthy(
-                data.get("RESEARCH_LAB_PRODUCTION_WRITES_ENABLED", data.get("production_writes_enabled", prod_default))
+            production_writes_enabled=_truthy_with_default(
+                data.get("RESEARCH_LAB_PRODUCTION_WRITES_ENABLED", data.get("production_writes_enabled")),
+                prod_default,
             ),
-            submit_on_chain_enabled=_truthy(
-                data.get("RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED", data.get("submit_on_chain_enabled", prod_default))
+            submit_on_chain_enabled=_truthy_with_default(
+                data.get("RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED", data.get("submit_on_chain_enabled")),
+                prod_default,
             ),
             fulfillment_mutation_enabled=_truthy(
                 data.get("RESEARCH_LAB_FULFILLMENT_MUTATION_ENABLED", data.get("fulfillment_mutation_enabled", False))

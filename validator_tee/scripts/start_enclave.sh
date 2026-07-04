@@ -9,6 +9,11 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VALIDATOR_TEE_DIR="$(dirname "$SCRIPT_DIR")"
 EIF_FILE="$VALIDATOR_TEE_DIR/validator-enclave.eif"
+ENCLAVE_NAME="${VALIDATOR_ENCLAVE_NAME:-validator-enclave}"
+ENCLAVE_CPU_COUNT="${VALIDATOR_ENCLAVE_CPU_COUNT:-2}"
+ENCLAVE_MEMORY_MIB="${VALIDATOR_ENCLAVE_MEMORY_MIB:-1024}"
+ENCLAVE_CID="${VALIDATOR_ENCLAVE_CID:-}"
+DEBUG_MODE="${VALIDATOR_ENCLAVE_DEBUG_MODE:-false}"
 
 echo "=========================================="
 echo "🚀 Starting Validator Nitro Enclave"
@@ -32,21 +37,42 @@ if [ "$RUNNING" -gt 0 ]; then
     exit 1
 fi
 
-# Start enclave
-# Memory: 1024 MB (minimum required for validator EIF)
-# CPU: 2 (configured in allocator)
+# Start enclave.
+# Production default is non-debug. Debug enclaves return all-zero PCRs in
+# attestation documents, which the gateway correctly rejects for weight bundles.
 echo ""
 echo "📦 Starting enclave..."
 echo "   EIF: $EIF_FILE"
-echo "   Memory: 1024 MB"
-echo "   CPUs: 2"
+echo "   Name: $ENCLAVE_NAME"
+echo "   Memory: $ENCLAVE_MEMORY_MIB MB"
+echo "   CPUs: $ENCLAVE_CPU_COUNT"
+if [ -n "$ENCLAVE_CID" ]; then
+    echo "   CID: $ENCLAVE_CID"
+fi
+if [ "$DEBUG_MODE" = "true" ] || [ "$DEBUG_MODE" = "1" ] || [ "$DEBUG_MODE" = "yes" ]; then
+    echo "   Mode: DEBUG (PCR0 will not be accepted by production gateway)"
+else
+    echo "   Mode: PRODUCTION"
+fi
 echo ""
 
-nitro-cli run-enclave \
-    --eif-path "$EIF_FILE" \
-    --cpu-count 2 \
-    --memory 1024 \
-    --debug-mode
+RUN_ARGS=(
+    run-enclave
+    --eif-path "$EIF_FILE"
+    --cpu-count "$ENCLAVE_CPU_COUNT"
+    --memory "$ENCLAVE_MEMORY_MIB"
+    --enclave-name "$ENCLAVE_NAME"
+)
+
+if [ -n "$ENCLAVE_CID" ]; then
+    RUN_ARGS+=(--enclave-cid "$ENCLAVE_CID")
+fi
+
+if [ "$DEBUG_MODE" = "true" ] || [ "$DEBUG_MODE" = "1" ] || [ "$DEBUG_MODE" = "yes" ]; then
+    RUN_ARGS+=(--debug-mode)
+fi
+
+nitro-cli "${RUN_ARGS[@]}"
 
 echo ""
 echo "✅ Enclave started!"

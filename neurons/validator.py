@@ -4299,8 +4299,17 @@ class Validator(BaseValidatorNeuron):
                 if tee_event_hash:
                     print(f"   ✅ Gateway accepted weights (hash: {tee_event_hash[:16]}...)")
                 else:
-                    # Gateway submission failed - but we still proceed to chain
-                    # This ensures chain submission is not blocked by gateway issues
+                    require_gateway_submission = _env_flag(
+                        "VALIDATOR_REQUIRE_GATEWAY_WEIGHT_SUBMISSION",
+                        _research_lab_production_subnet_default(),
+                    )
+                    if require_gateway_submission:
+                        print(
+                            "   ❌ Gateway submission failed and "
+                            "VALIDATOR_REQUIRE_GATEWAY_WEIGHT_SUBMISSION is enabled; "
+                            "refusing chain submission to avoid an unaudited weight epoch"
+                        )
+                        return False
                     print(f"   ⚠️ Gateway submission failed - proceeding to chain anyway")
             elif TEE_AVAILABLE:
                 print(f"\nℹ️ TEE available but submission disabled (set ENABLE_TEE_SUBMISSION=true to enable)")

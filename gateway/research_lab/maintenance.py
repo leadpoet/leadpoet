@@ -1153,6 +1153,10 @@ def autoresearch_queue_capacity_doc(config: ResearchLabGatewayConfig | None = No
     return {
         "autoresearch_capacity_policy": "proxy_worker_capacity:v1",
         "autoresearch_capacity": int(_autoresearch_loop_capacity(config)),
+        "autoresearch_hotkey_capacity": max(
+            1,
+            int(config.max_active_autoresearch_loops_per_hotkey or 1),
+        ),
         "active_loop_stale_after_seconds": max(
             60,
             int(config.active_loop_stale_after_seconds or DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS),

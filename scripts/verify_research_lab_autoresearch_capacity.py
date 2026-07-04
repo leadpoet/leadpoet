@@ -25,6 +25,7 @@ def _config(*, total_workers: int = 5, require_proxy: bool = False) -> ResearchL
     return ResearchLabGatewayConfig(
         hosted_worker_total_workers=total_workers,
         hosted_worker_require_proxy=require_proxy,
+        max_active_autoresearch_loops_per_hotkey=2,
     )
 
 
@@ -142,7 +143,7 @@ async def main() -> int:
             expected_detail=None,
         )
         await run_case(
-            "same hotkey blocked",
+            "same hotkey below cap passes",
             queue_rows=[
                 {
                     "run_id": "run-1",
@@ -154,7 +155,26 @@ async def main() -> int:
             ticket_rows=[{"ticket_id": "ticket-1", "miner_hotkey": "hotkey-active"}],
             miner_hotkey="hotkey-active",
             config=_config(),
-            expected_detail="autoresearch loop for this hotkey already running",
+            expected_detail=None,
+        )
+        await run_case(
+            "same hotkey cap blocked",
+            queue_rows=[
+                {
+                    "run_id": f"run-{index}",
+                    "ticket_id": f"ticket-{index}",
+                    "current_queue_status": "started",
+                    "current_status_at": (now + timedelta(seconds=index)).isoformat(),
+                }
+                for index in range(2)
+            ],
+            ticket_rows=[
+                {"ticket_id": f"ticket-{index}", "miner_hotkey": "hotkey-active"}
+                for index in range(2)
+            ],
+            miner_hotkey="hotkey-active",
+            config=_config(),
+            expected_detail="too many autoresearch loops for this hotkey already running",
         )
         await run_case(
             "proxy capacity blocked",
@@ -259,7 +279,7 @@ async def main() -> int:
             expected_detail=None,
         )
         await run_post_queue_case(
-            "post-queue same hotkey rejects later run",
+            "post-queue same hotkey allows second run",
             queue_rows=[
                 {
                     "run_id": "run-earlier",
@@ -281,7 +301,27 @@ async def main() -> int:
             run_id="run-later",
             miner_hotkey="hotkey-active",
             config=_config(),
-            expected_detail="autoresearch loop for this hotkey already running",
+            expected_detail=None,
+        )
+        await run_post_queue_case(
+            "post-queue same hotkey rejects third run",
+            queue_rows=[
+                {
+                    "run_id": f"run-{index}",
+                    "ticket_id": f"ticket-{index}",
+                    "current_queue_status": "queued",
+                    "current_status_at": (now + timedelta(seconds=index)).isoformat(),
+                }
+                for index in range(3)
+            ],
+            ticket_rows=[
+                {"ticket_id": f"ticket-{index}", "miner_hotkey": "hotkey-active"}
+                for index in range(3)
+            ],
+            run_id="run-2",
+            miner_hotkey="hotkey-active",
+            config=_config(),
+            expected_detail="too many autoresearch loops for this hotkey already running",
         )
     finally:
         research_lab_api.select_all = original_select_all

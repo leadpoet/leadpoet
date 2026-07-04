@@ -10,12 +10,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SQL_PATH = ROOT / "scripts" / "43-research-lab-queue-capacity-guard.sql"
 RESUME_SQL_PATH = ROOT / "scripts" / "54-research-lab-resume-requeue-hotkey-guard.sql"
+HOTKEY_CAP_SQL_PATH = ROOT / "scripts" / "67-research-lab-hotkey-active-loop-cap.sql"
 API_PATH = ROOT / "gateway" / "research_lab" / "api.py"
 
 
 def main() -> int:
     sql = SQL_PATH.read_text(encoding="utf-8")
     resume_sql = RESUME_SQL_PATH.read_text(encoding="utf-8")
+    hotkey_cap_sql = HOTKEY_CAP_SQL_PATH.read_text(encoding="utf-8")
     api = API_PATH.read_text(encoding="utf-8")
     required_sql = {
         "guard_research_lab_queue_capacity",
@@ -37,6 +39,7 @@ def main() -> int:
         "_queue_capacity_doc(config)",
         '"autoresearch_capacity_policy": "proxy_worker_capacity:v1"',
         '"autoresearch_capacity": int(_autoresearch_loop_capacity(config))',
+        '"autoresearch_hotkey_capacity"',
         "DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS",
         "research_lab_queue_capacity_conflict",
         "research_lab_queue_hotkey_conflict",
@@ -55,6 +58,20 @@ def main() -> int:
     missing.extend(
         f"resume_sql:{marker}" for marker in sorted(required_resume_sql) if marker not in resume_sql
     )
+    required_hotkey_cap_sql = {
+        "allow a configurable active auto-research loop cap per hotkey",
+        "hotkey_capacity_text TEXT",
+        "hotkey_capacity INTEGER",
+        "NEW.event_doc->>'autoresearch_hotkey_capacity'",
+        "hotkey_capacity := GREATEST(1, hotkey_capacity_text::INTEGER)",
+        "same_hotkey_count >= hotkey_capacity",
+        "research_lab_queue_hotkey_conflict",
+        "maintenance requeues ignore paused rows",
+        "configurable same-hotkey active-loop cap",
+    }
+    missing.extend(
+        f"hotkey_cap_sql:{marker}" for marker in sorted(required_hotkey_cap_sql) if marker not in hotkey_cap_sql
+    )
     same_hotkey_match = re.search(
         r"SELECT COUNT\(\*\)\s+INTO same_hotkey_count(?P<body>.*?)IF same_hotkey_count > 0",
         resume_sql,
@@ -72,6 +89,23 @@ def main() -> int:
         ):
             if marker not in same_hotkey_body:
                 missing.append(f"resume_sql:same_hotkey:{marker}")
+    hotkey_cap_match = re.search(
+        r"SELECT COUNT\(\*\)\s+INTO same_hotkey_count(?P<body>.*?)IF same_hotkey_count >= hotkey_capacity",
+        hotkey_cap_sql,
+        flags=re.S,
+    )
+    if not hotkey_cap_match:
+        missing.append("hotkey_cap_sql:same_hotkey_count capped query block")
+    else:
+        hotkey_cap_body = hotkey_cap_match.group("body")
+        for marker in (
+            "is_existing_run_requeue",
+            "q.current_queue_status IN ('queued', 'started')",
+            "NOT is_existing_run_requeue",
+            "q.current_queue_status IN ('queued', 'started', 'paused')",
+        ):
+            if marker not in hotkey_cap_body:
+                missing.append(f"hotkey_cap_sql:same_hotkey:{marker}")
     missing.extend(f"api:{marker}" for marker in sorted(required_api) if marker not in api)
     if missing:
         for marker in missing:

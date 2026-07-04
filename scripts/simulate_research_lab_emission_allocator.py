@@ -15,16 +15,16 @@ from leadpoet_verifier.economics import allocate_research_lab_epoch
 
 
 POLICY = {
-    "research_lab_emission_percent": 10.0,
-    "fulfillment_emission_percent": 80.5,
+    "research_lab_emission_percent": 20.0,
+    "fulfillment_emission_percent": 70.5,
     "fulfillment_leaderboard_emission_percent": 9.5,
     "reward_epochs": 20,
     "usd_per_0_1_percent_epoch": 0.162,
     "reimbursement_allow_overpay_without_champions": True,
     "reimbursement_max_cost_multiplier_with_champions": 1.0,
-    "champion_min_alpha_percent": 2.0,
-    "champion_extra_alpha_percent_per_point": 0.1,
-    "champion_max_alpha_percent": 5.0,
+    "champion_min_alpha_percent": 4.0,
+    "champion_extra_alpha_percent_per_point": 0.2,
+    "champion_max_alpha_percent": 10.0,
     "champion_placeholder_alpha_percent": 0.0001,
     "champion_threshold_points": 2.0,
 }

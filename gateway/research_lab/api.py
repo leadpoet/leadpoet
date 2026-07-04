@@ -1917,13 +1917,18 @@ async def _enforce_autoresearch_loop_capacity(config: ResearchLabGatewayConfig, 
         return
     ticket_map = await _ticket_rows_by_id(active_rows)
     normalized_hotkey = str(miner_hotkey or "").strip()
-    for row in active_rows:
-        ticket = ticket_map.get(str(row.get("ticket_id") or ""))
-        if ticket and str(ticket.get("miner_hotkey") or "").strip() == normalized_hotkey:
-            raise HTTPException(
-                status_code=409,
-                detail="autoresearch loop for this hotkey already running",
-            )
+    hotkey_capacity = max(1, int(config.max_active_autoresearch_loops_per_hotkey or 1))
+    same_hotkey_count = sum(
+        1
+        for row in active_rows
+        if str((ticket_map.get(str(row.get("ticket_id") or "")) or {}).get("miner_hotkey") or "").strip()
+        == normalized_hotkey
+    )
+    if same_hotkey_count >= hotkey_capacity:
+        raise HTTPException(
+            status_code=409,
+            detail="too many autoresearch loops for this hotkey already running",
+        )
 
     if len(active_rows) >= capacity:
         raise HTTPException(
@@ -1958,8 +1963,12 @@ async def _post_queue_capacity_error(
         == normalized_hotkey
     ]
     same_hotkey_rows.sort(key=_autoresearch_capacity_sort_key)
-    if same_hotkey_rows and str(same_hotkey_rows[0].get("run_id") or "") != normalized_run_id:
-        return "autoresearch loop for this hotkey already running"
+    hotkey_capacity = max(1, int(config.max_active_autoresearch_loops_per_hotkey or 1))
+    same_hotkey_admitted_run_ids = {
+        str(row.get("run_id") or "") for row in same_hotkey_rows[:hotkey_capacity]
+    }
+    if len(same_hotkey_rows) > hotkey_capacity and normalized_run_id not in same_hotkey_admitted_run_ids:
+        return "too many autoresearch loops for this hotkey already running"
 
     active_rows.sort(key=_autoresearch_capacity_sort_key)
     admitted_run_ids = {str(row.get("run_id") or "") for row in active_rows[:capacity]}
@@ -2031,6 +2040,10 @@ def _queue_capacity_doc(config: ResearchLabGatewayConfig) -> dict[str, int | str
     return {
         "autoresearch_capacity_policy": "proxy_worker_capacity:v1",
         "autoresearch_capacity": int(_autoresearch_loop_capacity(config)),
+        "autoresearch_hotkey_capacity": max(
+            1,
+            int(config.max_active_autoresearch_loops_per_hotkey or 1),
+        ),
         "active_loop_stale_after_seconds": max(
             60,
             int(config.active_loop_stale_after_seconds or DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS),
@@ -2285,7 +2298,10 @@ def _raise_storage_error(exc: Exception) -> None:
     if "does not exist" in message_lower or "relation" in message_lower:
         raise HTTPException(status_code=503, detail="Research Lab SQL migrations are not applied") from exc
     if "research_lab_queue_hotkey_conflict" in message_lower:
-        raise HTTPException(status_code=409, detail="autoresearch loop for this hotkey already running") from exc
+        raise HTTPException(
+            status_code=409,
+            detail="too many autoresearch loops for this hotkey already running",
+        ) from exc
     if "research_lab_queue_capacity_conflict" in message_lower:
         raise HTTPException(status_code=409, detail="too many autoresearch loops right now, try again later") from exc
     if _is_duplicate_payment_error(exc):

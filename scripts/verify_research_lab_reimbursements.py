@@ -179,16 +179,16 @@ def _run_simulations() -> None:
 
 def _run_lab_allocator_simulations() -> None:
     policy = {
-        "research_lab_emission_percent": 10.0,
-        "fulfillment_emission_percent": 80.5,
+        "research_lab_emission_percent": 20.0,
+        "fulfillment_emission_percent": 70.5,
         "fulfillment_leaderboard_emission_percent": 9.5,
         "reward_epochs": 20,
         "usd_per_0_1_percent_epoch": 0.162,
         "reimbursement_allow_overpay_without_champions": True,
         "reimbursement_max_cost_multiplier_with_champions": 1.0,
-        "champion_min_alpha_percent": 2.0,
-        "champion_extra_alpha_percent_per_point": 0.1,
-        "champion_max_alpha_percent": 5.0,
+        "champion_min_alpha_percent": 4.0,
+        "champion_extra_alpha_percent_per_point": 0.2,
+        "champion_max_alpha_percent": 10.0,
         "champion_placeholder_alpha_percent": 0.0001,
         "champion_queue_trigger_ratio": 0.50,
         "champion_threshold_points": 2.0,
@@ -202,11 +202,11 @@ def _run_lab_allocator_simulations() -> None:
         for uid in range(1, 11)
     ]
     allocation = allocate_research_lab_epoch(100, policy, no_champion_reimbursements, [])
-    _assert_cap(allocation, 10.0)
+    _assert_cap(allocation, 20.0)
     high = _paid_for_uid(allocation["reimbursement_allocations"], 1)
     low = _paid_for_uid(allocation["reimbursement_allocations"], 6)
     _assert_close(high, low * 2, "no-champion reimbursement should be spend-proportional")
-    _assert_close(sum(item["paid_alpha_percent"] for item in allocation["reimbursement_allocations"]), 10.0, "no-champion reimbursement should use full lab cap")
+    _assert_close(sum(item["paid_alpha_percent"] for item in allocation["reimbursement_allocations"]), 20.0, "no-champion reimbursement should use full lab cap")
     if all(item["overpaid_alpha_percent"] <= 0 for item in allocation["reimbursement_allocations"]):
         raise AssertionError("no-champion reimbursement should allow overpayment")
 
@@ -216,7 +216,7 @@ def _run_lab_allocator_simulations() -> None:
     ]
     three_reimbursements = [_reimbursement_obligation(uid, spend_usd=10) for uid in range(1, 4)]
     allocation = allocate_research_lab_epoch(100, policy, three_reimbursements, two_champions)
-    _assert_cap(allocation, 10.0)
+    _assert_cap(allocation, 20.0)
     _assert_close(allocation["unallocated_percent"], 0.0, "active winners should receive all non-reimbursed lab capacity")
     if len(allocation["champion_allocations"]) != 2:
         raise AssertionError("two active champions should both fit with three $10 reimbursements")
@@ -226,15 +226,15 @@ def _run_lab_allocator_simulations() -> None:
         raise AssertionError("remaining lab capacity should go to champions")
     _assert_close(
         allocation["reimbursement_alpha_percent"] + allocation["champion_alpha_percent"],
-        10.0,
+        20.0,
         "reimbursements plus winners should exhaust lab cap",
     )
 
     crowded_reimbursements = [_reimbursement_obligation(uid, spend_usd=500) for uid in range(1, 31)]
     allocation = allocate_research_lab_epoch(100, policy, crowded_reimbursements, two_champions)
-    _assert_cap(allocation, 10.0)
+    _assert_cap(allocation, 20.0)
     _assert_close(allocation["unallocated_percent"], 0.0, "crowded reimbursements should not leave lab capacity unassigned")
-    if allocation["reimbursement_alpha_percent"] >= 8.0:
+    if allocation["reimbursement_alpha_percent"] >= 16.0:
         raise AssertionError("crowded reimbursements should scale down to reserve champion capacity")
     if not allocation["queued_champion_allocations"]:
         raise AssertionError("queue trigger should queue additional champions when reimbursements crowd champion capacity")
@@ -255,7 +255,7 @@ def _run_lab_allocator_simulations() -> None:
         _champion_obligation(203, start_epoch=92, improvement_points=100.0),
     ]
     allocation = allocate_research_lab_epoch(100, policy, [], overflow_champions)
-    _assert_cap(allocation, 10.0)
+    _assert_cap(allocation, 20.0)
     _assert_close(allocation["unallocated_percent"], 0.0, "champion-only overflow should not leave lab capacity unassigned")
     if not allocation["queued_champion_allocations"]:
         raise AssertionError("champion overflow should queue later champions")
@@ -273,7 +273,7 @@ def _run_lab_allocator_simulations() -> None:
         "daily_icp_counts": {f"2026-06-{day:02d}": 6 for day in range(1, 11)},
     }
     obligation = build_champion_reward_obligation(good_candidate, policy)
-    _assert_close(obligation["desired_alpha_percent"], 2.2, "champion reward should be 2% + 0.1% per point over threshold")
+    _assert_close(obligation["desired_alpha_percent"], 4.4, "champion reward should be 4% + 0.2% per point over threshold")
     bad_candidate = {**good_candidate, "candidate_id": "candidate:bad", "daily_icp_counts": {"2026-06-01": 6}}
     blocked = build_champion_reward_obligation(bad_candidate, policy)
     if blocked["status"] != "blocked":
@@ -318,7 +318,7 @@ def _run_lab_allocator_simulations() -> None:
     vector = compose_final_weight_vector(
         epoch=100,
         uids=[1, 2, 3, 101, 102],
-        fulfillment_scores={"900": 80.5},
+        fulfillment_scores={"900": 70.5},
         leaderboard_scores={"901": 9.5},
         research_lab_allocation=lab_allocation,
         policy=policy,
@@ -332,7 +332,7 @@ def _run_lab_allocator_simulations() -> None:
             active.extend(_reimbursement_obligation(uid, spend_usd=10, start_epoch=101) for uid in range(11, 13))
         champions = two_champions if simulated_epoch >= 105 else []
         allocation = allocate_research_lab_epoch(simulated_epoch, policy, active, champions)
-        _assert_cap(allocation, 10.0)
+        _assert_cap(allocation, 20.0)
         if simulated_epoch >= 121 and allocation["reimbursement_allocations"]:
             raise AssertionError("20-epoch reimbursement obligations should expire")
 

@@ -863,13 +863,13 @@ def verify_research_lab_validator_integration(path: Path | str | None = None) ->
 
     allocation_policy = {
         "policy_id": "research_lab_reimbursement_and_champion_rewards:v1",
-        "research_lab_emission_percent": 10.0,
+        "research_lab_emission_percent": 20.0,
         "reward_epochs": 20,
         "usd_per_0_1_percent_epoch": 0.162,
         "champion_threshold_points": 2.0,
-        "champion_min_alpha_percent": 2.0,
-        "champion_extra_alpha_percent_per_point": 0.1,
-        "champion_max_alpha_percent": 5.0,
+        "champion_min_alpha_percent": 4.0,
+        "champion_extra_alpha_percent_per_point": 0.2,
+        "champion_max_alpha_percent": 10.0,
     }
     reimbursement_obligations = [
         {

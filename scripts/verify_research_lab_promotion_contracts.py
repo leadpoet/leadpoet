@@ -97,9 +97,9 @@ def main() -> int:
         },
         {
             "champion_threshold_points": 1.0,
-            "champion_min_alpha_percent": 2.0,
-            "champion_extra_alpha_percent_per_point": 0.1,
-            "champion_max_alpha_percent": 5.0,
+            "champion_min_alpha_percent": 4.0,
+            "champion_extra_alpha_percent_per_point": 0.2,
+            "champion_max_alpha_percent": 10.0,
             "champion_eval_days": 10,
             "champion_icps_per_day": 6,
             "reward_epochs": 20,

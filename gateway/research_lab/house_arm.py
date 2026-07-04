@@ -12,9 +12,9 @@ Safety posture — everything defaults to NOT spending:
   * The daily budget is clamped hard at the
     ``BaselineArmOperatingPolicyRecord`` policy max ($500/day) regardless of
     arguments; today's already-recorded house spend is subtracted first.
-  * The scripts/43 + scripts/54 DB capacity triggers apply unchanged: one
-    active loop per hotkey, so a single house hotkey can hold at most ONE
-    open loop at a time. The queued event carries the same
+  * The scripts/43 + scripts/54/67 DB capacity triggers apply unchanged:
+    active loops per hotkey are capped by the shared gateway policy. The
+    queued event carries the same
     ``autoresearch_capacity`` doc miner loops carry so admission stays atomic.
 
 Ticket-opening path: the exact store primitives the miner API uses —
@@ -728,8 +728,8 @@ async def open_house_loops(
     Never spends unless BOTH the ``RESEARCH_LAB_HOUSE_ARM_ENABLED`` master
     flag is truthy AND ``dry_run=False``. The effective daily budget is
     ``min(budget_usd_today, policy max $500) - today's recorded house spend``,
-    and the scripts/43/54 one-loop-per-hotkey guard caps concurrent house
-    loops at 1 for a single house hotkey regardless of ``max_open_loops``.
+    and the scripts/43/54/67 per-hotkey guard caps concurrent house loops
+    according to the shared gateway policy regardless of ``max_open_loops``.
     """
 
     now = now or datetime.now(timezone.utc)
@@ -835,17 +835,18 @@ async def open_house_loops(
     if house_tickets:
         last_lane = str(_ticket_doc(house_tickets[0]).get("house_lane") or "") or None
 
-    # One house hotkey holds at most one active loop (scripts/43/54 guard).
+    # House uses the same per-hotkey active-loop cap as miner submissions.
     # Repaired orphans re-enter the queue, so they consume slots first.
-    hotkey_slots = max(0, 1 - len(open_rows) - len(orphaned))
+    hotkey_cap = max(1, int(config.max_active_autoresearch_loops_per_hotkey or 1))
+    hotkey_slots = max(0, hotkey_cap - len(open_rows) - len(orphaned))
     budget_slots = int(remaining_usd // per_loop_usd) if per_loop_usd > 0 else 0
     request_slots = max(0, int(max_open_loops) - len(open_rows) - len(orphaned))
     to_open = max(0, min(hotkey_slots, budget_slots, request_slots))
     if hotkey_slots == 0:
         result["skipped"].append(
-            "house hotkey already has an active loop (one active loop per hotkey; scripts/43/54)"
+            f"house hotkey already reached active-loop cap ({hotkey_cap}; scripts/43/54/67)"
             if open_rows
-            else "orphaned house opening consumes the single hotkey slot this pass"
+            else "orphaned house opening consumes the remaining hotkey slot this pass"
         )
     if budget_slots == 0 and hotkey_slots > 0:
         result["skipped"].append("remaining daily budget is below the per-loop cost")
@@ -1273,7 +1274,12 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--open", action="store_true", help="Open house loops within the daily clamp")
     mode.add_argument("--status", action="store_true", help="Open house loops, today's spend, remaining clamp")
     parser.add_argument("--budget-usd", type=float, default=200.0, help="Today's house budget (clamped at policy max)")
-    parser.add_argument("--max-open-loops", type=int, default=1, help="Max open house loops (hotkey guard caps at 1)")
+    parser.add_argument(
+        "--max-open-loops",
+        type=int,
+        default=1,
+        help="Max open house loops; the shared per-hotkey guard still applies",
+    )
     parser.add_argument(
         "--dry-run",
         dest="dry_run",

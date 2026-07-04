@@ -316,6 +316,7 @@ class ResearchLabGatewayConfig:
     auto_commit_enabled: bool = False
     miner_openrouter_key_required: bool = True
     max_open_tickets_per_hotkey: int = 3
+    max_active_autoresearch_loops_per_hotkey: int = 2
     loop_start_fee_usd: float = DEFAULT_LOOP_START_FEE_USD
     allowed_research_islands: tuple[str, ...] = ("generalist",)
     internal_api_key: str = ""
@@ -404,16 +405,16 @@ class ResearchLabGatewayConfig:
     reimbursement_material_spend_ratio: float = 0.80
     reimbursement_default_island: str = "generalist"
     reimbursement_usd_per_0_1_percent_epoch: float = 0.162
-    lab_emission_percent: float = 10.0
-    fulfillment_emission_percent: float = 80.5
+    lab_emission_percent: float = 20.0
+    fulfillment_emission_percent: float = 70.5
     fulfillment_leaderboard_emission_percent: float = 9.5
     lab_reward_epochs: int = 20
     lab_reimbursement_allow_overpay_without_champions: bool = True
     lab_reimbursement_max_cost_multiplier_with_champions: float = 1.0
     lab_reimbursement_min_alpha_percent: float = 0.0
-    lab_champion_min_alpha_percent: float = 2.0
-    lab_champion_extra_alpha_percent_per_point: float = 0.1
-    lab_champion_max_alpha_percent: float = 5.0
+    lab_champion_min_alpha_percent: float = 4.0
+    lab_champion_extra_alpha_percent_per_point: float = 0.2
+    lab_champion_max_alpha_percent: float = 10.0
     lab_champion_placeholder_alpha_percent: float = 0.0001
     lab_champion_queue_trigger_ratio: float = 0.50
     # Deprecated compatibility field in public policy docs. The reward bar must
@@ -546,6 +547,10 @@ class ResearchLabGatewayConfig:
             max_open_tickets_per_hotkey=max(
                 1,
                 _int("RESEARCH_LAB_MAX_OPEN_TICKETS_PER_HOTKEY", 3),
+            ),
+            max_active_autoresearch_loops_per_hotkey=max(
+                1,
+                _int("RESEARCH_LAB_MAX_ACTIVE_AUTORESEARCH_LOOPS_PER_HOTKEY", 2),
             ),
             loop_start_fee_usd=_float("RESEARCH_LAB_LOOP_START_FEE_USD", DEFAULT_LOOP_START_FEE_USD),
             allowed_research_islands=_normalized_csv("RESEARCH_LAB_ALLOWED_ISLANDS", "generalist"),
@@ -762,8 +767,8 @@ class ResearchLabGatewayConfig:
                 0.000001,
                 _float("RESEARCH_LAB_REIMBURSEMENT_USD_PER_0_1_PERCENT_EPOCH", 0.162),
             ),
-            lab_emission_percent=max(0.0, _float("RESEARCH_LAB_EMISSION_PERCENT", 10.0)),
-            fulfillment_emission_percent=max(0.0, _float("RESEARCH_LAB_FULFILLMENT_EMISSION_PERCENT", 80.5)),
+            lab_emission_percent=max(0.0, _float("RESEARCH_LAB_EMISSION_PERCENT", 20.0)),
+            fulfillment_emission_percent=max(0.0, _float("RESEARCH_LAB_FULFILLMENT_EMISSION_PERCENT", 70.5)),
             fulfillment_leaderboard_emission_percent=max(
                 0.0,
                 _float("RESEARCH_LAB_FULFILLMENT_LEADERBOARD_EMISSION_PERCENT", 9.5),
@@ -781,12 +786,12 @@ class ResearchLabGatewayConfig:
                 0.0,
                 _float("RESEARCH_LAB_REIMBURSEMENT_MIN_ALPHA_PERCENT", 0.0),
             ),
-            lab_champion_min_alpha_percent=max(0.0, _float("RESEARCH_LAB_CHAMPION_MIN_ALPHA_PERCENT", 2.0)),
+            lab_champion_min_alpha_percent=max(0.0, _float("RESEARCH_LAB_CHAMPION_MIN_ALPHA_PERCENT", 4.0)),
             lab_champion_extra_alpha_percent_per_point=max(
                 0.0,
-                _float("RESEARCH_LAB_CHAMPION_EXTRA_ALPHA_PERCENT_PER_POINT", 0.1),
+                _float("RESEARCH_LAB_CHAMPION_EXTRA_ALPHA_PERCENT_PER_POINT", 0.2),
             ),
-            lab_champion_max_alpha_percent=max(0.0, _float("RESEARCH_LAB_CHAMPION_MAX_ALPHA_PERCENT", 5.0)),
+            lab_champion_max_alpha_percent=max(0.0, _float("RESEARCH_LAB_CHAMPION_MAX_ALPHA_PERCENT", 10.0)),
             lab_champion_placeholder_alpha_percent=max(
                 0.0,
                 _float("RESEARCH_LAB_CHAMPION_PLACEHOLDER_ALPHA_PERCENT", 0.0001),
@@ -1156,6 +1161,8 @@ class ResearchLabGatewayConfig:
             "allowed_research_areas": list(self.allowed_research_islands),
             "miner_openrouter_key_required": self.miner_openrouter_key_required,
             "openrouter_key_registration_enabled": bool(self.openrouter_key_kms_key_id),
+            "max_open_tickets_per_hotkey": self.max_open_tickets_per_hotkey,
+            "max_active_autoresearch_loops_per_hotkey": self.max_active_autoresearch_loops_per_hotkey,
             "reimbursement": {
                 "enabled": self.reimbursements_enabled,
                 "shadow_enabled": self.shadow_reimbursements_enabled,

@@ -3738,7 +3738,7 @@ class Validator(BaseValidatorNeuron):
             # ║                                                                  ║
             # ║ Research Lab is reserved from the verified allocation bundle.   ║
             # ║ Fulfillment receives the residual after Research Lab and the    ║
-            # ║ leaderboard. Default split is 10 / 80.5 / 9.5.                  ║
+            # ║ leaderboard. Default split is 20 / 70.5 / 9.5.                  ║
             # ║                                                                  ║
             # ║ History: 322f287d (2026-05-15) zeroed the leaderboard while     ║
             # ║ raising the per-epoch pool to 95%, mistakenly interpreting      ║
@@ -3748,6 +3748,8 @@ class Validator(BaseValidatorNeuron):
             # ║ all-time to rolling 140-epoch window (~7 days, gateway-side).   ║
             # ║ 2026-05-28: champion 5% → 10% (carved from fulfillment pool     ║
             # ║ 85.5% → 80.5%); leaderboard 9.5% unchanged.                     ║
+            # ║ 2026-07-04: Research Lab 10% → 20% (carved from fulfillment     ║
+            # ║ pool 80.5% → 70.5%); leaderboard 9.5% unchanged.                ║
             # ╚══════════════════════════════════════════════════════════════════╝
             # Allocation shares (dynamic based on champion status)
             BASE_BURN_SHARE = 0.0          # 0% base burn to UID 0
@@ -3760,7 +3762,7 @@ class Validator(BaseValidatorNeuron):
             RESEARCH_LAB_SHARE = _doc_percent_share(
                 research_lab_allocation_doc,
                 "lab_cap_percent",
-                _env_percent_share("RESEARCH_LAB_EMISSION_PERCENT", 10.0),
+                _env_percent_share("RESEARCH_LAB_EMISSION_PERCENT", 20.0),
             )
             # FULFILLMENT LEADERBOARD BONUS — added 2026-04-30, restored 2026-05-15,
             # bumped to 9.5% + switched to rolling window on 2026-05-17, changed

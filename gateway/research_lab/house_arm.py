@@ -837,14 +837,14 @@ async def open_house_loops(
 
     # House uses the same per-hotkey active-loop cap as miner submissions.
     # Repaired orphans re-enter the queue, so they consume slots first.
-    hotkey_cap = max(1, int(config.max_active_autoresearch_loops_per_hotkey or 1))
+    hotkey_cap = max(1, int(getattr(config, "max_active_autoresearch_loops_per_hotkey", 2) or 1))
     hotkey_slots = max(0, hotkey_cap - len(open_rows) - len(orphaned))
     budget_slots = int(remaining_usd // per_loop_usd) if per_loop_usd > 0 else 0
     request_slots = max(0, int(max_open_loops) - len(open_rows) - len(orphaned))
     to_open = max(0, min(hotkey_slots, budget_slots, request_slots))
     if hotkey_slots == 0:
         result["skipped"].append(
-            f"house hotkey already reached active-loop cap ({hotkey_cap}; scripts/43/54/67)"
+            f"house hotkey already reached active loop cap ({hotkey_cap}; scripts/43/54/67)"
             if open_rows
             else "orphaned house opening consumes the remaining hotkey slot this pass"
         )

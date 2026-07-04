@@ -176,6 +176,7 @@ def _fake_config() -> Any:
         miner_openrouter_key_ref_env_map_json="",
         miner_openrouter_key_env_var="OPENROUTER_API_KEY",
         improvement_threshold_points=1.0,
+        max_active_autoresearch_loops_per_hotkey=1,
     )
 
 

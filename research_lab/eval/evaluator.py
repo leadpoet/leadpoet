@@ -142,6 +142,21 @@ def _candidate_provider_retry_rounds() -> int:
     return max(0, _env_int("RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS", 2))
 
 
+def _work_conserving_enabled() -> bool:
+    """Opt-in work-conserving ICP scheduling (default off = legacy waves).
+
+    The fixed-size wave loop is a barrier: 4 fast ICPs idle while the wave's
+    straggler finishes, so container slots sit unused (observed 5<->10
+    oscillation at concurrency 5). The work-conserving pool keeps exactly
+    ``concurrency`` ICP jobs in flight and starts the next queued ICP the
+    moment one finishes. Results are still assembled in benchmark-item order
+    (hash determinism); the timeout latch and freshness checks run in
+    completion order, which concurrency>1 already made approximate.
+    """
+    raw = str(os.getenv("RESEARCH_LAB_EVAL_WORK_CONSERVING") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 class RealEvaluatorRequired(RuntimeError):
     """Raised when a production Research Lab evaluation lacks real inputs."""
 
@@ -329,6 +344,23 @@ async def score_private_model_pair_items(
     effective_trace_sink = _resolve_trace_sink(trace_sink, run_context)
     concurrency = _candidate_scoring_concurrency()
     resume_rows = _resume_rows_by_ref(resume_results)
+    if concurrency > 1 and _work_conserving_enabled():
+        return await _score_items_work_conserving(
+            benchmark_items=benchmark_items,
+            base_runner=base_runner,
+            candidate_runner=candidate_runner,
+            scorer=scorer,
+            run_context=run_context,
+            image_candidate=image_candidate,
+            runtime_patch=runtime_patch,
+            parent_freshness_check=parent_freshness_check,
+            icp_checkpoint=icp_checkpoint,
+            resume_rows=resume_rows,
+            trace_sink=effective_trace_sink,
+            concurrency=concurrency,
+            legacy_timeout_latch=legacy_timeout_latch,
+            provider_flake_retry=provider_flake_retry,
+        )
     per_icp_results: list[dict[str, Any]] = []
     candidate_runtime_skip_reason = ""
     consecutive_candidate_timeouts = 0
@@ -412,6 +444,127 @@ async def score_private_model_pair_items(
                 },
             )
     return per_icp_results
+
+
+async def _score_items_work_conserving(
+    *,
+    benchmark_items: Sequence[Mapping[str, Any]],
+    base_runner: ModelRunner | None,
+    candidate_runner: ModelRunner,
+    scorer: CompanyScorer,
+    run_context: Mapping[str, Any],
+    image_candidate: bool,
+    runtime_patch: CandidatePatchManifest | None,
+    parent_freshness_check: ParentFreshnessCheck | None,
+    icp_checkpoint: IcpCheckpoint | None,
+    resume_rows: Mapping[str, Mapping[str, Any]],
+    trace_sink: TraceSink | None,
+    concurrency: int,
+    legacy_timeout_latch: bool,
+    provider_flake_retry: bool,
+) -> list[dict[str, Any]]:
+    """Work-conserving ICP scheduler: exactly ``concurrency`` jobs in flight.
+
+    Replaces the fixed-wave barrier — the moment one ICP finishes, the next
+    queued ICP starts, so scoring slots never idle behind a wave straggler.
+
+    Behavior preserved from the wave loop:
+      * results returned in benchmark-item order (canonical hash determinism);
+      * resumed rows reused verbatim, never re-executed, never checkpointed,
+        and excluded from the timeout latch;
+      * per-completion checkpointing + ``after_icp`` freshness checks
+        (serialized under a lock; order follows completion, which the wave
+        loop already made approximate at concurrency>1);
+      * the 2-consecutive-timeouts latch: once raised, jobs that have not yet
+        STARTED run through the existing skip path (skip reason is read at
+        job start);
+      * settle-then-raise: on a fatal error no NEW jobs start, in-flight jobs
+        settle (blocking container waits cannot be cancelled), then the
+        lowest-benchmark-index fatal is raised.
+    """
+    semaphore = asyncio.Semaphore(max(1, int(concurrency)))
+    lock = asyncio.Lock()
+    results: dict[int, dict[str, Any]] = {}
+    fatals: dict[int, BaseException] = {}
+    state = {
+        "skip_reason": "",
+        "consecutive_timeouts": 0,
+        "completed": 0,
+        "stop": False,
+    }
+
+    async def _run_one(position: int, item_index: int, item: Mapping[str, Any]) -> None:
+        async with semaphore:
+            if state["stop"]:
+                return  # fatal already recorded; do not start new containers
+            try:
+                row, markers = await _score_single_icp(
+                    item=item,
+                    item_index=item_index,
+                    completed_icp_count=state["completed"],
+                    base_runner=base_runner,
+                    candidate_runner=candidate_runner,
+                    scorer=scorer,
+                    run_context=run_context,
+                    image_candidate=image_candidate,
+                    runtime_patch=runtime_patch,
+                    parent_freshness_check=parent_freshness_check,
+                    candidate_runtime_skip_reason=state["skip_reason"],
+                    legacy_timeout_latch=legacy_timeout_latch,
+                    provider_flake_retry=provider_flake_retry,
+                    trace_sink=trace_sink,
+                )
+            except BaseException as exc:  # noqa: BLE001 - settle-then-raise
+                async with lock:
+                    fatals[position] = exc
+                    state["stop"] = True
+                return
+            async with lock:
+                results[position] = row
+                state["completed"] += 1
+                if markers["timed_out"]:
+                    state["consecutive_timeouts"] += 1
+                elif not markers["skipped"]:
+                    state["consecutive_timeouts"] = 0
+                if markers["latch_reason"] and not state["skip_reason"]:
+                    state["skip_reason"] = markers["latch_reason"]
+                if (
+                    not legacy_timeout_latch
+                    and not state["skip_reason"]
+                    and state["consecutive_timeouts"] >= 2
+                ):
+                    state["skip_reason"] = _candidate_runtime_skip_reason(
+                        "candidate_model_runtime_timeout"
+                    )
+                if icp_checkpoint is not None:
+                    checkpoint_result = icp_checkpoint(row)
+                    if inspect.isawaitable(checkpoint_result):
+                        await checkpoint_result
+                await _run_parent_freshness_check(
+                    parent_freshness_check,
+                    {
+                        "phase": "after_icp",
+                        "last_icp_index": item_index,
+                        "completed_icp_count": state["completed"],
+                        "icp_ref": str(item.get("icp_ref") or item.get("icp_hash") or ""),
+                        "icp_hash": str(item.get("icp_hash") or ""),
+                    },
+                )
+
+    tasks: list[asyncio.Task] = []
+    for position, item in enumerate(benchmark_items):
+        resumed = resume_rows.get(_benchmark_item_ref(item)) if resume_rows else None
+        if resumed is not None:
+            results[position] = dict(resumed)
+            continue
+        tasks.append(asyncio.create_task(_run_one(position, position, item)))
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    if fatals:
+        raise fatals[min(fatals)]
+    # Assemble in benchmark order; positions missing only if a fatal aborted
+    # remaining jobs, and fatals raise above — so this is total.
+    return [results[position] for position in sorted(results)]
 
 
 async def _score_single_icp(

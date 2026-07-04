@@ -194,11 +194,6 @@ def normalize_docker_image(image_name, normalized_name):
                     members = sorted(old_tar.getmembers(), key=lambda m: m.name)
                     for member in members:
                         member.mtime = 0
-                        member.uid = 0
-                        member.gid = 0
-                        member.uname = ""
-                        member.gname = ""
-                        member.pax_headers = {}
                         if member.isfile():
                             content = old_tar.extractfile(member)
                             new_tar.addfile(member, content)

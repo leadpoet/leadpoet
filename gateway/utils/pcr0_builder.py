@@ -38,7 +38,6 @@ import json
 import logging
 import os
 import shutil
-import subprocess
 import tarfile
 import tempfile
 import time
@@ -395,17 +394,6 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
 # Image Timestamp Normalization (for reproducible PCR0)
 # =============================================================================
 
-def normalize_tar_member(member: tarfile.TarInfo) -> tarfile.TarInfo:
-    """Normalize tar header fields that affect layer digests, not file bytes."""
-    member.mtime = 0
-    member.uid = 0
-    member.gid = 0
-    member.uname = ""
-    member.gname = ""
-    member.pax_headers = {}
-    return member
-
-
 def normalize_docker_image(image_name: str, normalized_name: str) -> bool:
     """
     Normalize a Docker image to have deterministic timestamps.
@@ -464,7 +452,7 @@ def normalize_docker_image(image_name: str, normalized_name: str) -> bool:
                     # Sort members alphabetically by name for deterministic order
                     members = sorted(old_tar.getmembers(), key=lambda m: m.name)
                     for member in members:
-                        member = normalize_tar_member(member)
+                        member.mtime = 0  # Epoch timestamp
                         if member.isfile():
                             content = old_tar.extractfile(member)
                             new_tar.addfile(member, content)
@@ -623,27 +611,6 @@ def write_base_image_stamp(repo_dir: str, dockerfile_hash: str) -> None:
         logger.warning(f"[PCR0] Could not write base image stamp: {e}")
 
 
-def get_base_image_identity() -> Optional[str]:
-    """Return a cheap fingerprint of the current base image bytes/config."""
-    try:
-        output = subprocess.check_output(
-            [
-                "docker",
-                "image",
-                "inspect",
-                BASE_IMAGE_NAME,
-                "--format",
-                "{{.Id}}|{{json .RootFS.Layers}}",
-            ],
-            text=True,
-            stderr=subprocess.STDOUT,
-        ).strip()
-        return hashlib.sha256(output.encode()).hexdigest()[:16]
-    except Exception as e:
-        logger.warning(f"[PCR0] Could not inspect base image identity: {e}")
-        return None
-
-
 async def ensure_base_image_exists(repo_dir: str) -> bool:
     """
     Ensure the base image exists AND is up-to-date with current Dockerfile.base.
@@ -733,10 +700,71 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
             return None
         
         # Step 0.4: Clean and normalize the exact Docker COPY inputs.
-        # This is also done before cache lookup, but keeping it here makes the
-        # actual build path self-healing if called directly.
-        prepare_pcr0_context(repo_dir)
-        logger.info(f"[PCR0] PCR0 Docker context manifest_sha256={compute_files_content_hash(repo_dir)}")
+        #
+        # The gateway uses a sparse GitHub checkout, but this keeps the builder
+        # self-healing if a reused /tmp/pcr0_builder ever accumulates untracked
+        # files in paths copied into the enclave image.
+        logger.info("[PCR0] Cleaning PCR0 Docker context...")
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clean", "-ffdx", "--", *PCR0_COPY_PATHS,
+            cwd=repo_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+
+        # __pycache__ directories and .pyc files can differ between machines.
+        import shutil
+        for rel_path in PCR0_COPY_PATHS:
+            full_copy_path = os.path.join(repo_dir, rel_path)
+            if os.path.isdir(full_copy_path):
+                for root, dirs, files in os.walk(full_copy_path):
+                    for d in list(dirs):
+                        if d == "__pycache__":
+                            shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                    for f in files:
+                        if f.endswith(".pyc") or f.endswith(".pyo"):
+                            try:
+                                os.remove(os.path.join(root, f))
+                            except:
+                                pass
+        
+        # Step 0.5: Normalize file permissions for reproducibility
+        # Docker COPY includes file permissions in layer hash
+        # Different machines may have different umask settings (644 vs 664)
+        # We normalize every copied file to 644 and every copied directory to
+        # 755 to ensure identical layer hashes.
+        logger.info("[PCR0] Normalizing PCR0 Docker context permissions...")
+        copied_files = []
+        for rel_path in PCR0_COPY_PATHS:
+            full_path = os.path.join(repo_dir, rel_path)
+            if os.path.isdir(full_path):
+                for root, dirs, files in os.walk(full_path):
+                    for dirname in dirs:
+                        os.chmod(os.path.join(root, dirname), 0o755)
+                    os.chmod(root, 0o755)
+                    for fname in files:
+                        fpath = os.path.join(root, fname)
+                        if os.path.isfile(fpath):
+                            os.chmod(fpath, 0o644)
+                            copied_files.append(os.path.relpath(fpath, repo_dir))
+            elif os.path.isfile(full_path):
+                os.chmod(full_path, 0o644)
+                copied_files.append(rel_path)
+
+        manifest_hash = hashlib.sha256()
+        for rel_path in sorted(set(copied_files)):
+            full_path = os.path.join(repo_dir, rel_path)
+            try:
+                st = os.stat(full_path)
+                manifest_hash.update(f"{st.st_mode & 0o777} {st.st_size} {rel_path}\n".encode())
+                with open(full_path, "rb") as f:
+                    for chunk in iter(lambda: f.read(8192), b""):
+                        manifest_hash.update(chunk)
+                manifest_hash.update(b"\n")
+            except FileNotFoundError:
+                manifest_hash.update(f"MISSING {rel_path}\n".encode())
+        logger.info(f"[PCR0] PCR0 Docker context manifest_sha256={manifest_hash.hexdigest()}")
         
         # Step 1: Build Docker image with --no-cache
         # The base image is cached, so only our code layers rebuild
@@ -821,76 +849,6 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
 # Content Hash Tracking (for detecting PCR0-relevant changes)
 # =============================================================================
 
-def prepare_pcr0_context(repo_dir: str) -> None:
-    """Clean and permission-normalize files copied into the enclave image."""
-    logger.info("[PCR0] Cleaning PCR0 Docker context...")
-    try:
-        subprocess.run(
-            ["git", "clean", "-ffdx", "--", *PCR0_COPY_PATHS],
-            cwd=repo_dir,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except Exception as e:
-        logger.warning(f"[PCR0] git clean for PCR0 context failed: {e}")
-
-    for rel_path in PCR0_COPY_PATHS:
-        full_copy_path = os.path.join(repo_dir, rel_path)
-        if os.path.isdir(full_copy_path):
-            for root, dirs, files in os.walk(full_copy_path):
-                for dirname in list(dirs):
-                    dpath = os.path.join(root, dirname)
-                    if dirname == "__pycache__":
-                        shutil.rmtree(dpath, ignore_errors=True)
-                    else:
-                        try:
-                            os.chmod(dpath, 0o755)
-                        except OSError:
-                            pass
-                try:
-                    os.chmod(root, 0o755)
-                except OSError:
-                    pass
-                for fname in files:
-                    fpath = os.path.join(root, fname)
-                    if fname.endswith((".pyc", ".pyo")):
-                        try:
-                            os.remove(fpath)
-                        except OSError:
-                            pass
-                        continue
-                    if os.path.isfile(fpath):
-                        try:
-                            os.chmod(fpath, 0o644)
-                        except OSError:
-                            pass
-        elif os.path.isfile(full_copy_path):
-            try:
-                os.chmod(full_copy_path, 0o644)
-            except OSError:
-                pass
-
-
-def iter_pcr0_input_paths(repo_dir: str):
-    """Yield the exact PCR0-relevant files and directories after normalization."""
-    input_paths = set(MONITORED_FILES) | set(PCR0_COPY_PATHS)
-
-    for rel_path in sorted(input_paths):
-        full_path = os.path.join(repo_dir, rel_path)
-        if os.path.isdir(full_path):
-            for root, dirs, files in os.walk(full_path):
-                dirs.sort()
-                files.sort()
-                yield os.path.relpath(root, repo_dir), True
-                for filename in files:
-                    yield os.path.relpath(os.path.join(root, filename), repo_dir), False
-        elif os.path.isfile(full_path):
-            yield rel_path, False
-        else:
-            yield rel_path, None
-
-
 def compute_files_content_hash(repo_dir: str) -> Optional[str]:
     """
     Compute a hash of all PCR0-relevant files' contents.
@@ -899,48 +857,43 @@ def compute_files_content_hash(repo_dir: str) -> Optional[str]:
     Only rebuilds when the content of monitored files changes.
     """
     hasher = hashlib.sha256()
-
+    
     files_found = 0
-    for rel_path, is_dir in iter_pcr0_input_paths(repo_dir):
-        full_path = os.path.join(repo_dir, rel_path)
-        if is_dir is None:
-            hasher.update(f"MISSING {rel_path}\n".encode())
-            continue
-
-        try:
-            st = os.stat(full_path)
-            kind = "DIR" if is_dir else "FILE"
-            hasher.update(f"{kind} {st.st_mode & 0o777} {st.st_size} {rel_path}\n".encode())
-            if not is_dir:
-                with open(full_path, "rb") as f:
-                    for chunk in iter(lambda: f.read(8192), b""):
-                        hasher.update(chunk)
+    for filepath in sorted(MONITORED_FILES):
+        full_path = os.path.join(repo_dir, filepath)
+        if os.path.exists(full_path):
+            try:
+                with open(full_path, 'rb') as f:
+                    hasher.update(f.read())
+                hasher.update(filepath.encode())  # Include path in hash
                 files_found += 1
-            hasher.update(b"\n")
-        except Exception as e:
-            logger.warning(f"[PCR0] Could not hash {rel_path}: {e}")
+            except Exception as e:
+                logger.warning(f"[PCR0] Could not read {filepath}: {e}")
+    
+    # Also hash files in monitored directories
+    for dirpath in sorted(MONITORED_DIRS):
+        full_dir = os.path.join(repo_dir, dirpath)
+        if os.path.isdir(full_dir):
+            for root, dirs, files in os.walk(full_dir):
+                for filename in sorted(files):
+                    if any(filename.endswith(suffix) for suffix in MONITORED_DIR_SUFFIXES):
+                        filepath = os.path.join(root, filename)
+                        rel_path = os.path.relpath(filepath, repo_dir)
+                        try:
+                            with open(filepath, 'rb') as f:
+                                hasher.update(f.read())
+                            hasher.update(rel_path.encode())
+                            files_found += 1
+                        except Exception as e:
+                            logger.warning(f"[PCR0] Could not read {rel_path}: {e}")
     
     if files_found == 0:
         logger.error("[PCR0] No monitored files found!")
         return None
     
     content_hash = hasher.hexdigest()[:16]  # Short hash for logging
-    logger.info(f"[PCR0] Content hash: {content_hash} ({files_found} exact input files)")
+    logger.info(f"[PCR0] Content hash: {content_hash} ({files_found} files)")
     return content_hash
-
-
-async def compute_pcr0_cache_key(repo_dir: str, content_hash: str) -> Optional[str]:
-    """Build cache key from source content plus current base image identity."""
-    if not await ensure_base_image_exists(repo_dir):
-        logger.error("[PCR0] Cannot compute cache key without base image")
-        return None
-
-    base_identity = get_base_image_identity()
-    if not base_identity:
-        logger.error("[PCR0] Cannot compute cache key without base image identity")
-        return None
-
-    return f"{content_hash}:{base_identity}"
 
 
 # =============================================================================
@@ -979,25 +932,17 @@ async def check_and_build_pcr0():
             logger.error("[PCR0] Failed to update repo")
             return
         
-        # Clean and normalize the exact Docker inputs before hashing. This
-        # keeps cache lookup aligned with the image Docker will actually build.
-        prepare_pcr0_context(repo_dir)
-
         # Compute content hash of monitored files
         content_hash = compute_files_content_hash(repo_dir)
         if not content_hash:
             logger.error("[PCR0] Failed to compute content hash")
             return
-
-        cache_key = await compute_pcr0_cache_key(repo_dir, content_hash)
-        if not cache_key:
-            return
         
         # Check if we already have this content hash cached
         # With pinned Dockerfile, same content = same PCR0, so no need to rebuild
-        if cache_key in _pcr0_cache:
-            logger.info(f"[PCR0] PCR0 input {cache_key} already cached, skipping build")
-            print(f"[PCR0] PCR0 input {cache_key} already cached, skipping build")
+        if content_hash in _pcr0_cache:
+            logger.info(f"[PCR0] Content hash {content_hash} already cached, skipping build")
+            print(f"[PCR0] Content hash {content_hash} already cached, skipping build")
             _last_content_hash = content_hash
             return
         
@@ -1019,10 +964,9 @@ async def check_and_build_pcr0():
             if pcr0:
                 # Store keyed by CONTENT HASH (not commit hash)
                 # This means same code = same key, regardless of commit
-                _pcr0_cache[cache_key] = {
+                _pcr0_cache[content_hash] = {
                     "pcr0": pcr0,
                     "content_hash": content_hash,
-                    "cache_key": cache_key,
                     "commit_hash": commit_hash,
                     "built_at": datetime.utcnow().isoformat(),
                 }
@@ -1160,21 +1104,15 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
                 logger.warning(f"[PCR0] Failed to checkout {commit_hash[:8]}: {stderr.decode()}")
                 continue
             
-            # Normalize and compute content hash for this version
-            prepare_pcr0_context(repo_dir)
+            # Compute content hash for this version
             content_hash = compute_files_content_hash(repo_dir)
             if not content_hash:
                 logger.warning(f"[PCR0] Failed to compute content hash for {commit_hash[:8]}")
                 continue
-
-            cache_key = await compute_pcr0_cache_key(repo_dir, content_hash)
-            if not cache_key:
-                logger.warning(f"[PCR0] Failed to compute cache key for {commit_hash[:8]}")
-                continue
             
             # Check if already cached
-            if cache_key in _pcr0_cache:
-                logger.info(f"[PCR0] PCR0 input {cache_key} already cached, skipping")
+            if content_hash in _pcr0_cache:
+                logger.info(f"[PCR0] Content {content_hash} already cached, skipping")
                 continue
             
             # Build PCR0 for this version
@@ -1185,10 +1123,9 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
             
             if pcr0:
                 async with _cache_lock:
-                    _pcr0_cache[cache_key] = {
+                    _pcr0_cache[content_hash] = {
                         "pcr0": pcr0,
                         "content_hash": content_hash,
-                        "cache_key": cache_key,
                         "commit_hash": commit_hash,
                         "built_at": datetime.utcnow().isoformat(),
                     }

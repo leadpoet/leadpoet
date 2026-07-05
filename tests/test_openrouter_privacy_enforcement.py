@@ -84,9 +84,31 @@ def test_openrouter_workspace_privacy_verification_patches_and_proves(monkeypatc
         "is_observability_broadcast_enabled": False,
     }
     assert proof["logging_flags"]["is_observability_io_logging_enabled"] is False
-    assert proof["request_policy"]["zdr"] is True
+    assert proof["request_policy"] == {
+        "data_collection": "deny",
+        "allow_fallbacks": False,
+    }
     assert runtime_key not in json.dumps(proof)
     assert management_key not in json.dumps(proof)
+
+
+def test_openrouter_provider_policy_is_routeable_privacy_policy():
+    policy = key_vault.strict_openrouter_provider_policy()
+
+    assert policy == {
+        "data_collection": "deny",
+        "allow_fallbacks": False,
+    }
+    assert "zdr" not in policy
+    assert "require_parameters" not in policy
+
+
+def test_openrouter_key_validation_normalizes_prefix_case_only():
+    raw = "Sk-or-v1-" + "A" * 48
+
+    normalized = key_vault.validate_openrouter_key_format(raw)
+
+    assert normalized == "sk-or-v1-" + "A" * 48
 
 
 def test_openrouter_workspace_privacy_rejects_unmatched_workspace(monkeypatch):
@@ -212,10 +234,127 @@ def test_hidden_openrouter_call_writes_privacy_proof_before_prompt(monkeypatch):
     assert events[:3] == ["proof", "insert", "post"]
     assert bodies[0]["provider"] == {
         "data_collection": "deny",
-        "zdr": True,
         "allow_fallbacks": False,
-        "require_parameters": True,
     }
+    assert "zdr" not in bodies[0]["provider"]
+    assert "require_parameters" not in bodies[0]["provider"]
+    assert "include_reasoning" not in bodies[0]
+    assert "reasoning_effort" not in bodies[0]
+    assert "reasoning" not in bodies[0]
+
+
+def test_hidden_openrouter_call_preserves_explicit_reasoning_effort(monkeypatch):
+    bodies: list[dict[str, Any]] = []
+
+    def fake_verify(**kwargs):
+        return {
+            "source": "openrouter_workspace_privacy_guard",
+            "stage": kwargs["stage"],
+            "workspace_id_hash": "a" * 64,
+            "runtime_key_hash": "runtime-key-hash",
+            "management_key_hash": "b" * 64,
+            "logging_flags": {
+                "is_observability_io_logging_enabled": False,
+                "is_data_discount_logging_enabled": False,
+                "is_observability_broadcast_enabled": False,
+            },
+            "request_policy": kwargs["request_policy"],
+            "verified_at": "2026-07-04T00:00:00+00:00",
+            "proof_hash": "sha256:" + "c" * 64,
+        }
+
+    def fake_insert(**kwargs):
+        assert kwargs["proof_status"] == "passed"
+        return {"event_id": "00000000-0000-0000-0000-000000000011"}
+
+    def fake_urlopen(req, timeout: int):
+        body = json.loads((req.data or b"{}").decode("utf-8"))
+        bodies.append(body)
+        return _FakeResponse(
+            {"model": "test/model", "choices": [{"message": {"content": '{"ok": true}'}}]}
+        )
+
+    monkeypatch.setattr(worker_module, "verify_openrouter_workspace_privacy", fake_verify)
+    monkeypatch.setattr(worker_module, "create_openrouter_privacy_proof_event_sync", fake_insert)
+    monkeypatch.setattr(worker_module.urlrequest, "urlopen", fake_urlopen)
+
+    worker = ResearchLabHostedWorker(ResearchLabGatewayConfig(auto_research_model="test/model"))
+    asyncio.run(
+        worker._call_openrouter(
+            messages=[{"role": "user", "content": '{"task":"test"}'}],
+            api_key="sk-or-v1-" + "a" * 48,
+            model_id="test/model",
+            reasoning_effort="max",
+            max_tokens=8,
+            timeout_seconds=7,
+            capture_run_id="00000000-0000-0000-0000-000000000012",
+            capture_stage="alignment_judge",
+            privacy_key_ref="encrypted_ref:openrouter:" + "d" * 32,
+            privacy_miner_hotkey="5F" + "x" * 46,
+            privacy_management_key="sk-or-v1-" + "b" * 48,
+        )
+    )
+
+    assert bodies[0]["reasoning_effort"] == "max"
+    assert bodies[0]["reasoning"] == {"effort": "max"}
+    assert bodies[0]["include_reasoning"] is True
+
+
+def test_hidden_openrouter_call_can_opt_into_bare_include_reasoning(monkeypatch):
+    bodies: list[dict[str, Any]] = []
+
+    def fake_verify(**kwargs):
+        return {
+            "source": "openrouter_workspace_privacy_guard",
+            "stage": kwargs["stage"],
+            "workspace_id_hash": "a" * 64,
+            "runtime_key_hash": "runtime-key-hash",
+            "management_key_hash": "b" * 64,
+            "logging_flags": {
+                "is_observability_io_logging_enabled": False,
+                "is_data_discount_logging_enabled": False,
+                "is_observability_broadcast_enabled": False,
+            },
+            "request_policy": kwargs["request_policy"],
+            "verified_at": "2026-07-04T00:00:00+00:00",
+            "proof_hash": "sha256:" + "c" * 64,
+        }
+
+    def fake_insert(**kwargs):
+        assert kwargs["proof_status"] == "passed"
+        return {"event_id": "00000000-0000-0000-0000-000000000013"}
+
+    def fake_urlopen(req, timeout: int):
+        body = json.loads((req.data or b"{}").decode("utf-8"))
+        bodies.append(body)
+        return _FakeResponse(
+            {"model": "test/model", "choices": [{"message": {"content": '{"ok": true}'}}]}
+        )
+
+    monkeypatch.setenv("RESEARCH_LAB_LLM_INCLUDE_REASONING", "true")
+    monkeypatch.setattr(worker_module, "verify_openrouter_workspace_privacy", fake_verify)
+    monkeypatch.setattr(worker_module, "create_openrouter_privacy_proof_event_sync", fake_insert)
+    monkeypatch.setattr(worker_module.urlrequest, "urlopen", fake_urlopen)
+
+    worker = ResearchLabHostedWorker(ResearchLabGatewayConfig(auto_research_model="test/model"))
+    asyncio.run(
+        worker._call_openrouter(
+            messages=[{"role": "user", "content": '{"task":"test"}'}],
+            api_key="sk-or-v1-" + "a" * 48,
+            model_id="test/model",
+            max_tokens=8,
+            timeout_seconds=7,
+            capture_run_id="00000000-0000-0000-0000-000000000014",
+            capture_stage="code_edit_draft",
+            privacy_key_ref="encrypted_ref:openrouter:" + "d" * 32,
+            privacy_miner_hotkey="5F" + "x" * 46,
+            privacy_management_key="sk-or-v1-" + "b" * 48,
+        )
+    )
+
+    assert bodies[0]["include_reasoning"] is True
+    assert "reasoning_effort" not in bodies[0]
+    assert "reasoning" not in bodies[0]
 
 
 def test_hidden_openrouter_call_blocks_before_prompt_when_privacy_fails(monkeypatch):

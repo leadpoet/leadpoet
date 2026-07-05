@@ -143,10 +143,15 @@ def _trace_kms_key_id() -> str:
 
 
 def _llm_include_reasoning_enabled() -> bool:
-    """§9.1/5.6: request reasoning output on every chat call (default true) so
-    raw traces preserve chain-of-thought whenever the model produces it."""
+    """Optionally request provider reasoning output on calls without an
+    explicit reasoning effort.
+
+    Default false: several configured OpenRouter models route correctly with
+    explicit reasoning fields only when requested by the model config, but
+    return empty/filtered content when bare include_reasoning is forced.
+    """
     return str(
-        os.getenv("RESEARCH_LAB_LLM_INCLUDE_REASONING", "true")
+        os.getenv("RESEARCH_LAB_LLM_INCLUDE_REASONING", "false")
     ).strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -3617,12 +3622,9 @@ class ResearchLabHostedWorker:
                 body["reasoning"] = {"effort": requested_reasoning_effort}
                 body["include_reasoning"] = True
             elif _llm_include_reasoning_enabled() and include_reasoning_effort:
-                # §9.1/5.6: providers are the only source of chain-of-thought —
-                # ask for reasoning output on every call so the raw-trace
-                # capture preserves it whenever the model produces it.
-                # OpenRouter ignores this field for non-reasoning models; the
-                # reasoning-unsupported drop-and-retry (which clears
-                # include_reasoning_effort) is the backstop for strict models.
+                # Optional reasoning capture for operators that explicitly
+                # enable it. Keep it off by default so non-reasoning planner
+                # models are not forced into empty/filtered responses.
                 body["include_reasoning"] = True
             return body
 
@@ -3811,7 +3813,7 @@ class ResearchLabHostedWorker:
             length_failures = 0
             retry_provider_usage: list[dict[str, Any]] = []
             retry_cost_microusd = 0
-            # Also true for bare include_reasoning requests (§9.1/5.6) so the
+            # Also true for opt-in bare include_reasoning requests so the
             # unsupported-drop retry can clear it for strict models.
             include_reasoning_effort = bool(requested_reasoning_effort) or _llm_include_reasoning_enabled()
             reasoning_effort_drop_error_hash = ""

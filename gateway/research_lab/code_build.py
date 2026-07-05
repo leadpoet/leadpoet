@@ -1124,7 +1124,7 @@ def _redact_secret_values(text: str) -> str:
             return _mask_secret_chars(match.group(0))
         prefix = groups[0] or ""
         value = groups[1] if len(groups) > 1 else ""
-        if value and not re.search(r"\d", value):
+        if value and not re.search(r"\d", value) and "secret" not in value.lower():
             # Identifier-like (no digits) — likely code, not a literal secret.
             return match.group(0)
         return prefix + _mask_secret_chars(match.group(0)[len(prefix):])

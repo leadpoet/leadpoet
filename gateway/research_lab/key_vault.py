@@ -24,11 +24,13 @@ OPENROUTER_LOGGING_DISABLED_PATCH: dict[str, bool] = {
     "is_observability_broadcast_enabled": False,
 }
 OPENROUTER_LOGGING_FLAG_FIELDS = tuple(OPENROUTER_LOGGING_DISABLED_PATCH)
+# Workspace input/output logging is enforced with the management API immediately
+# before every hidden call. Keep request policy routeable for the configured
+# production models; live OpenRouter probes showed global `zdr` and
+# `require_parameters` reject those routes before prompts can run.
 STRICT_OPENROUTER_PROVIDER_POLICY: dict[str, Any] = {
     "data_collection": "deny",
-    "zdr": True,
     "allow_fallbacks": False,
-    "require_parameters": True,
 }
 
 
@@ -38,6 +40,9 @@ class OpenRouterKeyVaultError(RuntimeError):
 
 def validate_openrouter_key_format(raw_key: str) -> str:
     value = (raw_key or "").strip()
+    prefix = "sk-or-v1-"
+    if value[: len(prefix)].lower() == prefix and value[: len(prefix)] != prefix:
+        value = prefix + value[len(prefix) :]
     if not OPENROUTER_KEY_RE.match(value):
         raise OpenRouterKeyVaultError("OpenRouter key must start with sk-or-v1- and look like a valid API key")
     return value

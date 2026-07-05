@@ -244,8 +244,14 @@ def main() -> int:
             if captured_reasoning_body.get("reasoning_effort") != "xhigh":
                 errors.append("OpenRouter reasoning_effort was not forwarded")
             provider_doc = captured_reasoning_body.get("provider")
-            if not isinstance(provider_doc, dict) or provider_doc.get("data_collection") != "deny" or provider_doc.get("zdr") is not True:
-                errors.append("OpenRouter reasoning request lost provider privacy settings")
+            if (
+                not isinstance(provider_doc, dict)
+                or provider_doc.get("data_collection") != "deny"
+                or provider_doc.get("allow_fallbacks") is not False
+                or "zdr" in provider_doc
+                or "require_parameters" in provider_doc
+            ):
+                errors.append("OpenRouter reasoning request lost routeable provider privacy settings")
         finally:
             worker_module.urlrequest.urlopen = original_urlopen
 
@@ -606,9 +612,9 @@ def main() -> int:
     if (
         "strict_openrouter_provider_policy()" not in worker_text
         or '"allow_fallbacks": False' not in (ROOT / "gateway" / "research_lab" / "key_vault.py").read_text(encoding="utf-8")
-        or '"require_parameters": True' not in (ROOT / "gateway" / "research_lab" / "key_vault.py").read_text(encoding="utf-8")
+        or '"data_collection": "deny"' not in (ROOT / "gateway" / "research_lab" / "key_vault.py").read_text(encoding="utf-8")
     ):
-        errors.append("hosted worker OpenRouter calls must enforce strict OpenRouter provider privacy policy")
+        errors.append("hosted worker OpenRouter calls must enforce routeable provider privacy policy")
     if '"data_collection": "deny"' not in local_proxy_text or '"zdr": True' not in local_proxy_text:
         errors.append("local proxy must inject OpenRouter data_collection=deny and ZDR")
     if "_maybe_rebase_stale_candidate_before_scoring" not in scoring_worker_text:
@@ -1097,8 +1103,11 @@ def _verify_image_extracted_code_builder(artifact: PrivateModelArtifactManifest)
             serialized_context = json.dumps(batch.model_context)
             if "password=not-a-real-secret" in serialized_context:
                 errors.append("source inspection leaked secret-like source content")
-            if "[redacted secret-like source line]" not in serialized_context:
-                errors.append("source inspection did not redact secret-like source line")
+            if (
+                "[redacted secret-like source line]" not in serialized_context
+                and "password=*****************" not in serialized_context
+            ):
+                errors.append("source inspection did not redact secret-like source content")
             result = CodeEditCandidateBuilder(config).build(
                 draft=_allowed_runtime_patch_draft(),
                 parent_artifact=artifact,

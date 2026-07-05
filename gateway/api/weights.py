@@ -27,6 +27,9 @@ import base64
 import hashlib
 import json
 import logging
+import re
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime
 from typing import List, Optional, Set
@@ -58,6 +61,12 @@ MAX_BLOCK_DRIFT = 30  # Max allowed drift from gateway-observed block
 
 # Build identifier for transparency log
 BUILD_ID = os.environ.get("BUILD_ID", "production-gateway-tee")
+PCR0_ALLOWLIST_URL = os.environ.get(
+    "PCR0_ALLOWLIST_URL",
+    "https://raw.githubusercontent.com/leadpoet/leadpoet/main/pcr0_allowlist.json",
+)
+_COMMIT_HASH_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+_NOTES_COMMIT_RE = re.compile(r"\bcommit\s+([0-9a-fA-F]{7,40})\b")
 
 # PCR0 is the ROOT OF TRUST - code_hash in user_data is INFORMATIONAL only
 # The verify_nitro_attestation_full function checks PCR0 against the allowlist
@@ -85,6 +94,87 @@ def get_subtensor():
         import bittensor as bt
         _subtensor = bt.subtensor()
     return _subtensor
+
+
+def _extract_commit_hash_from_allowlist_entry(entry: dict) -> Optional[str]:
+    """Return commit metadata from a PCR0 allowlist entry, if present."""
+    return (
+        _extract_explicit_commit_hash_from_allowlist_entry(entry)
+        or _extract_notes_commit_hash_from_allowlist_entry(entry)
+    )
+
+
+def _extract_explicit_commit_hash_from_allowlist_entry(entry: dict) -> Optional[str]:
+    """Return structured commit metadata from a PCR0 allowlist entry."""
+    for key in ("commit_hash", "git_commit_sha", "git_commit", "commit"):
+        value = entry.get(key)
+        if isinstance(value, str) and _COMMIT_HASH_RE.fullmatch(value.strip()):
+            return value.strip().lower()
+
+    return None
+
+
+def _extract_notes_commit_hash_from_allowlist_entry(entry: dict) -> Optional[str]:
+    """Return legacy free-text commit metadata from a PCR0 allowlist entry."""
+    notes = entry.get("notes")
+    if isinstance(notes, str):
+        match = _NOTES_COMMIT_RE.search(notes)
+        if match:
+            return match.group(1).lower()
+
+    return None
+
+
+def _lookup_pcr0_commit_hash_from_allowlist(pcr0_hex: str) -> Optional[str]:
+    """
+    Resolve static-allowlist PCR0 approvals back to a commit for audit storage.
+
+    Dynamic GitHub verification already returns pcr0_commit. Static allowlist
+    fallback must also store a non-null commit hash because auditors rely on
+    published_weight_bundles.pcr0_commit_hash.
+    """
+    if not pcr0_hex or pcr0_hex == "N/A":
+        return None
+
+    allowlist_docs = []
+    try:
+        request = urllib.request.Request(
+            PCR0_ALLOWLIST_URL,
+            headers={"User-Agent": "LeadPoet-Gateway/1.0"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            allowlist_docs.append(json.loads(response.read().decode("utf-8")))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
+        logger.warning(f"[PCR0] Could not fetch allowlist metadata from GitHub: {e}")
+
+    try:
+        with open("pcr0_allowlist.json", "r", encoding="utf-8") as handle:
+            allowlist_docs.append(json.load(handle))
+    except (OSError, json.JSONDecodeError) as e:
+        logger.debug(f"[PCR0] Could not read local allowlist metadata: {e}")
+
+    explicit_matches = []
+    legacy_note_matches = []
+    for doc in allowlist_docs:
+        for entry in doc.get("validator_pcr0", []):
+            if entry.get("pcr0") != pcr0_hex:
+                continue
+
+            explicit = _extract_explicit_commit_hash_from_allowlist_entry(entry)
+            if explicit:
+                explicit_matches.append(explicit)
+                continue
+
+            notes_commit = _extract_notes_commit_hash_from_allowlist_entry(entry)
+            if notes_commit:
+                legacy_note_matches.append(notes_commit)
+
+    if explicit_matches:
+        return explicit_matches[0]
+    if legacy_note_matches:
+        return legacy_note_matches[0]
+
+    return None
 
 
 # ============================================================================
@@ -389,11 +479,18 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
     verified_pcr0 = attestation_data.get("pcr0", "N/A")
     pcr0_mode = attestation_data.get("pcr0_verification_mode", "allowlist")
     pcr0_commit_hash = attestation_data.get("pcr0_commit")  # Git commit hash for auditability
+    if not pcr0_commit_hash:
+        pcr0_commit_hash = _lookup_pcr0_commit_hash_from_allowlist(verified_pcr0)
     print(f"   ✅ Nitro attestation OK")
     print(f"      PCR0: {verified_pcr0[:32]}...")
     print(f"      Mode: {pcr0_mode} (auditors verify against GitHub)")
     if pcr0_commit_hash:
         print(f"      Commit: {pcr0_commit_hash[:8]}... (auditors can verify this commit exists)")
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail="Verified validator PCR0 but could not resolve pcr0_commit_hash for audit storage",
+        )
     
     # --- Step 5: Hotkey binding verification ---
     print(f"   Step 5: Verifying hotkey binding...")

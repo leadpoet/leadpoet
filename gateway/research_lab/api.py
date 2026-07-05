@@ -70,6 +70,7 @@ from .public_activity import (
     fetch_public_loop_detail,
     fetch_public_loop_rows,
     fetch_public_loop_summary,
+    public_loop_outcome_closes_ticket,
     safe_project_public_loop_activity,
 )
 from .promotion import private_repo_head_alignment_status
@@ -1708,10 +1709,23 @@ async def _enforce_open_ticket_cap(config: ResearchLabGatewayConfig, miner_hotke
         order_by=(("current_status_at", True),),
         max_rows=500,
     )
+    public_rows = await select_all(
+        "research_lab_public_loop_card_current",
+        columns="ticket_id,current_outcome_label,current_outcome_band,current_last_activity_at,created_at",
+        filters=(("miner_hotkey", str(miner_hotkey)),),
+        order_by=(("current_last_activity_at", True), ("created_at", True)),
+        max_rows=500,
+    )
+    public_by_ticket_id = {
+        str(row.get("ticket_id") or ""): row
+        for row in public_rows
+        if row.get("ticket_id")
+    }
     terminal_statuses = {"completed", "cancelled", "failed", "tombstoned"}
     open_rows = [
         row
         for row in rows
+        if not public_loop_outcome_closes_ticket(public_by_ticket_id.get(str(row.get("ticket_id") or "")))
         if str(row.get("current_ticket_status") or "").strip().lower() not in terminal_statuses
     ]
     if len(open_rows) < int(config.max_open_tickets_per_hotkey):

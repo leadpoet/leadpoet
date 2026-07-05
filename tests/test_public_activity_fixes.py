@@ -22,7 +22,11 @@ import pytest
 
 import gateway.research_lab.public_activity as public_activity
 import gateway.research_lab.recovery as recovery
-from gateway.research_lab.public_activity import derive_public_loop_outcome
+from gateway.research_lab.public_activity import (
+    derive_public_loop_outcome,
+    public_loop_outcome_closes_ticket,
+    public_loop_ticket_id_matches_lookup,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_61 = REPO_ROOT / "scripts" / "61-research-lab-public-status-check-allowlist.sql"
@@ -386,6 +390,51 @@ class TestDerivationPrecedence:
             candidate_rows=[_candidate("evaluating")],
         )
         assert outcome.outcome_label == "scoring"
+
+
+class TestPublicLoopLookupAndTicketCap:
+    def test_short_ticket_prefix_matches_full_ticket_id(self):
+        assert public_loop_ticket_id_matches_lookup(
+            "49a0d110-1234-4567-89ab-123456789abc",
+            "49a0d110",
+        )
+
+    def test_invalid_short_ticket_lookup_does_not_match(self):
+        assert not public_loop_ticket_id_matches_lookup(
+            "49a0d110-1234-4567-89ab-123456789abc",
+            "not-a-uuid-prefix",
+        )
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            {"current_outcome_label": "completed_no_candidate", "current_outcome_band": "pending"},
+            {"current_outcome_label": "failed", "current_outcome_band": "failed"},
+            {"current_outcome_label": "scored_no_gain", "current_outcome_band": "no_gain"},
+            {"current_outcome_label": "scored_promising", "current_outcome_band": "small_gain"},
+            {"current_outcome_label": "scored_promising", "current_outcome_band": "passed_threshold"},
+            {"current_outcome_label": "promotion_passed", "current_outcome_band": "passed_threshold"},
+            {"current_outcome_label": "promoted", "current_outcome_band": "promoted"},
+        ],
+    )
+    def test_terminal_public_outcomes_close_ticket_cap(self, row):
+        assert public_loop_outcome_closes_ticket(row)
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            {"current_outcome_label": "awaiting_payment", "current_outcome_band": "pending"},
+            {"current_outcome_label": "queued", "current_outcome_band": "pending"},
+            {"current_outcome_label": "running", "current_outcome_band": "pending"},
+            {"current_outcome_label": "scoring", "current_outcome_band": "pending"},
+            {"current_outcome_label": "waiting_for_baseline", "current_outcome_band": "pending"},
+            {"current_outcome_label": "candidate_generation_complete", "current_outcome_band": "pending"},
+            {"current_outcome_label": "blocked_for_credit", "current_outcome_band": "blocked"},
+            {"current_outcome_label": "needs_rescore", "current_outcome_band": "blocked"},
+        ],
+    )
+    def test_live_or_blocked_public_outcomes_do_not_close_ticket_cap(self, row):
+        assert not public_loop_outcome_closes_ticket(row)
 
 
 # --------------------------------------------------------------------------- #

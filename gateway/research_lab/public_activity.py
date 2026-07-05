@@ -44,6 +44,24 @@ PUBLIC_REPROJECTION_LOG_ONLY_ENV = "RESEARCH_LAB_PUBLIC_REPROJECTION_LOG_ONLY"
 PUBLIC_LOOP_LIST_MAX_CARDS_ENV = "RESEARCH_LAB_PUBLIC_LOOP_LIST_MAX_CARDS"
 DEFAULT_PUBLIC_LOOP_LIST_MAX_CARDS = 1000
 DEFAULT_REPROJECTION_SWEEP_BATCH_SIZE = 25
+PUBLIC_LOOP_TICKET_ID_PREFIX_MIN_LENGTH = 8
+_FULL_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_UUID_PREFIX_RE = re.compile(rf"^[0-9a-fA-F-]{{{PUBLIC_LOOP_TICKET_ID_PREFIX_MIN_LENGTH},36}}$")
+_TICKET_CAP_CLOSING_OUTCOME_LABELS = frozenset(
+    {
+        "completed_no_candidate",
+        "failed",
+        "promotion_passed",
+        "promoted",
+        "scored_no_gain",
+        "scored_promising",
+    }
+)
+_TICKET_CAP_CLOSING_OUTCOME_BANDS = frozenset(
+    {"failed", "no_gain", "passed_threshold", "promoted", "small_gain"}
+)
 
 
 def _env_flag(name: str, *, default: bool) -> bool:
@@ -59,6 +77,67 @@ def _env_positive_int(name: str, default: int) -> int:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def _normalize_public_loop_ticket_lookup(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def public_loop_ticket_id_matches_lookup(ticket_id: Any, lookup: str) -> bool:
+    normalized_ticket_id = _normalize_public_loop_ticket_lookup(ticket_id)
+    normalized_lookup = _normalize_public_loop_ticket_lookup(lookup)
+    if not normalized_ticket_id or not normalized_lookup:
+        return False
+    if _FULL_UUID_RE.fullmatch(normalized_lookup):
+        return normalized_ticket_id == normalized_lookup
+    if not _UUID_PREFIX_RE.fullmatch(normalized_lookup):
+        return False
+    return normalized_ticket_id.startswith(normalized_lookup)
+
+
+async def resolve_public_loop_ticket_id(ticket_id_or_prefix: str) -> str | None:
+    """Resolve public dashboard full or short ticket IDs before UUID-typed filters."""
+    lookup = _normalize_public_loop_ticket_lookup(ticket_id_or_prefix)
+    if not lookup:
+        return None
+    if _FULL_UUID_RE.fullmatch(lookup):
+        return lookup
+    if not _UUID_PREFIX_RE.fullmatch(lookup):
+        return None
+
+    rows = await select_many(
+        "research_lab_public_loop_card_current",
+        columns="ticket_id,current_last_activity_at,created_at",
+        filters=(),
+        order_by=(("current_last_activity_at", True), ("created_at", True)),
+        limit=_env_positive_int(PUBLIC_LOOP_LIST_MAX_CARDS_ENV, DEFAULT_PUBLIC_LOOP_LIST_MAX_CARDS),
+    )
+    matches: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        ticket_id = _normalize_public_loop_ticket_lookup(row.get("ticket_id"))
+        if not public_loop_ticket_id_matches_lookup(ticket_id, lookup) or ticket_id in seen:
+            continue
+        matches.append(ticket_id)
+        seen.add(ticket_id)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        logger.warning(
+            "research_lab_public_loop_short_id_ambiguous lookup=%s match_count=%s",
+            lookup,
+            len(matches),
+        )
+    return None
+
+
+def public_loop_outcome_closes_ticket(row: Mapping[str, Any] | None) -> bool:
+    """Whether a public loop card represents a terminal result for ticket caps."""
+    if not row:
+        return False
+    label = str(row.get("current_outcome_label") or row.get("outcome_label") or "").strip().lower()
+    band = str(row.get("current_outcome_band") or row.get("outcome_band") or "").strip().lower()
+    return label in _TICKET_CAP_CLOSING_OUTCOME_LABELS or band in _TICKET_CAP_CLOSING_OUTCOME_BANDS
 
 TOPIC_TAGS = (
     "intent_quality",
@@ -1012,13 +1091,16 @@ async def fetch_public_loop_summary(
 
 
 async def fetch_public_loop_detail(ticket_id: str) -> dict[str, Any] | None:
+    resolved_ticket_id = await resolve_public_loop_ticket_id(ticket_id)
+    if not resolved_ticket_id:
+        return None
     row = await select_one(
         "research_lab_public_loop_card_current",
-        filters=(("ticket_id", ticket_id),),
+        filters=(("ticket_id", resolved_ticket_id),),
     )
     if not row:
         return None
-    card_id = str(row.get("card_id") or public_loop_card_id(ticket_id))
+    card_id = str(row.get("card_id") or public_loop_card_id(resolved_ticket_id))
     events = await select_many(
         "research_lab_public_loop_card_events",
         filters=(("card_id", card_id),),
@@ -1027,7 +1109,7 @@ async def fetch_public_loop_detail(ticket_id: str) -> dict[str, Any] | None:
     )
     candidate_rows = await select_many(
         "research_lab_candidate_evaluation_current",
-        filters=(("ticket_id", ticket_id),),
+        filters=(("ticket_id", resolved_ticket_id),),
         order_by=(("created_at", False),),
         limit=1000,
     )

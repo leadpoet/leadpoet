@@ -16,6 +16,8 @@ from gateway.research_lab.public_activity import (  # noqa: E402
     contains_secret_material,
     derive_public_loop_outcome,
     public_loop_api_item,
+    public_loop_outcome_closes_ticket,
+    public_loop_ticket_id_matches_lookup,
     sanitize_public_text,
     topic_group_items,
     topic_signature_hash,
@@ -143,6 +145,10 @@ def verify_projection_fixtures() -> list[str]:
     )
     if scored.outcome_label != "scored_promising" or scored.outcome_band != "passed_threshold":
         errors.append("positive scored fixture should be promising/passed_threshold")
+    if not public_loop_outcome_closes_ticket(
+        {"current_outcome_label": scored.outcome_label, "current_outcome_band": scored.outcome_band}
+    ):
+        errors.append("scored public loop should close open-ticket cap")
     failed = derive_public_loop_outcome(
         ticket={"ticket_id": "t", "current_ticket_status": "running", "created_at": "2026-01-01T00:00:00+00:00"},
         queue_rows=[],
@@ -153,6 +159,10 @@ def verify_projection_fixtures() -> list[str]:
     )
     if failed.outcome_label != "failed" or failed.outcome_band != "failed":
         errors.append("failed fixture should be failed/failed")
+    if not public_loop_outcome_closes_ticket(
+        {"current_outcome_label": failed.outcome_label, "current_outcome_band": failed.outcome_band}
+    ):
+        errors.append("failed public loop should close open-ticket cap")
     blocked = derive_public_loop_outcome(
         ticket={"ticket_id": "t", "current_ticket_status": "running", "created_at": "2026-01-01T00:00:00+00:00"},
         queue_rows=[
@@ -212,6 +222,38 @@ def verify_projection_fixtures() -> list[str]:
     )
     if not_started.outcome_label != "awaiting_payment" or not_started.outcome_band != "pending":
         errors.append("ticket-without-run fixture should be awaiting_payment/pending")
+    no_candidate = derive_public_loop_outcome(
+        ticket={"ticket_id": "t", "current_ticket_status": "running", "created_at": "2026-01-01T00:00:00+00:00"},
+        queue_rows=[
+            {
+                "run_id": "r",
+                "current_queue_status": "completed",
+                "current_status_at": "2026-01-01T00:01:00+00:00",
+            }
+        ],
+        receipt_rows=[],
+        candidate_rows=[],
+        score_bundle_rows=[],
+        promotion_event_rows=[],
+    )
+    if no_candidate.outcome_label != "completed_no_candidate":
+        errors.append("completed run without candidate should be completed_no_candidate")
+    if not public_loop_outcome_closes_ticket(
+        {"current_outcome_label": no_candidate.outcome_label, "current_outcome_band": no_candidate.outcome_band}
+    ):
+        errors.append("completed_no_candidate public loop should close open-ticket cap")
+    if public_loop_outcome_closes_ticket({"current_outcome_label": "running", "current_outcome_band": "pending"}):
+        errors.append("running public loop must remain open for ticket cap")
+    if not public_loop_ticket_id_matches_lookup(
+        "49a0d110-1234-4567-89ab-123456789abc",
+        "49a0d110",
+    ):
+        errors.append("short public loop ticket prefix must match full ticket id")
+    if public_loop_ticket_id_matches_lookup(
+        "49a0d110-1234-4567-89ab-123456789abc",
+        "not-a-uuid-prefix",
+    ):
+        errors.append("invalid public loop ticket lookup must not match")
 
     row = {
         "card_id": "public_loop_card:00000000-0000-0000-0000-000000000000",

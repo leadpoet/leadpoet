@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
@@ -13,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from gateway.research_lab.bundles import contains_secret_material
 from gateway.research_lab.icp_window import (
+    RollingIcpWindowUnavailable,
     SELECTION_POLICY_HYBRID,
     WINDOW_MODE_HYBRID_FRESH_RETAINED,
     intent_signal_signature,
@@ -68,6 +70,23 @@ def main() -> int:
             errors.append(f"set {day['set_id']} did not prefer unique fresh intent signatures")
     if len({item["icp_ref"] for item in first.benchmark_items}) != 20:
         errors.append("selected ICP refs must be unique")
+    guarded_rows = [_fake_set(20260601 + day) for day in range(11)]
+    guarded = select_rolling_icp_window_from_sets(
+        guarded_rows,
+        required_fresh_set_id=20260610,
+        require_fresh_set_active_at=datetime(2026, 6, 10, 12, tzinfo=timezone.utc),
+    )
+    if guarded.public_doc.get("fresh_set_id") != 20260610:
+        errors.append("required fresh set guard did not ignore a newer future row")
+    try:
+        select_rolling_icp_window_from_sets(
+            guarded_rows[:-1],
+            required_fresh_set_id=20260611,
+            require_fresh_set_active_at=datetime(2026, 6, 11, 0, 1, tzinfo=timezone.utc),
+        )
+        errors.append("required fresh set guard allowed fallback to prior day")
+    except RollingIcpWindowUnavailable:
+        pass
 
     fresh_score = _selection_diversity(fresh)
     retained_score = _selection_diversity(retained)
@@ -87,6 +106,7 @@ def main() -> int:
 
 
 def _fake_set(set_id: int) -> dict[str, object]:
+    active_from = _set_day_start(set_id)
     icps = []
     industries = [
         "Software",
@@ -118,7 +138,14 @@ def _fake_set(set_id: int) -> dict[str, object]:
         "set_id": set_id,
         "icps": icps,
         "icp_set_hash": sha256_json(icps).split(":", 1)[1],
+        "active_from": active_from,
+        "active_until": active_from + timedelta(days=1),
+        "is_active": True,
     }
+
+
+def _set_day_start(set_id: int) -> datetime:
+    return datetime(set_id // 10000, (set_id // 100) % 100, set_id % 100, tzinfo=timezone.utc)
 
 
 def _selection_diversity(items: list[dict[str, object]] | tuple[dict[str, object], ...]) -> int:

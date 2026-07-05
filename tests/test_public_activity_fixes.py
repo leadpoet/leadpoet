@@ -664,22 +664,18 @@ class TestRecoveryProjections:
             def __init__(self, config, worker_ref=None):
                 pass
 
-            async def _candidate_private_holdout_gate(self, *, artifact, window_hash):
-                return None
+            async def _daily_candidate_scoring_window_and_gate(self, *, artifact):
+                return SimpleNamespace(window_hash="sha256:" + "3" * 64), {}
 
         async def fake_select_one(table, **kwargs):
             assert table == "research_lab_candidate_evaluation_current"
             return candidate_row
-
-        async def fake_window(**kwargs):
-            return SimpleNamespace(window_hash="sha256:" + "3" * 64)
 
         async def fake_create_candidate_event(**kwargs):
             return {"event_id": "event-1", "seq": 1}
 
         monkeypatch.setattr(recovery, "select_one", fake_select_one)
         monkeypatch.setattr(recovery, "ResearchLabGatewayScoringWorker", FakeWorker)
-        monkeypatch.setattr(recovery, "fetch_rolling_icp_window", fake_window)
         monkeypatch.setattr(
             recovery,
             "PrivateModelArtifactManifest",

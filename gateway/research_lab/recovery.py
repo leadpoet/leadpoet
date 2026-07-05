@@ -28,7 +28,6 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from .config import ResearchLabGatewayConfig
-from .icp_window import RollingIcpWindowUnavailable, fetch_rolling_icp_window
 from .key_vault import OpenRouterKeyVaultError, preflight_openrouter_key
 from .maintenance import (
     _is_queue_capacity_conflict,
@@ -586,7 +585,6 @@ async def requeue_baseline_not_ready_candidates(
     }
 
     worker: ResearchLabGatewayScoringWorker | None = None
-    window = None
 
     for row in rows:
         candidate_id = str(row.get("candidate_id") or "")
@@ -603,25 +601,10 @@ async def requeue_baseline_not_ready_candidates(
 
         if worker is None:
             worker = ResearchLabGatewayScoringWorker(config, worker_ref=actor)
-        if window is None:
-            try:
-                window = await fetch_rolling_icp_window(
-                    days=config.lab_champion_eval_days,
-                    icps_per_day=config.lab_champion_icps_per_day,
-                    window_mode=config.lab_champion_window_mode,
-                    fresh_icp_count=config.lab_champion_fresh_icp_count,
-                    retained_icp_count=config.lab_champion_retained_icp_count,
-                    min_new_icp_count=config.lab_champion_fresh_icp_count,
-                    allow_partial=config.scoring_worker_allow_partial_icp_window,
-                )
-            except RollingIcpWindowUnavailable as exc:
-                result["ok"] = False
-                result["error"] = f"rolling_window_unavailable:{str(exc)[:160]}"
-                return result
 
         artifact = PrivateModelArtifactManifest.from_mapping(manifest_doc)
         try:
-            await worker._candidate_private_holdout_gate(artifact=artifact, window_hash=window.window_hash)
+            window, _gate = await worker._daily_candidate_scoring_window_and_gate(artifact=artifact)
         except CandidateBaselineNotReady:
             result["still_waiting_for_baseline"].append(candidate_id)
             result["candidates"].append(

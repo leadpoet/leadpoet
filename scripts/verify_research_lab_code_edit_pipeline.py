@@ -988,6 +988,9 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
             benchmark_items=[{"icp_ref": "icp:test:1", "icp_hash": sha256_json({"i": 1}), "icp": {"industry": "Software"}}],
         )
 
+    async def fake_daily_window_and_gate(self, *, artifact):
+        return await fake_fetch_window(), {}
+
     async def fake_create_rolling(_window):
         return {}
 
@@ -1062,6 +1065,7 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
     original_public_activity = scoring_worker_module.safe_project_public_loop_activity
     original_write_audit = ResearchLabGatewayScoringWorker._write_audit_bundle
     original_holdout_gate = ResearchLabGatewayScoringWorker._candidate_private_holdout_gate
+    original_daily_window_and_gate = ResearchLabGatewayScoringWorker._daily_candidate_scoring_window_and_gate
     try:
         ResearchLabGatewayScoringWorker._resolve_evaluation_epoch = fake_resolve_epoch
         scoring_worker_module.load_active_private_model = fake_load_active_private_model
@@ -1077,6 +1081,7 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
         scoring_worker_module.safe_project_public_loop_activity = fake_public_activity
         ResearchLabGatewayScoringWorker._write_audit_bundle = fake_write_audit
         ResearchLabGatewayScoringWorker._candidate_private_holdout_gate = fake_holdout_gate
+        ResearchLabGatewayScoringWorker._daily_candidate_scoring_window_and_gate = fake_daily_window_and_gate
 
         worker = ResearchLabGatewayScoringWorker(ResearchLabGatewayConfig(), worker_ref="test-worker")
         await worker._score_candidate(candidate)
@@ -1095,6 +1100,7 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
         scoring_worker_module.safe_project_public_loop_activity = original_public_activity
         ResearchLabGatewayScoringWorker._write_audit_bundle = original_write_audit
         ResearchLabGatewayScoringWorker._candidate_private_holdout_gate = original_holdout_gate
+        ResearchLabGatewayScoringWorker._daily_candidate_scoring_window_and_gate = original_daily_window_and_gate
 
     assert not captured["score_bundles"]
     assert captured["rebase_calls"][0]["stage"] == "during_scoring_parent_changed"

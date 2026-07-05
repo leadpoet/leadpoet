@@ -35,6 +35,8 @@ from gateway.research_lab.icp_window import (
     RollingIcpWindowUnavailable,
     fetch_rolling_icp_window,
     reconstruct_icp_window_from_doc,
+    utc_day_start,
+    utc_set_id_for_datetime,
 )
 from gateway.research_lab.logging_utils import (
     compact_ref,
@@ -1321,6 +1323,14 @@ def _baseline_max_day_jump_points() -> float | None:
         return abs(float(raw))
     except ValueError:
         return None
+
+
+def _baseline_min_utc_day_delay_seconds() -> int:
+    raw = os.getenv("RESEARCH_LAB_BASELINE_MIN_UTC_DAY_DELAY_SECONDS", "120").strip()
+    try:
+        return max(0, min(3600, int(raw)))
+    except ValueError:
+        return 120
 
 
 def _summary_has_unresolved_runtime_error(item_summary: Mapping[str, Any]) -> bool:
@@ -2684,14 +2694,6 @@ class ResearchLabGatewayScoringWorker:
                 reason="gateway_qualification_worker_started",
                 event_doc={"worker_ref": self.worker_ref, "proxy_ref_hash": self.proxy_ref_hash},
             )
-            window = await fetch_rolling_icp_window(
-                days=self.config.lab_champion_eval_days,
-                icps_per_day=self.config.lab_champion_icps_per_day,
-                **_rolling_window_fetch_kwargs(self.config),
-                allow_partial=self.config.scoring_worker_allow_partial_icp_window,
-            )
-            await create_rolling_icp_window(window)
-
             artifact = PrivateModelArtifactManifest.from_mapping(candidate["private_model_manifest_doc"])
             patch = candidate["candidate_patch_manifest"]
             candidate_kind = str(candidate.get("candidate_kind") or "")
@@ -2721,6 +2723,10 @@ class ResearchLabGatewayScoringWorker:
                 )
                 scored_event_written = True
                 return
+            window, private_holdout_gate = await self._daily_candidate_scoring_window_and_gate(
+                artifact=artifact,
+            )
+            await create_rolling_icp_window(window)
             benchmark = SealedBenchmarkSet(
                 benchmark_id=window.benchmark_id,
                 icp_set_hash=window.window_hash,
@@ -2728,10 +2734,6 @@ class ResearchLabGatewayScoringWorker:
                 item_refs=window.item_refs,
                 scoring_version="qualification-company-scorer:v1",
                 hidden_plaintext_available=True,
-            )
-            private_holdout_gate = await self._candidate_private_holdout_gate(
-                artifact=artifact,
-                window_hash=window.window_hash,
             )
             candidate_runner = DockerPrivateModelRunner(
                 DockerPrivateModelSpec(
@@ -4821,6 +4823,53 @@ class ResearchLabGatewayScoringWorker:
             f"manifest={compact_ref(artifact.manifest_hash)} window={compact_ref(window_hash)}"
         )
 
+    async def _daily_candidate_scoring_window_and_gate(
+        self,
+        *,
+        artifact: PrivateModelArtifactManifest,
+        now: datetime | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
+        """Return the UTC day's frozen baseline window and private holdout gate.
+
+        Candidate scoring must compete against the private baseline that owns
+        the UTC day, not a freshly reselected "latest" ICP window. That keeps the
+        daily baseline stable even if ICP rows are inserted or repaired after
+        midnight.
+        """
+        today = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).date().isoformat()
+        rows = await select_many(
+            "research_lab_private_model_benchmark_current",
+            columns=(
+                "benchmark_bundle_id,private_model_manifest_hash,rolling_window_hash,"
+                "benchmark_quality,evaluation_epoch,score_summary_doc,current_benchmark_status,created_at"
+            ),
+            filters=(
+                ("benchmark_date", today),
+                ("private_model_manifest_hash", artifact.manifest_hash),
+                ("current_benchmark_status", "completed"),
+            ),
+            order_by=(("created_at", True),),
+            limit=25,
+        )
+        for row in rows:
+            if not _private_benchmark_row_is_valid(row):
+                continue
+            gate = _private_holdout_gate_from_baseline_row(row)
+            window_hash = str(row.get("rolling_window_hash") or "")
+            if not gate or not window_hash:
+                continue
+            window = await self._reconstruct_rolling_window(window_hash)
+            if window is None:
+                raise CandidateBaselineNotReady(
+                    "same_day_private_baseline_window_reconstruction_required_before_candidate_scoring: "
+                    f"manifest={compact_ref(artifact.manifest_hash)} window={compact_ref(window_hash)}"
+                )
+            return window, gate
+        raise CandidateBaselineNotReady(
+            "same_day_completed_private_baseline_required_before_candidate_scoring: "
+            f"date={today} manifest={compact_ref(artifact.manifest_hash)}"
+        )
+
     async def _check_candidate_scoring_freshness(
         self,
         *,
@@ -4837,27 +4886,39 @@ class ResearchLabGatewayScoringWorker:
                 progress=progress,
             )
         try:
-            current_window = await fetch_rolling_icp_window(
-                days=self.config.lab_champion_eval_days,
-                icps_per_day=self.config.lab_champion_icps_per_day,
-                **_rolling_window_fetch_kwargs(self.config),
-                allow_partial=self.config.scoring_worker_allow_partial_icp_window,
+            await self._candidate_private_holdout_gate(
+                artifact=parent_artifact,
+                window_hash=candidate_window_hash,
             )
         except Exception as exc:
+            if isinstance(exc, CandidateBaselineNotReady):
+                raise
             raise CandidateBaselineNotReady(
-                "current_rolling_window_unavailable_during_candidate_scoring: "
+                "candidate_private_baseline_unavailable_during_candidate_scoring: "
                 f"candidate_window={compact_ref(candidate_window_hash)}"
             ) from exc
-        current_window_hash = str(current_window.window_hash)
-        if current_window_hash != candidate_window_hash:
-            raise CandidateBaselineWindowChanged(
-                candidate_window_hash=candidate_window_hash,
-                current_window_hash=current_window_hash,
-                progress=progress,
-            )
 
     async def _maybe_run_private_baseline(self) -> dict[str, Any] | None:
-        today = datetime.now(timezone.utc).date().isoformat()
+        now = datetime.now(timezone.utc)
+        today = now.date().isoformat()
+        min_start_at = utc_day_start(now) + timedelta(seconds=_baseline_min_utc_day_delay_seconds())
+        if now < min_start_at:
+            logger.info(
+                format_worker_block(
+                    "RESEARCH LAB PRIVATE BASELINE WAITING FOR DAILY ICP ACTIVATION",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Benchmark date", today),
+                        ("Earliest start", min_start_at.isoformat()),
+                        ("Action", "deferring baseline so the UTC day's ICP set can activate"),
+                    ),
+                )
+            )
+            return {
+                "status": "waiting_for_daily_icp_activation",
+                "benchmark_date": today,
+                "earliest_start_at": min_start_at.isoformat(),
+            }
         start = time.time()
         evaluation_epoch = await self._resolve_evaluation_epoch()
         logger.info(
@@ -4907,12 +4968,35 @@ class ResearchLabGatewayScoringWorker:
                 "benchmark_date": today,
                 "repo_head_sync": repo_head_sync,
             }
-        window = await fetch_rolling_icp_window(
-            days=self.config.lab_champion_eval_days,
-            icps_per_day=self.config.lab_champion_icps_per_day,
-            **_rolling_window_fetch_kwargs(self.config),
-            allow_partial=self.config.scoring_worker_allow_partial_icp_window,
-        )
+        expected_fresh_set_id = utc_set_id_for_datetime(now)
+        try:
+            window = await fetch_rolling_icp_window(
+                days=self.config.lab_champion_eval_days,
+                icps_per_day=self.config.lab_champion_icps_per_day,
+                **_rolling_window_fetch_kwargs(self.config),
+                allow_partial=self.config.scoring_worker_allow_partial_icp_window,
+                required_fresh_set_id=expected_fresh_set_id,
+                require_fresh_set_active_at=now,
+            )
+        except RollingIcpWindowUnavailable as exc:
+            logger.warning(
+                format_worker_block(
+                    "RESEARCH LAB PRIVATE BASELINE BLOCKED: DAILY ICP WINDOW NOT READY",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Benchmark date", today),
+                        ("Expected fresh set", expected_fresh_set_id),
+                        ("Reason", str(exc)[:240]),
+                        ("Action", "retrying later; not falling back to a prior UTC day's ICP window"),
+                    ),
+                )
+            )
+            return {
+                "status": "daily_icp_window_not_ready",
+                "benchmark_date": today,
+                "expected_fresh_set_id": expected_fresh_set_id,
+                "error": str(exc),
+            }
         active = await load_active_private_model(self.config, register_bootstrap=True)
         artifact = active.artifact
         existing = await select_many(

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import asyncio
+from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from research_lab.canonical import sha256_json
@@ -55,6 +56,8 @@ def select_rolling_icp_window_from_sets(
     retained_icp_count: int = 10,
     min_new_icp_count: int | None = None,
     allow_partial: bool = False,
+    required_fresh_set_id: int | None = None,
+    require_fresh_set_active_at: datetime | None = None,
 ) -> ResearchLabRollingIcpWindow:
     if days <= 0 or icps_per_day <= 0:
         raise ValueError("days and icps_per_day must be positive")
@@ -65,6 +68,17 @@ def select_rolling_icp_window_from_sets(
         key=lambda row: int(row["set_id"]),
         reverse=True,
     )
+    if required_fresh_set_id is not None:
+        required = int(required_fresh_set_id)
+        normalized_rows = [row for row in normalized_rows if int(row["set_id"]) <= required]
+        fresh = normalized_rows[0] if normalized_rows else None
+        if fresh is None or int(fresh["set_id"]) != required:
+            raise RollingIcpWindowUnavailable(f"required_fresh_set_{required}_missing")
+        if require_fresh_set_active_at is not None and not _set_row_active_at(
+            fresh,
+            require_fresh_set_active_at,
+        ):
+            raise RollingIcpWindowUnavailable(f"required_fresh_set_{required}_not_active")
     if mode in {"legacy", "rolling", WINDOW_MODE_LEGACY_ROLLING}:
         return _select_legacy_rolling_icp_window(
             normalized_rows,
@@ -320,16 +334,23 @@ async def fetch_rolling_icp_window(
     retained_icp_count: int = 10,
     min_new_icp_count: int | None = None,
     allow_partial: bool = False,
+    required_fresh_set_id: int | None = None,
+    require_fresh_set_active_at: datetime | None = None,
 ) -> ResearchLabRollingIcpWindow:
     """Fetch private ICP sets through the gateway service-role client."""
 
     from gateway.db.client import get_write_client
 
     def _call() -> Any:
-        return (
+        query = (
             get_write_client()
             .table("qualification_private_icp_sets")
             .select("set_id,icps,icp_set_hash,active_from,active_until,is_active")
+        )
+        if required_fresh_set_id is not None:
+            query = query.lte("set_id", int(required_fresh_set_id))
+        return (
+            query
             .order("set_id", desc=True)
             .limit(max(days * 3, days))
             .execute()
@@ -346,7 +367,18 @@ async def fetch_rolling_icp_window(
         retained_icp_count=retained_icp_count,
         min_new_icp_count=min_new_icp_count,
         allow_partial=allow_partial,
+        required_fresh_set_id=required_fresh_set_id,
+        require_fresh_set_active_at=require_fresh_set_active_at,
     )
+
+
+def utc_day_start(value: datetime | None = None) -> datetime:
+    dt = (value or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc)
+
+
+def utc_set_id_for_datetime(value: datetime | None = None) -> int:
+    return int(utc_day_start(value).strftime("%Y%m%d"))
 
 
 def intent_signal_signature(icp: Mapping[str, Any]) -> str:
@@ -379,7 +411,39 @@ def _normalize_set_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "set_id": set_id,
         "icps": [dict(icp) for icp in icps if isinstance(icp, Mapping)],
         "icp_set_hash": normalize_sha256_ref(row.get("icp_set_hash"), field_name="icp_set_hash"),
+        "active_from": row.get("active_from"),
+        "active_until": row.get("active_until"),
+        "is_active": bool(row.get("is_active")),
     }
+
+
+def _set_row_active_at(row: Mapping[str, Any], value: datetime) -> bool:
+    if not bool(row.get("is_active")):
+        return False
+    at = value.astimezone(timezone.utc)
+    active_from = _parse_timestamp(row.get("active_from"))
+    active_until = _parse_timestamp(row.get("active_until"))
+    if active_from is not None and at < active_from:
+        return False
+    if active_until is not None and at >= active_until:
+        return False
+    return True
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _build_window_from_selected_records(

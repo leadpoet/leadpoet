@@ -707,6 +707,16 @@ async def _score_single_icp(
         if isinstance(pointer, Mapping) and pointer.get("s3_ref"):
             row["scorer_trace_ref"] = str(pointer["s3_ref"])
             row["scorer_trace_sha256"] = str(pointer.get("sha256") or "")
+    # Per-ICP candidate funnel counts, duck-typed so the default scorer needs
+    # no change.
+    funnel_for = getattr(scorer, "scorer_funnel_for", None)
+    if callable(funnel_for):
+        try:
+            funnel = funnel_for(row["icp_ref"] or row["icp_hash"])
+        except Exception:  # noqa: BLE001 - funnel pickup is best-effort
+            funnel = None
+        if isinstance(funnel, Mapping):
+            row["funnel"] = dict(funnel)
     if trace_sink is not None and trace_entries:
         # POINTERS ONLY (fableanalysis §9.1 item 5): rows/bundles must never
         # carry decoded bodies — the protected-material scanner rejects records

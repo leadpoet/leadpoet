@@ -106,6 +106,7 @@ from research_lab.eval import (
     private_model_env_passthrough,
     sign_digest_with_kms,
 )
+from research_lab.eval.miner_report_stats import build_icp_stats
 from research_lab.eval.evaluator import (
     INCONTAINER_TRACE_KMS_KEY_ENV,
     INCONTAINER_TRACE_S3_PREFIX_ENV,
@@ -1089,6 +1090,10 @@ class _TraceCapturingCompanyScorer:
             str(candidate_model_manifest_hash) if candidate_model_manifest_hash else None
         )
         self._pointer_map = pointer_map
+        # Per-ICP funnel counts (sourced -> fit -> verified -> intent -> scored)
+        # for the candidate model, keyed by icp_ref. Read back onto each per-ICP
+        # row via scorer_funnel_for.
+        self._funnel_map: dict[str, dict[str, Any]] = {}
         # The evaluator hands the scorer the raw ICP payload, not the benchmark
         # item, so refs are recovered via the payload's canonical hash.
         self._icp_refs: dict[str, tuple[str, str]] = {}
@@ -1135,6 +1140,14 @@ class _TraceCapturingCompanyScorer:
             )
             if pointer and self._pointer_map is not None:
                 self._pointer_map[icp_ref] = dict(pointer)
+            if not is_reference_model and icp_ref:
+                stats = build_icp_stats(
+                    sourced_count=len(companies or ()),
+                    breakdowns=breakdowns,
+                )
+                funnel = stats.get("funnel")
+                if isinstance(funnel, Mapping):
+                    self._funnel_map[icp_ref] = dict(funnel)
             # Persist rejected companies for false-rejection analysis (candidate
             # path). Best-effort; never affects scoring.
             await _persist_rejected_companies(
@@ -1163,6 +1176,12 @@ class _TraceCapturingCompanyScorer:
             return None
         pointer = self._pointer_map.get(str(icp_ref))
         return dict(pointer) if isinstance(pointer, Mapping) else None
+
+    def scorer_funnel_for(self, icp_ref: str) -> dict[str, Any] | None:
+        """Return this ICP's candidate funnel counts so they ride the per-ICP
+        row into the bundle. Duck-typed; the default scorer has no funnel."""
+        funnel = self._funnel_map.get(str(icp_ref))
+        return dict(funnel) if isinstance(funnel, Mapping) else None
 
 
 def _upload_baseline_incontainer_trace(

@@ -5,6 +5,7 @@ VALIDATOR_ROOT="${VALIDATOR_ROOT:-/home/ec2-user/leadpoet/leadpoet}"
 VALIDATOR_ENV_FILE="${VALIDATOR_ENV_FILE:-/home/ec2-user/.config/leadpoet/validator.env}"
 LEADPOET_VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-leadpoet/prod/validator/env}"
 VALIDATOR_ENV_BACKUP_DIR="${VALIDATOR_ENV_BACKUP_DIR:-/home/ec2-user/.config/leadpoet/env-backups}"
+EXPECTED_AWS_ACCOUNT="${EXPECTED_AWS_ACCOUNT:-493765492819}"
 VALIDATOR_ENV_EXPORT="$(mktemp /tmp/validator_env_export.XXXXXX)"
 SECRET_TMP="$(mktemp /tmp/validator_secret_env.XXXXXX)"
 
@@ -60,6 +61,13 @@ if isinstance(parsed, dict):
 cache.parent.mkdir(parents=True, exist_ok=True)
 cache.write_text(raw)
 
+skip_keys = {
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_PROFILE",
+}
 exports = []
 for raw_line in raw.replace("\x00", "\n").splitlines():
     line = raw_line.strip()
@@ -78,6 +86,8 @@ for raw_line in raw.replace("\x00", "\n").splitlines():
     else:
         continue
     key = key.strip()
+    if key in skip_keys:
+        continue
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
         continue
     exports.append(f"export {key}={shlex.quote(value)}")
@@ -106,8 +116,6 @@ required_keys=(
   EXA_API_KEY
   SCRAPINGDOG_API_KEY
   QUALIFICATION_SCRAPINGDOG_API_KEY
-  AWS_ACCESS_KEY_ID
-  AWS_SECRET_ACCESS_KEY
   AWS_REGION
   AWS_DEFAULT_REGION
   RESEARCH_LAB_VALIDATOR_FETCH_ENABLED
@@ -135,6 +143,13 @@ if [ "${#missing[@]}" -gt 0 ]; then
 fi
 
 export no_proxy="${no_proxy:-$NO_PROXY}"
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
+
+actual_aws_account="$(aws sts get-caller-identity --query Account --output text)"
+if [ "$actual_aws_account" != "$EXPECTED_AWS_ACCOUNT" ]; then
+  echo "ERROR: validator AWS account is $actual_aws_account, expected $EXPECTED_AWS_ACCOUNT"
+  exit 1
+fi
 
 cd "$VALIDATOR_ROOT"
 

@@ -84,7 +84,7 @@ Research Lab lets miners contribute direction and compute toward improving the A
 
 How it works:
 
-1. The miner securely provides an OpenRouter key.
+1. The miner securely provides an OpenRouter API key and management key.
 2. The miner enters a research direction.
 3. The miner pays the loop-start fee in TAO to cover benchmark costs.
 4. The TEE gateway runs the auto-research loop.

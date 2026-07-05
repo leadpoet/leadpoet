@@ -1132,9 +1132,9 @@ def push_curation_request(payload: dict) -> str:
         raise  # Re-raise to be handled by caller
 
 def fetch_curation_requests() -> dict:
-    # Curation is optional. When LEAD_API is not configured the target falls back
-    # to a default that is not a live service, so skip the poll instead of
-    # calling a dead endpoint every cycle.
+    # Curation is optional. When LEAD_API is not configured the request falls
+    # back to a default target that is not a live service, so return without
+    # polling instead of retrying the fallback every cycle.
     if not os.getenv("LEAD_API"):
         return None
     try:

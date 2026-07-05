@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -22,6 +23,7 @@ SERVICE_NAME = "leadpoet-gateway"
 BUILD_INFO_FILENAME = "BUILD_INFO.json"
 
 _UNKNOWN_VALUES = {"", UNKNOWN, "none", "null", "undefined"}
+_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _ENV_KEYS = {
     "build_id": ("BUILD_ID",),
     "git_commit": ("GITHUB_SHA", "GITHUB_COMMIT", "GIT_COMMIT_HASH", "GIT_COMMIT"),
@@ -69,6 +71,13 @@ def _parse_bool(value: Any) -> bool | None:
 def _short_commit(commit: Any) -> str:
     cleaned = _clean_string(commit)
     return cleaned[:12] if cleaned else UNKNOWN
+
+
+def _clean_commit_string(value: Any) -> str | None:
+    cleaned = _clean_string(value)
+    if not cleaned or not _COMMIT_RE.fullmatch(cleaned):
+        return None
+    return cleaned
 
 
 def _sanitize_remote(remote: str | None) -> str | None:
@@ -242,6 +251,12 @@ def _overlay_environment(info: dict[str, Any], field_sources: dict[str, str]) ->
     for canonical_key, env_names in _ENV_KEYS.items():
         for env_name in env_names:
             value = os.getenv(env_name)
+            if canonical_key == "git_commit":
+                cleaned_commit = _clean_commit_string(value)
+                if not cleaned_commit:
+                    continue
+                _set_string(info, field_sources, canonical_key, cleaned_commit, f"env:{env_name}")
+                break
             if _clean_string(value):
                 _set_string(info, field_sources, canonical_key, value, f"env:{env_name}")
                 break

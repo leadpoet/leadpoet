@@ -83,6 +83,23 @@ def test_environment_commit_overrides_build_info_file(monkeypatch, tmp_path: Pat
     assert info["build_id_source"] == "env:BUILD_ID"
 
 
+def test_branch_placeholder_commit_env_does_not_override_file(monkeypatch, tmp_path: Path) -> None:
+    _clear_build_env(monkeypatch)
+    info_path = tmp_path / "BUILD_INFO.json"
+    file_commit = "a" * 40
+    info_path.write_text(
+        json.dumps({"build_id": "file-build", "git_commit": file_commit}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GATEWAY_BUILD_INFO_FILE", str(info_path))
+    monkeypatch.setenv("GITHUB_COMMIT", "main")
+
+    info = build_info.load_build_info(discover_git=False)
+
+    assert info["git_commit"] == file_commit
+    assert info["commit_source"] == f"file:{info_path}"
+
+
 def test_create_and_write_build_info_document_from_env(monkeypatch, tmp_path: Path) -> None:
     _clear_build_env(monkeypatch)
     commit = "c" * 40

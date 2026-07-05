@@ -14,6 +14,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
+cd "$VALIDATOR_ROOT"
+
+echo "Preflight: preserving local validator.py diff if present"
+if ! git diff --quiet -- neurons/validator.py; then
+  git stash push -m "pre-prod-validator-local-validator-py-$(date -u +%Y%m%dT%H%M%SZ)" -- neurons/validator.py
+fi
+
+echo "Pulling latest GitHub main before stopping validator"
+before_head="$(git rev-parse HEAD)"
+git fetch origin
+git checkout main
+git pull --ff-only origin main
+after_head="$(git rev-parse HEAD)"
+if [ "$before_head" != "$after_head" ] && [ "${VALIDATOR_RESTART_REEXECED:-0}" != "1" ]; then
+  echo "Restart wrapper updated from GitHub; re-executing latest validator_restart.sh"
+  exec env VALIDATOR_RESTART_REEXECED=1 bash "$VALIDATOR_ROOT/validator_restart.sh" "$@"
+fi
+
 echo "Preparing validator runtime env from Secrets Manager"
 mkdir -p "$(dirname "$VALIDATOR_ENV_FILE")" "$VALIDATOR_ENV_BACKUP_DIR"
 chmod 700 "$(dirname "$VALIDATOR_ENV_FILE")" "$VALIDATOR_ENV_BACKUP_DIR"
@@ -150,18 +168,6 @@ if [ "$actual_aws_account" != "$EXPECTED_AWS_ACCOUNT" ]; then
   echo "ERROR: validator AWS account is $actual_aws_account, expected $EXPECTED_AWS_ACCOUNT"
   exit 1
 fi
-
-cd "$VALIDATOR_ROOT"
-
-echo "Preflight: preserving local validator.py diff if present"
-if ! git diff --quiet -- neurons/validator.py; then
-  git stash push -m "pre-prod-validator-local-validator-py-$(date -u +%Y%m%dT%H%M%SZ)" -- neurons/validator.py
-fi
-
-echo "Pulling latest GitHub main before stopping validator"
-git fetch origin
-git checkout main
-git pull --ff-only origin main
 
 echo "Stopping validator processes/containers/enclave"
 sudo pkill -TERM -f ".auto_update_wrapper.sh" 2>/dev/null || true

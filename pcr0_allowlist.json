@@ -4,6 +4,13 @@
   "_repo": "https://github.com/leadpoet/leadpoet",
   "gateway_pcr0": [
     {
+      "pcr0": "af54faabc191e01231561e49109d73a5e818ca03fd3a550b849742a57e8436c1862e50ba8fb00e77c8aa78fb83fda139",
+      "version": "2026-07-05",
+      "deployed": "2026-07-05",
+      "commit_hash": "dfe17449d1a4eed3f17f0634cae91d2851e36fe4",
+      "notes": "gateway enclave: current production build after daily baseline window deploy"
+    },
+    {
       "pcr0": "02797d0a3b02fdda186db756b7cae6ef283592bae6ea879c0c19e4ab0a787766bbbd2008eb49eb9de58f7346d6c834d5",
       "version": "v1.0.0",
       "deployed": "2026-01-05",
@@ -11,6 +18,13 @@
     }
   ],
   "validator_pcr0": [
+    {
+      "pcr0": "2b3bc241d77322112753c8e8b1e2d42090a88924e3b0a1e269c4f32cba1762f5e944e2f4a0b127c07067ffee0ec9dd8c",
+      "version": "2026-07-05",
+      "deployed": "2026-07-05",
+      "commit_hash": "dfe17449d1a4eed3f17f0634cae91d2851e36fe4",
+      "notes": "validator enclave: current production build after daily baseline window deploy"
+    },
     {
       "pcr0": "01877a6d4fd0f4b6f335e7816af36072c63e141ed40e9b100703f467a1feca740cdbca2fd29196e0808d80d50fee5104",
       "version": "2026-07-05",

@@ -23,9 +23,12 @@ import time
 _GATEWAY_DIR = os.path.dirname(os.path.abspath(__file__))
 _PACKAGE_PARENT = os.path.dirname(_GATEWAY_DIR)
 _ATTESTED_RUNTIME_DIR = os.path.join(_GATEWAY_DIR, "_attested_runtime")
-for _path in (_PACKAGE_PARENT, _ATTESTED_RUNTIME_DIR):
-    if os.path.isdir(_path) and _path not in sys.path:
-        sys.path.insert(0, _path)
+for _path in (_ATTESTED_RUNTIME_DIR, _PACKAGE_PARENT):
+    if not os.path.isdir(_path):
+        continue
+    while _path in sys.path:
+        sys.path.remove(_path)
+    sys.path.insert(0, _path)
 
 # Import configuration
 from gateway.build_info import get_build_info

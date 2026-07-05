@@ -1261,6 +1261,171 @@ async def _run_parent_freshness_check(
         await result
 
 
+def _global_scoring_queue_enabled() -> bool:
+    """Opt-in cross-candidate global job queue (default off = per-candidate path).
+
+    The per-candidate scheduler keeps ``concurrency`` ICPs in flight for a single
+    candidate, so slots idle once a candidate's remaining ICPs drop below the
+    concurrency (the tail gap) and no other candidate fills them. The global
+    queue holds every candidate's ICP jobs in one fixed-size pool that pulls the
+    next job — from any candidate — the moment a slot frees, so the pool stays
+    saturated at ``pool_size`` until the whole set has fewer jobs than the pool.
+    """
+    raw = str(os.getenv("RESEARCH_LAB_GLOBAL_SCORING_QUEUE") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+# Job priority: private ICPs (approved after the public gate) jump ahead of
+# other candidates' public ICPs still waiting.
+_GQ_PRIORITY_PRIVATE = 0
+_GQ_PRIORITY_PUBLIC = 1
+_GQ_PRIORITY_STOP = 2
+
+
+async def score_candidates_global_queue(
+    *,
+    candidate_specs: Sequence[Mapping[str, Any]],
+    pool_size: int,
+    legacy_timeout_latch: bool = False,
+    provider_flake_retry: bool = True,
+    trace_sink: TraceSink | None = None,
+) -> list[dict[str, Any]]:
+    """Score many candidates through one fixed-size job pool.
+
+    Each ``candidate_spec`` carries:
+      candidate_id, candidate_runner, base_runner, scorer, run_context,
+      image_candidate, runtime_patch, public_items, private_items,
+      baseline_public_score.
+
+    Public ICPs are enqueued first for every candidate. When a candidate's public
+    set finishes, its gate is decided: if the candidate's public score meets the
+    baseline, its private ICPs are pushed to the FRONT of the queue; otherwise the
+    candidate stops and its private ICPs never run. Exactly ``pool_size`` jobs run
+    at once regardless of which candidate they belong to.
+
+    Returns one entry per candidate: candidate_id, per_icp_results (public then
+    private, in item order), gate_result, and pool metadata.
+    """
+    n = len(candidate_specs)
+    pool = max(1, int(pool_size))
+    scorers = [spec.get("scorer") or QualificationStyleCompanyScorer() for spec in candidate_specs]
+
+    public_rows: list[dict[int, dict[str, Any]]] = [dict() for _ in range(n)]
+    private_rows: list[dict[int, dict[str, Any]]] = [dict() for _ in range(n)]
+    public_remaining = [len(spec.get("public_items") or ()) for spec in candidate_specs]
+    private_remaining = [0 for _ in range(n)]
+    skip_reason = ["" for _ in range(n)]
+    consecutive_timeouts = [0 for _ in range(n)]
+    gate_passed = [False for _ in range(n)]
+    gate_decided = [False for _ in range(n)]
+
+    lock = asyncio.Lock()
+    queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
+    seq = 0
+    outstanding = 0
+
+    def _enqueue(priority: int, ci: int, phase: str, item: Mapping[str, Any], item_index: int) -> None:
+        nonlocal seq, outstanding
+        queue.put_nowait((priority, seq, ci, phase, item, item_index))
+        seq += 1
+        outstanding += 1
+
+    for ci, spec in enumerate(candidate_specs):
+        for item_index, item in enumerate(spec.get("public_items") or ()):
+            _enqueue(_GQ_PRIORITY_PUBLIC, ci, "public", item, item_index)
+        # A candidate with no public ICPs cannot be gated; treat as decided/failed
+        # so it never contributes private jobs (defensive — real runs always split).
+        if public_remaining[ci] == 0:
+            gate_decided[ci] = True
+
+    async def _decide_gate_locked(ci: int) -> None:
+        spec = candidate_specs[ci]
+        rows = [public_rows[ci][k] for k in sorted(public_rows[ci])]
+        candidate_public_score = _benchmark_style_score(rows, "candidate_company_scores")
+        baseline_public_score = _optional_float(spec.get("baseline_public_score")) or 0.0
+        passed = candidate_public_score + 1e-9 >= baseline_public_score
+        gate_passed[ci] = passed
+        gate_decided[ci] = True
+        if passed:
+            private_items = spec.get("private_items") or ()
+            private_remaining[ci] = len(private_items)
+            for item_index, item in enumerate(private_items):
+                _enqueue(_GQ_PRIORITY_PRIVATE, ci, "private", item, item_index)
+
+    async def _worker() -> None:
+        nonlocal outstanding
+        while True:
+            priority, _s, ci, phase, item, item_index = await queue.get()
+            if priority == _GQ_PRIORITY_STOP:
+                queue.task_done()
+                return
+            spec = candidate_specs[ci]
+            async with lock:
+                current_skip = skip_reason[ci]
+                completed = len(public_rows[ci]) + len(private_rows[ci])
+            row, markers = await _score_single_icp(
+                item=item,
+                item_index=item_index,
+                completed_icp_count=completed,
+                base_runner=spec.get("base_runner"),
+                candidate_runner=spec["candidate_runner"],
+                scorer=scorers[ci],
+                run_context=spec.get("run_context") or {},
+                image_candidate=bool(spec.get("image_candidate")),
+                runtime_patch=spec.get("runtime_patch"),
+                parent_freshness_check=None,
+                candidate_runtime_skip_reason=current_skip,
+                legacy_timeout_latch=legacy_timeout_latch,
+                provider_flake_retry=provider_flake_retry,
+                trace_sink=trace_sink,
+            )
+            async with lock:
+                if phase == "public":
+                    public_rows[ci][item_index] = row
+                    public_remaining[ci] -= 1
+                else:
+                    private_rows[ci][item_index] = row
+                    private_remaining[ci] -= 1
+                if markers["timed_out"]:
+                    consecutive_timeouts[ci] += 1
+                elif not markers["skipped"]:
+                    consecutive_timeouts[ci] = 0
+                if markers["latch_reason"] and not skip_reason[ci]:
+                    skip_reason[ci] = markers["latch_reason"]
+                if (
+                    not legacy_timeout_latch
+                    and not skip_reason[ci]
+                    and consecutive_timeouts[ci] >= 2
+                ):
+                    skip_reason[ci] = _candidate_runtime_skip_reason("candidate_model_runtime_timeout")
+                if phase == "public" and public_remaining[ci] == 0 and not gate_decided[ci]:
+                    await _decide_gate_locked(ci)
+                outstanding -= 1
+                if outstanding == 0:
+                    for _ in range(pool):
+                        queue.put_nowait((_GQ_PRIORITY_STOP, seq, -1, "", {}, -1))
+            queue.task_done()
+
+    if outstanding > 0:
+        await asyncio.gather(*(_worker() for _ in range(pool)))
+
+    results: list[dict[str, Any]] = []
+    for ci, spec in enumerate(candidate_specs):
+        ordered = [public_rows[ci][k] for k in sorted(public_rows[ci])]
+        ordered.extend(private_rows[ci][k] for k in sorted(private_rows[ci]))
+        results.append(
+            {
+                "candidate_id": str(spec.get("candidate_id") or ""),
+                "per_icp_results": ordered,
+                "gate_result": {
+                    "decision": "private_holdout_approved" if gate_passed[ci] else "rejected_before_private_holdout",
+                    "private_holdout_evaluated": bool(gate_passed[ci]),
+                },
+            }
+        )
+    return results
+
+
 def _benchmark_style_score(
     per_icp_results: Sequence[Mapping[str, Any]],
     score_field: str,

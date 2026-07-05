@@ -145,9 +145,9 @@ PCR0_COPY_PATHS: List[str] = [
 # Cache
 # =============================================================================
 
-# Cache structure (keyed by CONTENT HASH, not commit hash):
-# {content_hash: {"pcr0": "...", "content_hash": "...", "commit_hash": "...", "built_at": timestamp}}
-# This means: same code content = same cache key, regardless of commits
+# Cache structure (keyed by source content plus base-image identity, not commit hash):
+# {cache_key: {"pcr0": "...", "content_hash": "...", "base_image_stamp": "...", "commit_hash": "...", "built_at": timestamp}}
+# This means: same code content + same base image = same cache key, regardless of commits
 _pcr0_cache: Dict[str, Dict] = {}
 _cache_lock = asyncio.Lock()
 
@@ -168,11 +168,14 @@ def is_pcr0_valid(pcr0: str) -> bool:
 def get_cache_status() -> Dict:
     """Get current cache status for debugging."""
     return {
-        "cached_content_hashes": list(_pcr0_cache.keys()),
+        "cached_cache_keys": list(_pcr0_cache.keys()),
+        "cached_content_hashes": [v.get("content_hash", k) for k, v in _pcr0_cache.items()],
         "cached_pcr0s": get_cached_pcr0_values(),
         "cache_entries": [
             {
-                "content_hash": k,
+                "cache_key": k,
+                "content_hash": v.get("content_hash", "?"),
+                "base_image_stamp": v.get("base_image_stamp", "?"),
                 "commit_hash": v.get("commit_hash", "?")[:8],
                 "pcr0": v["pcr0"][:32] + "...",
                 "built_at": v.get("built_at"),
@@ -629,6 +632,18 @@ async def inspect_base_image_id() -> Optional[str]:
     return stdout.decode().strip() or None
 
 
+def format_base_image_stamp(repo_dir: str) -> str:
+    dockerfile_hash, image_id = read_base_image_stamp(repo_dir)
+    if not dockerfile_hash:
+        return "missing"
+    return f"{dockerfile_hash}:{image_id or 'legacy-no-image-id'}"
+
+
+def build_pcr0_cache_key(content_hash: str, repo_dir: str) -> str:
+    """Include the base-image identity in the PCR0 cache key."""
+    return f"{content_hash}:{format_base_image_stamp(repo_dir)}"
+
+
 async def ensure_base_image_exists(repo_dir: str) -> bool:
     """
     Ensure the base image exists AND is up-to-date with current Dockerfile.base.
@@ -647,20 +662,14 @@ async def ensure_base_image_exists(repo_dir: str) -> bool:
         logger.error("[PCR0] Cannot compute Dockerfile.base hash")
         return False
     
-    # Check if base image exists
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "images", "-q", BASE_IMAGE_NAME,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    image_exists = bool(stdout.decode().strip())
-    current_image_id = await inspect_base_image_id() if image_exists else None
+    current_image_id = await inspect_base_image_id()
+    image_exists = bool(current_image_id)
     
     if image_exists:
         # Check if the existing image matches current Dockerfile.base.
-        # The hash is tracked outside Docker image config to keep gateway and
-        # validator base builds byte/config equivalent.
+        # The hash and image ID are tracked outside Docker image config to keep
+        # gateway and validator base builds byte/config equivalent while still
+        # detecting stale same-Dockerfile rebuilds.
         existing_hash, existing_image_id = read_base_image_stamp(repo_dir)
         
         if existing_hash == current_hash and existing_image_id == current_image_id:
@@ -709,7 +718,11 @@ async def ensure_base_image_exists(repo_dir: str) -> bool:
         return False
     
     built_image_id = await inspect_base_image_id()
-    write_base_image_stamp(repo_dir, current_hash, built_image_id or "")
+    if not built_image_id:
+        logger.error("[PCR0] Base image built but image ID could not be inspected")
+        return False
+
+    write_base_image_stamp(repo_dir, current_hash, built_image_id)
     logger.info(
         f"[PCR0] ✓ Base image {BASE_IMAGE_NAME} built successfully "
         f"(hash: {current_hash}, image: {str(built_image_id)[:32]})"
@@ -967,12 +980,18 @@ async def check_and_build_pcr0():
         if not content_hash:
             logger.error("[PCR0] Failed to compute content hash")
             return
+
+        if not await ensure_base_image_exists(repo_dir):
+            logger.error("[PCR0] Failed to prepare base image")
+            return
+
+        cache_key = build_pcr0_cache_key(content_hash, repo_dir)
         
         # Check if we already have this content hash cached
         # With pinned Dockerfile, same content = same PCR0, so no need to rebuild
-        if content_hash in _pcr0_cache:
-            logger.info(f"[PCR0] Content hash {content_hash} already cached, skipping build")
-            print(f"[PCR0] Content hash {content_hash} already cached, skipping build")
+        if cache_key in _pcr0_cache:
+            logger.info(f"[PCR0] Cache key {cache_key} already cached, skipping build")
+            print(f"[PCR0] Cache key {cache_key} already cached, skipping build")
             _last_content_hash = content_hash
             return
         
@@ -992,16 +1011,20 @@ async def check_and_build_pcr0():
             pcr0 = await build_enclave_and_extract_pcr0(repo_dir)
             
             if pcr0:
-                # Store keyed by CONTENT HASH (not commit hash)
-                # This means same code = same key, regardless of commit
-                _pcr0_cache[content_hash] = {
+                # Store keyed by source content plus base image identity. The
+                # Dockerfile.base hash alone is not enough because the base
+                # layer can be rebuilt to a different image ID from the same
+                # source; that changes PCR0.
+                _pcr0_cache[cache_key] = {
                     "pcr0": pcr0,
                     "content_hash": content_hash,
+                    "cache_key": cache_key,
+                    "base_image_stamp": format_base_image_stamp(repo_dir),
                     "commit_hash": commit_hash,
                     "built_at": datetime.utcnow().isoformat(),
                 }
-                print(f"[PCR0] ✅ Cached PCR0 for content {content_hash}: {pcr0[:64]}...")
-                logger.info(f"[PCR0] ✅ Cached PCR0 for content {content_hash}: {pcr0[:32]}...")
+                print(f"[PCR0] ✅ Cached PCR0 for key {cache_key}: {pcr0[:64]}...")
+                logger.info(f"[PCR0] ✅ Cached PCR0 for key {cache_key}: {pcr0[:32]}...")
                 
                 # Prune old entries (keep only last N)
                 if len(_pcr0_cache) > PCR0_CACHE_SIZE:
@@ -1139,10 +1162,16 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
             if not content_hash:
                 logger.warning(f"[PCR0] Failed to compute content hash for {commit_hash[:8]}")
                 continue
+
+            if not await ensure_base_image_exists(repo_dir):
+                logger.warning(f"[PCR0] Failed to prepare base image for {commit_hash[:8]}")
+                continue
+
+            cache_key = build_pcr0_cache_key(content_hash, repo_dir)
             
             # Check if already cached
-            if content_hash in _pcr0_cache:
-                logger.info(f"[PCR0] Content {content_hash} already cached, skipping")
+            if cache_key in _pcr0_cache:
+                logger.info(f"[PCR0] Cache key {cache_key} already cached, skipping")
                 continue
             
             # Build PCR0 for this version
@@ -1153,9 +1182,11 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
             
             if pcr0:
                 async with _cache_lock:
-                    _pcr0_cache[content_hash] = {
+                    _pcr0_cache[cache_key] = {
                         "pcr0": pcr0,
                         "content_hash": content_hash,
+                        "cache_key": cache_key,
+                        "base_image_stamp": format_base_image_stamp(repo_dir),
                         "commit_hash": commit_hash,
                         "built_at": datetime.utcnow().isoformat(),
                     }
@@ -1299,10 +1330,10 @@ def verify_pcr0(pcr0: str) -> Dict:
     """
     Verify a PCR0 value against our computed cache.
     
-    The cache stores PCR0 values keyed by CONTENT HASH of monitored files.
+    The cache stores PCR0 values keyed by monitored source content and base-image identity.
     This means:
-    - Same code = same PCR0 (regardless of how many commits)
-    - Only 3 different code versions are cached
+    - Same code + same base image = same PCR0 (regardless of how many commits)
+    - Only 3 different build identities are cached
     - Validators on older code versions are still accepted
     
     Returns:
@@ -1314,14 +1345,15 @@ def verify_pcr0(pcr0: str) -> Dict:
             "cache_size": int,
         }
     """
-    for content_hash, entry in _pcr0_cache.items():
+    for cache_key, entry in _pcr0_cache.items():
         if entry["pcr0"] == pcr0:
             return {
                 "valid": True,
                 "commit_hash": entry.get("commit_hash", "unknown"),
-                "content_hash": content_hash,
+                "content_hash": entry.get("content_hash", cache_key),
+                "base_image_stamp": entry.get("base_image_stamp"),
                 "built_at": entry.get("built_at"),
-                "message": f"PCR0 matches content {content_hash} (commit {entry.get('commit_hash', 'unknown')[:8]})",
+                "message": f"PCR0 matches cache key {cache_key} (commit {entry.get('commit_hash', 'unknown')[:8]})",
                 "cache_size": len(_pcr0_cache),
             }
     

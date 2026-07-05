@@ -20,6 +20,13 @@ sys.modules.setdefault("gateway.utils.logger", logger_stub)
 arweave_audit_stub = types.ModuleType("gateway.research_lab.arweave_audit")
 arweave_audit_stub.record_research_lab_checkpointed_events = None
 arweave_audit_stub.rebuffer_research_lab_buffered_audit_events = None
+
+
+async def _publish_research_lab_epoch_audit_stub(*args, **kwargs):
+    return {"ok": True, "status": "stubbed"}
+
+
+arweave_audit_stub.publish_research_lab_epoch_audit = _publish_research_lab_epoch_audit_stub
 sys.modules.setdefault("gateway.research_lab.arweave_audit", arweave_audit_stub)
 
 from gateway.tasks.hourly_batch import build_arweave_checkpoint_log_event

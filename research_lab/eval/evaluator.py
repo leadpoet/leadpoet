@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from importlib import import_module
 import inspect
 import logging
 import os
 import re
 from typing import Any, Awaitable, Callable, Mapping, Sequence, Union
+
+from .global_scoring_pool import get_global_scoring_pool
 
 from leadpoet_verifier.aggregation import per_icp_normalized_score
 from leadpoet_verifier.research_evaluation import (
@@ -567,6 +570,18 @@ async def _score_items_work_conserving(
     return [results[position] for position in sorted(results)]
 
 
+def _scoring_pool_slot():
+    """Shared cross-process concurrency slot for one candidate-model run.
+
+    Returns the global slot pool's async context when a pool size is configured,
+    otherwise a no-op context so behavior is unchanged when pooling is off.
+    """
+    pool = get_global_scoring_pool()
+    if pool is None:
+        return contextlib.nullcontext()
+    return pool.slot()
+
+
 async def _score_single_icp(
     *,
     item: Mapping[str, Any],
@@ -641,14 +656,19 @@ async def _score_single_icp(
             failure_reasons.append(candidate_runtime_skip_reason)
             markers["skipped"] = True
         else:
-            candidate_outputs, candidate_failure_reason, provider_excluded = await _run_candidate_with_retries(
-                candidate_runner=candidate_runner,
-                icp=icp,
-                candidate_context=candidate_context,
-                item_label=str(item.get("icp_ref") or item.get("icp_hash") or ""),
-                legacy_timeout_latch=legacy_timeout_latch,
-                provider_flake_retry=provider_flake_retry,
-            )
+            # Hold one shared pool slot only while the candidate model actually
+            # runs, so total concurrent candidate-model containers stay pinned
+            # at the pool size across every scoring process. The skip path above
+            # holds no slot. Pooling is disabled (no-op) when unconfigured.
+            async with _scoring_pool_slot():
+                candidate_outputs, candidate_failure_reason, provider_excluded = await _run_candidate_with_retries(
+                    candidate_runner=candidate_runner,
+                    icp=icp,
+                    candidate_context=candidate_context,
+                    item_label=str(item.get("icp_ref") or item.get("icp_hash") or ""),
+                    legacy_timeout_latch=legacy_timeout_latch,
+                    provider_flake_retry=provider_flake_retry,
+                )
             if candidate_failure_reason:
                 failure_reasons.append(candidate_failure_reason)
                 if candidate_failure_reason == "candidate_model_runtime_timeout":

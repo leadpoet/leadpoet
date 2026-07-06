@@ -29,4 +29,16 @@ SAFE_TRACE_METADATA_KEYS = {
     "langfuse_trace_id",
     "failure_category",
     "failure_stage",
+    # Loop-engine continuity spans (root trace + per-stage observations).
+    "stage",
+    "iteration",
+    "iterations_completed",
+    "candidate_index",
+    "candidate_count",
+    "node_id",
+    "loop_node_id",
+    "worker_ref",
+    "loop_status",
+    "stop_reason",
+    "resumed",
 }

@@ -677,3 +677,10 @@ async def test_repair_call_failure_records_exception_cost_in_running_ledger(tmp_
     assert repair_failure.cost_ledger["actual_openrouter_cost_microusd"] == 4321
     assert repair_failure.provider_usage[0]["call_outcome"] == "contained_failure"
     assert repair_failure.provider_usage[0]["raw_trace_ref"]["s3_ref"] == "s3://bucket/repair.json"
+    exhausted = [
+        event
+        for event in events
+        if event.event_type == "candidate_repair_exhausted"
+        and event.event_doc.get("stage") == "code_edit_repair_call_failed"
+    ][-1]
+    assert exhausted.cost_ledger["actual_openrouter_cost_microusd"] == 4321

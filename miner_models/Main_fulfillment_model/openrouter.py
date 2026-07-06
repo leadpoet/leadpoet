@@ -61,7 +61,7 @@ def reset_cost_tracker():
 
 def track_scrapingdog(credits: int):
     _cost_tracker["scrapingdog_credits"] += credits
-    _cost_tracker["total_usd"] += credits * 0.000066  # $0.000066 per credit
+    _cost_tracker["total_usd"] += credits * 0.00005  # $0.00005 per credit
 
 
 def _track_cost(model: str, tokens_in: int, tokens_out: int):

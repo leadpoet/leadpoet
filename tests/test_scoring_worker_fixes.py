@@ -506,6 +506,63 @@ def test_baseline_gate_env_parsing(monkeypatch):
     assert sw._candidate_scoring_quiet_start_utc_seconds() == 86399
 
 
+@pytest.mark.asyncio
+async def test_private_baseline_waits_before_scheduled_utc_start(monkeypatch):
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 7, 5, 0, 14, 59, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(sw, "datetime", FixedDateTime)
+    worker = sw.ResearchLabGatewayScoringWorker(
+        sw.ResearchLabGatewayConfig(baseline_start_utc_offset_seconds=900)
+    )
+
+    result = await worker._maybe_run_private_baseline()
+
+    assert result == {
+        "status": "waiting_for_daily_icp_activation",
+        "benchmark_date": "2026-07-05",
+        "scheduled_start_at": "2026-07-05T00:15:00+00:00",
+        "earliest_start_at": "2026-07-05T00:15:00+00:00",
+        "start_offset_seconds": 900,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "current_time",
+    (
+        datetime(2026, 7, 5, 0, 15, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 5, 0, 45, 0, tzinfo=timezone.utc),
+    ),
+)
+async def test_private_baseline_enters_flow_on_or_after_scheduled_start(
+    monkeypatch,
+    current_time,
+):
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return current_time
+
+    async def reached_baseline_flow(self):
+        raise RuntimeError("baseline_flow_reached")
+
+    monkeypatch.setattr(sw, "datetime", FixedDateTime)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_resolve_evaluation_epoch",
+        reached_baseline_flow,
+    )
+    worker = sw.ResearchLabGatewayScoringWorker(
+        sw.ResearchLabGatewayConfig(baseline_start_utc_offset_seconds=900)
+    )
+
+    with pytest.raises(RuntimeError, match="baseline_flow_reached"):
+        await worker._maybe_run_private_baseline()
+
+
 def test_candidate_baseline_target_date_respects_quiet_window():
     quiet_start = 23 * 3600 + 30 * 60
 

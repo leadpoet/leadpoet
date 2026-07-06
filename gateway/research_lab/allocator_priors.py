@@ -34,6 +34,7 @@ from research_lab.meta_allocator import (
 ALLOCATOR_PRIORS_ENABLED_ENV = "RESEARCH_LAB_ALLOCATOR_PRIORS_ENABLED"
 
 RESULTS_LEDGER_TABLE = "research_lab_results_ledger"
+ALLOCATOR_SELECTION_RECORDS_TABLE = "research_lab_allocator_selection_records"
 
 DEFAULT_WINDOW_ROWS = 500
 DEFAULT_TOP_CELLS = 8
@@ -77,6 +78,11 @@ class GatewayLedgerStore:
         return await store.select_many(
             table, columns=columns, filters=filters, order_by=order_by, limit=limit
         )
+
+    async def insert_row(self, table: str, row: dict[str, Any]) -> dict[str, Any]:
+        from gateway.research_lab import store
+
+        return await store.insert_row(table, row)
 
 
 def _cell_token(value: str, fallback: str) -> str:
@@ -315,4 +321,116 @@ async def build_cell_yield_priors(
             "or promotion decisions."
         ),
         "ranked_cells": ranked_cells[: max(1, int(top_cells))],
+    }
+
+
+async def load_persisted_selection_doc(
+    *,
+    store: Any | None = None,
+    day: str | None = None,
+) -> dict[str, Any] | None:
+    """Newest persisted selection doc for ``day`` (UTC today by default).
+
+    Returns ``None`` when no record exists for the day (missing table errors
+    are the caller's to treat as best-effort) so callers can fall back to the
+    on-demand computation.
+    """
+    store = store or GatewayLedgerStore()
+    day = str(day or utc_now_iso()[:10])
+    rows = await store.select_many(
+        ALLOCATOR_SELECTION_RECORDS_TABLE,
+        columns="selection_id,day,window_hash,selection_doc,created_at",
+        filters=[("day", day)],
+        order_by=[("created_at", True)],
+        limit=1,
+    )
+    for row in rows or []:
+        doc = row.get("selection_doc") if isinstance(row, Mapping) else None
+        if isinstance(doc, Mapping) and doc.get("ranked_cells"):
+            return dict(doc)
+    return None
+
+
+async def load_cell_yield_priors(
+    *,
+    store: Any | None = None,
+    window_rows: int = DEFAULT_WINDOW_ROWS,
+    top_cells: int = DEFAULT_TOP_CELLS,
+    day: str | None = None,
+) -> dict[str, Any] | None:
+    """Engine read path: prefer the persisted nightly selection, else compute.
+
+    The persisted record (written by ``refresh_allocator_priors``) gives every
+    run on a given day the identical hint and skips the per-run ledger scan;
+    the fallback keeps the flag usable before the first nightly pass lands.
+    """
+    try:
+        persisted = await load_persisted_selection_doc(store=store, day=day)
+    except Exception:
+        # Missing table / transient store failure: fall back to computing.
+        persisted = None
+    if persisted is not None:
+        return persisted
+    return await build_cell_yield_priors(
+        store=store, window_rows=window_rows, top_cells=top_cells, day=day
+    )
+
+
+async def refresh_allocator_priors(
+    *,
+    store: Any | None = None,
+    window_rows: int = DEFAULT_WINDOW_ROWS,
+    top_cells: int = DEFAULT_TOP_CELLS,
+    day: str | None = None,
+    created_by: str = "",
+) -> dict[str, Any]:
+    """Nightly job body: compute today's selection and persist it (idempotent).
+
+    Same day + same ledger window => same deterministic selection; the table's
+    ``UNIQUE (day, window_hash)`` key plus the pre-check below make re-runs
+    no-ops. Returns a compact status doc for logging.
+    """
+    store = store or GatewayLedgerStore()
+    day = str(day or utc_now_iso()[:10])
+    doc = await build_cell_yield_priors(
+        store=store, window_rows=window_rows, top_cells=top_cells, day=day
+    )
+    if doc is None:
+        return {"status": "empty_ledger", "day": day}
+    window = doc.get("window") if isinstance(doc.get("window"), Mapping) else {}
+    window_hash = str(window.get("window_hash") or "")
+    existing = await store.select_many(
+        ALLOCATOR_SELECTION_RECORDS_TABLE,
+        columns="selection_record_id",
+        filters=[("day", day), ("window_hash", window_hash)],
+        order_by=(),
+        limit=1,
+    )
+    if existing:
+        return {
+            "status": "already_persisted",
+            "day": day,
+            "selection_id": str(doc.get("selection_id") or ""),
+            "window_hash": window_hash,
+        }
+    await store.insert_row(
+        ALLOCATOR_SELECTION_RECORDS_TABLE,
+        {
+            "schema_version": "1.0",
+            "selection_id": str(doc.get("selection_id") or ""),
+            "day": day,
+            "seed": int(doc.get("seed") or 0),
+            "window_hash": window_hash,
+            "window_row_count": int(window.get("row_count") or 0),
+            "cell_count": int(window.get("cell_count") or 0),
+            "selection_doc": doc,
+            "created_by": str(created_by or "")[:120],
+        },
+    )
+    return {
+        "status": "persisted",
+        "day": day,
+        "selection_id": str(doc.get("selection_id") or ""),
+        "window_hash": window_hash,
+        "cell_count": int(window.get("cell_count") or 0),
     }

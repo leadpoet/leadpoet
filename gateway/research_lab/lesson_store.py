@@ -17,10 +17,13 @@ retrieval failure must never fail a paid run.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any, Mapping, Sequence
 
 from gateway.research_lab.code_loop_engine import _reflection_safe_text
+
+logger = logging.getLogger(__name__)
 
 LESSON_RETRIEVAL_ENABLED_ENV = "RESEARCH_LAB_LESSON_RETRIEVAL_ENABLED"
 
@@ -173,7 +176,52 @@ async def fetch_recent_lessons(
     # Rows arrive newest-first; the stable sort keeps recency order within the
     # fresh and stale groups while demoting stale-basis lessons.
     lessons.sort(key=lambda lesson: bool(lesson.get("stale_basis")))
-    return lessons[:limit]
+    kept = lessons[:limit]
+    await _hydrate_score_enrichments(kept, store=store)
+    return kept
+
+
+async def _hydrate_score_enrichments(
+    lessons: Sequence[dict[str, Any]], *, store: Any | None = None
+) -> None:
+    """Phase-5 score-aware lessons: merge realized deltas onto lessons in place.
+
+    Reflection events are immutable (recorded pre-score); the backfill hook
+    writes append-only calibration rows keyed by node_id instead, and this
+    read-time join surfaces them as ``realized_delta`` / ``scored_outcome``.
+    Strictly best-effort: with the backfill flag off, the calibration table
+    absent (scripts/71 unapplied), or no rows yet, lessons stay score-blind.
+    """
+    node_ids = [str(lesson.get("node_id") or "") for lesson in lessons]
+    if not any(node_ids):
+        return
+    try:
+        from gateway.research_lab.score_backfill import (
+            fetch_score_enrichments_by_node,
+            score_backfill_enabled,
+        )
+
+        if not score_backfill_enabled():
+            return
+        # The lesson store's select facade and the calibration store share the
+        # gateway store helpers; pass an explicit store through only when the
+        # caller injected one that also serves the calibration table (tests).
+        enrichments = await fetch_score_enrichments_by_node(node_ids, store=store)
+    except Exception as exc:
+        logger.debug("research_lab_lesson_score_enrichment_skipped error=%s", str(exc)[:200])
+        return
+    for lesson in lessons:
+        enrichment = enrichments.get(str(lesson.get("node_id") or ""))
+        if not enrichment:
+            continue
+        if enrichment.get("realized_delta") is not None:
+            lesson["realized_delta"] = enrichment["realized_delta"]
+        if enrichment.get("realized_delta_lcb") is not None:
+            lesson["realized_delta_lcb"] = enrichment["realized_delta_lcb"]
+        if enrichment.get("predicted_delta") is not None:
+            lesson["predicted_delta"] = enrichment["predicted_delta"]
+        if enrichment.get("scored_outcome"):
+            lesson["scored_outcome"] = enrichment["scored_outcome"]
 
 
 async def build_lesson_prompt_context(

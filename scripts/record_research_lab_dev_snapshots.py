@@ -383,6 +383,9 @@ def main() -> int:
         recorded_at=utc_now_iso(),
     )
     store.write_manifest(manifest)
+    # The replay runner needs the full ICP payloads, not just the manifest's
+    # {icp_ref, icp_hash} rows — persist them next to the manifest.
+    store.write_dev_icp_items(dev_set.items)
     verification = store.verify_manifest(expected_icp_set_hash=dev_set.dev_set_hash)
     print(f"snapshot_count={manifest['snapshot_count']}")
     print(f"content_hash={manifest['content_hash']}")

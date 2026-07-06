@@ -57,7 +57,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib.parse import parse_qsl, urlsplit
 
 from research_lab.canonical import sha256_json, sha256_text
@@ -77,6 +77,7 @@ MODE_RECORD = "record"
 MODE_REPLAY = "replay"
 SNAPSHOT_SUBDIR = "snapshots"
 MANIFEST_NAME = "manifest.json"
+DEV_ICPS_NAME = "dev_icps.json"
 
 # Auth-shaped query/body parameter names stripped from significant params so
 # the request key is independent of which credential recorded the traffic.
@@ -565,6 +566,37 @@ class ProviderSnapshotStore:
             "icp_set_hash": str(doc.get("icp_set_hash") or ""),
             "snapshot_count": self.snapshot_count(),
         }
+
+    def write_dev_icp_items(self, items: Sequence[Mapping[str, Any]]) -> None:
+        """Persist the full dev ICP payloads next to the manifest.
+
+        The snapshot-set manifest records only ``{icp_ref, icp_hash}`` per
+        selected item; the replay runner needs the actual ICP payloads to
+        drive a candidate container, so the recording CLI stores them here.
+        Callers verify the items against the manifest's ``icp_set_hash``
+        (``dev_eval.compute_dev_set_hash``) at load time.
+        """
+        rows = [dict(item) for item in items]
+        if not rows:
+            raise DevSnapshotStoreError("dev ICP items are required")
+        if _contains_secret_material(rows):
+            raise DevSnapshotStoreError("dev ICP items contain raw secret material")
+        self._write_text(
+            DEV_ICPS_NAME,
+            json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+        )
+
+    def load_dev_icp_items(self) -> list[dict[str, Any]] | None:
+        """Load the persisted dev ICP payloads, or None when absent."""
+        raw = self._read_text(DEV_ICPS_NAME)
+        if raw is None:
+            return None
+        decoded = json.loads(raw)
+        if not isinstance(decoded, list) or not all(
+            isinstance(item, Mapping) for item in decoded
+        ):
+            raise DevSnapshotStoreError("dev ICP items must be a JSON array of objects")
+        return [dict(item) for item in decoded]
 
     # -- storage backends ----------------------------------------------------
 

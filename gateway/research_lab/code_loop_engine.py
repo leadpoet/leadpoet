@@ -60,6 +60,11 @@ from research_lab.code_editing import (
 )
 from research_lab.engine_v1 import ReflectionRecord
 from research_lab.eval import PrivateModelArtifactManifest
+from research_lab.observability.langfuse_client import (
+    observation as langfuse_observation,
+    run_trace_id as langfuse_run_trace_id,
+    update_observation as langfuse_update_observation,
+)
 from research_lab.trajectory_corpus import PROTECTED_CORPUS_MARKERS
 
 
@@ -356,6 +361,10 @@ class CodeEditLoopEngine:
     # worker wires a container runner (``snapshot_store.container_replay_env``
     # + ``dev_eval.evaluate_dev``) here in a later wave.
     dev_evaluator: Callable[[BuiltCodeEditCandidate], Awaitable[Mapping[str, Any]]] | None = None
+    # Set by run() so stage/build spans can attach to the run's deterministic
+    # Langfuse trace (run_trace_id(run_id)) without threading run_id through
+    # every stage-call signature. One engine instance serves one run at a time.
+    _langfuse_run_id: str = field(default="", init=False, repr=False)
 
     async def _maybe_dev_eval_candidate(
         self,
@@ -502,34 +511,65 @@ class CodeEditLoopEngine:
         ``provider_usage`` / ``cost_microusd`` when the exception had them, so
         failure events keep the raw-trace pointer instead of dropping it on
         the containment floor.
+
+        Langfuse mirror: each stage call emits one ``generation`` observation
+        on the run's deterministic trace — stage name, outcome, and cost only
+        (never prompt/response content; the canonical raw trace already lives
+        in SSE-KMS S3). A Langfuse failure yields a None span and the stage
+        proceeds untouched.
         """
-        try:
-            raw = await self.call_openrouter(messages, timeout_seconds, max_tokens, stage)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            if any(
-                base.__name__ in _STAGE_PROPAGATE_ERROR_CLASS_NAMES
-                for base in type(exc).__mro__
-            ):
+        run_id = self._langfuse_run_id
+        with langfuse_observation(
+            f"research_lab.loop_stage.{stage}",
+            as_type="generation",
+            metadata={"run_id": run_id, "stage": stage},
+            trace_id=langfuse_run_trace_id(run_id),
+            sample_seed=run_id or None,
+        ) as stage_obs:
+            try:
+                raw = await self.call_openrouter(messages, timeout_seconds, max_tokens, stage)
+            except asyncio.CancelledError:
                 raise
-            if not _stage_error_containment_enabled():
-                raise
-            lost_cost_microusd = max(0, int(getattr(exc, "cost_microusd", 0) or 0))
-            failure_usage = getattr(exc, "provider_usage", None)
-            logger.warning(
-                "research_lab_loop_stage_call_contained stage=%s lost_cost_microusd=%s error=%s",
-                stage,
-                lost_cost_microusd,
-                str(exc)[:200],
+            except Exception as exc:
+                if any(
+                    base.__name__ in _STAGE_PROPAGATE_ERROR_CLASS_NAMES
+                    for base in type(exc).__mro__
+                ):
+                    raise
+                if not _stage_error_containment_enabled():
+                    raise
+                lost_cost_microusd = max(0, int(getattr(exc, "cost_microusd", 0) or 0))
+                failure_usage = getattr(exc, "provider_usage", None)
+                logger.warning(
+                    "research_lab_loop_stage_call_contained stage=%s lost_cost_microusd=%s error=%s",
+                    stage,
+                    lost_cost_microusd,
+                    str(exc)[:200],
+                )
+                langfuse_update_observation(
+                    stage_obs,
+                    output={
+                        "call_outcome": "contained_failure",
+                        "error_type": type(exc).__name__,
+                        "lost_cost_microusd": lost_cost_microusd,
+                    },
+                )
+                return None, ContainedStageFailure(
+                    _diagnostic_text(f"{type(exc).__name__}: {exc}", limit=300),
+                    stage=stage,
+                    provider_usage=failure_usage if isinstance(failure_usage, Mapping) else None,
+                    cost_microusd=lost_cost_microusd,
+                )
+            result = _coerce_call_result(raw)
+            langfuse_update_observation(
+                stage_obs,
+                output={
+                    "call_outcome": "ok",
+                    "cost_microusd": int(getattr(result, "cost_microusd", 0) or 0),
+                    "content_length": len(result.content or ""),
+                },
             )
-            return None, ContainedStageFailure(
-                _diagnostic_text(f"{type(exc).__name__}: {exc}", limit=300),
-                stage=stage,
-                provider_usage=failure_usage if isinstance(failure_usage, Mapping) else None,
-                cost_microusd=lost_cost_microusd,
-            )
-        return _coerce_call_result(raw), None
+            return result, None
 
     async def _build_candidate_with_heartbeat(
         self,
@@ -552,7 +592,59 @@ class CodeEditLoopEngine:
         build timeout with no loop events — exactly the no-loop-event window
         the stale-claim guard requeues (Chain E). Heartbeat events keep the run
         visibly alive during long builds.
+
+        Langfuse mirror: one ``candidate_build`` span on the run trace whose
+        duration is the wall-clock build; metadata is node/iteration refs
+        only. Build exceptions propagate through it unchanged.
         """
+        with langfuse_observation(
+            "research_lab.loop_stage.candidate_build",
+            metadata={
+                "run_id": run_id,
+                "node_id": node_id,
+                "iteration": iteration,
+                "candidate_index": candidate_index,
+            },
+            trace_id=langfuse_run_trace_id(run_id),
+            sample_seed=run_id or None,
+        ) as build_obs:
+            build_result = await self._build_candidate_inner(
+                draft=draft,
+                artifact=artifact,
+                run_id=run_id,
+                candidate_index=candidate_index,
+                source_context=source_context,
+                node_id=node_id,
+                iteration=iteration,
+                elapsed=elapsed,
+                openrouter_calls=openrouter_calls,
+                estimated_cost=estimated_cost,
+                actual_cost_microusd=actual_cost_microusd,
+            )
+            langfuse_update_observation(
+                build_obs,
+                output={
+                    "call_outcome": "ok",
+                    "source_diff_hash": getattr(build_result, "source_diff_hash", None),
+                },
+            )
+            return build_result
+
+    async def _build_candidate_inner(
+        self,
+        *,
+        draft: CodeEditDraft,
+        artifact: PrivateModelArtifactManifest,
+        run_id: str,
+        candidate_index: int,
+        source_context: Any,
+        node_id: str,
+        iteration: int,
+        elapsed: Callable[[], float],
+        openrouter_calls: int,
+        estimated_cost: float,
+        actual_cost_microusd: int,
+    ) -> CodeEditBuildResult:
         if not _build_heartbeat_enabled():
             return self.builder.build(
                 draft=draft,
@@ -758,6 +850,24 @@ class CodeEditLoopEngine:
         selected: list[BuiltCodeEditCandidate] = []
         resume = dict(resume_state or {})
         iteration = max(0, int(resume.get("iterations_completed") or 0))
+        # Langfuse continuity: every observation this run emits (stage calls,
+        # builds, and later the scoring worker's private-eval span) attaches
+        # to the deterministic trace run_trace_id(run_id). The marker span
+        # below names the trace and records start/resume; it closes
+        # immediately so pauses/requeues never strand an open span.
+        self._langfuse_run_id = str(run_id or "")
+        with langfuse_observation(
+            "research_lab.loop_run",
+            metadata={
+                "run_id": str(run_id or ""),
+                "ticket_id": str(ticket.get("ticket_id") or ""),
+                "resumed": bool(resume),
+                "iteration": iteration,
+            },
+            trace_id=langfuse_run_trace_id(str(run_id or "")),
+            sample_seed=str(run_id or "") or None,
+        ):
+            pass
         openrouter_calls = max(0, int(resume.get("openrouter_call_count") or 0))
         estimated_cost = max(0.0, float(resume.get("estimated_cost_usd") or 0.0))
         actual_cost_microusd = max(0, int(resume.get("actual_openrouter_cost_microusd") or 0))
@@ -992,11 +1102,14 @@ class CodeEditLoopEngine:
         try:
             from gateway.research_lab.allocator_priors import (
                 allocator_priors_enabled,
-                build_cell_yield_priors,
+                load_cell_yield_priors,
             )
 
             if allocator_priors_enabled():
-                cell_yield_priors_doc = await build_cell_yield_priors()
+                # Prefers the persisted nightly selection record (identical
+                # hint for every run that day); falls back to computing from
+                # the ledger before the first nightly pass lands.
+                cell_yield_priors_doc = await load_cell_yield_priors()
                 # P18: the priors injected into the planner prompt used to
                 # survive only inside the captured request body (S3-only,
                 # unqueryable). One pointer-scale allocator_decision event per
@@ -2770,6 +2883,22 @@ class CodeEditLoopEngine:
         provider_usage: Sequence[Mapping[str, Any]],
         checkpoint: dict[str, Any] | None,
     ) -> CodeEditLoopResult:
+        # Terminal marker on the run trace: outcome, iteration count, and
+        # finalist count — the span the dashboard sorts/filters runs by.
+        run_id = self._langfuse_run_id
+        with langfuse_observation(
+            "research_lab.loop_run_completed",
+            metadata={
+                "run_id": run_id,
+                "loop_status": status if status in {"paused", "completed", "failed"} else "completed",
+                "stop_reason": str(stop_reason)[:120],
+                "iterations_completed": int(iterations_completed),
+                "candidate_count": len(selected),
+            },
+            trace_id=langfuse_run_trace_id(run_id),
+            sample_seed=run_id or None,
+        ):
+            pass
         return CodeEditLoopResult(
             # §6.3-1: rank-then-truncate so the kept candidates are the best
             # dev-scored builds; unchanged ordering without 2+ dev scores.

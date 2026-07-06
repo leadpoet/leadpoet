@@ -352,6 +352,13 @@ class ResearchLabGatewayConfig:
     ticket_reconciliation_limit: int = 25
     ticket_reconciliation_worker_index: int = 0
     ticket_lifecycle_age_warning_seconds: int = 900
+    # Inner-loop activation Phase 2: nightly allocator-priors selection refresh.
+    # The refresh job persists a deterministic daily ranking; it is harmless to
+    # run while RESEARCH_LAB_ALLOCATOR_PRIORS_ENABLED (the injection flag)
+    # stays off, so it defaults ON with its own kill switch.
+    allocator_priors_refresh_enabled: bool = True
+    allocator_priors_refresh_interval_seconds: int = 86400
+    allocator_priors_refresh_worker_index: int = 0
     scoring_worker_enabled: bool = False
     scoring_worker_poll_seconds: int = 15
     scoring_worker_max_candidates: int = 1
@@ -617,6 +624,17 @@ class ResearchLabGatewayConfig:
             ticket_lifecycle_age_warning_seconds=max(
                 60,
                 _int("RESEARCH_LAB_TICKET_LIFECYCLE_AGE_WARNING_SECONDS", 900),
+            ),
+            allocator_priors_refresh_enabled=_truthy(
+                "RESEARCH_LAB_ALLOCATOR_PRIORS_REFRESH_ENABLED", "true"
+            ),
+            allocator_priors_refresh_interval_seconds=max(
+                3600,
+                _int("RESEARCH_LAB_ALLOCATOR_PRIORS_REFRESH_INTERVAL_SECONDS", 86400),
+            ),
+            allocator_priors_refresh_worker_index=max(
+                0,
+                _int("RESEARCH_LAB_ALLOCATOR_PRIORS_REFRESH_WORKER_INDEX", 0),
             ),
             scoring_worker_enabled=_truthy("RESEARCH_LAB_SCORING_WORKER_ENABLED"),
             scoring_worker_poll_seconds=max(1, _int("RESEARCH_LAB_SCORING_WORKER_POLL_SECONDS", 15)),

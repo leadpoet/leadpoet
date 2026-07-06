@@ -131,7 +131,7 @@ from research_lab.eval.private_runtime import (
     end_incontainer_trace_collection,
     incontainer_trace_capture_enabled,
 )
-from research_lab.observability.langfuse_client import observation
+from research_lab.observability.langfuse_client import observation, run_trace_id as langfuse_run_trace_id
 from research_lab.observability.redaction import miner_hotkey_hash
 from research_lab.observability.tracing import finish_score_bundle_observation
 
@@ -3267,14 +3267,27 @@ class ResearchLabGatewayScoringWorker:
             )
             langfuse_obs = None
             langfuse_trace_id = ""
+            # End-to-end continuity: the eval span joins the loop engine's
+            # deterministic run trace (run_trace_id(run_id)), and the sampling
+            # decision is seeded by run_id so a sampled run keeps its scoring
+            # span too — never a fragment of one without the other.
+            langfuse_run_id = str(candidate["run_id"])
+            candidate_loop_node_id = (
+                str((candidate.get("candidate_build_doc") or {}).get("loop_node_id") or "")
+                if isinstance(candidate.get("candidate_build_doc"), Mapping)
+                else ""
+            )
             try:
                 with observation(
                     "research_lab.private_eval_pair",
                     as_type="span",
+                    trace_id=langfuse_run_trace_id(langfuse_run_id),
+                    sample_seed=langfuse_run_id or None,
                     metadata={
                         "run_id": str(candidate["run_id"]),
                         "ticket_id": str(candidate["ticket_id"]),
                         "candidate_id": candidate_id,
+                        **({"loop_node_id": candidate_loop_node_id} if candidate_loop_node_id else {}),
                         "miner_hotkey_hash": miner_hotkey_hash(str(candidate.get("miner_hotkey") or "")),
                         "evaluation_epoch": evaluation_epoch,
                         "parent_artifact_hash": artifact.model_artifact_hash,
@@ -3446,6 +3459,12 @@ class ResearchLabGatewayScoringWorker:
                     elapsed_seconds=round(time.time() - start, 3),
                     stage="after_scoring_parent_changed",
                 )
+            await self._maybe_record_score_backfill(
+                candidate=candidate,
+                score_bundle_row=bundle,
+                score_bundle=score_bundle,
+                promotion_result=promotion_result,
+            )
             await self._maybe_finalize_candidate_receipt(candidate)
             await safe_project_public_loop_activity(
                 str(candidate["ticket_id"]),
@@ -3814,6 +3833,12 @@ class ResearchLabGatewayScoringWorker:
                     elapsed_seconds=round(time.time() - start, 3),
                     stage="after_scoring_parent_changed",
                 )
+            await self._maybe_record_score_backfill(
+                candidate=candidate,
+                score_bundle_row=bundle_row,
+                score_bundle=score_bundle,
+                promotion_result=promotion_result,
+            )
             await self._maybe_finalize_candidate_receipt(candidate)
             await safe_project_public_loop_activity(
                 str(candidate["ticket_id"]),
@@ -4046,6 +4071,42 @@ class ResearchLabGatewayScoringWorker:
             score_bundle_row=score_bundle_row,
             score_bundle=score_bundle,
         )
+
+    async def _maybe_record_score_backfill(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_row: Mapping[str, Any],
+        score_bundle: Mapping[str, Any],
+        promotion_result: Mapping[str, Any] | None,
+    ) -> None:
+        """Phase-5 score backfill (flag default OFF): reconcile the realized
+        bundle against the hypothesis's predicted_delta + dev score in an
+        append-only calibration row. Best-effort; never blocks scoring."""
+        candidate_id = str(candidate.get("candidate_id") or "")
+        try:
+            from gateway.research_lab.score_backfill import record_score_backfill
+
+            result = await record_score_backfill(
+                candidate=candidate,
+                score_bundle_row=score_bundle_row,
+                score_bundle=score_bundle,
+                promotion_result=promotion_result,
+                created_by=self.worker_ref,
+            )
+            if result.get("status") == "recorded":
+                logger.info(
+                    "research_lab_score_backfill_recorded candidate=%s bundle=%s outcome=%s",
+                    compact_ref(candidate_id),
+                    compact_ref(result.get("score_bundle_id")),
+                    str(result.get("outcome") or "")[:80],
+                )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_score_backfill_failed candidate=%s error=%s",
+                compact_ref(candidate_id),
+                str(exc)[:200],
+            )
 
     # --- §5.2-2 confirmation re-run: worker-side measurement ---------------
     # A candidate held `held_pending_confirmation` cleared every merge gate on

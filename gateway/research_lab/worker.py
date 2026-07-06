@@ -28,6 +28,7 @@ from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.code_build import CodeEditCandidateBuilder, CodeEditInfraFailureError
 from gateway.research_lab.code_loop_engine import CodeEditLoopEngine
 from gateway.research_lab.config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
+from gateway.research_lab.dev_eval_runner import build_code_edit_dev_evaluator
 from gateway.research_lab.key_vault import (
     OpenRouterKeyVaultError,
     decrypt_openrouter_key,
@@ -1173,6 +1174,7 @@ class ResearchLabHostedWorker:
         # §9.1 item 5: raw prompt/response capture at the OpenRouter boundary.
         self._raw_trace_recorder = _OpenRouterRawTraceRecorder(self.config)
         self._last_ticket_lifecycle_reconcile_at = 0.0
+        self._last_allocator_priors_refresh_at = 0.0
 
     async def run_forever(self) -> None:
         # trajectoryimprovements.md P5: one structured capture health block at
@@ -1236,6 +1238,7 @@ class ResearchLabHostedWorker:
             await self._recover_stale_started_runs()
             await self._reconcile_stale_loop_projections()
             await self._maybe_reconcile_terminal_tickets()
+            await self._maybe_refresh_allocator_priors()
         if await is_autoresearch_maintenance_paused():
             return HostedWorkerOutcome(
                 processed=False,
@@ -1570,6 +1573,53 @@ class ResearchLabHostedWorker:
                 repaired_count,
                 skipped_count,
             )
+
+    async def _maybe_refresh_allocator_priors(self) -> None:
+        """Nightly allocator-priors selection refresh (activation Phase 2).
+
+        Ledger -> cell-yield priors -> deterministic seeded Thompson selection,
+        persisted to research_lab_allocator_selection_records so every run that
+        day injects the identical ordering hint. Only one hosted worker index
+        runs it; idempotent per (day, ledger window); strictly best-effort.
+        Harmless while RESEARCH_LAB_ALLOCATOR_PRIORS_ENABLED (the injection
+        flag) stays off — the record is simply never read.
+        """
+        if not self.config.allocator_priors_refresh_enabled:
+            return
+        total_workers = max(1, int(self.config.hosted_worker_total_workers or 1))
+        configured_index = (
+            int(self.config.allocator_priors_refresh_worker_index or 0) % total_workers
+        )
+        worker_index = int(self.config.hosted_worker_index or 0) % total_workers
+        if worker_index != configured_index:
+            return
+        now = time.monotonic()
+        interval = max(
+            3600, int(self.config.allocator_priors_refresh_interval_seconds or 86400)
+        )
+        if self._last_allocator_priors_refresh_at and (
+            now - self._last_allocator_priors_refresh_at < interval
+        ):
+            return
+        self._last_allocator_priors_refresh_at = now
+        try:
+            from gateway.research_lab.allocator_priors import refresh_allocator_priors
+
+            result = await refresh_allocator_priors(created_by=self.worker_ref)
+        except Exception as exc:
+            logger.warning(
+                "research_lab_allocator_priors_refresh_failed worker_ref=%s error=%s",
+                self.worker_ref,
+                str(exc)[:240],
+            )
+            return
+        logger.info(
+            "research_lab_allocator_priors_refresh worker_ref=%s status=%s day=%s selection_id=%s",
+            self.worker_ref,
+            str(result.get("status") or ""),
+            str(result.get("day") or ""),
+            str(result.get("selection_id") or "")[:80],
+        )
 
     async def _recover_stale_started_runs(self) -> int:
         stale_after_seconds = max(
@@ -2073,11 +2123,18 @@ class ResearchLabHostedWorker:
             code_builder = CodeEditCandidateBuilder(self.config)
             self._require_code_edit_builder_ready()
 
+            # §6.3 dev-eval seam: wire the docker replay runner when the flag
+            # + snapshot URI are configured (None otherwise — the engine's
+            # existing safe default logs research_lab_loop_dev_eval_unwired).
+            # Evaluated per run so the flag can flip without a worker restart.
+            dev_evaluator = build_code_edit_dev_evaluator()
+
             loop_result = await CodeEditLoopEngine(
                 settings=loop_settings,
                 call_openrouter=_call_loop_model,
                 event_sink=_record_loop_event,
                 builder=code_builder,
+                dev_evaluator=dev_evaluator,
             ).run(
                 run_id=context.run_id,
                 ticket=context.ticket,
@@ -2163,6 +2220,9 @@ class ResearchLabHostedWorker:
                     },
                     "iteration": candidate.iteration,
                     "node_id": candidate.node_id,
+                    # §6.3-1 ranking-only dev score (None = never dev-evaluated).
+                    "dev_score": candidate.dev_score,
+                    "dev_score_version": candidate.dev_score_version,
                     "redacted_public_summary": candidate.draft.redacted_summary,
                 }
                 for candidate in loop_result.selected_candidates
@@ -2199,6 +2259,19 @@ class ResearchLabHostedWorker:
                     # bundles stamp the deterministic execution_trace:<uuid5>
                     # ref the trajectory projector writes (bundle→trace join).
                     "loop_node_id": str(finalist.get("node_id") or ""),
+                    # Ranking-only dev score for the Phase-5 calibration row
+                    # (predicted vs dev vs realized); never promotion input.
+                    **(
+                        {
+                            "loop_dev_score": float(finalist["dev_score"]),
+                            "loop_dev_score_version": str(
+                                finalist.get("dev_score_version") or ""
+                            ),
+                        }
+                        if isinstance(finalist.get("dev_score"), (int, float))
+                        and not isinstance(finalist.get("dev_score"), bool)
+                        else {}
+                    ),
                 },
                 hypothesis_doc=hypothesis_doc,
                 redacted_public_summary=redacted_summary,
@@ -4322,7 +4395,8 @@ class ResearchLabHostedWorker:
                 "research_lab_candidate_evaluation_current",
                 columns=(
                     "candidate_id,run_id,parent_artifact_hash,current_candidate_status,current_reason,"
-                    "current_score_bundle_id,candidate_patch_manifest,redacted_public_summary,created_at,current_status_at"
+                    "current_score_bundle_id,candidate_patch_manifest,hypothesis_doc,"
+                    "redacted_public_summary,created_at,current_status_at"
                 ),
                 filters=(("parent_artifact_hash", parent_hash),),
                 order_by=(("created_at", True),),
@@ -4348,6 +4422,19 @@ class ResearchLabHostedWorker:
 
         candidate_ids = {str(row.get("candidate_id") or "") for row in candidates}
         candidate_ids.discard("")
+        # Phase-5 score-aware attempt memory: realized deltas per score bundle
+        # so planners see "this path scored -0.02", not just "this path was
+        # tried" (loopplanner.md field shape).
+        bundle_deltas: dict[str, dict[str, float]] = {}
+        for row in score_bundles:
+            bundle_id = str(row.get("score_bundle_id") or "")
+            doc = row.get("score_bundle_doc") if isinstance(row.get("score_bundle_doc"), Mapping) else {}
+            aggregates = doc.get("aggregates") if isinstance(doc.get("aggregates"), Mapping) else {}
+            if bundle_id and aggregates:
+                bundle_deltas[bundle_id] = {
+                    "score_delta": _safe_float_for_memory(aggregates.get("mean_delta")),
+                    "score_delta_lcb": _safe_float_for_memory(aggregates.get("delta_lcb")),
+                }
         lane_counts: Counter[str] = Counter()
         target_file_counts: Counter[str] = Counter()
         status_counts: Counter[str] = Counter()
@@ -4367,7 +4454,7 @@ class ResearchLabHostedWorker:
             failure_class = _candidate_failure_class_for_memory(row)
             if failure_class:
                 failure_class_counts[failure_class] += 1
-            attempt = _candidate_attempt_memory(row)
+            attempt = _candidate_attempt_memory(row, bundle_deltas=bundle_deltas)
             if attempt:
                 recent_attempts.append(attempt)
 
@@ -4659,7 +4746,11 @@ def _candidate_lane_and_files(value: Any) -> tuple[str, tuple[str, ...]]:
     return lane[:80], tuple(files[:12])
 
 
-def _candidate_attempt_memory(row: Mapping[str, Any]) -> dict[str, Any]:
+def _candidate_attempt_memory(
+    row: Mapping[str, Any],
+    *,
+    bundle_deltas: Mapping[str, Mapping[str, float]] | None = None,
+) -> dict[str, Any]:
     manifest = row.get("candidate_patch_manifest") if isinstance(row.get("candidate_patch_manifest"), Mapping) else {}
     patch_doc = manifest.get("patch_doc") if isinstance(manifest.get("patch_doc"), Mapping) else {}
     code_edit = patch_doc.get("code_edit") if isinstance(patch_doc.get("code_edit"), Mapping) else {}
@@ -4667,7 +4758,7 @@ def _candidate_attempt_memory(row: Mapping[str, Any]) -> dict[str, Any]:
     summary = str(row.get("redacted_public_summary") or manifest.get("redacted_summary") or "")[:500]
     if not summary:
         summary = str(code_edit.get("expected_improvement") or code_edit.get("test_plan") or "")[:500]
-    return {
+    attempt = {
         "candidate_id": str(row.get("candidate_id") or "")[:120],
         "run_id": str(row.get("run_id") or "")[:120],
         "lane": lane,
@@ -4684,6 +4775,23 @@ def _candidate_attempt_memory(row: Mapping[str, Any]) -> dict[str, Any]:
         "status": str(row.get("current_candidate_status") or "")[:120],
         "reason": str(row.get("current_reason") or "")[:240],
     }
+    # Phase-5 score-aware attempt memory: attach the realized delta (and the
+    # hypothesis's prediction) when this attempt's bundle was scored, so the
+    # planner sees "scored -0.02", not just "tried".
+    bundle_id = str(row.get("current_score_bundle_id") or "")
+    realized = (bundle_deltas or {}).get(bundle_id)
+    if realized is not None:
+        # Post-score statuses (rejected/tombstoned/...) stay as-is — they say
+        # more than "scored"; pre-score statuses upgrade to "scored".
+        if attempt["status"] in ("", "queued", "assigned", "evaluating"):
+            attempt["status"] = "scored"
+        attempt["score_delta"] = round(float(realized.get("score_delta", 0.0)), 6)
+        attempt["score_delta_lcb"] = round(float(realized.get("score_delta_lcb", 0.0)), 6)
+        hypothesis = row.get("hypothesis_doc") if isinstance(row.get("hypothesis_doc"), Mapping) else {}
+        predicted = hypothesis.get("predicted_delta")
+        if isinstance(predicted, (int, float)) and not isinstance(predicted, bool):
+            attempt["predicted_delta"] = round(float(predicted), 6)
+    return attempt
 
 
 def _resolve_code_edit_loop_stage_model_request(

@@ -6948,6 +6948,12 @@ class ResearchLabGatewayScoringWorker:
             value = os.getenv(name)
             if value:
                 env[name] = value
+        # Provider evidence replay: when the worker carries a recorded per-ICP
+        # cache directory, candidate runs replay the recorded baseline
+        # evidence for identical provider requests.
+        evidence_cache_dir = os.getenv("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR")
+        if evidence_cache_dir:
+            env["RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR"] = evidence_cache_dir
         if self.proxy_url and self.config.private_model_docker_global_proxy_enabled:
             env.update(
                 {
@@ -6978,6 +6984,11 @@ class ResearchLabGatewayScoringWorker:
         are opt-in — unset config falls back to the prod values.
         """
         env = self._private_scoring_env()
+        # The baseline run seeds the replay cache: capture provider bodies at
+        # full fidelity (recorded evidence must never be truncated) and never
+        # consume a cache itself.
+        env.pop("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR", None)
+        env["RESEARCH_LAB_PROVIDER_EVIDENCE_RECORD"] = "1"
         if self.config.benchmark_exa_api_key:
             env["EXA_API_KEY"] = self.config.benchmark_exa_api_key
         if self.config.benchmark_exa_max_rps > 0:

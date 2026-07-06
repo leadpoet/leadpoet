@@ -1079,6 +1079,10 @@ _research_lab_original_urlopen = urllib.request.urlopen
 # Fingerprint canonicalization mirrors
 # research_lab/eval/provider_evidence_cache.py and MUST stay in sync with it.
 def _research_lab_load_evidence_cache():
+    # A recording run seeds the cache and must observe live providers only.
+    record_flag = (os.environ.get("RESEARCH_LAB_PROVIDER_EVIDENCE_RECORD") or "").strip().lower()
+    if record_flag in ("1", "true", "yes", "on"):
+        return {}
     path = (os.environ.get("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH") or "").strip()
     if not path:
         return {}
@@ -1197,13 +1201,13 @@ class _ResearchLabCachedHeaders(object):
         return list(self._values.items())
 
 class _ResearchLabCachedResponse(object):
-    def __init__(self, url, status, body):
+    def __init__(self, url, status, body, headers=None):
         import io as _io
         self._stream = _io.BytesIO(body)
         self.url = url
         self.status = status
         self.code = status
-        self.headers = _ResearchLabCachedHeaders(len(body))
+        self.headers = headers if headers is not None else _ResearchLabCachedHeaders(len(body))
         self.reason = ""
 
     def read(self, *args):
@@ -1323,10 +1327,22 @@ def _research_lab_trace_env_int(name, default):
 
 _research_lab_trace_max_call_bytes = _research_lab_trace_env_int("RESEARCH_LAB_INCONTAINER_TRACE_MAX_CALL_BYTES", 16384)
 _research_lab_trace_max_total_bytes = _research_lab_trace_env_int("RESEARCH_LAB_INCONTAINER_TRACE_MAX_TOTAL_BYTES", 524288)
+# Evidence recording mode: the run's provider responses seed the replay cache,
+# and a truncated body can never be replayed, so recording lifts the capture
+# budgets far above any real provider payload instead of truncating.
+_research_lab_evidence_record = (
+    (os.environ.get("RESEARCH_LAB_PROVIDER_EVIDENCE_RECORD") or "").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+if _research_lab_evidence_record:
+    _research_lab_trace_max_call_bytes = max(_research_lab_trace_max_call_bytes, 1 << 27)
+    _research_lab_trace_max_total_bytes = max(_research_lab_trace_max_total_bytes, 1 << 30)
 # Metadata guard: bodies are budgeted by the caps above, but a pathological
 # call loop could still grow stderr through per-entry overhead alone. Stop
 # emitting entirely after this many entries (~350B each => ~1.75MB worst case).
 _research_lab_trace_max_entries = 5000
+if _research_lab_evidence_record:
+    _research_lab_trace_max_entries = max(_research_lab_trace_max_entries, 200000)
 _research_lab_trace_state = {"seq": 0, "body_bytes_emitted": 0}
 
 def _research_lab_trace_sanitize_text(text):
@@ -1522,6 +1538,28 @@ def _research_lab_urlopen(req, *args, **kwargs):
         )
         raise
     _research_lab_in_urlopen.active = False
+    if _research_lab_evidence_record:
+        _record_status = getattr(response, "status", None) or getattr(response, "code", None)
+        try:
+            _record_body = response.read()
+        except Exception:
+            _record_body = None
+        if _record_body is not None:
+            _research_lab_emit_trace(
+                method,
+                target,
+                request_body,
+                _record_status,
+                _record_body,
+                "success",
+                "",
+                request_capture_incomplete=request_incomplete,
+                response_capture_incomplete=False,
+            )
+            return _ResearchLabCachedResponse(
+                str(target), _record_status, _record_body,
+                headers=getattr(response, "headers", None),
+            )
     response_body = None
     response_incomplete = True
     try:

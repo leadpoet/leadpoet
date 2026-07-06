@@ -22,11 +22,19 @@ inert until the worker wires it in behind the queue flag.
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from gateway.research_lab.store import insert_row, select_many, select_one, update_row
+
+
+def global_icp_queue_enabled() -> bool:
+    """Opt-in flag for the persisted global (candidate, icp) queue. Default off
+    keeps the per-candidate claim path exactly as it is."""
+    raw = str(os.getenv("RESEARCH_LAB_GLOBAL_ICP_QUEUE_ENABLED") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 JOB_TABLE = "research_lab_scoring_job_queue"
 CANDIDATE_TABLE = "research_lab_scoring_job_candidate"
@@ -241,6 +249,71 @@ async def candidate_result_docs(candidate_id: str) -> dict[str, list[dict[str, A
         "public": [dict(j.get("result_doc") or {}) for j in public],
         "private": [dict(j.get("result_doc") or {}) for j in private],
     }
+
+
+async def run_queue_scoring_pass(
+    *,
+    worker_ref: str,
+    lease_seconds: int,
+    score_icp: Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]],
+    compute_public_score: Callable[[Sequence[Mapping[str, Any]]], float],
+    assemble_candidate: Callable[[str, Mapping[str, list]], Awaitable[None]],
+    max_jobs: int | None = None,
+) -> dict[str, int]:
+    """One worker's pass over the global queue.
+
+    Recovers stale leases, then repeatedly claims the next highest-priority job
+    and scores it via the injected ``score_icp``. When a candidate's public set
+    finishes it decides the gate (using ``compute_public_score`` over the public
+    result docs); when a candidate is fully scored and gate-decided it assembles
+    exactly once via ``assemble_candidate``. Returns per-pass counters.
+
+    Injecting scoring and assembly keeps this loop free of the worker's runner
+    and bundle machinery, so it is unit-testable in isolation. It is only ever
+    invoked when the queue flag is on, so the per-candidate path is untouched.
+    """
+    counters = {"scored": 0, "failed": 0, "gates_decided": 0, "assembled": 0, "recovered": 0}
+    counters["recovered"] = await recover_stale_leases(lease_grace_seconds=lease_seconds)
+    while True:
+        job = await claim_next_job(worker_ref=worker_ref, lease_seconds=lease_seconds)
+        if job is None:
+            return counters
+        candidate_id = str(job.get("candidate_id") or "")
+        try:
+            result_doc = await score_icp(job)
+            await complete_job(job=job, result_doc=result_doc or {})
+            counters["scored"] += 1
+        except Exception:
+            # A job that errors out is recorded failed, not retried in-loop, so
+            # one bad ICP never blocks the queue; stale-lease recovery covers a
+            # worker that dies mid-job.
+            await complete_job(job=job, result_doc={}, failed=True)
+            counters["failed"] += 1
+        if str(job.get("phase")) == "public" and await public_set_complete(candidate_id):
+            docs = await candidate_result_docs(candidate_id)
+            decision = await try_decide_gate(
+                candidate_id=candidate_id,
+                public_score=float(compute_public_score(docs["public"])),
+            )
+            if decision is not None:
+                counters["gates_decided"] += 1
+        ready = await candidate_ready_to_assemble(candidate_id)
+        if ready is not None and await try_claim_assembly(candidate_id):
+            docs = await candidate_result_docs(candidate_id)
+            try:
+                await assemble_candidate(candidate_id, docs)
+                await mark_assembled(candidate_id)
+                counters["assembled"] += 1
+            except Exception:
+                # Assembly failed: release the slot so another worker retries
+                # rather than leaving the candidate wedged in 'assembling'.
+                await _cas_update(
+                    CANDIDATE_TABLE,
+                    {"assembly_status": "pending", "updated_at": _iso(_now())},
+                    filters=(("candidate_id", candidate_id),),
+                )
+        if max_jobs is not None and counters["scored"] + counters["failed"] >= max_jobs:
+            return counters
 
 
 async def recover_stale_leases(*, lease_grace_seconds: int = 0) -> int:

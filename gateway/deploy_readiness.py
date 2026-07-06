@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
+import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -17,6 +21,8 @@ from gateway.build_info import UNKNOWN, get_build_info
 
 DEFAULT_DEPLOY_READINESS_MANIFEST = "/home/ec2-user/gateway/deploy_readiness.json"
 DEPLOY_READINESS_MANIFEST_ENV = "RESEARCH_LAB_DEPLOY_READINESS_MANIFEST"
+DEFAULT_DOCKER_MIN_FREE_GB = 5.0
+DEFAULT_DOCKER_HEALTH_TIMEOUT_SECONDS = 60
 
 _TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 _FALSE_VALUES = {"0", "false", "no", "n", "off"}
@@ -56,6 +62,13 @@ def parse_bool(value: Any, *, default: bool = False) -> bool:
     if text in _FALSE_VALUES:
         return False
     return default
+
+
+def _parse_float(value: Any, *, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def default_manifest_path() -> Path:
@@ -238,6 +251,189 @@ def _allowlist_commit_matches_runtime(status: Mapping[str, Any], runtime_commit:
     return any(_commit_matches(commit, runtime_commit) for commit in commits)
 
 
+def _truncate(value: str, limit: int = 700) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def _run_command(command: list[str], *, timeout_seconds: int) -> dict[str, Any]:
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=max(1, int(timeout_seconds)),
+        )
+    except FileNotFoundError as exc:
+        return {
+            "ok": False,
+            "command": command,
+            "returncode": None,
+            "stdout": "",
+            "stderr": str(exc),
+            "duration_seconds": round(time.monotonic() - started, 3),
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "command": command,
+            "returncode": None,
+            "stdout": _truncate(exc.stdout or ""),
+            "stderr": f"timeout after {timeout_seconds}s",
+            "duration_seconds": round(time.monotonic() - started, 3),
+        }
+    return {
+        "ok": completed.returncode == 0,
+        "command": command,
+        "returncode": completed.returncode,
+        "stdout": _truncate(completed.stdout),
+        "stderr": _truncate(completed.stderr),
+        "duration_seconds": round(time.monotonic() - started, 3),
+    }
+
+
+def _docker_base_command() -> list[str] | None:
+    docker_path = shutil.which("docker")
+    if docker_path:
+        return [docker_path]
+    sudo_path = shutil.which("sudo")
+    if sudo_path and Path("/usr/bin/docker").exists():
+        return [sudo_path, "-n", "/usr/bin/docker"]
+    return None
+
+
+def _run_docker(args: list[str], *, timeout_seconds: int) -> dict[str, Any]:
+    base = _docker_base_command()
+    if base is None:
+        return {
+            "ok": False,
+            "command": ["docker", *args],
+            "returncode": None,
+            "stdout": "",
+            "stderr": "docker CLI not found",
+            "duration_seconds": 0,
+        }
+    result = _run_command([*base, *args], timeout_seconds=timeout_seconds)
+    if result["ok"] or base[0].endswith("sudo"):
+        return result
+    stderr = str(result.get("stderr") or "").lower()
+    if not any(marker in stderr for marker in ("permission denied", "cannot connect", "got permission denied")):
+        return result
+    sudo_path = shutil.which("sudo")
+    if not sudo_path:
+        return result
+    return _run_command([sudo_path, "-n", base[0], *args], timeout_seconds=timeout_seconds)
+
+
+def _parse_docker_info(stdout: str) -> dict[str, str | None]:
+    parts = str(stdout or "").strip().split("|")
+    return {
+        "driver": parts[0] if len(parts) > 0 and parts[0] else None,
+        "docker_root": parts[1] if len(parts) > 1 and parts[1] else None,
+        "server_version": parts[2] if len(parts) > 2 and parts[2] else None,
+    }
+
+
+def _disk_status(path: str | None, *, min_free_gb: float) -> dict[str, Any]:
+    probe = Path(path or "/var/lib/docker")
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        usage = shutil.disk_usage(probe)
+    except OSError as exc:
+        return {
+            "ok": False,
+            "path": str(probe),
+            "error": str(exc)[:500],
+            "min_free_gb": min_free_gb,
+        }
+    free_gb = usage.free / (1024**3)
+    total_gb = usage.total / (1024**3)
+    used_gb = usage.used / (1024**3)
+    return {
+        "ok": free_gb >= min_free_gb,
+        "path": str(probe),
+        "free_gb": round(free_gb, 3),
+        "used_gb": round(used_gb, 3),
+        "total_gb": round(total_gb, 3),
+        "used_percent": round((usage.used / usage.total) * 100, 2) if usage.total else None,
+        "min_free_gb": min_free_gb,
+    }
+
+
+def _docker_smoke_build(*, timeout_seconds: int) -> dict[str, Any]:
+    tag = f"leadpoet-deploy-readiness-smoke:{os.getpid()}-{int(time.time())}"
+    with tempfile.TemporaryDirectory(prefix="leadpoet_docker_smoke_") as tmpdir:
+        dockerfile = Path(tmpdir) / "Dockerfile"
+        dockerfile.write_text(
+            "FROM scratch\nLABEL leadpoet.deploy_readiness=1\n",
+            encoding="utf-8",
+        )
+        build = _run_docker(
+            ["build", "--quiet", "--no-cache", "-t", tag, tmpdir],
+            timeout_seconds=timeout_seconds,
+        )
+    cleanup = _run_docker(["rmi", "-f", tag], timeout_seconds=15)
+    return {
+        "ok": bool(build.get("ok")),
+        "tag": tag,
+        "build": build,
+        "cleanup": {
+            "ok": bool(cleanup.get("ok")),
+            "returncode": cleanup.get("returncode"),
+            "stderr": cleanup.get("stderr"),
+        },
+    }
+
+
+def docker_build_health(
+    *,
+    smoke_build: bool = False,
+    timeout_seconds: int | None = None,
+    min_free_gb: float | None = None,
+) -> dict[str, Any]:
+    """Report Docker availability and, optionally, exercise a tiny local build."""
+    timeout = int(
+        timeout_seconds
+        or os.getenv("DEPLOY_READINESS_DOCKER_HEALTH_TIMEOUT_SECONDS")
+        or DEFAULT_DOCKER_HEALTH_TIMEOUT_SECONDS
+    )
+    min_free = float(
+        min_free_gb
+        if min_free_gb is not None
+        else _parse_float(os.getenv("DEPLOY_READINESS_DOCKER_MIN_FREE_GB"), default=DEFAULT_DOCKER_MIN_FREE_GB)
+    )
+    docker_cli = _docker_base_command()
+    info = _run_docker(
+        ["info", "--format", "{{.Driver}}|{{.DockerRootDir}}|{{.ServerVersion}}"],
+        timeout_seconds=min(timeout, 15),
+    )
+    parsed_info = _parse_docker_info(str(info.get("stdout") or "")) if info.get("ok") else {}
+    disk = _disk_status(str(parsed_info.get("docker_root") or "/var/lib/docker"), min_free_gb=min_free)
+    smoke = _docker_smoke_build(timeout_seconds=timeout) if smoke_build and info.get("ok") else None
+    ok = bool(docker_cli and info.get("ok") and disk.get("ok") and (not smoke_build or (smoke and smoke.get("ok"))))
+    return {
+        "ok": ok,
+        "docker_cli": docker_cli,
+        "docker_info": {
+            "ok": bool(info.get("ok")),
+            "driver": parsed_info.get("driver"),
+            "docker_root": parsed_info.get("docker_root"),
+            "server_version": parsed_info.get("server_version"),
+            "returncode": info.get("returncode"),
+            "stderr": info.get("stderr"),
+            "duration_seconds": info.get("duration_seconds"),
+        },
+        "disk": disk,
+        "smoke_build_requested": bool(smoke_build),
+        "smoke_build": smoke,
+    }
+
+
 def build_deploy_readiness(
     *,
     gateway_commit: str | None = None,
@@ -251,6 +447,8 @@ def build_deploy_readiness(
     require_same_commit: bool = False,
     require_pcr0: bool = False,
     require_pcr0_commit_match: bool = False,
+    include_docker_health: bool = False,
+    require_docker_build_health: bool = False,
 ) -> dict[str, Any]:
     build_info = get_build_info()
     source_commit, source_commit_path = read_source_commit()
@@ -271,6 +469,11 @@ def build_deploy_readiness(
     validator_static = _static_allowlist_status(resolved_validator_pcr0, role="validator")
     validator_dynamic = _dynamic_validator_status(resolved_validator_pcr0)
     validator_pcr0_accepted = bool(validator_static.get("allowed") or validator_dynamic.get("valid"))
+    docker_health = (
+        docker_build_health(smoke_build=require_docker_build_health)
+        if include_docker_health or require_docker_build_health
+        else None
+    )
 
     checks: list[dict[str, Any]] = []
     _add_check(
@@ -375,6 +578,27 @@ def build_deploy_readiness(
             expected=resolved_validator_commit,
             actual=validator_static.get("matched_entry_commits"),
         )
+    if docker_health is not None:
+        _add_check(
+            checks,
+            "docker_build_health",
+            bool(docker_health.get("ok")),
+            severity="error" if require_docker_build_health else "warning",
+            detail=(
+                "Docker host/build health; require flag runs a tiny scratch-image smoke build "
+                "and blocks resume on failure"
+            ),
+            actual={
+                "docker_root": (docker_health.get("docker_info") or {}).get("docker_root"),
+                "disk": docker_health.get("disk"),
+                "smoke_build_requested": docker_health.get("smoke_build_requested"),
+                "smoke_build_ok": (
+                    (docker_health.get("smoke_build") or {}).get("ok")
+                    if docker_health.get("smoke_build") is not None
+                    else None
+                ),
+            },
+        )
 
     ok = all(check["ok"] for check in checks if check.get("severity") == "error")
     return {
@@ -404,6 +628,11 @@ def build_deploy_readiness(
             "require_same_commit": require_same_commit,
             "require_pcr0": require_pcr0,
             "require_pcr0_commit_match": require_pcr0_commit_match,
+            "include_docker_health": include_docker_health,
+            "require_docker_build_health": require_docker_build_health,
+        },
+        "host_health": {
+            "docker": docker_health,
         },
         "checks": checks,
     }

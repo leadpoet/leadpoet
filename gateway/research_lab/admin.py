@@ -26,6 +26,7 @@ from .maintenance import (
     pause_pending_autoresearch_runs,
     rebase_stale_parent_candidates as maintenance_rebase_stale_parent_candidates,
     reconcile_terminal_loop_projections,
+    reconcile_terminal_ticket_statuses,
     repair_public_loop_cards,
     requeue_failed_candidate,
     requeue_failed_loop,
@@ -34,6 +35,7 @@ from .maintenance import (
     resume_credit_blocked_run,
     set_autoresearch_maintenance_paused,
     set_scoring_maintenance_paused,
+    ticket_lifecycle_health,
     wait_until_autoresearch_drained,
 )
 from .promotion import (
@@ -79,6 +81,16 @@ def _add_deploy_readiness_args(parser: argparse.ArgumentParser) -> None:
         "--require-pcr0-commit-match",
         action="store_true",
         help="fail unless matched static PCR0 allowlist metadata points at the running commit",
+    )
+    parser.add_argument(
+        "--include-docker-health",
+        action="store_true",
+        help="include Docker daemon and disk headroom health as a warning check",
+    )
+    parser.add_argument(
+        "--require-docker-build-health",
+        action="store_true",
+        help="run a tiny Docker smoke build and fail readiness if Docker/build storage is unhealthy",
     )
 
 
@@ -258,6 +270,17 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--actor-ref", default=default_actor_ref())
     reconcile.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
     reconcile.add_argument("--write", dest="dry_run", action="store_false")
+
+    reconcile_tickets = sub.add_parser(
+        "reconcile-terminal-tickets",
+        help="Repair tickets still open after all expected queue runs are terminal",
+    )
+    reconcile_tickets.add_argument("--ticket-id")
+    reconcile_tickets.add_argument("--limit", type=int, default=50)
+    reconcile_tickets.add_argument("--reason", default="terminal_ticket_status_reconciler")
+    reconcile_tickets.add_argument("--actor-ref", default=default_actor_ref())
+    reconcile_tickets.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
+    reconcile_tickets.add_argument("--write", dest="dry_run", action="store_false")
 
     repair_cards = sub.add_parser(
         "repair-public-cards",
@@ -861,6 +884,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             require_same_commit=args.require_same_commit,
             require_pcr0=args.require_pcr0,
             require_pcr0_commit_match=args.require_pcr0_commit_match,
+            include_docker_health=args.include_docker_health,
+            require_docker_build_health=args.require_docker_build_health,
         )
         result["action"] = "check-deploy-readiness"
         if args.write_manifest is not None:
@@ -1050,6 +1075,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "scoring_state": await get_scoring_maintenance_state(),
             "queue_counts": await autoresearch_queue_status_counts(),
             "candidate_counts": await candidate_scoring_status_counts(),
+            "ticket_lifecycle_health": await ticket_lifecycle_health(sample_limit=25),
         }
     if args.command == "wait-drained":
         result = await wait_until_autoresearch_drained(
@@ -1060,6 +1086,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "reconcile-loop-projections":
         return await reconcile_terminal_loop_projections(
             run_id=args.run_id,
+            limit=args.limit,
+            reason=args.reason,
+            actor_ref=args.actor_ref,
+            dry_run=args.dry_run,
+        )
+    if args.command == "reconcile-terminal-tickets":
+        return await reconcile_terminal_ticket_statuses(
+            ticket_id=args.ticket_id,
             limit=args.limit,
             reason=args.reason,
             actor_ref=args.actor_ref,

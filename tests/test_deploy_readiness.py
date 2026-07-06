@@ -143,3 +143,98 @@ def test_resume_guard_allows_ok_manifest(tmp_path: Path) -> None:
 
     assert result is not None
     assert result["ok"] is True
+
+
+def test_optional_docker_health_is_warning_only(monkeypatch) -> None:
+    commit = "a" * 40
+
+    monkeypatch.setattr(
+        deploy_readiness,
+        "get_build_info",
+        lambda: {"git_commit": commit, "build_time_utc": "2026-07-06T12:00:00Z"},
+    )
+    monkeypatch.setattr(deploy_readiness, "read_source_commit", lambda: (commit, "test-source"))
+    monkeypatch.setattr(
+        deploy_readiness,
+        "_static_allowlist_status",
+        lambda pcr0, *, role: _status(role, pcr0 or "", allowed=False, commits=[]),
+    )
+    monkeypatch.setattr(
+        deploy_readiness,
+        "_dynamic_validator_status",
+        lambda pcr0: {"available": True, "valid": False, "verification": {}, "cache_status": {}},
+    )
+    monkeypatch.setattr(
+        deploy_readiness,
+        "docker_build_health",
+        lambda *, smoke_build=False: {
+            "ok": False,
+            "docker_info": {"docker_root": "/var/lib/docker"},
+            "disk": {"ok": False, "free_gb": 0.1},
+            "smoke_build_requested": smoke_build,
+            "smoke_build": None,
+        },
+    )
+
+    result = deploy_readiness.build_deploy_readiness(include_docker_health=True)
+
+    assert result["ok"] is True
+    docker_checks = [check for check in result["checks"] if check["name"] == "docker_build_health"]
+    assert docker_checks == [
+        {
+            "name": "docker_build_health",
+            "ok": False,
+            "severity": "warning",
+            "detail": (
+                "Docker host/build health; require flag runs a tiny scratch-image smoke build "
+                "and blocks resume on failure"
+            ),
+            "expected": None,
+            "actual": {
+                "docker_root": "/var/lib/docker",
+                "disk": {"ok": False, "free_gb": 0.1},
+                "smoke_build_requested": False,
+                "smoke_build_ok": None,
+            },
+        }
+    ]
+
+
+def test_required_docker_build_health_blocks_readiness(monkeypatch) -> None:
+    commit = "a" * 40
+
+    monkeypatch.setattr(
+        deploy_readiness,
+        "get_build_info",
+        lambda: {"git_commit": commit, "build_time_utc": "2026-07-06T12:00:00Z"},
+    )
+    monkeypatch.setattr(deploy_readiness, "read_source_commit", lambda: (commit, "test-source"))
+    monkeypatch.setattr(
+        deploy_readiness,
+        "_static_allowlist_status",
+        lambda pcr0, *, role: _status(role, pcr0 or "", allowed=False, commits=[]),
+    )
+    monkeypatch.setattr(
+        deploy_readiness,
+        "_dynamic_validator_status",
+        lambda pcr0: {"available": True, "valid": False, "verification": {}, "cache_status": {}},
+    )
+    monkeypatch.setattr(
+        deploy_readiness,
+        "docker_build_health",
+        lambda *, smoke_build=False: {
+            "ok": False,
+            "docker_info": {"docker_root": "/var/lib/docker"},
+            "disk": {"ok": True, "free_gb": 92.0},
+            "smoke_build_requested": smoke_build,
+            "smoke_build": {"ok": False},
+        },
+    )
+
+    result = deploy_readiness.build_deploy_readiness(require_docker_build_health=True)
+
+    assert result["ok"] is False
+    failed = [check for check in result["checks"] if check["name"] == "docker_build_health"]
+    assert len(failed) == 1
+    assert failed[0]["severity"] == "error"
+    assert failed[0]["actual"]["smoke_build_requested"] is True

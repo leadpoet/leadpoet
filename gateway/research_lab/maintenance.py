@@ -19,6 +19,7 @@ from .store import (
     create_candidate_evaluation_event,
     create_gateway_control_event,
     create_queue_event,
+    create_ticket_event,
     select_all,
     select_many,
     select_one,
@@ -38,6 +39,9 @@ AUTORESEARCH_PROXY_PREFIXES = (
     "RESEARCH_LAB_WORKER_PROXY",
     "RESEARCH_LAB_WORKER_HTTPS_PROXY",
 )
+TERMINAL_QUEUE_STATUSES = frozenset({"completed", "failed", "cancelled", "tombstoned"})
+TERMINAL_TICKET_STATUSES = frozenset({"completed", "failed", "cancelled", "tombstoned"})
+TICKET_LIFECYCLE_QUEUE_BATCH_SIZE = 100
 
 
 async def get_autoresearch_maintenance_state() -> dict[str, Any]:
@@ -198,6 +202,127 @@ async def candidate_scoring_status_counts() -> dict[str, int]:
         )
         counts[status] = len(rows)
     return counts
+
+
+def _terminal_ticket_event_for_queue_rows(queue_rows: list[Mapping[str, Any]]) -> str | None:
+    if not queue_rows:
+        return None
+    statuses = {str(row.get("current_queue_status") or "") for row in queue_rows}
+    if not statuses or not statuses.issubset(TERMINAL_QUEUE_STATUSES):
+        return None
+    if "completed" in statuses:
+        return "completed"
+    if "failed" in statuses:
+        return "failed"
+    if "cancelled" in statuses:
+        return "cancelled"
+    return "tombstoned"
+
+
+def _chunks(values: list[str], size: int) -> list[list[str]]:
+    chunk_size = max(1, int(size or TICKET_LIFECYCLE_QUEUE_BATCH_SIZE))
+    return [values[index : index + chunk_size] for index in range(0, len(values), chunk_size)]
+
+
+async def _queue_rows_by_ticket_id(ticket_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {ticket_id: [] for ticket_id in ticket_ids}
+    for chunk in _chunks(ticket_ids, TICKET_LIFECYCLE_QUEUE_BATCH_SIZE):
+        rows = await select_all(
+            "research_loop_run_queue_current",
+            columns=(
+                "run_id,ticket_id,current_queue_status,current_reason,current_event_hash,"
+                "current_status_at,worker_ref"
+            ),
+            filters=(("ticket_id", "in", chunk),),
+            order_by=(("current_status_at", True),),
+            max_rows=10000,
+        )
+        for row in rows:
+            ticket_id = str(row.get("ticket_id") or "")
+            if ticket_id in grouped:
+                grouped[ticket_id].append(row)
+    return grouped
+
+
+async def find_terminal_queue_open_tickets(*, limit: int = 50) -> list[dict[str, Any]]:
+    """Return tickets still open even though all expected queue runs are terminal."""
+    tickets = await select_all(
+        "research_loop_ticket_current",
+        columns=(
+            "ticket_id,miner_hotkey,requested_loop_count,current_ticket_status,"
+            "current_event_hash,current_status_at,created_at"
+        ),
+        filters=(),
+        order_by=(("current_status_at", True), ("created_at", True)),
+        max_rows=10000,
+    )
+    tickets = [
+        ticket
+        for ticket in tickets
+        if str(ticket.get("ticket_id") or "")
+        and str(ticket.get("current_ticket_status") or "") not in TERMINAL_TICKET_STATUSES
+    ]
+    queues_by_ticket_id = await _queue_rows_by_ticket_id([str(ticket["ticket_id"]) for ticket in tickets])
+    planned: list[dict[str, Any]] = []
+    for ticket in tickets:
+        ticket_id = str(ticket.get("ticket_id") or "")
+        current_ticket_status = str(ticket.get("current_ticket_status") or "")
+        queue_rows = queues_by_ticket_id.get(ticket_id) or []
+        terminal_event = _terminal_ticket_event_for_queue_rows(queue_rows)
+        requested_loop_count = max(1, int(ticket.get("requested_loop_count") or 1))
+        if not terminal_event or len(queue_rows) < requested_loop_count:
+            continue
+        statuses: dict[str, int] = {}
+        for row in queue_rows:
+            status = str(row.get("current_queue_status") or "unknown")
+            statuses[status] = statuses.get(status, 0) + 1
+        planned.append(
+            {
+                "ticket_id": ticket_id,
+                "miner_hotkey": ticket.get("miner_hotkey"),
+                "current_ticket_status": current_ticket_status,
+                "target_ticket_status": terminal_event,
+                "requested_loop_count": requested_loop_count,
+                "queue_count": len(queue_rows),
+                "queue_status_counts": statuses,
+                "ticket_event_hash": ticket.get("current_event_hash"),
+                "ticket_status_at": ticket.get("current_status_at"),
+                "latest_queue_status_at": max(
+                    (str(row.get("current_status_at") or "") for row in queue_rows),
+                    default=None,
+                ),
+                "queue_event_hashes": [
+                    row.get("current_event_hash")
+                    for row in queue_rows
+                    if row.get("current_event_hash")
+                ],
+            }
+        )
+        if len(planned) >= max(1, int(limit or 50)):
+            break
+    return planned
+
+
+async def ticket_lifecycle_health(*, sample_limit: int = 25) -> dict[str, Any]:
+    open_rows = await select_all(
+        "research_loop_ticket_current",
+        columns="ticket_id,current_ticket_status,current_status_at",
+        filters=(),
+        max_rows=10000,
+    )
+    open_ticket_count = sum(
+        1
+        for row in open_rows
+        if str(row.get("current_ticket_status") or "") not in TERMINAL_TICKET_STATUSES
+    )
+    terminal_queue_open_tickets = await find_terminal_queue_open_tickets(limit=sample_limit)
+    return {
+        "ok": len(terminal_queue_open_tickets) == 0,
+        "open_ticket_count": open_ticket_count,
+        "terminal_queue_open_ticket_count": len(terminal_queue_open_tickets),
+        "sample_limit": sample_limit,
+        "samples": terminal_queue_open_tickets,
+    }
 
 
 def _stale_after_seconds(config: ResearchLabGatewayConfig) -> int:
@@ -464,6 +589,78 @@ async def reconcile_terminal_loop_projections(
         "ok": True,
         "dry_run": False,
         "action": "reconcile-loop-projections",
+        "planned_count": len(planned),
+        "repaired_count": len(repaired),
+        "repaired": repaired,
+    }
+
+
+async def reconcile_terminal_ticket_statuses(
+    *,
+    ticket_id: str | None = None,
+    limit: int = 50,
+    reason: str = "terminal_ticket_status_reconciler",
+    actor_ref: str | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    planned = await find_terminal_queue_open_tickets(limit=max(1, int(limit or 50)))
+    if ticket_id:
+        planned = [row for row in planned if str(row.get("ticket_id") or "") == str(ticket_id)]
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "action": "reconcile-terminal-tickets",
+            "planned_count": len(planned),
+            "planned": planned,
+        }
+
+    repaired: list[dict[str, Any]] = []
+    for plan in planned:
+        event_doc = {
+            "schema_version": "1.0",
+            "source": "terminal_ticket_status_reconciler",
+            "operator_reason": reason,
+            "actor_ref": actor_ref or default_actor_ref(),
+            "previous_ticket_status": plan.get("current_ticket_status"),
+            "target_ticket_status": plan.get("target_ticket_status"),
+            "requested_loop_count": plan.get("requested_loop_count"),
+            "queue_count": plan.get("queue_count"),
+            "queue_status_counts": plan.get("queue_status_counts"),
+            "previous_ticket_event_hash": plan.get("ticket_event_hash"),
+            "queue_event_hashes": plan.get("queue_event_hashes") or [],
+        }
+        event = await create_ticket_event(
+            ticket_id=str(plan["ticket_id"]),
+            event_type=str(plan["target_ticket_status"]),
+            actor_hotkey=None,
+            reason=reason,
+            event_doc=event_doc,
+        )
+        repaired.append(
+            {
+                **plan,
+                "event_seq": event.get("seq"),
+                "event_hash": event.get("anchored_hash"),
+            }
+        )
+        try:
+            await safe_project_public_loop_activity(
+                str(plan["ticket_id"]),
+                source_ref=f"terminal_ticket_status_reconciler:{plan['ticket_id']}",
+                reason=reason,
+                force=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_terminal_ticket_public_projection_failed ticket_id=%s error=%s",
+                plan.get("ticket_id"),
+                str(exc)[:240],
+            )
+    return {
+        "ok": True,
+        "dry_run": False,
+        "action": "reconcile-terminal-tickets",
         "planned_count": len(planned),
         "repaired_count": len(repaired),
         "repaired": repaired,

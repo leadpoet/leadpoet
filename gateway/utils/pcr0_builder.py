@@ -67,6 +67,15 @@ PCR0_CHECK_INTERVAL = int(os.environ.get("PCR0_CHECK_INTERVAL", "480"))  # 8 min
 # Allows validators on older code to still be accepted
 PCR0_CACHE_SIZE = int(os.environ.get("PCR0_CACHE_SIZE", "3"))
 
+# Give the gateway process time to finish serving health/readiness before the
+# Docker/Nitro cache warmer starts competing for host resources. Static PCR0
+# allowlist acceptance remains available while this delayed warmup runs.
+PCR0_STARTUP_WARM_DELAY_SECONDS = int(os.environ.get("PCR0_STARTUP_WARM_DELAY_SECONDS", "60"))
+PCR0_STARTUP_HISTORICAL_WARM_ENABLED = os.environ.get(
+    "PCR0_STARTUP_HISTORICAL_WARM_ENABLED",
+    "true",
+).lower() in {"1", "true", "yes", "y", "on"}
+
 # NOTE: No TTL needed with pinned Dockerfile!
 # With pinned base image + pinned pip versions, builds are DETERMINISTIC.
 # Same code = same PCR0, regardless of when it's built.
@@ -184,6 +193,8 @@ def get_cache_status() -> Dict:
         ],
         "build_in_progress": _build_in_progress,
         "cache_size": len(_pcr0_cache),
+        "startup_warm_delay_seconds": PCR0_STARTUP_WARM_DELAY_SECONDS,
+        "startup_historical_warm_enabled": PCR0_STARTUP_HISTORICAL_WARM_ENABLED,
     }
 
 
@@ -1295,11 +1306,21 @@ async def pcr0_builder_task():
         logger.error("[PCR0] Prerequisites check failed. PCR0 builder disabled.")
         return
     
-    # STARTUP: Build PCR0s for last N commits (cache warming)
-    # This ensures validators on slightly older code versions are accepted
-    # even right after gateway restart
-    logger.info("[PCR0] Running startup cache warming (last N commits)...")
-    await build_pcr0_for_recent_commits(PCR0_CACHE_SIZE)
+    if PCR0_STARTUP_WARM_DELAY_SECONDS > 0:
+        logger.info(
+            "[PCR0] Delaying startup cache warming for %ss so gateway health/readiness can come up first",
+            PCR0_STARTUP_WARM_DELAY_SECONDS,
+        )
+        await asyncio.sleep(PCR0_STARTUP_WARM_DELAY_SECONDS)
+
+    # STARTUP: Build PCR0s for last N commits (cache warming). This is delayed
+    # and optional so a gateway restart does not immediately depend on Docker
+    # overlay health; static allowlist verification is still available.
+    if PCR0_STARTUP_HISTORICAL_WARM_ENABLED:
+        logger.info("[PCR0] Running startup cache warming (last N commits)...")
+        await build_pcr0_for_recent_commits(PCR0_CACHE_SIZE)
+    else:
+        logger.info("[PCR0] Startup historical cache warming disabled by env")
     
     logger.info(f"[PCR0] Startup complete. Cache status: {get_cache_status()}")
     
@@ -1318,6 +1339,7 @@ def start_pcr0_builder():
     print(f"   Branch: {GITHUB_BRANCH}")
     print(f"   Interval: {PCR0_CHECK_INTERVAL // 60} minutes")
     print(f"   Cache size: {PCR0_CACHE_SIZE} versions")
+    print(f"   Startup warm delay: {PCR0_STARTUP_WARM_DELAY_SECONDS}s")
     print(f"   Mode: PINNED DOCKERFILE (reproducible builds)")
     print(f"   TTL: None (pinned builds are deterministic)")
 

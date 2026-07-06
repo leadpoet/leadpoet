@@ -256,6 +256,8 @@ async def deploy_readiness(
     require_same_commit: bool = Query(default=False),
     require_pcr0: bool = Query(default=False),
     require_pcr0_commit_match: bool = Query(default=False),
+    include_docker_health: bool = Query(default=False),
+    require_docker_build_health: bool = Query(default=False),
 ):
     """
     Operator readiness summary for deploy/PCR0 alignment.
@@ -279,4 +281,6 @@ async def deploy_readiness(
         require_same_commit=require_same_commit,
         require_pcr0=require_pcr0,
         require_pcr0_commit_match=require_pcr0_commit_match,
+        include_docker_health=include_docker_health,
+        require_docker_build_health=require_docker_build_health,
     )

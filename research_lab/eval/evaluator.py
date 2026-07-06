@@ -1164,6 +1164,22 @@ async def _finalize_incontainer_trace(
     truncated_count = sum(1 for entry in entries if entry.get("truncated"))
     if truncated_count:
         fields["incontainer_trace_truncated_count"] = truncated_count
+    # Provider evidence cache visibility: hits replayed recorded baseline
+    # responses; misses fell through to live provider calls. Any miss means
+    # the run used fresh evidence, so downstream comparison policy can hold
+    # it to the fresh-evidence bar instead of the same-evidence bar.
+    cache_hit_count = sum(1 for entry in entries if str(entry.get("phase") or "") == "cache_hit")
+    cache_miss_count = sum(1 for entry in entries if str(entry.get("phase") or "") == "cache_miss")
+    uninstrumented_count = sum(
+        1 for entry in entries if str(entry.get("phase") or "") == "uninstrumented_http"
+    )
+    if cache_hit_count or cache_miss_count or uninstrumented_count:
+        fields["provider_evidence_cache_hits"] = cache_hit_count
+        fields["provider_evidence_cache_misses"] = cache_miss_count
+    if uninstrumented_count:
+        # Provider traffic outside the instrumented path is fresh evidence
+        # replay never saw; it disqualifies a same-evidence classification.
+        fields["provider_evidence_uninstrumented_calls"] = uninstrumented_count
     if not ref:
         fields["incontainer_trace_dropped"] = True
         fields["incontainer_trace_dropped_call_count"] = len(entries)

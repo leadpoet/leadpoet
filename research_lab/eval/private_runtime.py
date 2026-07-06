@@ -476,6 +476,37 @@ class DockerPrivateModelRunner:
         argv: Sequence[str],
         stdin_payload: Mapping[str, Any],
     ) -> Any:
+        # Provider evidence cache: bind-mount the recorded baseline cache
+        # read-only and repoint the env at the in-container path (the trailing
+        # -e overrides the passthrough name). The per-ICP directory form is
+        # the intended one — each run is only ever handed evidence for the ICP
+        # in its own payload, never the rest of the window's sealed ICPs; the
+        # single-file form remains for callers that already scope the file
+        # themselves. An absent host file leaves the run uncached.
+        evidence_cache_args: list[str] = []
+        extra_env = dict(self.spec.extra_env or {})
+        host_cache_path = ""
+        cache_dir = str(extra_env.get("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR") or "").strip()
+        if cache_dir and isinstance(stdin_payload, dict):
+            payload_icp = stdin_payload.get("icp")
+            if isinstance(payload_icp, dict):
+                from .provider_evidence_cache import icp_evidence_cache_key
+
+                host_cache_path = os.path.join(
+                    cache_dir, f"{icp_evidence_cache_key(payload_icp)}.json"
+                )
+        if not host_cache_path:
+            host_cache_path = str(
+                extra_env.get("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH") or ""
+            ).strip()
+        if host_cache_path and os.path.isfile(host_cache_path):
+            container_cache_path = "/research_lab_provider_evidence_cache.json"
+            evidence_cache_args = [
+                "-v",
+                f"{host_cache_path}:{container_cache_path}:ro",
+                "-e",
+                f"RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH={container_cache_path}",
+            ]
         command = [
             self.spec.docker_executable,
             "run",
@@ -483,6 +514,7 @@ class DockerPrivateModelRunner:
             "-i",
             *_docker_platform_args(self.spec),
             *_docker_env_args(self.spec),
+            *evidence_cache_args,
             self.spec.image_digest,
             "python",
             "-c",
@@ -1039,6 +1071,190 @@ import urllib.request
 
 _research_lab_original_urlopen = urllib.request.urlopen
 
+# Provider evidence cache: when the runner supplies a recorded baseline
+# request->response cache, an identical provider request always replays the
+# same recorded canonical response (including recorded settled failures)
+# instead of calling the provider live, so provider variance between runs
+# cannot change the evaluation.
+# Fingerprint canonicalization mirrors
+# research_lab/eval/provider_evidence_cache.py and MUST stay in sync with it.
+def _research_lab_load_evidence_cache():
+    path = (os.environ.get("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH") or "").strip()
+    if not path:
+        return {}
+    try:
+        import json as _json
+        with open(path, "r", encoding="utf-8") as handle:
+            doc = _json.load(handle)
+        entries = doc.get("entries") if isinstance(doc, dict) else None
+        if not isinstance(entries, dict):
+            return {}
+        cache = {}
+        for key, record in entries.items():
+            # Canonical form is one record per fingerprint; settle a legacy
+            # sequence the same way the builder does (last success wins,
+            # otherwise the final failure).
+            if isinstance(record, list):
+                settled = None
+                for item in record:
+                    if not isinstance(item, dict) or not isinstance(item.get("status"), int):
+                        continue
+                    if settled is None or item["status"] < 400 or settled["status"] >= 400:
+                        settled = item
+                record = settled
+            if isinstance(record, dict) and isinstance(record.get("status"), int):
+                cache[str(key)] = record
+        return cache
+    except Exception:
+        return {}
+
+_research_lab_evidence_cache = _research_lab_load_evidence_cache()
+
+import threading as _research_lab_threading
+
+# Flags provider traffic made outside the instrumented urlopen path (for
+# example an HTTP client layered directly on http.client) while replay is
+# active, so the evaluation can tell the run used live evidence that replay
+# never saw.
+_research_lab_in_urlopen = _research_lab_threading.local()
+
+def _research_lab_install_httpclient_watch():
+    if not _research_lab_evidence_cache:
+        return
+    try:
+        import http.client as _http_client
+        _original_httpclient_request = _http_client.HTTPConnection.request
+
+        def _research_lab_watched_request(self, method, url, *args, **kwargs):
+            if not getattr(_research_lab_in_urlopen, "active", False):
+                _research_lab_emit_trace(
+                    method,
+                    "%s%s" % (getattr(self, "host", ""), url),
+                    None, None, None,
+                    "uninstrumented_http", "", phase="uninstrumented_http",
+                )
+            return _original_httpclient_request(self, method, url, *args, **kwargs)
+
+        _http_client.HTTPConnection.request = _research_lab_watched_request
+    except Exception:
+        pass
+
+def _research_lab_evidence_fingerprint(method, url, body):
+    import hashlib as _hashlib
+    import json as _json
+    import urllib.parse as _urlparse
+    auth_params = ("api_key", "apikey", "api-key", "key", "token", "access_token", "x-api-key")
+    method_part = str(method or "GET").upper()
+    try:
+        split = _urlparse.urlsplit(str(url or ""))
+        pairs = [
+            (k, v)
+            for k, v in _urlparse.parse_qsl(split.query, keep_blank_values=True)
+            if k.lower() not in auth_params
+        ]
+        pairs.sort()
+        url_part = "|".join(
+            (
+                (split.scheme or "").lower(),
+                (split.netloc or "").lower(),
+                split.path or "",
+                _urlparse.urlencode(pairs),
+            )
+        )
+    except Exception:
+        url_part = str(url or "")
+    if body is None:
+        body_bytes = b""
+    elif isinstance(body, (bytes, bytearray)):
+        body_bytes = bytes(body)
+    else:
+        body_bytes = str(body).encode("utf-8", "replace")
+    if body_bytes:
+        try:
+            parsed = _json.loads(body_bytes.decode("utf-8"))
+            body_bytes = _json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        except Exception:
+            pass
+    digest = _hashlib.sha256()
+    digest.update(method_part.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(url_part.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(body_bytes)
+    return digest.hexdigest()
+
+class _ResearchLabCachedHeaders(object):
+    def __init__(self, body_len):
+        self._values = {"Content-Length": str(body_len)}
+
+    def get(self, name, default=None):
+        return self._values.get(str(name), default)
+
+    def get_content_charset(self, failobj=None):
+        return "utf-8"
+
+    def items(self):
+        return list(self._values.items())
+
+class _ResearchLabCachedResponse(object):
+    def __init__(self, url, status, body):
+        import io as _io
+        self._stream = _io.BytesIO(body)
+        self.url = url
+        self.status = status
+        self.code = status
+        self.headers = _ResearchLabCachedHeaders(len(body))
+        self.reason = ""
+
+    def read(self, *args):
+        return self._stream.read(*args)
+
+    def peek(self, *args):
+        return self._stream.getbuffer().tobytes()[self._stream.tell():]
+
+    def readline(self, *args):
+        return self._stream.readline(*args)
+
+    def getcode(self):
+        return self.status
+
+    def geturl(self):
+        return self.url
+
+    def info(self):
+        return self.headers
+
+    def close(self):
+        self._stream.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+def _research_lab_serve_cached_response(record, method, target, request_body):
+    import urllib.error as _urlerror
+    status = int(record.get("status") or 0)
+    try:
+        body = _research_lab_base64.b64decode(record.get("body_b64") or "")
+    except Exception:
+        body = b""
+    if status >= 400:
+        _research_lab_emit_trace(
+            method, target, request_body, status, body,
+            "error", "cached provider failure replayed", phase="cache_hit",
+        )
+        raise _urlerror.HTTPError(
+            str(target), status, "cached provider failure replayed",
+            _ResearchLabCachedHeaders(len(body)), _ResearchLabCachedResponse(str(target), status, body),
+        )
+    _research_lab_emit_trace(
+        method, target, request_body, status, body, "success", "", phase="cache_hit",
+    )
+    return _ResearchLabCachedResponse(str(target), status, body)
+
 def _research_lab_sanitize(text):
     text = str(text or "")
     for env_name in (
@@ -1270,9 +1486,28 @@ def _research_lab_urlopen(req, *args, **kwargs):
             request_incomplete = True
     except Exception:
         request_incomplete = True
+    if _research_lab_evidence_cache:
+        _cached_record = None
+        if not request_incomplete:
+            try:
+                _cached_record = _research_lab_evidence_cache.get(
+                    _research_lab_evidence_fingerprint(method, target, request_body)
+                )
+            except Exception:
+                _cached_record = None
+        if _cached_record is not None:
+            return _research_lab_serve_cached_response(_cached_record, method, target, request_body)
+        # No replayable record (or an unreadable request body): this call is
+        # live, so mark it as fresh evidence either way.
+        _research_lab_emit_trace(
+            method, target, request_body, None, None,
+            "cache_miss", "", phase="cache_miss",
+        )
+    _research_lab_in_urlopen.active = True
     try:
         response = _research_lab_original_urlopen(req, *args, **kwargs)
     except Exception as exc:
+        _research_lab_in_urlopen.active = False
         _research_lab_emit_provider_error(_research_lab_http_error_details(exc), target)
         _research_lab_emit_trace(
             method,
@@ -1286,6 +1521,7 @@ def _research_lab_urlopen(req, *args, **kwargs):
             response_capture_incomplete=True,
         )
         raise
+    _research_lab_in_urlopen.active = False
     response_body = None
     response_incomplete = True
     try:
@@ -1315,6 +1551,7 @@ def _research_lab_urlopen(req, *args, **kwargs):
     return response
 
 urllib.request.urlopen = _research_lab_urlopen
+_research_lab_install_httpclient_watch()
 
 def _research_lab_generic_error_details(exc):
     # httpx / requests / aiohttp analog of _research_lab_http_error_details:

@@ -90,8 +90,9 @@ async def enqueue_candidate(
                 "enqueued_by": worker_ref,
             },
         )
-    except RuntimeError:
-        # Another worker created the coordination row first: not ours to fill.
+    except Exception:
+        # Another worker created the coordination row first (PK violation) or a
+        # transient write error: not ours to fill.
         return False
     now = _iso(_now())
     for offset, item in enumerate(public_items):
@@ -120,7 +121,7 @@ async def _insert_job(candidate_id, window_hash, item, item_index, phase, priori
                 "updated_at": now,
             },
         )
-    except RuntimeError:
+    except Exception:
         # UNIQUE(candidate_id, phase, icp_ref) — job already enqueued; idempotent.
         pass
 
@@ -322,7 +323,8 @@ async def recover_stale_leases(*, lease_grace_seconds: int = 0) -> int:
     cutoff = _iso(_now() - timedelta(seconds=int(lease_grace_seconds)))
     stale = await select_many(
         JOB_TABLE,
-        filters=(("status", "claimed"), ("lease_expires_at", ("lte", cutoff))),
+        # Store filter API: 3-tuple (field, operator, value) for comparisons.
+        filters=(("status", "claimed"), ("lease_expires_at", "lte", cutoff)),
         limit=200,
     )
     recovered = 0

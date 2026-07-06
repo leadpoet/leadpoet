@@ -1803,6 +1803,25 @@ class QualificationStyleCompanyScorer:
         ICPPrompt = getattr(models, "ICPPrompt")
         score_company = getattr(scorer_module, "score_company_autoresearch_intent_v2")
 
+        # Durable, global, day-scoped scoring cache: identical scoring inputs
+        # always yield identical scores, and a result computed once today is
+        # reused by every later run (candidate or baseline rerun) so the LLM
+        # judge cannot drift the comparison. Keyed on the full input, so it is
+        # correct under the per-call de-duplication below.
+        scoring_cache = None
+        cache_key = ""
+        try:
+            from .scored_evidence_cache import get_scored_evidence_cache, scoring_cache_key
+
+            scoring_cache = get_scored_evidence_cache()
+            if scoring_cache is not None:
+                cache_key = scoring_cache_key(icp, companies, is_reference_model)
+                cached = scoring_cache.get(cache_key)
+                if cached is not None:
+                    return [dict(item) for item in cached]
+        except Exception:
+            scoring_cache = None
+
         allowed_buckets = employee_count_buckets_for_icp(icp)
         seen_companies: set[str] = set()
         breakdowns: list[dict[str, Any]] = []
@@ -1842,6 +1861,11 @@ class QualificationStyleCompanyScorer:
             else:
                 item = dict(result)
             breakdowns.append(item)
+        if scoring_cache is not None and cache_key:
+            try:
+                scoring_cache.put(cache_key, breakdowns)
+            except Exception:
+                pass
         return breakdowns
 
 

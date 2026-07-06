@@ -40,7 +40,6 @@ from research_lab.eval.provider_evidence_cache import (
 )
 
 PROXY_URL_ENV = "RESEARCH_LAB_EVIDENCE_PROXY_URL"
-PROXY_RECORD_ONLY_HEADER = "X-Research-Lab-Record-Only"
 
 # Upstream routing: first path segment selects the provider. The proxy
 # re-authenticates each upstream call from its own environment.
@@ -187,16 +186,18 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         # evidence recorded from direct provider calls (baseline tapes).
         upstream_url = upstream["base"] + rest
         fingerprint = canonical_request_fingerprint(self.command, upstream_url, request_body or None)
-        record_only = str(self.headers.get(PROXY_RECORD_ONLY_HEADER) or "").strip() == "1"
-        if not record_only:
-            cached = self.store.lookup(fingerprint)
-            if cached is not None:
-                try:
-                    body = base64.b64decode(cached.get("body_b64") or "")
-                except Exception:
-                    body = b""
-                self._respond(int(cached.get("status") or 502), body, evidence="hit")
-                return
+        # Global read-through for every run, including baseline reruns: the
+        # first run of the day to make a request populates the cache live, and
+        # every later identical request — candidate or a mid-day baseline
+        # rerun — replays the same recorded response.
+        cached = self.store.lookup(fingerprint)
+        if cached is not None:
+            try:
+                body = base64.b64decode(cached.get("body_b64") or "")
+            except Exception:
+                body = b""
+            self._respond(int(cached.get("status") or 502), body, evidence="hit")
+            return
         # Live call, re-authenticated from the proxy's own credentials.
         target = upstream_url
         auth_param = upstream.get("auth_param")

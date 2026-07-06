@@ -6961,6 +6961,9 @@ class ResearchLabGatewayScoringWorker:
         evidence_proxy_url = os.getenv("RESEARCH_LAB_EVIDENCE_PROXY_URL")
         if evidence_proxy_url:
             env["RESEARCH_LAB_EVIDENCE_PROXY_URL"] = evidence_proxy_url
+        scoring_cache_dir = os.getenv("RESEARCH_LAB_SCORING_CACHE_DIR")
+        if scoring_cache_dir:
+            env["RESEARCH_LAB_SCORING_CACHE_DIR"] = scoring_cache_dir
         if self.proxy_url and self.config.private_model_docker_global_proxy_enabled:
             env.update(
                 {
@@ -6995,9 +6998,6 @@ class ResearchLabGatewayScoringWorker:
         # providers only, so it never receives a cache to consume (recording
         # is inherited from the base scoring env).
         env.pop("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR", None)
-        # The seeding baseline must observe live providers: through the proxy
-        # it records but never replays.
-        env["RESEARCH_LAB_EVIDENCE_RECORD_ONLY"] = "1"
         if self.config.benchmark_exa_api_key:
             env["EXA_API_KEY"] = self.config.benchmark_exa_api_key
         if self.config.benchmark_exa_max_rps > 0:

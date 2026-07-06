@@ -1130,9 +1130,6 @@ import threading as _research_lab_threading
 _research_lab_in_urlopen = _research_lab_threading.local()
 
 _research_lab_evidence_proxy = (os.environ.get("RESEARCH_LAB_EVIDENCE_PROXY_URL") or "").strip().rstrip("/")
-_research_lab_evidence_record_only = (
-    (os.environ.get("RESEARCH_LAB_EVIDENCE_RECORD_ONLY") or "").strip().lower() in ("1", "true", "yes", "on")
-)
 _research_lab_proxy_routes = (
     ("api.exa.ai", "/exa"),
     ("api.scrapingdog.com", "/sd"),
@@ -1550,8 +1547,6 @@ def _research_lab_urlopen(req, *args, **kwargs):
     if _proxied_url is not None:
         try:
             _headers = dict(getattr(req, "headers", None) or {})
-            if _research_lab_evidence_record_only:
-                _headers["X-Research-Lab-Record-Only"] = "1"
             req = urllib.request.Request(_proxied_url, data=getattr(req, "data", None) if hasattr(req, "get_method") else (args[0] if args else kwargs.get("data")), headers=_headers, method=method)
             args = ()
             kwargs = {k: v for k, v in kwargs.items() if k != "data"}

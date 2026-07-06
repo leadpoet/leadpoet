@@ -14,11 +14,18 @@ Usage:
 
 from __future__ import annotations
 
+from pathlib import Path
 import sys
 
+# Run-from-anywhere: put the repo root on the path before importing gateway.*
+# (matches scripts/run_research_lab_scoring_worker.py).
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 # Import order matters: gateway.config runs load_dotenv() so SUPABASE_* resolve.
-import gateway.config  # noqa: F401
-from gateway.db.client import get_write_client
+import gateway.config  # noqa: F401,E402
+from gateway.db.client import get_write_client  # noqa: E402
 
 # (table, a representative column that must exist per the migration)
 CHECKS = (

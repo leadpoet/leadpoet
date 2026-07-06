@@ -1969,8 +1969,14 @@ def _normalize_company_output(
     if isinstance(row.get("intent_signals"), Sequence) and not isinstance(
         row.get("intent_signals"), (str, bytes, bytearray)
     ):
-        signals = list(row.get("intent_signals") or [])
+        for index, signal in enumerate(row.get("intent_signals") or []):
+            fallback_idx = index if index < len(icp_signal_texts) else 0
+            normalized = _intent_dict_from_signal_like(signal, row, icp_signal_texts, fallback_idx)
+            if normalized:
+                signals.append(normalized)
     else:
+        signals.append(_intent_dict_from_private_record(intent, row, 0))
+    if not signals:
         signals.append(_intent_dict_from_private_record(intent, row, 0))
 
     for additional in row.get("additional_intents") or []:
@@ -1994,6 +2000,35 @@ def _normalize_company_output(
         "description": row.get("description", ""),
         "intent_signals": signals,
     }
+
+
+def _intent_dict_from_signal_like(
+    signal: Any,
+    row: Mapping[str, Any],
+    icp_signal_texts: Sequence[str],
+    fallback_idx: int,
+) -> dict[str, Any] | None:
+    if isinstance(signal, Mapping):
+        matched_idx = _matched_intent_index(signal, icp_signal_texts)
+        if matched_idx is None:
+            raw_idx = signal.get("matched_icp_signal")
+            matched_idx = raw_idx if isinstance(raw_idx, int) and raw_idx >= 0 else fallback_idx
+        return _intent_dict_from_private_record(signal, row, int(matched_idx))
+
+    text = str(signal or "").strip()
+    if not text:
+        return None
+    return _intent_dict_from_private_record(
+        {
+            "signal": text,
+            "description": text,
+            "snippet": text,
+            "source": row.get("intent_source") or "news",
+            "url": row.get("intent_url") or row.get("company_website") or "",
+        },
+        row,
+        fallback_idx,
+    )
 
 
 def _intent_dict_from_private_record(

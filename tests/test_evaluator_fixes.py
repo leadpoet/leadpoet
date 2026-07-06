@@ -570,6 +570,42 @@ async def test_max_scored_companies_caps_llm_scoring(monkeypatch):
     assert len(scored_calls) == 6
 
 
+def test_explicit_candidate_intent_signals_are_schema_normalized():
+    company = {
+        "company_name": "ExampleCo",
+        "company_website": "https://example.com",
+        "industry": "Software",
+        "employee_count": "51-200",
+        "country": "United States",
+        "intent_signal": "hiring sales reps",
+        "intent_url": "https://example.com/careers",
+        "intent_signals": [
+            {
+                "source": "company_site",
+                "url": "https://example.com/careers",
+                "signal": "hiring sales reps",
+                "matched_icp_signal": 0,
+            },
+            {
+                "source": "news",
+                "url": "https://example.com/news",
+                "matched_icp_signal": 0,
+            },
+        ],
+    }
+    normalized = evaluator._normalize_company_output(
+        company,
+        {"intent_signals": ["hiring sales reps"]},
+    )
+
+    assert len(normalized["intent_signals"]) == 2
+    for signal in normalized["intent_signals"]:
+        assert signal["description"]
+        assert signal["snippet"]
+        assert signal["url"].startswith("https://example.com/")
+        assert signal["matched_icp_signal"] == 0
+
+
 # ---------------------------------------------------------------------------
 # Defaults — score-affecting flags OFF, fairness fixes ON
 # ---------------------------------------------------------------------------

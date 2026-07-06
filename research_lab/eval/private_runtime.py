@@ -1129,6 +1129,43 @@ import threading as _research_lab_threading
 # never saw.
 _research_lab_in_urlopen = _research_lab_threading.local()
 
+_research_lab_evidence_proxy = (os.environ.get("RESEARCH_LAB_EVIDENCE_PROXY_URL") or "").strip().rstrip("/")
+_research_lab_evidence_record_only = (
+    (os.environ.get("RESEARCH_LAB_EVIDENCE_RECORD_ONLY") or "").strip().lower() in ("1", "true", "yes", "on")
+)
+_research_lab_proxy_routes = (
+    ("api.exa.ai", "/exa"),
+    ("api.scrapingdog.com", "/sd"),
+    ("openrouter.ai", "/or"),
+)
+
+def _research_lab_proxy_rewrite(url):
+    # Provider URL -> host proxy route, or None when not a provider call.
+    if not _research_lab_evidence_proxy:
+        return None
+    try:
+        import urllib.parse as _urlparse
+        split = _urlparse.urlsplit(str(url or ""))
+        host = (split.hostname or "").lower()
+        for provider_host, route in _research_lab_proxy_routes:
+            if host == provider_host:
+                path = split.path or "/"
+                query = ("?" + split.query) if split.query else ""
+                return _research_lab_evidence_proxy + route + path + query
+    except Exception:
+        return None
+    return None
+
+def _research_lab_emit_evidence_marker(headers, method, target, request_body):
+    try:
+        kind = str(headers.get("X-Research-Lab-Evidence") or "") if headers is not None else ""
+    except Exception:
+        kind = ""
+    if kind == "hit":
+        _research_lab_emit_trace(method, target, request_body, None, None, "cache_hit", "", phase="cache_hit")
+    elif kind == "recorded":
+        _research_lab_emit_trace(method, target, request_body, None, None, "cache_miss", "", phase="cache_miss")
+
 def _research_lab_install_httpclient_watch():
     if not _research_lab_evidence_cache:
         return
@@ -1509,7 +1546,19 @@ def _research_lab_urlopen(req, *args, **kwargs):
             request_incomplete = True
     except Exception:
         request_incomplete = True
-    if _research_lab_evidence_cache:
+    _proxied_url = _research_lab_proxy_rewrite(target) if not request_incomplete else None
+    if _proxied_url is not None:
+        try:
+            _headers = dict(getattr(req, "headers", None) or {})
+            if _research_lab_evidence_record_only:
+                _headers["X-Research-Lab-Record-Only"] = "1"
+            req = urllib.request.Request(_proxied_url, data=getattr(req, "data", None) if hasattr(req, "get_method") else (args[0] if args else kwargs.get("data")), headers=_headers, method=method)
+            args = ()
+            kwargs = {k: v for k, v in kwargs.items() if k != "data"}
+            target = _proxied_url
+        except Exception:
+            _proxied_url = None
+    if _research_lab_evidence_cache and _proxied_url is None:
         _cached_record = None
         if not request_incomplete:
             try:
@@ -1531,6 +1580,8 @@ def _research_lab_urlopen(req, *args, **kwargs):
         response = _research_lab_original_urlopen(req, *args, **kwargs)
     except Exception as exc:
         _research_lab_in_urlopen.active = False
+        if _proxied_url is not None:
+            _research_lab_emit_evidence_marker(getattr(exc, "headers", None), method, target, request_body)
         _research_lab_emit_provider_error(_research_lab_http_error_details(exc), target)
         _research_lab_emit_trace(
             method,
@@ -1545,6 +1596,8 @@ def _research_lab_urlopen(req, *args, **kwargs):
         )
         raise
     _research_lab_in_urlopen.active = False
+    if _proxied_url is not None:
+        _research_lab_emit_evidence_marker(getattr(response, "headers", None), method, target, request_body)
     if _research_lab_evidence_record:
         _record_status = getattr(response, "status", None) or getattr(response, "code", None)
         try:

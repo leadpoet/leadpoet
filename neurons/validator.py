@@ -2300,6 +2300,23 @@ class Validator(BaseValidatorNeuron):
         except Exception as e:
             print(f"❌ Error discovering miners: {e}")
 
+    async def _check_weight_submission_for_processed_epoch(self, current_epoch: int, reason: str) -> bool:
+        """Keep weight submission live even after sourcing work is marked done."""
+        try:
+            submitted = await self.submit_weights_at_epoch_end()
+        except Exception as exc:
+            bt.logging.warning(
+                f"Error checking weight submission for processed epoch {current_epoch} "
+                f"({reason}): {exc}"
+            )
+            return False
+        if submitted:
+            print(
+                f"✅ Weight submission check complete for epoch {current_epoch} "
+                f"({reason})"
+            )
+        return bool(submitted)
+
     async def process_gateway_validation_workflow(self):
         """
         GATEWAY WORKFLOW (Passages 1 & 2): Fetch leads from gateway, validate, submit hashed results.
@@ -2356,6 +2373,10 @@ class Validator(BaseValidatorNeuron):
             if current_epoch <= self._last_processed_epoch:
                 # Already processed this epoch - no need to spam logs
                 print(f"[DEBUG] Skipping epoch {current_epoch} (already processed)")
+                await self._check_weight_submission_for_processed_epoch(
+                    current_epoch,
+                    "already_processed",
+                )
                 await asyncio.sleep(5)
                 return
             
@@ -2413,6 +2434,10 @@ class Validator(BaseValidatorNeuron):
                     )
                     await asyncio.sleep(10)
                     return
+                await self._check_weight_submission_for_processed_epoch(
+                    current_epoch,
+                    "legacy_sourcing_disabled",
+                )
                 self._last_processed_epoch = current_epoch
                 print(f"✅ Marked epoch {current_epoch} as processed (legacy sourcing skipped)\n")
                 await asyncio.sleep(10)
@@ -2579,6 +2604,10 @@ class Validator(BaseValidatorNeuron):
                 # Gateway explicitly said "already submitted" or "queue empty"
                 print(f"ℹ️  No leads to process for epoch {current_epoch}")
                 print(f"   Gateway confirmed: You've already submitted or queue is empty")
+                await self._check_weight_submission_for_processed_epoch(
+                    current_epoch,
+                    "gateway_already_submitted_or_queue_empty",
+                )
                 
                 # Mark as processed (don't retry - would be duplicate submission)
                 self._last_processed_epoch = current_epoch

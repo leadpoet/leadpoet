@@ -66,63 +66,119 @@ def _utc_day() -> str:
 
 
 class EvidenceStore:
-    """Baseline tape (read-only) + shared day cache (append, host-recorded)."""
+    """Baseline tape + shared day cache with single-flight live calls.
+
+    A Condition guards all state. Single-flight guarantees that for any one
+    request fingerprint, exactly one caller makes the live provider call while
+    every concurrent identical caller waits and then replays the recorded
+    result — so parallel same-request work (e.g. two candidates on the same
+    ICP) shares one live call instead of each calling the provider.
+    """
 
     def __init__(self, baseline_dir: str = "", day_cache_path: str = "") -> None:
-        self._lock = threading.Lock()
+        # Reentrant so a lookup that triggers a midnight rollover can reload
+        # under the same held lock without deadlocking.
+        self._cond = threading.Condition(threading.RLock())
         self._baseline: dict[str, dict[str, Any]] = {}
         self._day: dict[str, dict[str, Any]] = {}
+        self._inflight: set[str] = set()
         self._day_path = day_cache_path
         self._loaded_day = ""
         self._baseline_dir = baseline_dir
-        self.reload()
+        with self._cond:
+            self._reload_locked()
+
+    def _reload_locked(self) -> None:
+        self._loaded_day = _utc_day()
+        self._baseline = {}
+        self._inflight.clear()
+        if self._baseline_dir and os.path.isdir(self._baseline_dir):
+            for name in sorted(os.listdir(self._baseline_dir)):
+                if not name.endswith(".json"):
+                    continue
+                try:
+                    loaded = load_evidence_cache(os.path.join(self._baseline_dir, name))
+                except Exception:
+                    continue
+                for key, record in loaded.items():
+                    self._baseline.setdefault(key, record)
+        self._day = {}
+        if self._day_path and os.path.isfile(self._day_path):
+            try:
+                with open(self._day_path, "r", encoding="utf-8") as handle:
+                    doc = json.load(handle)
+                if str(doc.get("utc_day") or "") == self._loaded_day:
+                    entries = doc.get("entries")
+                    if isinstance(entries, Mapping):
+                        self._day = {
+                            str(k): dict(v)
+                            for k, v in entries.items()
+                            if isinstance(v, Mapping) and isinstance(v.get("status"), int)
+                        }
+            except Exception:
+                self._day = {}
 
     def reload(self) -> None:
-        with self._lock:
-            self._loaded_day = _utc_day()
-            self._baseline = {}
-            if self._baseline_dir and os.path.isdir(self._baseline_dir):
-                for name in sorted(os.listdir(self._baseline_dir)):
-                    if not name.endswith(".json"):
-                        continue
-                    try:
-                        loaded = load_evidence_cache(os.path.join(self._baseline_dir, name))
-                    except Exception:
-                        continue
-                    for key, record in loaded.items():
-                        self._baseline.setdefault(key, record)
-            self._day = {}
-            if self._day_path and os.path.isfile(self._day_path):
-                try:
-                    with open(self._day_path, "r", encoding="utf-8") as handle:
-                        doc = json.load(handle)
-                    if str(doc.get("utc_day") or "") == self._loaded_day:
-                        entries = doc.get("entries")
-                        if isinstance(entries, Mapping):
-                            self._day = {
-                                str(k): dict(v)
-                                for k, v in entries.items()
-                                if isinstance(v, Mapping) and isinstance(v.get("status"), int)
-                            }
-                except Exception:
-                    self._day = {}
+        with self._cond:
+            self._reload_locked()
 
-    def _rollover_if_needed(self) -> None:
+    def _rollover_if_needed_locked(self) -> None:
         if self._loaded_day != _utc_day():
-            # Midnight UTC: all recorded evidence expires; start the day empty.
-            self.reload()
+            # Midnight UTC: all recorded evidence expires; start the day empty
+            # and wake any waiters so they re-lead against the fresh day.
+            self._reload_locked()
+            self._cond.notify_all()
+
+    def _cached_locked(self, fingerprint: str) -> dict[str, Any] | None:
+        record = self._baseline.get(fingerprint)
+        if record is None:
+            record = self._day.get(fingerprint)
+        return dict(record) if record else None
 
     def lookup(self, fingerprint: str) -> dict[str, Any] | None:
-        with self._lock:
-            self._rollover_if_needed()
-            record = self._baseline.get(fingerprint)
-            if record is None:
-                record = self._day.get(fingerprint)
-            return dict(record) if record else None
+        with self._cond:
+            self._rollover_if_needed_locked()
+            return self._cached_locked(fingerprint)
+
+    def acquire_or_wait(self, fingerprint: str, timeout: float = 175.0) -> tuple[dict[str, Any] | None, bool]:
+        """Single-flight gate.
+
+        Returns (record, is_leader):
+        - (record, False): already recorded — replay it, do not call live.
+        - (None, True): you are the leader — make the live call, then call
+          record() (or release_lead() on failure).
+        - (None, False): timed out waiting for the leader — fall back to a
+          live call without leadership (rare; keeps a stuck leader from
+          blocking forever).
+        """
+        with self._cond:
+            deadline = None
+            while True:
+                self._rollover_if_needed_locked()
+                cached = self._cached_locked(fingerprint)
+                if cached is not None:
+                    return cached, False
+                if fingerprint not in self._inflight:
+                    self._inflight.add(fingerprint)
+                    return None, True
+                # Another caller is leading this fingerprint; wait for it.
+                if deadline is None:
+                    deadline = timeout
+                if not self._cond.wait(timeout=deadline):
+                    return None, False
+
+    def release_lead(self, fingerprint: str) -> None:
+        """Leader's live call failed with no recordable result: let a waiter
+        take over rather than block."""
+        with self._cond:
+            self._inflight.discard(fingerprint)
+            self._cond.notify_all()
 
     def record(self, fingerprint: str, status: int, body: bytes) -> None:
-        with self._lock:
-            self._rollover_if_needed()
+        with self._cond:
+            self._rollover_if_needed_locked()
+            self._inflight.discard(fingerprint)
+            self._cond.notify_all()
             if fingerprint in self._baseline or fingerprint in self._day:
                 return
             self._day[fingerprint] = {
@@ -186,11 +242,11 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         # evidence recorded from direct provider calls (baseline tapes).
         upstream_url = upstream["base"] + rest
         fingerprint = canonical_request_fingerprint(self.command, upstream_url, request_body or None)
-        # Global read-through for every run, including baseline reruns: the
-        # first run of the day to make a request populates the cache live, and
-        # every later identical request — candidate or a mid-day baseline
-        # rerun — replays the same recorded response.
-        cached = self.store.lookup(fingerprint)
+        # Global read-through with single-flight: the first run of the day to
+        # make a request calls the provider live while every concurrent
+        # identical request (e.g. another candidate on the same ICP) waits and
+        # replays the recorded result, so one live call is shared by all.
+        cached, is_leader = self.store.acquire_or_wait(fingerprint)
         if cached is not None:
             try:
                 body = base64.b64decode(cached.get("body_b64") or "")
@@ -223,12 +279,17 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 status = int(getattr(response, "status", None) or getattr(response, "code", 0) or 0)
                 body = response.read()
         except urllib.error.HTTPError as exc:
+            # An HTTP error status is a real, recordable provider outcome.
             status = int(exc.code)
             try:
                 body = exc.read()
             except Exception:
                 body = b""
         except Exception:
+            # No recordable result (transport failure): release leadership so a
+            # waiting caller can retry rather than block on us.
+            if is_leader:
+                self.store.release_lead(fingerprint)
             self._respond(502, b'{"error":"upstream unreachable"}')
             return
         self.store.record(fingerprint, status, body)

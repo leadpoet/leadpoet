@@ -35,6 +35,12 @@ from gateway.build_info import get_build_info
 from gateway.config import BUILD_ID, GITHUB_COMMIT, TIMESTAMP_TOLERANCE_SECONDS
 from gateway.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
+# Telemetry: no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set (see TELEMETRY.md).
+# Must init before HTTP-client modules are used so auto-instrumentation patches apply.
+from gateway.telemetry import init_telemetry, instrument_app
+
+init_telemetry()
+
 # Import models
 from gateway.models.events import SubmissionRequestEvent, EventType
 from gateway.models.responses import PresignedURLResponse, ErrorResponse, HealthResponse
@@ -469,6 +475,8 @@ app = FastAPI(
     lifespan=lifespan,  # Use lifespan context manager
     redirect_slashes=False,  # Prevent 307 redirects from consuming semaphore slots
 )
+
+instrument_app(app)  # OTel SERVER spans per request; no-op when telemetry is off
 
 # ============================================================
 # CORS Middleware

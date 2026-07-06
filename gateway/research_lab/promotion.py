@@ -2785,6 +2785,70 @@ def _candidate_already_marked_stale_parent(candidate: Mapping[str, Any]) -> bool
     )
 
 
+def _stale_parent_terminal_status(reason: str) -> str:
+    if reason == "stale_parent_rebase_unavailable":
+        return "stale_parent_rebase_already_recovered"
+    if reason == "stale_parent_rebased_to_current":
+        return "stale_parent_rebase_already_queued"
+    if reason == "stale_parent_rebase_failed":
+        return "stale_parent_rebase_already_failed"
+    if reason == "stale_parent_needs_rescore":
+        return "stale_parent_rebase_already_marked"
+    return ""
+
+
+async def _existing_stale_parent_regeneration_run(candidate: Mapping[str, Any]) -> str:
+    candidate_id = str(candidate.get("candidate_id") or "")
+    ticket_id = str(candidate.get("ticket_id") or "")
+    if not candidate_id or not ticket_id:
+        return ""
+    rows = await select_many(
+        "research_loop_run_queue_events",
+        columns="run_id,reason,event_doc,created_at",
+        filters=(("ticket_id", ticket_id), ("reason", "regenerate_after_rebase_unavailable")),
+        order_by=(("created_at", True),),
+        limit=200,
+    )
+    for row in rows:
+        doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
+        if str(doc.get("regenerated_from_candidate_id") or "") == candidate_id:
+            return str(row.get("run_id") or "")
+    return ""
+
+
+async def _stale_parent_recovery_state(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    status = str(candidate.get("current_candidate_status") or "")
+    reason = str(candidate.get("current_reason") or "")
+    if status != "rejected":
+        return {}
+    terminal_status = _stale_parent_terminal_status(reason)
+    if not terminal_status:
+        return {}
+    regenerated_run_id = await _existing_stale_parent_regeneration_run(candidate)
+    if regenerated_run_id:
+        return {
+            "status": "stale_parent_rebase_already_recovered",
+            "stale_parent_recovery_event_status": "already_recovered",
+            "regenerated_run_id": regenerated_run_id,
+            "previous_candidate_status": status,
+            "previous_candidate_reason": reason,
+        }
+    if reason == "stale_parent_needs_rescore":
+        return {
+            "status": "stale_parent_needs_rescore",
+            "stale_parent_recovery_event_status": "already_marked",
+            "stale_parent_rebase_eligible": True,
+            "previous_candidate_status": status,
+            "previous_candidate_reason": reason,
+        }
+    return {
+        "status": terminal_status,
+        "stale_parent_recovery_event_status": "already_terminal",
+        "previous_candidate_status": status,
+        "previous_candidate_reason": reason,
+    }
+
+
 async def _mark_private_source_push_stale_parent_for_rebase(
     *,
     candidate: Mapping[str, Any],
@@ -2806,8 +2870,9 @@ async def _mark_private_source_push_stale_parent_for_rebase(
     candidate_id = str(candidate.get("candidate_id") or "")
     if not candidate_id:
         return {"stale_parent_recovery_event_status": "candidate_missing_id"}
-    if _candidate_already_marked_stale_parent(candidate):
-        return {"stale_parent_recovery_event_status": "already_marked"}
+    existing_recovery = await _stale_parent_recovery_state(candidate)
+    if existing_recovery:
+        return existing_recovery
 
     run_id = str(candidate.get("run_id") or "")
     ticket_id = str(candidate.get("ticket_id") or "")
@@ -3000,7 +3065,10 @@ async def reconcile_failed_private_source_pushes(
                 filters=(("candidate_id", candidate_id),),
             )
             if candidate and dry_run:
-                if not _candidate_already_marked_stale_parent(candidate):
+                existing_recovery = await _stale_parent_recovery_state(candidate)
+                if existing_recovery:
+                    entry.update(existing_recovery)
+                elif not _candidate_already_marked_stale_parent(candidate):
                     entry["status"] = "would_mark_stale_parent_needs_rescore"
                     entry["stale_parent_rebase_eligible"] = True
                 results.append(entry)
@@ -3016,6 +3084,8 @@ async def reconcile_failed_private_source_pushes(
                 entry.update(marker)
                 if marker.get("stale_parent_rebase_eligible"):
                     entry["status"] = "stale_parent_needs_rescore"
+                elif marker.get("status"):
+                    entry["status"] = str(marker.get("status") or "")
             results.append(entry)
             continue
 
@@ -3093,6 +3163,8 @@ async def reconcile_failed_private_source_pushes(
                 promotion_result=promotion_result,
             )
             entry.update(marker)
+            if marker.get("status"):
+                entry["status"] = str(marker.get("status") or "")
         results.append(entry)
 
     retried_statuses = {
@@ -3102,6 +3174,9 @@ async def reconcile_failed_private_source_pushes(
         "failed",
         "stale_parent_needs_rescore",
         "stale_parent_rebase_already_queued",
+        "stale_parent_rebase_already_marked",
+        "stale_parent_rebase_already_recovered",
+        "stale_parent_rebase_already_failed",
     }
     retried = sum(1 for item in results if item.get("status") in retried_statuses)
     finalized = sum(1 for item in results if item.get("status") in {"merged", "already_promoted"})

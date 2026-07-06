@@ -120,6 +120,10 @@ def main() -> int:
     except Exception as exc:
         errors.append(f"stale scored candidate promotion contract failed: {exc}")
     try:
+        asyncio.run(_test_private_source_reconciler_skips_recovered_stale_parent())
+    except Exception as exc:
+        errors.append(f"private-source recovered stale-parent idempotency failed: {exc}")
+    try:
         asyncio.run(_test_disabled_auto_promotion_writes_terminal_decision())
     except Exception as exc:
         errors.append(f"disabled auto-promotion decision contract failed: {exc}")
@@ -295,6 +299,90 @@ async def _test_stale_scored_candidate_requires_rebase() -> None:
         raise AssertionError(f"stale parent event used invalid status: {stale_events[0]}")
     if any(event.get("event_type") == "active_version_created" for event in events):
         raise AssertionError("stale scored candidate must not create an active version directly")
+
+
+async def _test_private_source_reconciler_skips_recovered_stale_parent() -> None:
+    candidate_id = "candidate:" + "9" * 64
+    writes: list[dict[str, object]] = []
+
+    async def fake_select_many(table, **_kwargs):
+        if table != "research_loop_run_queue_events":
+            return []
+        filters = dict(_kwargs.get("filters") or ())
+        if str(filters.get("ticket_id") or "") == "66666666-6666-4666-8666-666666666666":
+            return []
+        return [
+            {
+                "run_id": "33333333-3333-4333-8333-333333333333",
+                "reason": "regenerate_after_rebase_unavailable",
+                "event_doc": {"regenerated_from_candidate_id": candidate_id},
+                "created_at": "2026-07-06T05:31:54+00:00",
+            }
+        ]
+
+    async def fake_create_candidate_evaluation_event(**kwargs):
+        writes.append({"kind": "candidate_evaluation", **kwargs})
+        return kwargs
+
+    async def fake_create_scoring_dispatch_event(**kwargs):
+        writes.append({"kind": "scoring_dispatch", **kwargs})
+        return kwargs
+
+    original_select_many = promotion_module.select_many
+    original_candidate_event = promotion_module.create_candidate_evaluation_event
+    original_dispatch_event = promotion_module.create_scoring_dispatch_event
+    try:
+        promotion_module.select_many = fake_select_many
+        promotion_module.create_candidate_evaluation_event = fake_create_candidate_evaluation_event
+        promotion_module.create_scoring_dispatch_event = fake_create_scoring_dispatch_event
+        for reason in ("stale_parent_rebase_unavailable", "stale_parent_needs_rescore"):
+            result = await promotion_module._mark_private_source_push_stale_parent_for_rebase(
+                candidate={
+                    "candidate_id": candidate_id,
+                    "run_id": "11111111-1111-4111-8111-111111111111",
+                    "ticket_id": "22222222-2222-4222-8222-222222222222",
+                    "current_candidate_status": "rejected",
+                    "current_reason": reason,
+                    "parent_artifact_hash": "sha256:" + "a" * 64,
+                    "candidate_artifact_hash": "sha256:" + "b" * 64,
+                },
+                score_bundle_id="score_bundle:" + "c" * 64,
+                worker_ref="test-worker",
+                failed_promotion_event_id="44444444-4444-4444-8444-444444444444",
+                latest_promotion_event_id="55555555-5555-4555-8555-555555555555",
+            )
+            if result.get("status") != "stale_parent_rebase_already_recovered":
+                raise AssertionError(f"expected already recovered for {reason}, got {result}")
+            if result.get("stale_parent_recovery_event_status") != "already_recovered":
+                raise AssertionError(f"expected already_recovered marker for {reason}, got {result}")
+            if result.get("stale_parent_rebase_eligible"):
+                raise AssertionError(f"recovered stale-parent candidate must not be rebase eligible: {result}")
+        unrecovered = await promotion_module._mark_private_source_push_stale_parent_for_rebase(
+            candidate={
+                "candidate_id": "candidate:" + "8" * 64,
+                "run_id": "77777777-7777-4777-8777-777777777777",
+                "ticket_id": "66666666-6666-4666-8666-666666666666",
+                "current_candidate_status": "rejected",
+                "current_reason": "stale_parent_needs_rescore",
+                "parent_artifact_hash": "sha256:" + "d" * 64,
+                "candidate_artifact_hash": "sha256:" + "e" * 64,
+            },
+            score_bundle_id="score_bundle:" + "f" * 64,
+            worker_ref="test-worker",
+            failed_promotion_event_id="88888888-8888-4888-8888-888888888888",
+            latest_promotion_event_id="99999999-9999-4999-8999-999999999999",
+        )
+        if unrecovered.get("status") != "stale_parent_needs_rescore":
+            raise AssertionError(f"unrecovered stale-parent marker should remain actionable: {unrecovered}")
+        if not unrecovered.get("stale_parent_rebase_eligible"):
+            raise AssertionError(f"unrecovered stale-parent marker should queue rebase: {unrecovered}")
+    finally:
+        promotion_module.select_many = original_select_many
+        promotion_module.create_candidate_evaluation_event = original_candidate_event
+        promotion_module.create_scoring_dispatch_event = original_dispatch_event
+
+    if writes:
+        raise AssertionError(f"recovered stale-parent reconciler wrote new events: {writes}")
 
 
 async def _test_disabled_auto_promotion_writes_terminal_decision() -> None:

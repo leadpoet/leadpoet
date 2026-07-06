@@ -239,6 +239,57 @@ def verify_projection_fixtures() -> list[str]:
     )
     if needs_rescore.outcome_label != "needs_rescore" or needs_rescore.outcome_band != "blocked":
         errors.append("stale-parent fixture should be needs_rescore/blocked")
+    recovered_stale_parent = derive_public_loop_outcome(
+        ticket={"ticket_id": "t", "current_ticket_status": "running", "created_at": "2026-07-05T16:13:28+00:00"},
+        queue_rows=[
+            {
+                "run_id": "new-run",
+                "current_queue_status": "completed",
+                "current_status_at": "2026-07-06T05:35:34+00:00",
+            }
+        ],
+        receipt_rows=[],
+        candidate_rows=[
+            {
+                "candidate_id": "candidate:old",
+                "run_id": "old-run",
+                "current_candidate_status": "rejected",
+                "current_reason": "stale_parent_needs_rescore",
+                "current_status_at": "2026-07-06T20:34:54+00:00",
+            },
+            {
+                "candidate_id": "candidate:new",
+                "run_id": "new-run",
+                "current_candidate_status": "scored",
+                "candidate_artifact_hash": "sha256:new",
+                "redacted_public_summary": "Recovered run scored cleanly",
+                "current_status_at": "2026-07-06T05:53:55+00:00",
+            },
+        ],
+        score_bundle_rows=[
+            {
+                "candidate_artifact_hash": "sha256:new",
+                "score_bundle_doc": {"aggregates": {"mean_delta": 2.4, "delta_lcb": 1.1}},
+                "current_status_at": "2026-07-06T05:53:56+00:00",
+            }
+        ],
+        promotion_event_rows=[
+            {
+                "event_type": "stale_parent_detected",
+                "promotion_status": "rebase_required",
+                "created_at": "2026-07-06T21:34:54+00:00",
+            }
+        ],
+    )
+    if recovered_stale_parent.outcome_label != "scored_promising":
+        errors.append("recovered stale-parent fixture should remain scored_promising")
+    if recovered_stale_parent.last_activity_at == "2026-07-06T20:34:54+00:00":
+        errors.append("recovered stale-parent tombstone must not drive public last_activity_at")
+    if recovered_stale_parent.last_activity_at != "2026-07-06T05:53:56+00:00":
+        errors.append(
+            "recovered stale-parent fixture should use scored replacement activity, "
+            f"got {recovered_stale_parent.last_activity_at}"
+        )
     not_started = derive_public_loop_outcome(
         ticket={"ticket_id": "t", "current_ticket_status": "opened", "created_at": "2026-01-01T00:00:00+00:00"},
         queue_rows=[],

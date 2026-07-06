@@ -577,6 +577,47 @@ def _all_candidates_terminal(candidate_rows: Sequence[Mapping[str, Any]]) -> boo
     )
 
 
+def _is_stale_parent_tombstone(row: Mapping[str, Any]) -> bool:
+    return str(row.get("current_candidate_status") or "") == "rejected" and str(
+        row.get("current_reason") or row.get("reason") or ""
+    ) in {
+        "stale_parent_needs_rescore",
+        "stale_parent_rebase_failed",
+        "stale_parent_rebase_unavailable",
+        "stale_parent_rebased_to_current",
+    }
+
+
+def _has_replacement_candidate(candidate_rows: Sequence[Mapping[str, Any]]) -> bool:
+    for row in candidate_rows:
+        if _is_stale_parent_tombstone(row):
+            continue
+        if str(row.get("current_candidate_status") or "") in {"queued", "assigned", "evaluating", "scored"}:
+            return True
+    return False
+
+
+def _activity_candidate_rows(candidate_rows: Sequence[Mapping[str, Any]]) -> Sequence[Mapping[str, Any]]:
+    if not _has_replacement_candidate(candidate_rows):
+        return candidate_rows
+    return [row for row in candidate_rows if not _is_stale_parent_tombstone(row)]
+
+
+def _is_stale_parent_promotion_tombstone(row: Mapping[str, Any]) -> bool:
+    return str(row.get("event_type") or "") == "stale_parent_detected" or str(
+        row.get("promotion_status") or ""
+    ) == "rebase_required"
+
+
+def _activity_promotion_rows(
+    promotion_event_rows: Sequence[Mapping[str, Any]],
+    candidate_rows: Sequence[Mapping[str, Any]],
+) -> Sequence[Mapping[str, Any]]:
+    if not _has_replacement_candidate(candidate_rows):
+        return promotion_event_rows
+    return [row for row in promotion_event_rows if not _is_stale_parent_promotion_tombstone(row)]
+
+
 def derive_public_loop_outcome(
     *,
     ticket: Mapping[str, Any],
@@ -593,7 +634,8 @@ def derive_public_loop_outcome(
     scored_candidate_count = int(status_counts.get("scored", 0))
     latest_queue = _latest_row(queue_rows, "current_status_at")
     latest_receipt = _latest_row(receipt_rows, "current_status_at")
-    latest_candidate = _latest_row(candidate_rows, "current_status_at")
+    last_activity_candidate_rows = _activity_candidate_rows(candidate_rows)
+    latest_candidate = _latest_row(last_activity_candidate_rows, "current_status_at")
     # Post-score side-effect failures are bookkeeping noise, not promotion outcomes;
     # they must not become the "latest" promotion event that drives the status.
     effective_promotion_rows = [
@@ -612,13 +654,14 @@ def derive_public_loop_outcome(
     )
     best_bundle = _best_score_bundle(score_bundle_rows)
     best_summary = _best_candidate_summary(candidate_rows, best_bundle)
+    last_activity_promotion_rows = _activity_promotion_rows(promotion_event_rows, candidate_rows)
     last_activity_at = _latest_timestamp(
         [ticket],
         queue_rows,
         receipt_rows,
-        candidate_rows,
+        last_activity_candidate_rows,
         score_bundle_rows,
-        promotion_event_rows,
+        last_activity_promotion_rows,
     )
 
     queue_status = str(latest_queue.get("current_queue_status") or "") if latest_queue else ""

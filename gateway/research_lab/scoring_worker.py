@@ -30,7 +30,11 @@ from gateway.research_lab.code_build import (
     CodeEditPatchApplyError,
     resolve_source_inspection_requests,
 )
-from gateway.research_lab.config import ResearchLabGatewayConfig
+from gateway.research_lab.config import (
+    DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS,
+    DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS,
+    ResearchLabGatewayConfig,
+)
 from gateway.research_lab.icp_window import (
     RollingIcpWindowUnavailable,
     fetch_rolling_icp_window,
@@ -1326,11 +1330,40 @@ def _baseline_max_day_jump_points() -> float | None:
 
 
 def _baseline_min_utc_day_delay_seconds() -> int:
-    raw = os.getenv("RESEARCH_LAB_BASELINE_MIN_UTC_DAY_DELAY_SECONDS", "120").strip()
+    raw = os.getenv(
+        "RESEARCH_LAB_BASELINE_START_UTC_OFFSET_SECONDS",
+        os.getenv(
+            "RESEARCH_LAB_BASELINE_MIN_UTC_DAY_DELAY_SECONDS",
+            str(DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS),
+        ),
+    ).strip()
     try:
-        return max(0, min(3600, int(raw)))
+        return max(0, min(86399, int(raw)))
     except ValueError:
-        return 120
+        return DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS
+
+
+def _candidate_scoring_quiet_start_utc_seconds() -> int:
+    raw = os.getenv(
+        "RESEARCH_LAB_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS",
+        str(DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS),
+    ).strip()
+    try:
+        return max(0, min(86399, int(raw)))
+    except ValueError:
+        return DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS
+
+
+def _utc_seconds_since_day_start(value: datetime) -> int:
+    dt = value.astimezone(timezone.utc)
+    return dt.hour * 3600 + dt.minute * 60 + dt.second
+
+
+def _candidate_baseline_target_date(now: datetime, *, quiet_start_seconds: int) -> str:
+    utc_now = now.astimezone(timezone.utc)
+    if _utc_seconds_since_day_start(utc_now) >= quiet_start_seconds:
+        return (utc_now.date() + timedelta(days=1)).isoformat()
+    return utc_now.date().isoformat()
 
 
 def _summary_has_unresolved_runtime_error(item_summary: Mapping[str, Any]) -> bool:
@@ -1818,6 +1851,8 @@ class ResearchLabGatewayScoringWorker:
         self.proxy_ref_hash = canonical_hash({"proxy_ref": self.proxy_url}) if self.proxy_url else None
         self._baseline_skip_logged = False
         self._baseline_already_logged_date: str | None = None
+        self._candidate_start_hold_logged_key: str | None = None
+        self._last_candidate_start_gate: dict[str, Any] | None = None
         self._private_scoring_env_not_ready_logged = False
         self._resolved_epoch_cache: tuple[int, float] | None = None
         self._scorer_trace_recorder = _ScorerTraceRecorder(config)
@@ -1957,6 +1992,7 @@ class ResearchLabGatewayScoringWorker:
 
         processed: list[str] = []
         claim_capacity: dict[str, Any] = {"available": True}
+        self._last_candidate_start_gate = None
         for _ in range(max(1, self.config.scoring_worker_max_candidates)):
             claim_capacity = await self._candidate_claim_capacity()
             if not claim_capacity.get("available"):
@@ -2001,6 +2037,11 @@ class ResearchLabGatewayScoringWorker:
             status = "confirmation_processed"
         elif not claim_capacity.get("available"):
             status = str(claim_capacity.get("reason") or "candidate_claim_capacity_limited")
+        elif self._last_candidate_start_gate and not self._last_candidate_start_gate.get("available"):
+            status = str(
+                self._last_candidate_start_gate.get("reason")
+                or "candidate_scoring_daily_baseline_hold"
+            )
         else:
             status = "idle"
         return {
@@ -2010,6 +2051,7 @@ class ResearchLabGatewayScoringWorker:
             "baseline": baseline_result,
             "confirmation": confirmation_result,
             "candidate_claim_capacity": claim_capacity,
+            "candidate_start_gate": self._last_candidate_start_gate,
         }
 
     async def _candidate_claim_capacity(self) -> dict[str, Any]:
@@ -2086,6 +2128,32 @@ class ResearchLabGatewayScoringWorker:
                     len(rows),
                 )
             return None
+        start_gate = await self._candidate_scoring_start_gate()
+        self._last_candidate_start_gate = start_gate
+        if not start_gate.get("available"):
+            hold_key = ":".join(
+                str(start_gate.get(key) or "")
+                for key in ("reason", "target_benchmark_date", "private_model_manifest_hash")
+            )
+            if self._candidate_start_hold_logged_key != hold_key:
+                logger.info(
+                    format_worker_block(
+                        "RESEARCH LAB CANDIDATE SCORING START HELD",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("Queued candidates", len(rows)),
+                            ("Reason", start_gate.get("reason")),
+                            ("UTC now", start_gate.get("now_utc")),
+                            ("Target baseline date", start_gate.get("target_benchmark_date")),
+                            ("Quiet start seconds", start_gate.get("quiet_start_utc_seconds")),
+                            ("Private model", compact_ref(start_gate.get("private_model_manifest_hash"))),
+                            ("Action", "leaving queued candidates untouched"),
+                        ),
+                    )
+                )
+                self._candidate_start_hold_logged_key = hold_key
+            return None
+        self._candidate_start_hold_logged_key = None
         candidate_id = str(candidate.get("candidate_id") or "")
         fresh = await select_one(
             "research_lab_candidate_evaluation_current",
@@ -4870,6 +4938,80 @@ class ResearchLabGatewayScoringWorker:
             f"date={today} manifest={compact_ref(artifact.manifest_hash)}"
         )
 
+    async def _candidate_scoring_start_gate(self, *, now: datetime | None = None) -> dict[str, Any]:
+        now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        quiet_start = int(
+            getattr(
+                self.config,
+                "candidate_scoring_quiet_start_utc_seconds",
+                _candidate_scoring_quiet_start_utc_seconds(),
+            )
+            or 0
+        )
+        quiet_start = max(0, min(86399, quiet_start))
+        target_date = _candidate_baseline_target_date(now_utc, quiet_start_seconds=quiet_start)
+        target_now = datetime.fromisoformat(target_date).replace(tzinfo=timezone.utc)
+        seconds_since_midnight = _utc_seconds_since_day_start(now_utc)
+        quiet_window_active = seconds_since_midnight >= quiet_start
+        try:
+            active = await load_active_private_model(self.config, register_bootstrap=True)
+            artifact = active.artifact
+        except Exception as exc:  # noqa: BLE001 - fail closed before assigning a candidate
+            return {
+                "available": False,
+                "reason": "candidate_scoring_active_model_unavailable",
+                "now_utc": now_utc.isoformat(),
+                "target_benchmark_date": target_date,
+                "quiet_start_utc_seconds": quiet_start,
+                "quiet_window_active": quiet_window_active,
+                "error": _short_error(exc),
+            }
+        try:
+            window, gate = await self._daily_candidate_scoring_window_and_gate(
+                artifact=artifact,
+                now=target_now,
+            )
+        except CandidateBaselineNotReady as exc:
+            return {
+                "available": False,
+                "reason": (
+                    "candidate_scoring_next_daily_baseline_not_ready"
+                    if quiet_window_active
+                    else "candidate_scoring_daily_baseline_not_ready"
+                ),
+                "now_utc": now_utc.isoformat(),
+                "target_benchmark_date": target_date,
+                "quiet_start_utc_seconds": quiet_start,
+                "quiet_window_active": quiet_window_active,
+                "private_model_manifest_hash": artifact.manifest_hash,
+                "private_model_artifact_hash": artifact.model_artifact_hash,
+                "error": _short_error(exc),
+            }
+        except Exception as exc:  # noqa: BLE001 - fail closed before assigning a candidate
+            return {
+                "available": False,
+                "reason": "candidate_scoring_daily_baseline_gate_unavailable",
+                "now_utc": now_utc.isoformat(),
+                "target_benchmark_date": target_date,
+                "quiet_start_utc_seconds": quiet_start,
+                "quiet_window_active": quiet_window_active,
+                "private_model_manifest_hash": artifact.manifest_hash,
+                "private_model_artifact_hash": artifact.model_artifact_hash,
+                "error": _short_error(exc),
+            }
+        return {
+            "available": True,
+            "reason": "",
+            "now_utc": now_utc.isoformat(),
+            "target_benchmark_date": target_date,
+            "quiet_start_utc_seconds": quiet_start,
+            "quiet_window_active": quiet_window_active,
+            "private_model_manifest_hash": artifact.manifest_hash,
+            "private_model_artifact_hash": artifact.model_artifact_hash,
+            "rolling_window_hash": getattr(window, "window_hash", ""),
+            "baseline_benchmark_bundle_id": str(gate.get("baseline_benchmark_bundle_id") or ""),
+        }
+
     async def _check_candidate_scoring_freshness(
         self,
         *,
@@ -4886,22 +5028,37 @@ class ResearchLabGatewayScoringWorker:
                 progress=progress,
             )
         try:
-            await self._candidate_private_holdout_gate(
+            current_window, _gate = await self._daily_candidate_scoring_window_and_gate(
                 artifact=parent_artifact,
-                window_hash=candidate_window_hash,
             )
         except Exception as exc:
             if isinstance(exc, CandidateBaselineNotReady):
                 raise
             raise CandidateBaselineNotReady(
-                "candidate_private_baseline_unavailable_during_candidate_scoring: "
+                "candidate_daily_baseline_unavailable_during_candidate_scoring: "
                 f"candidate_window={compact_ref(candidate_window_hash)}"
             ) from exc
+        current_window_hash = str(getattr(current_window, "window_hash", "") or "")
+        if current_window_hash and current_window_hash != candidate_window_hash:
+            raise CandidateBaselineWindowChanged(
+                candidate_window_hash=candidate_window_hash,
+                current_window_hash=current_window_hash,
+                progress=progress,
+            )
 
     async def _maybe_run_private_baseline(self) -> dict[str, Any] | None:
         now = datetime.now(timezone.utc)
         today = now.date().isoformat()
-        min_start_at = utc_day_start(now) + timedelta(seconds=_baseline_min_utc_day_delay_seconds())
+        baseline_start_offset = int(
+            getattr(
+                self.config,
+                "baseline_start_utc_offset_seconds",
+                _baseline_min_utc_day_delay_seconds(),
+            )
+            or 0
+        )
+        baseline_start_offset = max(0, min(86399, baseline_start_offset))
+        min_start_at = utc_day_start(now) + timedelta(seconds=baseline_start_offset)
         if now < min_start_at:
             logger.info(
                 format_worker_block(
@@ -4909,7 +5066,8 @@ class ResearchLabGatewayScoringWorker:
                     (
                         ("Worker", self.worker_ref),
                         ("Benchmark date", today),
-                        ("Earliest start", min_start_at.isoformat()),
+                        ("Scheduled start", min_start_at.isoformat()),
+                        ("Start offset seconds", baseline_start_offset),
                         ("Action", "deferring baseline so the UTC day's ICP set can activate"),
                     ),
                 )
@@ -4917,7 +5075,9 @@ class ResearchLabGatewayScoringWorker:
             return {
                 "status": "waiting_for_daily_icp_activation",
                 "benchmark_date": today,
+                "scheduled_start_at": min_start_at.isoformat(),
                 "earliest_start_at": min_start_at.isoformat(),
+                "start_offset_seconds": baseline_start_offset,
             }
         start = time.time()
         evaluation_epoch = await self._resolve_evaluation_epoch()

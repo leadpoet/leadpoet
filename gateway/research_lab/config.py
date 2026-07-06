@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_LOOP_START_FEE_USD = 2.0
 DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS = 300
 DEFAULT_HOSTED_WORKER_RETRYABLE_FAILURE_LIMIT = 3
+DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS = 15 * 60
+DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS = (23 * 3600) + (30 * 60)
 STALE_PARENT_REBASE_REPAIR_MODEL_ID = "anthropic/claude-opus-4.8"
 STALE_PARENT_REBASE_REPAIR_TIMEOUT_SECONDS = 1200
 DEFAULT_PRIVATE_REPO_URL = ""
@@ -201,6 +203,18 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _bounded_utc_offset_seconds(name: str, *, default: int, legacy_name: str | None = None) -> int:
+    raw = os.getenv(name)
+    if (raw is None or not raw.strip()) and legacy_name:
+        raw = os.getenv(legacy_name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return max(0, min(86399, int(str(raw).strip())))
+    except ValueError:
+        return default
+
+
 # Floor for the promotion improvement threshold. A threshold of 0 (or below)
 # would promote unmeasured / 0.0-basis candidates — explicitly forbidden by
 # fableanalysis §8.3 and §0-N3. The clamp is defense in depth alongside the
@@ -363,6 +377,8 @@ class ResearchLabGatewayConfig:
     private_baseline_concurrency: int = 1
     private_baseline_retry_concurrency: int = 2
     private_baseline_provider_retry_rounds: int = 2
+    baseline_start_utc_offset_seconds: int = DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS
+    candidate_scoring_quiet_start_utc_seconds: int = DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS
     benchmark_exa_api_key: str = ""
     benchmark_exa_max_rps: float = 0.0
     auto_research_min_seconds: int = 600
@@ -667,6 +683,15 @@ class ResearchLabGatewayConfig:
             private_baseline_provider_retry_rounds=max(
                 0,
                 _int("RESEARCH_LAB_BENCHMARK_PROVIDER_RETRY_ROUNDS", 2),
+            ),
+            baseline_start_utc_offset_seconds=_bounded_utc_offset_seconds(
+                "RESEARCH_LAB_BASELINE_START_UTC_OFFSET_SECONDS",
+                default=DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS,
+                legacy_name="RESEARCH_LAB_BASELINE_MIN_UTC_DAY_DELAY_SECONDS",
+            ),
+            candidate_scoring_quiet_start_utc_seconds=_bounded_utc_offset_seconds(
+                "RESEARCH_LAB_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS",
+                default=DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS,
             ),
             benchmark_exa_api_key=os.getenv("RESEARCH_LAB_BENCHMARK_EXA_API_KEY", ""),
             benchmark_exa_max_rps=max(
@@ -1284,6 +1309,10 @@ class ResearchLabGatewayConfig:
                 "private_baseline_concurrency": self.private_baseline_concurrency,
                 "private_baseline_retry_concurrency": self.private_baseline_retry_concurrency,
                 "private_baseline_provider_retry_rounds": self.private_baseline_provider_retry_rounds,
+                "baseline_start_utc_offset_seconds": self.baseline_start_utc_offset_seconds,
+                "candidate_scoring_quiet_start_utc_seconds": (
+                    self.candidate_scoring_quiet_start_utc_seconds
+                ),
                 "benchmark_exa_key_configured": bool(self.benchmark_exa_api_key),
                 "benchmark_exa_max_rps": self.benchmark_exa_max_rps,
                 "auto_promotion_enabled": self.auto_promotion_enabled,

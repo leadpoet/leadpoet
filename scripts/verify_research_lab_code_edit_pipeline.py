@@ -1051,6 +1051,9 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
     async def fake_holdout_gate(self, *, artifact, window_hash):
         return {}
 
+    async def fake_find_reusable_bundle(self, **_kwargs):
+        return None
+
     original_resolve_epoch = ResearchLabGatewayScoringWorker._resolve_evaluation_epoch
     original_load_active = scoring_worker_module.load_active_private_model
     original_fetch_window = scoring_worker_module.fetch_rolling_icp_window
@@ -1066,6 +1069,7 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
     original_write_audit = ResearchLabGatewayScoringWorker._write_audit_bundle
     original_holdout_gate = ResearchLabGatewayScoringWorker._candidate_private_holdout_gate
     original_daily_window_and_gate = ResearchLabGatewayScoringWorker._daily_candidate_scoring_window_and_gate
+    original_find_reusable = ResearchLabGatewayScoringWorker._find_reusable_scored_bundle
     try:
         ResearchLabGatewayScoringWorker._resolve_evaluation_epoch = fake_resolve_epoch
         scoring_worker_module.load_active_private_model = fake_load_active_private_model
@@ -1082,6 +1086,7 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
         ResearchLabGatewayScoringWorker._write_audit_bundle = fake_write_audit
         ResearchLabGatewayScoringWorker._candidate_private_holdout_gate = fake_holdout_gate
         ResearchLabGatewayScoringWorker._daily_candidate_scoring_window_and_gate = fake_daily_window_and_gate
+        ResearchLabGatewayScoringWorker._find_reusable_scored_bundle = fake_find_reusable_bundle
 
         worker = ResearchLabGatewayScoringWorker(ResearchLabGatewayConfig(), worker_ref="test-worker")
         await worker._score_candidate(candidate)
@@ -1101,6 +1106,7 @@ async def test_mid_scoring_stale_parent_requeues_without_score_bundle() -> None:
         ResearchLabGatewayScoringWorker._write_audit_bundle = original_write_audit
         ResearchLabGatewayScoringWorker._candidate_private_holdout_gate = original_holdout_gate
         ResearchLabGatewayScoringWorker._daily_candidate_scoring_window_and_gate = original_daily_window_and_gate
+        ResearchLabGatewayScoringWorker._find_reusable_scored_bundle = original_find_reusable
 
     assert not captured["score_bundles"]
     assert captured["rebase_calls"][0]["stage"] == "during_scoring_parent_changed"
@@ -1220,7 +1226,8 @@ async def test_scoring_worker_terminal_decision_events() -> None:
             worker_ref="test-worker",
         )
         gate_result = worker._scoring_health_gate_result(score_bundle)
-        assert gate_result["decision"] == "quarantined"
+        assert gate_result["configured_enabled"] is True
+        assert gate_result["decision"] == "observe_only"
         assert gate_result["would_quarantine"] is True
 
         public_result = await worker._record_public_holdout_rejected(
@@ -1239,25 +1246,15 @@ async def test_scoring_worker_terminal_decision_events() -> None:
                 "private_holdout_evaluated": False,
             },
         )
-        health_result = await worker._record_scoring_health_quarantined(
-            candidate=candidate,
-            score_bundle_row=score_bundle_row,
-            score_bundle=score_bundle,
-            scoring_health_gate=gate_result,
-        )
     finally:
         scoring_worker_module.create_candidate_promotion_event = original_promotion_event
 
     assert public_result["status"] == "rejected_public_holdout_gate"
-    assert health_result["status"] == "scoring_health_quarantined"
     assert [event["event_type"] for event in captured] == [
         "promotion_checked",
         "public_holdout_rejected",
-        "promotion_checked",
-        "scoring_health_quarantined",
     ]
     assert captured[1]["promotion_status"] == "rejected"
-    assert captured[3]["event_doc"]["scoring_health_gate"]["decision"] == "quarantined"
 
 
 async def test_image_build_score_bundle_contract(draft: CodeEditDraft) -> None:

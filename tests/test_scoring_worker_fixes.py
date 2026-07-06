@@ -486,12 +486,50 @@ def test_baseline_gate_env_parsing(monkeypatch):
     assert sw._baseline_max_day_jump_points() is None
     monkeypatch.setenv("RESEARCH_LAB_BASELINE_MAX_DAY_JUMP_POINTS", "-4.5")
     assert sw._baseline_max_day_jump_points() == 4.5
+    monkeypatch.delenv("RESEARCH_LAB_BASELINE_START_UTC_OFFSET_SECONDS", raising=False)
     monkeypatch.delenv("RESEARCH_LAB_BASELINE_MIN_UTC_DAY_DELAY_SECONDS", raising=False)
+    assert sw._baseline_min_utc_day_delay_seconds() == 900
+    monkeypatch.setenv("RESEARCH_LAB_BASELINE_MIN_UTC_DAY_DELAY_SECONDS", "120")
     assert sw._baseline_min_utc_day_delay_seconds() == 120
+    monkeypatch.setenv("RESEARCH_LAB_BASELINE_START_UTC_OFFSET_SECONDS", "180")
+    assert sw._baseline_min_utc_day_delay_seconds() == 180
     monkeypatch.setenv("RESEARCH_LAB_BASELINE_MIN_UTC_DAY_DELAY_SECONDS", "bad")
-    assert sw._baseline_min_utc_day_delay_seconds() == 120
-    monkeypatch.setenv("RESEARCH_LAB_BASELINE_MIN_UTC_DAY_DELAY_SECONDS", "99999")
-    assert sw._baseline_min_utc_day_delay_seconds() == 3600
+    monkeypatch.setenv("RESEARCH_LAB_BASELINE_START_UTC_OFFSET_SECONDS", "bad")
+    assert sw._baseline_min_utc_day_delay_seconds() == 900
+    monkeypatch.setenv("RESEARCH_LAB_BASELINE_START_UTC_OFFSET_SECONDS", "99999")
+    assert sw._baseline_min_utc_day_delay_seconds() == 86399
+    monkeypatch.delenv("RESEARCH_LAB_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS", raising=False)
+    assert sw._candidate_scoring_quiet_start_utc_seconds() == 84600
+    monkeypatch.setenv("RESEARCH_LAB_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS", "bad")
+    assert sw._candidate_scoring_quiet_start_utc_seconds() == 84600
+    monkeypatch.setenv("RESEARCH_LAB_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS", "99999")
+    assert sw._candidate_scoring_quiet_start_utc_seconds() == 86399
+
+
+def test_candidate_baseline_target_date_respects_quiet_window():
+    quiet_start = 23 * 3600 + 30 * 60
+
+    assert (
+        sw._candidate_baseline_target_date(
+            datetime(2026, 7, 5, 23, 29, 59, tzinfo=timezone.utc),
+            quiet_start_seconds=quiet_start,
+        )
+        == "2026-07-05"
+    )
+    assert (
+        sw._candidate_baseline_target_date(
+            datetime(2026, 7, 5, 23, 30, 0, tzinfo=timezone.utc),
+            quiet_start_seconds=quiet_start,
+        )
+        == "2026-07-06"
+    )
+    assert (
+        sw._candidate_baseline_target_date(
+            datetime(2026, 7, 6, 0, 10, 0, tzinfo=timezone.utc),
+            quiet_start_seconds=quiet_start,
+        )
+        == "2026-07-06"
+    )
 
 
 def _artifact(artifact_hash: str = "sha256:" + "1" * 64) -> sw.PrivateModelArtifactManifest:
@@ -582,6 +620,122 @@ async def test_daily_candidate_scoring_uses_same_day_baseline_window(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_candidate_start_gate_allows_before_quiet_when_today_baseline_exists(monkeypatch):
+    artifact = _artifact()
+    worker = sw.ResearchLabGatewayScoringWorker(
+        sw.ResearchLabGatewayConfig(candidate_scoring_quiet_start_utc_seconds=84600)
+    )
+    captured = {}
+
+    async def fake_load_active(_config, *, register_bootstrap):
+        return SimpleNamespace(artifact=artifact)
+
+    async def fake_daily_window_and_gate(self, *, artifact, now=None):
+        captured["target_date"] = now.date().isoformat()
+        return (
+            SimpleNamespace(window_hash="sha256:" + "7" * 64),
+            {"baseline_benchmark_bundle_id": "private_benchmark:test"},
+        )
+
+    monkeypatch.setattr(sw, "load_active_private_model", fake_load_active)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_daily_candidate_scoring_window_and_gate",
+        fake_daily_window_and_gate,
+    )
+
+    gate = await worker._candidate_scoring_start_gate(
+        now=datetime(2026, 7, 5, 23, 29, 59, tzinfo=timezone.utc)
+    )
+
+    assert gate["available"] is True
+    assert gate["target_benchmark_date"] == "2026-07-05"
+    assert captured["target_date"] == "2026-07-05"
+
+
+@pytest.mark.asyncio
+async def test_candidate_start_gate_blocks_at_quiet_until_next_baseline(monkeypatch):
+    artifact = _artifact()
+    worker = sw.ResearchLabGatewayScoringWorker(
+        sw.ResearchLabGatewayConfig(candidate_scoring_quiet_start_utc_seconds=84600)
+    )
+    captured = {}
+
+    async def fake_load_active(_config, *, register_bootstrap):
+        return SimpleNamespace(artifact=artifact)
+
+    async def fake_daily_window_and_gate(self, *, artifact, now=None):
+        captured["target_date"] = now.date().isoformat()
+        raise sw.CandidateBaselineNotReady("baseline missing")
+
+    monkeypatch.setattr(sw, "load_active_private_model", fake_load_active)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_daily_candidate_scoring_window_and_gate",
+        fake_daily_window_and_gate,
+    )
+
+    quiet_gate = await worker._candidate_scoring_start_gate(
+        now=datetime(2026, 7, 5, 23, 30, 0, tzinfo=timezone.utc)
+    )
+    midnight_gate = await worker._candidate_scoring_start_gate(
+        now=datetime(2026, 7, 6, 0, 10, 0, tzinfo=timezone.utc)
+    )
+
+    assert quiet_gate["available"] is False
+    assert quiet_gate["reason"] == "candidate_scoring_next_daily_baseline_not_ready"
+    assert quiet_gate["target_benchmark_date"] == "2026-07-06"
+    assert midnight_gate["available"] is False
+    assert midnight_gate["reason"] == "candidate_scoring_daily_baseline_not_ready"
+    assert midnight_gate["target_benchmark_date"] == "2026-07-06"
+    assert captured["target_date"] == "2026-07-06"
+
+
+@pytest.mark.asyncio
+async def test_candidate_claim_quiet_hold_writes_no_assignment(monkeypatch):
+    candidate = {
+        "candidate_id": "candidate:" + "8" * 64,
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "ticket_id": "22222222-2222-4222-8222-222222222222",
+        "current_reason": "",
+        "current_status_at": "2026-07-05T23:30:00+00:00",
+    }
+    worker = sw.ResearchLabGatewayScoringWorker(sw.ResearchLabGatewayConfig(), worker_ref="test-worker")
+    events = []
+
+    async def fake_select_many(table, *, columns, filters, order_by, limit):
+        assert table == "research_lab_candidate_evaluation_current"
+        return [candidate]
+
+    async def fake_start_gate(self):
+        return {
+            "available": False,
+            "reason": "candidate_scoring_next_daily_baseline_not_ready",
+            "now_utc": "2026-07-05T23:30:00+00:00",
+            "target_benchmark_date": "2026-07-06",
+            "quiet_start_utc_seconds": 84600,
+            "private_model_manifest_hash": "sha256:" + "c" * 64,
+        }
+
+    async def fake_create_event(**kwargs):  # pragma: no cover - must not assign
+        events.append(kwargs)
+        raise AssertionError("quiet hold must not write candidate assignment")
+
+    monkeypatch.setattr(sw, "select_many", fake_select_many)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_candidate_scoring_start_gate",
+        fake_start_gate,
+    )
+    monkeypatch.setattr(sw, "create_candidate_evaluation_event", fake_create_event)
+
+    claimed = await worker._claim_next_candidate()
+
+    assert claimed is None
+    assert events == []
+
+
+@pytest.mark.asyncio
 async def test_candidate_freshness_passes_when_parent_and_window_match(monkeypatch):
     artifact = _artifact()
     window_hash = "sha256:" + "2" * 64
@@ -591,13 +745,16 @@ async def test_candidate_freshness_passes_when_parent_and_window_match(monkeypat
     async def fake_load_active(_config, *, register_bootstrap):
         return SimpleNamespace(artifact=artifact)
 
-    async def fake_holdout_gate(self, *, artifact, window_hash):
+    async def fake_daily_window_and_gate(self, *, artifact, now=None):
         captured["artifact_hash"] = artifact.manifest_hash
-        captured["window_hash"] = window_hash
-        return {"baseline_benchmark_bundle_id": "baseline:test"}
+        return SimpleNamespace(window_hash=window_hash), {"baseline_benchmark_bundle_id": "baseline:test"}
 
     monkeypatch.setattr(sw, "load_active_private_model", fake_load_active)
-    monkeypatch.setattr(sw.ResearchLabGatewayScoringWorker, "_candidate_private_holdout_gate", fake_holdout_gate)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_daily_candidate_scoring_window_and_gate",
+        fake_daily_window_and_gate,
+    )
 
     await worker._check_candidate_scoring_freshness(
         parent_artifact=artifact,
@@ -605,7 +762,6 @@ async def test_candidate_freshness_passes_when_parent_and_window_match(monkeypat
         progress={"phase": "before_icp", "completed_icp_count": 3},
     )
     assert captured["artifact_hash"] == artifact.manifest_hash
-    assert captured["window_hash"] == window_hash
 
 
 @pytest.mark.asyncio
@@ -617,11 +773,15 @@ async def test_candidate_freshness_stale_parent_takes_precedence(monkeypatch):
     async def fake_load_active(_config, *, register_bootstrap):
         return SimpleNamespace(artifact=active_artifact)
 
-    async def fake_holdout_gate(self, *, artifact, window_hash):  # pragma: no cover - parent check should win first
+    async def fake_daily_window_and_gate(self, *, artifact, now=None):  # pragma: no cover - parent check should win first
         raise AssertionError("baseline gate should not run after stale parent")
 
     monkeypatch.setattr(sw, "load_active_private_model", fake_load_active)
-    monkeypatch.setattr(sw.ResearchLabGatewayScoringWorker, "_candidate_private_holdout_gate", fake_holdout_gate)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_daily_candidate_scoring_window_and_gate",
+        fake_daily_window_and_gate,
+    )
 
     with pytest.raises(sw.StaleParentDuringScoring) as raised:
         await worker._check_candidate_scoring_freshness(
@@ -644,11 +804,15 @@ async def test_candidate_freshness_waits_when_candidate_baseline_missing(monkeyp
     async def fake_load_active(_config, *, register_bootstrap):
         return SimpleNamespace(artifact=artifact)
 
-    async def fake_holdout_gate(self, *, artifact, window_hash):
+    async def fake_daily_window_and_gate(self, *, artifact, now=None):
         raise sw.CandidateBaselineNotReady("matching baseline missing")
 
     monkeypatch.setattr(sw, "load_active_private_model", fake_load_active)
-    monkeypatch.setattr(sw.ResearchLabGatewayScoringWorker, "_candidate_private_holdout_gate", fake_holdout_gate)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_daily_candidate_scoring_window_and_gate",
+        fake_daily_window_and_gate,
+    )
 
     with pytest.raises(sw.CandidateBaselineNotReady) as raised:
         await worker._check_candidate_scoring_freshness(
@@ -673,11 +837,15 @@ async def test_candidate_freshness_waits_when_current_window_unavailable(monkeyp
     async def fake_load_active(_config, *, register_bootstrap):
         return SimpleNamespace(artifact=artifact)
 
-    async def fake_holdout_gate(self, *, artifact, window_hash):
+    async def fake_daily_window_and_gate(self, *, artifact, now=None):
         raise RuntimeError("baseline lookup unavailable")
 
     monkeypatch.setattr(sw, "load_active_private_model", fake_load_active)
-    monkeypatch.setattr(sw.ResearchLabGatewayScoringWorker, "_candidate_private_holdout_gate", fake_holdout_gate)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_daily_candidate_scoring_window_and_gate",
+        fake_daily_window_and_gate,
+    )
 
     with pytest.raises(sw.CandidateBaselineNotReady) as raised:
         await worker._check_candidate_scoring_freshness(
@@ -686,7 +854,39 @@ async def test_candidate_freshness_waits_when_current_window_unavailable(monkeyp
             progress={"phase": "before_icp", "completed_icp_count": 7},
         )
 
-    assert "candidate_private_baseline_unavailable_during_candidate_scoring" in str(raised.value)
+    assert "candidate_daily_baseline_unavailable_during_candidate_scoring" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_candidate_freshness_raises_when_daily_window_changed(monkeypatch):
+    artifact = _artifact()
+    old_window = "sha256:" + "2" * 64
+    current_window = "sha256:" + "3" * 64
+    worker = sw.ResearchLabGatewayScoringWorker(sw.ResearchLabGatewayConfig())
+
+    async def fake_load_active(_config, *, register_bootstrap):
+        return SimpleNamespace(artifact=artifact)
+
+    async def fake_daily_window_and_gate(self, *, artifact, now=None):
+        return SimpleNamespace(window_hash=current_window), {"baseline_benchmark_bundle_id": "baseline:test"}
+
+    monkeypatch.setattr(sw, "load_active_private_model", fake_load_active)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_daily_candidate_scoring_window_and_gate",
+        fake_daily_window_and_gate,
+    )
+
+    with pytest.raises(sw.CandidateBaselineWindowChanged) as raised:
+        await worker._check_candidate_scoring_freshness(
+            parent_artifact=artifact,
+            candidate_window_hash=old_window,
+            progress={"phase": "before_icp", "completed_icp_count": 16},
+        )
+
+    assert raised.value.candidate_window_hash == old_window
+    assert raised.value.current_window_hash == current_window
+    assert raised.value.progress["completed_icp_count"] == 16
 
 
 def test_candidate_baseline_wait_event_doc_includes_window_progress():

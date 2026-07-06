@@ -570,6 +570,11 @@ async def _score_items_work_conserving(
     return [results[position] for position in sorted(results)]
 
 
+@contextlib.asynccontextmanager
+async def _noop_scoring_pool_slot():
+    yield False
+
+
 def _scoring_pool_slot():
     """Shared cross-process concurrency slot for one candidate-model run.
 
@@ -578,7 +583,7 @@ def _scoring_pool_slot():
     """
     pool = get_global_scoring_pool()
     if pool is None:
-        return contextlib.nullcontext()
+        return _noop_scoring_pool_slot()
     return pool.slot()
 
 

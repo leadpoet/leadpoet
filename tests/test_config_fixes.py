@@ -81,6 +81,22 @@ def test_section_6_4_recommended_defaults(clean_env):
     assert config.code_edit_build_timeout_seconds == 1800
     # Source inspection budget.
     assert config.code_edit_source_inspection_max_files == 12
+    # Daily rebenchmark starts predictably at 00:15 UTC; new candidate scoring
+    # stops starting at 23:30 UTC until the next baseline completes.
+    assert config.baseline_start_utc_offset_seconds == 900
+    assert config.candidate_scoring_quiet_start_utc_seconds == 84600
+
+
+def test_daily_scoring_schedule_env_overrides(clean_env):
+    clean_env.setenv("RESEARCH_LAB_BASELINE_START_UTC_OFFSET_SECONDS", "600")
+    clean_env.setenv("RESEARCH_LAB_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS", "82800")
+    config = ResearchLabGatewayConfig.from_env()
+    assert config.baseline_start_utc_offset_seconds == 600
+    assert config.candidate_scoring_quiet_start_utc_seconds == 82800
+
+    clean_env.delenv("RESEARCH_LAB_BASELINE_START_UTC_OFFSET_SECONDS", raising=False)
+    clean_env.setenv("RESEARCH_LAB_BASELINE_MIN_UTC_DAY_DELAY_SECONDS", "120")
+    assert ResearchLabGatewayConfig.from_env().baseline_start_utc_offset_seconds == 120
 
 
 def test_hybrid_window_and_public_split_defaults(clean_env):

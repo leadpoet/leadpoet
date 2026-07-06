@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Mapping
 
 from gateway.research_lab.bundles import contains_secret_material, sha256_json
@@ -15,6 +16,7 @@ from leadpoet_verifier.economics import allocate_research_lab_epoch
 ACTIVE_REIMBURSEMENT_STATUSES = {"awarded"}
 ACTIVE_SCHEDULE_STATUSES = {"scheduled"}
 ACTIVE_CHAMPION_STATUSES = {"active", "queued", "partially_paid"}
+RATE_QUANT = Decimal("0.000001")
 
 
 async def build_research_lab_allocation_bundle(
@@ -27,7 +29,7 @@ async def build_research_lab_allocation_bundle(
     """Build a sanitized Research Lab allocation bundle for one epoch."""
     policy = config.reimbursement_policy_doc(enabled=True)
     reimbursement_obligations, reimbursement_skipped = await _active_reimbursement_obligations(int(epoch), policy=policy)
-    champion_obligations, champion_skipped = await _active_champion_obligations(int(epoch))
+    champion_obligations, champion_skipped = await _active_champion_obligations(int(epoch), netuid=int(netuid))
     allocation = allocate_research_lab_epoch(
         int(epoch),
         policy,
@@ -179,15 +181,16 @@ async def _active_reimbursement_obligations(
     return obligations, skipped
 
 
-async def _active_champion_obligations(epoch: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+async def _active_champion_obligations(epoch: int, *, netuid: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     champion_rows: list[dict[str, Any]] = []
     for status in sorted(ACTIVE_CHAMPION_STATUSES):
         champion_rows.extend(
             await select_all(
                 "research_lab_champion_reward_current",
-                filters=(("current_reward_status", status),),
+                filters=(("current_reward_status", status), ("start_epoch", "lte", int(epoch))),
             )
         )
+    paid_by_reward = await _champion_paid_alpha_to_date(epoch=int(epoch), netuid=int(netuid), champion_rows=champion_rows)
     hotkey_uids = await resolve_hotkey_uids(str(row.get("miner_hotkey") or "") for row in champion_rows)
     obligations: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -195,12 +198,13 @@ async def _active_champion_obligations(epoch: int) -> tuple[list[dict[str, Any]]
         status = str(row.get("current_reward_status") or row.get("reward_status") or "")
         if status not in ACTIVE_CHAMPION_STATUSES:
             continue
-        if not _epoch_active(row, epoch):
-            continue
         miner_hotkey = str(row.get("miner_hotkey") or "")
         uid = hotkey_uids.get(miner_hotkey)
         if uid is None:
             skipped.append({"champion_reward_id": str(row.get("champion_reward_id") or ""), "reason": "miner_hotkey_not_registered"})
+            continue
+        replay_obligation = _champion_replay_obligation(row, paid_by_reward=paid_by_reward, epoch=int(epoch))
+        if replay_obligation is None:
             continue
         obligations.append(
             {
@@ -214,14 +218,92 @@ async def _active_champion_obligations(epoch: int) -> tuple[list[dict[str, Any]]
                 "run_id": str(row.get("run_id") or ""),
                 "island": str(row.get("island") or "generalist"),
                 "status": "active",
-                "start_epoch": int(row.get("start_epoch") or 0),
-                "epoch_count": int(row.get("epoch_count") or 0),
-                "improvement_points": float(row.get("improvement_points") or 0.0),
-                "threshold_points": float(row.get("threshold_points") or 0.0),
-                "desired_alpha_percent": float(row.get("desired_alpha_percent") or 0.0),
+                **replay_obligation,
             }
         )
     return obligations, skipped
+
+
+async def _champion_paid_alpha_to_date(
+    *,
+    epoch: int,
+    netuid: int,
+    champion_rows: list[dict[str, Any]],
+) -> dict[str, float]:
+    if not champion_rows:
+        return {}
+    start_epochs = [int(row.get("start_epoch") or 0) for row in champion_rows if int(row.get("start_epoch") or 0) <= int(epoch)]
+    if not start_epochs:
+        return {}
+    start_floor = min(start_epochs)
+    snapshot_rows = await select_all(
+        "research_lab_emission_allocation_current",
+        columns="epoch,allocation_doc",
+        filters=(
+            ("netuid", int(netuid)),
+            ("epoch", "gte", int(start_floor)),
+            ("epoch", "lt", int(epoch)),
+        ),
+        order_by=(("epoch", False),),
+        max_rows=max(10000, int(epoch) - int(start_floor) + 100),
+        allow_partial=True,
+    )
+    return _champion_paid_alpha_to_date_from_snapshots(snapshot_rows)
+
+
+def _champion_paid_alpha_to_date_from_snapshots(snapshot_rows: list[Mapping[str, Any]]) -> dict[str, float]:
+    paid_by_reward: dict[str, Decimal] = {}
+    for row in snapshot_rows:
+        allocation_doc = row.get("allocation_doc") or {}
+        if not isinstance(allocation_doc, Mapping):
+            continue
+        for section in ("champion_allocations", "queued_champion_allocations"):
+            allocations = allocation_doc.get(section) or []
+            if not isinstance(allocations, list):
+                continue
+            for allocation in allocations:
+                if not isinstance(allocation, Mapping):
+                    continue
+                source_id = str(allocation.get("source_id") or allocation.get("champion_reward_id") or "")
+                if not source_id:
+                    continue
+                paid_by_reward[source_id] = paid_by_reward.get(source_id, Decimal("0")) + _decimal(
+                    allocation.get("paid_alpha_percent") or 0
+                )
+    return {reward_id: _rate_float(paid) for reward_id, paid in paid_by_reward.items()}
+
+
+def _champion_replay_obligation(
+    row: Mapping[str, Any],
+    *,
+    paid_by_reward: Mapping[str, float],
+    epoch: int,
+) -> dict[str, Any] | None:
+    start_epoch = int(row.get("start_epoch") or 0)
+    epoch_count = int(row.get("epoch_count") or 0)
+    if epoch_count <= 0 or int(epoch) < start_epoch:
+        return None
+    champion_reward_id = str(row.get("champion_reward_id") or "")
+    desired = _decimal(row.get("desired_alpha_percent") or 0)
+    total_due = desired * Decimal(epoch_count)
+    paid_to_date = _decimal(paid_by_reward.get(champion_reward_id, 0))
+    remaining = max(Decimal("0"), total_due - paid_to_date)
+    if desired <= 0 or remaining <= 0:
+        return None
+    nominal_end_epoch = start_epoch + epoch_count
+    return {
+        "start_epoch": start_epoch,
+        "epoch_count": epoch_count,
+        "nominal_end_epoch": nominal_end_epoch,
+        "improvement_points": float(row.get("improvement_points") or 0.0),
+        "threshold_points": float(row.get("threshold_points") or 0.0),
+        "desired_alpha_percent": _rate_float(desired),
+        "total_due_alpha_percent": _rate_float(total_due),
+        "paid_alpha_percent_to_date": _rate_float(paid_to_date),
+        "remaining_alpha_percent": _rate_float(remaining),
+        "current_epoch_desired_alpha_percent": _rate_float(min(desired, remaining)),
+        "replay_status": "extended_replay" if int(epoch) >= nominal_end_epoch else "nominal_window",
+    }
 
 
 def _epoch_active(row: Mapping[str, Any], epoch: int) -> bool:
@@ -231,6 +313,14 @@ def _epoch_active(row: Mapping[str, Any], epoch: int) -> bool:
     except (TypeError, ValueError):
         return False
     return epoch_count > 0 and start_epoch <= int(epoch) < start_epoch + epoch_count
+
+
+def _decimal(value: Any) -> Decimal:
+    return Decimal(str(value))
+
+
+def _rate_float(value: Decimal) -> float:
+    return float(value.quantize(RATE_QUANT, rounding=ROUND_HALF_UP))
 
 
 def _utc_now_iso() -> str:

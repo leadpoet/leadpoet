@@ -357,7 +357,7 @@ def allocate_research_lab_epoch(
     champions = [
         _normalize_champion_obligation(item, epoch=epoch, policy=policy)
         for item in active_champion_obligations
-        if _obligation_active(item, epoch, default_epoch_count=reward_epochs)
+        if _champion_obligation_active(item, epoch, default_epoch_count=reward_epochs)
     ]
     champions = [item for item in champions if item["desired_alpha_percent"] > 0 and item["uid"] >= 0]
     champions.sort(key=lambda item: (item["start_epoch"], -item["improvement_points"], item["source_id"]))
@@ -878,6 +878,21 @@ def _obligation_active(obligation: Mapping[str, Any], epoch: int, *, default_epo
     return epoch_count > 0 and start_epoch <= int(epoch) < start_epoch + epoch_count
 
 
+def _champion_obligation_active(obligation: Mapping[str, Any], epoch: int, *, default_epoch_count: int) -> bool:
+    status = str(obligation.get("status", obligation.get("schedule_status", "active")))
+    if status in {"empty", "disabled", "ineligible", "blocked", "voided", "tombstoned", "completed", "paid"}:
+        return False
+    start_epoch = int(obligation.get("start_epoch", obligation.get("grant_start_epoch", epoch)))
+    if int(epoch) < start_epoch:
+        return False
+    replay_keys = {"remaining_alpha_percent", "paid_alpha_percent_to_date", "total_due_alpha_percent"}
+    if replay_keys.intersection(obligation.keys()):
+        remaining = _champion_remaining_alpha_percent(obligation, policy=None, default_epoch_count=default_epoch_count)
+        return remaining > 0
+    epoch_count = int(obligation.get("epoch_count", obligation.get("reward_epochs", default_epoch_count)))
+    return epoch_count > 0 and int(epoch) < start_epoch + epoch_count
+
+
 def _normalize_reimbursement_obligation(
     obligation: Mapping[str, Any],
     *,
@@ -954,7 +969,14 @@ def _normalize_champion_obligation(
             obligation.get("score_delta", obligation.get("delta", obligation.get("mean_delta", 0))),
         )
     )
-    return {
+    base_desired = _champion_desired_alpha_percent(obligation, policy)
+    replay_keys = {"remaining_alpha_percent", "paid_alpha_percent_to_date", "total_due_alpha_percent"}
+    replay_enabled = bool(replay_keys.intersection(obligation.keys()))
+    remaining = _champion_remaining_alpha_percent(obligation, policy=policy, default_epoch_count=reward_epochs)
+    desired = min(base_desired, remaining) if replay_enabled else base_desired
+    total_due = _champion_total_due_alpha_percent(obligation, base_desired=base_desired, epoch_count=epoch_count)
+    paid_to_date = _champion_paid_alpha_percent_to_date(obligation, total_due=total_due, remaining=remaining)
+    normalized: Dict[str, Any] = {
         "uid": int(obligation.get("uid", obligation.get("miner_uid", -1))),
         "miner_hotkey": str(obligation.get("miner_hotkey", "")),
         "source_id": str(
@@ -969,9 +991,67 @@ def _normalize_champion_obligation(
         "start_epoch": start_epoch,
         "epoch_count": epoch_count,
         "improvement_points": improvement_points,
-        "intended_alpha_percent": _champion_desired_alpha_percent(obligation, policy),
-        "desired_alpha_percent": _champion_desired_alpha_percent(obligation, policy),
+        "intended_alpha_percent": desired,
+        "desired_alpha_percent": desired,
     }
+    if replay_enabled:
+        normalized.update(
+            {
+                "base_desired_alpha_percent": base_desired,
+                "total_due_alpha_percent": total_due,
+                "paid_alpha_percent_to_date": paid_to_date,
+                "remaining_alpha_percent": remaining,
+                "nominal_end_epoch": start_epoch + epoch_count,
+            }
+        )
+        if obligation.get("replay_status") is not None:
+            normalized["replay_status"] = str(obligation.get("replay_status") or "")
+    return normalized
+
+
+def _champion_total_due_alpha_percent(
+    obligation: Mapping[str, Any],
+    *,
+    base_desired: Decimal,
+    epoch_count: int,
+) -> Decimal:
+    if "total_due_alpha_percent" in obligation:
+        return max(Decimal("0"), _decimal(obligation["total_due_alpha_percent"]))
+    return max(Decimal("0"), base_desired) * Decimal(max(0, int(epoch_count)))
+
+
+def _champion_paid_alpha_percent_to_date(
+    obligation: Mapping[str, Any],
+    *,
+    total_due: Decimal,
+    remaining: Decimal,
+) -> Decimal:
+    if "paid_alpha_percent_to_date" in obligation:
+        return max(Decimal("0"), _decimal(obligation["paid_alpha_percent_to_date"]))
+    if "remaining_alpha_percent" in obligation:
+        return max(Decimal("0"), total_due - max(Decimal("0"), _decimal(obligation["remaining_alpha_percent"])))
+    return Decimal("0")
+
+
+def _champion_remaining_alpha_percent(
+    obligation: Mapping[str, Any],
+    *,
+    policy: Mapping[str, Any] | None,
+    default_epoch_count: int,
+) -> Decimal:
+    epoch_count = int(obligation.get("epoch_count", obligation.get("reward_epochs", default_epoch_count)))
+    if policy is None:
+        if "desired_alpha_percent" in obligation:
+            base_desired = max(Decimal("0"), _decimal(obligation["desired_alpha_percent"]))
+        else:
+            base_desired = Decimal("0")
+    else:
+        base_desired = _champion_desired_alpha_percent(obligation, policy)
+    total_due = _champion_total_due_alpha_percent(obligation, base_desired=base_desired, epoch_count=epoch_count)
+    if "remaining_alpha_percent" in obligation:
+        return _clamp(_decimal(obligation["remaining_alpha_percent"]), Decimal("0"), total_due)
+    paid_to_date = max(Decimal("0"), _decimal(obligation.get("paid_alpha_percent_to_date", 0)))
+    return max(Decimal("0"), total_due - paid_to_date)
 
 
 def _champion_desired_alpha_percent(obligation: Mapping[str, Any], policy: Mapping[str, Any]) -> Decimal:
@@ -1095,43 +1175,33 @@ def _allocate_champions(
     placeholder = _decimal(
         policy.get("champion_placeholder_alpha_percent", DEFAULT_RESEARCH_LAB_CHAMPION_PLACEHOLDER_ALPHA_PERCENT)
     )
-    queue_trigger_ratio = _decimal(policy.get("champion_queue_trigger_ratio", Decimal("0.50")))
-    if queue_trigger_ratio < 0:
-        raise ValueError("champion_queue_trigger_ratio must be non-negative")
-
     total_pool = max(Decimal("0"), pool)
+    paid = [Decimal("0") for _ in champions]
     active_indices: list[int] = []
     queued_indices: list[int] = []
-
+    remaining_pool = total_pool
     for index, champion in enumerate(champions):
         desired = _decimal(champion["desired_alpha_percent"])
-        should_queue_for_reimbursement = (
-            bool(active_indices)
-            and queue_trigger_ratio > 0
-            and reimbursement_paid >= desired * queue_trigger_ratio
-        )
-        if should_queue_for_reimbursement:
+        if desired <= 0:
             queued_indices.append(index)
             continue
-
-        remaining_undecided = len(champions) - index - 1
-        active_desired = sum(_decimal(champions[idx]["desired_alpha_percent"]) for idx in active_indices)
-        required_if_active = active_desired + desired
-        required_if_active += placeholder * Decimal(len(queued_indices) + remaining_undecided)
-        if required_if_active <= total_pool:
+        amount = min(desired, remaining_pool)
+        paid[index] = amount
+        remaining_pool -= amount
+        if amount >= desired:
             active_indices.append(index)
         else:
             queued_indices.append(index)
 
-    paid = [Decimal("0") for _ in champions]
-    for index in active_indices:
-        paid[index] = _decimal(champions[index]["desired_alpha_percent"])
-    for index in queued_indices:
-        paid[index] = min(placeholder, _decimal(champions[index]["desired_alpha_percent"]))
-
-    spent = sum(paid, Decimal("0"))
-    remaining = max(Decimal("0"), total_pool - spent)
-    if remaining > 0 and active_indices:
+    # Preserve the legacy "use the full lab slice" behavior only for non-replay
+    # fixtures with no waiting champions. Replay-tracked production rewards are
+    # capped by their remaining balance, and queued rewards receive capacity
+    # chronologically instead of older active champions being overpaid.
+    replay_tracked = any(
+        {"remaining_alpha_percent", "paid_alpha_percent_to_date", "total_due_alpha_percent"}.intersection(champion.keys())
+        for champion in champions
+    )
+    if remaining_pool > 0 and active_indices and not queued_indices and not replay_tracked:
         weights = [
             max(Decimal("0"), _decimal(champions[index].get("improvement_points", 0)))
             for index in active_indices
@@ -1144,9 +1214,8 @@ def _allocate_champions(
             weights = [Decimal("1") for _ in active_indices]
             weight_sum = Decimal(len(active_indices))
         for index, weight in zip(active_indices, weights):
-            paid[index] += remaining * weight / weight_sum
-    elif remaining > 0 and paid:
-        paid[0] += remaining
+            paid[index] += remaining_pool * weight / weight_sum
+        remaining_pool = Decimal("0")
 
     active: list[Dict[str, Any]] = []
     queued: list[Dict[str, Any]] = []
@@ -1155,7 +1224,8 @@ def _allocate_champions(
         if amount >= _decimal(champion["desired_alpha_percent"]):
             active.append({**allocation, "reason": "active_champion_reward"})
         elif amount > 0:
-            queued.append({**allocation, "reason": "queued_with_placeholder"})
+            reason = "queued_with_placeholder" if amount <= placeholder else "queued_with_partial_capacity"
+            queued.append({**allocation, "reason": reason})
         else:
             queued.append({**allocation, "reason": "queued_no_capacity"})
     return active, queued
@@ -1208,7 +1278,7 @@ def _reimbursement_allocation(item: Mapping[str, Any], paid: Decimal, reason: st
 
 def _champion_allocation(item: Mapping[str, Any], paid: Decimal) -> Dict[str, Any]:
     intended = _decimal(item["desired_alpha_percent"])
-    return {
+    allocation: Dict[str, Any] = {
         "uid": int(item["uid"]),
         "miner_hotkey": str(item["miner_hotkey"]),
         "source_id": str(item["source_id"]),
@@ -1218,6 +1288,21 @@ def _champion_allocation(item: Mapping[str, Any], paid: Decimal) -> Dict[str, An
         "deferred_alpha_percent": _rate_float(max(Decimal("0"), intended - paid)),
         "improvement_points": _rate_float(_decimal(item["improvement_points"])),
     }
+    if "base_desired_alpha_percent" in item:
+        remaining_before = _decimal(item.get("remaining_alpha_percent", 0))
+        allocation.update(
+            {
+                "base_desired_alpha_percent": _rate_float(_decimal(item["base_desired_alpha_percent"])),
+                "total_due_alpha_percent": _rate_float(_decimal(item["total_due_alpha_percent"])),
+                "paid_alpha_percent_to_date": _rate_float(_decimal(item["paid_alpha_percent_to_date"])),
+                "remaining_alpha_percent_before_epoch": _rate_float(remaining_before),
+                "remaining_alpha_percent_after_epoch": _rate_float(max(Decimal("0"), remaining_before - paid)),
+                "nominal_end_epoch": int(item.get("nominal_end_epoch", 0)),
+            }
+        )
+        if item.get("replay_status") is not None:
+            allocation["replay_status"] = str(item.get("replay_status") or "")
+    return allocation
 
 
 def _alpha_entry_fields(amount_microusd: int, usd_per_0_1_percent_epoch: Any) -> Dict[str, Any]:

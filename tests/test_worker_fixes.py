@@ -68,6 +68,61 @@ def _queue_event(seq, event_type, event_doc):
     return {"run_id": RUN_ID, "seq": seq, "event_type": event_type, "event_doc": event_doc}
 
 
+async def test_ticket_reconciliation_runs_periodically_on_configured_worker(monkeypatch):
+    calls = []
+
+    async def fake_reconcile_terminal_ticket_statuses(**kwargs):
+        calls.append(kwargs)
+        return {"planned_count": 1, "repaired_count": 1, "skipped_count": 0}
+
+    monkeypatch.setattr(
+        worker_mod,
+        "reconcile_terminal_ticket_statuses",
+        fake_reconcile_terminal_ticket_statuses,
+    )
+    config = ResearchLabGatewayConfig(
+        hosted_worker_index=0,
+        hosted_worker_total_workers=3,
+        ticket_reconciliation_worker_index=0,
+        ticket_reconciliation_interval_seconds=300,
+        ticket_reconciliation_limit=7,
+    )
+    worker = worker_mod.ResearchLabHostedWorker(config, worker_ref="ticket-reconciler")
+
+    await worker._maybe_reconcile_terminal_tickets()
+    await worker._maybe_reconcile_terminal_tickets()
+
+    assert len(calls) == 1
+    assert calls[0]["limit"] == 7
+    assert calls[0]["dry_run"] is False
+    assert calls[0]["actor_ref"] == "ticket-reconciler"
+    assert calls[0]["reason"] == "hosted_worker_periodic_ticket_lifecycle_reconciler"
+
+
+async def test_ticket_reconciliation_skips_non_configured_worker(monkeypatch):
+    calls = []
+
+    async def fake_reconcile_terminal_ticket_statuses(**kwargs):
+        calls.append(kwargs)
+        return {"planned_count": 1, "repaired_count": 1, "skipped_count": 0}
+
+    monkeypatch.setattr(
+        worker_mod,
+        "reconcile_terminal_ticket_statuses",
+        fake_reconcile_terminal_ticket_statuses,
+    )
+    config = ResearchLabGatewayConfig(
+        hosted_worker_index=1,
+        hosted_worker_total_workers=3,
+        ticket_reconciliation_worker_index=0,
+    )
+    worker = worker_mod.ResearchLabHostedWorker(config, worker_ref="ordinary-worker")
+
+    await worker._maybe_reconcile_terminal_tickets()
+
+    assert calls == []
+
+
 def _own_started_row():
     return {
         "run_id": RUN_ID,

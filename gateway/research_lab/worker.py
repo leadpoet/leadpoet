@@ -41,7 +41,11 @@ from gateway.research_lab.loop_engine import (
     AutoResearchLoopSettings,
     OpenRouterCallResult,
 )
-from gateway.research_lab.maintenance import autoresearch_queue_capacity_doc, is_autoresearch_maintenance_paused
+from gateway.research_lab.maintenance import (
+    autoresearch_queue_capacity_doc,
+    is_autoresearch_maintenance_paused,
+    reconcile_terminal_ticket_statuses,
+)
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabReceiptCreateRequest
 from gateway.research_lab.promotion import (
     PromotionPausedError,
@@ -1168,6 +1172,7 @@ class ResearchLabHostedWorker:
         self.key_resolver = OpenRouterKeyResolver(self.config)
         # §9.1 item 5: raw prompt/response capture at the OpenRouter boundary.
         self._raw_trace_recorder = _OpenRouterRawTraceRecorder(self.config)
+        self._last_ticket_lifecycle_reconcile_at = 0.0
 
     async def run_forever(self) -> None:
         # trajectoryimprovements.md P5: one structured capture health block at
@@ -1230,6 +1235,7 @@ class ResearchLabHostedWorker:
         if not self.config.hosted_worker_dry_run:
             await self._recover_stale_started_runs()
             await self._reconcile_stale_loop_projections()
+            await self._maybe_reconcile_terminal_tickets()
         if await is_autoresearch_maintenance_paused():
             return HostedWorkerOutcome(
                 processed=False,
@@ -1516,6 +1522,53 @@ class ResearchLabHostedWorker:
                 "research_lab_periodic_trajectory_projection_failed worker_ref=%s error=%s",
                 self.worker_ref,
                 str(exc)[:200],
+            )
+
+    async def _maybe_reconcile_terminal_tickets(self) -> None:
+        """Periodically close tickets whose expected queue runs are all terminal.
+
+        Only one hosted worker index runs this sweep. The write path revalidates
+        ticket and queue projections immediately before appending, so this stays
+        safe if an operator runs the manual CLI at the same time.
+        """
+        if not self.config.ticket_reconciliation_enabled:
+            return
+        total_workers = max(1, int(self.config.hosted_worker_total_workers or 1))
+        configured_index = int(self.config.ticket_reconciliation_worker_index or 0) % total_workers
+        worker_index = int(self.config.hosted_worker_index or 0) % total_workers
+        if worker_index != configured_index:
+            return
+        now = time.monotonic()
+        interval = max(60, int(self.config.ticket_reconciliation_interval_seconds or 300))
+        if self._last_ticket_lifecycle_reconcile_at and (
+            now - self._last_ticket_lifecycle_reconcile_at < interval
+        ):
+            return
+        self._last_ticket_lifecycle_reconcile_at = now
+        try:
+            result = await reconcile_terminal_ticket_statuses(
+                limit=max(1, int(self.config.ticket_reconciliation_limit or 25)),
+                reason="hosted_worker_periodic_ticket_lifecycle_reconciler",
+                actor_ref=self.worker_ref,
+                dry_run=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_periodic_ticket_reconcile_failed worker_ref=%s error=%s",
+                self.worker_ref,
+                str(exc)[:240],
+            )
+            return
+        repaired_count = int(result.get("repaired_count") or 0)
+        skipped_count = int(result.get("skipped_count") or 0)
+        planned_count = int(result.get("planned_count") or 0)
+        if repaired_count or skipped_count:
+            logger.warning(
+                "research_lab_periodic_ticket_reconcile worker_ref=%s planned=%s repaired=%s skipped=%s",
+                self.worker_ref,
+                planned_count,
+                repaired_count,
+                skipped_count,
             )
 
     async def _recover_stale_started_runs(self) -> int:

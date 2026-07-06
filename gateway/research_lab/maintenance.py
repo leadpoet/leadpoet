@@ -41,6 +41,7 @@ AUTORESEARCH_PROXY_PREFIXES = (
 )
 TERMINAL_QUEUE_STATUSES = frozenset({"completed", "failed", "cancelled", "tombstoned"})
 TERMINAL_TICKET_STATUSES = frozenset({"completed", "failed", "cancelled", "tombstoned"})
+ACTIVE_QUEUE_STATUSES = frozenset({"queued", "started", "paused"})
 TICKET_LIFECYCLE_QUEUE_BATCH_SIZE = 100
 
 
@@ -219,6 +220,15 @@ def _terminal_ticket_event_for_queue_rows(queue_rows: list[Mapping[str, Any]]) -
     return "tombstoned"
 
 
+def _age_seconds(value: object) -> int | None:
+    parsed = _parse_iso(value)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()))
+
+
 def _chunks(values: list[str], size: int) -> list[list[str]]:
     chunk_size = max(1, int(size or TICKET_LIFECYCLE_QUEUE_BATCH_SIZE))
     return [values[index : index + chunk_size] for index in range(0, len(values), chunk_size)]
@@ -276,6 +286,10 @@ async def find_terminal_queue_open_tickets(*, limit: int = 50) -> list[dict[str,
         for row in queue_rows:
             status = str(row.get("current_queue_status") or "unknown")
             statuses[status] = statuses.get(status, 0) + 1
+        latest_queue_status_at = max(
+            (str(row.get("current_status_at") or "") for row in queue_rows),
+            default=None,
+        )
         planned.append(
             {
                 "ticket_id": ticket_id,
@@ -287,10 +301,10 @@ async def find_terminal_queue_open_tickets(*, limit: int = 50) -> list[dict[str,
                 "queue_status_counts": statuses,
                 "ticket_event_hash": ticket.get("current_event_hash"),
                 "ticket_status_at": ticket.get("current_status_at"),
-                "latest_queue_status_at": max(
-                    (str(row.get("current_status_at") or "") for row in queue_rows),
-                    default=None,
-                ),
+                "ticket_age_seconds": _age_seconds(ticket.get("created_at") or ticket.get("current_status_at")),
+                "ticket_status_age_seconds": _age_seconds(ticket.get("current_status_at")),
+                "latest_queue_status_at": latest_queue_status_at,
+                "latest_queue_status_age_seconds": _age_seconds(latest_queue_status_at),
                 "queue_event_hashes": [
                     row.get("current_event_hash")
                     for row in queue_rows
@@ -306,23 +320,96 @@ async def find_terminal_queue_open_tickets(*, limit: int = 50) -> list[dict[str,
 async def ticket_lifecycle_health(*, sample_limit: int = 25) -> dict[str, Any]:
     open_rows = await select_all(
         "research_loop_ticket_current",
-        columns="ticket_id,current_ticket_status,current_status_at",
+        columns="ticket_id,current_ticket_status,current_status_at,created_at",
         filters=(),
         max_rows=10000,
     )
-    open_ticket_count = sum(
-        1
+    open_tickets = [
+        row
         for row in open_rows
         if str(row.get("current_ticket_status") or "") not in TERMINAL_TICKET_STATUSES
-    )
+    ]
+    open_ticket_ages = [
+        age
+        for row in open_tickets
+        if (age := _age_seconds(row.get("created_at") or row.get("current_status_at"))) is not None
+    ]
+    queue_status_counts: dict[str, int] = {}
+    oldest_active_queue_age_seconds: int | None = None
+    for status in sorted(ACTIVE_QUEUE_STATUSES):
+        rows = await select_all(
+            "research_loop_run_queue_current",
+            columns="run_id,current_queue_status,current_status_at",
+            filters=(("current_queue_status", status),),
+            max_rows=10000,
+        )
+        queue_status_counts[status] = len(rows)
+        ages = [
+            age for row in rows if (age := _age_seconds(row.get("current_status_at"))) is not None
+        ]
+        if ages:
+            oldest = max(ages)
+            oldest_active_queue_age_seconds = (
+                oldest
+                if oldest_active_queue_age_seconds is None
+                else max(oldest_active_queue_age_seconds, oldest)
+            )
     terminal_queue_open_tickets = await find_terminal_queue_open_tickets(limit=sample_limit)
+    terminal_ticket_ages = [
+        int(row["ticket_age_seconds"])
+        for row in terminal_queue_open_tickets
+        if row.get("ticket_age_seconds") is not None
+    ]
+    warning_seconds = ResearchLabGatewayConfig.from_env().ticket_lifecycle_age_warning_seconds
     return {
         "ok": len(terminal_queue_open_tickets) == 0,
-        "open_ticket_count": open_ticket_count,
+        "open_ticket_count": len(open_tickets),
+        "oldest_open_ticket_age_seconds": max(open_ticket_ages) if open_ticket_ages else None,
+        "active_queue_status_counts": queue_status_counts,
+        "oldest_active_queue_age_seconds": oldest_active_queue_age_seconds,
         "terminal_queue_open_ticket_count": len(terminal_queue_open_tickets),
+        "oldest_terminal_queue_open_ticket_age_seconds": (
+            max(terminal_ticket_ages) if terminal_ticket_ages else None
+        ),
+        "age_warning_seconds": warning_seconds,
+        "age_warning": bool(
+            (terminal_ticket_ages and max(terminal_ticket_ages) >= warning_seconds)
+            or (
+                oldest_active_queue_age_seconds is not None
+                and oldest_active_queue_age_seconds >= warning_seconds
+            )
+        ),
         "sample_limit": sample_limit,
         "samples": terminal_queue_open_tickets,
     }
+
+
+async def _revalidate_terminal_ticket_plan(plan: Mapping[str, Any]) -> tuple[bool, str, dict[str, Any] | None]:
+    ticket_id = str(plan.get("ticket_id") or "")
+    if not ticket_id:
+        return False, "missing_ticket_id", None
+    current = await select_one(
+        "research_loop_ticket_current",
+        columns="ticket_id,current_ticket_status,current_event_hash,current_status_at",
+        filters=(("ticket_id", ticket_id),),
+    )
+    if not current:
+        return False, "ticket_missing", None
+    current_status = str(current.get("current_ticket_status") or "")
+    if current_status in TERMINAL_TICKET_STATUSES:
+        return False, "ticket_already_terminal", current
+    planned_hash = str(plan.get("ticket_event_hash") or "")
+    current_hash = str(current.get("current_event_hash") or "")
+    if planned_hash and current_hash and planned_hash != current_hash:
+        return False, "ticket_projection_changed", current
+    queue_rows = (await _queue_rows_by_ticket_id([ticket_id])).get(ticket_id) or []
+    terminal_event = _terminal_ticket_event_for_queue_rows(queue_rows)
+    requested_loop_count = max(1, int(plan.get("requested_loop_count") or 1))
+    if terminal_event != str(plan.get("target_ticket_status") or ""):
+        return False, "queue_terminal_status_changed", current
+    if len(queue_rows) < requested_loop_count:
+        return False, "missing_expected_queue_rows", current
+    return True, "ready", current
 
 
 def _stale_after_seconds(config: ResearchLabGatewayConfig) -> int:
@@ -616,7 +703,22 @@ async def reconcile_terminal_ticket_statuses(
         }
 
     repaired: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
     for plan in planned:
+        ready, skip_reason, current_ticket = await _revalidate_terminal_ticket_plan(plan)
+        if not ready:
+            skipped.append(
+                {
+                    "ticket_id": plan.get("ticket_id"),
+                    "reason": skip_reason,
+                    "planned_status": plan.get("target_ticket_status"),
+                    "current_ticket_status": (
+                        current_ticket.get("current_ticket_status") if current_ticket else None
+                    ),
+                    "current_event_hash": current_ticket.get("current_event_hash") if current_ticket else None,
+                }
+            )
+            continue
         event_doc = {
             "schema_version": "1.0",
             "source": "terminal_ticket_status_reconciler",
@@ -663,7 +765,9 @@ async def reconcile_terminal_ticket_statuses(
         "action": "reconcile-terminal-tickets",
         "planned_count": len(planned),
         "repaired_count": len(repaired),
+        "skipped_count": len(skipped),
         "repaired": repaired,
+        "skipped": skipped,
     }
 
 

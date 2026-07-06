@@ -347,6 +347,11 @@ class ResearchLabGatewayConfig:
     hosted_worker_proxy_url: str = ""
     active_loop_stale_after_seconds: int = DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS
     hosted_worker_retryable_failure_limit: int = DEFAULT_HOSTED_WORKER_RETRYABLE_FAILURE_LIMIT
+    ticket_reconciliation_enabled: bool = True
+    ticket_reconciliation_interval_seconds: int = 300
+    ticket_reconciliation_limit: int = 25
+    ticket_reconciliation_worker_index: int = 0
+    ticket_lifecycle_age_warning_seconds: int = 900
     scoring_worker_enabled: bool = False
     scoring_worker_poll_seconds: int = 15
     scoring_worker_max_candidates: int = 1
@@ -595,6 +600,23 @@ class ResearchLabGatewayConfig:
                     "RESEARCH_LAB_HOSTED_WORKER_RETRYABLE_FAILURE_LIMIT",
                     DEFAULT_HOSTED_WORKER_RETRYABLE_FAILURE_LIMIT,
                 ),
+            ),
+            ticket_reconciliation_enabled=_truthy("RESEARCH_LAB_TICKET_RECONCILIATION_ENABLED", "true"),
+            ticket_reconciliation_interval_seconds=max(
+                60,
+                _int("RESEARCH_LAB_TICKET_RECONCILIATION_INTERVAL_SECONDS", 300),
+            ),
+            ticket_reconciliation_limit=max(
+                1,
+                _int("RESEARCH_LAB_TICKET_RECONCILIATION_LIMIT", 25),
+            ),
+            ticket_reconciliation_worker_index=max(
+                0,
+                _int("RESEARCH_LAB_TICKET_RECONCILIATION_WORKER_INDEX", 0),
+            ),
+            ticket_lifecycle_age_warning_seconds=max(
+                60,
+                _int("RESEARCH_LAB_TICKET_LIFECYCLE_AGE_WARNING_SECONDS", 900),
             ),
             scoring_worker_enabled=_truthy("RESEARCH_LAB_SCORING_WORKER_ENABLED"),
             scoring_worker_poll_seconds=max(1, _int("RESEARCH_LAB_SCORING_WORKER_POLL_SECONDS", 15)),
@@ -1239,6 +1261,13 @@ class ResearchLabGatewayConfig:
                 "queue_fetch_limit": self.hosted_worker_queue_fetch_limit,
                 "require_proxy": self.hosted_worker_require_proxy,
                 "worker_proxy_configured": bool(self.hosted_worker_proxy_url),
+                "ticket_reconciliation": {
+                    "enabled": self.ticket_reconciliation_enabled,
+                    "interval_seconds": self.ticket_reconciliation_interval_seconds,
+                    "limit": self.ticket_reconciliation_limit,
+                    "worker_index": self.ticket_reconciliation_worker_index,
+                    "age_warning_seconds": self.ticket_lifecycle_age_warning_seconds,
+                },
                 "auto_research_min_seconds": self.auto_research_min_seconds,
                 "auto_research_max_seconds": self.auto_research_max_seconds,
                 "auto_research_min_iterations": self.auto_research_min_iterations,

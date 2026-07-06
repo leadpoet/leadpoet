@@ -188,7 +188,10 @@ SCRAPINGDOG_ENDPOINT_CREDITS = {
     
     # LinkedIn APIs
     "linkedin": {"base": 50, "private": 100},        # LinkedIn Profile (50 normal, 100 private)
+    "profile": {"base": 50, "premium": 100},         # Current LinkedIn profile/company scraper
+    "profile_post": {"base": 5},                     # LinkedIn Post Scraper API
     "linkedin_jobs": {"base": 5},                    # LinkedIn Jobs API
+    "linkedinjobs": {"base": 5},                     # Legacy/private-model LinkedIn Jobs path
     
     # Amazon APIs
     "amazon": {"base": 1},                           # Amazon Search API
@@ -198,6 +201,7 @@ SCRAPINGDOG_ENDPOINT_CREDITS = {
     # YouTube APIs
     "youtube": {"base": 5},                          # YouTube Scraper API
     "youtube_transcript": {"base": 1},               # YouTube Transcript API
+    "youtube_transcripts": {"base": 1},              # YouTube Transcripts API
     "youtube_channel": {"base": 5},                  # YouTube Channel API
     "youtube_comment": {"base": 5},                  # YouTube Comment API
     
@@ -213,6 +217,7 @@ SCRAPINGDOG_ENDPOINT_CREDITS = {
     # Social Media
     "twitter": {"base": 5},                          # Twitter/X Scraper API
     "x": {"base": 5},                                # X Scraper API (alias)
+    "tiktok_profile": {"base": 5},                   # TikTok Profile API
     
     # E-commerce
     "walmart": {"base": 5},                          # Walmart Scraper API
@@ -256,18 +261,25 @@ def calculate_scrapingdog_credits(
         >>> calculate_scrapingdog_credits("linkedin", {"private": "true"})
         (100, "linkedin (private)")
     """
-    # Normalize endpoint (remove leading slashes, lowercase)
-    endpoint = endpoint.strip("/").lower().split("/")[0] if endpoint else "scrape"
+    # Normalize endpoint paths while preserving known nested ScrapingDog APIs
+    # such as /google/ai_mode, /profile/post, and /youtube/transcripts.
+    endpoint_path = endpoint.strip("/").lower().replace("-", "_") if endpoint else "scrape"
+    endpoint_path = endpoint_path.split("?", 1)[0].rstrip("/")
+    endpoint_key = endpoint_path.replace("/", "_")
+    endpoint_root = endpoint_path.split("/", 1)[0]
     
     # Handle endpoint aliases
     endpoint_aliases = {
-        "jobs": "google_jobs" if "google" in endpoint else "linkedin_jobs",
+        "jobs": "google_jobs" if "google" in endpoint_path else "linkedin_jobs",
         "search": "google",
-        "profile": "linkedin",
     }
+    endpoint = endpoint_aliases.get(endpoint_key, endpoint_key)
     
     # Get credits config for endpoint
     if endpoint in SCRAPINGDOG_ENDPOINT_CREDITS:
+        credits_config = SCRAPINGDOG_ENDPOINT_CREDITS[endpoint]
+    elif endpoint_root in SCRAPINGDOG_ENDPOINT_CREDITS:
+        endpoint = endpoint_root
         credits_config = SCRAPINGDOG_ENDPOINT_CREDITS[endpoint]
     else:
         # Try to match google_* or similar prefixed endpoints
@@ -316,6 +328,12 @@ def calculate_scrapingdog_credits(
         if private:
             return (100, "linkedin (private)")
         return (50, "linkedin")
+
+    elif endpoint == "profile":
+        premium = query_params.get("premium", "false").lower() == "true"
+        if premium:
+            return (100, "profile (premium)")
+        return (50, "profile")
     
     elif endpoint == "google_serp":
         # SERP API: 5 or 10 based on features

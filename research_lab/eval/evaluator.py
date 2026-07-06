@@ -1186,6 +1186,65 @@ async def _finalize_incontainer_trace(
     return fields
 
 
+def build_holdout_gate_result(
+    *,
+    public_results: Sequence[Mapping[str, Any]],
+    private_results: Sequence[Mapping[str, Any]],
+    public_icp_count: int,
+    private_icp_count: int,
+    gate: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Assemble the (results, gate_result) pair from scored public/private ICP
+    results.
+
+    Shared by the per-candidate gate path (``_score_with_private_holdout_gate``)
+    and the global (candidate, icp) queue's assembly, so both produce a
+    byte-identical bundle. Pure: it derives the public gate the same way the
+    per-candidate path does and, when the gate passes, folds in the private
+    results and the total/delta fields. ``private_results`` is empty when the
+    gate did not pass.
+    """
+    baseline_public_score = float(gate.get("baseline_public_score") or 0.0)
+    baseline_aggregate_score = _optional_float(gate.get("baseline_aggregate_score"))
+    baseline_private_score = _optional_float(gate.get("baseline_private_score"))
+    candidate_public_score = _benchmark_style_score(public_results, "candidate_company_scores")
+    passed_public_gate = candidate_public_score + 1e-9 >= baseline_public_score
+    gate_result = {
+        "schema_version": "1.0",
+        "gate_type": "public_score_before_private_holdout",
+        "decision": "private_holdout_approved" if passed_public_gate else "rejected_before_private_holdout",
+        "baseline_benchmark_bundle_id": str(gate.get("baseline_benchmark_bundle_id") or ""),
+        "baseline_benchmark_hash": str(gate.get("baseline_benchmark_hash") or ""),
+        "baseline_aggregate_score": round(baseline_aggregate_score, 6) if baseline_aggregate_score is not None else None,
+        "baseline_public_score": round(baseline_public_score, 6),
+        "baseline_private_score": round(baseline_private_score, 6) if baseline_private_score is not None else None,
+        "candidate_public_score": round(candidate_public_score, 6),
+        "paired_base_public_score": None,
+        "reference_evaluation_mode": "stored_daily_baseline",
+        "public_icp_count": public_icp_count,
+        "private_holdout_icp_count": private_icp_count,
+        "private_holdout_evaluated": bool(passed_public_gate),
+        "provider_excluded_icp_ids": _provider_excluded_icp_ids(public_results),
+    }
+    if not passed_public_gate:
+        return list(public_results), gate_result
+    all_results = [*public_results, *private_results]
+    candidate_total_score = _benchmark_style_score(all_results, "candidate_company_scores")
+    daily_delta = (
+        candidate_total_score - baseline_aggregate_score
+        if baseline_aggregate_score is not None
+        else None
+    )
+    gate_result = {
+        **gate_result,
+        "candidate_total_score": round(candidate_total_score, 6),
+        "paired_base_total_score": None,
+        "candidate_delta_vs_daily_baseline": round(daily_delta, 6) if daily_delta is not None else None,
+        "provider_excluded_icp_ids": _provider_excluded_icp_ids(all_results),
+    }
+    return all_results, gate_result
+
+
 async def _score_with_private_holdout_gate(
     *,
     benchmark_items: Sequence[Mapping[str, Any]],
@@ -1234,32 +1293,19 @@ async def _score_with_private_holdout_gate(
         resume_results=resume_results,
         trace_sink=trace_sink,
     )
+    # Public gate decides whether the private holdout runs at all; the shared
+    # assembler below reproduces the same decision when building the result.
     baseline_public_score = float(gate.get("baseline_public_score") or 0.0)
-    baseline_aggregate_score = _optional_float(gate.get("baseline_aggregate_score"))
-    baseline_private_score = _optional_float(gate.get("baseline_private_score"))
     candidate_public_score = _benchmark_style_score(public_results, "candidate_company_scores")
     passed_public_gate = candidate_public_score + 1e-9 >= baseline_public_score
-    gate_result = {
-        "schema_version": "1.0",
-        "gate_type": "public_score_before_private_holdout",
-        "decision": "private_holdout_approved" if passed_public_gate else "rejected_before_private_holdout",
-        "baseline_benchmark_bundle_id": str(gate.get("baseline_benchmark_bundle_id") or ""),
-        "baseline_benchmark_hash": str(gate.get("baseline_benchmark_hash") or ""),
-        "baseline_aggregate_score": round(baseline_aggregate_score, 6) if baseline_aggregate_score is not None else None,
-        "baseline_public_score": round(baseline_public_score, 6),
-        "baseline_private_score": round(baseline_private_score, 6) if baseline_private_score is not None else None,
-        "candidate_public_score": round(candidate_public_score, 6),
-        "paired_base_public_score": None,
-        "reference_evaluation_mode": "stored_daily_baseline",
-        "public_icp_count": len(public_items),
-        "private_holdout_icp_count": len(private_items),
-        "private_holdout_evaluated": bool(passed_public_gate),
-        # Legacy field retained for old/resumed bundles. New candidate scoring
-        # keeps retry-exhausted provider failures in the aggregate as zero ICPs.
-        "provider_excluded_icp_ids": _provider_excluded_icp_ids(public_results),
-    }
     if not passed_public_gate:
-        return public_results, gate_result
+        return build_holdout_gate_result(
+            public_results=public_results,
+            private_results=(),
+            public_icp_count=len(public_items),
+            private_icp_count=len(private_items),
+            gate=gate,
+        )
 
     private_results = await score_private_model_pair_items(
         benchmark_items=private_items,
@@ -1274,21 +1320,13 @@ async def _score_with_private_holdout_gate(
         resume_results=resume_results,
         trace_sink=trace_sink,
     )
-    all_results = [*public_results, *private_results]
-    candidate_total_score = _benchmark_style_score(all_results, "candidate_company_scores")
-    daily_delta = (
-        candidate_total_score - baseline_aggregate_score
-        if baseline_aggregate_score is not None
-        else None
+    return build_holdout_gate_result(
+        public_results=public_results,
+        private_results=private_results,
+        public_icp_count=len(public_items),
+        private_icp_count=len(private_items),
+        gate=gate,
     )
-    gate_result = {
-        **gate_result,
-        "candidate_total_score": round(candidate_total_score, 6),
-        "paired_base_total_score": None,
-        "candidate_delta_vs_daily_baseline": round(daily_delta, 6) if daily_delta is not None else None,
-        "provider_excluded_icp_ids": _provider_excluded_icp_ids(all_results),
-    }
-    return all_results, gate_result
 
 
 async def _run_parent_freshness_check(

@@ -119,8 +119,13 @@ from research_lab.eval.evaluator import (
     INCONTAINER_TRACE_KMS_KEY_ENV,
     INCONTAINER_TRACE_S3_PREFIX_ENV,
     QualificationStyleCompanyScorer,
+    _benchmark_style_score as _queue_benchmark_style_score,
     _upload_incontainer_trace as _upload_incontainer_trace_doc,
+    build_holdout_gate_result,
+    build_score_bundle_from_scored_icps,
+    score_private_model_pair_items,
 )
+from gateway.research_lab import global_icp_queue
 from research_lab.eval.private_runtime import (
     begin_incontainer_trace_collection,
     end_incontainer_trace_collection,
@@ -2080,6 +2085,14 @@ class ResearchLabGatewayScoringWorker:
                         claim_capacity.get("max_load_per_cpu"),
                     )
                 break
+            if global_icp_queue.global_icp_queue_enabled():
+                # Global (candidate, icp) queue path: enqueue queued candidates'
+                # jobs and score from one shared job pool so the pool stays
+                # saturated (no per-candidate tail-gap idling). The
+                # per-candidate path below is untouched and unused while on.
+                queue_processed = await self._run_global_icp_queue_pass()
+                processed.extend(queue_processed)
+                break
             candidate = await self._claim_next_candidate()
             if not candidate:
                 break
@@ -2175,6 +2188,248 @@ class ResearchLabGatewayScoringWorker:
             "worker_index": self.config.scoring_worker_index,
             "host_pressure": host_pressure,
         }
+
+    async def _build_queue_candidate_context(self, candidate: Mapping[str, Any]) -> dict[str, Any]:
+        """Per-candidate scoring context for the global-queue path.
+
+        Mirrors the setup block in ``_score_candidate`` (artifact/patch/window/
+        gate/runner/run_context) and additionally splits the window into public
+        and private ICP items using the gate's public refs. Cached per
+        candidate within one queue pass.
+        """
+        candidate_id = str(candidate["candidate_id"])
+        if str(candidate.get("candidate_kind") or "") != "image_build":
+            raise RuntimeError("global queue requires image_build candidate_kind")
+        evaluation_epoch = await self._resolve_evaluation_epoch()
+        artifact = PrivateModelArtifactManifest.from_mapping(candidate["private_model_manifest_doc"])
+        patch = candidate["candidate_patch_manifest"]
+        candidate_manifest_doc = candidate.get("candidate_model_manifest_doc")
+        if not isinstance(candidate_manifest_doc, Mapping):
+            raise RuntimeError("image_build candidate missing candidate_model_manifest_doc")
+        candidate_artifact = PrivateModelArtifactManifest.from_mapping(candidate_manifest_doc)
+        window, gate = await self._daily_candidate_scoring_window_and_gate(artifact=artifact)
+        await create_rolling_icp_window(window)
+        benchmark = SealedBenchmarkSet(
+            benchmark_id=window.benchmark_id,
+            icp_set_hash=window.window_hash,
+            split_ref=window.split_ref,
+            item_refs=window.item_refs,
+            scoring_version="qualification-company-scorer:v1",
+            hidden_plaintext_available=True,
+        )
+        runner = DockerPrivateModelRunner(
+            DockerPrivateModelSpec(
+                image_digest=candidate_artifact.image_digest,
+                timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
+                env_passthrough=self._private_model_env_passthrough(),
+                extra_env=self._private_scoring_env(),
+            )
+        )
+        run_context = self._candidate_run_context(
+            candidate, window_hash=window.window_hash, evaluation_epoch=evaluation_epoch
+        )
+        public_refs = {str(r) for r in (gate.get("public_icp_refs") or ()) if str(r).strip()}
+
+        def _ref(item: Mapping[str, Any]) -> str:
+            return str(item.get("icp_ref") or item.get("icp_hash") or "")
+
+        items = list(window.benchmark_items)
+        public_items = [it for it in items if _ref(it) in public_refs]
+        private_items = [it for it in items if _ref(it) not in public_refs]
+        return {
+            "candidate": dict(candidate),
+            "candidate_id": candidate_id,
+            "artifact": artifact,
+            "patch": patch,
+            "candidate_artifact": candidate_artifact,
+            "window": window,
+            "gate": gate,
+            "benchmark": benchmark,
+            "runner": runner,
+            "run_context": run_context,
+            "scorer": QualificationStyleCompanyScorer(),
+            "public_items": public_items,
+            "private_items": private_items,
+            "items_by_ref": {_ref(it): it for it in items},
+            "baseline_public_score": float(gate.get("baseline_public_score") or 0.0),
+            "trace_sink": self._candidate_incontainer_trace_sink(candidate_id),
+        }
+
+    async def _queue_assemble_candidate(
+        self, candidate_id: str, docs: Mapping[str, Any], ctx: Mapping[str, Any]
+    ) -> None:
+        """Assemble a fully-scored candidate into a signed score bundle and
+        write its scored events. Uses the same shared assembler and bundle
+        builder as the per-candidate path, so the bundle is byte-identical."""
+        _results, gate_result = build_holdout_gate_result(
+            public_results=docs.get("public") or (),
+            private_results=docs.get("private") or (),
+            public_icp_count=len(ctx["public_items"]),
+            private_icp_count=len(ctx["private_items"]),
+            gate=ctx["gate"],
+        )
+        score_bundle = build_score_bundle_from_scored_icps(
+            artifact_manifest=ctx["artifact"],
+            benchmark=ctx["benchmark"],
+            patch_manifest=ctx["patch"],
+            candidate_artifact_manifest=ctx["candidate_artifact"].to_dict(),
+            per_icp_results=_results,
+            run_context={**ctx["run_context"], "signature_ref": "pending"},
+            policy={},
+            extra_bundle_fields={"private_holdout_gate": gate_result},
+        )
+        scoring_health_gate = self._scoring_health_gate_result(score_bundle)
+        signature_ref = await asyncio.to_thread(
+            sign_digest_with_kms,
+            key_id=self.config.score_bundle_kms_key_id,
+            digest_hash=str(score_bundle["score_bundle_hash"]),
+            signature_uri_prefix=self.config.score_bundle_signature_uri_prefix,
+        )
+        score_bundle = {**score_bundle, "signature_ref": signature_ref}
+        candidate = ctx["candidate"]
+        bundle, _bundle_event = await create_score_bundle(
+            ResearchLabScoreBundleCreateRequest(
+                bundle_status="scored",
+                receipt_id=candidate.get("receipt_id") or None,
+                score_bundle=score_bundle,
+            )
+        )
+        await self._create_scored_evaluation_event(
+            candidate=candidate,
+            candidate_id=candidate_id,
+            score_bundle_id=str(bundle["score_bundle_id"]),
+            event_doc={
+                "score_bundle_hash": score_bundle["score_bundle_hash"],
+                "rolling_window_hash": ctx["window"].window_hash,
+                "worker_ref": self.worker_ref,
+                "proxy_ref_hash": self.proxy_ref_hash,
+                "private_holdout_gate": _candidate_gate_event_doc(gate_result),
+                "scoring_health_gate": scoring_health_gate,
+                "scored_via": "global_icp_queue",
+            },
+        )
+        await create_scoring_dispatch_event(
+            dispatch_type="candidate_scoring",
+            dispatch_status="scored",
+            worker_ref=self.worker_ref,
+            proxy_ref_hash=self.proxy_ref_hash,
+            candidate_id=candidate_id,
+            run_id=str(candidate.get("run_id") or ""),
+            ticket_id=str(candidate.get("ticket_id") or ""),
+        )
+
+    async def _run_global_icp_queue_pass(self) -> list[str]:
+        """One worker pass over the global (candidate, icp) queue.
+
+        Enqueues any queued candidate's public jobs (and parks its private jobs
+        held for the gate), then claims and scores jobs from the shared pool,
+        deciding gates and assembling finished candidates. Returns the ids of
+        candidates assembled in this pass.
+        """
+        ctx_cache: dict[str, dict[str, Any]] = {}
+
+        async def _ctx(candidate_id: str) -> dict[str, Any] | None:
+            if candidate_id in ctx_cache:
+                return ctx_cache[candidate_id]
+            row = await select_one(
+                "research_lab_candidate_evaluation_current",
+                filters=(("candidate_id", candidate_id),),
+            )
+            if row is None:
+                return None
+            ctx = await self._build_queue_candidate_context(dict(row))
+            ctx_cache[candidate_id] = ctx
+            return ctx
+
+        # 1. Enqueue queued candidates not already in the job queue.
+        queued = await select_many(
+            "research_lab_candidate_evaluation_current",
+            columns="*",
+            filters=(("current_candidate_status", "queued"),),
+            order_by=(("current_status_at", False),),
+            limit=50,
+        )
+        for offset, row in enumerate(queued):
+            cid = str(row.get("candidate_id") or "")
+            if await select_one(global_icp_queue.CANDIDATE_TABLE, filters=(("candidate_id", cid),)) is not None:
+                continue
+            try:
+                ctx = await self._build_queue_candidate_context(dict(row))
+            except Exception:
+                logger.warning(
+                    "research_lab_queue_enqueue_context_failed candidate_id=%s",
+                    compact_ref(cid),
+                    exc_info=True,
+                )
+                continue
+            ctx_cache[cid] = ctx
+            enqueued = await global_icp_queue.enqueue_candidate(
+                candidate_id=cid,
+                window_hash=ctx["window"].window_hash,
+                public_items=ctx["public_items"],
+                private_items=ctx["private_items"],
+                baseline_public_score=ctx["baseline_public_score"],
+                worker_ref=self.worker_ref,
+                seq_base=offset * 10_000,
+            )
+            if enqueued:
+                await create_candidate_evaluation_event(
+                    candidate_id=cid,
+                    run_id=str(row.get("run_id") or ""),
+                    ticket_id=str(row.get("ticket_id") or ""),
+                    event_type="evaluating",
+                    candidate_status="evaluating",
+                    evaluator_ref=self.worker_ref,
+                    reason="global_icp_queue_enqueued",
+                    event_doc={"worker_ref": self.worker_ref, "scored_via": "global_icp_queue"},
+                )
+
+        assembled: list[str] = []
+
+        async def score_icp(job: Mapping[str, Any]) -> dict[str, Any]:
+            ctx = await _ctx(str(job.get("candidate_id") or ""))
+            if ctx is None:
+                return {}
+            item = ctx["items_by_ref"].get(str(job.get("icp_ref") or ""))
+            if item is None:
+                return {}
+            results = await score_private_model_pair_items(
+                benchmark_items=[item],
+                base_runner=None,
+                candidate_runner=ctx["runner"],
+                company_scorer=ctx["scorer"],
+                run_context=ctx["run_context"],
+                image_candidate=True,
+                runtime_patch=None,
+                parent_freshness_check=None,
+                trace_sink=ctx["trace_sink"],
+            )
+            return dict(results[0]) if results else {}
+
+        def compute_public_score(public_docs: Sequence[Mapping[str, Any]]) -> float:
+            return float(_queue_benchmark_style_score(public_docs, "candidate_company_scores"))
+
+        async def assemble(candidate_id: str, docs: Mapping[str, Any]) -> None:
+            ctx = await _ctx(candidate_id)
+            if ctx is None:
+                raise RuntimeError("assemble context missing")
+            await self._queue_assemble_candidate(candidate_id, docs, ctx)
+            assembled.append(candidate_id)
+
+        counters = await global_icp_queue.run_queue_scoring_pass(
+            worker_ref=self.worker_ref,
+            lease_seconds=self.config.scoring_worker_model_timeout_seconds + 60,
+            score_icp=score_icp,
+            compute_public_score=compute_public_score,
+            assemble_candidate=assemble,
+        )
+        logger.info(
+            "research_lab_global_icp_queue_pass worker_ref=%s counters=%s assembled=%s",
+            self.worker_ref,
+            counters,
+            len(assembled),
+        )
+        return assembled
 
     async def _claim_next_candidate(self) -> dict[str, Any] | None:
         rows = await select_many(

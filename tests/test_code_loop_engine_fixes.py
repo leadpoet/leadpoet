@@ -667,7 +667,12 @@ async def test_repair_call_failure_records_exception_cost_in_running_ledger(tmp_
     assert estimated_cost == 0.0
     assert actual_cost_microusd == 4321
     assert budget_exhausted is False
-    repair_failure = [event for event in events if event.event_doc.get("stage") == "code_edit_repair_call_failed"][-1]
+    repair_failure = [
+        event
+        for event in events
+        if event.event_type == "code_edit_repair_failed"
+        and event.event_doc.get("stage") == "code_edit_repair_call_failed"
+    ][-1]
     assert repair_failure.event_type == "code_edit_repair_failed"
     assert repair_failure.cost_ledger["actual_openrouter_cost_microusd"] == 4321
     assert repair_failure.provider_usage[0]["call_outcome"] == "contained_failure"

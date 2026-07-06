@@ -314,6 +314,67 @@ def main() -> int:
         finally:
             worker_module.urlrequest.urlopen = original_urlopen
 
+        response_format_fallback_bodies: list[dict[str, object]] = []
+
+        def _fake_response_format_unsupported_then_success(_request, timeout: int):
+            body = json.loads((_request.data or b"{}").decode("utf-8"))
+            response_format_fallback_bodies.append(body)
+            if body.get("response_format"):
+                raise worker_module.HTTPError(
+                    _request.full_url,
+                    404,
+                    "Not Found",
+                    {},
+                    _FakeOpenRouterErrorBody(
+                        {
+                            "error": {
+                                "message": "No endpoints found that support requested parameters: response_format",
+                            }
+                        }
+                    ),
+                )
+            return _FakeOpenRouterResponse(
+                {
+                    "model": "provider/jsonless-model",
+                    "choices": [{"message": {"content": '{"candidates":[]}'}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                }
+            )
+
+        worker_module.urlrequest.urlopen = _fake_response_format_unsupported_then_success
+        try:
+            result = await hosted_worker._call_openrouter(
+                messages=[{"role": "user", "content": '{"task":"test"}'}],
+                api_key=fake_key,
+                model_id="provider/jsonless-model",
+                timeout_seconds=7,
+                max_tokens=16,
+                **privacy_kwargs,
+            )
+            if len(response_format_fallback_bodies) != 2:
+                errors.append("OpenRouter response_format fallback did not retry exactly once")
+            elif (
+                "response_format" not in response_format_fallback_bodies[0]
+                or "response_format" in response_format_fallback_bodies[1]
+            ):
+                errors.append("OpenRouter response_format fallback did not drop JSON response_format")
+            if not result.provider_usage.get("response_format_dropped"):
+                errors.append("OpenRouter response_format fallback did not annotate provider usage")
+            failed_request = result.provider_usage.get("response_format_drop_failed_request")
+            if not isinstance(failed_request, dict):
+                errors.append("OpenRouter response_format fallback did not store failed request diagnostics")
+            else:
+                if failed_request.get("http_status") != 404:
+                    errors.append("OpenRouter response_format diagnostics lost HTTP status")
+                if "messages" in failed_request.get("parameter_keys", []):
+                    errors.append("OpenRouter response_format diagnostics leaked message body key")
+                if not failed_request.get("provider_policy_hash"):
+                    errors.append("OpenRouter response_format diagnostics lost provider policy hash")
+        except Exception as exc:
+            errors.append(f"OpenRouter response_format unsupported fallback failed: {exc}")
+        finally:
+            worker_module.urlrequest.urlopen = original_urlopen
+
         def _fake_permanent_error(_request, timeout: int):
             return _FakeOpenRouterResponse(
                 {"error": {"code": 401, "message": "invalid api key " + fake_key}}

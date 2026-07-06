@@ -101,7 +101,18 @@ def _loop_event_to_engine(row: Mapping[str, Any]) -> EngineTraceEvent | None:
     reason = str(doc.get("failure_reason_code") or doc.get("failure_class") or doc.get("reason") or event_type)
     category = ""
     component = "auto_research_loop"
-    if event_type in {"candidate_patch_apply_failed", "candidate_test_failed", "candidate_image_build_failed", "candidate_build_failed", "candidate_build_infra_failed"}:
+    if event_type in {
+        "candidate_patch_apply_failed",
+        "candidate_patch_parse_failed",
+        "candidate_patch_empty_or_noop",
+        "candidate_test_failed",
+        "candidate_patch_test_failed",
+        "candidate_image_build_failed",
+        "candidate_artifact_missing",
+        "candidate_repair_exhausted",
+        "candidate_build_failed",
+        "candidate_build_infra_failed",
+    }:
         if event_type == "candidate_build_infra_failed":
             return None
         category = "candidate_build_failed"

@@ -72,12 +72,20 @@ class CodeEditPatchApplyError(CodeEditBuildError):
     default_failure_stage = "candidate_patch_apply_failed"
 
 
+class CodeEditEmptyOrNoopPatchError(CodeEditPatchApplyError):
+    default_failure_stage = "candidate_patch_empty_or_noop"
+
+
 class CodeEditPrivateTestError(CodeEditBuildError):
-    default_failure_stage = "candidate_test_failed"
+    default_failure_stage = "candidate_patch_test_failed"
 
 
 class CodeEditImageBuildError(CodeEditBuildError):
     default_failure_stage = "candidate_image_build_failed"
+
+
+class CodeEditArtifactMissingError(CodeEditImageBuildError):
+    default_failure_stage = "candidate_artifact_missing"
 
 
 class CodeEditInfraFailureError(CodeEditImageBuildError):
@@ -345,7 +353,7 @@ class CodeEditCandidateBuilder:
                 ) from exc
             changed_files = _changed_files(repo_dir)
             if not changed_files:
-                raise CodeEditPatchApplyError("code edit produced no repository changes")
+                raise CodeEditEmptyOrNoopPatchError("code edit produced no repository changes")
             try:
                 _py_compile_changed_files(repo_dir, changed_files)
                 _run_shell(
@@ -423,7 +431,7 @@ class CodeEditCandidateBuilder:
             if not manifest_path.is_absolute():
                 manifest_path = repo_dir / manifest_path
             if not manifest_path.exists():
-                raise CodeEditImageBuildError("private build did not produce artifact manifest output")
+                raise CodeEditArtifactMissingError("private build did not produce artifact manifest output")
             candidate_manifest = PrivateModelArtifactManifest.from_mapping(
                 json.loads(manifest_path.read_text(encoding="utf-8"))
             )

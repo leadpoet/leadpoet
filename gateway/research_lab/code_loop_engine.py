@@ -44,6 +44,7 @@ from research_lab.code_editing import (
     FORBIDDEN_CODE_EDIT_TERMS,
     CodeEditDraft,
     build_code_edit_auto_research_messages,
+    build_code_edit_fallback_messages,
     build_code_edit_repair_messages,
     build_code_edit_source_inspection_messages,
     build_loop_direction_planner_messages,
@@ -1595,6 +1596,196 @@ class CodeEditLoopEngine:
                     draft_parse_limit = min(remaining_candidate_slots, _drafts_per_call_limit())
                 else:
                     draft_parse_limit = settings.max_candidates
+                candidate_generation_fallback_attempted = False
+
+                async def _attempt_candidate_generation_fallback(
+                    *,
+                    trigger: str,
+                    reason: str,
+                ) -> list[CodeEditDraft]:
+                    nonlocal openrouter_calls, estimated_cost, actual_cost_microusd
+                    nonlocal candidate_generation_fallback_attempted
+                    if candidate_generation_fallback_attempted or not read_paths:
+                        return []
+                    if elapsed() >= settings.max_seconds:
+                        return []
+                    if _would_exceed_budget(
+                        actual_cost_microusd,
+                        _estimated_call_microusd(settings.estimated_iteration_cost_usd),
+                        budget_limit_microusd,
+                    ):
+                        return []
+                    candidate_generation_fallback_attempted = True
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="candidate_generation_fallback_requested",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            provider_usage=([provider_usage[-1]] if provider_usage else []),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "candidate_generation_fallback_requested",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "trigger": str(trigger or "")[:120],
+                                "reason": safe_event_error_text(reason),
+                                "mode": "smaller_same_lane_inspected_files",
+                                "max_candidates": 1,
+                                "max_target_files": 1,
+                                "read_file_count": len(read_paths),
+                                "read_files_sample": list(sorted(read_paths))[:8],
+                            },
+                        )
+                    )
+                    remaining_fallback_seconds = max(1, int(settings.max_seconds - elapsed()))
+                    fallback_result, fallback_call_error = await self._call_stage_contained(
+                        build_code_edit_fallback_messages(
+                            ticket={
+                                "ticket_id": str(ticket.get("ticket_id") or ""),
+                                "run_id": run_id,
+                                "miner_hotkey": ticket.get("miner_hotkey"),
+                                "island": ticket.get("island"),
+                                "brief_sanitized_ref": ticket.get("brief_sanitized_ref"),
+                                "brief_public_summary": _ticket_doc_value(ticket, "brief_public_summary"),
+                                "requested_loop_count": requested_loop_count,
+                                "loop_iteration": iteration,
+                            },
+                            artifact_manifest=artifact.to_dict(),
+                            component_registry=dict(component_registry),
+                            benchmark_public_summary=benchmark_public_summary,
+                            runtime_source_context=source_context.prompt_context(),
+                            source_inspection_context=source_inspection_context,
+                            loop_direction_plan=loop_direction_plan_doc,
+                            budget_context=_memory_budget_context(
+                                {
+                                    **dict(budget_context),
+                                    "loop_iteration": iteration,
+                                    "candidate_kind": "image_build",
+                                    "fallback_trigger": str(trigger or "")[:120],
+                                    "loop_direction_plan_hash": (
+                                        (loop_direction_plan_doc or {}).get("plan_hash")
+                                        if isinstance(loop_direction_plan_doc, Mapping)
+                                        else None
+                                    ),
+                                },
+                                include_lessons=True,
+                            ),
+                            fallback_reason=reason,
+                            max_candidates=1,
+                        ),
+                        min(settings.draft_timeout_seconds, remaining_fallback_seconds),
+                        3000,
+                        "code_edit_fallback",
+                    )
+                    if fallback_result is None:
+                        failure_usage = (
+                            fallback_call_error.failure_usage_entries()
+                            if isinstance(fallback_call_error, ContainedStageFailure)
+                            else []
+                        )
+                        if isinstance(fallback_call_error, ContainedStageFailure):
+                            actual_cost_microusd += fallback_call_error.cost_microusd
+                            provider_usage.extend(failure_usage)
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type="candidate_generation_fallback_failed",
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                provider_usage=failure_usage,
+                                cost_ledger=_running_cost_ledger(
+                                    openrouter_calls,
+                                    estimated_cost,
+                                    actual_cost_microusd,
+                                    "candidate_generation_fallback_call_failed",
+                                ),
+                                event_doc={
+                                    "iteration": iteration,
+                                    "trigger": str(trigger or "")[:120],
+                                    "stage": "candidate_generation_fallback_call_failed",
+                                    "error": fallback_call_error or "candidate_generation_fallback_call_failed",
+                                },
+                            )
+                        )
+                        return []
+                    openrouter_calls += 1
+                    estimated_cost += settings.estimated_iteration_cost_usd
+                    actual_cost_microusd += max(0, int(fallback_result.cost_microusd))
+                    if fallback_result.provider_usage:
+                        provider_usage.append(
+                            {
+                                **fallback_result.provider_usage,
+                                "loop_iteration": iteration,
+                                "call_stage": "code_edit_fallback",
+                                "fallback_trigger": str(trigger or "")[:120],
+                            }
+                        )
+                    try:
+                        fallback_drafts = parse_code_edit_response(fallback_result.content, max_candidates=1)
+                    except Exception as exc:
+                        no_viable_reason = code_edit_no_viable_patch_reason(fallback_result.content)
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type=(
+                                    "no_viable_patch"
+                                    if no_viable_reason
+                                    else "candidate_generation_fallback_failed"
+                                ),
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                provider_usage=([provider_usage[-1]] if provider_usage else []),
+                                cost_ledger=_running_cost_ledger(
+                                    openrouter_calls,
+                                    estimated_cost,
+                                    actual_cost_microusd,
+                                    "candidate_generation_fallback_no_viable_patch"
+                                    if no_viable_reason
+                                    else "candidate_generation_fallback_parse_failed",
+                                ),
+                                event_doc={
+                                    "iteration": iteration,
+                                    "trigger": str(trigger or "")[:120],
+                                    "stage": (
+                                        "candidate_generation_fallback_no_viable_patch"
+                                        if no_viable_reason
+                                        else "candidate_generation_fallback_parse_failed"
+                                    ),
+                                    "reason": no_viable_reason,
+                                    "error": safe_event_error_text(exc),
+                                    "raw_response_hash": sha256_json({"raw_response": fallback_result.content}),
+                                },
+                            )
+                        )
+                        return []
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="candidate_generation_fallback_drafted",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            provider_usage=([provider_usage[-1]] if provider_usage else []),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "candidate_generation_fallback_drafted",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "trigger": str(trigger or "")[:120],
+                                "draft_count": len(fallback_drafts),
+                                "target_files": list(fallback_drafts[0].target_files) if fallback_drafts else [],
+                                "unified_diff_hash": (
+                                    sha256_json({"unified_diff": fallback_drafts[0].unified_diff})
+                                    if fallback_drafts
+                                    else ""
+                                ),
+                            },
+                        )
+                    )
+                    return fallback_drafts
+
                 draft_result, draft_call_error = await self._call_stage_contained(
                     build_code_edit_auto_research_messages(
                         ticket={
@@ -1680,6 +1871,7 @@ class CodeEditLoopEngine:
                         drafts = parse_code_edit_response(raw, max_candidates=draft_parse_limit)
                     except Exception as exc:
                         no_viable_reason = code_edit_no_viable_patch_reason(raw)
+                        fallback_drafts: list[CodeEditDraft] = []
                         if no_viable_reason:
                             terminal_binding_plan = bool(loop_direction_plan_doc) and _binding_plan_unimplementable_reason(
                                 no_viable_reason
@@ -1722,13 +1914,19 @@ class CodeEditLoopEngine:
                             if terminal_binding_plan:
                                 stop_reason = "binding_plan_unimplementable"
                                 binding_plan_terminal_without_candidate = True
+                            fallback_drafts = await _attempt_candidate_generation_fallback(
+                                trigger="no_viable_patch",
+                                reason=no_viable_reason,
+                            )
+                            if fallback_drafts:
+                                binding_plan_terminal_without_candidate = False
                         else:
                             await self.event_sink(
                                 AutoResearchLoopEvent(
-                                    event_type="code_edit_validation_failed",
+                                    event_type="candidate_patch_parse_failed",
                                     loop_status="running",
                                     elapsed_seconds=elapsed(),
-                                    cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "code_edit_parse_failed"),
+                                    cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "candidate_patch_parse_failed"),
                                     # P3: parse failures are negative training
                                     # examples — the draft call's usage carries
                                     # the raw-trace pointer to the malformed
@@ -1741,7 +1939,11 @@ class CodeEditLoopEngine:
                                     },
                                 )
                             )
-                        drafts = []
+                            fallback_drafts = await _attempt_candidate_generation_fallback(
+                                trigger="candidate_patch_parse_failed",
+                                reason=safe_event_error_text(exc),
+                            )
+                        drafts = fallback_drafts if fallback_drafts else []
             for draft_index, draft in enumerate(drafts):
                 if len(selected) >= settings.max_candidates and _stop_at_candidate_cap_enabled():
                     # Bug 20: never start a docker build for a candidate that would be
@@ -2960,18 +3162,19 @@ class CodeEditLoopEngine:
                 )
                 return candidate_draft, openrouter_calls, estimated_cost, actual_cost_microusd, False
             except CodeEditPatchApplyError as exc:
+                failure_stage = str(getattr(exc, "failure_stage", "") or "candidate_patch_apply_failed")
                 diagnostic_doc = await _write_private_code_edit_diagnostic(
                     artifact=artifact,
                     run_id=run_id,
                     node_id=node_id,
                     iteration=iteration,
-                    stage="candidate_patch_apply_failed",
+                    stage=failure_stage,
                     draft=candidate_draft,
                     error=exc,
                 )
                 await self.event_sink(
                     AutoResearchLoopEvent(
-                        event_type="candidate_patch_apply_failed",
+                        event_type=failure_stage,
                         loop_status="running",
                         elapsed_seconds=elapsed(),
                         node_id=node_id,
@@ -2980,7 +3183,7 @@ class CodeEditLoopEngine:
                             openrouter_calls,
                             estimated_cost,
                             actual_cost_microusd,
-                            "candidate_patch_apply_failed",
+                            failure_stage,
                         ),
                         event_doc={
                             "iteration": iteration,
@@ -2997,7 +3200,7 @@ class CodeEditLoopEngine:
                 if repair_attempt >= max_repairs:
                     await self.event_sink(
                         AutoResearchLoopEvent(
-                            event_type="code_edit_repair_failed",
+                            event_type="candidate_repair_exhausted",
                             loop_status="running",
                             elapsed_seconds=elapsed(),
                             node_id=node_id,
@@ -3006,7 +3209,7 @@ class CodeEditLoopEngine:
                                 openrouter_calls,
                                 estimated_cost,
                                 actual_cost_microusd,
-                                "code_edit_repair_failed",
+                                "candidate_repair_exhausted",
                             ),
                             event_doc={
                                 "iteration": iteration,
@@ -3015,6 +3218,7 @@ class CodeEditLoopEngine:
                                 "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
                                 "error": safe_event_error_text(exc),
                                 "error_hash": sha256_json({"error": str(exc)}),
+                                "last_failure_stage": failure_stage,
                             },
                         )
                     )
@@ -3126,6 +3330,29 @@ class CodeEditLoopEngine:
                         )
                     )
                     if repair_attempt + 1 >= max_repairs:
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type="candidate_repair_exhausted",
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                node_id=node_id,
+                                provider_usage=failure_usage,
+                                cost_ledger=_running_cost_ledger(
+                                    openrouter_calls,
+                                    estimated_cost,
+                                    actual_cost_microusd,
+                                    "candidate_repair_exhausted",
+                                ),
+                                event_doc={
+                                    "iteration": iteration,
+                                    "repair_attempts": max_repairs,
+                                    "stage": "code_edit_repair_call_failed",
+                                    "target_files": list(candidate_draft.target_files),
+                                    "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
+                                    "error": repair_call_error or "code_edit_repair_call_failed",
+                                },
+                            )
+                        )
                         return None, openrouter_calls, estimated_cost, actual_cost_microusd, False
                     continue
                 openrouter_calls += 1
@@ -3168,6 +3395,28 @@ class CodeEditLoopEngine:
                         )
                     )
                     if repair_attempt + 1 >= max_repairs:
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type="candidate_repair_exhausted",
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                node_id=node_id,
+                                provider_usage=([provider_usage[-1]] if provider_usage else []),
+                                cost_ledger=_running_cost_ledger(
+                                    openrouter_calls,
+                                    estimated_cost,
+                                    actual_cost_microusd,
+                                    "candidate_repair_exhausted",
+                                ),
+                                event_doc={
+                                    "iteration": iteration,
+                                    "repair_attempts": max_repairs,
+                                    "stage": "code_edit_repair_parse_failed",
+                                    "error": str(parse_exc)[:500],
+                                    "raw_response_hash": sha256_json({"raw_response": repair_result.content}),
+                                },
+                            )
+                        )
                         return None, openrouter_calls, estimated_cost, actual_cost_microusd, False
                     continue
                 repaired = repaired_drafts[0].with_unified_diff(repaired_drafts[0].unified_diff)
@@ -3202,6 +3451,30 @@ class CodeEditLoopEngine:
                         )
                     )
                     if repair_attempt + 1 >= max_repairs:
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type="candidate_repair_exhausted",
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                node_id=node_id,
+                                provider_usage=([provider_usage[-1]] if provider_usage else []),
+                                cost_ledger=_running_cost_ledger(
+                                    openrouter_calls,
+                                    estimated_cost,
+                                    actual_cost_microusd,
+                                    "candidate_repair_exhausted",
+                                ),
+                                event_doc={
+                                    "iteration": iteration,
+                                    "repair_attempts": max_repairs,
+                                    "stage": "code_edit_repair_source_context_failed",
+                                    "target_files": list(repaired.target_files),
+                                    "error": "; ".join(source_errors)[:500],
+                                    "source_diff_hash": sha256_json({"unified_diff": repaired.unified_diff}),
+                                    "source_tree_hash": source_context.source_tree_hash,
+                                },
+                            )
+                        )
                         return None, openrouter_calls, estimated_cost, actual_cost_microusd, False
                     continue
                 candidate_draft = repaired

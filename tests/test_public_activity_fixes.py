@@ -1,9 +1,9 @@
 """Tests for the Research Lab public-activity fixes (audit bugs 7, 33, 34).
 
 Covers:
-- scripts/61 CHECK-constraint allowlist: every label the projection can emit is
+- scripts/69 CHECK-constraint allowlist: every label the projection can emit is
   allowlisted (labels extracted from the module AST, allowlists parsed from the
-  migration SQL), and the new allowlist is a strict superset of scripts/57.
+  migration SQL), and the new allowlist is a strict superset of scripts/61.
 - derive_public_loop_outcome precedence fixes (bug 33a-e).
 - safe_project_public_loop_activity bounded retry + escalated warning (bug 34b).
 - reproject_stale_public_cards sweep: stale selection, batch cap, log-only mode,
@@ -29,8 +29,8 @@ from gateway.research_lab.public_activity import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+MIGRATION_69 = REPO_ROOT / "scripts" / "69-research-lab-candidate-generation-diagnostics.sql"
 MIGRATION_61 = REPO_ROOT / "scripts" / "61-research-lab-public-status-check-allowlist.sql"
-MIGRATION_57 = REPO_ROOT / "scripts" / "57-research-lab-public-loop-completed-no-candidate-label.sql"
 PUBLIC_ACTIVITY_SOURCE = REPO_ROOT / "gateway" / "research_lab" / "public_activity.py"
 
 T1 = "2026-07-01T00:00:00+00:00"
@@ -132,6 +132,7 @@ def _derive(
     candidate_rows: list | None = None,
     score_bundle_rows: list | None = None,
     promotion_event_rows: list | None = None,
+    auto_loop_event_rows: list | None = None,
 ):
     return derive_public_loop_outcome(
         ticket=ticket or _ticket(),
@@ -140,6 +141,7 @@ def _derive(
         candidate_rows=candidate_rows or [],
         score_bundle_rows=score_bundle_rows or [],
         promotion_event_rows=promotion_event_rows or [],
+        auto_loop_event_rows=auto_loop_event_rows or [],
         improvement_threshold_points=1.0,
     )
 
@@ -162,6 +164,7 @@ def _opened_ticket_inputs() -> dict:
         "candidate_rows": [],
         "score_bundle_rows": [],
         "promotion_event_rows": [],
+        "auto_loop_event_rows": [],
     }
 
 
@@ -177,11 +180,11 @@ def _card(ticket_id: str, stored_label: str = "", event_doc: dict | None = None)
 
 
 # --------------------------------------------------------------------------- #
-# Bug 7 — scripts/61 allowlist covers every writable label
+# Bug 7 — scripts/69 allowlist covers every writable label
 # --------------------------------------------------------------------------- #
-class TestMigration61Allowlist:
+class TestMigration69Allowlist:
     def test_every_writable_label_is_allowlisted(self):
-        sql = MIGRATION_61.read_text()
+        sql = MIGRATION_69.read_text()
         allowed_event_types = _sql_allowlist(sql, "event_type")
         allowed_outcome_labels = _sql_allowlist(sql, "outcome_label")
         allowed_outcome_bands = _sql_allowlist(sql, "outcome_band")
@@ -197,20 +200,25 @@ class TestMigration61Allowlist:
         )
 
     def test_awaiting_payment_allowlisted(self):
-        sql = MIGRATION_61.read_text()
+        sql = MIGRATION_69.read_text()
         assert "awaiting_payment" in _sql_allowlist(sql, "event_type")
         assert "awaiting_payment" in _sql_allowlist(sql, "outcome_label")
 
-    def test_strict_superset_of_migration_57(self):
+    def test_no_buildable_candidate_allowlisted(self):
+        sql = MIGRATION_69.read_text()
+        assert "no_buildable_candidate" in _sql_allowlist(sql, "event_type")
+        assert "no_buildable_candidate" in _sql_allowlist(sql, "outcome_label")
+
+    def test_strict_superset_of_migration_61(self):
+        sql_69 = MIGRATION_69.read_text()
         sql_61 = MIGRATION_61.read_text()
-        sql_57 = MIGRATION_57.read_text()
         for column in ("event_type", "outcome_label", "outcome_band"):
-            old = _sql_allowlist(sql_57, column)
-            new = _sql_allowlist(sql_61, column)
-            assert old <= new, f"{column}: migration 61 dropped labels {sorted(old - new)}"
-        # Strictly larger overall (awaiting_payment added), so old writers keep working
+            old = _sql_allowlist(sql_61, column)
+            new = _sql_allowlist(sql_69, column)
+            assert old <= new, f"{column}: migration 69 dropped labels {sorted(old - new)}"
+        # Strictly larger overall (no_buildable_candidate added), so old writers keep working
         # while the new label becomes legal.
-        assert _sql_allowlist(sql_57, "event_type") < _sql_allowlist(sql_61, "event_type")
+        assert _sql_allowlist(sql_61, "event_type") < _sql_allowlist(sql_69, "event_type")
 
 
 # --------------------------------------------------------------------------- #
@@ -384,6 +392,23 @@ class TestDerivationPrecedence:
         outcome = _derive(queue_rows=[_queue("completed")])
         assert outcome.outcome_label == "completed_no_candidate"
 
+    def test_failed_zero_candidate_with_loop_evidence_is_no_buildable_candidate(self):
+        outcome = _derive(
+            queue_rows=[_queue("failed", "no_valid_image_build_finalists")],
+            auto_loop_event_rows=[
+                {
+                    "event_type": "no_viable_patch",
+                    "seq": 1,
+                    "event_doc": {"reason": "planner returned no_new_safe_path"},
+                }
+            ],
+        )
+        assert outcome.event_type == "no_buildable_candidate"
+        assert outcome.outcome_label == "no_buildable_candidate"
+        assert outcome.outcome_band == "failed"
+        assert outcome.event_doc["public_status_label"] == "No buildable candidate"
+        assert outcome.event_doc["candidate_generation_failure"]["primary_reason"] == "no_viable_patch"
+
     def test_active_candidate_still_shows_scoring(self):
         outcome = _derive(
             queue_rows=[_queue("completed")],
@@ -410,6 +435,7 @@ class TestPublicLoopLookupAndTicketCap:
         [
             {"current_outcome_label": "completed_no_candidate", "current_outcome_band": "pending"},
             {"current_outcome_label": "failed", "current_outcome_band": "failed"},
+            {"current_outcome_label": "no_buildable_candidate", "current_outcome_band": "failed"},
             {"current_outcome_label": "scored_no_gain", "current_outcome_band": "no_gain"},
             {"current_outcome_label": "scored_promising", "current_outcome_band": "small_gain"},
             {"current_outcome_label": "scored_promising", "current_outcome_band": "passed_threshold"},

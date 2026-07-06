@@ -27,6 +27,7 @@ from gateway.research_lab.public_activity import (  # noqa: E402
 
 MIGRATION = ROOT / "scripts" / "40-research-lab-public-loop-activity.sql"
 STATUS_LABEL_MIGRATION = ROOT / "scripts" / "55-research-lab-public-loop-status-labels.sql"
+CANDIDATE_DIAGNOSTICS_MIGRATION = ROOT / "scripts" / "69-research-lab-candidate-generation-diagnostics.sql"
 FORBIDDEN_GRANT_RE = re.compile(
     r"\bGRANT\b(?!\s+EXECUTE\b)[^;]*\b(?:anon|authenticated)\b",
     re.IGNORECASE | re.DOTALL,
@@ -36,6 +37,7 @@ FORBIDDEN_GRANT_RE = re.compile(
 def main() -> int:
     errors = verify_sql(MIGRATION.read_text(encoding="utf-8"))
     errors.extend(verify_status_label_sql(STATUS_LABEL_MIGRATION.read_text(encoding="utf-8")))
+    errors.extend(verify_candidate_diagnostics_sql(CANDIDATE_DIAGNOSTICS_MIGRATION.read_text(encoding="utf-8")))
     errors.extend(verify_projection_fixtures())
     if errors:
         for error in errors:
@@ -98,6 +100,31 @@ def verify_status_label_sql(sql: str) -> list[str]:
             errors.append(f"status label migration missing marker: {marker}")
     if FORBIDDEN_GRANT_RE.search(sql):
         errors.append("status label migration must not grant privileges to anon/authenticated")
+    return errors
+
+
+def verify_candidate_diagnostics_sql(sql: str) -> list[str]:
+    errors: list[str] = []
+    lowered = sql.lower()
+    for marker in (
+        "begin;",
+        "commit;",
+        "no_buildable_candidate",
+        "candidate_patch_parse_failed",
+        "candidate_patch_empty_or_noop",
+        "candidate_patch_test_failed",
+        "candidate_artifact_missing",
+        "candidate_repair_exhausted",
+        "candidate_generation_fallback_requested",
+        "candidate_generation_fallback_drafted",
+        "candidate_generation_fallback_failed",
+        "allocator_decision",
+        "awaiting_payment",
+    ):
+        if marker not in lowered:
+            errors.append(f"candidate diagnostics migration missing marker: {marker}")
+    if FORBIDDEN_GRANT_RE.search(sql):
+        errors.append("candidate diagnostics migration must not grant privileges to anon/authenticated")
     return errors
 
 
@@ -242,6 +269,43 @@ def verify_projection_fixtures() -> list[str]:
         {"current_outcome_label": no_candidate.outcome_label, "current_outcome_band": no_candidate.outcome_band}
     ):
         errors.append("completed_no_candidate public loop should close open-ticket cap")
+    no_buildable = derive_public_loop_outcome(
+        ticket={"ticket_id": "t", "current_ticket_status": "running", "created_at": "2026-01-01T00:00:00+00:00"},
+        queue_rows=[
+            {
+                "run_id": "r",
+                "current_queue_status": "failed",
+                "current_reason": "no_valid_image_build_finalists",
+                "current_status_at": "2026-01-01T00:01:00+00:00",
+            }
+        ],
+        receipt_rows=[],
+        candidate_rows=[],
+        score_bundle_rows=[],
+        promotion_event_rows=[],
+        auto_loop_event_rows=[
+            {
+                "run_id": "r",
+                "event_type": "source_inspection_failed",
+                "seq": 1,
+                "event_doc": {
+                    "stage": "source_inspection_call_failed",
+                    "error": "OpenRouter candidate generation failed: HTTP 404: No endpoints found for requested parameters",
+                },
+            }
+        ],
+    )
+    if no_buildable.outcome_label != "no_buildable_candidate" or no_buildable.outcome_band != "failed":
+        errors.append("failed zero-candidate fixture should be no_buildable_candidate/failed")
+    failure_doc = no_buildable.event_doc.get("candidate_generation_failure", {})
+    if failure_doc.get("primary_reason") != "provider_route_unavailable":
+        errors.append("no_buildable_candidate fixture should classify provider_route_unavailable")
+    if no_buildable.event_doc.get("public_status_label") != "No buildable candidate":
+        errors.append("no_buildable_candidate fixture should carry display label")
+    if not public_loop_outcome_closes_ticket(
+        {"current_outcome_label": no_buildable.outcome_label, "current_outcome_band": no_buildable.outcome_band}
+    ):
+        errors.append("no_buildable_candidate public loop should close open-ticket cap")
     if public_loop_outcome_closes_ticket({"current_outcome_label": "running", "current_outcome_band": "pending"}):
         errors.append("running public loop must remain open for ticket cap")
     if not public_loop_ticket_id_matches_lookup(

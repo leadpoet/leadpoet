@@ -21,6 +21,9 @@ from urllib import parse as urlparse
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
+from gateway.research_lab.candidate_diagnostics import (
+    build_candidate_generation_failure_summary,
+)
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.code_build import CodeEditCandidateBuilder, CodeEditInfraFailureError
 from gateway.research_lab.code_loop_engine import CodeEditLoopEngine
@@ -211,6 +214,70 @@ def _is_openrouter_reasoning_effort_unsupported(status_code: int, message: str) 
             "unexpected",
         )
     )
+
+
+def _is_openrouter_response_format_route_unavailable(exc: BaseException) -> bool:
+    text = str(exc or "").lower()
+    if "no endpoint" not in text and "no endpoints" not in text:
+        return False
+    return any(marker in text for marker in ("response_format", "json", "parameters", "requested parameter"))
+
+
+def _openrouter_request_diagnostics(
+    *,
+    stage: str,
+    model_id: str,
+    body: Mapping[str, Any],
+    http_status: int | None = None,
+    error_text: str = "",
+    outcome: str,
+) -> dict[str, Any]:
+    provider_policy = body.get("provider") if isinstance(body.get("provider"), Mapping) else {}
+    response_format = body.get("response_format") if isinstance(body.get("response_format"), Mapping) else {}
+    messages = body.get("messages")
+    message_count = len(messages) if isinstance(messages, list) else 0
+    diagnostics = {
+        "schema_version": "1.0",
+        "provider": "openrouter",
+        "stage": str(stage or "openrouter_call")[:120],
+        "model": str(model_id or "")[:160],
+        "model_ref": compact_ref(model_id),
+        "outcome": str(outcome or "failed")[:80],
+        "parameter_keys": sorted(str(key)[:80] for key in body.keys() if key != "messages")[:30],
+        "messages_omitted": True,
+        "message_count": int(message_count),
+        "provider_policy_hash": sha256_json({"provider": provider_policy}) if provider_policy else "",
+        "response_format_type": str(response_format.get("type") or "")[:80],
+        "reasoning_requested": bool(
+            body.get("reasoning_effort") or body.get("reasoning") or body.get("include_reasoning")
+        ),
+    }
+    if http_status is not None:
+        diagnostics["http_status"] = int(http_status)
+    if error_text:
+        diagnostics["error_hash"] = sha256_json({"error": str(error_text)[:2000]})
+    return diagnostics
+
+
+def _attach_openrouter_failure_metadata(
+    exc: HostedResearchLabWorkerError,
+    *,
+    diagnostics: Mapping[str, Any],
+) -> HostedResearchLabWorkerError:
+    diagnostic_doc = dict(diagnostics)
+    exc.openrouter_request_diagnostics = diagnostic_doc  # type: ignore[attr-defined]
+    usage = getattr(exc, "provider_usage", None)
+    failure_usage = {
+        "provider": "openrouter",
+        "call_stage": diagnostic_doc.get("stage"),
+        "call_outcome": "failed",
+        "failed_request": diagnostic_doc,
+    }
+    if isinstance(usage, Mapping):
+        exc.provider_usage = {**dict(usage), **failure_usage}  # type: ignore[attr-defined]
+    else:
+        exc.provider_usage = failure_usage  # type: ignore[attr-defined]
+    return exc
 
 
 def _status_age_seconds(raw_status_at: object) -> float | None:
@@ -506,24 +573,34 @@ def _raise_openrouter_generation_response_error(
     default_retryable: bool,
     provider_usage: Mapping[str, Any] | None = None,
     cost_microusd: int = 0,
+    request_diagnostics: Mapping[str, Any] | None = None,
 ) -> None:
     summary = _openrouter_response_summary(decoded)
     error = f"OpenRouter candidate generation failed: {failure}: {summary}"
     if _is_openrouter_credit_block(decoded, error):
         raise CreditBlockedHostedRunError(error)
     if _openrouter_generation_stopped_for_length(decoded):
-        raise OpenRouterLengthRetryableError(
+        exc = OpenRouterLengthRetryableError(
             error,
             provider_usage=provider_usage,
             cost_microusd=cost_microusd,
         )
+        if request_diagnostics:
+            _attach_openrouter_failure_metadata(exc, diagnostics=request_diagnostics)
+        raise exc
     if _openrouter_generation_response_is_retryable(
         decoded,
         error,
         default_retryable=default_retryable,
     ):
-        raise RetryableHostedResearchLabWorkerError(error)
-    raise HostedResearchLabWorkerError(error)
+        exc = RetryableHostedResearchLabWorkerError(error)
+        if request_diagnostics:
+            _attach_openrouter_failure_metadata(exc, diagnostics=request_diagnostics)
+        raise exc
+    exc = HostedResearchLabWorkerError(error)
+    if request_diagnostics:
+        _attach_openrouter_failure_metadata(exc, diagnostics=request_diagnostics)
+    raise exc
 
 
 def _openrouter_generation_stopped_for_length(decoded: object) -> bool:
@@ -1732,6 +1809,7 @@ class ResearchLabHostedWorker:
 
             latest_checkpoint: dict[str, Any] | None = None
             last_queue_heartbeat_at = 0.0
+            recorded_loop_events: list[dict[str, Any]] = []
 
             async def _record_loop_event(event: AutoResearchLoopEvent) -> None:
                 nonlocal latest_checkpoint, last_queue_heartbeat_at
@@ -1739,7 +1817,24 @@ class ResearchLabHostedWorker:
                     checkpoint_doc = event.event_doc.get("checkpoint") if isinstance(event.event_doc, Mapping) else None
                     if isinstance(checkpoint_doc, dict):
                         latest_checkpoint = dict(checkpoint_doc)
+                event_doc = dict(event.event_doc) if isinstance(event.event_doc, Mapping) else {}
                 event_provider_usage = event.provider_usage or self._provider_usage(context)
+                if event.event_type == "loop_failed":
+                    failure_summary = build_candidate_generation_failure_summary(
+                        (
+                            *recorded_loop_events,
+                            {
+                                "event_type": event.event_type,
+                                "provider_usage": event_provider_usage,
+                                "cost_ledger": event.cost_ledger,
+                                "event_doc": event_doc,
+                            },
+                        ),
+                        queue_reason="no_valid_image_build_finalists",
+                        terminal_error=str(event_doc.get("stop_reason") or ""),
+                    )
+                    event_doc["candidate_generation_failure"] = failure_summary
+                    event_doc["failure_reason"] = failure_summary.get("primary_reason")
                 context.latest_loop_cost_evidence = normalize_cost_evidence(
                     {
                         "source": "loop_event_in_memory",
@@ -1762,7 +1857,16 @@ class ResearchLabHostedWorker:
                     candidate_patch_hash=event.candidate_patch_hash,
                     provider_usage=event_provider_usage,
                     cost_ledger=event.cost_ledger,
-                    event_doc=event.event_doc,
+                    event_doc=event_doc,
+                )
+                recorded_loop_events.append(
+                    {
+                        **dict(loop_event_row or {}),
+                        "event_type": event.event_type,
+                        "provider_usage": event_provider_usage,
+                        "cost_ledger": event.cost_ledger,
+                        "event_doc": event_doc,
+                    }
                 )
                 now_monotonic = time.monotonic()
                 if (
@@ -1877,6 +1981,18 @@ class ResearchLabHostedWorker:
                                 "stage": stage,
                                 "model_ref": compact_ref(attempt_model_id),
                                 "error_hash": sha256_json({"error": str(exc)}),
+                                **(
+                                    {
+                                        "failed_request": dict(
+                                            getattr(exc, "openrouter_request_diagnostics")
+                                        )
+                                    }
+                                    if isinstance(
+                                        getattr(exc, "openrouter_request_diagnostics", None),
+                                        Mapping,
+                                    )
+                                    else {}
+                                ),
                                 "next_model_ref": compact_ref(stage_model_ids[model_attempt_index + 1]),
                             }
                         )
@@ -1929,11 +2045,27 @@ class ResearchLabHostedWorker:
                     reason="maintenance_pause_checkpointed",
                 )
             if not loop_result.selected_candidates:
+                failure_summary = build_candidate_generation_failure_summary(
+                    recorded_loop_events,
+                    queue_reason="no_valid_image_build_finalists",
+                    terminal_error=str(getattr(loop_result, "stop_reason", "") or ""),
+                    candidate_count=0,
+                )
+                failure_reason = str(
+                    failure_summary.get("primary_reason") or "no_valid_image_build_finalists"
+                )
                 return await self._mark_failed(
                     context,
-                    "auto-research loop completed without valid image-build finalists",
+                    (
+                        "auto-research loop completed without valid image-build finalists: "
+                        + str(failure_summary.get("public_summary") or failure_reason)
+                    ),
                     loop_result=loop_result,
-                    reason="no_valid_image_build_finalists",
+                    reason=failure_reason,
+                    failure_diagnostics={
+                        **failure_summary,
+                        "parent_failure_reason": "no_valid_image_build_finalists",
+                    },
                 )
             final_artifact = artifact
             finalists = [
@@ -3129,6 +3261,7 @@ class ResearchLabHostedWorker:
         loop_result: Any | None = None,
         failure_exception: BaseException | None = None,
         reason: str = "hosted_research_lab_run_failed",
+        failure_diagnostics: Mapping[str, Any] | None = None,
     ) -> HostedWorkerOutcome:
         if loop_result is not None:
             cost_evidence = cost_evidence_from_loop_result(loop_result)
@@ -3191,6 +3324,8 @@ class ResearchLabHostedWorker:
             "receipt_id": receipt_id,
             "reimbursement": reimbursement_decision or {"status": "not_written"},
         }
+        if failure_diagnostics:
+            event_doc["candidate_generation_failure"] = dict(failure_diagnostics)
         if cost_ledger:
             event_doc["final_cost_ledger"] = cost_ledger
         if provider_usage:
@@ -3608,14 +3743,20 @@ class ResearchLabHostedWorker:
             ),
         )
 
-        def _request_body(effective_max_tokens: int, *, include_reasoning_effort: bool) -> dict[str, Any]:
+        def _request_body(
+            effective_max_tokens: int,
+            *,
+            include_reasoning_effort: bool,
+            include_response_format: bool,
+        ) -> dict[str, Any]:
             body = {
                 "model": model_id,
                 "messages": list(messages),
                 "temperature": request_temperature,
                 "max_tokens": int(effective_max_tokens),
-                "response_format": {"type": "json_object"},
             }
+            if include_response_format:
+                body["response_format"] = {"type": "json_object"}
             body["provider"] = strict_openrouter_provider_policy()
             if requested_reasoning_effort and include_reasoning_effort:
                 body["reasoning_effort"] = requested_reasoning_effort
@@ -3678,10 +3819,16 @@ class ResearchLabHostedWorker:
                     "OpenRouter workspace privacy verification failed before hidden prompt"
                 ) from exc
 
-        def _call_once(*, effective_max_tokens: int, include_reasoning_effort: bool) -> OpenRouterCallResult:
+        def _call_once(
+            *,
+            effective_max_tokens: int,
+            include_reasoning_effort: bool,
+            include_response_format: bool,
+        ) -> OpenRouterCallResult:
             body = _request_body(
                 effective_max_tokens,
                 include_reasoning_effort=include_reasoning_effort,
+                include_response_format=include_response_format,
             )
 
             def _record_raw_trace(response_doc: Any, *, outcome: str) -> dict[str, str] | None:
@@ -3729,7 +3876,19 @@ class ResearchLabHostedWorker:
                             "OpenRouter candidate generation failed: non-JSON response"
                             f" status={response_status or 'unknown'} excerpt={excerpt[:200]}"
                         )
-                        raise RetryableHostedResearchLabWorkerError(error) from exc
+                        retryable = RetryableHostedResearchLabWorkerError(error)
+                        _attach_openrouter_failure_metadata(
+                            retryable,
+                            diagnostics=_openrouter_request_diagnostics(
+                                stage=capture_stage,
+                                model_id=model_id,
+                                body=body,
+                                http_status=int(response_status) if response_status is not None else None,
+                                error_text=error,
+                                outcome="invalid_json_response",
+                            ),
+                        )
+                        raise retryable from exc
             except HTTPError as exc:
                 message = exc.read().decode("utf-8", errors="replace")[:500]
                 _record_raw_trace(
@@ -3737,22 +3896,47 @@ class ResearchLabHostedWorker:
                     outcome="http_error",
                 )
                 error = f"OpenRouter candidate generation failed: HTTP {exc.code}: {message}"
+                diagnostics = _openrouter_request_diagnostics(
+                    stage=capture_stage,
+                    model_id=model_id,
+                    body=body,
+                    http_status=int(exc.code),
+                    error_text=message,
+                    outcome="http_error",
+                )
                 if (
                     include_reasoning_effort
                     and (requested_reasoning_effort or _llm_include_reasoning_enabled())
                     and _is_openrouter_reasoning_effort_unsupported(int(exc.code), message)
                 ):
-                    raise OpenRouterReasoningEffortUnsupportedError(error) from exc
+                    unsupported = OpenRouterReasoningEffortUnsupportedError(error)
+                    _attach_openrouter_failure_metadata(unsupported, diagnostics=diagnostics)
+                    raise unsupported from exc
                 if int(exc.code) == 402 or _is_openrouter_credit_block(None, error):
                     raise CreditBlockedHostedRunError(error) from exc
                 if int(exc.code) in _RETRYABLE_HTTP_CODES:
-                    raise RetryableHostedResearchLabWorkerError(error) from exc
-                raise HostedResearchLabWorkerError(error) from exc
+                    retryable = RetryableHostedResearchLabWorkerError(error)
+                    _attach_openrouter_failure_metadata(retryable, diagnostics=diagnostics)
+                    raise retryable from exc
+                permanent = HostedResearchLabWorkerError(error)
+                _attach_openrouter_failure_metadata(permanent, diagnostics=diagnostics)
+                raise permanent from exc
             except URLError as exc:
                 _record_raw_trace({"error_excerpt": str(exc)[:500]}, outcome="transport_error")
-                raise RetryableHostedResearchLabWorkerError(
+                retryable = RetryableHostedResearchLabWorkerError(
                     f"OpenRouter candidate generation failed: {exc}"
-                ) from exc
+                )
+                _attach_openrouter_failure_metadata(
+                    retryable,
+                    diagnostics=_openrouter_request_diagnostics(
+                        stage=capture_stage,
+                        model_id=model_id,
+                        body=body,
+                        error_text=str(exc),
+                        outcome="transport_error",
+                    ),
+                )
+                raise retryable from exc
             raw_trace_ref = _record_raw_trace(decoded, outcome="response")
             choices = decoded.get("choices") if isinstance(decoded, Mapping) else None
             if not isinstance(choices, list) or not choices:
@@ -3760,6 +3944,14 @@ class ResearchLabHostedWorker:
                     decoded,
                     failure="no candidate-generation choices",
                     default_retryable=True,
+                    request_diagnostics=_openrouter_request_diagnostics(
+                        stage=capture_stage,
+                        model_id=model_id,
+                        body=body,
+                        http_status=200,
+                        error_text="no candidate-generation choices",
+                        outcome="invalid_generation_response",
+                    ),
                 )
             first_choice = choices[0] if isinstance(choices[0], Mapping) else {}
             message = first_choice.get("message") if isinstance(first_choice.get("message"), Mapping) else {}
@@ -3794,13 +3986,33 @@ class ResearchLabHostedWorker:
                     default_retryable=True,
                     provider_usage=provider_usage,
                     cost_microusd=cost_microusd,
+                    request_diagnostics=_openrouter_request_diagnostics(
+                        stage=capture_stage,
+                        model_id=model_id,
+                        body=body,
+                        http_status=200,
+                        error_text="empty candidate-generation content",
+                        outcome="empty_generation_content",
+                    ),
                 )
             if _openrouter_generation_stopped_for_length(decoded):
-                raise OpenRouterLengthRetryableError(
+                length_exc = OpenRouterLengthRetryableError(
                     f"OpenRouter candidate generation stopped at output token cap: {_openrouter_response_summary(decoded)}",
                     provider_usage=provider_usage,
                     cost_microusd=cost_microusd,
                 )
+                _attach_openrouter_failure_metadata(
+                    length_exc,
+                    diagnostics=_openrouter_request_diagnostics(
+                        stage=capture_stage,
+                        model_id=model_id,
+                        body=body,
+                        http_status=200,
+                        error_text="finish_reason_length",
+                        outcome="finish_reason_length",
+                    ),
+                )
+                raise length_exc
             return OpenRouterCallResult(
                 content=str(content),
                 provider_usage=provider_usage,
@@ -3817,6 +4029,9 @@ class ResearchLabHostedWorker:
             # unsupported-drop retry can clear it for strict models.
             include_reasoning_effort = bool(requested_reasoning_effort) or _llm_include_reasoning_enabled()
             reasoning_effort_drop_error_hash = ""
+            include_response_format = True
+            response_format_drop_error_hash = ""
+            response_format_drop_failed_request: dict[str, Any] = {}
             for attempt in range(1, attempts + 1):
                 effective_max_tokens = _openrouter_generation_retry_max_tokens(
                     base_max_tokens,
@@ -3824,10 +4039,36 @@ class ResearchLabHostedWorker:
                 )
                 try:
                     try:
-                        result = _call_once(
-                            effective_max_tokens=effective_max_tokens,
-                            include_reasoning_effort=include_reasoning_effort,
-                        )
+                        try:
+                            result = _call_once(
+                                effective_max_tokens=effective_max_tokens,
+                                include_reasoning_effort=include_reasoning_effort,
+                                include_response_format=include_response_format,
+                            )
+                        except HostedResearchLabWorkerError as exc:
+                            if not include_response_format or not _is_openrouter_response_format_route_unavailable(exc):
+                                raise
+                            include_response_format = False
+                            response_format_drop_error_hash = sha256_json({"error": str(exc)})
+                            response_format_drop_failed_request = (
+                                dict(getattr(exc, "openrouter_request_diagnostics"))
+                                if isinstance(getattr(exc, "openrouter_request_diagnostics", None), Mapping)
+                                else {}
+                            )
+                            logger.warning(
+                                (
+                                    "research_lab_openrouter_response_format_route_unavailable "
+                                    "model=%s attempt=%s error_hash=%s; retrying_without_response_format"
+                                ),
+                                compact_ref(model_id),
+                                attempt,
+                                response_format_drop_error_hash,
+                            )
+                            result = _call_once(
+                                effective_max_tokens=effective_max_tokens,
+                                include_reasoning_effort=include_reasoning_effort,
+                                include_response_format=False,
+                            )
                     except OpenRouterReasoningEffortUnsupportedError as exc:
                         if not include_reasoning_effort:
                             raise
@@ -3846,23 +4087,31 @@ class ResearchLabHostedWorker:
                         result = _call_once(
                             effective_max_tokens=effective_max_tokens,
                             include_reasoning_effort=False,
+                            include_response_format=include_response_format,
                         )
-                    if reasoning_effort_drop_error_hash:
+                    if reasoning_effort_drop_error_hash or response_format_drop_error_hash:
                         provider_usage = dict(result.provider_usage or {})
-                        provider_usage["reasoning_effort_dropped"] = True
-                        provider_usage["reasoning_request_dropped"] = True
-                        provider_usage["requested_reasoning_effort"] = requested_reasoning_effort
-                        provider_usage["reasoning_effort_drop_error_hash"] = reasoning_effort_drop_error_hash
-                        reasoning_capture = dict(
-                            provider_usage.get("reasoning_capture")
-                            if isinstance(provider_usage.get("reasoning_capture"), Mapping)
-                            else {}
-                        )
-                        reasoning_capture["requested"] = True
-                        reasoning_capture["request_dropped"] = True
-                        reasoning_capture["drop_error_hash"] = reasoning_effort_drop_error_hash
-                        reasoning_capture["requested_reasoning_effort"] = requested_reasoning_effort
-                        provider_usage["reasoning_capture"] = reasoning_capture
+                        if reasoning_effort_drop_error_hash:
+                            provider_usage["reasoning_effort_dropped"] = True
+                            provider_usage["reasoning_request_dropped"] = True
+                            provider_usage["requested_reasoning_effort"] = requested_reasoning_effort
+                            provider_usage["reasoning_effort_drop_error_hash"] = reasoning_effort_drop_error_hash
+                            reasoning_capture = dict(
+                                provider_usage.get("reasoning_capture")
+                                if isinstance(provider_usage.get("reasoning_capture"), Mapping)
+                                else {}
+                            )
+                            reasoning_capture["requested"] = True
+                            reasoning_capture["request_dropped"] = True
+                            reasoning_capture["drop_error_hash"] = reasoning_effort_drop_error_hash
+                            reasoning_capture["requested_reasoning_effort"] = requested_reasoning_effort
+                            provider_usage["reasoning_capture"] = reasoning_capture
+                        if response_format_drop_error_hash:
+                            provider_usage["response_format_dropped"] = True
+                            provider_usage["response_format_drop_reason"] = "provider_route_unavailable_for_json_object"
+                            provider_usage["response_format_drop_error_hash"] = response_format_drop_error_hash
+                            if response_format_drop_failed_request:
+                                provider_usage["response_format_drop_failed_request"] = response_format_drop_failed_request
                         result = OpenRouterCallResult(
                             content=result.content,
                             provider_usage=provider_usage,

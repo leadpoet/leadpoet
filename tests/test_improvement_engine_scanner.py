@@ -139,7 +139,17 @@ def test_infra_build_failures_are_ops_noise_not_issues() -> None:
 
 @pytest.mark.parametrize(
     "event_type",
-    ["candidate_patch_apply_failed", "candidate_test_failed", "candidate_image_build_failed", "candidate_build_failed"],
+    [
+        "candidate_patch_apply_failed",
+        "candidate_patch_parse_failed",
+        "candidate_patch_empty_or_noop",
+        "candidate_test_failed",
+        "candidate_patch_test_failed",
+        "candidate_image_build_failed",
+        "candidate_artifact_missing",
+        "candidate_repair_exhausted",
+        "candidate_build_failed",
+    ],
 )
 def test_typed_build_stages_map_to_candidate_build_failed(event_type: str) -> None:
     event = _loop_event_to_engine(

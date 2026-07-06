@@ -46,7 +46,7 @@ def main() -> int:
     )
     event_c = EngineTraceEvent(
         failure_category="candidate_build_failed",
-        runtime_stage="candidate_test_failed",
+        runtime_stage="candidate_patch_test_failed",
         normalized_failure_reason="tests failed",
         component="code_build",
         run_id="00000000-0000-0000-0000-000000000003",

@@ -482,6 +482,65 @@ def build_code_edit_auto_research_messages(
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
+def build_code_edit_fallback_messages(
+    *,
+    ticket: Mapping[str, Any],
+    artifact_manifest: Mapping[str, Any],
+    component_registry: Mapping[str, Any],
+    benchmark_public_summary: Mapping[str, Any],
+    runtime_source_context: Mapping[str, Any] | None = None,
+    source_inspection_context: Mapping[str, Any] | None = None,
+    budget_context: Mapping[str, Any] | None,
+    loop_direction_plan: Mapping[str, Any] | None = None,
+    fallback_reason: str,
+    max_candidates: int = 1,
+) -> list[dict[str, str]]:
+    """Build one bounded fallback pass after the first candidate draft fails.
+
+    The output shape intentionally matches ``build_code_edit_auto_research_messages``
+    so the same parser, source-context gates, patch repair, build, scoring,
+    reimbursement, and ledger paths remain in force.
+    """
+
+    fallback_context = {
+        **dict(budget_context or {}),
+        "candidate_generation_fallback": {
+            "schema_version": "1.0",
+            "mode": "smaller_same_lane_inspected_files",
+            "fallback_reason": str(fallback_reason or "")[:500],
+            "max_candidates": 1,
+            "max_target_files": 1,
+            "preserve_loop_direction_plan": bool(loop_direction_plan),
+        },
+    }
+    messages = build_code_edit_auto_research_messages(
+        ticket=ticket,
+        artifact_manifest=artifact_manifest,
+        component_registry=component_registry,
+        benchmark_public_summary=benchmark_public_summary,
+        runtime_source_context=runtime_source_context,
+        source_inspection_context=source_inspection_context,
+        budget_context=fallback_context,
+        loop_direction_plan=loop_direction_plan,
+        max_candidates=min(1, max(1, int(max_candidates))),
+    )
+    user = messages[-1]["content"]
+    messages[-1] = {
+        **messages[-1],
+        "content": (
+            user
+            + "\n\nBounded fallback pass:\n"
+            "- This is the only automatic fallback candidate-generation pass for this iteration.\n"
+            "- Produce at most one candidate and target exactly one file from source_inspection_context.read_files.\n"
+            "- Keep the same lane and same LoopDirectionPlan binding when a plan is present.\n"
+            "- Do not add new files or broaden the target file set.\n"
+            "- Prefer the smallest behavior-preserving patch that directly addresses the failure mode.\n"
+            "- If no one-file inspected-source patch is safe, return {\"no_viable_patch\":true,\"reason\":\"...\"}.\n"
+        ),
+    }
+    return messages
+
+
 def build_plan_alignment_judge_messages(
     *,
     loop_direction_plan: Mapping[str, Any],

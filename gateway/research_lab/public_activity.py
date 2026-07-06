@@ -11,6 +11,11 @@ import os
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
+from .candidate_diagnostics import (
+    NO_BUILDABLE_CANDIDATE_EVENT_TYPE,
+    build_candidate_generation_failure_summary,
+    public_candidate_generation_failure_summary,
+)
 from .config import ResearchLabGatewayConfig
 from .store import (
     canonical_hash,
@@ -18,6 +23,7 @@ from .store import (
     create_public_loop_card_event,
     public_loop_card_event_ref,
     public_loop_card_id,
+    select_all,
     select_many,
     select_one,
 )
@@ -27,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 PUBLIC_ACTIVITY_SCHEMA_VERSION = "1.0"
 TOPIC_POLICY_ID = "research_lab_public_activity_topics:v1"
-OUTCOME_POLICY_ID = "research_lab_public_activity_outcomes:v1"
+OUTCOME_POLICY_ID = "research_lab_public_activity_outcomes:v2"
 
 # A projection write is small and idempotent (event_ref dedup), so one bounded retry
 # recovers transient DB blips without hammering; a second failure escalates loudly so
@@ -53,6 +59,7 @@ _TICKET_CAP_CLOSING_OUTCOME_LABELS = frozenset(
     {
         "completed_no_candidate",
         "failed",
+        NO_BUILDABLE_CANDIDATE_EVENT_TYPE,
         "promotion_passed",
         "promoted",
         "scored_no_gain",
@@ -402,6 +409,25 @@ async def _fetch_projection_inputs(ticket_id: str) -> dict[str, Any] | None:
         limit=1000,
     )
     promotion_event_rows = await _promotion_events_for_candidates(candidate_rows)
+    latest_queue = _latest_row(queue_rows, "current_status_at")
+    auto_loop_filters: tuple[tuple[str, Any], ...] = (("ticket_id", ticket_id),)
+    if latest_queue and latest_queue.get("run_id"):
+        auto_loop_filters = (
+            ("ticket_id", ticket_id),
+            ("run_id", str(latest_queue.get("run_id") or "")),
+        )
+    auto_loop_event_rows = await select_all(
+        "research_lab_auto_research_loop_events",
+        columns=(
+            "event_id,run_id,ticket_id,event_type,loop_status,seq,elapsed_seconds,"
+            "provider_usage,cost_ledger,event_doc,created_at"
+        ),
+        filters=auto_loop_filters,
+        order_by=(("seq", False),),
+        batch_size=1000,
+        max_rows=10000,
+        allow_partial=True,
+    )
     return {
         "ticket": ticket,
         "queue_rows": queue_rows,
@@ -409,6 +435,7 @@ async def _fetch_projection_inputs(ticket_id: str) -> dict[str, Any] | None:
         "candidate_rows": candidate_rows,
         "score_bundle_rows": score_bundle_rows,
         "promotion_event_rows": promotion_event_rows,
+        "auto_loop_event_rows": auto_loop_event_rows,
     }
 
 
@@ -459,6 +486,7 @@ async def project_public_loop_activity(
         candidate_rows=candidate_rows,
         score_bundle_rows=inputs["score_bundle_rows"],
         promotion_event_rows=inputs["promotion_event_rows"],
+        auto_loop_event_rows=inputs["auto_loop_event_rows"],
         improvement_threshold_points=effective_config.improvement_threshold_points,
     )
     event_ref = public_loop_card_event_ref(ticket_id, source_ref, outcome.outcome_label, outcome.last_activity_at)
@@ -557,6 +585,7 @@ def derive_public_loop_outcome(
     candidate_rows: Sequence[Mapping[str, Any]],
     score_bundle_rows: Sequence[Mapping[str, Any]],
     promotion_event_rows: Sequence[Mapping[str, Any]],
+    auto_loop_event_rows: Sequence[Mapping[str, Any]] = (),
     improvement_threshold_points: float = 1.0,
 ) -> PublicLoopOutcome:
     candidate_count = len(candidate_rows)
@@ -610,6 +639,23 @@ def derive_public_loop_outcome(
         "score_bundle_count": len(score_bundle_rows),
         "promotion_event_count": len(promotion_event_rows),
     }
+    candidate_generation_failure: dict[str, Any] = {}
+    if (
+        candidate_count == 0
+        and queue_status not in {"queued", "started", "running", "paused"}
+        and (queue_status == "failed" or auto_loop_event_rows)
+    ):
+        candidate_generation_failure = build_candidate_generation_failure_summary(
+            auto_loop_event_rows,
+            queue_reason=queue_reason,
+            terminal_error=queue_reason,
+            candidate_count=candidate_count,
+        )
+        public_candidate_generation_failure = public_candidate_generation_failure_summary(
+            candidate_generation_failure
+        )
+        if public_candidate_generation_failure:
+            event_doc["candidate_generation_failure"] = public_candidate_generation_failure
     if queue_parked_waiting:
         # Truthful detail for the public card: the run is parked waiting for a
         # free loop slot — neither actively running nor failed.
@@ -682,6 +728,27 @@ def derive_public_loop_outcome(
     ticket_status = str(ticket.get("current_ticket_status") or ticket.get("ticket_status") or "")
     if queue_status in {"paused", "failed"} and _is_credit_block_reason(queue_reason):
         return _result("blocked_for_credit", "blocked_for_credit", "blocked")
+    if (
+        queue_status == "failed"
+        and candidate_count == 0
+        and candidate_generation_failure
+        and not _is_credit_block_reason(queue_reason)
+    ):
+        no_candidate_event_doc = dict(event_doc)
+        no_candidate_event_doc["public_status"] = NO_BUILDABLE_CANDIDATE_EVENT_TYPE
+        no_candidate_event_doc["public_status_label"] = "No buildable candidate"
+        return PublicLoopOutcome(
+            "no_buildable_candidate",
+            "no_buildable_candidate",
+            "failed",
+            candidate_count,
+            scored_candidate_count,
+            best_summary,
+            run_id,
+            receipt_id,
+            last_activity_at,
+            no_candidate_event_doc,
+        )
     if (
         _has_candidate_reason(candidate_rows, "stale_parent_needs_rescore")
         and not _has_active_candidate(status_counts)
@@ -903,6 +970,11 @@ def public_loop_api_item(row: Mapping[str, Any], *, similar_recent_loop_count: i
     topic_tags = row.get("current_topic_tags") or row.get("topic_tags") or []
     if not isinstance(topic_tags, list):
         topic_tags = []
+    event_doc = row.get("current_event_doc") if isinstance(row.get("current_event_doc"), Mapping) else {}
+    outcome_label = row.get("current_outcome_label") or "submitted"
+    outcome_display_label = str(event_doc.get("public_status_label") or "").strip()
+    if not outcome_display_label and outcome_label == NO_BUILDABLE_CANDIDATE_EVENT_TYPE:
+        outcome_display_label = "No buildable candidate"
     return {
         "card_id": row.get("card_id"),
         "ticket_id": row.get("ticket_id"),
@@ -915,7 +987,8 @@ def public_loop_api_item(row: Mapping[str, Any], *, similar_recent_loop_count: i
         "research_focus_summary": row.get("research_focus_summary"),
         "topic_tags": topic_tags,
         "topic_signature_hash": row.get("current_topic_signature_hash") or row.get("topic_signature_hash"),
-        "outcome_label": row.get("current_outcome_label") or "submitted",
+        "outcome_label": outcome_label,
+        "outcome_display_label": outcome_display_label or outcome_label,
         "outcome_band": row.get("current_outcome_band") or "pending",
         "candidate_count": int(row.get("current_candidate_count") or 0),
         "scored_candidate_count": int(row.get("current_scored_candidate_count") or 0),
@@ -925,10 +998,16 @@ def public_loop_api_item(row: Mapping[str, Any], *, similar_recent_loop_count: i
 
 
 def public_loop_event_api_item(row: Mapping[str, Any]) -> dict[str, Any]:
+    event_doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
+    outcome_label = row.get("outcome_label")
+    outcome_display_label = str(event_doc.get("public_status_label") or "").strip()
+    if not outcome_display_label and outcome_label == NO_BUILDABLE_CANDIDATE_EVENT_TYPE:
+        outcome_display_label = "No buildable candidate"
     return {
         "event_ref": row.get("event_ref"),
         "event_type": row.get("event_type"),
-        "outcome_label": row.get("outcome_label"),
+        "outcome_label": outcome_label,
+        "outcome_display_label": outcome_display_label or outcome_label,
         "outcome_band": row.get("outcome_band"),
         "run_id": row.get("run_id"),
         "receipt_id": row.get("receipt_id"),
@@ -974,6 +1053,7 @@ def topic_group_items(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]
             "promotion_passed",
             "promoted",
             "failed",
+            NO_BUILDABLE_CANDIDATE_EVENT_TYPE,
             "blocked_for_credit",
             "needs_rescore",
         }:
@@ -1201,6 +1281,7 @@ async def reproject_stale_public_cards(
                 candidate_rows=inputs["candidate_rows"],
                 score_bundle_rows=inputs["score_bundle_rows"],
                 promotion_event_rows=inputs["promotion_event_rows"],
+                auto_loop_event_rows=inputs["auto_loop_event_rows"],
                 improvement_threshold_points=effective_config.improvement_threshold_points,
             )
         except Exception as exc:  # noqa: BLE001 - sweep must never fail the worker pass

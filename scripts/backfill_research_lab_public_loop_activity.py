@@ -26,7 +26,7 @@ from gateway.research_lab.public_activity import (  # noqa: E402
     topic_signature_hash,
     topic_tags_from_texts,
 )
-from gateway.research_lab.store import select_many  # noqa: E402
+from gateway.research_lab.store import select_all, select_many  # noqa: E402
 
 
 async def main() -> int:
@@ -88,6 +88,18 @@ async def _dry_run_preview(ticket: Mapping[str, Any]) -> dict[str, Any]:
         filters=(("ticket_id", ticket_id),),
         limit=1000,
     )
+    auto_loop_event_rows = await select_all(
+        "research_lab_auto_research_loop_events",
+        columns=(
+            "event_id,run_id,ticket_id,event_type,loop_status,seq,elapsed_seconds,"
+            "provider_usage,cost_ledger,event_doc,created_at"
+        ),
+        filters=(("ticket_id", ticket_id),),
+        order_by=(("seq", False),),
+        batch_size=1000,
+        max_rows=10000,
+        allow_partial=True,
+    )
     promotion_rows = await _promotion_events(candidate_rows)
     ticket_doc = ticket.get("ticket_doc") if isinstance(ticket.get("ticket_doc"), Mapping) else {}
     research_area = str(ticket.get("island") or "generalist")
@@ -105,6 +117,7 @@ async def _dry_run_preview(ticket: Mapping[str, Any]) -> dict[str, Any]:
         candidate_rows=candidate_rows,
         score_bundle_rows=score_bundle_rows,
         promotion_event_rows=promotion_rows,
+        auto_loop_event_rows=auto_loop_event_rows,
     )
     return {
         "ticket_id": ticket_id,

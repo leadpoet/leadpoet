@@ -38,6 +38,7 @@ from .promotion import (
     promotion_confirmation_rerun_enabled,
     promotion_improvement_metric,
     reconcile_active_private_model_lineage,
+    reconcile_failed_private_source_pushes,
     reconcile_pending_champion_rewards,
     reregister_active_manifest,
     sync_active_model_to_repo_head,
@@ -322,6 +323,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sync_repo_head.add_argument("--timeout-seconds", type=int, default=None)
     sync_repo_head.add_argument("--poll-seconds", type=int, default=None)
+
+    reconcile_private_source = sub.add_parser(
+        "reconcile-failed-private-source-pushes",
+        help="Retry candidates that passed promotion but failed while pushing private source",
+    )
+    reconcile_private_source.add_argument(
+        "--candidate-id", action="append", dest="candidate_ids", help="candidate_id (repeatable; omit for all failed)"
+    )
+    reconcile_private_source.add_argument("--limit", type=int, default=None)
+    reconcile_private_source.add_argument("--retry-after-seconds", type=int, default=None)
+    reconcile_private_source.add_argument("--actor-ref", default=default_actor_ref())
+    reconcile_private_source.add_argument(
+        "--apply", action="store_true", help="Apply retries/finalization (default is dry-run)"
+    )
 
     reconcile_rewards = sub.add_parser(
         "reconcile-champion-rewards",
@@ -1024,6 +1039,15 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             wait_for_repo_head=args.wait_for_current_json,
             wait_timeout_seconds=args.timeout_seconds,
             poll_seconds=args.poll_seconds,
+        )
+    if args.command == "reconcile-failed-private-source-pushes":
+        return await reconcile_failed_private_source_pushes(
+            ResearchLabGatewayConfig.from_env(),
+            worker_ref=args.actor_ref,
+            candidate_ids=args.candidate_ids,
+            limit=args.limit,
+            retry_after_seconds=args.retry_after_seconds,
+            dry_run=not args.apply,
         )
     if args.command == "reconcile-champion-rewards":
         return await reconcile_pending_champion_rewards(

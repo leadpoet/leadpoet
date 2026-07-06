@@ -63,8 +63,10 @@ from gateway.research_lab.promotion import (
     confirmation_attempt_budget,
     load_active_private_model,
     load_confirmation_state,
+    private_source_push_retry_seconds,
     promotion_confirmation_rerun_enabled,
     promotion_improvement_metric,
+    reconcile_failed_private_source_pushes,
     sync_active_model_to_repo_head,
 )
 from gateway.research_lab.public_activity import safe_project_public_loop_activity
@@ -1858,6 +1860,7 @@ class ResearchLabGatewayScoringWorker:
         self._scorer_trace_recorder = _ScorerTraceRecorder(config)
         self._confirmation_trace_scope: dict[str, Any] | None = None
         self._worker_started_at = datetime.now(timezone.utc)
+        self._last_private_source_push_reconcile_at = 0.0
 
     async def run_forever(self) -> None:
         # trajectoryimprovements.md P5: one structured capture health block at
@@ -1990,6 +1993,25 @@ class ResearchLabGatewayScoringWorker:
                     _short_error(exc),
                 )
 
+        private_source_reconcile_result: dict[str, Any] | None = None
+        if self.config.scoring_worker_index == 0 and self.config.auto_promotion_enabled:
+            interval = max(1, private_source_push_retry_seconds())
+            now = time.monotonic()
+            if now - self._last_private_source_push_reconcile_at >= interval:
+                self._last_private_source_push_reconcile_at = now
+                try:
+                    private_source_reconcile_result = await reconcile_failed_private_source_pushes(
+                        self.config,
+                        worker_ref=self.worker_ref,
+                        dry_run=False,
+                    )
+                except Exception as exc:  # noqa: BLE001 - never fail the scoring pass
+                    logger.warning(
+                        "research_lab_private_source_push_reconcile_pass_failed worker_ref=%s error=%s",
+                        self.worker_ref,
+                        _short_error(exc),
+                    )
+
         processed: list[str] = []
         claim_capacity: dict[str, Any] = {"available": True}
         self._last_candidate_start_gate = None
@@ -2029,12 +2051,21 @@ class ResearchLabGatewayScoringWorker:
             isinstance(confirmation_result, Mapping)
             and bool(confirmation_result.get("processed"))
         )
+        private_source_reconcile_processed = (
+            isinstance(private_source_reconcile_result, Mapping)
+            and (
+                int(private_source_reconcile_result.get("retried") or 0) > 0
+                or int(private_source_reconcile_result.get("finalized") or 0) > 0
+            )
+        )
         if processed:
             status = "processed"
         elif baseline_completed:
             status = "baseline_completed"
         elif confirmation_processed:
             status = "confirmation_processed"
+        elif private_source_reconcile_processed:
+            status = "private_source_reconciled"
         elif not claim_capacity.get("available"):
             status = str(claim_capacity.get("reason") or "candidate_claim_capacity_limited")
         elif self._last_candidate_start_gate and not self._last_candidate_start_gate.get("available"):
@@ -2045,11 +2076,17 @@ class ResearchLabGatewayScoringWorker:
         else:
             status = "idle"
         return {
-            "processed": bool(processed or baseline_completed or confirmation_processed),
+            "processed": bool(
+                processed
+                or baseline_completed
+                or confirmation_processed
+                or private_source_reconcile_processed
+            ),
             "status": status,
             "candidate_ids": processed,
             "baseline": baseline_result,
             "confirmation": confirmation_result,
+            "private_source_reconcile": private_source_reconcile_result,
             "candidate_claim_capacity": claim_capacity,
             "candidate_start_gate": self._last_candidate_start_gate,
         }

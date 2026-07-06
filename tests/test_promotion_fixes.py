@@ -21,6 +21,7 @@ Covers, with fake store rows (no live Supabase):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -37,6 +38,7 @@ from gateway.research_lab.promotion import (
     load_active_private_model,
     promotion_improvement_metric,
     reconcile_active_private_model_lineage,
+    reconcile_failed_private_source_pushes,
     reconcile_pending_champion_rewards,
     sync_active_model_to_repo_head,
 )
@@ -1216,6 +1218,158 @@ async def test_reward_start_epoch_falls_back_to_bundle_epoch_when_chain_unreacha
     # Degraded but never blocked: the legacy bundle-epoch derivation applies.
     assert result["champion_reward_status"] == "created"
     assert captured[0]["start_epoch"] == 101
+
+
+# ---------------------------------------------------------------------------
+# Failed private-source push reconciler
+# ---------------------------------------------------------------------------
+
+
+def _failed_private_source_push_rows(store: FakeStore, *, created_at: str = "2026-07-01T00:00:00+00:00") -> None:
+    store.select_many_results["research_lab_candidate_promotion_events:promotion_failed"] = [
+        {
+            "promotion_event_id": "pe-failed",
+            "candidate_id": "cand-1",
+            "source_score_bundle_id": "sb-1",
+            "event_type": "promotion_failed",
+            "promotion_status": "failed",
+            "event_doc": {"reason": "private_source_push_failed", "source_push_attempt": 1},
+            "created_at": created_at,
+        }
+    ]
+    store.select_many_results["research_lab_candidate_promotion_events"] = []
+    store.select_one_results["research_lab_candidate_evaluation_current"] = {
+        "candidate_id": "cand-1",
+        "miner_hotkey": "hk-1",
+        "ticket_id": "ticket-1",
+        "run_id": "run-1",
+        "island": "generalist",
+        "current_score_bundle_id": "sb-1",
+    }
+    store.select_one_results["research_evaluation_score_bundle_current"] = {
+        "score_bundle_id": "sb-1",
+        "score_bundle_doc": {
+            "candidate_artifact_hash": "sha256:" + "c" * 64,
+            "parent_artifact_hash": "sha256:" + "a" * 64,
+            "icp_set_hash": "sha256:" + "3" * 64,
+            "evaluation_epoch": 23770,
+            "score_bundle_hash": "sha256:" + "5" * 64,
+            "aggregates": {},
+        },
+    }
+
+
+async def test_private_source_push_reconciler_dry_run_plans_retry(store):
+    _failed_private_source_push_rows(store)
+
+    result = await reconcile_failed_private_source_pushes(
+        _reward_config(),
+        worker_ref="test-reconciler",
+        dry_run=True,
+        retry_after_seconds=0,
+    )
+
+    assert result["ok"] is True
+    assert result["found_failed"] == 1
+    assert result["results"][0]["status"] == "would_retry_private_source_push"
+    assert store.promotion_event_writes == []
+    assert store.version_writes == []
+    assert store.reward_obligation_writes == []
+
+
+async def test_private_source_push_reconciler_candidate_filter_queries_candidate_directly(store):
+    _failed_private_source_push_rows(store)
+
+    await reconcile_failed_private_source_pushes(
+        _reward_config(),
+        worker_ref="test-reconciler",
+        candidate_ids=["cand-1"],
+        dry_run=True,
+        retry_after_seconds=0,
+    )
+
+    assert (
+        "research_lab_candidate_promotion_events",
+        (("event_type", "promotion_failed"), ("candidate_id", "cand-1")),
+    ) in store.select_many_calls
+
+
+async def test_private_source_push_reconciler_applies_retry_through_promotion_path(store, monkeypatch):
+    _failed_private_source_push_rows(store)
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_process(self: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {
+            "status": "merged",
+            "private_model_version_id": "pmv-1",
+            "champion_reward_status": "created",
+            "champion_reward_id": "cr-1",
+        }
+
+    monkeypatch.setattr(ResearchLabPromotionController, "process_scored_candidate", _fake_process)
+
+    result = await reconcile_failed_private_source_pushes(
+        _reward_config(),
+        worker_ref="test-reconciler",
+        dry_run=False,
+        retry_after_seconds=0,
+    )
+
+    assert result["retried"] == 1
+    assert result["finalized"] == 1
+    assert result["results"][0]["status"] == "merged"
+    assert calls[0]["candidate"]["candidate_id"] == "cand-1"
+    assert calls[0]["score_bundle_row"]["score_bundle_id"] == "sb-1"
+
+
+async def test_private_source_push_reconciler_respects_event_backoff(store, monkeypatch):
+    _failed_private_source_push_rows(store, created_at=datetime.now(timezone.utc).isoformat())
+
+    async def _fake_process(self: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("retry should be held by backoff")
+
+    monkeypatch.setattr(ResearchLabPromotionController, "process_scored_candidate", _fake_process)
+
+    result = await reconcile_failed_private_source_pushes(
+        _reward_config(),
+        worker_ref="test-reconciler",
+        dry_run=False,
+        retry_after_seconds=300,
+    )
+
+    assert result["results"][0]["status"] == "retry_backoff"
+    assert result["retried"] == 0
+
+
+async def test_private_source_push_reconciler_skips_already_rewarded(store, monkeypatch):
+    _failed_private_source_push_rows(store)
+    store.select_many_results["research_lab_candidate_promotion_events"] = [
+        {
+            "promotion_event_id": "pe-created",
+            "candidate_id": "cand-1",
+            "source_score_bundle_id": "sb-1",
+            "event_type": "champion_reward_created",
+            "promotion_status": "reward_created",
+            "event_doc": {},
+            "created_at": "2026-07-01T00:01:00+00:00",
+        }
+    ]
+
+    async def _fake_process(self: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("already rewarded candidates should not be retried")
+
+    monkeypatch.setattr(ResearchLabPromotionController, "process_scored_candidate", _fake_process)
+
+    result = await reconcile_failed_private_source_pushes(
+        _reward_config(),
+        worker_ref="test-reconciler",
+        dry_run=False,
+        retry_after_seconds=0,
+    )
+
+    assert result["results"][0]["status"] == "already_rewarded"
+    assert result["retried"] == 0
 
 
 # ---------------------------------------------------------------------------

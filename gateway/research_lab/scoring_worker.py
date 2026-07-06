@@ -135,6 +135,7 @@ logger = logging.getLogger(__name__)
 
 STALE_PARENT_REBASE_REPAIR_MAX_TOKENS = 32_768
 STALE_PARENT_REBASE_REPAIR_REASONING_BODY = {"enabled": True, "effort": "max"}
+STALE_PARENT_REBASE_REPAIR_EMPTY_CONTENT_ATTEMPTS = 2
 PRIVATE_BASELINE_FAST_EMPTY_ABORT_AFTER = 6
 PRIVATE_BASELINE_FAST_EMPTY_ABORT_SECONDS = 90.0
 _POSTGREST_TIMESTAMP_RE = re.compile(
@@ -1608,6 +1609,7 @@ async def _call_operator_openrouter_json(
     model_id: str,
     messages: list[dict[str, str]],
     timeout_seconds: int,
+    empty_content_attempts: int = STALE_PARENT_REBASE_REPAIR_EMPTY_CONTENT_ATTEMPTS,
 ) -> str:
     """Operator stale-parent repair/rebase call, via the shared telemetry
     transport (trajectoryimprovements.md P1: this path used to request
@@ -1618,26 +1620,42 @@ async def _call_operator_openrouter_json(
         call_openrouter_chat_async,
     )
 
-    try:
-        result = await call_openrouter_chat_async(
-            api_key=api_key,
-            model_id=model_id,
-            messages=messages,
-            channel="research_lab_operator",
-            purpose="operator_stale_parent_repair",
-            stage="operator_repair",
-            max_tokens=STALE_PARENT_REBASE_REPAIR_MAX_TOKENS,
-            temperature=0.1,
-            timeout_seconds=max(1, int(timeout_seconds)),
-            response_format={"type": "json_object"},
-            include_reasoning=True,
-            extra_body={"reasoning": STALE_PARENT_REBASE_REPAIR_REASONING_BODY},
-        )
-    except OpenRouterTelemetryError as exc:
-        raise CodeEditBuildError(f"operator stale-parent repair failed: {exc}") from exc
-    if not result.content:
-        raise CodeEditBuildError("operator stale-parent repair returned empty content")
-    return str(result.content)
+    attempts = max(1, int(empty_content_attempts or 1))
+    for attempt in range(1, attempts + 1):
+        include_reasoning = attempt == 1
+        try:
+            result = await call_openrouter_chat_async(
+                api_key=api_key,
+                model_id=model_id,
+                messages=messages,
+                channel="research_lab_operator",
+                purpose="operator_stale_parent_repair",
+                stage="operator_repair" if include_reasoning else "operator_repair_no_reasoning",
+                max_tokens=STALE_PARENT_REBASE_REPAIR_MAX_TOKENS,
+                temperature=0.1,
+                timeout_seconds=max(1, int(timeout_seconds)),
+                response_format={"type": "json_object"},
+                include_reasoning=include_reasoning,
+                extra_body={"reasoning": STALE_PARENT_REBASE_REPAIR_REASONING_BODY}
+                if include_reasoning
+                else None,
+            )
+        except OpenRouterTelemetryError as exc:
+            raise CodeEditBuildError(f"operator stale-parent repair failed: {exc}") from exc
+        content = str(result.content or "").strip()
+        if content:
+            return content
+        if attempt < attempts:
+            logger.warning(
+                "research_lab_stale_parent_repair_empty_content_retry attempt=%s/%s fallback_no_reasoning=%s",
+                attempt,
+                attempts,
+                attempt == 1,
+            )
+            continue
+    raise CodeEditBuildError(
+        f"operator stale-parent repair returned empty content after {attempts} attempt(s)"
+    )
 
 
 def _status_datetime(raw_status_at: object) -> datetime | None:
@@ -4623,9 +4641,11 @@ class ResearchLabGatewayScoringWorker:
                 reason="stale_parent_rebase_failed",
                 elapsed_seconds=elapsed_seconds,
             )
+            recovery_result = await self._recover_stale_parent_rebase_failed_candidate(candidate)
             return {
                 "status": "stale_parent_rebase_failed",
                 "error": "stale_parent_rebase_depth_exceeded",
+                "recovery_result": recovery_result,
             }
 
         try:
@@ -4659,7 +4679,12 @@ class ResearchLabGatewayScoringWorker:
                     reason="stale_parent_rebase_failed",
                     elapsed_seconds=elapsed_seconds,
                 )
-                return {"status": "stale_parent_rebase_failed", "error": str(repair_exc)[:300]}
+                recovery_result = await self._recover_stale_parent_rebase_failed_candidate(candidate)
+                return {
+                    "status": "stale_parent_rebase_failed",
+                    "error": str(repair_exc)[:300],
+                    "recovery_result": recovery_result,
+                }
         except Exception as exc:
             await self._reject_stale_parent_candidate(
                 candidate,
@@ -4672,7 +4697,12 @@ class ResearchLabGatewayScoringWorker:
                 reason="stale_parent_rebase_failed",
                 elapsed_seconds=elapsed_seconds,
             )
-            return {"status": "stale_parent_rebase_failed", "error": str(exc)[:300]}
+            recovery_result = await self._recover_stale_parent_rebase_failed_candidate(candidate)
+            return {
+                "status": "stale_parent_rebase_failed",
+                "error": str(exc)[:300],
+                "recovery_result": recovery_result,
+            }
 
         rebase_build_doc = {
             **build.build_doc,
@@ -4763,6 +4793,38 @@ class ResearchLabGatewayScoringWorker:
             "derived_candidate_id": derived_candidate_id,
             "repair_used": repair_used,
         }
+
+    async def _recover_stale_parent_rebase_failed_candidate(
+        self,
+        candidate: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        candidate_id = str(candidate.get("candidate_id") or "")
+        if not candidate_id:
+            return {"ok": False, "status": "candidate_missing_id"}
+        try:
+            from .recovery import recover_rebase_failed_candidates
+
+            result = await recover_rebase_failed_candidates(
+                candidate_ids=[candidate_id],
+                dry_run=False,
+                max_batch_size=1,
+                regenerate=True,
+                actor_ref=self.worker_ref,
+            )
+        except Exception as exc:  # noqa: BLE001 - recovery must not hide the original rebase failure
+            logger.warning(
+                "research_lab_stale_parent_rebase_failed_auto_recovery_failed candidate_id=%s error=%s",
+                compact_ref(candidate_id),
+                _short_error(exc),
+            )
+            return {"ok": False, "status": "auto_recovery_exception", "error": _short_error(exc)}
+        if int(result.get("regenerated") or 0):
+            logger.info(
+                "research_lab_stale_parent_rebase_failed_auto_regenerated candidate_id=%s regenerated=%s",
+                compact_ref(candidate_id),
+                result.get("regenerated"),
+            )
+        return result
 
     async def _reject_stale_parent_candidate(
         self,

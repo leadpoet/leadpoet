@@ -507,6 +507,90 @@ def test_baseline_gate_env_parsing(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_operator_stale_parent_repair_retries_empty_reasoning_content(monkeypatch):
+    from research_lab import openrouter_telemetry
+
+    calls = []
+
+    async def fake_call_openrouter_chat_async(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(content="" if len(calls) == 1 else '{"candidates":[]}')
+
+    monkeypatch.setattr(openrouter_telemetry, "call_openrouter_chat_async", fake_call_openrouter_chat_async)
+
+    result = await sw._call_operator_openrouter_json(
+        api_key="sk-test",
+        model_id="model:test",
+        messages=[{"role": "user", "content": "repair"}],
+        timeout_seconds=30,
+    )
+
+    assert result == '{"candidates":[]}'
+    assert len(calls) == 2
+    assert calls[0]["include_reasoning"] is True
+    assert calls[0]["extra_body"]
+    assert calls[1]["include_reasoning"] is False
+    assert calls[1]["extra_body"] is None
+    assert calls[1]["stage"] == "operator_repair_no_reasoning"
+
+
+@pytest.mark.asyncio
+async def test_stale_parent_rebase_failure_auto_routes_to_regeneration(monkeypatch):
+    candidate = {
+        "candidate_id": "candidate:" + "1" * 64,
+        "run_id": "run-1",
+        "ticket_id": "ticket-1",
+        "candidate_kind": "image_build",
+        "candidate_build_doc": {"stale_parent_rebase": {"depth": 3}},
+    }
+    active_artifact = SimpleNamespace(model_artifact_hash="sha256:" + "a" * 64)
+    captured = {"promotion_events": [], "evaluation_events": [], "dispatch_events": [], "recoveries": []}
+
+    async def fake_promotion_event(**kwargs):
+        captured["promotion_events"].append(kwargs)
+        return kwargs
+
+    async def fake_eval_event(**kwargs):
+        captured["evaluation_events"].append(kwargs)
+        return kwargs
+
+    async def fake_dispatch_event(**kwargs):
+        captured["dispatch_events"].append(kwargs)
+        return kwargs
+
+    async def fake_recover(self, candidate):
+        captured["recoveries"].append(candidate["candidate_id"])
+        return {"ok": True, "recovered": 1, "regenerated": 1}
+
+    monkeypatch.setattr(sw, "create_candidate_promotion_event", fake_promotion_event)
+    monkeypatch.setattr(sw, "create_candidate_evaluation_event", fake_eval_event)
+    monkeypatch.setattr(sw, "create_scoring_dispatch_event", fake_dispatch_event)
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_recover_stale_parent_rebase_failed_candidate",
+        fake_recover,
+    )
+
+    worker = sw.ResearchLabGatewayScoringWorker(
+        sw.ResearchLabGatewayConfig(stale_parent_rebase_max_depth=3),
+        worker_ref="test-worker",
+    )
+    result = await worker._queue_stale_parent_rebase(
+        candidate,
+        active_artifact=active_artifact,
+        candidate_parent="sha256:" + "b" * 64,
+        evaluation_epoch=23777,
+        elapsed_seconds=1.0,
+        stage="before_scoring_parent_changed",
+    )
+
+    assert result["status"] == "stale_parent_rebase_failed"
+    assert result["recovery_result"]["regenerated"] == 1
+    assert captured["recoveries"] == [candidate["candidate_id"]]
+    assert captured["evaluation_events"][0]["reason"] == "stale_parent_rebase_failed"
+
+
+@pytest.mark.asyncio
 async def test_private_baseline_waits_before_scheduled_utc_start(monkeypatch):
     class FixedDateTime(datetime):
         @classmethod

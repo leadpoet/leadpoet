@@ -775,6 +775,23 @@ async def rebase_stale_parent_candidates(
                 config=config,
             )
         else:
+            recovery_result = rebase.get("recovery_result") if isinstance(rebase, Mapping) else None
+            if isinstance(recovery_result, Mapping) and int(recovery_result.get("recovered") or 0):
+                result["rebases"].append(
+                    {
+                        **plan,
+                        "status": "stale_parent_rebase_failed_recovered",
+                        "detail": rebase,
+                        "recovery_result": recovery_result,
+                    }
+                )
+                await _project_after_recovery(
+                    str(row.get("ticket_id") or ""),
+                    source_ref=f"recovery_stale_parent_rebase_failed_recovered:{candidate_id}",
+                    reason="rebase_stale_parent_candidates",
+                    config=config,
+                )
+                continue
             result["rebases"].append({**plan, "status": rebase_status or "no_rebase", "detail": rebase})
             if rebase_status != "current_parent":
                 result["failed"].append({"candidate_id": candidate_id, "status": rebase_status})

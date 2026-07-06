@@ -27,10 +27,9 @@ SECURITY NOTES:
 - The returned code_hash is informational; trust comes from PCR0 in attestation
 """
 
-import base64
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from gateway.tee.enclave_signer import (
@@ -243,3 +242,41 @@ async def attestation_health():
             "message": f"Error: {str(e)}"
         }
 
+
+@router.get("/deploy-readiness")
+async def deploy_readiness(
+    gateway_commit: Optional[str] = Query(default=None),
+    validator_commit: Optional[str] = Query(default=None),
+    gateway_pcr0: Optional[str] = Query(default=None),
+    validator_pcr0: Optional[str] = Query(default=None),
+    expected_gateway_commit: Optional[str] = Query(default=None),
+    expected_validator_commit: Optional[str] = Query(default=None),
+    expected_gateway_pcr0: Optional[str] = Query(default=None),
+    expected_validator_pcr0: Optional[str] = Query(default=None),
+    require_same_commit: bool = Query(default=False),
+    require_pcr0: bool = Query(default=False),
+    require_pcr0_commit_match: bool = Query(default=False),
+):
+    """
+    Operator readiness summary for deploy/PCR0 alignment.
+
+    This endpoint does not replace full Nitro attestation verification on
+    /weights/submit. It reports whether the supplied validator PCR0 would be
+    accepted by the same dynamic-cache/static-allowlist PCR0 recognition layer,
+    and whether supplied current values match explicit expected values.
+    """
+    from gateway.deploy_readiness import build_deploy_readiness
+
+    return build_deploy_readiness(
+        gateway_commit=gateway_commit,
+        validator_commit=validator_commit,
+        gateway_pcr0=gateway_pcr0,
+        validator_pcr0=validator_pcr0,
+        expected_gateway_commit=expected_gateway_commit,
+        expected_validator_commit=expected_validator_commit,
+        expected_gateway_pcr0=expected_gateway_pcr0,
+        expected_validator_pcr0=expected_validator_pcr0,
+        require_same_commit=require_same_commit,
+        require_pcr0=require_pcr0,
+        require_pcr0_commit_match=require_pcr0_commit_match,
+    )

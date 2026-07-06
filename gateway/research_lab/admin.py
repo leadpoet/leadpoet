@@ -8,6 +8,13 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
+from gateway.deploy_readiness import (
+    assert_resume_allowed,
+    build_deploy_readiness,
+    default_manifest_path,
+    write_deploy_readiness_manifest,
+)
+
 from .config import ResearchLabGatewayConfig
 from .maintenance import (
     autoresearch_queue_status_counts,
@@ -49,6 +56,32 @@ from .store import select_many, select_one
 logger = logging.getLogger(__name__)
 
 
+def _add_deploy_readiness_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--gateway-commit", help="current gateway source commit")
+    parser.add_argument("--validator-commit", help="current validator source commit")
+    parser.add_argument("--gateway-pcr0", help="current gateway enclave PCR0")
+    parser.add_argument("--validator-pcr0", help="current validator enclave PCR0")
+    parser.add_argument("--expected-gateway-commit", help="expected gateway source commit")
+    parser.add_argument("--expected-validator-commit", help="expected validator source commit")
+    parser.add_argument("--expected-gateway-pcr0", help="expected gateway enclave PCR0")
+    parser.add_argument("--expected-validator-pcr0", help="expected validator enclave PCR0")
+    parser.add_argument(
+        "--require-same-commit",
+        action="store_true",
+        help="fail unless gateway and validator commits match",
+    )
+    parser.add_argument(
+        "--require-pcr0",
+        action="store_true",
+        help="fail unless both supplied gateway and validator PCR0s are present",
+    )
+    parser.add_argument(
+        "--require-pcr0-commit-match",
+        action="store_true",
+        help="fail unless matched static PCR0 allowlist metadata points at the running commit",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Leadpoet Research Lab admin controls")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -69,6 +102,26 @@ def build_parser() -> argparse.ArgumentParser:
     resume_scoring = sub.add_parser("resume-scoring", help="Resume candidate scoring claims")
     resume_scoring.add_argument("--reason", default="maintenance complete")
     resume_scoring.add_argument("--actor-ref", default=default_actor_ref())
+
+    deploy_readiness = sub.add_parser(
+        "check-deploy-readiness",
+        help="Check gateway/validator commit and PCR0 alignment before resuming production work",
+    )
+    _add_deploy_readiness_args(deploy_readiness)
+    deploy_readiness.add_argument(
+        "--write-manifest",
+        nargs="?",
+        const="",
+        help=(
+            "write the check result to a resume-guard manifest; omit the value to use "
+            f"{default_manifest_path()}"
+        ),
+    )
+    deploy_readiness.add_argument(
+        "--no-enforce-resume-block",
+        action="store_true",
+        help="write the manifest for visibility only; do not let it block resume commands",
+    )
 
     requeue_candidate = sub.add_parser(
         "requeue-candidate",
@@ -795,6 +848,31 @@ async def _recover_stale_candidate_claims_operator(
 
 
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
+    if args.command == "check-deploy-readiness":
+        result = build_deploy_readiness(
+            gateway_commit=args.gateway_commit,
+            validator_commit=args.validator_commit,
+            gateway_pcr0=args.gateway_pcr0,
+            validator_pcr0=args.validator_pcr0,
+            expected_gateway_commit=args.expected_gateway_commit,
+            expected_validator_commit=args.expected_validator_commit,
+            expected_gateway_pcr0=args.expected_gateway_pcr0,
+            expected_validator_pcr0=args.expected_validator_pcr0,
+            require_same_commit=args.require_same_commit,
+            require_pcr0=args.require_pcr0,
+            require_pcr0_commit_match=args.require_pcr0_commit_match,
+        )
+        result["action"] = "check-deploy-readiness"
+        if args.write_manifest is not None:
+            manifest_path = write_deploy_readiness_manifest(
+                result,
+                args.write_manifest or None,
+                enforce_resume_block=not args.no_enforce_resume_block,
+            )
+            result["manifest_path"] = str(manifest_path)
+            result["enforce_resume_block"] = not args.no_enforce_resume_block
+        return result
+
     if args.command == "pause-autoresearch":
         event = await set_autoresearch_maintenance_paused(
             paused=True,
@@ -817,6 +895,15 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "queue_counts": await autoresearch_queue_status_counts(),
         }
     if args.command == "resume-autoresearch":
+        try:
+            deploy_guard = assert_resume_allowed()
+        except RuntimeError as exc:
+            return {
+                "ok": False,
+                "action": "resume-autoresearch",
+                "blocked_reason": "deploy_readiness_guard_failed",
+                "error": str(exc),
+            }
         event = await set_autoresearch_maintenance_paused(
             paused=False,
             reason=args.reason,
@@ -844,6 +931,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "requeued_paused_runs": int(resume_requeue.get("requeued") or 0),
             "remaining_paused_runs": remaining_paused,
             "resume_requeue": resume_requeue,
+            "deploy_readiness_guard": deploy_guard,
             "state": await get_autoresearch_maintenance_state(),
             "queue_counts": queue_counts,
         }
@@ -864,6 +952,15 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "candidate_counts": await candidate_scoring_status_counts(),
         }
     if args.command == "resume-scoring":
+        try:
+            deploy_guard = assert_resume_allowed()
+        except RuntimeError as exc:
+            return {
+                "ok": False,
+                "action": "resume-scoring",
+                "blocked_reason": "deploy_readiness_guard_failed",
+                "error": str(exc),
+            }
         event = await set_scoring_maintenance_paused(
             paused=False,
             reason=args.reason,
@@ -876,6 +973,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             "event_id": event.get("event_id"),
             "event_seq": event.get("seq"),
             "event_hash": event.get("anchored_hash"),
+            "deploy_readiness_guard": deploy_guard,
             "state": await get_scoring_maintenance_state(),
             "candidate_counts": await candidate_scoring_status_counts(),
         }

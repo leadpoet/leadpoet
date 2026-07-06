@@ -70,8 +70,12 @@ GRANT SELECT, INSERT ON TABLE public.research_lab_score_calibration TO service_r
 
 ALTER TABLE public.research_lab_score_calibration ENABLE ROW LEVEL SECURITY;
 
+-- Postgres has no CREATE POLICY IF NOT EXISTS; drop-then-create keeps this
+-- migration safely re-runnable (a bare re-run otherwise fails 42710).
+DROP POLICY IF EXISTS service_role_read ON public.research_lab_score_calibration;
 CREATE POLICY service_role_read ON public.research_lab_score_calibration
     FOR SELECT TO service_role USING (true);
+DROP POLICY IF EXISTS service_role_insert ON public.research_lab_score_calibration;
 CREATE POLICY service_role_insert ON public.research_lab_score_calibration
     FOR INSERT TO service_role WITH CHECK (true);
 

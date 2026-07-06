@@ -347,6 +347,194 @@ class _NoCandidateBuilder:
         raise AssertionError("no-candidate test should not build")
 
 
+class _PlannerNoCandidateBuilder(_NoCandidateBuilder):
+    def __init__(self, source_context):
+        super().__init__(source_context)
+        self.config.loop_planner_enabled = True
+
+
+def _loop_direction_plan_payload(**overrides):
+    payload = {
+        "schema_version": "1.0",
+        "miner_focus_interpretation": "improve recall without weakening ICP fit",
+        "loop_goal": "route to one safe implementation path",
+        "required_lane": "source_routing",
+        "required_mechanism": "add an alternate discovery surface after completed-empty primary result",
+        "generalization_claim": "helps future sealed ICPs with sparse primary-provider coverage",
+        "target_behavior": ["preserve ICP constraints", "recover completed-empty primary results"],
+        "must_inspect": ["sourcing_model/discovery.py"],
+        "allowed_lanes": ["source_routing"],
+        "disallowed_lanes": ["provider_fallback"],
+        "must_not_try": ["do not weaken ICP constraints"],
+        "success_criteria": ["patch touches an editable runtime file"],
+        "novelty_requirements": ["not a duplicate of prior attempts"],
+        "anti_overfit_checks": ["preserves multiple qualified company outputs"],
+        "ranked_paths": [
+            {
+                "path_id": "alternate_discovery_surface",
+                "lane": "source_routing",
+                "mechanism": "alternate discovery after completed-empty result",
+            }
+        ],
+        "selected_path_id": "alternate_discovery_surface",
+    }
+    payload.update(overrides)
+    return payload
+
+
+async def test_loop_direction_no_new_safe_path_preserves_stop_reason(tmp_path):
+    events = []
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        assert stage == "loop_planner"
+        return OpenRouterCallResult(
+            content=json.dumps(
+                _loop_direction_plan_payload(
+                    no_new_safe_path=True,
+                    reason="ticket names a concrete provider path not present in editable_files",
+                )
+            ),
+            provider_usage={"provider": "openrouter", "response_id": "planner", "cost_microusd": 1000},
+            cost_microusd=1000,
+        )
+
+    async def event_sink(event):
+        events.append(event)
+
+    result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=6,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=_PlannerNoCandidateBuilder(_source_context(tmp_path)),
+    ).run(
+        run_id="run-no-new-safe-path",
+        ticket={
+            "ticket_id": "ticket-no-new-safe-path",
+            "miner_hotkey": "hotkey",
+            "island": "generalist",
+            "brief_sanitized_ref": "brief",
+            "ticket_doc": {"brief_public_summary": "port a missing provider-specific path"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+        requested_loop_count=1,
+    )
+
+    assert result.status == "failed"
+    assert result.iterations_completed == 0
+    assert result.stop_reason == "loop_direction_no_new_safe_path"
+    assert [event.event_type for event in events].count("no_viable_patch") == 1
+    terminal = events[-1]
+    assert terminal.event_type == "loop_failed"
+    assert terminal.event_doc["run_summary"]["stop_reason"] == "loop_direction_no_new_safe_path"
+
+
+async def test_unimplementable_binding_plan_stops_after_one_draft(tmp_path):
+    events = []
+    calls = []
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        calls.append(stage)
+        if stage == "loop_planner":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    _loop_direction_plan_payload(
+                        required_lane="provider_fallback",
+                        required_mechanism="salvage malformed Sonar provider responses",
+                        allowed_lanes=["provider_fallback"],
+                        disallowed_lanes=["query_construction"],
+                        ranked_paths=[
+                            {
+                                "path_id": "sonar_malformed_200_parse_salvage_recall",
+                                "lane": "provider_fallback",
+                                "mechanism": "add Sonar parse salvage",
+                            }
+                        ],
+                        selected_path_id="sonar_malformed_200_parse_salvage_recall",
+                    )
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "planner", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        if stage == "source_inspection":
+            return OpenRouterCallResult(
+                content='{"requests":[{"operation":"read_file","path":"sourcing_model.py"}]}',
+                provider_usage={"provider": "openrouter", "response_id": "inspect", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        if stage == "code_edit_draft":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "no_viable_patch": True,
+                        "reason": "required file is not present in editable_files; no call_sonar implementation exists",
+                    }
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "draft", "cost_microusd": 2000},
+                cost_microusd=2000,
+            )
+        raise AssertionError(f"unexpected stage: {stage}")
+
+    async def event_sink(event):
+        events.append(event)
+
+    result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=6,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=_PlannerNoCandidateBuilder(_source_context(tmp_path)),
+    ).run(
+        run_id="run-unimplementable-binding-plan",
+        ticket={
+            "ticket_id": "ticket-unimplementable-binding-plan",
+            "miner_hotkey": "hotkey",
+            "island": "generalist",
+            "brief_sanitized_ref": "brief",
+            "ticket_doc": {"brief_public_summary": "salvage malformed Sonar responses"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+        requested_loop_count=1,
+    )
+
+    assert result.status == "failed"
+    assert result.iterations_completed == 1
+    assert result.stop_reason == "binding_plan_unimplementable"
+    assert calls.count("code_edit_draft") == 1
+    no_viable = [event for event in events if event.event_type == "no_viable_patch"][-1]
+    assert no_viable.event_doc["terminal"] is True
+    assert no_viable.event_doc["stop_reason"] == "binding_plan_unimplementable"
+    terminal = events[-1]
+    assert terminal.event_type == "loop_failed"
+    assert terminal.event_doc["run_summary"]["stop_reason"] == "binding_plan_unimplementable"
+
+
 async def test_no_candidate_loop_failed_carries_final_cost_ledger(tmp_path):
     events = []
 

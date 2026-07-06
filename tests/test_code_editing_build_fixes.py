@@ -8,6 +8,7 @@ head sha recorded), bug #30 (infra-vs-candidate build failure classification).
 
 from __future__ import annotations
 
+import json
 import pytest
 
 from gateway.research_lab import code_build
@@ -194,6 +195,59 @@ def test_infra_retry_flag_default_on(monkeypatch):
     assert code_build._infra_retry_enabled() is True
     monkeypatch.setenv("RESEARCH_LAB_BUILD_INFRA_RETRY_ENABLED", "false")
     assert code_build._infra_retry_enabled() is False
+
+
+# --- planner lane regression: do not box all miner focus into provider fallback ---
+
+
+def test_loop_direction_planner_prompt_allows_source_routing_and_query_construction():
+    messages = code_editing.build_loop_direction_planner_messages(
+        ticket={
+            "ticket_id": "ticket-source-routing",
+            "brief_public_summary": "Route to an alternate discovery surface after primary search returns completed-empty.",
+        },
+        artifact_manifest={"git_commit_sha": "a" * 40},
+        component_registry={},
+        benchmark_public_summary={"zero_company_icps": 8},
+        runtime_source_index={
+            "editable_files": [
+                "sourcing_model/discovery.py",
+                "sourcing_model/clients.py",
+                "sourcing_model/core.py",
+            ]
+        },
+        budget_context={"requested_compute_budget_usd": 5.0},
+    )
+    content = messages[-1]["content"]
+    context = json.loads(content.split("Context JSON:\n", 1)[1])
+
+    assert "source_routing" in context["allowed_lanes"]
+    assert "query_construction" in context["allowed_lanes"]
+    assert "Alternate discovery surface/provider routing" in content
+    assert '"required_lane":"query_construction"' in content
+    assert '"allowed_lanes":["provider_fallback"]' not in content
+
+
+def test_code_edit_prompt_names_source_routing_lane():
+    messages = code_editing.build_code_edit_auto_research_messages(
+        ticket={"ticket_id": "ticket-source-routing", "brief_public_summary": "try an alternate discovery surface"},
+        artifact_manifest={"git_commit_sha": "a" * 40},
+        component_registry={},
+        benchmark_public_summary={},
+        runtime_source_context={"editable_files": ["sourcing_model/discovery.py"]},
+        source_inspection_context={"read_files": ["sourcing_model/discovery.py"]},
+        budget_context={},
+        loop_direction_plan={
+            "required_lane": "source_routing",
+            "selected_path_id": "alternate_discovery_surface",
+        },
+        max_candidates=1,
+    )
+    content = messages[-1]["content"]
+    context = json.loads(content.split("Context JSON:\n", 1)[1])
+
+    assert "source_routing" in context["allowed_lanes"]
+    assert "source routing" in content
 
 
 # --- bug #29(a): real head sha recorded instead of throwaway git-init sha ---

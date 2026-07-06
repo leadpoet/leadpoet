@@ -123,6 +123,7 @@ HOUSE_SHARED_PRIOR_CAVEAT = (
 DEFAULT_PLANNER_LANES: tuple[str, ...] = (
     "icp_normalization",
     "query_construction",
+    "source_routing",
     "provider_fallback",
     "intent_evidence_quality",
     "company_fit_filtering",

@@ -104,6 +104,36 @@ def _stage_error_containment_enabled() -> bool:
     return _engine_env_flag("RESEARCH_LAB_LOOP_STAGE_ERROR_CONTAINMENT", "true")
 
 
+_UNIMPLEMENTABLE_PLAN_MARKERS = (
+    "outside the allowed edit scope",
+    "not listed in editable_files",
+    "not in editable_files",
+    "not in editable source",
+    "not present in editable",
+    "not present in the visible",
+    "not present in visible",
+    "not present in current",
+    "no editable",
+    "no visible",
+    "no source path",
+    "source path does not exist",
+    "required file is not present",
+    "required path is not present",
+    "no sonar provider",
+    "no sonar client",
+    "no sonar parse",
+    "no sonar response",
+    "no discover_events_via_sonar",
+    "no call_sonar",
+    "no parse_sonar_json",
+)
+
+
+def _binding_plan_unimplementable_reason(reason: str) -> bool:
+    text = str(reason or "").strip().lower()
+    return bool(text and any(marker in text for marker in _UNIMPLEMENTABLE_PLAN_MARKERS))
+
+
 def _stop_at_candidate_cap_enabled() -> bool:
     """Bug 20 kill switch: stop iterating/building once max_candidates is reached (no build-and-discard)."""
 
@@ -1037,6 +1067,7 @@ class CodeEditLoopEngine:
                 )
                 loop_direction_plan_doc = None
         planner_terminal_without_candidate = False
+        binding_plan_terminal_without_candidate = False
         last_checkpoint: dict[str, Any] | None = None
         stop_reason = "max_iterations"
         if (
@@ -1229,7 +1260,7 @@ class CodeEditLoopEngine:
         elif not self.builder.config.loop_planner_enabled:
             loop_direction_plan_doc = None
         while iteration < settings.max_iterations:
-            if planner_terminal_without_candidate:
+            if planner_terminal_without_candidate or binding_plan_terminal_without_candidate:
                 break
             if elapsed() >= settings.max_seconds:
                 stop_reason = "max_seconds"
@@ -1650,6 +1681,9 @@ class CodeEditLoopEngine:
                     except Exception as exc:
                         no_viable_reason = code_edit_no_viable_patch_reason(raw)
                         if no_viable_reason:
+                            terminal_binding_plan = bool(loop_direction_plan_doc) and _binding_plan_unimplementable_reason(
+                                no_viable_reason
+                            )
                             await self.event_sink(
                                 AutoResearchLoopEvent(
                                     event_type="no_viable_patch",
@@ -1668,6 +1702,14 @@ class CodeEditLoopEngine:
                                     event_doc={
                                         "iteration": iteration,
                                         "reason": no_viable_reason,
+                                        **(
+                                            {
+                                                "terminal": True,
+                                                "stop_reason": "binding_plan_unimplementable",
+                                            }
+                                            if terminal_binding_plan
+                                            else {}
+                                        ),
                                         "raw_response_hash": sha256_json({"raw_response": raw}),
                                         "loop_direction_plan_hash": (
                                             (loop_direction_plan_doc or {}).get("plan_hash")
@@ -1677,6 +1719,9 @@ class CodeEditLoopEngine:
                                     },
                                 )
                             )
+                            if terminal_binding_plan:
+                                stop_reason = "binding_plan_unimplementable"
+                                binding_plan_terminal_without_candidate = True
                         else:
                             await self.event_sink(
                                 AutoResearchLoopEvent(
@@ -2304,7 +2349,11 @@ class CodeEditLoopEngine:
                     provider_usage=provider_usage,
                     checkpoint=last_checkpoint,
                 )
-        if not selected:
+        if not selected and stop_reason in {
+            "max_iterations",
+            "candidate_limit_reached",
+            "candidate_limit_reached_after_minimum_runtime",
+        }:
             stop_reason = "no_valid_image_build_candidates"
 
         # §6.3-1: final intra-run ranking — candidate_selected order and the

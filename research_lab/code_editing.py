@@ -35,6 +35,16 @@ DEFAULT_ALLOWED_EXACT_PATHS = (
     "research_lab_adapter.py",
 )
 DEFAULT_ALLOWED_SUFFIXES = (".py", ".json", ".yaml", ".yml", ".toml", ".txt", ".md")
+LOOP_DIRECTION_ALLOWED_LANES = (
+    "icp_normalization",
+    "query_construction",
+    "source_routing",
+    "provider_fallback",
+    "intent_evidence_quality",
+    "company_fit_filtering",
+    "openrouter_model_selection",
+    "output_ranking",
+)
 DISALLOWED_PATH_PATTERNS = (
     r"(^|/)Dockerfile$",
     r"(^|/)docker-compose[^/]*\.ya?ml$",
@@ -207,6 +217,7 @@ def build_loop_direction_planner_messages(
     budget_context: Mapping[str, Any] | None,
     prior_attempts: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
+    allowed_lanes = list(LOOP_DIRECTION_ALLOWED_LANES)
     context = {
         "ticket": _redacted_mapping(ticket),
         "artifact_manifest": _redacted_mapping(artifact_manifest),
@@ -215,15 +226,7 @@ def build_loop_direction_planner_messages(
         "runtime_source_index": _redacted_source_context(runtime_source_index),
         "budget_context": _redacted_mapping(budget_context or {}),
         "prior_attempts": _redacted_mapping({"attempts": list(prior_attempts or [])}).get("attempts", []),
-        "allowed_lanes": [
-            "icp_normalization",
-            "query_construction",
-            "provider_fallback",
-            "intent_evidence_quality",
-            "company_fit_filtering",
-            "openrouter_model_selection",
-            "output_ranking",
-        ],
+        "allowed_lanes": allowed_lanes,
     }
     system = (
         "You are Leadpoet Research Lab's loop-direction planner. Convert a miner's "
@@ -237,6 +240,10 @@ def build_loop_direction_planner_messages(
         "- Primary objective: improve true sourcing quality for future sealed ICPs. Treat public benchmark performance as a noisy validation signal, not as the objective.\n"
         "- Treat ticket.brief_public_summary as the miner research focus.\n"
         "- If ticket.brief_public_summary names a failure mode, selected_path_id must directly address that failure mode.\n"
+        "- Choose required_lane from Context JSON allowed_lanes; do not force provider_fallback unless the failure is a provider/runtime failure.\n"
+        "- Query decomposition, query relaxation, and term selection belong to query_construction.\n"
+        "- Alternate discovery surface/provider routing after a completed-empty primary result belongs to source_routing.\n"
+        "- Provider fallback is only for genuine provider/runtime failures such as HTTP errors, timeouts, malformed provider responses, or runtime exceptions.\n"
         "- Do not optimize for known public ICP quirks, visible examples, or benchmark-specific shortcuts.\n"
         "- If the miner focus is blank or broad, narrow it to one testable mechanism using benchmark and outcome context.\n"
         "- If prior_attempts show an already-tried path, choose a meaningfully different selected_path_id.\n"
@@ -245,21 +252,22 @@ def build_loop_direction_planner_messages(
         "- Do not remove ICP constraints unless replacing them with a more faithful constraint or adding a compensating downstream validation/filter.\n"
         "- Provider fallback paths must classify, retry, timeout, log, or route provider/runtime failures; pure query wording changes are not provider fallback.\n"
         "- Do not select paths that weaken ICP fit, remove constraints as the primary mechanism, or merely clean up code.\n"
+        "- If the ticket names a concrete file/path/provider/function that is not present in runtime_source_index editable_files or inventory, return no_new_safe_path=true instead of translating it to a different source path.\n"
         "- Do not request, reveal, or store secrets, hidden ICP plaintext, judge prompts, provider keys, private repo URLs, or raw private data.\n"
         "- If no safe new path exists, return no_new_safe_path=true with a clear reason.\n\n"
         "Required output shape:\n"
         "{\"schema_version\":\"1.0\",\"miner_focus_interpretation\":\"...\",\"loop_goal\":\"...\","
-        "\"required_lane\":\"provider_fallback\",\"required_mechanism\":\"...\","
+        "\"required_lane\":\"query_construction\",\"required_mechanism\":\"...\","
         "\"generalization_claim\":\"Why this helps future sealed ICPs rather than one public example.\","
         "\"target_behavior\":[\"...\"],\"must_inspect\":[\"...\"],"
-        "\"allowed_lanes\":[\"provider_fallback\"],\"disallowed_lanes\":[\"query_construction\"],"
-        "\"must_not_try\":[\"Do not remove LinkedIn employee-count clauses from Exa search queries.\"],"
+        "\"allowed_lanes\":[\"query_construction\"],\"disallowed_lanes\":[\"provider_fallback\"],"
+        "\"must_not_try\":[\"Do not weaken ICP constraints or hide completed-empty results.\"],"
         "\"success_criteria\":[\"...\"],\"novelty_requirements\":[\"...\"],"
         "\"anti_overfit_checks\":[\"Preserves multiple qualified company outputs.\"],"
         "\"novelty_contrast\":\"How this differs from prior attempts by mechanism, target function/file, and expected behavior.\","
-        "\"ranked_paths\":[{\"path_id\":\"provider_retry_backoff\",\"lane\":\"provider_fallback\","
-        "\"mechanism\":\"Classify retryable provider errors and add bounded retry/backoff.\"}],"
-        "\"selected_path_id\":\"provider_retry_backoff\"}\n\n"
+        "\"ranked_paths\":[{\"path_id\":\"query_decomposition_recall\",\"lane\":\"query_construction\","
+        "\"mechanism\":\"Add one bounded decomposed-search pass while preserving downstream gates.\"}],"
+        "\"selected_path_id\":\"query_decomposition_recall\"}\n\n"
         "Context JSON:\n"
         + json.dumps(context, sort_keys=True, separators=(",", ":"))
     )
@@ -390,6 +398,7 @@ def build_code_edit_auto_research_messages(
         "allowed_lanes": [
             "icp_normalization",
             "query_construction",
+            "source_routing",
             "provider_fallback",
             "intent_evidence_quality",
             "company_fit_filtering",
@@ -411,8 +420,8 @@ def build_code_edit_auto_research_messages(
     user = (
         "Return strict JSON only, no markdown.\n\n"
         "Choose one improvement lane per candidate: ICP normalization, query construction, "
-        "provider fallback, intent evidence quality, company fit filtering, OpenRouter model "
-        "selection, or output ranking.\n\n"
+        "source routing, provider fallback, intent evidence quality, company fit filtering, "
+        "OpenRouter model selection, or output ranking.\n\n"
         "Allowed edit scope:\n"
         "- gateway/\n"
         "- qualification/\n"

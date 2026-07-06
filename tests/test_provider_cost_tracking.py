@@ -1,0 +1,196 @@
+from __future__ import annotations
+
+import json
+import threading
+import urllib.request
+from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from gateway.research_lab import provider_evidence_proxy
+from research_lab.eval.provider_costs import (
+    DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    ProviderCostEstimate,
+    ProviderCostLedger,
+    decode_cost_event_header,
+    estimate_provider_cost,
+    extract_exa_cost_dollars,
+    extract_openrouter_cost_dollars,
+    scrapingdog_credits_for_path,
+    summarize_provider_cost_trace_entries,
+)
+
+
+def test_scrapingdog_cost_map_uses_current_endpoint_credits():
+    assert scrapingdog_credits_for_path("/profile") == 100
+    assert scrapingdog_credits_for_path("/profile/post") == 5
+    assert scrapingdog_credits_for_path("/google/ai") == 10
+    assert scrapingdog_credits_for_path("/google-ai") == 10
+    assert scrapingdog_credits_for_path("/youtube/transcripts") == 5
+    assert scrapingdog_credits_for_path("/tiktok/profile") == 5
+    assert scrapingdog_credits_for_path("/linkedinjobs") == 5
+    assert scrapingdog_credits_for_path("/instagram/profile") == 15
+    assert scrapingdog_credits_for_path("/unmapped") is None
+
+
+def test_scrapingdog_success_cost_and_unknown_endpoint_fail_closed():
+    profile = estimate_provider_cost(
+        provider="sd",
+        upstream_url="https://api.scrapingdog.com/profile?id=abc&api_key=secret",
+        status=200,
+        response_body=b"{}",
+        request_body=None,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert profile.billable
+    assert profile.credits == 100
+    assert profile.cost_usd == Decimal("0.00500")
+
+    unknown = estimate_provider_cost(
+        provider="sd",
+        upstream_url="https://api.scrapingdog.com/new/paid/endpoint",
+        status=200,
+        response_body=b"{}",
+        request_body=None,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert unknown.tracking_failed
+    assert unknown.tracking_reason == "unknown_scrapingdog_endpoint"
+
+
+def test_failed_provider_call_adds_zero_cost():
+    failed = estimate_provider_cost(
+        provider="exa",
+        upstream_url="https://api.exa.ai/search",
+        status=503,
+        response_body=b'{"error":"temporarily unavailable"}',
+        request_body=None,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert not failed.billable
+    assert failed.cost_usd == Decimal("0")
+    assert not failed.tracking_failed
+
+
+def test_exa_and_openrouter_cost_extraction():
+    assert extract_exa_cost_dollars(b'{"results":[],"costDollars":{"total":0.017}}') == Decimal("0.017")
+
+    inline_cost, inline_meta = extract_openrouter_cost_dollars(
+        b'{"usage":{"prompt_tokens":12,"completion_tokens":3,"cost":0.0042}}'
+    )
+    assert inline_cost == Decimal("0.0042")
+    assert inline_meta["prompt_tokens"] == 12
+    assert inline_meta["completion_tokens"] == 3
+
+    reconciled_cost, reconciled_meta = extract_openrouter_cost_dollars(
+        b'{"data":{"total_cost":"0.0065","native_tokens_prompt":21,"native_tokens_completion":8}}'
+    )
+    assert reconciled_cost == Decimal("0.0065")
+    assert reconciled_meta["prompt_tokens"] == 21
+    assert reconciled_meta["completion_tokens"] == 8
+
+
+def test_ledger_allows_final_success_to_exceed_cap_then_blocks_later_call():
+    ledger = ProviderCostLedger(scope="scope-1", cap_usd=Decimal("0.50"))
+    first = ledger.record_live_event(
+        provider="exa",
+        request_fingerprint="a" * 64,
+        status_code=200,
+        estimate=ProviderCostEstimate(
+            provider="exa",
+            endpoint="/search",
+            billable=True,
+            cost_usd=Decimal("0.51"),
+            cost_source="exa_cost_dollars",
+        ),
+    )
+    assert first.cap_exceeded_after_success
+    assert not first.cap_blocked
+
+    summary_after_first = summarize_provider_cost_trace_entries(
+        [{"provider_cost_event": first.to_doc()}]
+    )
+    assert summary_after_first["cap_exceeded_after_success"]
+    assert not summary_after_first["cap_blocked"]
+    assert summary_after_first["total_cost_usd"] == 0.51
+
+    assert ledger.should_block_paid_call()
+    second = ledger.block_event(
+        provider="exa",
+        endpoint="/search",
+        request_fingerprint="b" * 64,
+        reason="cost_cap_reached",
+    )
+    summary_after_second = summarize_provider_cost_trace_entries(
+        [{"provider_cost_event": first.to_doc()}, {"provider_cost_event": second.to_doc()}]
+    )
+    assert summary_after_second["cap_blocked"]
+    assert summary_after_second["blocked_call_count"] == 1
+
+
+def test_cache_hit_adds_zero_cost_to_summary():
+    ledger = ProviderCostLedger(scope="scope-2", cap_usd=Decimal("0.50"))
+    event = ledger.cache_hit_event(
+        provider="sd",
+        endpoint="/profile",
+        request_fingerprint="c" * 64,
+        status_code=200,
+    )
+    summary = summarize_provider_cost_trace_entries([{"provider_cost_event": event.to_doc()}])
+    assert summary["cache_hit_count"] == 1
+    assert summary["total_cost_usd"] == 0.0
+    assert summary["paid_call_count"] == 0
+
+
+class _FakeProvider(BaseHTTPRequestHandler):
+    def log_message(self, *args):  # noqa: ANN001
+        pass
+
+    def do_POST(self):  # noqa: N802
+        body = json.dumps({"results": [], "costDollars": 0.0123}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_evidence_proxy_emits_cost_event_header_for_live_success():
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeProvider)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    original = dict(provider_evidence_proxy._UPSTREAMS["exa"])
+    proxy = None
+    try:
+        provider_evidence_proxy._UPSTREAMS["exa"] = {
+            **original,
+            "base": f"http://127.0.0.1:{upstream.server_address[1]}",
+            "auth": lambda: {},
+        }
+        proxy, _store, proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
+            host="127.0.0.1",
+            port=0,
+        )
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_address[1]}/exa/search",
+            data=b'{"query":"redacted"}',
+            headers={
+                "Content-Type": "application/json",
+                "X-Research-Lab-Cost-Scope": "test-scope",
+                "X-Research-Lab-Cost-Cap-Usd": "0.50",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            event = decode_cost_event_header(response.headers.get("X-Research-Lab-Provider-Cost-Event"))
+            assert event is not None
+            assert event["provider"] == "exa"
+            assert event["evidence"] == "recorded"
+            assert event["billable"] is True
+            assert event["cost_usd"] == 0.0123
+    finally:
+        provider_evidence_proxy._UPSTREAMS["exa"] = original
+        if proxy is not None:
+            proxy.shutdown()
+            proxy.server_close()
+        upstream.shutdown()
+        upstream.server_close()

@@ -37,6 +37,7 @@ from .private_runtime import (
     ensure_private_model_outputs,
     incontainer_trace_capture_enabled,
 )
+from .provider_costs import summarize_provider_cost_trace_entries
 
 logger = logging.getLogger(__name__)
 
@@ -757,6 +758,21 @@ async def _score_single_icp(
                 entries=tagged_entries,
             )
         )
+        cost_summary = row.get("provider_cost_summary")
+        if isinstance(cost_summary, Mapping) and (
+            cost_summary.get("cap_blocked") or int(cost_summary.get("tracking_failed_count") or 0) > 0
+        ):
+            row["base_company_scores"] = []
+            row["candidate_company_scores"] = []
+            row["hard_failure"] = False
+            row["provider_cost_cap_blocked"] = bool(cost_summary.get("cap_blocked"))
+            row["provider_cost_tracking_failed"] = int(cost_summary.get("tracking_failed_count") or 0) > 0
+            tokens = [token for token in _failure_reason_tokens(row.get("failure_reason"))]
+            if cost_summary.get("cap_blocked") and "provider_cost_cap_blocked" not in tokens:
+                tokens.append("provider_cost_cap_blocked")
+            if int(cost_summary.get("tracking_failed_count") or 0) > 0 and "provider_cost_tracking_failed" not in tokens:
+                tokens.append("provider_cost_tracking_failed")
+            row["failure_reason"] = ";".join(tokens)
     return row, markers
 
 
@@ -1180,6 +1196,18 @@ async def _finalize_incontainer_trace(
         # Provider traffic outside the instrumented path is fresh evidence
         # replay never saw; it disqualifies a same-evidence classification.
         fields["provider_evidence_uninstrumented_calls"] = uninstrumented_count
+    provider_cost_summary = summarize_provider_cost_trace_entries(entries)
+    if (
+        provider_cost_summary.get("paid_call_count")
+        or provider_cost_summary.get("cache_hit_count")
+        or provider_cost_summary.get("blocked_call_count")
+        or provider_cost_summary.get("tracking_failed_count")
+    ):
+        fields["provider_cost_summary"] = provider_cost_summary
+        fields["provider_cost_total_usd"] = provider_cost_summary.get("total_cost_usd", 0.0)
+        fields["provider_cost_paid_call_count"] = provider_cost_summary.get("paid_call_count", 0)
+        fields["provider_cost_cap_blocked"] = bool(provider_cost_summary.get("cap_blocked"))
+        fields["provider_cost_tracking_failed"] = int(provider_cost_summary.get("tracking_failed_count") or 0) > 0
     if not ref:
         fields["incontainer_trace_dropped"] = True
         fields["incontainer_trace_dropped_call_count"] = len(entries)
@@ -1695,6 +1723,8 @@ def build_scoring_health_doc(
         "skipped_candidate_count": 0,
         "provider_excluded_icp_count": 0,
         "sourced_zero_no_error_count": 0,
+        "provider_cost_cap_blocked_icp_count": 0,
+        "provider_cost_tracking_failed_icp_count": 0,
     }
     failure_classes: dict[str, int] = {}
     for row in per_icp_results:
@@ -1734,6 +1764,10 @@ def build_scoring_health_doc(
             counts["provider_excluded_icp_count"] += 1
         if row.get("sourced_zero_no_error") or row.get("reference_sourced_zero_no_error"):
             counts["sourced_zero_no_error_count"] += 1
+        if row.get("provider_cost_cap_blocked"):
+            counts["provider_cost_cap_blocked_icp_count"] += 1
+        if row.get("provider_cost_tracking_failed"):
+            counts["provider_cost_tracking_failed_icp_count"] += 1
 
     rates = {
         "reference_runtime_success_rate": _health_success_rate(total, counts["reference_runtime_failure_count"]),
@@ -1746,6 +1780,8 @@ def build_scoring_health_doc(
         "skipped_candidate_rate": _health_rate(total, counts["skipped_candidate_count"]),
         "provider_excluded_icp_rate": _health_rate(total, counts["provider_excluded_icp_count"]),
         "sourced_zero_no_error_rate": _health_rate(total, counts["sourced_zero_no_error_count"]),
+        "provider_cost_cap_blocked_icp_rate": _health_rate(total, counts["provider_cost_cap_blocked_icp_count"]),
+        "provider_cost_tracking_failed_icp_rate": _health_rate(total, counts["provider_cost_tracking_failed_icp_count"]),
     }
     holdout_doc = _scoring_health_holdout_doc(private_holdout_gate)
     degraded = any(value > 0 for value in counts.values())

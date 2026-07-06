@@ -24,7 +24,9 @@ proxy's own environment, so a container never needs (or sees) a real key.
 from __future__ import annotations
 
 import base64
+from decimal import Decimal
 import json
+import logging
 import os
 import threading
 import time
@@ -38,8 +40,20 @@ from research_lab.eval.provider_evidence_cache import (
     canonical_request_fingerprint,
     load_evidence_cache,
 )
+from research_lab.eval.provider_costs import (
+    DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP,
+    DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    ProviderCostEstimate,
+    ProviderCostLedger,
+    decimal_from_env,
+    estimate_provider_cost,
+    extract_openrouter_cost_dollars,
+    redacted_endpoint,
+    scrapingdog_credits_for_path,
+)
 
 PROXY_URL_ENV = "RESEARCH_LAB_EVIDENCE_PROXY_URL"
+logger = logging.getLogger(__name__)
 
 # Upstream routing: first path segment selects the provider. The proxy
 # re-authenticates each upstream call from its own environment.
@@ -82,6 +96,7 @@ class EvidenceStore:
         self._baseline: dict[str, dict[str, Any]] = {}
         self._day: dict[str, dict[str, Any]] = {}
         self._inflight: set[str] = set()
+        self._cost_ledgers: dict[str, ProviderCostLedger] = {}
         self._day_path = day_cache_path
         self._loaded_day = ""
         self._baseline_dir = baseline_dir
@@ -92,6 +107,7 @@ class EvidenceStore:
         self._loaded_day = _utc_day()
         self._baseline = {}
         self._inflight.clear()
+        self._cost_ledgers.clear()
         if self._baseline_dir and os.path.isdir(self._baseline_dir):
             for name in sorted(os.listdir(self._baseline_dir)):
                 if not name.endswith(".json"):
@@ -200,6 +216,16 @@ class EvidenceStore:
                 except Exception:
                     pass
 
+    def cost_ledger(self, scope: str, cap_usd: Decimal) -> ProviderCostLedger:
+        with self._cond:
+            self._rollover_if_needed_locked()
+            key = str(scope or "unscoped")
+            ledger = self._cost_ledgers.get(key)
+            if ledger is None:
+                ledger = ProviderCostLedger(scope=key, cap_usd=cap_usd)
+                self._cost_ledgers[key] = ledger
+            return ledger
+
 
 class _ProxyHandler(BaseHTTPRequestHandler):
     store: EvidenceStore
@@ -217,13 +243,23 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         rest = "/" + (parts[1] if len(parts) > 1 else "")
         return name, rest
 
-    def _respond(self, status: int, body: bytes, evidence: str = "") -> None:
+    def _respond(
+        self,
+        status: int,
+        body: bytes,
+        evidence: str = "",
+        *,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
         try:
             self.send_response(status)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Content-Type", "application/json")
             if evidence:
                 self.send_header("X-Research-Lab-Evidence", evidence)
+            for key, value in dict(headers or {}).items():
+                if key and value is not None:
+                    self.send_header(str(key), str(value))
             self.end_headers()
             self.wfile.write(body)
         except Exception:
@@ -242,6 +278,24 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         # evidence recorded from direct provider calls (baseline tapes).
         upstream_url = upstream["base"] + rest
         fingerprint = canonical_request_fingerprint(self.command, upstream_url, request_body or None)
+        scope = str(self.headers.get("X-Research-Lab-Cost-Scope") or "unscoped").strip() or "unscoped"
+        cap_usd = decimal_from_env(
+            "RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP",
+            DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP,
+        )
+        header_cap = str(self.headers.get("X-Research-Lab-Cost-Cap-Usd") or "").strip()
+        if header_cap:
+            try:
+                parsed_cap = Decimal(header_cap)
+                if parsed_cap >= 0:
+                    cap_usd = parsed_cap
+            except Exception:
+                pass
+        credit_price = decimal_from_env(
+            "RESEARCH_LAB_SCRAPINGDOG_COST_PER_CREDIT_USD",
+            DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+        )
+        ledger = self.store.cost_ledger(scope, cap_usd)
         # Global read-through with single-flight: the first run of the day to
         # make a request calls the provider live while every concurrent
         # identical request (e.g. another candidate on the same ICP) waits and
@@ -252,7 +306,54 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 body = base64.b64decode(cached.get("body_b64") or "")
             except Exception:
                 body = b""
-            self._respond(int(cached.get("status") or 502), body, evidence="hit")
+            status = int(cached.get("status") or 502)
+            event = ledger.cache_hit_event(
+                provider=name,
+                endpoint=redacted_endpoint(name, upstream_url),
+                request_fingerprint=fingerprint,
+                status_code=status,
+            )
+            self._respond(status, body, evidence="hit", headers=event.to_headers())
+            return
+        endpoint = redacted_endpoint(name, upstream_url)
+        if name == "sd" and scrapingdog_credits_for_path(urllib.parse.urlsplit(upstream_url).path) is None:
+            event = ledger.block_event(
+                provider=name,
+                endpoint=endpoint,
+                request_fingerprint=fingerprint,
+                reason="unknown_scrapingdog_endpoint",
+            )
+            body = json.dumps(
+                {
+                    "error": "research_lab_provider_cost_unknown_scrapingdog_endpoint",
+                    "endpoint": endpoint,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if is_leader:
+                self.store.release_lead(fingerprint)
+            self._respond(402, body, evidence="blocked", headers=event.to_headers())
+            return
+        if ledger.should_block_paid_call():
+            event = ledger.block_event(
+                provider=name,
+                endpoint=endpoint,
+                request_fingerprint=fingerprint,
+                reason="cost_cap_reached",
+            )
+            body = json.dumps(
+                {
+                    "error": "research_lab_provider_cost_cap_exceeded",
+                    "provider": name,
+                    "endpoint": endpoint,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if is_leader:
+                self.store.release_lead(fingerprint)
+            self._respond(402, body, evidence="blocked", headers=event.to_headers())
             return
         # Live call, re-authenticated from the proxy's own credentials.
         target = upstream_url
@@ -290,10 +391,76 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             # waiting caller can retry rather than block on us.
             if is_leader:
                 self.store.release_lead(fingerprint)
-            self._respond(502, b'{"error":"upstream unreachable"}')
+            event = ledger.record_live_event(
+                provider=name,
+                request_fingerprint=fingerprint,
+                status_code=502,
+                estimate=ProviderCostEstimate(
+                    provider=name,
+                    endpoint=endpoint,
+                    billable=False,
+                    cost_source="transport_failure_zero_cost",
+                ),
+            )
+            self._respond(502, b'{"error":"upstream unreachable"}', evidence="error", headers=event.to_headers())
             return
         self.store.record(fingerprint, status, body)
-        self._respond(status, body, evidence="recorded")
+        estimate = estimate_provider_cost(
+            provider=name,
+            upstream_url=upstream_url,
+            status=status,
+            response_body=body,
+            request_body=request_body or None,
+            scrapingdog_credit_price_usd=credit_price,
+        )
+        if (
+            name == "or"
+            and estimate.tracking_failed
+            and estimate.tracking_reason == "missing_openrouter_cost"
+            and estimate.generation_id
+        ):
+            try:
+                gen_url = (
+                    _UPSTREAMS["or"]["base"]
+                    + "/api/v1/generation?id="
+                    + urllib.parse.quote(estimate.generation_id, safe="")
+                )
+                auth_getter = _UPSTREAMS["or"].get("auth")
+                gen_headers = {
+                    key: value
+                    for key, value in (auth_getter() if auth_getter else {}).items()
+                    if value
+                }
+                gen_req = urllib.request.Request(gen_url, headers=gen_headers, method="GET")
+                with urllib.request.urlopen(gen_req, timeout=30) as gen_response:
+                    if int(getattr(gen_response, "status", None) or getattr(gen_response, "code", 0) or 0) < 400:
+                        generation_body = gen_response.read()
+                        reconciled_cost, reconciled_metadata = extract_openrouter_cost_dollars(generation_body)
+                        if reconciled_cost is not None:
+                            estimate = ProviderCostEstimate(
+                                provider="or",
+                                endpoint=estimate.endpoint,
+                                model=estimate.model,
+                                billable=True,
+                                cost_usd=reconciled_cost,
+                                cost_source="openrouter_generation_reconciliation",
+                                prompt_tokens=int(reconciled_metadata.get("prompt_tokens") or 0),
+                                completion_tokens=int(reconciled_metadata.get("completion_tokens") or 0),
+                                generation_id=estimate.generation_id,
+                            )
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_openrouter_generation_cost_reconcile_failed generation_id_prefix=%s error=%s",
+                    str(estimate.generation_id or "")[:16],
+                    exc,
+                )
+        event = ledger.record_live_event(
+            provider=name,
+            request_fingerprint=fingerprint,
+            status_code=status,
+            estimate=estimate,
+        )
+        self._respond(status, body, evidence="recorded", headers=event.to_headers())
 
     do_GET = _handle
     do_POST = _handle

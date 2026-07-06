@@ -90,6 +90,7 @@ from gateway.research_lab.store import (
     create_scoring_dispatch_event,
     create_signed_audit_bundle,
     create_ticket_event,
+    deterministic_uuid,
     insert_row,
     select_all,
     select_many,
@@ -132,6 +133,10 @@ from research_lab.eval.private_runtime import (
     incontainer_trace_capture_enabled,
 )
 from research_lab.observability.langfuse_client import observation, run_trace_id as langfuse_run_trace_id
+from research_lab.eval.provider_costs import (
+    cost_event_from_trace_entry,
+    summarize_provider_cost_trace_entries,
+)
 from research_lab.observability.redaction import miner_hotkey_hash
 from research_lab.observability.tracing import finish_score_bundle_observation
 
@@ -1313,10 +1318,128 @@ async def _publish_baseline_incontainer_trace(
     truncated_count = sum(1 for entry in entries if entry.get("truncated"))
     if truncated_count:
         fields["incontainer_trace_truncated_count"] = truncated_count
+    provider_cost_summary = summarize_provider_cost_trace_entries(entries)
+    if (
+        provider_cost_summary.get("paid_call_count")
+        or provider_cost_summary.get("cache_hit_count")
+        or provider_cost_summary.get("blocked_call_count")
+        or provider_cost_summary.get("tracking_failed_count")
+    ):
+        fields["provider_cost_summary"] = provider_cost_summary
+        fields["provider_cost_total_usd"] = provider_cost_summary.get("total_cost_usd", 0.0)
+        fields["provider_cost_paid_call_count"] = provider_cost_summary.get("paid_call_count", 0)
+        fields["provider_cost_cap_blocked"] = bool(provider_cost_summary.get("cap_blocked"))
+        fields["provider_cost_tracking_failed"] = int(provider_cost_summary.get("tracking_failed_count") or 0) > 0
     if not ref:
         fields["incontainer_trace_dropped"] = True
         fields["incontainer_trace_dropped_call_count"] = len(entries)
     return fields
+
+
+def _apply_provider_cost_baseline_outcome(item_summary: dict[str, Any]) -> None:
+    diagnostics = item_summary.get("diagnostics")
+    if not isinstance(diagnostics, Mapping):
+        return
+    summary = diagnostics.get("provider_cost_summary")
+    if not isinstance(summary, Mapping):
+        return
+    cap_blocked = bool(summary.get("cap_blocked"))
+    tracking_failed = int(summary.get("tracking_failed_count") or 0) > 0
+    if not cap_blocked and not tracking_failed:
+        return
+    mutable_diagnostics = dict(diagnostics)
+    categories = set(mutable_diagnostics.get("failure_categories") or [])
+    if cap_blocked:
+        categories.add("provider_cost_cap_blocked")
+        mutable_diagnostics["provider_cost_cap_blocked"] = True
+    if tracking_failed:
+        categories.add("provider_cost_tracking_failed")
+        mutable_diagnostics["provider_cost_tracking_failed"] = True
+    mutable_diagnostics["failure_categories"] = sorted(categories)
+    item_summary["score"] = 0.0
+    item_summary["company_count"] = 0
+    item_summary["diagnostics"] = mutable_diagnostics
+
+
+def _provider_cost_cap_state(event: Mapping[str, Any]) -> str:
+    if event.get("tracking_failed"):
+        return "cost_tracking_failed"
+    if event.get("cap_blocked"):
+        return "blocked_before_call"
+    if event.get("cap_exceeded_after_success"):
+        return "exceeded_after_success"
+    return "under_cap"
+
+
+async def _persist_provider_cost_events(
+    *,
+    entries: list[dict[str, Any]],
+    run_type: str,
+    icp_ref: str,
+    icp_hash: str = "",
+    runner_role: str = "unknown",
+    candidate_id: str = "",
+    benchmark_date: str = "",
+    rolling_window_hash: str = "",
+) -> None:
+    for entry in entries:
+        event = cost_event_from_trace_entry(entry)
+        if not event:
+            continue
+        provider = str(event.get("provider") or "unknown")
+        if provider not in {"exa", "or", "sd"}:
+            provider = "unknown"
+        anchored_payload = {
+            "event": event,
+            "icp_ref": str(icp_ref),
+            "icp_hash": str(icp_hash or ""),
+            "runner_role": str(entry.get("runner_role") or runner_role or "unknown"),
+            "trace_seq": entry.get("seq"),
+        }
+        anchored_hash = sha256_json(anchored_payload)
+        row = {
+            "event_id": deterministic_uuid("provider_cost_event", anchored_hash),
+            "run_scope": str(event.get("scope") or "unscoped"),
+            "run_type": str(run_type or "unknown"),
+            "candidate_id": str(candidate_id or "") or None,
+            "benchmark_date": str(benchmark_date or "") or None,
+            "rolling_window_hash": str(rolling_window_hash or "") or None,
+            "icp_ref": str(icp_ref or ""),
+            "icp_hash": str(icp_hash or ""),
+            "runner_role": str(entry.get("runner_role") or runner_role or "unknown"),
+            "provider": provider,
+            "endpoint": str(event.get("endpoint") or "")[:200],
+            "model": str(event.get("model") or "")[:200],
+            "request_fingerprint": str(event.get("request_fingerprint") or "")[:64],
+            "status_code": int(event.get("status_code") or 0),
+            "billable": bool(event.get("billable")),
+            "cost_usd": float(event.get("cost_usd") or 0.0),
+            "cost_source": str(event.get("cost_source") or "not_billable")[:80],
+            "credits": int(event.get("credits") or 0),
+            "prompt_tokens": int(event.get("prompt_tokens") or 0),
+            "completion_tokens": int(event.get("completion_tokens") or 0),
+            "cap_usd": float(event.get("cap_usd") or 0.0),
+            "spent_before_usd": float(event.get("spent_before_usd") or 0.0),
+            "spent_after_usd": float(event.get("spent_after_usd") or 0.0),
+            "cap_state": _provider_cost_cap_state(event),
+            "event_doc": {
+                "evidence": str(event.get("evidence") or ""),
+                "generation_id": str(event.get("generation_id") or "")[:200],
+                "tracking_reason": str(event.get("tracking_reason") or "")[:200],
+                "trace_seq": entry.get("seq"),
+            },
+            "anchored_hash": anchored_hash,
+        }
+        try:
+            await insert_row("research_lab_provider_cost_events", row)
+        except Exception:  # noqa: BLE001 - telemetry must not affect scoring
+            logger.warning(
+                "research_lab_provider_cost_event_insert_failed run_type=%s icp_ref=%s provider=%s",
+                run_type,
+                compact_ref(icp_ref),
+                provider,
+                exc_info=True,
+            )
 
 
 def _baseline_max_unresolved_icps() -> int:
@@ -4794,6 +4917,7 @@ class ResearchLabGatewayScoringWorker:
         return self._baseline_trace_context(
             context_ref=f"confirmation-{candidate_ref}-a{int(scope.get('attempt') or 0)}-{side}",
             manifest_uri=str(scope.get("manifest_uri") or ""),
+            run_type=f"promotion_confirmation_{side}",
         )
 
     async def _reconstruct_rolling_window(self, window_hash: str) -> Any | None:
@@ -5710,6 +5834,9 @@ class ResearchLabGatewayScoringWorker:
         baseline_trace_context = self._baseline_trace_context(
             context_ref=f"daily-{today}-a{benchmark_attempt}-{baseline_window_tag}",
             manifest_uri=artifact.manifest_uri,
+            run_type="private_baseline_rebenchmark",
+            benchmark_date=today,
+            rolling_window_hash=window.window_hash,
         )
         per_icp_summaries: list[dict[str, Any]] = []
         nonempty_output_count = 0
@@ -5921,6 +6048,7 @@ class ResearchLabGatewayScoringWorker:
                     trace_entries=serial_trace_entries,
                     trace_context=baseline_trace_context,
                 )
+                _apply_provider_cost_baseline_outcome(item_summary)
                 per_icp_summaries.append(item_summary)
             if nonempty_output_count <= 0:
                 raise PrivateModelRuntimeError(
@@ -6133,13 +6261,24 @@ class ResearchLabGatewayScoringWorker:
             self._scorer_trace_recorder = recorder
         return recorder
 
-    def _baseline_trace_context(self, *, context_ref: str, manifest_uri: str) -> dict[str, Any]:
+    def _baseline_trace_context(
+        self,
+        *,
+        context_ref: str,
+        manifest_uri: str,
+        run_type: str = "private_baseline_rebenchmark",
+        benchmark_date: str = "",
+        rolling_window_hash: str = "",
+    ) -> dict[str, Any]:
         """Shared trace scope for one baseline/champion batch: keys the §5.4
         scorer-trace docs and the in-container trace docs, and carries the
         batch's log-once drop state for unconfigured S3."""
         return {
             "context_ref": str(context_ref),
             "manifest_uri": str(manifest_uri or ""),
+            "run_type": str(run_type or "private_baseline_rebenchmark"),
+            "benchmark_date": str(benchmark_date or ""),
+            "rolling_window_hash": str(rolling_window_hash or ""),
             "incontainer_drop_state": {"logged": False, "dropped_entries": 0},
         }
 
@@ -6193,6 +6332,15 @@ class ResearchLabGatewayScoringWorker:
                 )
             if trace_entries:
                 drop_state = trace_context.get("incontainer_drop_state")
+                await _persist_provider_cost_events(
+                    entries=trace_entries,
+                    run_type=str(trace_context.get("run_type") or "private_baseline_rebenchmark"),
+                    icp_ref=label,
+                    icp_hash=str(item.get("icp_hash") or ""),
+                    runner_role="baseline",
+                    benchmark_date=str(trace_context.get("benchmark_date") or ""),
+                    rolling_window_hash=str(trace_context.get("rolling_window_hash") or ""),
+                )
                 diagnostics_updates.update(
                     await _publish_baseline_incontainer_trace(
                         context_ref=context_ref,
@@ -6241,6 +6389,13 @@ class ResearchLabGatewayScoringWorker:
         safe_candidate = _trace_path_segment(candidate_id, fallback="candidate")
 
         async def _sink(icp_ref: str, entries: list[dict[str, Any]]) -> str:
+            await _persist_provider_cost_events(
+                entries=entries,
+                run_type="candidate_scoring",
+                icp_ref=str(icp_ref),
+                runner_role="candidate",
+                candidate_id=candidate_id,
+            )
             return await asyncio.to_thread(
                 _upload_incontainer_trace_doc,
                 prefix,
@@ -6433,6 +6588,7 @@ class ResearchLabGatewayScoringWorker:
             trace_entries=trace_entries,
             trace_context=trace_context,
         )
+        _apply_provider_cost_baseline_outcome(item_summary)
         item_summary["_item_index"] = item_index
         item_summary["_retryable"] = retryable
         item_summary["_nonempty"] = bool(outputs)
@@ -7277,6 +7433,15 @@ class ResearchLabGatewayScoringWorker:
         evidence_proxy_url = os.getenv("RESEARCH_LAB_EVIDENCE_PROXY_URL")
         if evidence_proxy_url:
             env["RESEARCH_LAB_EVIDENCE_PROXY_URL"] = evidence_proxy_url
+        env["RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP"] = str(
+            self.config.provider_cost_cap_usd_per_icp
+        )
+        env["RESEARCH_LAB_SCRAPINGDOG_COST_PER_CREDIT_USD"] = str(
+            self.config.scrapingdog_cost_per_credit_usd
+        )
+        env["RESEARCH_LAB_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY"] = str(
+            self.config.provider_cost_unknown_endpoint_policy
+        )
         scoring_cache_dir = os.getenv("RESEARCH_LAB_SCORING_CACHE_DIR")
         if scoring_cache_dir:
             env["RESEARCH_LAB_SCORING_CACHE_DIR"] = scoring_cache_dir

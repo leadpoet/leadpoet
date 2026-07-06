@@ -61,6 +61,11 @@ INCONTAINER_TRACE_ENV_PASSTHROUGH = (
     INCONTAINER_TRACE_MAX_CALL_BYTES_ENV,
     INCONTAINER_TRACE_MAX_TOTAL_BYTES_ENV,
 )
+PROVIDER_COST_ENV_PASSTHROUGH = (
+    "RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP",
+    "RESEARCH_LAB_SCRAPINGDOG_COST_PER_CREDIT_USD",
+    "RESEARCH_LAB_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY",
+)
 DEFAULT_DOCKER_PLATFORM = "linux/amd64"
 DEFAULT_ENV_PASSTHROUGH = (
     "EXA_API_KEY",
@@ -75,7 +80,7 @@ DEFAULT_ENV_PASSTHROUGH = (
     "http_proxy",
     "https_proxy",
     "no_proxy",
-) + INCONTAINER_TRACE_ENV_PASSTHROUGH
+) + INCONTAINER_TRACE_ENV_PASSTHROUGH + PROVIDER_COST_ENV_PASSTHROUGH
 PROVIDER_KEY_ENV_PASSTHROUGH = (
     "EXA_API_KEY",
     "SCRAPINGDOG_API_KEY",
@@ -507,6 +512,17 @@ class DockerPrivateModelRunner:
                 "-e",
                 f"RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH={container_cache_path}",
             ]
+        provider_cost_scope = sha256_json(
+            {
+                "image_digest": self.spec.image_digest,
+                "argv": list(argv),
+                "stdin_payload": stdin_payload,
+            }
+        )
+        provider_cost_args = [
+            "-e",
+            f"RESEARCH_LAB_PROVIDER_COST_SCOPE={provider_cost_scope}",
+        ]
         command = [
             self.spec.docker_executable,
             "run",
@@ -514,6 +530,7 @@ class DockerPrivateModelRunner:
             "-i",
             *_docker_platform_args(self.spec),
             *_docker_env_args(self.spec),
+            *provider_cost_args,
             *evidence_cache_args,
             self.spec.image_digest,
             "python",
@@ -1130,6 +1147,8 @@ import threading as _research_lab_threading
 _research_lab_in_urlopen = _research_lab_threading.local()
 
 _research_lab_evidence_proxy = (os.environ.get("RESEARCH_LAB_EVIDENCE_PROXY_URL") or "").strip().rstrip("/")
+_research_lab_provider_cost_scope = (os.environ.get("RESEARCH_LAB_PROVIDER_COST_SCOPE") or "").strip()
+_research_lab_provider_cost_cap_usd = (os.environ.get("RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP") or "").strip()
 _research_lab_proxy_routes = (
     ("api.exa.ai", "/exa"),
     ("api.scrapingdog.com", "/sd"),
@@ -1153,7 +1172,49 @@ def _research_lab_proxy_rewrite(url):
         return None
     return None
 
+def _research_lab_proxy_headers():
+    headers = {}
+    if _research_lab_provider_cost_scope:
+        headers["X-Research-Lab-Cost-Scope"] = _research_lab_provider_cost_scope
+    if _research_lab_provider_cost_cap_usd:
+        headers["X-Research-Lab-Cost-Cap-Usd"] = _research_lab_provider_cost_cap_usd
+    return headers
+
+def _research_lab_decode_cost_event_header(headers):
+    try:
+        if headers is None:
+            return None
+        raw = headers.get("X-Research-Lab-Provider-Cost-Event")
+        if not raw:
+            return None
+        import base64 as _cost_base64
+        import json as _cost_json
+        decoded = _cost_base64.b64decode(str(raw)).decode("utf-8")
+        doc = _cost_json.loads(decoded)
+        if not isinstance(doc, dict):
+            return None
+        text = _cost_json.dumps(doc, sort_keys=True, separators=(",", ":")).lower()
+        for marker in ("sk-or-", "api_key", "service_role", "raw_secret", "hidden_prompt", "provider_output"):
+            if marker in text:
+                return None
+        return doc
+    except Exception:
+        return None
+
 def _research_lab_emit_evidence_marker(headers, method, target, request_body):
+    cost_event = _research_lab_decode_cost_event_header(headers)
+    if cost_event is not None:
+        _research_lab_emit_trace(
+            method,
+            target,
+            request_body,
+            None,
+            None,
+            "provider_cost",
+            "",
+            phase="provider_cost",
+            extra={"provider_cost_event": cost_event},
+        )
     try:
         kind = str(headers.get("X-Research-Lab-Evidence") or "") if headers is not None else ""
     except Exception:
@@ -1471,6 +1532,7 @@ def _research_lab_emit_trace(
     request_capture_incomplete=False,
     response_capture_incomplete=False,
     phase="call",
+    extra=None,
 ):
     if not _research_lab_trace_enabled:
         return
@@ -1514,6 +1576,10 @@ def _research_lab_emit_trace(
         except Exception:
             entry["response_status"] = None
         entry["truncated"] = truncated
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                if key not in entry:
+                    entry[key] = value
         # Single line: base64 has no newlines and json.dumps escapes the rest,
         # so the host-side per-line parser always sees one complete record.
         sys.stderr.write(
@@ -1547,6 +1613,7 @@ def _research_lab_urlopen(req, *args, **kwargs):
     if _proxied_url is not None:
         try:
             _headers = dict(getattr(req, "headers", None) or {})
+            _headers.update(_research_lab_proxy_headers())
             req = urllib.request.Request(_proxied_url, data=getattr(req, "data", None) if hasattr(req, "get_method") else (args[0] if args else kwargs.get("data")), headers=_headers, method=method)
             args = ()
             kwargs = {k: v for k, v in kwargs.items() if k != "data"}
@@ -1707,9 +1774,19 @@ def _research_lab_patch_httpx():
 
         def _research_lab_httpx_send(self, request, *args, **kwargs):
             request_body, request_incomplete = _research_lab_httpx_request_body(request)
+            _proxied_url = _research_lab_proxy_rewrite(getattr(request, "url", ""))
+            if _proxied_url is not None:
+                try:
+                    request.url = httpx.URL(_proxied_url)
+                    for _key, _value in _research_lab_proxy_headers().items():
+                        request.headers[_key] = _value
+                except Exception:
+                    _proxied_url = None
             try:
                 response = _research_lab_original_httpx_send(self, request, *args, **kwargs)
             except Exception as exc:
+                if _proxied_url is not None:
+                    _research_lab_emit_evidence_marker(getattr(getattr(exc, "response", None), "headers", None), getattr(request, "method", ""), getattr(request, "url", ""), request_body)
                 _research_lab_emit_provider_error(
                     _research_lab_generic_error_details(exc),
                     getattr(request, "url", ""),
@@ -1727,6 +1804,8 @@ def _research_lab_patch_httpx():
                 )
                 raise
             response_body, response_incomplete = _research_lab_httpx_response_body(response)
+            if _proxied_url is not None:
+                _research_lab_emit_evidence_marker(getattr(response, "headers", None), getattr(request, "method", ""), getattr(request, "url", ""), request_body)
             _research_lab_emit_trace(
                 getattr(request, "method", ""),
                 getattr(request, "url", ""),
@@ -1748,9 +1827,19 @@ def _research_lab_patch_httpx():
 
         async def _research_lab_httpx_async_send(self, request, *args, **kwargs):
             request_body, request_incomplete = _research_lab_httpx_request_body(request)
+            _proxied_url = _research_lab_proxy_rewrite(getattr(request, "url", ""))
+            if _proxied_url is not None:
+                try:
+                    request.url = httpx.URL(_proxied_url)
+                    for _key, _value in _research_lab_proxy_headers().items():
+                        request.headers[_key] = _value
+                except Exception:
+                    _proxied_url = None
             try:
                 response = await _research_lab_original_httpx_async_send(self, request, *args, **kwargs)
             except Exception as exc:
+                if _proxied_url is not None:
+                    _research_lab_emit_evidence_marker(getattr(getattr(exc, "response", None), "headers", None), getattr(request, "method", ""), getattr(request, "url", ""), request_body)
                 _research_lab_emit_provider_error(
                     _research_lab_generic_error_details(exc),
                     getattr(request, "url", ""),
@@ -1768,6 +1857,8 @@ def _research_lab_patch_httpx():
                 )
                 raise
             response_body, response_incomplete = _research_lab_httpx_response_body(response)
+            if _proxied_url is not None:
+                _research_lab_emit_evidence_marker(getattr(response, "headers", None), getattr(request, "method", ""), getattr(request, "url", ""), request_body)
             _research_lab_emit_trace(
                 getattr(request, "method", ""),
                 getattr(request, "url", ""),
@@ -1820,10 +1911,20 @@ def _research_lab_patch_requests():
                 # File-like/generator bodies cannot be captured without
                 # consuming them.
                 request_body = None
+            _proxied_url = _research_lab_proxy_rewrite(getattr(request, "url", ""))
+            if _proxied_url is not None:
+                try:
+                    request.url = _proxied_url
+                    for _key, _value in _research_lab_proxy_headers().items():
+                        request.headers[_key] = _value
+                except Exception:
+                    _proxied_url = None
             stream = bool(kwargs.get("stream"))
             try:
                 response = _research_lab_original_requests_send(self, request, *args, **kwargs)
             except Exception as exc:
+                if _proxied_url is not None:
+                    _research_lab_emit_evidence_marker(getattr(getattr(exc, "response", None), "headers", None), getattr(request, "method", ""), getattr(request, "url", ""), request_body)
                 _research_lab_emit_provider_error(
                     _research_lab_generic_error_details(exc),
                     getattr(request, "url", ""),
@@ -1851,6 +1952,8 @@ def _research_lab_patch_requests():
                 except Exception:
                     response_body = None
                     response_incomplete = True
+            if _proxied_url is not None:
+                _research_lab_emit_evidence_marker(getattr(response, "headers", None), getattr(request, "method", ""), getattr(request, "url", ""), request_body)
             _research_lab_emit_trace(
                 getattr(request, "method", ""),
                 getattr(request, "url", ""),
@@ -1907,9 +2010,17 @@ def _research_lab_patch_aiohttp():
                     request_incomplete = True
             except Exception:
                 request_incomplete = True
+            _proxied_url = _research_lab_proxy_rewrite(str_or_url)
+            if _proxied_url is not None:
+                str_or_url = _proxied_url
+                headers = dict(kwargs.get("headers") or {})
+                headers.update(_research_lab_proxy_headers())
+                kwargs["headers"] = headers
             try:
                 response = await _research_lab_original_aiohttp_request(self, method, str_or_url, *args, **kwargs)
             except Exception as exc:
+                if _proxied_url is not None:
+                    _research_lab_emit_evidence_marker(getattr(exc, "headers", None), method, str_or_url, request_body)
                 _research_lab_emit_provider_error(
                     _research_lab_generic_error_details(exc),
                     str_or_url,
@@ -1930,6 +2041,8 @@ def _research_lab_patch_aiohttp():
             # it here would consume the model's stream; the ClientResponse.read
             # hook below emits a paired phase="response_body" entry once the
             # model itself reads it.
+            if _proxied_url is not None:
+                _research_lab_emit_evidence_marker(getattr(response, "headers", None), method, str_or_url, request_body)
             _research_lab_emit_trace(
                 method,
                 str_or_url,

@@ -26,6 +26,9 @@ DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS = 300
 DEFAULT_HOSTED_WORKER_RETRYABLE_FAILURE_LIMIT = 3
 DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS = 15 * 60
 DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS = (23 * 3600) + (30 * 60)
+DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP = 0.50
+DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD = 0.00005
+DEFAULT_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY = "fail_closed"
 STALE_PARENT_REBASE_REPAIR_MODEL_ID = "anthropic/claude-opus-4.8"
 STALE_PARENT_REBASE_REPAIR_TIMEOUT_SECONDS = 1200
 DEFAULT_PRIVATE_REPO_URL = ""
@@ -391,6 +394,9 @@ class ResearchLabGatewayConfig:
     private_baseline_provider_retry_rounds: int = 2
     baseline_start_utc_offset_seconds: int = DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS
     candidate_scoring_quiet_start_utc_seconds: int = DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS
+    provider_cost_cap_usd_per_icp: float = DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP
+    scrapingdog_cost_per_credit_usd: float = DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD
+    provider_cost_unknown_endpoint_policy: str = DEFAULT_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY
     benchmark_exa_api_key: str = ""
     benchmark_exa_max_rps: float = 0.0
     auto_research_min_seconds: int = 600
@@ -732,6 +738,21 @@ class ResearchLabGatewayConfig:
             candidate_scoring_quiet_start_utc_seconds=_bounded_utc_offset_seconds(
                 "RESEARCH_LAB_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS",
                 default=DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS,
+            ),
+            provider_cost_cap_usd_per_icp=max(
+                0.0,
+                _float("RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP", DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP),
+            ),
+            scrapingdog_cost_per_credit_usd=max(
+                0.0,
+                _float("RESEARCH_LAB_SCRAPINGDOG_COST_PER_CREDIT_USD", DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD),
+            ),
+            provider_cost_unknown_endpoint_policy=(
+                os.getenv(
+                    "RESEARCH_LAB_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY",
+                    DEFAULT_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY,
+                ).strip()
+                or DEFAULT_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY
             ),
             benchmark_exa_api_key=os.getenv("RESEARCH_LAB_BENCHMARK_EXA_API_KEY", ""),
             benchmark_exa_max_rps=max(
@@ -1360,6 +1381,9 @@ class ResearchLabGatewayConfig:
                 "candidate_scoring_quiet_start_utc_seconds": (
                     self.candidate_scoring_quiet_start_utc_seconds
                 ),
+                "provider_cost_cap_usd_per_icp": self.provider_cost_cap_usd_per_icp,
+                "scrapingdog_cost_per_credit_usd": self.scrapingdog_cost_per_credit_usd,
+                "provider_cost_unknown_endpoint_policy": self.provider_cost_unknown_endpoint_policy,
                 "benchmark_exa_key_configured": bool(self.benchmark_exa_api_key),
                 "benchmark_exa_max_rps": self.benchmark_exa_max_rps,
                 "auto_promotion_enabled": self.auto_promotion_enabled,

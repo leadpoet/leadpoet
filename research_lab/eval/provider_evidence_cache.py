@@ -43,6 +43,7 @@ import base64
 import hashlib
 import json
 import os
+import time
 import urllib.parse
 from typing import Any, Iterable, Mapping
 
@@ -241,6 +242,9 @@ def save_evidence_cache(
         "schema_version": EVIDENCE_CACHE_SCHEMA_VERSION,
         "rolling_window_hash": window_hash,
         "icp_ref": icp_ref,
+        # Evidence is valid only for the UTC day it was recorded: at 00:00
+        # UTC the window rotates and every input must be re-recorded fresh.
+        "utc_day": time.strftime("%Y-%m-%d", time.gmtime()),
         "entries": {
             str(k): v
             for k, v in ((str(k), _normalize_record(v)) for k, v in cache.items())
@@ -256,6 +260,10 @@ def save_evidence_cache(
 def load_evidence_cache(path: str) -> dict[str, dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as handle:
         doc = json.load(handle)
+    if isinstance(doc, Mapping):
+        stamp = str(doc.get("utc_day") or "")
+        if stamp and stamp != time.strftime("%Y-%m-%d", time.gmtime()):
+            return {}
     entries = doc.get("entries") if isinstance(doc, Mapping) else None
     if not isinstance(entries, Mapping):
         return {}

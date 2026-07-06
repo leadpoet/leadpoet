@@ -6954,6 +6954,10 @@ class ResearchLabGatewayScoringWorker:
         evidence_cache_dir = os.getenv("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR")
         if evidence_cache_dir:
             env["RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR"] = evidence_cache_dir
+        # Every run records its provider I/O at full fidelity: cached hits
+        # replay recorded evidence, and any live call (cache miss or fresh
+        # surface) is captured completely for audit and future replay.
+        env["RESEARCH_LAB_PROVIDER_EVIDENCE_RECORD"] = "1"
         if self.proxy_url and self.config.private_model_docker_global_proxy_enabled:
             env.update(
                 {
@@ -6984,11 +6988,10 @@ class ResearchLabGatewayScoringWorker:
         are opt-in — unset config falls back to the prod values.
         """
         env = self._private_scoring_env()
-        # The baseline run seeds the replay cache: capture provider bodies at
-        # full fidelity (recorded evidence must never be truncated) and never
-        # consume a cache itself.
+        # The baseline run seeds the replay cache and must observe live
+        # providers only, so it never receives a cache to consume (recording
+        # is inherited from the base scoring env).
         env.pop("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR", None)
-        env["RESEARCH_LAB_PROVIDER_EVIDENCE_RECORD"] = "1"
         if self.config.benchmark_exa_api_key:
             env["EXA_API_KEY"] = self.config.benchmark_exa_api_key
         if self.config.benchmark_exa_max_rps > 0:

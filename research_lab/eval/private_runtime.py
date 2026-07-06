@@ -1079,17 +1079,24 @@ _research_lab_original_urlopen = urllib.request.urlopen
 # Fingerprint canonicalization mirrors
 # research_lab/eval/provider_evidence_cache.py and MUST stay in sync with it.
 def _research_lab_load_evidence_cache():
-    # A recording run seeds the cache and must observe live providers only.
-    record_flag = (os.environ.get("RESEARCH_LAB_PROVIDER_EVIDENCE_RECORD") or "").strip().lower()
-    if record_flag in ("1", "true", "yes", "on"):
-        return {}
+    # Replay is governed solely by whether a cache is supplied; runs that
+    # must observe live providers (the seeding baseline) are simply never
+    # handed a cache. Recording and replay compose: hits replay recorded
+    # evidence, live calls are captured at full fidelity.
     path = (os.environ.get("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH") or "").strip()
     if not path:
         return {}
     try:
         import json as _json
+        import time as _time
         with open(path, "r", encoding="utf-8") as handle:
             doc = _json.load(handle)
+        # Evidence expires at 00:00 UTC: a cache recorded on a previous UTC
+        # day is ignored so the same input is recorded fresh for the new day.
+        if isinstance(doc, dict):
+            stamp = str(doc.get("utc_day") or "")
+            if stamp and stamp != _time.strftime("%Y-%m-%d", _time.gmtime()):
+                return {}
         entries = doc.get("entries") if isinstance(doc, dict) else None
         if not isinstance(entries, dict):
             return {}

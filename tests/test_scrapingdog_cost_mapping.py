@@ -4,11 +4,12 @@ from qualification.validator.local_proxy import calculate_scrapingdog_credits
 def test_scrapingdog_private_model_endpoint_credit_mapping():
     cases = [
         ("google/ai_mode", {}, (10, "google_ai_mode")),
-        ("profile", {"type": "company"}, (50, "profile")),
-        ("profile", {"type": "profile", "premium": "true"}, (100, "profile (premium)")),
+        ("profile", {"type": "company"}, (100, "profile")),
+        ("profile", {"type": "profile", "premium": "true"}, (100, "profile")),
         ("profile/post", {}, (5, "profile_post")),
-        ("youtube/transcripts", {}, (1, "youtube_transcripts")),
+        ("youtube/transcripts", {}, (5, "youtube_transcripts")),
         ("tiktok/profile", {}, (5, "tiktok_profile")),
+        ("instagram/profile", {}, (15, "instagram_profile")),
         ("linkedinjobs", {}, (5, "linkedinjobs")),
     ]
 

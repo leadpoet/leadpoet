@@ -187,8 +187,8 @@ SCRAPINGDOG_ENDPOINT_CREDITS = {
     "google_serp": {"base": 5, "advanced": 10},      # Google SERP API
     
     # LinkedIn APIs
-    "linkedin": {"base": 50, "private": 100},        # LinkedIn Profile (50 normal, 100 private)
-    "profile": {"base": 50, "premium": 100},         # Current LinkedIn profile/company scraper
+    "linkedin": {"base": 50, "private": 100},        # LinkedIn Profile (legacy normal/private)
+    "profile": {"base": 100},                       # Current LinkedIn profile/company scraper
     "profile_post": {"base": 5},                     # LinkedIn Post Scraper API
     "linkedin_jobs": {"base": 5},                    # LinkedIn Jobs API
     "linkedinjobs": {"base": 5},                     # Legacy/private-model LinkedIn Jobs path
@@ -201,7 +201,7 @@ SCRAPINGDOG_ENDPOINT_CREDITS = {
     # YouTube APIs
     "youtube": {"base": 5},                          # YouTube Scraper API
     "youtube_transcript": {"base": 1},               # YouTube Transcript API
-    "youtube_transcripts": {"base": 1},              # YouTube Transcripts API
+    "youtube_transcripts": {"base": 5},              # YouTube Transcripts API
     "youtube_channel": {"base": 5},                  # YouTube Channel API
     "youtube_comment": {"base": 5},                  # YouTube Comment API
     
@@ -218,6 +218,7 @@ SCRAPINGDOG_ENDPOINT_CREDITS = {
     "twitter": {"base": 5},                          # Twitter/X Scraper API
     "x": {"base": 5},                                # X Scraper API (alias)
     "tiktok_profile": {"base": 5},                   # TikTok Profile API
+    "instagram_profile": {"base": 15},               # Instagram Profile API
     
     # E-commerce
     "walmart": {"base": 5},                          # Walmart Scraper API
@@ -330,10 +331,7 @@ def calculate_scrapingdog_credits(
         return (50, "linkedin")
 
     elif endpoint == "profile":
-        premium = query_params.get("premium", "false").lower() == "true"
-        if premium:
-            return (100, "profile (premium)")
-        return (50, "profile")
+        return (100, "profile")
     
     elif endpoint == "google_serp":
         # SERP API: 5 or 10 based on features

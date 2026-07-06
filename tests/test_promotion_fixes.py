@@ -88,6 +88,8 @@ class FakeStore:
     version_writes: list[dict[str, Any]] = field(default_factory=list)
     version_event_writes: list[dict[str, Any]] = field(default_factory=list)
     promotion_event_writes: list[dict[str, Any]] = field(default_factory=list)
+    candidate_evaluation_event_writes: list[dict[str, Any]] = field(default_factory=list)
+    scoring_dispatch_event_writes: list[dict[str, Any]] = field(default_factory=list)
     reward_obligation_writes: list[dict[str, Any]] = field(default_factory=list)
     private_benchmark_writes: list[dict[str, Any]] = field(default_factory=list)
     public_report_writes: list[dict[str, Any]] = field(default_factory=list)
@@ -135,6 +137,14 @@ class FakeStore:
         self.promotion_event_writes.append(kwargs)
         return {"promotion_event_id": f"pe-{len(self.promotion_event_writes)}", **kwargs}
 
+    async def create_candidate_evaluation_event(self, **kwargs: Any) -> dict[str, Any]:
+        self.candidate_evaluation_event_writes.append(kwargs)
+        return {"event_id": f"ce-{len(self.candidate_evaluation_event_writes)}", **kwargs}
+
+    async def create_scoring_dispatch_event(self, **kwargs: Any) -> dict[str, Any]:
+        self.scoring_dispatch_event_writes.append(kwargs)
+        return {"dispatch_event_id": f"sd-{len(self.scoring_dispatch_event_writes)}", **kwargs}
+
     async def create_champion_reward_obligation(self, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
         self.reward_obligation_writes.append(kwargs)
         return {"champion_reward_id": "cr-1"}, {"event_type": "active"}
@@ -170,6 +180,8 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
     monkeypatch.setattr(promotion, "create_private_model_version", fake.create_private_model_version)
     monkeypatch.setattr(promotion, "create_private_model_version_event", fake.create_private_model_version_event)
     monkeypatch.setattr(promotion, "create_candidate_promotion_event", fake.create_candidate_promotion_event)
+    monkeypatch.setattr(promotion, "create_candidate_evaluation_event", fake.create_candidate_evaluation_event)
+    monkeypatch.setattr(promotion, "create_scoring_dispatch_event", fake.create_scoring_dispatch_event)
     monkeypatch.setattr(promotion, "create_champion_reward_obligation", fake.create_champion_reward_obligation)
     monkeypatch.setattr(promotion, "create_private_model_benchmark_bundle", fake.create_private_model_benchmark_bundle)
     monkeypatch.setattr(promotion, "create_public_benchmark_report", fake.create_public_benchmark_report)
@@ -1321,6 +1333,82 @@ async def test_private_source_push_reconciler_applies_retry_through_promotion_pa
     assert result["results"][0]["status"] == "merged"
     assert calls[0]["candidate"]["candidate_id"] == "cand-1"
     assert calls[0]["score_bundle_row"]["score_bundle_id"] == "sb-1"
+
+
+async def test_private_source_push_reconciler_marks_fresh_stale_parent_for_rebase(store, monkeypatch):
+    _failed_private_source_push_rows(store)
+
+    async def _fake_process(self: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"status": "stale_parent_needs_rescore"}
+
+    monkeypatch.setattr(ResearchLabPromotionController, "process_scored_candidate", _fake_process)
+
+    result = await reconcile_failed_private_source_pushes(
+        _reward_config(),
+        worker_ref="test-reconciler",
+        dry_run=False,
+        retry_after_seconds=0,
+    )
+
+    assert result["retried"] == 1
+    entry = result["results"][0]
+    assert entry["status"] == "stale_parent_needs_rescore"
+    assert entry["stale_parent_rebase_eligible"] is True
+    assert entry["stale_parent_recovery_event_status"] == "marked"
+    assert store.candidate_evaluation_event_writes == [
+        {
+            "candidate_id": "cand-1",
+            "run_id": "run-1",
+            "ticket_id": "ticket-1",
+            "event_type": "rejected",
+            "candidate_status": "rejected",
+            "evaluator_ref": "test-reconciler",
+            "reason": "stale_parent_needs_rescore",
+            "score_bundle_id": "sb-1",
+            "event_doc": store.candidate_evaluation_event_writes[0]["event_doc"],
+        }
+    ]
+    assert store.candidate_evaluation_event_writes[0]["event_doc"]["reason"] == (
+        "private_source_push_failed_retry_stale_parent"
+    )
+    assert store.scoring_dispatch_event_writes[0]["dispatch_status"] == "rejected"
+    assert store.scoring_dispatch_event_writes[0]["event_doc"]["dispatch_context"] == (
+        "private_source_push_reconcile"
+    )
+
+
+async def test_private_source_push_reconciler_marks_existing_stale_parent_event_for_rebase(store, monkeypatch):
+    _failed_private_source_push_rows(store)
+    store.select_many_results["research_lab_candidate_promotion_events"] = [
+        {
+            "promotion_event_id": "pe-stale",
+            "candidate_id": "cand-1",
+            "source_score_bundle_id": "sb-1",
+            "event_type": "stale_parent_detected",
+            "promotion_status": "rebase_required",
+            "event_doc": {"reason": "stale_parent_needs_rescore"},
+            "created_at": "2026-07-01T00:02:00+00:00",
+        }
+    ]
+
+    async def _fake_process(self: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("existing stale-parent promotion event should not be retried")
+
+    monkeypatch.setattr(ResearchLabPromotionController, "process_scored_candidate", _fake_process)
+
+    result = await reconcile_failed_private_source_pushes(
+        _reward_config(),
+        worker_ref="test-reconciler",
+        dry_run=False,
+        retry_after_seconds=0,
+    )
+
+    entry = result["results"][0]
+    assert entry["status"] == "stale_parent_needs_rescore"
+    assert entry["latest_promotion_event_id"] == "pe-stale"
+    assert entry["stale_parent_rebase_eligible"] is True
+    assert store.candidate_evaluation_event_writes[0]["reason"] == "stale_parent_needs_rescore"
+    assert store.candidate_evaluation_event_writes[0]["event_doc"]["latest_promotion_event_id"] == "pe-stale"
 
 
 async def test_private_source_push_reconciler_respects_event_backoff(store, monkeypatch):

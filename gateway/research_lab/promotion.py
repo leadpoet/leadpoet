@@ -21,6 +21,7 @@ from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.public_benchmarks import build_public_benchmark_report
 from gateway.research_lab.store import (
     canonical_hash,
+    create_candidate_evaluation_event,
     create_candidate_promotion_event,
     create_champion_reward_obligation,
     create_private_model_benchmark_bundle,
@@ -28,6 +29,7 @@ from gateway.research_lab.store import (
     create_private_model_version_event,
     create_private_repo_commit_event,
     create_public_benchmark_report,
+    create_scoring_dispatch_event,
     select_many,
     select_one,
 )
@@ -2776,6 +2778,99 @@ def _promotion_event_doc(row: Mapping[str, Any]) -> dict[str, Any]:
     return dict(doc) if isinstance(doc, Mapping) else {}
 
 
+def _candidate_already_marked_stale_parent(candidate: Mapping[str, Any]) -> bool:
+    return (
+        str(candidate.get("current_candidate_status") or "") == "rejected"
+        and str(candidate.get("current_reason") or "") == "stale_parent_needs_rescore"
+    )
+
+
+async def _mark_private_source_push_stale_parent_for_rebase(
+    *,
+    candidate: Mapping[str, Any],
+    score_bundle_id: str,
+    worker_ref: str,
+    failed_promotion_event_id: str,
+    latest_promotion_event_id: str = "",
+    promotion_result: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Move a scored private-source retry into the normal stale-parent queue.
+
+    The original scoring path immediately calls the scoring worker's rebase
+    helper when promotion returns ``stale_parent_needs_rescore``. The background
+    private-source reconciler lives in promotion.py, so it cannot directly import
+    the worker helper without a circular dependency. Instead it records the same
+    append-only candidate state the recovery operator already consumes.
+    """
+
+    candidate_id = str(candidate.get("candidate_id") or "")
+    if not candidate_id:
+        return {"stale_parent_recovery_event_status": "candidate_missing_id"}
+    if _candidate_already_marked_stale_parent(candidate):
+        return {"stale_parent_recovery_event_status": "already_marked"}
+
+    run_id = str(candidate.get("run_id") or "")
+    ticket_id = str(candidate.get("ticket_id") or "")
+    if not run_id or not ticket_id:
+        return {
+            "stale_parent_recovery_event_status": "missing_candidate_refs",
+            "has_run_id": bool(run_id),
+            "has_ticket_id": bool(ticket_id),
+        }
+
+    event_doc = {
+        "reason": "private_source_push_failed_retry_stale_parent",
+        "source": "reconcile_failed_private_source_pushes",
+        "failed_promotion_event_id": failed_promotion_event_id,
+        "latest_promotion_event_id": latest_promotion_event_id,
+        "score_bundle_id": score_bundle_id,
+        "previous_candidate_status": candidate.get("current_candidate_status"),
+        "previous_candidate_reason": candidate.get("current_reason"),
+        "parent_artifact_hash": candidate.get("parent_artifact_hash"),
+        "candidate_artifact_hash": candidate.get("candidate_artifact_hash"),
+        "reimbursement_preserved": True,
+        "reimbursement_source": "hosted_loop_completion",
+    }
+    if promotion_result:
+        event_doc["promotion_result_status"] = str(promotion_result.get("status") or "")
+
+    evaluation_event = await create_candidate_evaluation_event(
+        candidate_id=candidate_id,
+        run_id=run_id,
+        ticket_id=ticket_id,
+        event_type="rejected",
+        candidate_status="rejected",
+        evaluator_ref=worker_ref,
+        reason="stale_parent_needs_rescore",
+        score_bundle_id=score_bundle_id or None,
+        event_doc=event_doc,
+    )
+    dispatch_event = await create_scoring_dispatch_event(
+        dispatch_type="candidate_scoring",
+        dispatch_status="rejected",
+        worker_ref=worker_ref,
+        candidate_id=candidate_id,
+        run_id=run_id,
+        ticket_id=ticket_id,
+        score_bundle_id=score_bundle_id or None,
+        event_doc={
+            **event_doc,
+            "reason": "stale_parent_needs_rescore",
+            "dispatch_context": "private_source_push_reconcile",
+        },
+    )
+    return {
+        "stale_parent_recovery_event_status": "marked",
+        "stale_parent_rebase_eligible": True,
+        "candidate_evaluation_event_id": str(
+            evaluation_event.get("candidate_evaluation_event_id")
+            or evaluation_event.get("event_id")
+            or ""
+        ),
+        "dispatch_event_id": str(dispatch_event.get("dispatch_event_id") or ""),
+    }
+
+
 async def reconcile_failed_private_source_pushes(
     config: ResearchLabGatewayConfig,
     *,
@@ -2892,9 +2987,35 @@ async def reconcile_failed_private_source_pushes(
         latest_scoped = scoped_events[0] if scoped_events else {}
         latest_type = str(latest_scoped.get("event_type") or "")
         latest_status = str(latest_scoped.get("promotion_status") or "")
-        if latest_type == "stale_parent_detected" or latest_status in {"rebase_required", "rebenchmarking"}:
+        if latest_type == "rebase_queued" or latest_status == "rebenchmarking":
+            entry["status"] = "stale_parent_rebase_already_queued"
+            entry["latest_promotion_event_id"] = str(latest_scoped.get("promotion_event_id") or "")
+            results.append(entry)
+            continue
+        if latest_type == "stale_parent_detected" or latest_status == "rebase_required":
             entry["status"] = "stale_parent_rebase_required"
             entry["latest_promotion_event_id"] = str(latest_scoped.get("promotion_event_id") or "")
+            candidate = await select_one(
+                "research_lab_candidate_evaluation_current",
+                filters=(("candidate_id", candidate_id),),
+            )
+            if candidate and dry_run:
+                if not _candidate_already_marked_stale_parent(candidate):
+                    entry["status"] = "would_mark_stale_parent_needs_rescore"
+                    entry["stale_parent_rebase_eligible"] = True
+                results.append(entry)
+                continue
+            if candidate:
+                marker = await _mark_private_source_push_stale_parent_for_rebase(
+                    candidate=candidate,
+                    score_bundle_id=score_bundle_id,
+                    worker_ref=worker_ref,
+                    failed_promotion_event_id=str(event.get("promotion_event_id") or ""),
+                    latest_promotion_event_id=str(latest_scoped.get("promotion_event_id") or ""),
+                )
+                entry.update(marker)
+                if marker.get("stale_parent_rebase_eligible"):
+                    entry["status"] = "stale_parent_needs_rescore"
             results.append(entry)
             continue
 
@@ -2958,6 +3079,20 @@ async def reconcile_failed_private_source_pushes(
             continue
         entry["status"] = str(promotion_result.get("status") or "unknown")
         entry["promotion_result"] = promotion_result
+        if entry["status"] == "stale_parent_needs_rescore":
+            marker = await _mark_private_source_push_stale_parent_for_rebase(
+                candidate=candidate,
+                score_bundle_id=score_bundle_id,
+                worker_ref=worker_ref,
+                failed_promotion_event_id=str(event.get("promotion_event_id") or ""),
+                latest_promotion_event_id=str(
+                    promotion_result.get("promotion_event_id")
+                    or promotion_result.get("latest_promotion_event_id")
+                    or ""
+                ),
+                promotion_result=promotion_result,
+            )
+            entry.update(marker)
         results.append(entry)
 
     retried_statuses = {
@@ -2966,6 +3101,7 @@ async def reconcile_failed_private_source_pushes(
         "source_pushed_manifest_pending",
         "failed",
         "stale_parent_needs_rescore",
+        "stale_parent_rebase_already_queued",
     }
     retried = sum(1 for item in results if item.get("status") in retried_statuses)
     finalized = sum(1 for item in results if item.get("status") in {"merged", "already_promoted"})

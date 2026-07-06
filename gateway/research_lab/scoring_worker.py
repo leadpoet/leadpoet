@@ -2011,6 +2011,31 @@ class ResearchLabGatewayScoringWorker:
                         self.worker_ref,
                         _short_error(exc),
                     )
+                stale_rebase_ids = [
+                    str(item.get("candidate_id") or "")
+                    for item in (private_source_reconcile_result or {}).get("results", [])
+                    if item.get("stale_parent_rebase_eligible")
+                ]
+                stale_rebase_ids = [candidate_id for candidate_id in stale_rebase_ids if candidate_id]
+                if stale_rebase_ids:
+                    try:
+                        from .recovery import rebase_stale_parent_candidates as rebase_reconciled_stale_parents
+
+                        rebase_result = await rebase_reconciled_stale_parents(
+                            candidate_ids=stale_rebase_ids,
+                            dry_run=False,
+                            max_batch_size=len(stale_rebase_ids),
+                            actor_ref=self.worker_ref,
+                        )
+                        private_source_reconcile_result["stale_parent_rebase_result"] = rebase_result
+                    except Exception as exc:  # noqa: BLE001 - never fail the scoring pass
+                        private_source_reconcile_result["stale_parent_rebase_error"] = _short_error(exc)
+                        logger.warning(
+                            "research_lab_private_source_push_stale_parent_rebase_failed worker_ref=%s candidates=%s error=%s",
+                            self.worker_ref,
+                            ",".join(compact_ref(candidate_id) for candidate_id in stale_rebase_ids),
+                            _short_error(exc),
+                        )
 
         processed: list[str] = []
         claim_capacity: dict[str, Any] = {"available": True}

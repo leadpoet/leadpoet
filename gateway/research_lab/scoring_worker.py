@@ -128,6 +128,7 @@ from research_lab.eval.evaluator import (
 )
 from gateway.research_lab import global_icp_queue
 from research_lab.eval.private_runtime import (
+    PROVIDER_COST_EVALUATION_SCOPE_ENV,
     begin_incontainer_trace_collection,
     end_incontainer_trace_collection,
     incontainer_trace_capture_enabled,
@@ -2508,7 +2509,17 @@ class ResearchLabGatewayScoringWorker:
                 image_digest=candidate_artifact.image_digest,
                 timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
                 env_passthrough=self._private_model_env_passthrough(),
-                extra_env=self._private_scoring_env(),
+                extra_env=self._with_provider_cost_evaluation_scope(
+                    self._private_scoring_env(),
+                    run_type="candidate_scoring",
+                    rolling_window_hash=window.window_hash,
+                    artifact_hash=candidate_artifact.model_artifact_hash,
+                    candidate_id=candidate_id,
+                    run_id=str(candidate.get("run_id") or ""),
+                    ticket_id=str(candidate.get("ticket_id") or ""),
+                    evaluation_epoch=evaluation_epoch,
+                    started_at=time.time(),
+                ),
             )
         )
         run_context = self._candidate_run_context(
@@ -3353,7 +3364,7 @@ class ResearchLabGatewayScoringWorker:
                     )
                 )
                 return
-            await create_scoring_dispatch_event(
+            assigned_dispatch_event = await create_scoring_dispatch_event(
                 dispatch_type="candidate_scoring",
                 dispatch_status="assigned",
                 worker_ref=self.worker_ref,
@@ -3432,7 +3443,18 @@ class ResearchLabGatewayScoringWorker:
                     image_digest=candidate_artifact.image_digest,
                     timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
                     env_passthrough=self._private_model_env_passthrough(),
-                    extra_env=self._private_scoring_env(),
+                    extra_env=self._with_provider_cost_evaluation_scope(
+                        self._private_scoring_env(),
+                        run_type="candidate_scoring",
+                        rolling_window_hash=window.window_hash,
+                        artifact_hash=candidate_artifact.model_artifact_hash,
+                        candidate_id=candidate_id,
+                        run_id=str(candidate.get("run_id") or ""),
+                        ticket_id=str(candidate.get("ticket_id") or ""),
+                        dispatch_event_id=str(assigned_dispatch_event.get("dispatch_event_id") or ""),
+                        evaluation_epoch=evaluation_epoch,
+                        started_at=start,
+                    ),
                 )
             )
             run_context = self._candidate_run_context(
@@ -5037,12 +5059,30 @@ class ResearchLabGatewayScoringWorker:
         through the same batch machinery as the parallel baseline — provider
         retry rounds, benchmark Exa isolation, and §0-N6 scorer isolation
         included, so both sides run under the identical execution regime."""
+        confirmation_scope = getattr(self, "_confirmation_trace_scope", None)
+        confirmation_scope = confirmation_scope if isinstance(confirmation_scope, Mapping) else {}
+        confirmation_attempt = None
+        try:
+            if confirmation_scope.get("attempt") is not None:
+                confirmation_attempt = int(confirmation_scope.get("attempt"))
+        except (TypeError, ValueError):
+            confirmation_attempt = None
+        confirmation_candidate_id = str(confirmation_scope.get("candidate_id") or "")
         runner = DockerPrivateModelRunner(
             DockerPrivateModelSpec(
                 image_digest=artifact.image_digest,
                 timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
                 env_passthrough=self._private_model_env_passthrough(),
-                extra_env=self._private_baseline_scoring_env(),
+                extra_env=self._with_provider_cost_evaluation_scope(
+                    self._private_baseline_scoring_env(),
+                    run_type="promotion_confirmation",
+                    rolling_window_hash=window.window_hash,
+                    artifact_hash=artifact.model_artifact_hash,
+                    candidate_id=confirmation_candidate_id,
+                    confirmation_attempt=confirmation_attempt,
+                    side=mode_label,
+                    started_at=run_start,
+                ),
             )
         )
         retry_runner = DockerPrivateModelRunner(
@@ -5050,7 +5090,16 @@ class ResearchLabGatewayScoringWorker:
                 image_digest=artifact.image_digest,
                 timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
                 env_passthrough=self._private_model_env_passthrough(),
-                extra_env=self._private_baseline_retry_scoring_env(),
+                extra_env=self._with_provider_cost_evaluation_scope(
+                    self._private_baseline_retry_scoring_env(),
+                    run_type="promotion_confirmation",
+                    rolling_window_hash=window.window_hash,
+                    artifact_hash=artifact.model_artifact_hash,
+                    candidate_id=confirmation_candidate_id,
+                    confirmation_attempt=confirmation_attempt,
+                    side=mode_label,
+                    started_at=run_start,
+                ),
                 # The first-pass runner already pulled this digest.
                 pull_before_run=False,
             )
@@ -5989,7 +6038,16 @@ class ResearchLabGatewayScoringWorker:
                 image_digest=artifact.image_digest,
                 timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
                 env_passthrough=self._private_model_env_passthrough(),
-                extra_env=self._private_baseline_scoring_env(),
+                extra_env=self._with_provider_cost_evaluation_scope(
+                    self._private_baseline_scoring_env(),
+                    run_type="private_baseline_rebenchmark",
+                    rolling_window_hash=window.window_hash,
+                    artifact_hash=artifact.model_artifact_hash,
+                    benchmark_date=today,
+                    benchmark_attempt=benchmark_attempt,
+                    evaluation_epoch=evaluation_epoch,
+                    started_at=start,
+                ),
             )
         )
         scorer = QualificationStyleCompanyScorer()
@@ -6111,7 +6169,16 @@ class ResearchLabGatewayScoringWorker:
                         image_digest=artifact.image_digest,
                         timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
                         env_passthrough=self._private_model_env_passthrough(),
-                        extra_env=self._private_baseline_retry_scoring_env(),
+                        extra_env=self._with_provider_cost_evaluation_scope(
+                            self._private_baseline_retry_scoring_env(),
+                            run_type="private_baseline_rebenchmark",
+                            rolling_window_hash=window.window_hash,
+                            artifact_hash=artifact.model_artifact_hash,
+                            benchmark_date=today,
+                            benchmark_attempt=benchmark_attempt,
+                            evaluation_epoch=evaluation_epoch,
+                            started_at=start,
+                        ),
                         # The first-pass runner already pulled this digest.
                         pull_before_run=False,
                     )
@@ -7758,6 +7825,55 @@ class ResearchLabGatewayScoringWorker:
 
         env.update(incontainer_trace_corpus_env())
         return env
+
+    def _with_provider_cost_evaluation_scope(
+        self,
+        env: Mapping[str, str],
+        *,
+        run_type: str,
+        rolling_window_hash: str = "",
+        artifact_hash: str = "",
+        candidate_id: str = "",
+        run_id: str = "",
+        ticket_id: str = "",
+        dispatch_event_id: str = "",
+        benchmark_date: str = "",
+        benchmark_attempt: int | None = None,
+        confirmation_attempt: int | None = None,
+        side: str = "",
+        evaluation_epoch: int | None = None,
+        started_at: float | None = None,
+    ) -> dict[str, str]:
+        scoped = dict(env)
+        scope_doc: dict[str, Any] = {
+            "schema_version": "research_lab_provider_cost_evaluation_scope.v1",
+            "run_type": str(run_type or "unknown"),
+            "worker_ref": self.worker_ref,
+        }
+        optional_values: dict[str, Any] = {
+            "rolling_window_hash": rolling_window_hash,
+            "artifact_hash": artifact_hash,
+            "candidate_id": candidate_id,
+            "run_id": run_id,
+            "ticket_id": ticket_id,
+            "dispatch_event_id": dispatch_event_id,
+            "benchmark_date": benchmark_date,
+            "side": side,
+        }
+        for key, value in optional_values.items():
+            text = str(value or "").strip()
+            if text:
+                scope_doc[key] = text
+        if benchmark_attempt is not None:
+            scope_doc["benchmark_attempt"] = int(benchmark_attempt)
+        if confirmation_attempt is not None:
+            scope_doc["confirmation_attempt"] = int(confirmation_attempt)
+        if evaluation_epoch is not None:
+            scope_doc["evaluation_epoch"] = int(evaluation_epoch)
+        if started_at is not None:
+            scope_doc["started_at_ms"] = int(float(started_at) * 1000)
+        scoped[PROVIDER_COST_EVALUATION_SCOPE_ENV] = sha256_json(scope_doc)
+        return scoped
 
     def _private_baseline_scoring_env(self) -> dict[str, str]:
         """Candidate scoring env with the benchmark's dedicated Exa budget.

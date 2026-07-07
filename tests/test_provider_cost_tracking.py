@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import subprocess
 import threading
 import urllib.parse
 import urllib.request
@@ -9,6 +10,12 @@ from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from gateway.research_lab import provider_evidence_proxy
+from research_lab.canonical import sha256_json
+from research_lab.eval.private_runtime import (
+    DockerPrivateModelRunner,
+    DockerPrivateModelSpec,
+    PROVIDER_COST_EVALUATION_SCOPE_ENV,
+)
 from research_lab.eval.provider_costs import (
     DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
     ProviderCostEstimate,
@@ -22,6 +29,56 @@ from research_lab.eval.provider_costs import (
     scrapingdog_credits_for_url,
     summarize_provider_cost_trace_entries,
 )
+
+
+def _docker_cost_scope_for_seed(monkeypatch, evaluation_scope: str) -> str:
+    captured_commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):  # noqa: ANN001
+        captured_commands.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    image_digest = "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:" + "a" * 64
+    runner = DockerPrivateModelRunner(
+        DockerPrivateModelSpec(
+            image_digest=image_digest,
+            pull_before_run=False,
+            extra_env={PROVIDER_COST_EVALUATION_SCOPE_ENV: evaluation_scope},
+        )
+    )
+    stdin_payload = {"icp": {"id": "icp-1"}, "context": {"mode": "private_baseline"}}
+    runner._run_json(
+        bootstrap="print([])",
+        argv=("research_lab_adapter", "run_icp"),
+        stdin_payload=stdin_payload,
+    )
+    command = captured_commands[-1]
+    scope_args = [
+        value
+        for index, value in enumerate(command)
+        if index > 0
+        and command[index - 1] == "-e"
+        and value.startswith("RESEARCH_LAB_PROVIDER_COST_SCOPE=")
+    ]
+    assert len(scope_args) == 1
+    expected = sha256_json(
+        {
+            "image_digest": image_digest,
+            "argv": ["research_lab_adapter", "run_icp"],
+            "stdin_payload": stdin_payload,
+            "evaluation_scope": evaluation_scope,
+        }
+    )
+    assert scope_args[0] == f"RESEARCH_LAB_PROVIDER_COST_SCOPE={expected}"
+    return scope_args[0]
+
+
+def test_docker_provider_cost_scope_includes_evaluation_scope(monkeypatch):
+    first = _docker_cost_scope_for_seed(monkeypatch, "sha256:" + "1" * 64)
+    second = _docker_cost_scope_for_seed(monkeypatch, "sha256:" + "2" * 64)
+
+    assert first != second
 
 
 def test_scrapingdog_cost_map_uses_current_endpoint_credits():

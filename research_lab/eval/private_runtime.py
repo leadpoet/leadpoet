@@ -67,6 +67,7 @@ PROVIDER_COST_ENV_PASSTHROUGH = (
     "RESEARCH_LAB_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS",
     "RESEARCH_LAB_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY",
 )
+PROVIDER_COST_EVALUATION_SCOPE_ENV = "RESEARCH_LAB_PROVIDER_COST_EVALUATION_SCOPE"
 DEFAULT_DOCKER_PLATFORM = "linux/amd64"
 DEFAULT_ENV_PASSTHROUGH = (
     "EXA_API_KEY",
@@ -513,13 +514,17 @@ class DockerPrivateModelRunner:
                 "-e",
                 f"RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH={container_cache_path}",
             ]
-        provider_cost_scope = sha256_json(
-            {
-                "image_digest": self.spec.image_digest,
-                "argv": list(argv),
-                "stdin_payload": stdin_payload,
-            }
-        )
+        provider_cost_scope_doc: dict[str, Any] = {
+            "image_digest": self.spec.image_digest,
+            "argv": list(argv),
+            "stdin_payload": stdin_payload,
+        }
+        evaluation_scope = str(extra_env.get(PROVIDER_COST_EVALUATION_SCOPE_ENV) or "").strip()
+        if evaluation_scope:
+            if len(evaluation_scope) > 512 or _contains_secret_material(evaluation_scope):
+                raise PrivateModelRuntimeError("provider cost evaluation scope is unsafe")
+            provider_cost_scope_doc["evaluation_scope"] = evaluation_scope
+        provider_cost_scope = sha256_json(provider_cost_scope_doc)
         provider_cost_args = [
             "-e",
             f"RESEARCH_LAB_PROVIDER_COST_SCOPE={provider_cost_scope}",

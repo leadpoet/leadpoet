@@ -32,13 +32,19 @@ reset_orphaned_docker_storage_if_needed() {
      && [ "${CONTAINER_COUNT:-0}" -eq 0 ] \
      && [ "${VOLUME_COUNT:-0}" -eq 0 ] \
      && { [ "${OVERLAY_KB:-0}" -gt $((1024 * 1024)) ] || [ "${OVERLAY_DIRS:-0}" -gt 0 ]; }; then
-    echo "Detected orphaned Docker storage with no tracked Docker objects; resetting Docker storage"
+    echo "Detected orphaned Docker storage with no tracked Docker objects; resetting full Docker data root"
     echo "orphaned overlay usage: ${OVERLAY_KB:-0} KiB across ${OVERLAY_DIRS:-0} dirs"
     sudo systemctl stop docker.socket docker 2>/dev/null || true
-    sudo rm -rf /var/lib/docker/overlay2 /var/lib/docker/buildkit /var/lib/docker/tmp
-    sudo mkdir -p /var/lib/docker/overlay2 /var/lib/docker/buildkit /var/lib/docker/tmp
+    sudo rm -rf /var/lib/docker
+    sudo mkdir -p /var/lib/docker
     sudo systemctl start docker
-    sleep 5
+    for _ in $(seq 1 20); do
+      if sudo docker info >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
+    sudo docker system df 2>/dev/null || true
   fi
 }
 

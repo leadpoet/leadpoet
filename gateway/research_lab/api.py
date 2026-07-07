@@ -7,7 +7,7 @@ require explicit Research Lab flags and write only Research Lab tables/events.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -36,6 +36,7 @@ from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayC
 from .key_vault import (
     OpenRouterKeyVaultError,
     encrypt_openrouter_key,
+    encrypt_source_add_credential,
     openrouter_key_ref,
     preflight_openrouter_key,
     verify_openrouter_workspace_privacy,
@@ -62,6 +63,8 @@ from .models import (
     ResearchLabResumeCreditBlockedResponse,
     ResearchLabScoreBundleCreateRequest,
     ResearchLabScoreBundleResponse,
+    ResearchLabSourceAdapterSubmissionRequest,
+    ResearchLabSourceAdapterSubmissionResponse,
     ResearchLabTicketCreateRequest,
     ResearchLabTicketResponse,
     reject_secret_material,
@@ -88,12 +91,14 @@ from .store import (
     create_ticket_event,
     insert_row,
     payment_ref_exists,
+    persist_source_add_submission,
     select_all,
     select_many,
     select_one,
     update_row,
 )
 from research_lab.improvement_engine.config import ImprovementEngineConfig
+from research_lab.source_add_execution import intake_source_add_submission
 from research_lab.improvement_engine.fix_generator import sanitized_miner_opportunity
 from research_lab.improvement_engine.scanner import scan_for_issues
 
@@ -235,6 +240,107 @@ async def create_research_lab_probe(payload: ResearchLabProbeRequest):
         "event_id": event["event_id"],
         "event_seq": int(event["seq"]),
     }
+
+
+async def _source_add_intake_context(miner_hotkey: str) -> tuple[int, int, list[str]]:
+    """(open submissions, submissions last 30d, existing catalog domains).
+
+    Best-effort reads: before the scripts/72 migration the tables are absent
+    and everything counts as zero/empty (the endpoint is flag-gated anyway).
+    """
+
+    open_count = 0
+    last_30d_count = 0
+    try:
+        rows = await select_all(
+            "research_lab_source_add_submission_current",
+            filters=(("miner_hotkey", miner_hotkey),),
+        )
+    except Exception:
+        rows = []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    for row in rows:
+        stage = str(row.get("stage") or "")
+        if stage not in {"accepted", "rejected"}:
+            open_count += 1
+        created_raw = str(row.get("created_at") or "")
+        try:
+            created_at = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if created_at >= cutoff:
+            last_30d_count += 1
+    domains: list[str] = []
+    try:
+        catalog_rows = await select_all("research_lab_source_catalog", columns="declared_base_domains")
+    except Exception:
+        catalog_rows = []
+    for row in catalog_rows:
+        declared = row.get("declared_base_domains")
+        if isinstance(declared, list):
+            domains.extend(str(item) for item in declared)
+    return open_count, last_30d_count, domains
+
+
+@router.post("/source-adapters", response_model=ResearchLabSourceAdapterSubmissionResponse)
+async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSubmissionRequest):
+    """W5 SOURCE_ADD intake: manifest validation, anti-spam caps, catalog
+    dedupe, KMS credential envelope. The funnel (static scan → LLM review →
+    sandboxed trial → acceptance) runs from the persisted submission."""
+
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
+    _require_enabled(config.miner_submissions_enabled, "Research Lab miner submissions are disabled")
+    _require_enabled(config.source_add_enabled, "Research Lab SOURCE_ADD submissions are disabled")
+    await _verify_signed_miner(payload)
+    await _enforce_research_lab_submission_rate_limit(payload.miner_hotkey, route="source_adapters")
+
+    kms_key_id = config.source_add_credential_kms_key_id or config.openrouter_key_kms_key_id
+    if payload.adapter_credential and not kms_key_id:
+        raise HTTPException(status_code=503, detail="SOURCE_ADD credential KMS key is not configured")
+
+    open_count, last_30d_count, catalog_domains = await _source_add_intake_context(payload.miner_hotkey)
+
+    def _kms_encrypt(raw_credential: str, miner_hotkey: str, adapter_ref: str) -> dict[str, str]:
+        return encrypt_source_add_credential(
+            raw_credential=raw_credential,
+            kms_key_id=kms_key_id,
+            miner_hotkey=miner_hotkey,
+            adapter_ref=adapter_ref,
+        )
+
+    try:
+        record, errors = await asyncio.to_thread(
+            intake_source_add_submission,
+            payload.manifest,
+            miner_hotkey=payload.miner_hotkey,
+            raw_credential=payload.adapter_credential or "",
+            source_brief=payload.source_brief or "",
+            submitted_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            existing_catalog_domains=catalog_domains,
+            open_submission_count_for_hotkey=open_count,
+            submissions_last_30d_for_hotkey=last_30d_count,
+            max_concurrent_per_hotkey=config.source_add_max_concurrent_per_hotkey,
+            max_per_30d_per_hotkey=config.source_add_max_per_30d_per_hotkey,
+            kms_encrypt=_kms_encrypt,
+        )
+    except OpenRouterKeyVaultError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if errors or record is None:
+        raise HTTPException(status_code=400, detail="; ".join(errors or ["submission rejected"]))
+
+    try:
+        await persist_source_add_submission(record.to_dict())
+    except Exception as exc:
+        _raise_storage_error(exc)
+
+    return ResearchLabSourceAdapterSubmissionResponse(
+        submission_id=record.submission_id,
+        adapter_id=record.adapter_id,
+        stage=record.stage,
+        credential_ref=record.credential_envelope.get("credential_ref") or None,
+    )
 
 
 _TERMINAL_CANDIDATE_STATUSES = {"scored", "rejected", "failed"}

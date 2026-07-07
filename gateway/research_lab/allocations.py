@@ -190,6 +190,7 @@ async def _active_champion_obligations(epoch: int, *, netuid: int) -> tuple[list
                 filters=(("current_reward_status", status), ("start_epoch", "lte", int(epoch))),
             )
         )
+    champion_rows.extend(await _active_source_add_reward_rows(int(epoch)))
     paid_by_reward = await _champion_paid_alpha_to_date(epoch=int(epoch), netuid=int(netuid), champion_rows=champion_rows)
     hotkey_uids = await resolve_hotkey_uids(str(row.get("miner_hotkey") or "") for row in champion_rows)
     obligations: list[dict[str, Any]] = []
@@ -218,10 +219,54 @@ async def _active_champion_obligations(epoch: int, *, netuid: int) -> tuple[list
                 "run_id": str(row.get("run_id") or ""),
                 "island": str(row.get("island") or "generalist"),
                 "status": "active",
+                # W6: SOURCE_ADD reward legs ride these rails; reward_kind
+                # labels them ("source_acceptance"/"source_implementation")
+                # without any validator-side change.
+                "reward_kind": str(row.get("reward_kind") or "champion"),
                 **replay_obligation,
             }
         )
     return obligations, skipped
+
+
+async def _active_source_add_reward_rows(epoch: int) -> list[dict[str, Any]]:
+    """W6: SOURCE_ADD reward legs as champion-shaped obligation rows.
+
+    The source-add reward view exposes ``desired_alpha_percent``/``epoch_count``
+    column aliases so rows flow through the champion obligation path (and the
+    validator) unchanged, labeled by ``reward_kind``. Best-effort: before the
+    scripts/72 migration (or with the feature off) the view is absent and this
+    contributes nothing.
+    """
+
+    rows: list[dict[str, Any]] = []
+    for status in sorted(ACTIVE_CHAMPION_STATUSES):
+        try:
+            source_rows = await select_all(
+                "research_lab_source_add_reward_current",
+                filters=(("current_reward_status", status), ("start_epoch", "lte", int(epoch))),
+            )
+        except Exception:
+            return []
+        for row in source_rows:
+            rows.append(
+                {
+                    "champion_reward_id": str(row.get("reward_ref") or ""),
+                    "miner_hotkey": str(row.get("miner_hotkey") or ""),
+                    "candidate_id": "",
+                    "score_bundle_id": "",
+                    "run_id": "",
+                    "island": "generalist",
+                    "current_reward_status": str(row.get("current_reward_status") or ""),
+                    "desired_alpha_percent": float(row.get("desired_alpha_percent") or row.get("alpha_percent") or 0.0),
+                    "start_epoch": int(row.get("start_epoch") or 0),
+                    "epoch_count": int(row.get("epoch_count") or row.get("reward_epochs") or 0),
+                    "improvement_points": 0.0,
+                    "threshold_points": 0.0,
+                    "reward_kind": str(row.get("reward_kind") or ""),
+                }
+            )
+    return rows
 
 
 async def _champion_paid_alpha_to_date(

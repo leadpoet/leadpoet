@@ -92,6 +92,37 @@ class ResearchLabLoopDiagnosticsRequest(SignedResearchLabRequest):
     candidate_id: Optional[str] = Field(default=None, min_length=8, max_length=256)
 
 
+class ResearchLabSourceAdapterSubmissionRequest(SignedResearchLabRequest):
+    """W5 SOURCE_ADD submission: adapter manifest (+ optional provider key).
+
+    ``adapter_credential`` is KMS-encrypted at intake and never stored raw;
+    it is only accepted when the manifest declares ``credential_ref_only``.
+    """
+
+    manifest: dict[str, Any] = Field()
+    source_brief: Optional[str] = Field(default=None, max_length=2000)
+    adapter_credential: Optional[str] = Field(default=None, min_length=8, max_length=512)
+
+    @field_validator("source_brief")
+    @classmethod
+    def brief_has_no_secret_material(cls, value: Optional[str]) -> Optional[str]:
+        if value:
+            reject_secret_material(value)
+        return value
+
+    def signed_payload(self) -> dict[str, Any]:
+        # The raw credential must never enter the signature payload path
+        # (it would land in logs/refs); sign everything else.
+        return self.model_dump(exclude={"signature", "adapter_credential"}, exclude_unset=True, mode="json")
+
+
+class ResearchLabSourceAdapterSubmissionResponse(BaseModel):
+    submission_id: str
+    adapter_id: str
+    stage: str
+    credential_ref: Optional[str] = None
+
+
 class ResearchLabOpenRouterKeyRegisterRequest(SignedResearchLabRequest):
     openrouter_api_key: str = Field(min_length=1, max_length=512)
     openrouter_management_key: str = Field(min_length=1, max_length=512)

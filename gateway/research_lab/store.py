@@ -85,6 +85,41 @@ def insert_row_sync(table: str, row: dict[str, Any]) -> dict[str, Any]:
     return dict(data[0])
 
 
+async def persist_source_add_submission(record_doc: dict[str, Any]) -> None:
+    """Persist a SOURCE_ADD submission's funnel stages (W5, append-only).
+
+    One row per ``stage_history`` entry, keyed UNIQUE(submission_id, seq).
+    Idempotent: already-persisted stage rows are skipped, so calling this
+    after every funnel transition writes only the new stages. The full
+    submission doc rides on the newest row (earlier rows keep a stub) so the
+    current view always returns the freshest state.
+    """
+
+    submission_id = str(record_doc.get("submission_id") or "")
+    stage_history = [str(stage) for stage in (record_doc.get("stage_history") or [])]
+    if not submission_id or not stage_history:
+        raise ValueError("source_add submission doc requires submission_id and stage_history")
+    yield_value = record_doc.get("measured_trial_yield")
+    measured_yield = float(yield_value) if isinstance(yield_value, (int, float)) and float(yield_value) >= 0 else None
+    last_seq = len(stage_history) - 1
+    for seq, stage in enumerate(stage_history):
+        row = {
+            "submission_id": submission_id,
+            "adapter_id": str(record_doc.get("adapter_id") or ""),
+            "miner_hotkey": str(record_doc.get("miner_hotkey") or ""),
+            "stage": stage,
+            "seq": seq,
+            "measured_trial_yield": measured_yield if seq == last_seq else None,
+            "submission_doc": record_doc if seq == last_seq else {},
+        }
+        try:
+            await insert_row("research_lab_source_add_submissions", row)
+        except Exception as exc:
+            if "duplicate" in str(exc).lower() or "unique" in str(exc).lower() or "23505" in str(exc):
+                continue
+            raise
+
+
 async def update_row(
     table: str,
     values: dict[str, Any],

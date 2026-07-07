@@ -1006,6 +1006,11 @@ def _normalize_champion_obligation(
         )
         if obligation.get("replay_status") is not None:
             normalized["replay_status"] = str(obligation.get("replay_status") or "")
+    # SOURCE_ADD reward legs ride the champion rails with a reward_kind label
+    # ("source_acceptance"/"source_implementation"); absent for classic
+    # champion grants so their allocation entries keep the exact prior shape.
+    if obligation.get("reward_kind") not in (None, "", "champion"):
+        normalized["reward_kind"] = str(obligation.get("reward_kind"))
     return normalized
 
 
@@ -1302,6 +1307,10 @@ def _champion_allocation(item: Mapping[str, Any], paid: Decimal) -> Dict[str, An
         )
         if item.get("replay_status") is not None:
             allocation["replay_status"] = str(item.get("replay_status") or "")
+    # SOURCE_ADD legs on the champion rails keep their reward_kind label in the
+    # allocation doc; classic champion entries (no reward_kind) are unchanged.
+    if item.get("reward_kind"):
+        allocation["reward_kind"] = str(item.get("reward_kind"))
     return allocation
 
 

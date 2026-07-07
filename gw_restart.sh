@@ -6,7 +6,7 @@ GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.en
 LEADPOET_GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-leadpoet/prod/gateway/env}"
 ENV_CLONE="/tmp/gw_env_clone.sh"
 ENV_SECRET="/tmp/gw_env_secret.sh"
-MIN_FREE_KB=$((15 * 1024 * 1024))
+MIN_FREE_KB=$((10 * 1024 * 1024))
 EXPECTED_AWS_ACCOUNT="493765492819"
 ENV_BACKUP_DIR="/home/ec2-user/.config/leadpoet/env-backups"
 
@@ -281,7 +281,7 @@ sudo docker system df 2>/dev/null || true
 FREE_KB="$(df --output=avail / | tail -1 | tr -d ' ')"
 if [ "${FREE_KB:-0}" -lt "$MIN_FREE_KB" ]; then
   echo "ERROR: insufficient free disk after cleanup: $(df -h / | tail -1)"
-  echo "Need at least 15GB free before starting gateway Research Lab Docker workloads."
+  echo "Need at least 10GiB free before starting gateway Research Lab Docker workloads."
   exit 1
 fi
 

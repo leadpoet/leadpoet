@@ -61,7 +61,7 @@ from research_lab.eval.provider_costs import (
     exa_agent_run_status,
     extract_openrouter_cost_dollars,
     redacted_endpoint,
-    scrapingdog_credits_for_path,
+    scrapingdog_credits_for_url,
 )
 from research_lab.eval.provider_evidence_cache import (
     canonical_request_fingerprint,
@@ -699,7 +699,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         endpoint = redacted_endpoint(entry.id, upstream_url)
         # Fail closed on unknown ScrapingDog endpoints: their per-endpoint
         # credit table is the cost model, so an unmapped path is unpriceable.
-        if entry.id == "sd" and scrapingdog_credits_for_path(urllib.parse.urlsplit(upstream_url).path) is None:
+        if entry.id == "sd" and scrapingdog_credits_for_url(upstream_url) is None:
             event = cost_ledger.block_event(
                 provider=entry.id,
                 endpoint=endpoint,
@@ -720,15 +720,21 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             self._respond(402, body, evidence="blocked", headers=event.to_headers())
             return
         if cost_ledger.should_block_paid_call():
+            block_reason = cost_ledger.block_reason()
             event = cost_ledger.block_event(
                 provider=entry.id,
                 endpoint=endpoint,
                 request_fingerprint=fingerprint,
-                reason="cost_cap_reached",
+                reason=block_reason,
+            )
+            error_code = (
+                "research_lab_provider_cost_cap_exceeded"
+                if block_reason == "cost_cap_reached"
+                else "research_lab_provider_cost_tracking_failed"
             )
             body = json.dumps(
                 {
-                    "error": "research_lab_provider_cost_cap_exceeded",
+                    "error": error_code,
                     "provider": entry.id,
                     "endpoint": endpoint,
                 },

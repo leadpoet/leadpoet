@@ -16,7 +16,9 @@ from research_lab.eval.provider_costs import (
     estimate_provider_cost,
     extract_exa_cost_dollars,
     extract_openrouter_cost_dollars,
+    openrouter_generation_id,
     scrapingdog_credits_for_path,
+    scrapingdog_credits_for_url,
     summarize_provider_cost_trace_entries,
 )
 
@@ -31,6 +33,11 @@ def test_scrapingdog_cost_map_uses_current_endpoint_credits():
     assert scrapingdog_credits_for_path("/linkedinjobs") == 5
     assert scrapingdog_credits_for_path("/instagram/profile") == 15
     assert scrapingdog_credits_for_path("/unmapped") is None
+    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/scrape?url=https%3A%2F%2Fexample.com") == 1
+    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/scrape?dynamic=true") == 5
+    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/scrape?premium=true") == 10
+    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/scrape?dynamic=true&premium=true") == 25
+    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/scrape?country=us") == 10
 
 
 def test_scrapingdog_success_cost_and_unknown_endpoint_fail_closed():
@@ -56,6 +63,18 @@ def test_scrapingdog_success_cost_and_unknown_endpoint_fail_closed():
     )
     assert unknown.tracking_failed
     assert unknown.tracking_reason == "unknown_scrapingdog_endpoint"
+
+    scrape = estimate_provider_cost(
+        provider="sd",
+        upstream_url="https://api.scrapingdog.com/scrape?dynamic=true&url=https%3A%2F%2Fexample.com",
+        status=200,
+        response_body=b"{}",
+        request_body=None,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert scrape.billable
+    assert scrape.credits == 5
+    assert scrape.cost_usd == Decimal("0.00025")
 
 
 def test_failed_provider_call_adds_zero_cost():
@@ -88,6 +107,19 @@ def test_exa_and_openrouter_cost_extraction():
     assert reconciled_cost == Decimal("0.0065")
     assert reconciled_meta["prompt_tokens"] == 21
     assert reconciled_meta["completion_tokens"] == 8
+
+    event_stream_cost, event_stream_meta = extract_openrouter_cost_dollars(
+        b'data: {"id":"gen-123","choices":[{"delta":{"content":"hi"}}]}\n\n'
+        b'data: {"usage":{"prompt_tokens":31,"completion_tokens":9,"cost":"0.0071"}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    assert event_stream_cost == Decimal("0.0071")
+    assert event_stream_meta["prompt_tokens"] == 31
+    assert event_stream_meta["completion_tokens"] == 9
+    assert openrouter_generation_id(
+        b'data: {"id":"gen-123","choices":[{"delta":{"content":"hi"}}]}\n\n'
+        b"data: [DONE]\n\n"
+    ) == "gen-123"
 
 
 def test_exa_agent_running_poll_is_not_billable_until_completed():
@@ -153,6 +185,35 @@ def test_ledger_allows_final_success_to_exceed_cap_then_blocks_later_call():
     )
     assert summary_after_second["cap_blocked"]
     assert summary_after_second["blocked_call_count"] == 1
+
+
+def test_ledger_preserves_prior_tracking_failure_reason_for_later_blocks():
+    ledger = ProviderCostLedger(scope="scope-tracking", cap_usd=Decimal("0.50"))
+    failed = ledger.record_live_event(
+        provider="or",
+        request_fingerprint="d" * 64,
+        status_code=200,
+        estimate=ProviderCostEstimate(
+            provider="or",
+            endpoint="/api/v1/chat/completions",
+            model="perplexity/sonar",
+            tracking_failed=True,
+            tracking_reason="missing_openrouter_cost",
+        ),
+    )
+    assert failed.tracking_failed
+    assert ledger.should_block_paid_call()
+    assert ledger.block_reason() == "missing_openrouter_cost"
+
+    blocked = ledger.block_event(
+        provider="exa",
+        endpoint="/search",
+        request_fingerprint="e" * 64,
+        reason=ledger.block_reason(),
+    )
+    doc = blocked.to_doc()
+    assert doc["tracking_failed"]
+    assert doc["tracking_reason"] == "missing_openrouter_cost"
 
 
 def test_cache_hit_adds_zero_cost_to_summary():

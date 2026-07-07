@@ -43,6 +43,7 @@ SECRET_MARKERS = (
 )
 
 SCRAPINGDOG_ENDPOINT_CREDITS: dict[str, int] = {
+    "/scrape": 1,
     "/profile": 100,
     "/profile/post": 5,
     "/google/ai": 10,
@@ -121,6 +122,31 @@ def _json_body(body: bytes | str | None) -> Any:
         return None
 
 
+def _json_payloads(body: bytes | str | None) -> list[Any]:
+    parsed = _json_body(body)
+    if parsed is not None:
+        return [parsed]
+    if body in (None, b"", ""):
+        return []
+    try:
+        text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
+    except Exception:
+        return []
+    payloads: list[Any] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("data:"):
+            continue
+        data = stripped[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            payloads.append(json.loads(data))
+        except Exception:
+            continue
+    return payloads
+
+
 def _iter_json_values(value: Any, keys: set[str]) -> Sequence[Any]:
     found: list[Any] = []
     wanted = {str(key) for key in keys}
@@ -167,57 +193,57 @@ def exa_agent_run_status(body: bytes | str | None) -> str:
 
 
 def extract_openrouter_cost_dollars(body: bytes | str | None) -> tuple[Decimal | None, dict[str, Any]]:
-    parsed = _json_body(body)
     metadata: dict[str, Any] = {}
-    if not isinstance(parsed, Mapping):
-        return None, metadata
-    usage = parsed.get("usage") if isinstance(parsed.get("usage"), Mapping) else {}
-    if isinstance(usage, Mapping):
-        for source_key, target_key in (
-            ("prompt_tokens", "prompt_tokens"),
-            ("completion_tokens", "completion_tokens"),
-            ("total_tokens", "total_tokens"),
-        ):
-            try:
-                if usage.get(source_key) is not None:
-                    metadata[target_key] = int(usage[source_key])
-            except Exception:
-                pass
+    for parsed in _json_payloads(body):
+        if not isinstance(parsed, Mapping):
+            continue
+        usage = parsed.get("usage") if isinstance(parsed.get("usage"), Mapping) else {}
+        if isinstance(usage, Mapping):
+            for source_key, target_key in (
+                ("prompt_tokens", "prompt_tokens"),
+                ("completion_tokens", "completion_tokens"),
+                ("total_tokens", "total_tokens"),
+            ):
+                try:
+                    if usage.get(source_key) is not None:
+                        metadata[target_key] = int(usage[source_key])
+                except Exception:
+                    pass
+            for key in ("cost", "cost_usd", "cost_dollars"):
+                cost = safe_decimal(usage.get(key))
+                if cost is not None:
+                    return cost, metadata
         for key in ("cost", "cost_usd", "cost_dollars"):
-            cost = safe_decimal(usage.get(key))
+            cost = safe_decimal(parsed.get(key))
             if cost is not None:
                 return cost, metadata
-    for key in ("cost", "cost_usd", "cost_dollars"):
-        cost = safe_decimal(parsed.get(key))
-        if cost is not None:
-            return cost, metadata
-    for source_key, target_key in (
-        ("tokens_prompt", "prompt_tokens"),
-        ("native_tokens_prompt", "prompt_tokens"),
-        ("tokens_completion", "completion_tokens"),
-        ("native_tokens_completion", "completion_tokens"),
-    ):
-        for value in _iter_json_values(parsed, {source_key}):
-            try:
-                metadata.setdefault(target_key, int(value))
-            except Exception:
-                pass
-            break
-    for value in _iter_json_values(parsed, {"cost", "cost_usd", "cost_dollars", "total_cost", "total_cost_usd"}):
-        cost = safe_decimal(value)
-        if cost is not None:
-            return cost, metadata
+        for source_key, target_key in (
+            ("tokens_prompt", "prompt_tokens"),
+            ("native_tokens_prompt", "prompt_tokens"),
+            ("tokens_completion", "completion_tokens"),
+            ("native_tokens_completion", "completion_tokens"),
+        ):
+            for value in _iter_json_values(parsed, {source_key}):
+                try:
+                    metadata.setdefault(target_key, int(value))
+                except Exception:
+                    pass
+                break
+        for value in _iter_json_values(parsed, {"cost", "cost_usd", "cost_dollars", "total_cost", "total_cost_usd"}):
+            cost = safe_decimal(value)
+            if cost is not None:
+                return cost, metadata
     return None, metadata
 
 
 def openrouter_generation_id(body: bytes | str | None) -> str:
-    parsed = _json_body(body)
-    if not isinstance(parsed, Mapping):
-        return ""
-    for key in ("id", "generation_id"):
-        value = str(parsed.get(key) or "").strip()
-        if value:
-            return value[:160]
+    for parsed in _json_payloads(body):
+        if not isinstance(parsed, Mapping):
+            continue
+        for key in ("id", "generation_id"):
+            value = str(parsed.get(key) or "").strip()
+            if value:
+                return value[:160]
     return ""
 
 
@@ -233,6 +259,33 @@ def _scrapingdog_endpoint_key(path: str) -> str:
 
 def scrapingdog_credits_for_path(path: str) -> int | None:
     return SCRAPINGDOG_ENDPOINT_CREDITS.get(_scrapingdog_endpoint_key(path))
+
+
+def scrapingdog_credits_for_url(upstream_url: str) -> int | None:
+    try:
+        split = urllib.parse.urlsplit(upstream_url)
+    except Exception:
+        return scrapingdog_credits_for_path(upstream_url)
+    endpoint = _scrapingdog_endpoint_key(split.path)
+    if endpoint != "/scrape":
+        return SCRAPINGDOG_ENDPOINT_CREDITS.get(endpoint)
+    params = {
+        key.lower(): values[-1].lower()
+        for key, values in urllib.parse.parse_qs(split.query, keep_blank_values=True).items()
+        if values
+    }
+    dynamic = params.get("dynamic") == "true"
+    premium = params.get("premium") == "true"
+    country = bool(params.get("country"))
+    if dynamic and premium:
+        return 25
+    if dynamic:
+        return 5
+    if premium:
+        return 10
+    if country:
+        return 10
+    return 1
 
 
 @dataclass
@@ -285,11 +338,7 @@ def estimate_provider_cost(
             cost_source="provider_failure_zero_cost",
         )
     if provider == "sd":
-        try:
-            path = urllib.parse.urlsplit(upstream_url).path
-        except Exception:
-            path = endpoint
-        credits = scrapingdog_credits_for_path(path)
+        credits = scrapingdog_credits_for_url(upstream_url)
         if credits is None:
             return ProviderCostEstimate(
                 provider=provider,
@@ -442,6 +491,7 @@ class ProviderCostLedger:
         self._spent = Decimal("0")
         self._events: list[dict[str, Any]] = []
         self._blocked = False
+        self._blocked_reason = ""
 
     @property
     def spent_usd(self) -> Decimal:
@@ -455,6 +505,12 @@ class ProviderCostLedger:
     def should_block_paid_call(self) -> bool:
         with self._lock:
             return self._blocked or self._spent >= self.cap_usd
+
+    def block_reason(self) -> str:
+        with self._lock:
+            if self._spent >= self.cap_usd:
+                return "cost_cap_reached"
+            return self._blocked_reason or "prior_cost_tracking_failed"
 
     def cache_hit_event(self, *, provider: str, endpoint: str, request_fingerprint: str, status_code: int) -> ProviderCostEvent:
         with self._lock:
@@ -484,6 +540,7 @@ class ProviderCostLedger:
     ) -> ProviderCostEvent:
         with self._lock:
             self._blocked = True
+            self._blocked_reason = reason
             event = ProviderCostEvent(
                 scope=self.scope,
                 provider=provider,
@@ -541,6 +598,7 @@ class ProviderCostLedger:
             )
             if estimate.tracking_failed:
                 self._blocked = True
+                self._blocked_reason = estimate.tracking_reason or "cost_tracking_failed"
             self._events.append(event.to_doc())
             return event
 

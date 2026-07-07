@@ -389,7 +389,7 @@ class ResearchLabGatewayConfig:
     scoring_health_max_candidate_zero_company_rate: float = 0.50
     scoring_health_max_provider_error_rate: float = 0.10
     scoring_health_max_timeout_rate: float = 0.10
-    private_baseline_rebenchmark_enabled: bool = False
+    private_baseline_rebenchmark_enabled: bool = True
     private_baseline_concurrency: int = 1
     private_baseline_retry_concurrency: int = 2
     private_baseline_provider_retry_rounds: int = 2
@@ -747,7 +747,7 @@ class ResearchLabGatewayConfig:
             ),
             private_baseline_rebenchmark_enabled=_truthy(
                 "RESEARCH_LAB_PRIVATE_BASELINE_REBENCHMARK_ENABLED",
-                prod_on,
+                "true",
             ),
             private_baseline_concurrency=max(
                 1,

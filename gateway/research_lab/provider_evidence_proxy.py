@@ -46,7 +46,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Mapping, Sequence
 
@@ -166,6 +166,63 @@ def validate_provider_registry_entries(entries: Sequence[ProviderRegistryEntry])
 
 def provider_registry_hash(entries: Sequence[ProviderRegistryEntry]) -> str:
     return sha256_json({"registry": [entry.to_dict() for entry in sorted(entries, key=lambda e: e.id)]})
+
+
+def _openrouter_chat_completion_path(upstream_url: str) -> bool:
+    try:
+        path = urllib.parse.urlsplit(str(upstream_url or "")).path.rstrip("/")
+    except Exception:
+        return False
+    return path == "/api/v1/chat/completions"
+
+
+def _openrouter_request_with_usage_metadata(request_body: bytes) -> bytes:
+    """Ask OpenRouter to return usage/cost metadata without changing prompts.
+
+    The replay fingerprint remains the caller's original request body; this
+    helper only changes the live upstream request made by the host proxy so
+    successful OpenRouter calls can be cost-accounted deterministically.
+    """
+
+    if not request_body:
+        return request_body
+    try:
+        decoded = json.loads(request_body.decode("utf-8"))
+    except Exception:
+        return request_body
+    if not isinstance(decoded, dict):
+        return request_body
+    usage = decoded.get("usage")
+    if not isinstance(usage, dict):
+        usage = {}
+    usage["include"] = True
+    decoded["usage"] = usage
+    if decoded.get("stream") is True:
+        stream_options = decoded.get("stream_options")
+        if not isinstance(stream_options, dict):
+            stream_options = {}
+        stream_options["include_usage"] = True
+        decoded["stream_options"] = stream_options
+    return json.dumps(
+        decoded,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def _openrouter_generation_id_from_headers(headers: Mapping[str, Any]) -> str:
+    lowered = {str(k).lower(): str(v) for k, v in dict(headers or {}).items()}
+    for name in (
+        "X-OpenRouter-Generation-Id",
+        "X-Openrouter-Generation-Id",
+        "OpenRouter-Generation-Id",
+        "X-Generation-Id",
+    ):
+        value = str(headers.get(name) or lowered.get(name.lower()) or "").strip()
+        if value:
+            return value[:200]
+    return ""
 
 
 def seed_provider_registry() -> list[ProviderRegistryEntry]:
@@ -760,14 +817,28 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             headers[entry.auth_name] = credential
         elif entry.auth_kind == "bearer" and credential:
             headers[entry.auth_name or "Authorization"] = "Bearer " + credential
-        request = urllib.request.Request(target, data=request_body or None, headers=headers, method=self.command)
+        upstream_request_body = request_body
+        if entry.id == "or" and _openrouter_chat_completion_path(upstream_url):
+            upstream_request_body = _openrouter_request_with_usage_metadata(request_body)
+        request = urllib.request.Request(
+            target,
+            data=upstream_request_body or None,
+            headers=headers,
+            method=self.command,
+        )
+        response_headers: dict[str, str] = {}
         try:
             with urllib.request.urlopen(request, timeout=180) as response:
                 status = int(getattr(response, "status", None) or getattr(response, "code", 0) or 0)
+                response_headers = {str(k): str(v) for k, v in response.headers.items()}
                 body = response.read()
         except urllib.error.HTTPError as exc:
             # An HTTP error status is a real, recordable provider outcome.
             status = int(exc.code)
+            try:
+                response_headers = {str(k): str(v) for k, v in (exc.headers or {}).items()}
+            except Exception:
+                response_headers = {}
             try:
                 body = exc.read()
             except Exception:
@@ -804,9 +875,13 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             upstream_url=upstream_url,
             status=status,
             response_body=body,
-            request_body=request_body or None,
+            request_body=upstream_request_body or request_body or None,
             scrapingdog_credit_price_usd=credit_price,
         )
+        if entry.id == "or" and not estimate.generation_id:
+            generation_id = _openrouter_generation_id_from_headers(response_headers)
+            if generation_id:
+                estimate = replace(estimate, generation_id=generation_id)
         if (
             entry.id == "or"
             and estimate.tracking_failed

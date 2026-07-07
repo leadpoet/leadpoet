@@ -336,6 +336,56 @@ class _FakeExaAgentProvider(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class _FakeOpenRouterProvider(BaseHTTPRequestHandler):
+    seen_completion_bodies: list[dict] = []
+    generation_ids: list[str] = []
+
+    def log_message(self, *args):  # noqa: ANN001
+        pass
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length") or 0)
+        payload = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+        type(self).seen_completion_bodies.append(payload)
+        body = json.dumps(
+            {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 3},
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("X-OpenRouter-Generation-Id", "gen-sonar-cost-1")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path != "/api/v1/generation":
+            self.send_response(404)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
+        query = dict(urllib.parse.parse_qsl(parsed.query))
+        type(self).generation_ids.append(query.get("id") or "")
+        body = json.dumps(
+            {
+                "data": {
+                    "total_cost": "0.0032",
+                    "native_tokens_prompt": 11,
+                    "native_tokens_completion": 5,
+                }
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 def test_evidence_proxy_emits_cost_event_header_for_live_success():
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeProvider)
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
@@ -371,6 +421,67 @@ def test_evidence_proxy_emits_cost_event_header_for_live_success():
             assert event["evidence"] == "recorded"
             assert event["billable"] is True
             assert event["cost_usd"] == 0.0123
+    finally:
+        if proxy is not None:
+            proxy.shutdown()
+            proxy.server_close()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_evidence_proxy_reconciles_openrouter_generation_cost_from_header():
+    _FakeOpenRouterProvider.seen_completion_bodies = []
+    _FakeOpenRouterProvider.generation_ids = []
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeOpenRouterProvider)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    proxy = None
+    try:
+        registry = [
+            provider_evidence_proxy.ProviderRegistryEntry(
+                id="or",
+                base_url=f"http://127.0.0.1:{upstream.server_address[1]}",
+                auth_kind="none",
+            )
+        ]
+        proxy, _store, _proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
+            host="127.0.0.1",
+            port=0,
+            registry=registry,
+        )
+        request_body = json.dumps(
+            {
+                "model": "perplexity/sonar",
+                "messages": [{"role": "user", "content": "redacted"}],
+            }
+        ).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_address[1]}/or/api/v1/chat/completions",
+            data=request_body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Research-Lab-Cost-Scope": "or-scope",
+                "X-Research-Lab-Cost-Cap-Usd": "0.50",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            event = decode_cost_event_header(response.headers.get("X-Research-Lab-Provider-Cost-Event"))
+
+        assert _FakeOpenRouterProvider.seen_completion_bodies
+        upstream_body = _FakeOpenRouterProvider.seen_completion_bodies[0]
+        assert upstream_body["model"] == "perplexity/sonar"
+        assert upstream_body["usage"]["include"] is True
+        assert _FakeOpenRouterProvider.generation_ids == ["gen-sonar-cost-1"]
+        assert event is not None
+        assert event["provider"] == "or"
+        assert event["billable"] is True
+        assert event["cost_usd"] == 0.0032
+        assert event["cost_source"] == "openrouter_generation_reconciliation"
+        assert event["tracking_failed"] is False
+        assert event["model"] == "perplexity/sonar"
+        assert event["prompt_tokens"] == 11
+        assert event["completion_tokens"] == 5
     finally:
         if proxy is not None:
             proxy.shutdown()

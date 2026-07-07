@@ -2224,7 +2224,18 @@ _DOCKER_ADAPTER_BOOTSTRAP = _PROVIDER_DIAGNOSTICS_BOOTSTRAP + r"""
 import contextlib
 import importlib
 import json
+import logging
 import sys
+
+for _research_lab_logger_name in (
+    "urllib3",
+    "requests",
+    "httpx",
+    "httpcore",
+    "aiohttp",
+    "openai",
+):
+    logging.getLogger(_research_lab_logger_name).setLevel(logging.WARNING)
 
 module_name, callable_name = sys.argv[1:3]
 payload = json.load(sys.stdin)

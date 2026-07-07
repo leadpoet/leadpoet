@@ -85,6 +85,7 @@ def test_section_6_4_recommended_defaults(clean_env):
     # stops starting at 23:30 UTC until the next baseline completes.
     assert config.baseline_start_utc_offset_seconds == 900
     assert config.candidate_scoring_quiet_start_utc_seconds == 84600
+    assert config.private_baseline_rebenchmark_enabled is True
 
 
 def test_daily_scoring_schedule_env_overrides(clean_env):

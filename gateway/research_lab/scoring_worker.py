@@ -2169,6 +2169,7 @@ class ResearchLabGatewayScoringWorker:
         self._confirmation_trace_scope: dict[str, Any] | None = None
         self._worker_started_at = datetime.now(timezone.utc)
         self._last_private_source_push_reconcile_at = 0.0
+        self._stale_parent_overdue_warning_keys: set[str] = set()
 
     async def run_forever(self) -> None:
         # trajectoryimprovements.md P5: one structured capture health block at
@@ -2916,22 +2917,25 @@ class ResearchLabGatewayScoringWorker:
                 if not existing:
                     overdue.append(candidate_id)
             if overdue:
-                logger.warning(
-                    format_worker_block(
-                        "RESEARCH LAB STALE-PARENT CANDIDATES NOT REBASED WITHIN SLA",
-                        (
-                            ("Worker", self.worker_ref),
-                            ("Count", len(overdue)),
-                            ("SLA", f"{sla_seconds}s"),
-                            ("Candidates", ", ".join(compact_ref(c) for c in overdue[:10])),
-                        ),
+                overdue_key = sha256_json({"candidates": sorted(overdue), "sla_seconds": sla_seconds})
+                if overdue_key not in self._stale_parent_overdue_warning_keys:
+                    self._stale_parent_overdue_warning_keys.add(overdue_key)
+                    logger.warning(
+                        format_worker_block(
+                            "RESEARCH LAB STALE-PARENT CANDIDATES NOT REBASED WITHIN SLA",
+                            (
+                                ("Worker", self.worker_ref),
+                                ("Count", len(overdue)),
+                                ("SLA", f"{sla_seconds}s"),
+                                ("Candidates", ", ".join(compact_ref(c) for c in overdue[:10])),
+                            ),
+                        )
                     )
-                )
-                logger.warning(
-                    "research_lab_stale_parent_candidates_overdue count=%s sla_seconds=%s",
-                    len(overdue),
-                    sla_seconds,
-                )
+                    logger.warning(
+                        "research_lab_stale_parent_candidates_overdue count=%s sla_seconds=%s",
+                        len(overdue),
+                        sla_seconds,
+                    )
         except Exception as exc:  # noqa: BLE001 - alerting must never break the worker pass
             logger.warning("research_lab_stuck_candidate_alert_failed error=%s", str(exc)[:200])
 

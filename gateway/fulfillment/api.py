@@ -4,9 +4,11 @@ Fulfillment API Router
 7 endpoints for the lead fulfillment commit-reveal system.
 """
 
+import asyncio
 import os
 import logging
 import base64
+import threading
 import time as _time
 from uuid import UUID, uuid4
 from datetime import datetime, timezone, timedelta
@@ -34,7 +36,7 @@ from gateway.fulfillment.models import (
     scrub_company_name,
 )
 from gateway.models.events import EventType
-from gateway.utils.bans import is_hotkey_banned, ban_hotkey
+from gateway.utils.bans import is_hotkey_banned, is_hotkey_banned_sync, ban_hotkey
 from gateway.utils.registry import is_registered_hotkey_async
 
 logger = logging.getLogger(__name__)
@@ -786,15 +788,85 @@ async def create_request(
 # ---------------------------------------------------------------
 # GET /fulfillment/requests/active  — miners poll for open ICPs
 # ---------------------------------------------------------------
+
+# The open pool is identical for every miner and only changes on lifecycle
+# ticks (every 30s), so the base query is cached for a few seconds instead
+# of hitting the DB once per poll.  With the whole miner population polling
+# on a 30s cadence, this collapses hundreds of identical queries per minute
+# into ~one per TTL; a few seconds of staleness is invisible next to the
+# multi-minute commit windows the rows describe.
+_ACTIVE_REQUESTS_CACHE_TTL_SECONDS = float(
+    os.getenv("FULFILLMENT_ACTIVE_CACHE_TTL_SECONDS", "5")
+)
+_active_requests_cache = {"fetched_at_mono": 0.0, "rows": None}
+_active_requests_cache_lock = threading.Lock()
+
+
+def _fetch_active_request_rows(supabase, cutoff: str) -> list:
+    """Fetch the miner-visible open pool, cached for a few seconds.
+
+    The lock deliberately covers the DB fetch: when the cache expires under
+    concurrent polling, the first caller refreshes while the rest briefly
+    serialize behind it — one query instead of a thundering herd.
+
+    Callers must NOT mutate the returned rows (they are shared across
+    requests); the handler below builds fresh dicts for everything it
+    returns.
+    """
+    with _active_requests_cache_lock:
+        now_mono = _time.monotonic()
+        if (
+            _active_requests_cache["rows"] is not None
+            and now_mono - _active_requests_cache["fetched_at_mono"]
+            < _ACTIVE_REQUESTS_CACHE_TTL_SECONDS
+        ):
+            return _active_requests_cache["rows"]
+
+        # FIFO: return up to FULFILLMENT_MAX_PARALLEL_REQUESTS oldest visible
+        # requests.  Miners may work on any/all of them in parallel. Once a
+        # request is fulfilled/recycled/expired/partially_fulfilled, the next
+        # one in line becomes visible.
+        #
+        # Both 'open' (fresh) and 'continued_open' (chain continuation) are
+        # surfaced — they're functionally identical for the miner's purposes
+        # (commit window, reveal window, num_leads, ICP shape).  The status
+        # label is preserved on each entry's "status" field so miners that
+        # care can detect "this request is part of an in-flight chain;
+        # rewards only flow when the chain reaches its full quota".
+        resp = supabase.table("fulfillment_requests") \
+            .select("*") \
+            .in_("status", ["open", "continued_open"]) \
+            .gt("window_end", cutoff) \
+            .order("window_start", desc=False) \
+            .limit(FULFILLMENT_MAX_PARALLEL_REQUESTS) \
+            .execute()
+
+        _active_requests_cache["rows"] = resp.data or []
+        _active_requests_cache["fetched_at_mono"] = now_mono
+        return _active_requests_cache["rows"]
+
+
 @fulfillment_router.get("/requests/active")
 async def get_active_requests(miner_hotkey: str = ""):
+    # The gateway runs a single event loop, and this is its highest-traffic
+    # endpoint.  The sync Supabase client blocks whatever thread runs it, so
+    # executing the handler body inline would stall every in-flight request
+    # for the duration of each DB round-trip — under normal polling load the
+    # loop saturates and the whole gateway stops answering.  Running the
+    # body in a worker thread keeps the loop free; HTTPExceptions raised
+    # inside propagate unchanged.
+    return await asyncio.to_thread(_get_active_requests_impl, miner_hotkey)
+
+
+def _get_active_requests_impl(miner_hotkey: str = ""):
     if not _enable_fulfillment():
         raise HTTPException(503, detail="Fulfillment system is not enabled")
 
     supabase = _get_supabase()
 
     if miner_hotkey:
-        banned, reason = await is_hotkey_banned(miner_hotkey)
+        # Sync variant: this function already runs in a worker thread.
+        banned, reason = is_hotkey_banned_sync(miner_hotkey)
         if banned:
             raise HTTPException(403, detail=f"Hotkey banned: {reason}")
 
@@ -809,27 +881,28 @@ async def get_active_requests(miner_hotkey: str = ""):
     min_remaining = timedelta(minutes=FULFILLMENT_MIN_REMAINING_WINDOW_MINUTES)
     cutoff = (now + min_remaining).isoformat()
 
-    # FIFO: return up to FULFILLMENT_MAX_PARALLEL_REQUESTS oldest visible
-    # requests.  Miners may work on any/all of them in parallel. Once a
-    # request is fulfilled/recycled/expired/partially_fulfilled, the next
-    # one in line becomes visible.
-    #
-    # Both 'open' (fresh) and 'continued_open' (chain continuation) are
-    # surfaced — they're functionally identical for the miner's purposes
-    # (commit window, reveal window, num_leads, ICP shape).  The status
-    # label is preserved on each entry's "status" field so miners that
-    # care can detect "this request is part of an in-flight chain;
-    # rewards only flow when the chain reaches its full quota".
-    resp = supabase.table("fulfillment_requests") \
-        .select("*") \
-        .in_("status", ["open", "continued_open"]) \
-        .gt("window_end", cutoff) \
-        .order("window_start", desc=False) \
-        .limit(FULFILLMENT_MAX_PARALLEL_REQUESTS) \
-        .execute()
+    rows = _fetch_active_request_rows(supabase, cutoff)
+
+    # Per-miner committed counts for every visible request in ONE batched
+    # round-trip.  A per-request lookup here multiplies each poll into
+    # 1+N sequential queries, which is what saturates the endpoint under
+    # normal polling load.
+    committed_by_request = {}
+    if miner_hotkey and rows:
+        existing = supabase.table("fulfillment_submissions") \
+            .select("request_id, lead_hashes") \
+            .in_("request_id", [r["request_id"] for r in rows]) \
+            .eq("miner_hotkey", miner_hotkey) \
+            .execute()
+        for s in (existing.data or []):
+            # First row per request wins, matching the previous per-request
+            # lookup which read only the first returned row.
+            committed_by_request.setdefault(
+                s["request_id"], len(s.get("lead_hashes") or [])
+            )
 
     requests_out = []
-    for r in (resp.data or []):
+    for r in rows:
         per_miner_cap = _miner_submission_cap(r["num_leads"])
 
         # Hide requests this miner has already fully committed to.  The
@@ -839,15 +912,8 @@ async def get_active_requests(miner_hotkey: str = ""):
         # would hide a request from a miner who committed exactly N
         # but still has headroom to commit up to 1.5×N.
         if miner_hotkey:
-            existing = supabase.table("fulfillment_submissions") \
-                .select("submission_id, lead_hashes") \
-                .eq("request_id", r["request_id"]) \
-                .eq("miner_hotkey", miner_hotkey) \
-                .execute()
-            if existing.data:
-                committed_count = len(existing.data[0].get("lead_hashes", []))
-                if committed_count >= per_miner_cap:
-                    continue  # fully committed — hide this request
+            if committed_by_request.get(r["request_id"], 0) >= per_miner_cap:
+                continue  # fully committed — hide this request
 
         icp = dict(r.get("icp_details", {}) or {})
 

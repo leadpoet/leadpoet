@@ -29,8 +29,21 @@ Miner Throttled Paths (sourcing only):
 
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 import asyncio
+import os
 import time
+
+# Longest a miner request may queue for a semaphore slot before being shed
+# with a 503.  Miner clients stop reading after ~15s, so a slot granted
+# later than that is spent rendering a response nobody receives — while
+# blocking a slot that could serve a live request.  Shedding early keeps
+# the queue bounded: under overload miners get a fast 503 and retry on
+# their normal polling cadence instead of stacking up behind dead sockets
+# until the queue can never drain.
+MINER_SLOT_WAIT_TIMEOUT_SECONDS = float(
+    os.getenv("MINER_SLOT_WAIT_TIMEOUT_SECONDS", "8")
+)
 
 
 class PriorityMiddleware(BaseHTTPMiddleware):
@@ -62,6 +75,7 @@ class PriorityMiddleware(BaseHTTPMiddleware):
         self.qualification_model_requests = 0
         self.miner_requests = 0
         self.throttled_miners = 0
+        self.shed_miners = 0
     
     def _is_validator_request(self, path: str) -> bool:
         """Check if request is from a validator (high priority)."""
@@ -143,12 +157,29 @@ class PriorityMiddleware(BaseHTTPMiddleware):
                       f"Miners={self.miner_requests}, Throttled={self.throttled_miners}")
             
             start_wait = time.time()
-            async with self.miner_semaphore:
+            try:
+                await asyncio.wait_for(
+                    self.miner_semaphore.acquire(),
+                    timeout=MINER_SLOT_WAIT_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                self.shed_miners += 1
+                print(f"🛑 MINER SHED (no slot within "
+                      f"{MINER_SLOT_WAIT_TIMEOUT_SECONDS:.0f}s): "
+                      f"{request.method} {path} (shed={self.shed_miners})")
+                return JSONResponse(
+                    status_code=503,
+                    content={"detail": "Gateway at miner capacity — retry shortly"},
+                    headers={"Retry-After": "15"},
+                )
+            try:
                 wait_time = time.time() - start_wait
                 if wait_time > 0.1:
                     print(f"⏳ MINER WAITED {wait_time:.2f}s for slot: {request.method} {path}")
-                
+
                 return await call_next(request)
+            finally:
+                self.miner_semaphore.release()
         
         # PRIORITY 4: Other requests (health checks, etc.) - immediate
         return await call_next(request)

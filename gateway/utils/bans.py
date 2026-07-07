@@ -6,6 +6,7 @@ qualification and fulfillment endpoints can import ban functions
 without cross-module coupling.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Tuple
@@ -15,7 +16,7 @@ import bittensor as bt
 logger = logging.getLogger(__name__)
 
 
-async def is_hotkey_banned(hotkey: str) -> Tuple[bool, Optional[str]]:
+def is_hotkey_banned_sync(hotkey: str) -> Tuple[bool, Optional[str]]:
     """
     Check if a hotkey is banned from submitting models.
 
@@ -24,6 +25,10 @@ async def is_hotkey_banned(hotkey: str) -> Tuple[bool, Optional[str]]:
 
     Fail-open: returns ``(False, None)`` on any DB exception so legitimate
     miners are not blocked by transient DB errors.
+
+    This is the blocking implementation — call it from worker threads.
+    Event-loop callers must use ``is_hotkey_banned`` instead, which runs
+    this in a thread so the loop keeps serving other requests meanwhile.
     """
     try:
         from gateway.db.client import get_write_client
@@ -47,6 +52,18 @@ async def is_hotkey_banned(hotkey: str) -> Tuple[bool, Optional[str]]:
     except Exception as e:
         bt.logging.warning(f"Ban check failed for {hotkey[:16]}...: {e} — failing open (allowing request)")
         return False, None
+
+
+async def is_hotkey_banned(hotkey: str) -> Tuple[bool, Optional[str]]:
+    """Async wrapper for :func:`is_hotkey_banned_sync`.
+
+    Runs the blocking Supabase lookup in a worker thread. The gateway is a
+    single-event-loop process, so a blocking DB round-trip here would stall
+    every in-flight request for its duration — this check runs on the
+    hottest miner paths, where that stall compounds into a gateway-wide
+    backlog.
+    """
+    return await asyncio.to_thread(is_hotkey_banned_sync, hotkey)
 
 
 async def promote_next_champion() -> Optional[Dict[str, Any]]:

@@ -25,7 +25,17 @@ echo "Hydrating gateway env from Secrets Manager before stopping processes"
 mkdir -p "$(dirname "$GATEWAY_ENV_FILE")" "$ENV_BACKUP_DIR"
 chmod 700 "$(dirname "$GATEWAY_ENV_FILE")" "$ENV_BACKUP_DIR"
 if [ -f "$GATEWAY_ENV_FILE" ]; then
-  cp -p "$GATEWAY_ENV_FILE" "$ENV_BACKUP_DIR/gateway.env.before-gw-restart.$(date -u +%Y%m%dT%H%M%SZ).bak"
+  find "$ENV_BACKUP_DIR" -maxdepth 1 -type f -name "gateway.env.before-gw-restart.*.bak" \
+    -printf "%T@ %p\n" 2>/dev/null \
+    | sort -nr \
+    | awk 'NR > 5 {print substr($0, index($0,$2))}' \
+    | xargs -r rm -f
+  BACKUP_PATH="$ENV_BACKUP_DIR/gateway.env.before-gw-restart.$(date -u +%Y%m%dT%H%M%SZ).bak"
+  if cp -p "$GATEWAY_ENV_FILE" "$BACKUP_PATH"; then
+    echo "Backed up cached gateway env to $BACKUP_PATH"
+  else
+    echo "WARNING: failed to back up cached gateway env; continuing with Secrets Manager hydration"
+  fi
 fi
 
 SECRET_TMP="$(mktemp /tmp/gateway_secret_env.XXXXXX)"

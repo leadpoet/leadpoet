@@ -89,6 +89,33 @@ def test_exa_and_openrouter_cost_extraction():
     assert reconciled_meta["completion_tokens"] == 8
 
 
+def test_exa_agent_running_poll_is_not_billable_until_completed():
+    running = estimate_provider_cost(
+        provider="exa",
+        upstream_url="https://api.exa.ai/agent/runs/agent_run_123",
+        status=200,
+        response_body=b'{"object":"agent_run","id":"agent_run_123","status":"running","costDollars":{"total":0.1}}',
+        request_body=None,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert not running.billable
+    assert running.cost_usd == Decimal("0")
+    assert running.cost_source == "exa_agent_nonterminal_poll_zero_cost"
+    assert not running.tracking_failed
+
+    completed = estimate_provider_cost(
+        provider="exa",
+        upstream_url="https://api.exa.ai/agent/runs/agent_run_123",
+        status=200,
+        response_body=b'{"object":"agent_run","id":"agent_run_123","status":"completed","costDollars":{"total":0.1}}',
+        request_body=None,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert completed.billable
+    assert completed.cost_usd == Decimal("0.1")
+    assert completed.cost_source == "exa_cost_dollars"
+
+
 def test_ledger_allows_final_success_to_exceed_cap_then_blocks_later_call():
     ledger = ProviderCostLedger(scope="scope-1", cap_usd=Decimal("0.50"))
     first = ledger.record_live_event(
@@ -154,6 +181,31 @@ class _FakeProvider(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class _FakeExaAgentProvider(BaseHTTPRequestHandler):
+    calls = 0
+
+    def log_message(self, *args):  # noqa: ANN001
+        pass
+
+    def do_GET(self):  # noqa: N802
+        type(self).calls += 1
+        status = "running" if type(self).calls == 1 else "completed"
+        cost = 0.1 if status == "completed" else 0.0
+        body = json.dumps(
+            {
+                "object": "agent_run",
+                "id": "agent_run_123",
+                "status": status,
+                "costDollars": {"total": cost},
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 def test_evidence_proxy_emits_cost_event_header_for_live_success():
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeProvider)
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
@@ -187,6 +239,63 @@ def test_evidence_proxy_emits_cost_event_header_for_live_success():
             assert event["evidence"] == "recorded"
             assert event["billable"] is True
             assert event["cost_usd"] == 0.0123
+    finally:
+        provider_evidence_proxy._UPSTREAMS["exa"] = original
+        if proxy is not None:
+            proxy.shutdown()
+            proxy.server_close()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_evidence_proxy_does_not_cache_nonterminal_exa_agent_poll():
+    _FakeExaAgentProvider.calls = 0
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeExaAgentProvider)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    original = dict(provider_evidence_proxy._UPSTREAMS["exa"])
+    proxy = None
+    try:
+        provider_evidence_proxy._UPSTREAMS["exa"] = {
+            **original,
+            "base": f"http://127.0.0.1:{upstream.server_address[1]}",
+            "auth": lambda: {},
+        }
+        proxy, store, _proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
+            host="127.0.0.1",
+            port=0,
+        )
+        url = f"http://127.0.0.1:{proxy.server_address[1]}/exa/agent/runs/agent_run_123"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "X-Research-Lab-Cost-Scope": "agent-scope",
+                "X-Research-Lab-Cost-Cap-Usd": "0.50",
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            first = json.loads(response.read().decode())
+            first_event = decode_cost_event_header(response.headers.get("X-Research-Lab-Provider-Cost-Event"))
+        assert first["status"] == "running"
+        assert first_event["evidence"] == "live_unrecorded"
+        assert first_event["billable"] is False
+        assert not store.lookup(
+            provider_evidence_proxy.canonical_request_fingerprint(
+                "GET",
+                provider_evidence_proxy._UPSTREAMS["exa"]["base"] + "/agent/runs/agent_run_123",
+                None,
+            )
+        )
+
+        with urllib.request.urlopen(req, timeout=5) as response:
+            second = json.loads(response.read().decode())
+            second_event = decode_cost_event_header(response.headers.get("X-Research-Lab-Provider-Cost-Event"))
+        assert second["status"] == "completed"
+        assert second_event["evidence"] == "recorded"
+        assert second_event["billable"] is True
+        assert second_event["cost_usd"] == 0.1
+        assert _FakeExaAgentProvider.calls == 2
     finally:
         provider_evidence_proxy._UPSTREAMS["exa"] = original
         if proxy is not None:

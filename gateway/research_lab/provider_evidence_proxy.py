@@ -47,6 +47,7 @@ from research_lab.eval.provider_costs import (
     ProviderCostLedger,
     decimal_from_env,
     estimate_provider_cost,
+    exa_agent_run_status,
     extract_openrouter_cost_dollars,
     redacted_endpoint,
     scrapingdog_credits_for_path,
@@ -74,9 +75,24 @@ _UPSTREAMS: dict[str, dict[str, Any]] = {
 
 _HOP_HEADERS = {"connection", "keep-alive", "transfer-encoding", "host", "content-length", "authorization", "x-api-key"}
 
+_EXA_AGENT_NONTERMINAL_STATUSES = {"queued", "running", "in_progress", "pending"}
+
 
 def _utc_day() -> str:
     return time.strftime("%Y-%m-%d", time.gmtime())
+
+
+def _response_is_recordable(provider: str, upstream_url: str, status: int, body: bytes) -> bool:
+    if provider != "exa" or status >= 400:
+        return True
+    try:
+        path = urllib.parse.urlsplit(upstream_url).path
+    except Exception:
+        path = ""
+    if not path.startswith("/agent/runs/"):
+        return True
+    agent_status = exa_agent_run_status(body)
+    return agent_status not in _EXA_AGENT_NONTERMINAL_STATUSES
 
 
 class EvidenceStore:
@@ -404,7 +420,12 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             )
             self._respond(502, b'{"error":"upstream unreachable"}', evidence="error", headers=event.to_headers())
             return
-        self.store.record(fingerprint, status, body)
+        recordable = _response_is_recordable(name, upstream_url, status, body)
+        evidence_label = "recorded" if recordable else "live_unrecorded"
+        if recordable:
+            self.store.record(fingerprint, status, body)
+        elif is_leader:
+            self.store.release_lead(fingerprint)
         estimate = estimate_provider_cost(
             provider=name,
             upstream_url=upstream_url,
@@ -459,8 +480,9 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             request_fingerprint=fingerprint,
             status_code=status,
             estimate=estimate,
+            evidence=evidence_label,
         )
-        self._respond(status, body, evidence="recorded", headers=event.to_headers())
+        self._respond(status, body, evidence=evidence_label, headers=event.to_headers())
 
     do_GET = _handle
     do_POST = _handle

@@ -155,6 +155,17 @@ def extract_exa_cost_dollars(body: bytes | str | None) -> Decimal | None:
     return None
 
 
+def exa_agent_run_status(body: bytes | str | None) -> str:
+    parsed = _json_body(body)
+    if not isinstance(parsed, Mapping):
+        return ""
+    object_type = str(parsed.get("object") or "")
+    identifier = str(parsed.get("id") or "")
+    if object_type != "agent_run" and not identifier.startswith("agent_run"):
+        return ""
+    return str(parsed.get("status") or "").strip().lower()
+
+
 def extract_openrouter_cost_dollars(body: bytes | str | None) -> tuple[Decimal | None, dict[str, Any]]:
     parsed = _json_body(body)
     metadata: dict[str, Any] = {}
@@ -295,6 +306,18 @@ def estimate_provider_cost(
             credits=credits,
         )
     if provider == "exa":
+        agent_status = exa_agent_run_status(response_body)
+        if agent_status and agent_status != "completed":
+            return ProviderCostEstimate(
+                provider=provider,
+                endpoint=endpoint,
+                billable=False,
+                cost_source=(
+                    "exa_agent_nonterminal_poll_zero_cost"
+                    if agent_status in {"queued", "running", "in_progress", "pending"}
+                    else "exa_agent_terminal_failure_zero_cost"
+                ),
+            )
         cost = extract_exa_cost_dollars(response_body)
         if cost is None:
             return ProviderCostEstimate(
@@ -486,6 +509,7 @@ class ProviderCostLedger:
         request_fingerprint: str,
         status_code: int,
         estimate: ProviderCostEstimate,
+        evidence: str = "recorded",
     ) -> ProviderCostEvent:
         with self._lock:
             before = self._spent
@@ -499,7 +523,7 @@ class ProviderCostLedger:
                 endpoint=estimate.endpoint,
                 model=estimate.model,
                 request_fingerprint=request_fingerprint,
-                evidence="recorded",
+                evidence=evidence,
                 status_code=status_code,
                 billable=estimate.billable and not estimate.tracking_failed,
                 cost_usd=estimate.cost_usd if not estimate.tracking_failed else Decimal("0"),

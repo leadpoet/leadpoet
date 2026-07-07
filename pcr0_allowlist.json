@@ -1,8 +1,15 @@
 {
   "_comment": "PCR0 allowlist for LeadPoet TEE verification. Updated by CI/CD on each enclave build.",
-  "_updated": "2026-07-06T23:08:00Z",
+  "_updated": "2026-07-07T17:05:00Z",
   "_repo": "https://github.com/leadpoet/leadpoet",
   "gateway_pcr0": [
+    {
+      "pcr0": "9376a62482c8d275813265bfa829ec4c0bf57c0087b8a07ada674097194ea0f929e11da8754b9f3b00686cdc3e77534c",
+      "version": "2026-07-07",
+      "deployed": "2026-07-07",
+      "commit_hash": "43dad2100f8b682a44a4912155a803e9499cb367",
+      "notes": "gateway enclave: observed production build after 2026-07-07 morning restart (Docker-root reset build session)"
+    },
     {
       "pcr0": "af54faabc191e01231561e49109d73a5e818ca03fd3a550b849742a57e8436c1862e50ba8fb00e77c8aa78fb83fda139",
       "version": "2026-07-05",
@@ -18,6 +25,13 @@
     }
   ],
   "validator_pcr0": [
+    {
+      "pcr0": "e4d0da1828c4dfbc13191dae1955b19a4e1db0507f1fe742843ee3b45a372da548b0d3eafe930c8e03603606f67db112",
+      "version": "2026-07-07",
+      "deployed": "2026-07-07",
+      "commit_hash": "ff39b5b279d2e36f23ebc8222836cde0ca3833d6",
+      "notes": "validator enclave: observed production build on commit ff39b5b2 after 2026-07-07 restart (validator box repo HEAD at build)"
+    },
     {
       "pcr0": "67da49d008d22c120eaafcbc17580364c340aa1f02f83547f19d1ff64b086ede9be2a44762d3ff30aad06ddcd0855788",
       "version": "2026-07-06",

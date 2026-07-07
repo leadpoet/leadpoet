@@ -1081,6 +1081,13 @@ async def get_excluded_now(request_id: str):
     reveal-time check uses, so a miner who normalizes locally with the
     same rule gets a clean intersection check.
     """
+    # Same reasoning as /requests/active: the held-set loader is a chain of
+    # blocking Supabase calls, so it runs in a worker thread to keep the
+    # single event loop serving other requests.
+    return await asyncio.to_thread(_get_excluded_now_impl, request_id)
+
+
+def _get_excluded_now_impl(request_id: str):
     if not _enable_fulfillment():
         raise HTTPException(503, detail="Fulfillment system is not enabled")
     supabase = _get_supabase()

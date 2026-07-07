@@ -137,6 +137,12 @@ async def lifespan(app: FastAPI):
         print("   This is a critical failure - check TEE enclave health")
     print("="*80 + "\n")
     
+    # Start the event-loop stall watchdog first, so even a hang later in
+    # startup (or any future loop-blocking bug) logs CRITICAL + full thread
+    # stacks instead of silently freezing every endpoint.
+    from gateway.utils.loop_watchdog import start_loop_watchdog
+    start_loop_watchdog(asyncio.get_running_loop())
+
     # Load gateway keypair for signed receipts
     print("="*80)
     print("🔐 LOADING GATEWAY KEYPAIR")

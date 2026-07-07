@@ -8,6 +8,9 @@ without cross-module coupling.
 
 import asyncio
 import logging
+import os
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Tuple
 
@@ -15,12 +18,53 @@ import bittensor as bt
 
 logger = logging.getLogger(__name__)
 
+# The banned set is tiny (tens of rows) and changes rarely, but the check
+# runs on every miner-facing call — under normal polling cadence that makes
+# it the single largest source of DB round-trips on the gateway.  Caching
+# the whole table for a short TTL collapses that to ~2 queries a minute.
+# A fresh ban takes effect within the TTL; fail-open behaviour is preserved
+# (fetch errors serve the previous snapshot, or allow if none exists yet).
+_BAN_CACHE_TTL_SECONDS = float(os.getenv("BAN_CACHE_TTL_SECONDS", "30"))
+_ban_cache: Dict[str, Any] = {"fetched_at_mono": 0.0, "banned": None}
+_ban_cache_lock = threading.Lock()
+
+
+def _load_banned_hotkeys() -> Optional[Dict[str, Dict[str, Any]]]:
+    """Return {hotkey: ban_record} snapshot of banned_hotkeys, cached ~30s.
+
+    Blocking — call from worker threads only.  Returns None when no snapshot
+    is available (first fetch failing), so callers can fail open.
+    """
+    with _ban_cache_lock:
+        now_mono = time.monotonic()
+        if (
+            _ban_cache["banned"] is not None
+            and now_mono - _ban_cache["fetched_at_mono"] < _BAN_CACHE_TTL_SECONDS
+        ):
+            return _ban_cache["banned"]
+        try:
+            from gateway.db.client import get_write_client
+
+            response = get_write_client().table("banned_hotkeys") \
+                .select("hotkey, reason, banned_at, banned_by") \
+                .execute()
+            _ban_cache["banned"] = {
+                r["hotkey"]: r for r in (response.data or []) if r.get("hotkey")
+            }
+            _ban_cache["fetched_at_mono"] = now_mono
+        except Exception as e:
+            logger.warning(
+                f"Banned-hotkeys refresh failed: {e} — "
+                f"{'serving stale snapshot' if _ban_cache['banned'] is not None else 'failing open'}"
+            )
+        return _ban_cache["banned"]
+
 
 def is_hotkey_banned_sync(hotkey: str) -> Tuple[bool, Optional[str]]:
     """
     Check if a hotkey is banned from submitting models.
 
-    Queries the public ``banned_hotkeys`` table in Supabase.
+    Reads the short-TTL snapshot of the public ``banned_hotkeys`` table.
     Banned hotkeys cannot submit new models and lose champion status if they have it.
 
     Fail-open: returns ``(False, None)`` on any DB exception so legitimate
@@ -31,17 +75,12 @@ def is_hotkey_banned_sync(hotkey: str) -> Tuple[bool, Optional[str]]:
     this in a thread so the loop keeps serving other requests meanwhile.
     """
     try:
-        from gateway.db.client import get_write_client
+        banned = _load_banned_hotkeys()
+        if banned is None:
+            return False, None  # no snapshot available — fail open
 
-        supabase = get_write_client()
-
-        response = supabase.table("banned_hotkeys") \
-            .select("hotkey, reason, banned_at, banned_by") \
-            .eq("hotkey", hotkey) \
-            .execute()
-
-        if response.data and len(response.data) > 0:
-            ban_record = response.data[0]
+        ban_record = banned.get(hotkey)
+        if ban_record:
             reason = ban_record.get("reason", "Banned for gaming/hardcoding violations")
             banned_at = ban_record.get("banned_at", "unknown")
             logger.warning(f"🚫 Banned hotkey attempted submission: {hotkey[:16]}... (reason: {reason}, banned_at: {banned_at})")
@@ -175,6 +214,11 @@ async def ban_hotkey(
             "banned_by": banned_by,
             "banned_at": datetime.now(timezone.utc).isoformat(),
         }, on_conflict="hotkey").execute()
+
+        # Expire the read cache so the ban is enforced on the next check
+        # instead of after the TTL.
+        with _ban_cache_lock:
+            _ban_cache["fetched_at_mono"] = 0.0
 
         logger.warning(f"🚫 Hotkey banned: {hotkey[:16]}... (reason: {reason}, by: {banned_by})")
 

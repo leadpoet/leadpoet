@@ -14,6 +14,34 @@ root_free_kb() {
   df --output=avail / | tail -1 | tr -d ' '
 }
 
+docker_storage_counts() {
+  OVERLAY_DIRS="$(sudo find /var/lib/docker/overlay2 -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+  OVERLAY_KB="$(sudo du -sxk /var/lib/docker/overlay2 2>/dev/null | awk '{print $1}' || true)"
+  OVERLAY_KB="${OVERLAY_KB:-0}"
+  IMAGE_COUNT="$(sudo docker images -q 2>/dev/null | wc -l | tr -d ' ')"
+  CONTAINER_COUNT="$(sudo docker ps -aq 2>/dev/null | wc -l | tr -d ' ')"
+  VOLUME_COUNT="$(sudo docker volume ls -q 2>/dev/null | wc -l | tr -d ' ')"
+}
+
+reset_orphaned_docker_storage_if_needed() {
+  local free_kb_after_prune="$1"
+  docker_storage_counts
+
+  if [ "${free_kb_after_prune:-0}" -lt "$MIN_FREE_KB" ] \
+     && [ "${IMAGE_COUNT:-0}" -eq 0 ] \
+     && [ "${CONTAINER_COUNT:-0}" -eq 0 ] \
+     && [ "${VOLUME_COUNT:-0}" -eq 0 ] \
+     && { [ "${OVERLAY_KB:-0}" -gt $((1024 * 1024)) ] || [ "${OVERLAY_DIRS:-0}" -gt 0 ]; }; then
+    echo "Detected orphaned Docker storage with no tracked Docker objects; resetting Docker storage"
+    echo "orphaned overlay usage: ${OVERLAY_KB:-0} KiB across ${OVERLAY_DIRS:-0} dirs"
+    sudo systemctl stop docker.socket docker 2>/dev/null || true
+    sudo rm -rf /var/lib/docker/overlay2 /var/lib/docker/buildkit /var/lib/docker/tmp
+    sudo mkdir -p /var/lib/docker/overlay2 /var/lib/docker/buildkit /var/lib/docker/tmp
+    sudo systemctl start docker
+    sleep 5
+  fi
+}
+
 emergency_disk_preflight() {
   local free_kb
   free_kb="$(root_free_kb)"
@@ -34,25 +62,9 @@ emergency_disk_preflight() {
   sudo docker builder prune -af 2>/dev/null || true
   sudo docker system prune -af --volumes 2>/dev/null || true
 
-  local free_kb_after_prune overlay_dirs image_count container_count volume_count
+  local free_kb_after_prune
   free_kb_after_prune="$(root_free_kb)"
-  overlay_dirs="$(sudo find /var/lib/docker/overlay2 -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
-  image_count="$(sudo docker images -q 2>/dev/null | wc -l | tr -d ' ')"
-  container_count="$(sudo docker ps -aq 2>/dev/null | wc -l | tr -d ' ')"
-  volume_count="$(sudo docker volume ls -q 2>/dev/null | wc -l | tr -d ' ')"
-
-  if [ "${free_kb_after_prune:-0}" -lt "$MIN_FREE_KB" ] \
-     && [ "${overlay_dirs:-0}" -gt 1000 ] \
-     && [ "${image_count:-0}" -eq 0 ] \
-     && [ "${container_count:-0}" -eq 0 ] \
-     && [ "${volume_count:-0}" -eq 0 ]; then
-    echo "Emergency cleanup detected orphaned Docker overlay data with no tracked Docker objects; resetting Docker storage"
-    sudo systemctl stop docker.socket docker 2>/dev/null || true
-    sudo rm -rf /var/lib/docker/overlay2 /var/lib/docker/buildkit /var/lib/docker/tmp
-    sudo mkdir -p /var/lib/docker/overlay2 /var/lib/docker/buildkit /var/lib/docker/tmp
-    sudo systemctl start docker
-    sleep 5
-  fi
+  reset_orphaned_docker_storage_if_needed "$free_kb_after_prune"
 
   echo "Disk after emergency cleanup"
   df -h / /var/lib/docker 2>/dev/null || df -h /
@@ -256,23 +268,7 @@ sudo docker builder prune -af 2>/dev/null || true
 sudo docker system prune -af --volumes 2>/dev/null || true
 
 FREE_KB_AFTER_PRUNE="$(df --output=avail / | tail -1 | tr -d ' ')"
-OVERLAY_DIRS="$(sudo find /var/lib/docker/overlay2 -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
-IMAGE_COUNT="$(sudo docker images -q 2>/dev/null | wc -l | tr -d ' ')"
-CONTAINER_COUNT="$(sudo docker ps -aq 2>/dev/null | wc -l | tr -d ' ')"
-VOLUME_COUNT="$(sudo docker volume ls -q 2>/dev/null | wc -l | tr -d ' ')"
-
-if [ "${FREE_KB_AFTER_PRUNE:-0}" -lt "$MIN_FREE_KB" ] \
-   && [ "${OVERLAY_DIRS:-0}" -gt 1000 ] \
-   && [ "${IMAGE_COUNT:-0}" -eq 0 ] \
-   && [ "${CONTAINER_COUNT:-0}" -eq 0 ] \
-   && [ "${VOLUME_COUNT:-0}" -eq 0 ]; then
-  echo "Detected orphaned Docker overlay data with no tracked Docker objects; resetting Docker storage"
-  sudo systemctl stop docker.socket docker 2>/dev/null || true
-  sudo rm -rf /var/lib/docker/overlay2 /var/lib/docker/buildkit /var/lib/docker/tmp
-  sudo mkdir -p /var/lib/docker/overlay2 /var/lib/docker/buildkit /var/lib/docker/tmp
-  sudo systemctl start docker
-  sleep 5
-fi
+reset_orphaned_docker_storage_if_needed "$FREE_KB_AFTER_PRUNE"
 
 echo "Disk after cleanup"
 df -h / /var/lib/docker 2>/dev/null || df -h /

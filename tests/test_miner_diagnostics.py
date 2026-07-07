@@ -73,6 +73,10 @@ def _vis():
     return {PUBLIC_REF: "public", "icp_pub_infra": "public"}   # others default → private
 
 
+def _clone_bundle():
+    return json.loads(json.dumps(_bundle()))
+
+
 def _build():
     return md.build_candidate_diagnostics(
         candidate_id="candidate:abc", bundle_doc=_bundle(),
@@ -145,13 +149,111 @@ def test_emitted_patch_fields():
 def test_private_pool_counts():
     pool = _build()["private_pool"]
     # PRIVATE_REF helped, icp_priv_flat flat, icp_INFRA_dead infra
-    assert pool == {"icp_count": 3, "helped": 1, "hurt": 0, "flat": 1, "infra_excluded": 1}
+    assert pool == {
+        "icp_count": 3,
+        "helped": 1,
+        "hurt": 0,
+        "flat": 1,
+        "infra_excluded": 1,
+        "cost_budget_exceeded": 0,
+    }
 
 
 def test_public_icp_values_and_infra_label():
     pub = {r["icp_ref"]: r for r in _build()["public_icps"]}
     assert pub[PUBLIC_REF]["delta"] == 32.4 and pub[PUBLIC_REF]["candidate_score"] == 32.4
     assert pub["icp_pub_infra"]["status"] == "infra_excluded"
+
+
+def test_public_cost_budget_exceeded_reason_is_sanitized():
+    bundle = _clone_bundle()
+    bundle["aggregates"]["per_icp_results"].append({
+        "icp_ref": "icp_pub_budget",
+        "status": "completed",
+        "failure_reason": "provider_cost_cap_blocked",
+        "provider_cost_cap_blocked": True,
+        "provider_cost_summary": {
+            "cap_blocked": True,
+            "total_cost_usd": 12.34,
+            "provider_breakdown": {"scrapingdog": {"cost_usd": 12.34}},
+            "request_fingerprint": "sha256:provider-fingerprint",
+            "endpoint": "/profile",
+        },
+        "delta_vs_base": 0.0,
+        "base_per_icp_score": 0.0,
+        "candidate_per_icp_score": 0.0,
+        "candidate_company_scores": [],
+    })
+    doc = md.build_candidate_diagnostics(
+        candidate_id="candidate:abc",
+        bundle_doc=bundle,
+        patch_manifest=_patch_manifest(),
+        visibility_by_ref={**_vis(), "icp_pub_budget": "public"},
+    )
+    row = {r["icp_ref"]: r for r in doc["public_icps"]}["icp_pub_budget"]
+    assert row["status"] == "cost_budget_exceeded"
+    assert row["reason"] == "ICP budget exceeded"
+    assert row["note"] == "This ICP scored 0 because the per-ICP provider budget was exceeded."
+    assert row["reason"] != md._EXTERNAL_FAILURE_LABEL
+
+    blob = json.dumps(doc).lower()
+    for forbidden in (
+        "provider_cost_summary",
+        "provider_breakdown",
+        "total_cost_usd",
+        "cost_usd",
+        "request_fingerprint",
+        "scrapingdog",
+        "/profile",
+        "sha256:provider-fingerprint",
+    ):
+        assert forbidden not in blob, forbidden
+
+
+def test_private_cost_budget_exceeded_is_pool_count_only():
+    private_budget_ref = "qualification_private_icp_sets:20260703:icp_PRIVATE_BUDGET_999"
+    bundle = _clone_bundle()
+    bundle["aggregates"]["per_icp_results"].append({
+        "icp_ref": private_budget_ref,
+        "status": "provider_cost_cap_blocked",
+        "delta_vs_base": 0.0,
+        "base_per_icp_score": 0.0,
+        "candidate_per_icp_score": 0.0,
+        "candidate_company_scores": [],
+    })
+    doc = md.build_candidate_diagnostics(
+        candidate_id="candidate:abc",
+        bundle_doc=bundle,
+        patch_manifest=_patch_manifest(),
+        visibility_by_ref=_vis(),
+    )
+    blob = json.dumps(doc)
+    assert private_budget_ref not in blob
+    assert "PRIVATE_BUDGET_999" not in blob
+    assert doc["private_pool"]["cost_budget_exceeded"] == 1
+    assert "budget" not in doc["aggregate"]
+
+
+def test_cost_budget_detection_from_summary_only():
+    bundle = _clone_bundle()
+    bundle["aggregates"]["per_icp_results"].append({
+        "icp_ref": "icp_pub_budget_summary",
+        "status": "completed",
+        "provider_cost_summary": {"cap_blocked": True},
+        "delta_vs_base": 0.0,
+        "base_per_icp_score": 0.0,
+        "candidate_per_icp_score": 0.0,
+        "candidate_company_scores": [],
+    })
+    doc = md.build_candidate_diagnostics(
+        candidate_id="candidate:abc",
+        bundle_doc=bundle,
+        patch_manifest=_patch_manifest(),
+        visibility_by_ref={**_vis(), "icp_pub_budget_summary": "public"},
+    )
+    row = {r["icp_ref"]: r for r in doc["public_icps"]}["icp_pub_budget_summary"]
+    assert row["status"] == "cost_budget_exceeded"
+    assert row["reason"] == "ICP budget exceeded"
 
 
 def test_infra_aggregate_and_rerun_flag():

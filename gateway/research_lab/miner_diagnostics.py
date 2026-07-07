@@ -55,6 +55,11 @@ _INFRA_MARKERS = (
     "candidate_model_runtime_provider",
 )
 
+_BUDGET_MARKER = "provider_cost_cap_blocked"
+_BUDGET_EXCEEDED_STATUS = "cost_budget_exceeded"
+_BUDGET_EXCEEDED_LABEL = "ICP budget exceeded"
+_BUDGET_EXCEEDED_NOTE = "This ICP scored 0 because the per-ICP provider budget was exceeded."
+
 
 def visibility_map_from_benchmark_split(
     benchmark_score_summary_doc: Mapping[str, Any] | None,
@@ -91,6 +96,16 @@ def _is_infra_row(row: Mapping[str, Any], provider_excluded: set[str]) -> bool:
         return True
     blob = f"{row.get('status') or ''} {row.get('failure_reason') or ''}".lower()
     return any(marker in blob for marker in _INFRA_MARKERS)
+
+
+def _is_cost_budget_row(row: Mapping[str, Any]) -> bool:
+    if bool(row.get("provider_cost_cap_blocked")):
+        return True
+    summary = row.get("provider_cost_summary")
+    if isinstance(summary, Mapping) and bool(summary.get("cap_blocked")):
+        return True
+    blob = f"{row.get('status') or ''} {row.get('failure_reason') or ''}".lower()
+    return _BUDGET_MARKER in blob
 
 
 def _delta_band(delta: float, flat_band: float) -> str:
@@ -234,6 +249,7 @@ def build_candidate_diagnostics(
 
     public_icps: list[dict[str, Any]] = []
     priv_helped = priv_hurt = priv_flat = priv_infra = priv_total = 0
+    priv_budget = 0
     pub_infra = 0
     scored_score_sum = 0.0
     scored_score_count = 0
@@ -241,6 +257,7 @@ def build_candidate_diagnostics(
         if not isinstance(row, Mapping):
             continue
         ref = str(row.get("icp_ref") or "")
+        is_budget = _is_cost_budget_row(row)
         is_infra = _is_infra_row(row, provider_excluded)
         delta = _num(row.get("delta_vs_base"))
         cand_score = _num(row.get("candidate_per_icp_score"))
@@ -261,7 +278,11 @@ def build_candidate_diagnostics(
                 "base_score": round(base_score, 4),
                 "delta": round(delta, 4),
             }
-            if is_infra:
+            if is_budget:
+                entry["status"] = _BUDGET_EXCEEDED_STATUS
+                entry["reason"] = _BUDGET_EXCEEDED_LABEL
+                entry["note"] = _BUDGET_EXCEEDED_NOTE
+            elif is_infra:
                 entry["status"] = "infra_excluded"
                 entry["reason"] = _EXTERNAL_FAILURE_LABEL
                 entry["note"] = f"{_EXTERNAL_FAILURE_LABEL} — external service issue, not attributable to your patch"
@@ -272,7 +293,9 @@ def build_candidate_diagnostics(
         else:
             # PRIVATE: pool aggregates only. Never a per-ICP row.
             priv_total += 1
-            if is_infra:
+            if is_budget:
+                priv_budget += 1
+            elif is_infra:
                 priv_infra += 1
             else:
                 band = _delta_band(delta, flat_band)
@@ -314,13 +337,13 @@ def build_candidate_diagnostics(
             ),
         },
     }
-
     private_pool = {
         "icp_count": priv_total,
         "helped": priv_helped,
         "hurt": priv_hurt,
         "flat": priv_flat,
         "infra_excluded": priv_infra,
+        "cost_budget_exceeded": priv_budget,
     }
 
     scored_companies = {

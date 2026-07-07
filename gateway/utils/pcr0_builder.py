@@ -67,6 +67,16 @@ PCR0_CHECK_INTERVAL = int(os.environ.get("PCR0_CHECK_INTERVAL", "480"))  # 8 min
 # Allows validators on older code to still be accepted
 PCR0_CACHE_SIZE = int(os.environ.get("PCR0_CACHE_SIZE", "3"))
 
+# Git history depth for the builder's working clone.  The historical warm-up
+# advertises "last N commits", but with a depth-1 clone the repo only ever
+# contains HEAD, so after any gateway restart the (in-memory) PCR0 cache is
+# rebuilt with HEAD's PCR0 alone — a validator whose enclave was built even
+# one monitored commit earlier stops verifying dynamically and every weight
+# submission 403s until its measurement is hand-added to the static
+# allowlist.  History is metadata-only under --filter=blob:none (blobs fetch
+# on demand at checkout), so a deeper clone costs almost nothing.
+PCR0_GIT_HISTORY_DEPTH = max(1, int(os.environ.get("PCR0_GIT_HISTORY_DEPTH", "20")))
+
 # Give the gateway process time to finish serving health/readiness before the
 # Docker/Nitro cache warmer starts competing for host resources. Static PCR0
 # allowlist acceptance remains available while this delayed warmup runs.
@@ -296,7 +306,7 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
         # somewhere), but the fix is trivially safe: re-apply the patterns
         # on every update so the state is self-healing.
         proc = await asyncio.create_subprocess_exec(
-            "git", "fetch", "--depth", "1", "origin", GITHUB_BRANCH,
+            "git", "fetch", "--depth", str(PCR0_GIT_HISTORY_DEPTH), "origin", GITHUB_BRANCH,
             cwd=repo_dir,
             env=git_env,
             stdout=asyncio.subprocess.PIPE,
@@ -369,7 +379,7 @@ async def clone_or_update_repo(repo_dir: str) -> bool:
         # Step 1: Clone with sparse checkout enabled (downloads only .git metadata)
         proc = await asyncio.create_subprocess_exec(
             "git", "clone",
-            "--depth", "1",           # Only latest commit
+            "--depth", str(PCR0_GIT_HISTORY_DEPTH),  # History for warm-up's last-N-commits build
             "--filter=blob:none",     # Don't download any files yet
             "--sparse",               # Enable sparse checkout
             "-b", GITHUB_BRANCH,

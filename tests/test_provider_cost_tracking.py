@@ -211,17 +211,19 @@ def test_evidence_proxy_emits_cost_event_header_for_live_success():
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeProvider)
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     upstream_thread.start()
-    original = dict(provider_evidence_proxy._UPSTREAMS["exa"])
     proxy = None
     try:
-        provider_evidence_proxy._UPSTREAMS["exa"] = {
-            **original,
-            "base": f"http://127.0.0.1:{upstream.server_address[1]}",
-            "auth": lambda: {},
-        }
+        registry = [
+            provider_evidence_proxy.ProviderRegistryEntry(
+                id="exa",
+                base_url=f"http://127.0.0.1:{upstream.server_address[1]}",
+                auth_kind="none",
+            )
+        ]
         proxy, _store, proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
             host="127.0.0.1",
             port=0,
+            registry=registry,
         )
         req = urllib.request.Request(
             f"http://127.0.0.1:{proxy.server_address[1]}/exa/search",
@@ -241,7 +243,6 @@ def test_evidence_proxy_emits_cost_event_header_for_live_success():
             assert event["billable"] is True
             assert event["cost_usd"] == 0.0123
     finally:
-        provider_evidence_proxy._UPSTREAMS["exa"] = original
         if proxy is not None:
             proxy.shutdown()
             proxy.server_close()
@@ -254,17 +255,20 @@ def test_evidence_proxy_does_not_cache_nonterminal_exa_agent_poll():
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeExaAgentProvider)
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     upstream_thread.start()
-    original = dict(provider_evidence_proxy._UPSTREAMS["exa"])
+    upstream_base = f"http://127.0.0.1:{upstream.server_address[1]}"
     proxy = None
     try:
-        provider_evidence_proxy._UPSTREAMS["exa"] = {
-            **original,
-            "base": f"http://127.0.0.1:{upstream.server_address[1]}",
-            "auth": lambda: {},
-        }
+        registry = [
+            provider_evidence_proxy.ProviderRegistryEntry(
+                id="exa",
+                base_url=upstream_base,
+                auth_kind="none",
+            )
+        ]
         proxy, store, _proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
             host="127.0.0.1",
             port=0,
+            registry=registry,
         )
         url = f"http://127.0.0.1:{proxy.server_address[1]}/exa/agent/runs/agent_run_123"
         req = urllib.request.Request(
@@ -284,7 +288,7 @@ def test_evidence_proxy_does_not_cache_nonterminal_exa_agent_poll():
         assert not store.lookup(
             provider_evidence_proxy.canonical_request_fingerprint(
                 "GET",
-                provider_evidence_proxy._UPSTREAMS["exa"]["base"] + "/agent/runs/agent_run_123",
+                upstream_base + "/agent/runs/agent_run_123",
                 None,
             )
         )
@@ -298,7 +302,6 @@ def test_evidence_proxy_does_not_cache_nonterminal_exa_agent_poll():
         assert second_event["cost_usd"] == 0.1
         assert _FakeExaAgentProvider.calls == 2
     finally:
-        provider_evidence_proxy._UPSTREAMS["exa"] = original
         if proxy is not None:
             proxy.shutdown()
             proxy.server_close()

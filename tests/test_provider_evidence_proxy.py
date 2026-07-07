@@ -304,7 +304,10 @@ class TestProxyEndToEnd:
             status = 200
 
             def read(self):
-                return b'{"live":true}'
+                # Carries an Exa cost field so the per-scope cost ledger can
+                # price the call (a cost-untrackable response fail-closes the
+                # scope by design — covered in test_provider_cost_tracking).
+                return b'{"live":true,"costDollars":{"total":0.005}}'
 
             def __enter__(self):
                 return self

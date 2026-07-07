@@ -58,6 +58,7 @@ from research_lab.eval.provider_costs import (
     ProviderCostLedger,
     decimal_from_env,
     estimate_provider_cost,
+    exa_agent_run_status,
     extract_openrouter_cost_dollars,
     redacted_endpoint,
     scrapingdog_credits_for_path,
@@ -144,7 +145,11 @@ def validate_provider_registry_entries(entries: Sequence[ProviderRegistryEntry])
         if entry.id in seen_ids:
             errors.append(f"{label}: duplicate registry id")
         seen_ids.add(entry.id)
-        if not entry.base_url.startswith("https://"):
+        if not entry.base_url.startswith("https://") and not entry.base_url.startswith(
+            ("http://127.0.0.1", "http://localhost")
+        ):
+            # Loopback http is allowed for test fakes and local trial doubles;
+            # anything routable must be https.
             errors.append(f"{label}: base_url must be https")
         if entry.auth_kind not in _VALID_AUTH_KINDS:
             errors.append(f"{label}: unknown auth_kind {entry.auth_kind}")
@@ -362,6 +367,37 @@ def _utc_day() -> str:
     return time.strftime("%Y-%m-%d", time.gmtime())
 
 
+_EXA_AGENT_NONTERMINAL_STATUSES = {"queued", "running", "in_progress", "pending"}
+
+
+def _response_is_recordable(provider: str, upstream_url: str, status: int, body: bytes) -> bool:
+    if provider != "exa" or status >= 400:
+        return True
+    try:
+        path = urllib.parse.urlsplit(upstream_url).path
+    except Exception:
+        path = ""
+    if not path.startswith("/agent/runs/"):
+        return True
+    agent_status = exa_agent_run_status(body)
+    return agent_status not in _EXA_AGENT_NONTERMINAL_STATUSES
+
+
+def _record_is_replayable(record: Mapping[str, Any]) -> bool:
+    try:
+        status = int(record.get("status") or 0)
+    except Exception:
+        status = 0
+    if status >= 400:
+        return True
+    try:
+        body = base64.b64decode(record.get("body_b64") or "")
+    except Exception:
+        body = b""
+    agent_status = exa_agent_run_status(body)
+    return agent_status not in _EXA_AGENT_NONTERMINAL_STATUSES
+
+
 class EvidenceStore:
     """Baseline tape + shared day cache with single-flight live calls.
 
@@ -400,7 +436,8 @@ class EvidenceStore:
                 except Exception:
                     continue
                 for key, record in loaded.items():
-                    self._baseline.setdefault(key, record)
+                    if _record_is_replayable(record):
+                        self._baseline.setdefault(key, record)
         self._day = {}
         if self._day_path and os.path.isfile(self._day_path):
             try:
@@ -412,7 +449,11 @@ class EvidenceStore:
                         self._day = {
                             str(k): dict(v)
                             for k, v in entries.items()
-                            if isinstance(v, Mapping) and isinstance(v.get("status"), int)
+                            if (
+                                isinstance(v, Mapping)
+                                and isinstance(v.get("status"), int)
+                                and _record_is_replayable(v)
+                            )
                         }
             except Exception:
                 self._day = {}
@@ -430,8 +471,13 @@ class EvidenceStore:
 
     def _cached_locked(self, fingerprint: str) -> dict[str, Any] | None:
         record = self._baseline.get(fingerprint)
+        if record is not None and not _record_is_replayable(record):
+            record = None
         if record is None:
             record = self._day.get(fingerprint)
+            if record is not None and not _record_is_replayable(record):
+                self._day.pop(fingerprint, None)
+                record = None
         return dict(record) if record else None
 
     def lookup(self, fingerprint: str) -> dict[str, Any] | None:
@@ -762,7 +808,14 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             self._ledger_row(entry, rest, fingerprint, evidence="error", status=502, live_cost=False)
             self._respond(502, b'{"error":"upstream unreachable"}', evidence="error", headers=event.to_headers())
             return
-        self.store.record(fingerprint, status, body)
+        # Nonterminal Exa agent polls are real spend but not replayable
+        # evidence: never cache them (a later identical poll must go live).
+        recordable = _response_is_recordable(entry.id, upstream_url, status, body)
+        evidence_label = "recorded" if recordable else "live_unrecorded"
+        if recordable:
+            self.store.record(fingerprint, status, body)
+        elif is_leader:
+            self.store.release_lead(fingerprint)
         estimate = estimate_provider_cost(
             provider=entry.id,
             upstream_url=upstream_url,
@@ -812,6 +865,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             request_fingerprint=fingerprint,
             status_code=status,
             estimate=estimate,
+            evidence=evidence_label,
         )
         # The usage row carries the measured cost when the estimator priced the
         # call; the registry's static per-call estimate is the fallback.
@@ -830,7 +884,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             live_cost=True,
             est_cost_microusd=measured_microusd,
         )
-        self._respond(status, body, evidence="recorded", headers=event.to_headers())
+        self._respond(status, body, evidence=evidence_label, headers=event.to_headers())
 
     do_GET = _handle
     do_POST = _handle

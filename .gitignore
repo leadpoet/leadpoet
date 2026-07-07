@@ -118,6 +118,8 @@ cursor_md_files/
 # Codex local instructions (never commit; use ~/.codex/AGENTS.md for global rules)
 AGENTS.md
 AGENTS.override.md
+# Claude Code local instructions (same policy as AGENTS.md)
+CLAUDE.md
 
 # Local/private Research Lab planning drafts
 leadpoet_research_lab_plan_v5.md

@@ -240,6 +240,8 @@ pkill -9 -f "uvicorn" 2>/dev/null || true
 pkill -9 -f "gateway/research_lab/worker_process.py" 2>/dev/null || true
 pkill -9 -f "run_research_lab_hosted_worker" 2>/dev/null || true
 pkill -9 -f "run_research_lab_scoring_worker" 2>/dev/null || true
+pkill -9 -f "gateway.research_lab.provider_evidence_proxy" 2>/dev/null || true
+pkill -9 -f "provider_evidence_proxy" 2>/dev/null || true
 
 echo "Stopping stuck private-model Docker builds or pip installs"
 sudo pkill -TERM -f "docker build -f .*/validator_models/containerizing/Dockerfile" 2>/dev/null || true

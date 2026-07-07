@@ -217,12 +217,64 @@ def _openrouter_generation_id_from_headers(headers: Mapping[str, Any]) -> str:
         "X-OpenRouter-Generation-Id",
         "X-Openrouter-Generation-Id",
         "OpenRouter-Generation-Id",
+        "X-OpenRouter-Response-Id",
+        "OpenRouter-Response-Id",
         "X-Generation-Id",
     ):
         value = str(headers.get(name) or lowered.get(name.lower()) or "").strip()
         if value:
             return value[:200]
     return ""
+
+
+def _reconcile_openrouter_generation_cost(
+    *,
+    entry: ProviderRegistryEntry,
+    credential: str,
+    estimate: ProviderCostEstimate,
+) -> ProviderCostEstimate:
+    generation_id = str(estimate.generation_id or "").strip()
+    if not generation_id:
+        return estimate
+    gen_url = entry.base_url + "/api/v1/generation?id=" + urllib.parse.quote(generation_id, safe="")
+    gen_headers = {"Authorization": "Bearer " + credential} if credential else {}
+    gen_req = urllib.request.Request(gen_url, headers=gen_headers, method="GET")
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(gen_req, timeout=30) as gen_response:
+                if int(getattr(gen_response, "status", None) or getattr(gen_response, "code", 0) or 0) >= 400:
+                    continue
+                generation_body = gen_response.read()
+                reconciled_cost, reconciled_metadata = extract_openrouter_cost_dollars(generation_body)
+                if reconciled_cost is not None:
+                    return ProviderCostEstimate(
+                        provider="or",
+                        endpoint=estimate.endpoint,
+                        model=estimate.model,
+                        billable=True,
+                        cost_usd=reconciled_cost,
+                        cost_source="openrouter_generation_reconciliation",
+                        prompt_tokens=int(reconciled_metadata.get("prompt_tokens") or 0),
+                        completion_tokens=int(reconciled_metadata.get("completion_tokens") or 0),
+                        generation_id=generation_id,
+                    )
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code not in {404, 409, 425, 429, 500, 502, 503, 504}:
+                break
+        except Exception as exc:
+            last_error = exc
+            break
+        if attempt < 2:
+            time.sleep(0.5 * (attempt + 1))
+    if last_error is not None:
+        logger.warning(
+            "research_lab_openrouter_generation_cost_reconcile_failed generation_id_prefix=%s error=%s",
+            generation_id[:16],
+            last_error,
+        )
+    return estimate
 
 
 def _headers_to_dict(headers: Any) -> dict[str, str]:
@@ -898,36 +950,11 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             and estimate.tracking_reason == "missing_openrouter_cost"
             and estimate.generation_id
         ):
-            try:
-                gen_url = (
-                    entry.base_url
-                    + "/api/v1/generation?id="
-                    + urllib.parse.quote(estimate.generation_id, safe="")
-                )
-                gen_headers = {"Authorization": "Bearer " + credential} if credential else {}
-                gen_req = urllib.request.Request(gen_url, headers=gen_headers, method="GET")
-                with urllib.request.urlopen(gen_req, timeout=30) as gen_response:
-                    if int(getattr(gen_response, "status", None) or getattr(gen_response, "code", 0) or 0) < 400:
-                        generation_body = gen_response.read()
-                        reconciled_cost, reconciled_metadata = extract_openrouter_cost_dollars(generation_body)
-                        if reconciled_cost is not None:
-                            estimate = ProviderCostEstimate(
-                                provider="or",
-                                endpoint=estimate.endpoint,
-                                model=estimate.model,
-                                billable=True,
-                                cost_usd=reconciled_cost,
-                                cost_source="openrouter_generation_reconciliation",
-                                prompt_tokens=int(reconciled_metadata.get("prompt_tokens") or 0),
-                                completion_tokens=int(reconciled_metadata.get("completion_tokens") or 0),
-                                generation_id=estimate.generation_id,
-                            )
-            except Exception as exc:
-                logger.warning(
-                    "research_lab_openrouter_generation_cost_reconcile_failed generation_id_prefix=%s error=%s",
-                    str(estimate.generation_id or "")[:16],
-                    exc,
-                )
+            estimate = _reconcile_openrouter_generation_cost(
+                entry=entry,
+                credential=credential,
+                estimate=estimate,
+            )
         event = cost_ledger.record_live_event(
             provider=entry.id,
             request_fingerprint=fingerprint,

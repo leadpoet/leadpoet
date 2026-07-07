@@ -250,14 +250,42 @@ def extract_openrouter_cost_dollars(body: bytes | str | None) -> tuple[Decimal |
     return None, metadata
 
 
+_OPENROUTER_GENERATION_ID_KEYS = (
+    "id",
+    "generation_id",
+    "generationId",
+    "response_id",
+    "responseId",
+)
+
+
+def _openrouter_generation_id_from_json(value: Any) -> str:
+    if isinstance(value, Mapping):
+        for key in _OPENROUTER_GENERATION_ID_KEYS:
+            candidate = str(value.get(key) or "").strip()
+            if candidate:
+                return candidate[:160]
+        for key in ("data", "generation", "response", "metadata"):
+            nested = _openrouter_generation_id_from_json(value.get(key))
+            if nested:
+                return nested
+        for nested_value in value.values():
+            nested = _openrouter_generation_id_from_json(nested_value)
+            if nested:
+                return nested
+    elif isinstance(value, list):
+        for item in value:
+            nested = _openrouter_generation_id_from_json(item)
+            if nested:
+                return nested
+    return ""
+
+
 def openrouter_generation_id(body: bytes | str | None) -> str:
     for parsed in _json_payloads(body):
-        if not isinstance(parsed, Mapping):
-            continue
-        for key in ("id", "generation_id"):
-            value = str(parsed.get(key) or "").strip()
-            if value:
-                return value[:160]
+        value = _openrouter_generation_id_from_json(parsed)
+        if value:
+            return value
     return ""
 
 
@@ -520,6 +548,8 @@ class ProviderCostLedger:
 
     def block_reason(self) -> str:
         with self._lock:
+            if self._blocked and self._blocked_reason:
+                return self._blocked_reason
             if self._spent >= self.cap_usd:
                 return "cost_cap_reached"
             return self._blocked_reason or "prior_cost_tracking_failed"

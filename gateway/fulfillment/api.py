@@ -1479,13 +1479,23 @@ def _collect_scoring_requests_sync(validator_hotkey: str) -> dict:
     """
     supabase = _get_supabase()
 
-    # 1. All requests currently in scoring status (paged).
+    # 1. All requests currently in scoring status (paged), PLUS recent
+    #    partially_fulfilled ones.  Consensus can finalize a request while
+    #    some revealed submissions are still un-scored (forced-consensus
+    #    timeout after an interruption); the lifecycle's stale-rescue pass
+    #    re-aggregates whenever late scores land — but that only works if
+    #    the validator is still OFFERED the leftover submissions.  The
+    #    per-submission filter below returns only the un-scored remainder,
+    #    so fully-scored requests in either status drop out of the payload.
+    #    The window matches the stale-rescue score-freshness window.
+    rescore_cutoff = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
     scoring_requests: List[dict] = []
     offset = 0
     for _ in range(20):
         page = supabase.table("fulfillment_requests") \
             .select("*") \
-            .eq("status", "scoring") \
+            .in_("status", ["scoring", "partially_fulfilled"]) \
+            .or_(f"status.eq.scoring,reveal_window_end.gte.{rescore_cutoff}") \
             .range(offset, offset + 999) \
             .execute()
         if not page.data:

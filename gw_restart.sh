@@ -312,11 +312,13 @@ aws ecr get-login-password --region "$AWS_REGION" | sudo docker login --username
 echo "Building/restarting TEE enclave"
 chmod +x "$GATEWAY_ROOT"/tee/*.sh || true
 cd "$GATEWAY_ROOT/tee"
+sudo mkdir -p /home/ec2-user/tee
+rm -f "$GATEWAY_ROOT/tee/tee-enclave.eif"
 sudo docker rmi tee-enclave:latest 2>/dev/null || true
 bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"
 sudo docker build --no-cache -f "$GATEWAY_ROOT/tee/Dockerfile.enclave" -t tee-enclave:latest "$GATEWAY_ROOT/"
 set +e
-sudo nitro-cli build-enclave --docker-uri tee-enclave:latest --output-file tee-enclave.eif >/dev/null 2>&1
+sudo nitro-cli build-enclave --docker-uri tee-enclave:latest --output-file /home/ec2-user/tee/tee-enclave.eif >/dev/null 2>&1
 ENCLAVE_BUILD_STATUS="$?"
 set -e
 echo "Cleaning temporary enclave Docker image/layers before gateway relaunch"

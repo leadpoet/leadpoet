@@ -1493,33 +1493,46 @@ def _collect_scoring_requests_sync(validator_hotkey: str) -> dict:
     print(f"📋 /fulfillment/scoring: {len(scoring_requests)} request(s) in scoring status")
     scoring_ids = [r["request_id"] for r in scoring_requests]
 
-    # 2. Which of THESE requests has this validator already scored?  Scoped to
-    #    the current scoring ids (was: a full fulfillment_scores history scan).
-    already_scored_requests = set()
+    # 2. Which SUBMISSIONS of these requests has this validator already
+    #    scored?  Tracked per-submission, NOT per-request: excluding a whole
+    #    request the moment one of its submissions has a score strands the
+    #    rest.  When scoring is interrupted mid-request (validator restart,
+    #    gateway outage), the request sits with partial scores, never
+    #    reappears in this feed, and at forced consensus every un-scored
+    #    miner's revealed work is discarded.  Offering only the un-scored
+    #    remainder lets the validator finish the request; re-scores are safe
+    #    regardless (fulfillment_upsert_scores upserts on the same natural
+    #    key).
+    scored_subs_by_req: dict = {}
     if validator_hotkey:
         for i in range(0, len(scoring_ids), 100):
             chunk = scoring_ids[i:i + 100]
             offset = 0
             for _ in range(20):
                 page = supabase.table("fulfillment_scores") \
-                    .select("request_id") \
+                    .select("request_id, submission_id") \
                     .eq("validator_hotkey", validator_hotkey) \
                     .in_("request_id", chunk) \
                     .range(offset, offset + 999) \
                     .execute()
                 if not page.data:
                     break
-                already_scored_requests.update(r["request_id"] for r in page.data)
+                for row in page.data:
+                    # Rows predating submission_id stamping can't identify
+                    # their submission; leaving them out re-offers the whole
+                    # request, and the upsert makes the re-score harmless.
+                    if row.get("submission_id"):
+                        scored_subs_by_req.setdefault(row["request_id"], set()) \
+                            .add(row["submission_id"])
                 if len(page.data) < 1000:
                     break
                 offset += 1000
-        if already_scored_requests:
-            print(f"   Validator {validator_hotkey[:8]}... already scored "
-                  f"{len(already_scored_requests)} of {len(scoring_ids)}")
+        if scored_subs_by_req:
+            print(f"   Validator {validator_hotkey[:8]}... has scores on "
+                  f"{len(scored_subs_by_req)} of {len(scoring_ids)} request(s); "
+                  f"offering un-scored submissions only")
 
-    needed_ids = [rid for rid in scoring_ids if rid not in already_scored_requests]
-    if not needed_ids:
-        return {"requests": []}
+    needed_ids = scoring_ids
 
     # 3. Batch-fetch all revealed submissions for the needed requests in one
     #    chunked, paged query grouped by request_id (was: one paged query per
@@ -1549,8 +1562,14 @@ def _collect_scoring_requests_sync(validator_hotkey: str) -> dict:
     out = []
     for rid in needed_ids:
         r = req_by_id[rid]
+        already_scored = scored_subs_by_req.get(rid, set())
         submissions = []
         for s in subs_by_req.get(rid, []):
+            # Skip submissions this validator already scored — only the
+            # un-scored remainder needs work (see the per-submission
+            # tracking rationale above).
+            if s["submission_id"] in already_scored:
+                continue
             # SAFETY: `leads` and `lead_ids` MUST come from the same
             # `lead_data` list so they stay index-aligned — the validator
             # zips them onto scores, and mismatched lengths silently corrupt
@@ -1563,6 +1582,12 @@ def _collect_scoring_requests_sync(validator_hotkey: str) -> dict:
                 "leads": [entry.get("data", {}) for entry in lead_data],
                 "lead_ids": [entry.get("lead_id", "") for entry in lead_data],
             })
+
+        # Nothing left to score on this request for this validator — omit it
+        # (this is where the fully-scored case, previously handled by the
+        # request-level filter, now falls out).
+        if not submissions:
+            continue
 
         print(f"   Returning {rid[:8]}... with {len(submissions)} submission(s), "
               f"{sum(len(s['leads']) for s in submissions)} total leads")

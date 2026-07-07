@@ -95,6 +95,21 @@ def _response_is_recordable(provider: str, upstream_url: str, status: int, body:
     return agent_status not in _EXA_AGENT_NONTERMINAL_STATUSES
 
 
+def _record_is_replayable(record: Mapping[str, Any]) -> bool:
+    try:
+        status = int(record.get("status") or 0)
+    except Exception:
+        status = 0
+    if status >= 400:
+        return True
+    try:
+        body = base64.b64decode(record.get("body_b64") or "")
+    except Exception:
+        body = b""
+    agent_status = exa_agent_run_status(body)
+    return agent_status not in _EXA_AGENT_NONTERMINAL_STATUSES
+
+
 class EvidenceStore:
     """Baseline tape + shared day cache with single-flight live calls.
 
@@ -133,7 +148,8 @@ class EvidenceStore:
                 except Exception:
                     continue
                 for key, record in loaded.items():
-                    self._baseline.setdefault(key, record)
+                    if _record_is_replayable(record):
+                        self._baseline.setdefault(key, record)
         self._day = {}
         if self._day_path and os.path.isfile(self._day_path):
             try:
@@ -145,7 +161,11 @@ class EvidenceStore:
                         self._day = {
                             str(k): dict(v)
                             for k, v in entries.items()
-                            if isinstance(v, Mapping) and isinstance(v.get("status"), int)
+                            if (
+                                isinstance(v, Mapping)
+                                and isinstance(v.get("status"), int)
+                                and _record_is_replayable(v)
+                            )
                         }
             except Exception:
                 self._day = {}
@@ -163,8 +183,13 @@ class EvidenceStore:
 
     def _cached_locked(self, fingerprint: str) -> dict[str, Any] | None:
         record = self._baseline.get(fingerprint)
+        if record is not None and not _record_is_replayable(record):
+            record = None
         if record is None:
             record = self._day.get(fingerprint)
+            if record is not None and not _record_is_replayable(record):
+                self._day.pop(fingerprint, None)
+                record = None
         return dict(record) if record else None
 
     def lookup(self, fingerprint: str) -> dict[str, Any] | None:

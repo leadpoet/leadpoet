@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import threading
 import urllib.request
@@ -303,3 +304,30 @@ def test_evidence_proxy_does_not_cache_nonterminal_exa_agent_poll():
             proxy.server_close()
         upstream.shutdown()
         upstream.server_close()
+
+
+def test_evidence_store_ignores_preexisting_nonterminal_exa_agent_cache(tmp_path):
+    fingerprint = "d" * 64
+    cache_path = tmp_path / "day_cache.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1.1",
+                "utc_day": provider_evidence_proxy._utc_day(),
+                "entries": {
+                    fingerprint: {
+                        "status": 200,
+                        "body_b64": base64.b64encode(
+                            b'{"object":"agent_run","id":"agent_run_123","status":"running"}'
+                        ).decode("ascii"),
+                        "outcome": "success",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = provider_evidence_proxy.EvidenceStore(day_cache_path=str(cache_path))
+
+    assert store.lookup(fingerprint) is None

@@ -6608,31 +6608,31 @@ class ResearchLabGatewayScoringWorker:
             )
 
     def _candidate_incontainer_trace_sink(self, candidate_id: str) -> Any:
-        """Candidate-scoped in-container trace sink for the evaluator.
+        """Candidate-scoped in-container trace/cost sink for the evaluator.
 
-        Uploads key by candidate (``{prefix}/{candidate_id}/{icp_ref}.json``)
-        instead of the default run-scoped ref, so one candidate's traces stay
-        enumerable under a single prefix; the evaluator places the returned uri
-        into the row's ``incontainer_trace_ref``. Returns None when no S3
-        prefix is configured — the evaluator's default count-and-drop sink
-        (logged once) then applies — and the
+        Provider-cost events must be persisted even when full in-container
+        trace upload is disabled. When an S3 prefix is configured, uploads key
+        by candidate (``{prefix}/{candidate_id}/{icp_ref}.json``) instead of
+        the default run-scoped ref, so one candidate's traces stay enumerable
+        under a single prefix; the evaluator places the returned uri into the
+        row's ``incontainer_trace_ref``. When no encrypted S3 sink is
+        available, this still persists cost events and returns an empty ref so
+        the evaluator records dropped trace counts plus cost summaries. The
         ``RESEARCH_LAB_INCONTAINER_TRACE_CAPTURE`` kill switch still overrides
         injected sinks inside the evaluator.
         """
         prefix = str(os.getenv(INCONTAINER_TRACE_S3_PREFIX_ENV) or "").strip().rstrip("/")
-        if not prefix.startswith("s3://"):
-            return None
         kms_key_id = str(os.getenv(INCONTAINER_TRACE_KMS_KEY_ENV) or "").strip()
-        if not kms_key_id:
+        upload_enabled = prefix.startswith("s3://") and bool(kms_key_id)
+        if prefix.startswith("s3://") and not kms_key_id:
             # P5/P13: prefix-on/key-off must never write unencrypted; fall back
-            # to the evaluator's default sink, which drops loudly for this case.
+            # to dropped trace refs while still writing provider-cost events.
             logger.error(
                 "research_lab_incontainer_trace_sink_refused candidate=%s reason=missing_kms_key "
                 "(set %s so candidate in-container traces are written SSE-KMS encrypted)",
                 compact_ref(candidate_id),
                 INCONTAINER_TRACE_KMS_KEY_ENV,
             )
-            return None
         safe_candidate = _trace_path_segment(candidate_id, fallback="candidate")
 
         async def _sink(icp_ref: str, entries: list[dict[str, Any]]) -> str:
@@ -6643,6 +6643,8 @@ class ResearchLabGatewayScoringWorker:
                 runner_role="candidate",
                 candidate_id=candidate_id,
             )
+            if not upload_enabled:
+                return ""
             return await asyncio.to_thread(
                 _upload_incontainer_trace_doc,
                 prefix,

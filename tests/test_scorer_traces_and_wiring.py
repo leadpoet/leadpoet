@@ -575,11 +575,30 @@ async def test_candidate_sink_keys_by_candidate(fake_s3, monkeypatch):
     assert payload["call_count"] == 1
 
 
-def test_candidate_sink_none_without_prefix(monkeypatch):
+async def test_candidate_sink_persists_costs_without_trace_prefix(monkeypatch):
     monkeypatch.delenv("RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX", raising=False)
+    captured: list[dict[str, Any]] = []
+
+    async def fake_persist_provider_cost_events(**kwargs: Any) -> None:
+        captured.append(dict(kwargs))
+
+    monkeypatch.setattr(sw, "_persist_provider_cost_events", fake_persist_provider_cost_events)
     worker = _worker()
-    # None -> the evaluator's default count-and-drop sink applies.
-    assert worker._candidate_incontainer_trace_sink("cand-123") is None
+    sink = worker._candidate_incontainer_trace_sink("cand-123")
+    assert sink is not None
+
+    ref = await sink("icp-1", [dict(TRACE_ENTRY)])
+
+    assert ref == ""
+    assert captured == [
+        {
+            "entries": [dict(TRACE_ENTRY)],
+            "run_type": "candidate_scoring",
+            "icp_ref": "icp-1",
+            "runner_role": "candidate",
+            "candidate_id": "cand-123",
+        }
+    ]
 
 
 async def test_trace_capturing_scorer_delegates_and_captures(fake_s3, monkeypatch):

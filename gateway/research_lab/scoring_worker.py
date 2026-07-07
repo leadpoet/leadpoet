@@ -1513,6 +1513,18 @@ def _provider_cost_cap_state(event: Mapping[str, Any]) -> str:
     return "under_cap"
 
 
+def _is_provider_cost_duplicate_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return (
+        "research_lab_provider_cost_events" in message
+        and (
+            "duplicate key" in message
+            or "unique constraint" in message
+            or "23505" in message
+        )
+    )
+
+
 async def _persist_provider_cost_events(
     *,
     entries: list[dict[str, Any]],
@@ -1574,7 +1586,15 @@ async def _persist_provider_cost_events(
         }
         try:
             await insert_row("research_lab_provider_cost_events", row)
-        except Exception:  # noqa: BLE001 - telemetry must not affect scoring
+        except Exception as exc:  # noqa: BLE001 - telemetry must not affect scoring
+            if _is_provider_cost_duplicate_error(exc):
+                logger.debug(
+                    "research_lab_provider_cost_event_duplicate run_type=%s icp_ref=%s provider=%s",
+                    run_type,
+                    compact_ref(icp_ref),
+                    provider,
+                )
+                continue
             logger.warning(
                 "research_lab_provider_cost_event_insert_failed run_type=%s icp_ref=%s provider=%s",
                 run_type,

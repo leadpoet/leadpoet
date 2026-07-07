@@ -20,6 +20,70 @@ from gateway.research_lab.promotion import (
 )
 
 
+def _provider_cost_trace_entry(seq: int = 1) -> dict:
+    return {
+        "seq": seq,
+        "provider_cost_event": {
+            "provider": "sd",
+            "endpoint": "/profile",
+            "model": "",
+            "request_fingerprint": "a" * 64,
+            "status_code": 200,
+            "billable": True,
+            "cost_usd": 0.0005,
+            "cost_source": "scrapingdog_credit_map",
+            "credits": 10,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cap_usd": 0.5,
+            "spent_before_usd": 0.0,
+            "spent_after_usd": 0.0005,
+            "scope": "scope-test",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_provider_cost_duplicate_insert_is_idempotent(monkeypatch, caplog):
+    async def duplicate_insert(table: str, row: dict) -> dict:
+        assert table == "research_lab_provider_cost_events"
+        raise RuntimeError(
+            "postgrest.exceptions.APIError: {'message': 'duplicate key value violates unique "
+            "constraint \"research_lab_provider_cost_events_pkey\"', 'code': '23505'}"
+        )
+
+    monkeypatch.setattr(sw, "insert_row", duplicate_insert)
+    caplog.set_level("WARNING", logger=sw.logger.name)
+
+    await sw._persist_provider_cost_events(
+        entries=[_provider_cost_trace_entry()],
+        run_type="private_baseline_rebenchmark",
+        icp_ref="qualification_icp:test",
+        runner_role="baseline",
+    )
+
+    assert "research_lab_provider_cost_event_insert_failed" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_provider_cost_non_duplicate_insert_failure_still_warns(monkeypatch, caplog):
+    async def failing_insert(table: str, row: dict) -> dict:
+        assert table == "research_lab_provider_cost_events"
+        raise RuntimeError("supabase timeout")
+
+    monkeypatch.setattr(sw, "insert_row", failing_insert)
+    caplog.set_level("WARNING", logger=sw.logger.name)
+
+    await sw._persist_provider_cost_events(
+        entries=[_provider_cost_trace_entry()],
+        run_type="private_baseline_rebenchmark",
+        icp_ref="qualification_icp:test",
+        runner_role="baseline",
+    )
+
+    assert "research_lab_provider_cost_event_insert_failed" in caplog.text
+
+
 def test_scoring_worker_short_fraction_timestamps_count_as_stale():
     base_status_at = (
         datetime.now(timezone.utc) - timedelta(minutes=20)

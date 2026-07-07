@@ -617,6 +617,148 @@ def _store_scoring_progress(
     )
 
 
+def _baseline_progress_s3_location(
+    manifest_uri: str,
+    *,
+    benchmark_date: str,
+    window_hash: str,
+    private_model_artifact_hash: str,
+) -> tuple[str, str] | None:
+    uri = str(manifest_uri or "")
+    if not uri.startswith("s3://"):
+        return None
+    rest = uri[5:]
+    bucket, sep, key = rest.partition("/")
+    if not bucket or not sep or not key:
+        return None
+    base_prefix = key.rsplit("/", 1)[0] if "/" in key else "research-lab/sourcing-model"
+    safe_date = "".join(
+        ch if ch.isdigit() or ch == "-" else "-" for ch in str(benchmark_date or "date")
+    )[:32]
+    window_tag = str(window_hash or "").removeprefix("sha256:")[:16] or "window"
+    artifact_tag = str(private_model_artifact_hash or "").removeprefix("sha256:")[:16] or "model"
+    return (
+        bucket,
+        f"{base_prefix}/baselines/{safe_date}/scoring-progress/{window_tag}-{artifact_tag}.json",
+    )
+
+
+def _benchmark_item_ref_for_progress(item: Mapping[str, Any]) -> str:
+    return str(item.get("icp_ref") or item.get("icp_hash") or "")
+
+
+def _progress_rows_by_icp_ref(rows: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None) -> dict[str, dict[str, Any]]:
+    indexed: dict[str, dict[str, Any]] = {}
+    for row in rows or []:
+        if not isinstance(row, Mapping):
+            continue
+        ref = str(row.get("icp_ref") or row.get("icp_hash") or "")
+        if ref:
+            indexed[ref] = dict(row)
+    return indexed
+
+
+def _baseline_summary_nonempty(row: Mapping[str, Any]) -> bool:
+    for key in ("company_count", "sourced_count", "model_output_count"):
+        try:
+            if int(row.get(key) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    breakdowns = row.get("score_breakdowns")
+    return isinstance(breakdowns, list) and len(breakdowns) > 0
+
+
+def _baseline_summary_checkpointable(row: Mapping[str, Any]) -> bool:
+    if row.get("_runtime_error"):
+        return False
+    diagnostics = row.get("diagnostics")
+    if isinstance(diagnostics, Mapping):
+        if diagnostics.get("runtime_error"):
+            return False
+        categories = {str(value) for value in diagnostics.get("failure_categories") or []}
+        if categories.intersection(
+            {
+                "runtime_provider_error",
+                "scorer_provider_error",
+                "provider_cost_cap_blocked",
+                "provider_cost_tracking_failed",
+            }
+        ):
+            return False
+    return bool(str(row.get("icp_ref") or row.get("icp_hash") or ""))
+
+
+def _baseline_progress_public_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {str(key): value for key, value in row.items() if not str(key).startswith("_")}
+
+
+def _load_baseline_scoring_progress(
+    bucket: str,
+    object_key: str,
+    *,
+    benchmark_date: str,
+    window_hash: str,
+    private_model_artifact_hash: str,
+) -> list[dict[str, Any]]:
+    import boto3  # type: ignore
+
+    try:
+        body = boto3.client("s3").get_object(Bucket=bucket, Key=object_key)["Body"].read()
+        doc = json.loads(body.decode("utf-8"))
+    except Exception:
+        return []
+    if not isinstance(doc, Mapping):
+        return []
+    if str(doc.get("benchmark_date") or "") != str(benchmark_date):
+        return []
+    if str(doc.get("rolling_window_hash") or "") != str(window_hash):
+        return []
+    if str(doc.get("private_model_artifact_hash") or "") != str(private_model_artifact_hash):
+        return []
+    rows = doc.get("per_icp_results")
+    if not isinstance(rows, list):
+        return []
+    return [
+        dict(row)
+        for row in rows
+        if isinstance(row, Mapping) and _baseline_summary_checkpointable(row)
+    ]
+
+
+def _store_baseline_scoring_progress(
+    bucket: str,
+    object_key: str,
+    *,
+    benchmark_date: str,
+    window_hash: str,
+    private_model_artifact_hash: str,
+    rows: list[dict[str, Any]],
+) -> None:
+    import boto3  # type: ignore
+
+    safe_rows = [
+        _baseline_progress_public_row(row)
+        for row in rows
+        if isinstance(row, Mapping) and _baseline_summary_checkpointable(row)
+    ]
+    doc = {
+        "schema_version": "1.0",
+        "artifact_type": "research_lab_private_baseline_scoring_progress",
+        "benchmark_date": str(benchmark_date),
+        "rolling_window_hash": str(window_hash),
+        "private_model_artifact_hash": str(private_model_artifact_hash),
+        "completed_icp_count": len(safe_rows),
+        "per_icp_results": safe_rows,
+    }
+    boto3.client("s3").put_object(
+        Bucket=bucket,
+        Key=object_key,
+        Body=json.dumps(doc, sort_keys=True, default=str).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
 # --- §5.4 scorer-judge traces + baseline in-container trace collection ------
 # The qualification scorer's per-company judgments are dense reward labels for
 # a future Sales LLM; the private models' in-container provider traffic is the
@@ -5842,6 +5984,66 @@ class ResearchLabGatewayScoringWorker:
         nonempty_output_count = 0
         retried_total = 0
         recovered_total = 0
+        baseline_progress_rows: list[dict[str, Any]] = []
+        baseline_progress_location = (
+            _baseline_progress_s3_location(
+                artifact.manifest_uri,
+                benchmark_date=today,
+                window_hash=window.window_hash,
+                private_model_artifact_hash=artifact.model_artifact_hash,
+            )
+            if _per_icp_checkpoint_enabled()
+            else None
+        )
+        if baseline_progress_location is not None:
+            progress_bucket, progress_key = baseline_progress_location
+            baseline_progress_rows = await asyncio.to_thread(
+                _load_baseline_scoring_progress,
+                progress_bucket,
+                progress_key,
+                benchmark_date=today,
+                window_hash=window.window_hash,
+                private_model_artifact_hash=artifact.model_artifact_hash,
+            )
+            if baseline_progress_rows:
+                logger.info(
+                    format_worker_block(
+                        "RESEARCH LAB PRIVATE BASELINE PROGRESS RESUMED",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("Benchmark date", today),
+                            ("Rolling window", compact_ref(window.window_hash)),
+                            ("Private model", compact_ref(artifact.model_artifact_hash)),
+                            ("Completed ICPs", len(baseline_progress_rows)),
+                            ("Action", "skipping already-checkpointed ICPs after restart"),
+                        ),
+                    )
+                )
+
+        baseline_progress_lock = asyncio.Lock()
+
+        async def _checkpoint_completed_baseline_icp(row: Mapping[str, Any]) -> None:
+            if baseline_progress_location is None or not _baseline_summary_checkpointable(row):
+                return
+            async with baseline_progress_lock:
+                progress_bucket, progress_key = baseline_progress_location
+                public_row = _baseline_progress_public_row(row)
+                by_ref = _progress_rows_by_icp_ref(baseline_progress_rows)
+                ref = str(public_row.get("icp_ref") or public_row.get("icp_hash") or "")
+                if not ref:
+                    return
+                by_ref[ref] = public_row
+                baseline_progress_rows[:] = list(by_ref.values())
+                await asyncio.to_thread(
+                    _store_baseline_scoring_progress,
+                    progress_bucket,
+                    progress_key,
+                    benchmark_date=today,
+                    window_hash=window.window_hash,
+                    private_model_artifact_hash=artifact.model_artifact_hash,
+                    rows=baseline_progress_rows,
+                )
+
         try:
             lease_event = await create_scoring_dispatch_event(
                 dispatch_type="private_baseline_rebenchmark",
@@ -5897,6 +6099,8 @@ class ResearchLabGatewayScoringWorker:
                     window=window,
                     run_start=start,
                     trace_context=baseline_trace_context,
+                    resume_results=baseline_progress_rows,
+                    icp_checkpoint=_checkpoint_completed_baseline_icp,
                 )
                 retried_total = int(retry_stats.get("retried") or 0)
                 recovered_total = int(retry_stats.get("recovered") or 0)
@@ -5908,9 +6112,27 @@ class ResearchLabGatewayScoringWorker:
                     item_summary.pop("_runtime_error", None)
                     item_summary.pop("_retry_backoff_seconds", None)
                     per_icp_summaries.append(item_summary)
+            baseline_resume_by_ref = _progress_rows_by_icp_ref(baseline_progress_rows)
             for item_index, item in enumerate([] if parallel_mode else window.benchmark_items, start=1):
                 item_start = time.time()
                 label = str(item.get("icp_ref") or item.get("icp_hash") or "unknown_icp")
+                resumed_summary = baseline_resume_by_ref.get(label)
+                if resumed_summary is not None:
+                    logger.info(
+                        format_worker_block(
+                            "RESEARCH LAB PRIVATE BASELINE ICP RESUMED FROM CHECKPOINT",
+                            (
+                                ("Worker", self.worker_ref),
+                                ("ICP", f"{item_index}/{total_icps}"),
+                                ("ICP ref", compact_ref(label)),
+                                ("Rolling window", compact_ref(window.window_hash)),
+                            ),
+                        )
+                    )
+                    if _baseline_summary_nonempty(resumed_summary):
+                        nonempty_output_count += 1
+                    per_icp_summaries.append(dict(resumed_summary))
+                    continue
                 logger.info(
                     format_worker_block(
                         "RESEARCH LAB PRIVATE BASELINE ICP STARTED",
@@ -6049,6 +6271,7 @@ class ResearchLabGatewayScoringWorker:
                     trace_context=baseline_trace_context,
                 )
                 _apply_provider_cost_baseline_outcome(item_summary)
+                await _checkpoint_completed_baseline_icp(item_summary)
                 per_icp_summaries.append(item_summary)
             if nonempty_output_count <= 0:
                 raise PrivateModelRuntimeError(
@@ -6663,6 +6886,8 @@ class ResearchLabGatewayScoringWorker:
         run_start: float,
         mode_label: str = "private_baseline",
         trace_context: Mapping[str, Any] | None = None,
+        resume_results: list[dict[str, Any]] | None = None,
+        icp_checkpoint: Callable[[dict[str, Any]], Any] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Run all benchmark ICPs concurrently, then retry transient failures.
 
@@ -6680,6 +6905,8 @@ class ResearchLabGatewayScoringWorker:
                 run_start=run_start,
                 mode_label=mode_label,
                 trace_context=trace_context,
+                resume_results=resume_results,
+                icp_checkpoint=icp_checkpoint,
             )
 
     async def _run_baseline_batch_inner(
@@ -6692,6 +6919,8 @@ class ResearchLabGatewayScoringWorker:
         run_start: float,
         mode_label: str = "private_baseline",
         trace_context: Mapping[str, Any] | None = None,
+        resume_results: list[dict[str, Any]] | None = None,
+        icp_checkpoint: Callable[[dict[str, Any]], Any] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Run all benchmark ICPs concurrently, then retry transient failures.
 
@@ -6712,6 +6941,34 @@ class ResearchLabGatewayScoringWorker:
         concurrency = self.config.private_baseline_concurrency
         items = list(enumerate(window.benchmark_items, start=1))
         total_icps = len(items)
+        resumed_by_ref = _progress_rows_by_icp_ref(resume_results)
+        results: dict[int, dict[str, Any]] = {}
+        run_items: list[tuple[int, Mapping[str, Any]]] = []
+        for item_index, item in items:
+            ref = _benchmark_item_ref_for_progress(item)
+            resumed = resumed_by_ref.get(ref)
+            if resumed is None:
+                run_items.append((item_index, item))
+                continue
+            restored = dict(resumed)
+            restored["_item_index"] = item_index
+            restored["_retryable"] = False
+            restored["_nonempty"] = _baseline_summary_nonempty(restored)
+            restored["_runtime_error"] = ""
+            restored["_retry_backoff_seconds"] = 0.0
+            results[item_index] = restored
+        if resumed_by_ref:
+            logger.info(
+                format_worker_block(
+                    "RESEARCH LAB PRIVATE BASELINE PARALLEL RESUME",
+                    (
+                        ("Worker", self.worker_ref),
+                        ("Resumed ICPs", len(results)),
+                        ("Remaining ICPs", len(run_items)),
+                        ("Total ICPs", total_icps),
+                    ),
+                )
+            )
         scorer_limit = _benchmark_scorer_max_concurrency()
         scorer_semaphore = asyncio.Semaphore(scorer_limit) if scorer_limit > 0 else None
         executor = concurrent.futures.ThreadPoolExecutor(
@@ -6724,7 +6981,7 @@ class ResearchLabGatewayScoringWorker:
 
             async def run_one(item_index: int, item: Mapping[str, Any]) -> dict[str, Any]:
                 async with semaphore:
-                    return await self._run_baseline_icp(
+                    entry = await self._run_baseline_icp(
                         runner=runner,
                         scorer=scorer,
                         item=item,
@@ -6736,19 +6993,23 @@ class ResearchLabGatewayScoringWorker:
                         mode_label=mode_label,
                         trace_context=trace_context,
                     )
+                    if icp_checkpoint is not None and _baseline_summary_checkpointable(entry):
+                        await icp_checkpoint(entry)
+                    return entry
 
             # Settle-then-raise: blocking docker waits cannot be cancelled, so a
             # fail-fast gather would leave containers racing the failure path.
             # Wait for every task to finish (bounded by the per-container
             # timeout), then surface the first fatal error.
             settled = await asyncio.gather(
-                *(run_one(item_index, item) for item_index, item in items),
+                *(run_one(item_index, item) for item_index, item in run_items),
                 return_exceptions=True,
             )
             fatal = [entry for entry in settled if isinstance(entry, BaseException)]
             if fatal:
                 raise fatal[0]
-            results: dict[int, dict[str, Any]] = {entry["_item_index"]: entry for entry in settled}
+            for entry in settled:
+                results[entry["_item_index"]] = entry
 
             retried_total = 0
             recovered_total = 0
@@ -6786,7 +7047,7 @@ class ResearchLabGatewayScoringWorker:
                                 backoff_seconds,
                             )
                             await asyncio.sleep(backoff_seconds)
-                        return await self._run_baseline_icp(
+                        entry = await self._run_baseline_icp(
                             runner=retry_runner,
                             scorer=scorer,
                             item=window.benchmark_items[item_index - 1],
@@ -6798,6 +7059,9 @@ class ResearchLabGatewayScoringWorker:
                             mode_label=mode_label,
                             trace_context=trace_context,
                         )
+                        if icp_checkpoint is not None and _baseline_summary_checkpointable(entry):
+                            await icp_checkpoint(entry)
+                        return entry
 
                 retried = await asyncio.gather(
                     *(retry_one(item_index) for item_index in pending),
@@ -7438,6 +7702,9 @@ class ResearchLabGatewayScoringWorker:
         )
         env["RESEARCH_LAB_SCRAPINGDOG_COST_PER_CREDIT_USD"] = str(
             self.config.scrapingdog_cost_per_credit_usd
+        )
+        env["RESEARCH_LAB_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS"] = str(
+            self.config.scrapingdog_unknown_endpoint_credits
         )
         env["RESEARCH_LAB_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY"] = str(
             self.config.provider_cost_unknown_endpoint_policy

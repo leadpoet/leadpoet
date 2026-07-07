@@ -22,6 +22,7 @@ from research_lab.canonical import sha256_json
 
 DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP = Decimal("0.50")
 DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD = Decimal("0.00005")
+DEFAULT_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS = 5
 DEFAULT_UNKNOWN_ENDPOINT_POLICY = "fail_closed"
 
 PROVIDER_COST_HEADER_PREFIX = "X-Research-Lab-Provider-Cost-"
@@ -43,7 +44,7 @@ SECRET_MARKERS = (
 )
 
 SCRAPINGDOG_ENDPOINT_CREDITS: dict[str, int] = {
-    "/scrape": 1,
+    "/scrape": 5,
     "/profile": 100,
     "/profile/post": 5,
     "/google/ai": 10,
@@ -63,6 +64,19 @@ def decimal_from_env(name: str, default: Decimal) -> Decimal:
     try:
         value = Decimal(raw)
     except InvalidOperation:
+        return default
+    if value < 0:
+        return default
+    return value
+
+
+def int_from_env(name: str, default: int) -> int:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
         return default
     if value < 0:
         return default
@@ -261,31 +275,35 @@ def scrapingdog_credits_for_path(path: str) -> int | None:
     return SCRAPINGDOG_ENDPOINT_CREDITS.get(_scrapingdog_endpoint_key(path))
 
 
+def scrapingdog_endpoint_is_mapped(path: str) -> bool:
+    return _scrapingdog_endpoint_key(path) in SCRAPINGDOG_ENDPOINT_CREDITS
+
+
 def scrapingdog_credits_for_url(upstream_url: str) -> int | None:
+    default_unknown_credits = int_from_env(
+        "RESEARCH_LAB_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS",
+        DEFAULT_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS,
+    )
     try:
         split = urllib.parse.urlsplit(upstream_url)
     except Exception:
-        return scrapingdog_credits_for_path(upstream_url)
+        return scrapingdog_credits_for_path(upstream_url) or default_unknown_credits
     endpoint = _scrapingdog_endpoint_key(split.path)
-    if endpoint != "/scrape":
-        return SCRAPINGDOG_ENDPOINT_CREDITS.get(endpoint)
-    params = {
-        key.lower(): values[-1].lower()
-        for key, values in urllib.parse.parse_qs(split.query, keep_blank_values=True).items()
-        if values
-    }
-    dynamic = params.get("dynamic") == "true"
-    premium = params.get("premium") == "true"
-    country = bool(params.get("country"))
-    if dynamic and premium:
-        return 25
-    if dynamic:
-        return 5
-    if premium:
-        return 10
-    if country:
-        return 10
-    return 1
+    if endpoint == "/profile":
+        query = urllib.parse.parse_qs(split.query, keep_blank_values=True)
+        profile_type = str((query.get("type") or [""])[0] or "").strip().lower()
+        if profile_type == "company":
+            return 10
+        return 100
+    return SCRAPINGDOG_ENDPOINT_CREDITS.get(endpoint) or default_unknown_credits
+
+
+def scrapingdog_url_is_mapped(upstream_url: str) -> bool:
+    try:
+        split = urllib.parse.urlsplit(upstream_url)
+    except Exception:
+        return scrapingdog_endpoint_is_mapped(upstream_url)
+    return scrapingdog_endpoint_is_mapped(split.path)
 
 
 @dataclass
@@ -339,19 +357,13 @@ def estimate_provider_cost(
         )
     if provider == "sd":
         credits = scrapingdog_credits_for_url(upstream_url)
-        if credits is None:
-            return ProviderCostEstimate(
-                provider=provider,
-                endpoint=endpoint,
-                tracking_failed=True,
-                tracking_reason="unknown_scrapingdog_endpoint",
-            )
+        is_mapped = scrapingdog_url_is_mapped(upstream_url)
         return ProviderCostEstimate(
             provider=provider,
             endpoint=endpoint,
             billable=True,
             cost_usd=scrapingdog_credit_price_usd * Decimal(credits),
-            cost_source="scrapingdog_credit_map",
+            cost_source="scrapingdog_credit_map" if is_mapped else "scrapingdog_default_credit_map",
             credits=credits,
         )
     if provider == "exa":

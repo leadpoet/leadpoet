@@ -647,6 +647,95 @@ async def test_private_baseline_enters_flow_on_or_after_scheduled_start(
         await worker._maybe_run_private_baseline()
 
 
+@pytest.mark.asyncio
+async def test_private_baseline_parallel_resumes_completed_icps(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_concurrency=2,
+        private_baseline_retry_concurrency=1,
+        private_baseline_provider_retry_rounds=0,
+    )
+    window = SimpleNamespace(
+        benchmark_items=[
+            {"icp_ref": "icp-a", "icp_hash": "hash-a"},
+            {"icp_ref": "icp-b", "icp_hash": "hash-b"},
+        ]
+    )
+    called: list[str] = []
+    checkpointed: list[str] = []
+
+    async def fake_run_baseline_icp(self, *, item, item_index, **kwargs):  # noqa: ANN001
+        called.append(item["icp_ref"])
+        return {
+            "icp_ref": item["icp_ref"],
+            "icp_hash": item["icp_hash"],
+            "score": float(item_index),
+            "company_count": 1,
+            "sourced_count": 1,
+            "diagnostics": {},
+            "_item_index": item_index,
+            "_retryable": False,
+            "_nonempty": True,
+            "_runtime_error": "",
+            "_retry_backoff_seconds": 0.0,
+        }
+
+    async def checkpoint(row):  # noqa: ANN001
+        checkpointed.append(row["icp_ref"])
+
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_run_baseline_icp",
+        fake_run_baseline_icp,
+    )
+
+    rows, stats = await worker._run_baseline_batch_inner(
+        runner=object(),
+        retry_runner=object(),
+        scorer=object(),
+        window=window,
+        run_start=0.0,
+        resume_results=[
+            {
+                "icp_ref": "icp-a",
+                "icp_hash": "hash-a",
+                "score": 7.0,
+                "company_count": 1,
+                "sourced_count": 1,
+                "diagnostics": {},
+            }
+        ],
+        icp_checkpoint=checkpoint,
+    )
+
+    assert called == ["icp-b"]
+    assert checkpointed == ["icp-b"]
+    assert [row["icp_ref"] for row in rows] == ["icp-a", "icp-b"]
+    assert [row["score"] for row in rows] == [7.0, 2.0]
+    assert stats == {"retried": 0, "recovered": 0, "unresolved": 0}
+
+
+def test_private_baseline_checkpoint_rejects_unresolved_and_cost_blocked_rows():
+    assert sw._baseline_summary_checkpointable(
+        {"icp_ref": "ok", "score": 1.0, "company_count": 1, "diagnostics": {}}
+    )
+    assert not sw._baseline_summary_checkpointable(
+        {
+            "icp_ref": "runtime-error",
+            "score": 0.0,
+            "diagnostics": {"runtime_error": {"category": "provider"}},
+        }
+    )
+    assert not sw._baseline_summary_checkpointable(
+        {
+            "icp_ref": "cost-blocked",
+            "score": 0.0,
+            "diagnostics": {"failure_categories": ["provider_cost_cap_blocked"]},
+        }
+    )
+
+
 def test_candidate_baseline_target_date_respects_quiet_window():
     quiet_start = 23 * 3600 + 30 * 60
 

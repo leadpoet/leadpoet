@@ -33,17 +33,22 @@ def test_scrapingdog_cost_map_uses_current_endpoint_credits():
     assert scrapingdog_credits_for_path("/linkedinjobs") == 5
     assert scrapingdog_credits_for_path("/instagram/profile") == 15
     assert scrapingdog_credits_for_path("/unmapped") is None
-    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/scrape?url=https%3A%2F%2Fexample.com") == 1
+    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/profile?type=company&id=abc") == 10
+    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/profile?type=COMPANY&id=abc") == 10
+    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/profile?type=profile&id=abc") == 100
+    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/profile?id=abc") == 100
+    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/scrape?url=https%3A%2F%2Fexample.com") == 5
     assert scrapingdog_credits_for_url("https://api.scrapingdog.com/scrape?dynamic=true") == 5
-    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/scrape?premium=true") == 10
-    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/scrape?dynamic=true&premium=true") == 25
-    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/scrape?country=us") == 10
+    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/scrape?premium=true") == 5
+    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/scrape?dynamic=true&premium=true") == 5
+    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/scrape?country=us") == 5
+    assert scrapingdog_credits_for_url("https://api.scrapingdog.com/new/paid/endpoint") == 5
 
 
-def test_scrapingdog_success_cost_and_unknown_endpoint_fail_closed():
+def test_scrapingdog_success_cost_and_unknown_endpoint_defaults_to_five_credits():
     profile = estimate_provider_cost(
         provider="sd",
-        upstream_url="https://api.scrapingdog.com/profile?id=abc&api_key=secret",
+        upstream_url="https://api.scrapingdog.com/profile?id=abc",
         status=200,
         response_body=b"{}",
         request_body=None,
@@ -53,6 +58,18 @@ def test_scrapingdog_success_cost_and_unknown_endpoint_fail_closed():
     assert profile.credits == 100
     assert profile.cost_usd == Decimal("0.00500")
 
+    company = estimate_provider_cost(
+        provider="sd",
+        upstream_url="https://api.scrapingdog.com/profile?id=abc&type=company",
+        status=200,
+        response_body=b"{}",
+        request_body=None,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert company.billable
+    assert company.credits == 10
+    assert company.cost_usd == Decimal("0.00050")
+
     unknown = estimate_provider_cost(
         provider="sd",
         upstream_url="https://api.scrapingdog.com/new/paid/endpoint",
@@ -61,8 +78,10 @@ def test_scrapingdog_success_cost_and_unknown_endpoint_fail_closed():
         request_body=None,
         scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
     )
-    assert unknown.tracking_failed
-    assert unknown.tracking_reason == "unknown_scrapingdog_endpoint"
+    assert unknown.billable
+    assert unknown.cost_source == "scrapingdog_default_credit_map"
+    assert unknown.credits == 5
+    assert unknown.cost_usd == Decimal("0.00025")
 
     scrape = estimate_provider_cost(
         provider="sd",
@@ -89,6 +108,20 @@ def test_failed_provider_call_adds_zero_cost():
     assert not failed.billable
     assert failed.cost_usd == Decimal("0")
     assert not failed.tracking_failed
+
+    for status in (402, 500):
+        sd_failed = estimate_provider_cost(
+            provider="sd",
+            upstream_url="https://api.scrapingdog.com/scrape?url=https%3A%2F%2Fexample.com",
+            status=status,
+            response_body=b'{"error":"provider failed"}',
+            request_body=None,
+            scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+        )
+        assert not sd_failed.billable
+        assert sd_failed.cost_usd == Decimal("0")
+        assert sd_failed.cost_source == "provider_failure_zero_cost"
+        assert not sd_failed.tracking_failed
 
 
 def test_exa_and_openrouter_cost_extraction():

@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS public.research_lab_provider_cost_events (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- CREATE TABLE IF NOT EXISTS does not repair an existing partially-applied
+-- table. Keep the runtime insert contract safe across deploys where code using
+-- run_scope landed before this final schema shape.
+ALTER TABLE public.research_lab_provider_cost_events
+    ADD COLUMN IF NOT EXISTS run_scope TEXT NOT NULL DEFAULT 'unscoped';
+
 CREATE INDEX IF NOT EXISTS idx_research_lab_provider_cost_events_scope
     ON public.research_lab_provider_cost_events(run_scope, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_research_lab_provider_cost_events_candidate

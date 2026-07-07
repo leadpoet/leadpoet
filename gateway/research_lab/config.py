@@ -28,7 +28,8 @@ DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS = 15 * 60
 DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS = (23 * 3600) + (30 * 60)
 DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP = 0.50
 DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD = 0.00005
-DEFAULT_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY = "fail_closed"
+DEFAULT_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS = 5
+DEFAULT_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY = "default_5_credits"
 STALE_PARENT_REBASE_REPAIR_MODEL_ID = "anthropic/claude-opus-4.8"
 STALE_PARENT_REBASE_REPAIR_TIMEOUT_SECONDS = 1200
 DEFAULT_PRIVATE_REPO_URL = ""
@@ -396,6 +397,7 @@ class ResearchLabGatewayConfig:
     candidate_scoring_quiet_start_utc_seconds: int = DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS
     provider_cost_cap_usd_per_icp: float = DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP
     scrapingdog_cost_per_credit_usd: float = DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD
+    scrapingdog_unknown_endpoint_credits: int = DEFAULT_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS
     provider_cost_unknown_endpoint_policy: str = DEFAULT_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY
     benchmark_exa_api_key: str = ""
     benchmark_exa_max_rps: float = 0.0
@@ -775,6 +777,13 @@ class ResearchLabGatewayConfig:
             scrapingdog_cost_per_credit_usd=max(
                 0.0,
                 _float("RESEARCH_LAB_SCRAPINGDOG_COST_PER_CREDIT_USD", DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD),
+            ),
+            scrapingdog_unknown_endpoint_credits=max(
+                0,
+                _int(
+                    "RESEARCH_LAB_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS",
+                    DEFAULT_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS,
+                ),
             ),
             provider_cost_unknown_endpoint_policy=(
                 os.getenv(
@@ -1453,6 +1462,7 @@ class ResearchLabGatewayConfig:
                 ),
                 "provider_cost_cap_usd_per_icp": self.provider_cost_cap_usd_per_icp,
                 "scrapingdog_cost_per_credit_usd": self.scrapingdog_cost_per_credit_usd,
+                "scrapingdog_unknown_endpoint_credits": self.scrapingdog_unknown_endpoint_credits,
                 "provider_cost_unknown_endpoint_policy": self.provider_cost_unknown_endpoint_policy,
                 "benchmark_exa_key_configured": bool(self.benchmark_exa_api_key),
                 "benchmark_exa_max_rps": self.benchmark_exa_max_rps,

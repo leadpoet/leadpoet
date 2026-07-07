@@ -10,6 +10,54 @@ MIN_FREE_KB=$((15 * 1024 * 1024))
 EXPECTED_AWS_ACCOUNT="493765492819"
 ENV_BACKUP_DIR="/home/ec2-user/.config/leadpoet/env-backups"
 
+root_free_kb() {
+  df --output=avail / | tail -1 | tr -d ' '
+}
+
+emergency_disk_preflight() {
+  local free_kb
+  free_kb="$(root_free_kb)"
+  if [ "${free_kb:-0}" -ge "$MIN_FREE_KB" ]; then
+    return 0
+  fi
+
+  echo "Low disk before env hydration: $(df -h / | tail -1)"
+  echo "Running emergency cleanup so restart can reach the full Docker cleanup path"
+  mkdir -p "$ENV_BACKUP_DIR" 2>/dev/null || true
+  rm -f /tmp/gateway_secret_env.* "$ENV_CLONE" "$ENV_SECRET" 2>/dev/null || true
+  find "$ENV_BACKUP_DIR" -maxdepth 1 -type f \
+    \( -name "gateway.env.before-gw-restart.*.bak" -o -name "gateway.env.before-secret-hydrate.*" \) \
+    -delete 2>/dev/null || true
+  sudo journalctl --vacuum-size=200M 2>/dev/null || true
+  sudo rm -rf /tmp/research-lab-* /tmp/pcr0_builder /tmp/docker-build-* /tmp/buildkit-* 2>/dev/null || true
+  sudo docker container prune -f 2>/dev/null || true
+  sudo docker builder prune -af 2>/dev/null || true
+  sudo docker system prune -af --volumes 2>/dev/null || true
+
+  local free_kb_after_prune overlay_dirs image_count container_count volume_count
+  free_kb_after_prune="$(root_free_kb)"
+  overlay_dirs="$(sudo find /var/lib/docker/overlay2 -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+  image_count="$(sudo docker images -q 2>/dev/null | wc -l | tr -d ' ')"
+  container_count="$(sudo docker ps -aq 2>/dev/null | wc -l | tr -d ' ')"
+  volume_count="$(sudo docker volume ls -q 2>/dev/null | wc -l | tr -d ' ')"
+
+  if [ "${free_kb_after_prune:-0}" -lt "$MIN_FREE_KB" ] \
+     && [ "${overlay_dirs:-0}" -gt 1000 ] \
+     && [ "${image_count:-0}" -eq 0 ] \
+     && [ "${container_count:-0}" -eq 0 ] \
+     && [ "${volume_count:-0}" -eq 0 ]; then
+    echo "Emergency cleanup detected orphaned Docker overlay data with no tracked Docker objects; resetting Docker storage"
+    sudo systemctl stop docker.socket docker 2>/dev/null || true
+    sudo rm -rf /var/lib/docker/overlay2 /var/lib/docker/buildkit /var/lib/docker/tmp
+    sudo mkdir -p /var/lib/docker/overlay2 /var/lib/docker/buildkit /var/lib/docker/tmp
+    sudo systemctl start docker
+    sleep 5
+  fi
+
+  echo "Disk after emergency cleanup"
+  df -h / /var/lib/docker 2>/dev/null || df -h /
+}
+
 cd "$GATEWAY_ROOT"
 
 PID="$(pgrep -f "python3 -u main.py" | head -1 || true)"
@@ -20,6 +68,8 @@ fi
 
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+
+emergency_disk_preflight
 
 echo "Hydrating gateway env from Secrets Manager before stopping processes"
 mkdir -p "$(dirname "$GATEWAY_ENV_FILE")" "$ENV_BACKUP_DIR"

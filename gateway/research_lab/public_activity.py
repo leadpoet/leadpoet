@@ -1333,8 +1333,15 @@ async def reproject_stale_public_cards(
 
         stored_label = str(card.get("current_outcome_label") or "")
         stored_doc = card.get("current_event_doc") if isinstance(card.get("current_event_doc"), Mapping) else {}
-        canonical_fields_missing = bool(outcome.event_doc.get("public_status")) and not (
-            stored_doc.get("public_status") and stored_doc.get("payment_state")
+        # Only flag canonical-field drift the projection can actually repair.
+        # The projection writes public_status (it is part of the derived
+        # event_doc) but never payment_state — that comes from the payment
+        # lifecycle paths.  Requiring payment_state here marked cards stale
+        # that reprojection could never satisfy, so every sweep found the
+        # same cards again and, with the per-pass budget, spun on them
+        # forever while genuinely repairable cards waited behind them.
+        canonical_fields_missing = bool(outcome.event_doc.get("public_status")) and not stored_doc.get(
+            "public_status"
         )
         if outcome.outcome_label == stored_label and not canonical_fields_missing:
             continue
@@ -1359,11 +1366,18 @@ async def reproject_stale_public_cards(
             result["deferred_to_next_sweep"] += 1
             continue
         try:
-            await project_public_loop_activity(
+            # Force the projection like the operator repair path does.  The
+            # non-forced path dedups on event_ref and can decline to write,
+            # which leaves the card's stored outcome unchanged — the sweep
+            # then finds the same cards stale forever and, with the per-pass
+            # budget, spins on the oldest ones while newer stale cards never
+            # get a turn (observed: stale=94 reprojected=25 deferred=69 on
+            # every pass, indefinitely).
+            await safe_project_public_loop_activity(
                 ticket_id,
                 source_ref=f"{reason}:{ticket_id}",
                 reason=reason,
-                config=effective_config,
+                force=True,
             )
             result["reprojected"] += 1
         except Exception as exc:  # noqa: BLE001 - sweep must never fail the worker pass

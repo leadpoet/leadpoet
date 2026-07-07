@@ -5084,8 +5084,17 @@ class Validator(BaseValidatorNeuron):
 
                 active_requests = data.get("requests", []) if isinstance(data, dict) else []
 
+                # Accept both feed statuses: `scoring` (normal flow) and
+                # `partially_fulfilled` (late re-scores).  Forced consensus can
+                # finalize a request while some revealed submissions are still
+                # un-scored; the gateway re-offers exactly those leftover
+                # submissions and its lifecycle re-aggregates consensus when the
+                # late scores land.  Filtering to `scoring` alone left those
+                # submissions permanently un-scored — the gateway offered them,
+                # this line dropped them.
                 scoring_requests = [r for r in active_requests
-                                    if r.get("status") == "scoring" and r.get("submissions")]
+                                    if r.get("status") in ("scoring", "partially_fulfilled")
+                                    and r.get("submissions")]
 
                 # Skip any request that we've already written a work file
                 # for in this epoch.  The work file's existence IS the

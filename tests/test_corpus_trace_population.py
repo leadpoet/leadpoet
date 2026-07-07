@@ -150,6 +150,7 @@ class FakeStore:
             EXECUTION_TRACES_TABLE: "run_id",
             EVIDENCE_BUNDLES_TABLE: "bundle_id",
             RESULTS_LEDGER_TABLE: "ledger_row_id",
+            projector_mod.PROVIDER_USAGE_LEDGER_TABLE: "usage_row_id",
         }.get(table)
         if pk and any(r.get(pk) == row.get(pk) for r in stored):
             raise RuntimeError("duplicate key value violates unique constraint")
@@ -728,6 +729,7 @@ async def test_projection_writes_trace_and_evidence_rows(tables, enabled):
     # engine row + node-1 row + node-2 row (node-2 has a draft raw trace)
     assert result.execution_trace_count == 3
     assert result.evidence_bundle_count == 1
+    assert result.provider_usage_ledger_count == 4
 
     trace_rows = store.inserted[EXECUTION_TRACES_TABLE]
     for row in trace_rows:
@@ -744,6 +746,26 @@ async def test_projection_writes_trace_and_evidence_rows(tables, enabled):
     }
     assert evidence_rows[0]["bundle_id"] == EVIDENCE_ID
     assert evidence_rows[0]["run_id"] == RUN_ID
+
+
+async def test_projection_writes_provider_usage_ledger_rows(tables, enabled):
+    store = FakeStore(tables)
+    result = await project_run(RUN_ID, store=store, dry_run=False)
+    assert result.status == "projected", result.errors
+
+    rows = store.inserted[projector_mod.PROVIDER_USAGE_LEDGER_TABLE]
+    assert len(rows) == 4
+    assert {row["provider_id"] for row in rows} == {"openrouter"}
+    assert all(row["utc_day"] == "2026-06-28" for row in rows)
+    assert all(row["evidence"] == "recorded" for row in rows)
+    assert sorted(row["est_cost_microusd"] for row in rows) == [
+        0,
+        10_000,
+        10_000,
+        10_000,
+    ]
+    assert all("api_key" not in str(row["caller_doc"]).lower() for row in rows)
+    assert all(row["caller_doc"]["run_ref"] == f"run:{RUN_ID}" for row in rows)
 
 
 async def test_engine_and_node_pointer_aggregation(tables, enabled):
@@ -990,6 +1012,7 @@ async def test_traces_backfill_adds_rows_without_touching_events(tables, enabled
     # Simulate a run projected BEFORE item 5.5: pointer rows absent.
     store.tables[EXECUTION_TRACES_TABLE] = []
     store.tables[EVIDENCE_BUNDLES_TABLE] = []
+    store.tables[projector_mod.PROVIDER_USAGE_LEDGER_TABLE] = []
     event_writes = store.write_count(TRAJECTORY_EVENTS_TABLE)
     envelope_writes = store.write_count(TRAJECTORIES_TABLE)
 
@@ -997,10 +1020,12 @@ async def test_traces_backfill_adds_rows_without_touching_events(tables, enabled
     assert result.status == "traces_backfilled"
     assert result.execution_trace_count == 3
     assert result.evidence_bundle_count == 1
+    assert result.provider_usage_ledger_count == 4
     # deterministic ids: restored rows carry the same ids
     restored = {row["run_id"] for row in store.tables[EXECUTION_TRACES_TABLE]}
     assert NODE1_TRACE_ID in restored and ENGINE_TRACE_ID in restored
     assert store.tables[EVIDENCE_BUNDLES_TABLE][0]["bundle_id"] == EVIDENCE_ID
+    assert len(store.tables[projector_mod.PROVIDER_USAGE_LEDGER_TABLE]) == 4
     # forward-only: append-only tables untouched
     assert store.write_count(TRAJECTORY_EVENTS_TABLE) == event_writes
     assert store.write_count(TRAJECTORIES_TABLE) == envelope_writes
@@ -1019,8 +1044,12 @@ async def test_traces_backfill_repairs_existing_stale_pointer_rows(tables, enabl
         ]
         stale["judge_verdicts"] = []
         stale["evidence_bundles"] = []
+        stale["score_bundle_ref"] = "score_bundle:unavailable"
+        stale["outputs_ref"] = "score_bundle:unavailable"
+        stale["icp_set_hash"] = "unknown_icp_set"
         stale["trace_doc"] = {
             **dict(row["trace_doc"]),
+            "score_bundle_ref": "score_bundle:unavailable",
             "incontainer_trace_count": 0,
             "judge_verdict_count": 0,
         }
@@ -1063,6 +1092,10 @@ async def test_traces_backfill_repairs_existing_stale_pointer_rows(tables, enabl
     repaired_trace = {
         row["run_id"]: row for row in store.tables[EXECUTION_TRACES_TABLE]
     }[NODE1_TRACE_ID]
+    assert repaired_trace["score_bundle_ref"] == SCORE_BUNDLE_ID
+    assert repaired_trace["outputs_ref"] == SCORE_BUNDLE_ID
+    assert repaired_trace["icp_set_hash"] == sha256_json({"icp_set": "run1"})
+    assert repaired_trace["trace_doc"]["score_bundle_ref"] == SCORE_BUNDLE_ID
     assert repaired_trace["evidence_bundles"] == [f"evidence_bundle:{EVIDENCE_ID}"]
     assert len(
         [call for call in repaired_trace["calls"] if call["call_kind"] == "incontainer_trace"]

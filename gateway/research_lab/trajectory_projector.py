@@ -129,6 +129,7 @@ TRAJECTORY_EVENTS_TABLE = "research_trajectory_events"
 RESULTS_LEDGER_TABLE = "research_lab_results_ledger"
 EXECUTION_TRACES_TABLE = "execution_traces"
 EVIDENCE_BUNDLES_TABLE = "evidence_bundles"
+PROVIDER_USAGE_LEDGER_TABLE = "research_lab_provider_usage_ledger"
 
 # scripts/27 CHECK-enforced enums (mirrored verbatim; tests re-parse the SQL).
 EXECUTION_TRACE_ROLES: tuple[str, ...] = (
@@ -323,6 +324,38 @@ def _score_bundle_ref(score_bundle_id: str) -> str:
     """Live bundle ids are already ``score_bundle:``-prefixed; normalize."""
     text = str(score_bundle_id)
     return text if text.startswith("score_bundle:") else f"score_bundle:{text}"
+
+
+def _score_bundle_doc_from_row(bundle_row: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    if not isinstance(bundle_row, Mapping):
+        return {}
+    doc = bundle_row.get("score_bundle_doc")
+    return doc if isinstance(doc, Mapping) else {}
+
+
+def _score_bundle_candidate_id_from_row(bundle_row: Mapping[str, Any]) -> str:
+    doc = _score_bundle_doc_from_row(bundle_row)
+    return (
+        str(bundle_row.get("candidate_id") or "")
+        or str(doc.get("candidate_id") or "")
+        or str(doc.get("candidate_ref") or "").removeprefix("candidate:")
+    )
+
+
+def _score_bundle_artifact_hash_from_row(bundle_row: Mapping[str, Any]) -> str:
+    doc = _score_bundle_doc_from_row(bundle_row)
+    return str(
+        bundle_row.get("candidate_artifact_hash")
+        or doc.get("candidate_artifact_hash")
+        or doc.get("new_model_artifact_hash")
+        or ""
+    )
+
+
+def _score_bundle_gate_from_row(bundle_row: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    doc = _score_bundle_doc_from_row(bundle_row)
+    gate = doc.get("private_holdout_gate")
+    return gate if isinstance(gate, Mapping) else {}
 
 
 # ---------------------------------------------------------------------------
@@ -589,12 +622,17 @@ def _iter_raw_trace_pointers(value: Any, model: Any = None):
 
 
 def _looks_like_provider_usage_item(value: Mapping[str, Any]) -> bool:
+    provider = str(value.get("provider") or "").lower()
     return (
         isinstance(value.get("raw_trace_ref"), Mapping)
         or isinstance(value.get("reasoning_logs"), Mapping)
         or isinstance(value.get("reasoning_capture"), Mapping)
-        or str(value.get("provider") or "").lower() == "openrouter"
+        or provider in {"openrouter", "exa", "scrapingdog", "sd", "or"}
         or bool(value.get("response_id"))
+        or bool(value.get("request_fingerprint"))
+        or value.get("cost_usd") is not None
+        or value.get("status_code") is not None
+        or value.get("endpoint") is not None
     )
 
 
@@ -611,6 +649,171 @@ def _iter_provider_usage_items(value: Any, model: Any = None):
     elif isinstance(value, (list, tuple)):
         for item in value:
             yield from _iter_provider_usage_items(item, model)
+
+
+_PROVIDER_USAGE_LEDGER_EVIDENCE = frozenset(
+    {
+        "hit",
+        "recorded",
+        "error",
+        "blocked",
+        "quota_exhausted",
+        "credential_missing",
+        "replay_miss",
+    }
+)
+
+
+def _safe_endpoint_class(value: Any) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[?&=\s]+", "_", text)
+    return (text or "unknown")[:200]
+
+
+def _provider_usage_status(item: Mapping[str, Any]) -> int:
+    for key in ("status", "status_code", "http_status", "response_status"):
+        if item.get(key) is not None:
+            return max(0, _i(item.get(key)))
+    if item.get("response_id") or item.get("raw_trace_ref") or item.get("cost_usd"):
+        return 200
+    return 0
+
+
+def _provider_usage_evidence(item: Mapping[str, Any], status: int) -> str:
+    evidence = str(item.get("evidence") or "").strip().lower()
+    if evidence in _PROVIDER_USAGE_LEDGER_EVIDENCE:
+        return evidence
+    if bool(item.get("cache_hit")):
+        return "hit"
+    if bool(item.get("blocked")) or bool(item.get("cap_blocked")):
+        return "blocked"
+    if status in {401, 403}:
+        return "credential_missing"
+    if status in {402, 429}:
+        return "quota_exhausted"
+    if status >= 400:
+        return "error"
+    if item.get("raw_trace_ref") or item.get("response_id") or item.get("cost_usd"):
+        return "recorded"
+    return "recorded"
+
+
+def _provider_usage_cost_microusd(item: Mapping[str, Any]) -> int:
+    for key in ("cost_usd", "actual_cost_usd", "estimated_cost_usd"):
+        if item.get(key) is not None:
+            return max(0, int(round(_f(item.get(key)) * 1_000_000)))
+    if item.get("cost_microusd") is not None:
+        return max(0, _i(item.get("cost_microusd")))
+    return 0
+
+
+def _provider_usage_request_fingerprint(
+    *,
+    run_id: str,
+    row: Mapping[str, Any],
+    item: Mapping[str, Any],
+    model: Any,
+) -> str:
+    explicit = str(item.get("request_fingerprint") or "").strip()
+    if explicit:
+        return explicit[:256]
+    pointer = item.get("raw_trace_ref") if isinstance(item.get("raw_trace_ref"), Mapping) else {}
+    return sha256_json(
+        {
+            "run_id": str(run_id),
+            "event_id": str(row.get("event_id") or ""),
+            "seq": _i(row.get("seq")),
+            "event_type": str(row.get("event_type") or ""),
+            "node_id": str(row.get("node_id") or ""),
+            "provider": str(item.get("provider") or ""),
+            "model": str(model or item.get("model") or ""),
+            "response_id": str(item.get("response_id") or ""),
+            "s3_ref": str(pointer.get("s3_ref") or "") if isinstance(pointer, Mapping) else "",
+            "sha256": str(pointer.get("sha256") or "") if isinstance(pointer, Mapping) else "",
+            "call_stage": str(item.get("call_stage") or ""),
+            "loop_iteration": _i(item.get("loop_iteration")),
+        }
+    )
+
+
+def _provider_usage_ledger_row(
+    run_id: str,
+    row: Mapping[str, Any],
+    item: Mapping[str, Any],
+    model: Any,
+) -> dict[str, Any]:
+    status = _provider_usage_status(item)
+    provider_id = _safe_endpoint_class(item.get("provider") or "openrouter")[:80]
+    endpoint_class = _safe_endpoint_class(
+        item.get("endpoint")
+        or item.get("endpoint_class")
+        or item.get("call_stage")
+        or model
+        or item.get("model")
+        or "unknown"
+    )
+    request_fingerprint = _provider_usage_request_fingerprint(
+        run_id=run_id,
+        row=row,
+        item=item,
+        model=model,
+    )
+    recorded_at = _ts(row.get("created_at"))
+    caller_doc = sanitize_capture_payload(
+        {
+            "run_ref": f"run:{run_id}",
+            "live_event_id": str(row.get("event_id") or ""),
+            "live_seq": _i(row.get("seq")),
+            "live_event_type": str(row.get("event_type") or ""),
+            "node_id": str(row.get("node_id") or "") or None,
+            "model": str(model or item.get("model") or "")[:128],
+            "response_id": str(item.get("response_id") or "")[:200],
+            "call_stage": str(item.get("call_stage") or row.get("event_type") or "")[:128],
+            "loop_iteration": _i(item.get("loop_iteration")),
+            "raw_trace_ref_present": isinstance(item.get("raw_trace_ref"), Mapping),
+            "reasoning_capture_present": isinstance(item.get("reasoning_capture"), Mapping),
+        }
+    )
+    return {
+        "usage_row_id": _deterministic_uuid(
+            "provider_usage_ledger",
+            run_id,
+            str(row.get("event_id") or ""),
+            str(row.get("seq") or ""),
+            provider_id,
+            endpoint_class,
+            request_fingerprint,
+            str(item.get("response_id") or ""),
+        ),
+        "schema_version": "1.0",
+        "utc_day": recorded_at[:10],
+        "recorded_at": recorded_at,
+        "provider_id": provider_id,
+        "endpoint_class": endpoint_class,
+        "request_fingerprint": request_fingerprint,
+        "evidence": _provider_usage_evidence(item, status),
+        "status": status,
+        "est_cost_microusd": _provider_usage_cost_microusd(item),
+        "caller_doc": caller_doc,
+    }
+
+
+def _build_provider_usage_ledger_rows(
+    run_id: str,
+    loop_events: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in sorted(loop_events, key=lambda item: _i(item.get("seq"))):
+        doc = _doc(row)
+        for item, model in _iter_provider_usage_items([row.get("provider_usage"), doc]):
+            usage_row = _provider_usage_ledger_row(run_id, row, item, model)
+            key = str(usage_row["usage_row_id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(usage_row)
+    return rows
 
 
 def _reasoning_hashes_from_logs(logs: Mapping[str, Any]) -> list[str]:
@@ -1496,6 +1699,8 @@ def _build_corpus_trace_rows(
                 "candidate_ref": (
                     f"candidate:{state.candidate_id}" if state.candidate_id else None
                 ),
+                "score_bundle_ref": score_bundle_ref,
+                "evidence_bundle_refs": evidence_refs,
                 "engine_call_count": len(node_calls),
                 "incontainer_trace_count": len(incontainer_calls),
                 "build_diagnostic_count": len(node_diagnostic_calls),
@@ -1785,6 +1990,7 @@ class TrajectoryProjection:
     corpus_source_record: TrajectoryCorpusSourceRecord
     execution_trace_rows: list[dict[str, Any]] = field(default_factory=list)
     evidence_bundle_rows: list[dict[str, Any]] = field(default_factory=list)
+    provider_usage_ledger_rows: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
@@ -1800,6 +2006,7 @@ class ProjectionResult:
     ledger_row_count: int = 0
     execution_trace_count: int = 0
     evidence_bundle_count: int = 0
+    provider_usage_ledger_count: int = 0
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -1811,6 +2018,7 @@ class ProjectionResult:
             "ledger_row_count": self.ledger_row_count,
             "execution_trace_count": self.execution_trace_count,
             "evidence_bundle_count": self.evidence_bundle_count,
+            "provider_usage_ledger_count": self.provider_usage_ledger_count,
             "errors": list(self.errors),
         }
 
@@ -2510,6 +2718,7 @@ def build_trajectory_projection(
         total_cost_usd=last_anchor_total,
         fallback_ts=ledger_created_at,
     )
+    provider_usage_ledger_rows = _build_provider_usage_ledger_rows(run_id, ordered)
 
     # P15 token-budget invariant: count tokens against the declared trainer
     # max (flag, never drop). P10: the protected scan is a computed result
@@ -2583,6 +2792,7 @@ def build_trajectory_projection(
         corpus_source_record=corpus_source_record,
         execution_trace_rows=execution_trace_rows,
         evidence_bundle_rows=evidence_bundle_rows,
+        provider_usage_ledger_rows=provider_usage_ledger_rows,
     )
     projection.errors = validate_projection(projection)
     return projection
@@ -2615,6 +2825,7 @@ def _emit_node_evaluated(
     )
     gate: Mapping[str, Any] = {}
     score_bundle_id: str | None = None
+    bundle_row: Mapping[str, Any] | None = None
     if scored_row:
         scored_doc = _doc(scored_row)
         raw_gate = scored_doc.get("private_holdout_gate")
@@ -2624,8 +2835,6 @@ def _emit_node_evaluated(
             if scored_row.get("score_bundle_id")
             else None
         )
-        state.gate_doc = gate
-        state.score_bundle_id = score_bundle_id
         # P2: keep the scored event's scorer-trace pointer map so the node's
         # execution trace can project judge_verdicts.
         raw_scorer_refs = scored_doc.get("scorer_trace_refs")
@@ -2635,13 +2844,41 @@ def _emit_node_evaluated(
                 for icp_ref, pointer in raw_scorer_refs.items()
                 if isinstance(pointer, Mapping)
             }
+    if score_bundle_id:
+        bundle_row = bundles_by_id.get(score_bundle_id)
+    if not bundle_row:
+        for candidate_score_bundle_id, candidate_bundle_row in bundles_by_id.items():
+            if not isinstance(candidate_bundle_row, Mapping):
+                continue
+            if state.candidate_id and (
+                _score_bundle_candidate_id_from_row(candidate_bundle_row)
+                == state.candidate_id
+            ):
+                score_bundle_id = str(candidate_score_bundle_id)
+                bundle_row = candidate_bundle_row
+                break
+        if not bundle_row and state.candidate_artifact_hash:
+            for candidate_score_bundle_id, candidate_bundle_row in bundles_by_id.items():
+                if not isinstance(candidate_bundle_row, Mapping):
+                    continue
+                if (
+                    _score_bundle_artifact_hash_from_row(candidate_bundle_row)
+                    == state.candidate_artifact_hash
+                ):
+                    score_bundle_id = str(candidate_score_bundle_id)
+                    bundle_row = candidate_bundle_row
+                    break
+    if bundle_row and not gate:
+        gate = dict(_score_bundle_gate_from_row(bundle_row))
+    state.gate_doc = gate
+    state.score_bundle_id = score_bundle_id
+    if scored_row:
         # Bundle→trace linkage check (warn-only): a bundle stamped with an
         # execution_trace:<uuid> ref must point at THIS node's deterministic
         # row id, else the forward join is silently broken. Legacy
         # gateway_qualification_worker:* refs predate the linkage and are
         # expected on historical bundles — no warning for those.
         if score_bundle_id and run_id:
-            bundle_row = bundles_by_id.get(score_bundle_id)
             bundle_doc = (
                 bundle_row.get("score_bundle_doc") if isinstance(bundle_row, Mapping) else None
             )
@@ -2999,6 +3236,59 @@ def _merge_doc_values(
     return changed, merged
 
 
+_TRACE_SCALAR_FIELDS = (
+    "role",
+    "status",
+    "rung",
+    "artifact_hash",
+    "icp_set_hash",
+    "outputs_ref",
+    "score_bundle_ref",
+)
+
+
+def _is_trace_placeholder(value: Any) -> bool:
+    text = str(value or "")
+    return (
+        not text
+        or text == "score_bundle:unavailable"
+        or text.startswith("unknown_")
+        or text.endswith(":unavailable")
+    )
+
+
+def _merge_trace_scalar_fields(
+    existing: Mapping[str, Any], proposed: Mapping[str, Any]
+) -> tuple[bool, dict[str, Any]]:
+    values: dict[str, Any] = {}
+    for field_name in _TRACE_SCALAR_FIELDS:
+        if field_name not in proposed:
+            continue
+        proposed_value = proposed.get(field_name)
+        if proposed_value is None or _is_trace_placeholder(proposed_value):
+            continue
+        existing_value = existing.get(field_name)
+        if existing_value == proposed_value:
+            continue
+        if _is_trace_placeholder(existing_value) or field_name in {
+            "role",
+            "status",
+            "rung",
+        }:
+            values[field_name] = proposed_value
+    proposed_cost_ledger = proposed.get("cost_ledger")
+    if isinstance(proposed_cost_ledger, Mapping):
+        cost_changed, cost_ledger = _merge_doc_values(
+            existing.get("cost_ledger")
+            if isinstance(existing.get("cost_ledger"), Mapping)
+            else {},
+            proposed_cost_ledger,
+        )
+        if cost_changed:
+            values["cost_ledger"] = cost_ledger
+    return bool(values), values
+
+
 def _judge_verdict_key(verdict: Mapping[str, Any]) -> tuple[str, str, str, str, str, str]:
     s3_ref = str(verdict.get("s3_ref") or "")
     sha256 = str(verdict.get("sha256") or "")
@@ -3139,6 +3429,7 @@ async def _upsert_execution_trace_row(store: Any, row: Mapping[str, Any]) -> str
     evidence_changed, evidence_refs = _merge_string_refs(
         existing.get("evidence_bundles"), row.get("evidence_bundles")
     )
+    scalar_changed, scalar_values = _merge_trace_scalar_fields(existing, row)
     trace_doc_changed = False
     trace_doc: dict[str, Any] | None = None
     if isinstance(row.get("trace_doc"), Mapping):
@@ -3154,6 +3445,7 @@ async def _upsert_execution_trace_row(store: Any, row: Mapping[str, Any]) -> str
         changed
         or verdicts_changed
         or evidence_changed
+        or scalar_changed
         or trace_doc_changed
         or trajectory_changed
     ):
@@ -3165,6 +3457,8 @@ async def _upsert_execution_trace_row(store: Any, row: Mapping[str, Any]) -> str
         values["judge_verdicts"] = judge_verdicts
     if evidence_changed:
         values["evidence_bundles"] = evidence_refs
+    if scalar_changed:
+        values.update(scalar_values)
     if trace_doc_changed and trace_doc is not None:
         values["trace_doc"] = trace_doc
     if trajectory_changed:
@@ -3190,6 +3484,7 @@ async def _execution_trace_row_needs_write(store: Any, row: Mapping[str, Any]) -
     evidence_changed, _refs = _merge_string_refs(
         existing.get("evidence_bundles"), row.get("evidence_bundles")
     )
+    scalar_changed, _scalar_values = _merge_trace_scalar_fields(existing, row)
     trace_doc_changed = False
     if isinstance(row.get("trace_doc"), Mapping):
         trace_doc_changed, _trace_doc = _merge_doc_values(
@@ -3205,6 +3500,7 @@ async def _execution_trace_row_needs_write(store: Any, row: Mapping[str, Any]) -
         changed
         or verdicts_changed
         or evidence_changed
+        or scalar_changed
         or trace_doc_changed
         or trajectory_changed
     )
@@ -3285,10 +3581,46 @@ async def _evidence_bundle_row_needs_write(store: Any, row: Mapping[str, Any]) -
     return snapshots_changed or bundle_doc_changed
 
 
+async def _provider_usage_ledger_row_needs_write(
+    store: Any, row: Mapping[str, Any]
+) -> bool:
+    try:
+        existing = await store.select_one(
+            PROVIDER_USAGE_LEDGER_TABLE,
+            filters=(("usage_row_id", row["usage_row_id"]),),
+        )
+    except Exception as exc:
+        logger.warning(
+            "research_lab_provider_usage_ledger_check_failed usage_row_id=%s error=%s",
+            str(row.get("usage_row_id") or "")[:80],
+            str(exc)[:300],
+        )
+        return False
+    return not bool(existing)
+
+
+async def _insert_provider_usage_ledger_row(
+    store: Any, row: Mapping[str, Any]
+) -> bool:
+    try:
+        return await _insert_missing(
+            store, PROVIDER_USAGE_LEDGER_TABLE, "usage_row_id", row
+        )
+    except Exception as exc:
+        logger.warning(
+            "research_lab_provider_usage_ledger_insert_failed usage_row_id=%s provider=%s endpoint=%s error=%s",
+            str(row.get("usage_row_id") or "")[:80],
+            str(row.get("provider_id") or "")[:80],
+            str(row.get("endpoint_class") or "")[:120],
+            str(exc)[:300],
+        )
+        return False
+
+
 async def _write_missing_corpus_trace_rows(
     store: Any, projection: TrajectoryProjection
-) -> tuple[int, int]:
-    """Write/merge execution_traces and missing evidence_bundles; return counts."""
+) -> tuple[int, int, int]:
+    """Write/merge trace, evidence, and provider-usage rows; return counts."""
     trace_changed = 0
     for row in projection.execution_trace_rows:
         trace_status = await _upsert_execution_trace_row(store, row)
@@ -3299,7 +3631,11 @@ async def _write_missing_corpus_trace_rows(
         evidence_status = await _upsert_evidence_bundle_row(store, row)
         if evidence_status in {"inserted", "updated"}:
             evidence_written += 1
-    return trace_changed, evidence_written
+    provider_usage_written = 0
+    for row in projection.provider_usage_ledger_rows:
+        if await _insert_provider_usage_ledger_row(store, row):
+            provider_usage_written += 1
+    return trace_changed, evidence_written, provider_usage_written
 
 
 async def load_projection_inputs(
@@ -3428,6 +3764,7 @@ async def project_run(
                 ledger_row_count=len(projection.ledger_rows),
                 execution_trace_count=len(projection.execution_trace_rows),
                 evidence_bundle_count=len(projection.evidence_bundle_rows),
+                provider_usage_ledger_count=len(projection.provider_usage_ledger_rows),
             )
         # Envelope first (events FK-reference it), then append-only events in
         # seq order, then ledger rows, then the pointer rows.  A crash between
@@ -3437,18 +3774,19 @@ async def project_run(
             await store.insert_row(TRAJECTORY_EVENTS_TABLE, row)
         for row in projection.ledger_rows:
             await store.insert_row(RESULTS_LEDGER_TABLE, row)
-        trace_written, evidence_written = await _write_missing_corpus_trace_rows(
+        trace_written, evidence_written, provider_usage_written = await _write_missing_corpus_trace_rows(
             store, projection
         )
         logger.info(
             "research_lab_trajectory_projected run_id=%s trajectory_id=%s events=%s "
-            "ledger_rows=%s execution_traces=%s evidence_bundles=%s",
+            "ledger_rows=%s execution_traces=%s evidence_bundles=%s provider_usage_rows=%s",
             run_id,
             tid,
             len(projection.event_rows),
             len(projection.ledger_rows),
             trace_written,
             evidence_written,
+            provider_usage_written,
         )
         return ProjectionResult(
             run_id=run_id,
@@ -3458,6 +3796,7 @@ async def project_run(
             ledger_row_count=len(projection.ledger_rows),
             execution_trace_count=trace_written,
             evidence_bundle_count=evidence_written,
+            provider_usage_ledger_count=provider_usage_written,
         )
     except Exception as exc:  # never raise out of a projection
         logger.warning(
@@ -3579,7 +3918,11 @@ async def backfill_run_corpus_trace_rows(
                 trajectory_id=tid,
                 errors=projection.errors,
             )
-        if not projection.execution_trace_rows and not projection.evidence_bundle_rows:
+        if (
+            not projection.execution_trace_rows
+            and not projection.evidence_bundle_rows
+            and not projection.provider_usage_ledger_rows
+        ):
             return ProjectionResult(
                 run_id=run_id, status="skipped_no_trace_sources", trajectory_id=tid
             )
@@ -3593,7 +3936,12 @@ async def backfill_run_corpus_trace_rows(
             for row in projection.evidence_bundle_rows
             if await _evidence_bundle_row_needs_write(store, row)
         ]
-        if not missing_traces and not missing_evidence:
+        missing_provider_usage = [
+            row
+            for row in projection.provider_usage_ledger_rows
+            if await _provider_usage_ledger_row_needs_write(store, row)
+        ]
+        if not missing_traces and not missing_evidence and not missing_provider_usage:
             return ProjectionResult(
                 run_id=run_id, status="skipped_traces_existing", trajectory_id=tid
             )
@@ -3604,6 +3952,7 @@ async def backfill_run_corpus_trace_rows(
                 trajectory_id=tid,
                 execution_trace_count=len(missing_traces),
                 evidence_bundle_count=len(missing_evidence),
+                provider_usage_ledger_count=len(missing_provider_usage),
             )
         trace_written = 0
         for row in missing_traces:
@@ -3615,13 +3964,18 @@ async def backfill_run_corpus_trace_rows(
             evidence_status = await _upsert_evidence_bundle_row(store, row)
             if evidence_status in {"inserted", "updated"}:
                 evidence_written += 1
+        provider_usage_written = 0
+        for row in missing_provider_usage:
+            if await _insert_provider_usage_ledger_row(store, row):
+                provider_usage_written += 1
         logger.info(
             "research_lab_corpus_traces_backfilled run_id=%s trajectory_id=%s "
-            "execution_traces=%s evidence_bundles=%s",
+            "execution_traces=%s evidence_bundles=%s provider_usage_rows=%s",
             run_id,
             tid,
             trace_written,
             evidence_written,
+            provider_usage_written,
         )
         return ProjectionResult(
             run_id=run_id,
@@ -3629,6 +3983,7 @@ async def backfill_run_corpus_trace_rows(
             trajectory_id=tid,
             execution_trace_count=trace_written,
             evidence_bundle_count=evidence_written,
+            provider_usage_ledger_count=provider_usage_written,
         )
     except Exception as exc:  # never raise out of a backfill pass
         logger.warning(

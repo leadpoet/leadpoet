@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import threading
+import urllib.parse
 import urllib.request
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -94,6 +95,40 @@ def test_scrapingdog_success_cost_and_unknown_endpoint_defaults_to_five_credits(
     assert scrape.billable
     assert scrape.credits == 5
     assert scrape.cost_usd == Decimal("0.00025")
+
+
+def test_scrapingdog_company_profile_cost_matches_private_model_call_shape():
+    params = {"api_key": "redacted", "type": "company", "id": "amazon"}
+    private_model_url = "https://api.scrapingdog.com/profile?" + urllib.parse.urlencode(params)
+
+    assert private_model_url.endswith("api_key=redacted&type=company&id=amazon")
+    assert scrapingdog_credits_for_url(private_model_url) == 10
+
+    estimate = estimate_provider_cost(
+        provider="sd",
+        upstream_url=private_model_url,
+        status=200,
+        response_body=b"{}",
+        request_body=None,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert estimate.billable
+    assert estimate.credits == 10
+    assert estimate.cost_usd == Decimal("0.00050")
+
+    for status in (402, 500):
+        failed = estimate_provider_cost(
+            provider="sd",
+            upstream_url=private_model_url,
+            status=status,
+            response_body=b'{"error":"provider failed"}',
+            request_body=None,
+            scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+        )
+        assert not failed.billable
+        assert failed.credits == 0
+        assert failed.cost_usd == Decimal("0")
+        assert failed.cost_source == "provider_failure_zero_cost"
 
 
 def test_failed_provider_call_adds_zero_cost():

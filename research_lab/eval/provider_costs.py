@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import base64
+import math
 import json
 import os
 import threading
@@ -260,6 +261,68 @@ def extract_openrouter_cost_dollars(body: bytes | str | None) -> tuple[Decimal |
     return None, metadata
 
 
+def _rough_token_count_from_text(value: Any) -> int:
+    """Fallback estimate for providers that omit usage metadata.
+
+    This is deliberately conservative enough for cost-cap accounting while
+    avoiding raw prompt/response storage. OpenRouter costs remain exact when it
+    returns usage/cost; this only handles missing usage for known Perplexity
+    models.
+    """
+
+    if value is None:
+        return 0
+    text = str(value)
+    if not text:
+        return 0
+    return max(1, int(math.ceil(len(text) / 4)))
+
+
+def _openrouter_content_token_estimate(body: bytes | str | None, *, response: bool) -> int:
+    parsed = _json_body(body)
+    if not isinstance(parsed, Mapping):
+        return 0
+    texts: list[str] = []
+    if response:
+        choices = parsed.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, Mapping):
+                    continue
+                message = choice.get("message")
+                if isinstance(message, Mapping):
+                    content = message.get("content")
+                    if content:
+                        texts.append(str(content))
+                text = choice.get("text")
+                if text:
+                    texts.append(str(text))
+        output = parsed.get("output")
+        if output:
+            texts.append(str(output))
+    else:
+        messages = parsed.get("messages")
+        if isinstance(messages, list):
+            for message in messages:
+                if not isinstance(message, Mapping):
+                    continue
+                content = message.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, Mapping):
+                            text = part.get("text") or part.get("content")
+                            if text:
+                                texts.append(str(text))
+                        elif part:
+                            texts.append(str(part))
+                elif content:
+                    texts.append(str(content))
+        prompt = parsed.get("prompt")
+        if prompt:
+            texts.append(str(prompt))
+    return sum(_rough_token_count_from_text(text) for text in texts)
+
+
 def openrouter_perplexity_pricing_fallback(
     *,
     model: str,
@@ -274,8 +337,6 @@ def openrouter_perplexity_pricing_fallback(
         prompt = max(0, int(prompt_tokens or 0))
         completion = max(0, int(completion_tokens or 0))
     except Exception:
-        return None
-    if prompt <= 0 and completion <= 0:
         return None
     input_price, output_price, request_price = pricing
     cost = (
@@ -476,10 +537,16 @@ def estimate_provider_cost(
         if not model:
             model = str(metadata.get("model") or "")[:160]
         if cost is None:
+            prompt_tokens = metadata.get("prompt_tokens")
+            completion_tokens = metadata.get("completion_tokens")
+            if not prompt_tokens:
+                prompt_tokens = _openrouter_content_token_estimate(request_body, response=False)
+            if not completion_tokens:
+                completion_tokens = _openrouter_content_token_estimate(response_body, response=True)
             priced = openrouter_perplexity_pricing_fallback(
                 model=model,
-                prompt_tokens=metadata.get("prompt_tokens"),
-                completion_tokens=metadata.get("completion_tokens"),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
             )
             if priced is not None:
                 priced.generation_id = openrouter_generation_id(response_body)

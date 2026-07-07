@@ -287,6 +287,16 @@ def test_openrouter_perplexity_pricing_fallback_uses_model_specific_rates():
     assert deep_research is not None
     assert deep_research.cost_usd == Decimal("0.011")
 
+    request_only = openrouter_perplexity_pricing_fallback(
+        model="perplexity/sonar",
+        prompt_tokens=0,
+        completion_tokens=0,
+    )
+    assert request_only is not None
+    assert request_only.billable
+    assert request_only.cost_usd == Decimal("0.005")
+    assert request_only.cost_source == "openrouter_perplexity_token_pricing_fallback"
+
     assert (
         openrouter_perplexity_pricing_fallback(
             model="anthropic/claude-opus-4.1",
@@ -327,6 +337,30 @@ def test_openrouter_missing_cost_perplexity_fallback_from_response_usage():
     assert estimate.cost_source == "openrouter_perplexity_token_pricing_fallback"
     assert not estimate.tracking_failed
     assert estimate.generation_id == "gen-sonar-no-cost"
+
+
+def test_openrouter_missing_cost_perplexity_fallback_estimates_missing_usage():
+    estimate = estimate_provider_cost(
+        provider="or",
+        upstream_url="https://openrouter.ai/api/v1/chat/completions",
+        status=200,
+        response_body=(
+            b'{"id":"gen-sonar-no-usage","choices":[{"message":{"content":'
+            b'"The company appears relevant because it mentions active hiring."}}]}'
+        ),
+        request_body=(
+            b'{"model":"perplexity/sonar","messages":[{"role":"user","content":'
+            b'"Find evidence for this company and intent signal."}]}'
+        ),
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert estimate.billable
+    assert estimate.cost_usd > Decimal("0.005")
+    assert estimate.cost_source == "openrouter_perplexity_token_pricing_fallback"
+    assert not estimate.tracking_failed
+    assert estimate.generation_id == "gen-sonar-no-usage"
+    assert estimate.prompt_tokens > 0
+    assert estimate.completion_tokens > 0
 
 
 def test_exa_agent_running_poll_is_not_billable_until_completed():

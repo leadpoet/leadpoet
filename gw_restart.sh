@@ -14,7 +14,9 @@ cd "$GATEWAY_ROOT"
 
 PID="$(pgrep -f "python3 -u main.py" | head -1 || true)"
 echo "main pid before: ${PID:-none}"
-[ -n "${PID:-}" ] || { echo "ERROR: main.py not running"; exit 1; }
+if [ -z "${PID:-}" ]; then
+  echo "main.py not currently running; continuing with Secrets Manager env only"
+fi
 
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
@@ -106,8 +108,9 @@ out_path.write_text("\n".join(out) + "\n")
 print(f"hydrated env cache and prepared {len(out)} secret env vars")
 PY
 
-echo "Cloning live gateway env before stopping processes"
-python3 - "$PID" "$ENV_CLONE" <<'PY'
+if [ -n "${PID:-}" ] && [ -r "/proc/$PID/environ" ]; then
+  echo "Cloning live gateway env before stopping processes"
+  python3 - "$PID" "$ENV_CLONE" <<'PY'
 import re
 import shlex
 import sys
@@ -138,6 +141,10 @@ for kv in data.split(b"\0"):
 open(out_path, "w").write("\n".join(out) + "\n")
 print(f"cloned {len(out)} env vars")
 PY
+else
+  echo "No live gateway env available; using hydrated Secrets Manager env only"
+  : > "$ENV_CLONE"
+fi
 
 cat "$ENV_SECRET" >> "$ENV_CLONE"
 

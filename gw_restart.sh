@@ -18,6 +18,8 @@ docker_storage_counts() {
   OVERLAY_DIRS="$(sudo find /var/lib/docker/overlay2 -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
   OVERLAY_KB="$(sudo du -sxk /var/lib/docker/overlay2 2>/dev/null | awk '{print $1}' || true)"
   OVERLAY_KB="${OVERLAY_KB:-0}"
+  DOCKER_ROOT_KB="$(sudo du -sxk /var/lib/docker 2>/dev/null | awk '{print $1}' || true)"
+  DOCKER_ROOT_KB="${DOCKER_ROOT_KB:-0}"
   IMAGE_COUNT="$(sudo docker images -q 2>/dev/null | wc -l | tr -d ' ')"
   CONTAINER_COUNT="$(sudo docker ps -aq 2>/dev/null | wc -l | tr -d ' ')"
   VOLUME_COUNT="$(sudo docker volume ls -q 2>/dev/null | wc -l | tr -d ' ')"
@@ -25,15 +27,15 @@ docker_storage_counts() {
 
 reset_orphaned_docker_storage_if_needed() {
   local free_kb_after_prune="$1"
+  local reason="${2:-orphaned Docker storage}"
   docker_storage_counts
 
-  if [ "${free_kb_after_prune:-0}" -lt "$MIN_FREE_KB" ] \
-     && [ "${IMAGE_COUNT:-0}" -eq 0 ] \
+  if [ "${IMAGE_COUNT:-0}" -eq 0 ] \
      && [ "${CONTAINER_COUNT:-0}" -eq 0 ] \
      && [ "${VOLUME_COUNT:-0}" -eq 0 ] \
-     && { [ "${OVERLAY_KB:-0}" -gt $((1024 * 1024)) ] || [ "${OVERLAY_DIRS:-0}" -gt 0 ]; }; then
-    echo "Detected orphaned Docker storage with no tracked Docker objects; resetting full Docker data root"
-    echo "orphaned overlay usage: ${OVERLAY_KB:-0} KiB across ${OVERLAY_DIRS:-0} dirs"
+     && { [ "${free_kb_after_prune:-0}" -lt "$MIN_FREE_KB" ] || [ "${DOCKER_ROOT_KB:-0}" -gt 1024 ] || [ "${OVERLAY_DIRS:-0}" -gt 0 ]; }; then
+    echo "Detected ${reason} with no tracked Docker objects; resetting full Docker data root"
+    echo "docker root usage: ${DOCKER_ROOT_KB:-0} KiB; overlay usage: ${OVERLAY_KB:-0} KiB across ${OVERLAY_DIRS:-0} dirs"
     sudo systemctl stop docker.socket docker 2>/dev/null || true
     sudo rm -rf /var/lib/docker
     sudo mkdir -p /var/lib/docker
@@ -70,7 +72,7 @@ emergency_disk_preflight() {
 
   local free_kb_after_prune
   free_kb_after_prune="$(root_free_kb)"
-  reset_orphaned_docker_storage_if_needed "$free_kb_after_prune"
+  reset_orphaned_docker_storage_if_needed "$free_kb_after_prune" "orphaned Docker storage after emergency cleanup"
 
   echo "Disk after emergency cleanup"
   df -h / /var/lib/docker 2>/dev/null || df -h /
@@ -274,7 +276,7 @@ sudo docker builder prune -af 2>/dev/null || true
 sudo docker system prune -af --volumes 2>/dev/null || true
 
 FREE_KB_AFTER_PRUNE="$(df --output=avail / | tail -1 | tr -d ' ')"
-reset_orphaned_docker_storage_if_needed "$FREE_KB_AFTER_PRUNE"
+reset_orphaned_docker_storage_if_needed "$FREE_KB_AFTER_PRUNE" "stale Docker storage after cleanup"
 
 echo "Disk after cleanup"
 df -h / /var/lib/docker 2>/dev/null || df -h /

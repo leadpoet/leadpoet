@@ -296,6 +296,33 @@ def test_replay_bootstrap_serves_urllib_from_snapshot_dir(tmp_path):
     assert decoded["body"] == body
 
 
+def test_replay_bootstrap_serves_httpx_async_client_from_snapshot_dir(tmp_path):
+    pytest.importorskip("httpx")
+    recorder = _record_store(tmp_path)
+    body = _record_companies_response(recorder, "acme", [_rich_company()])
+    url = SCRAPINGDOG_URL.format(link_id="acme", key="CONTAINERASYNCKEY")
+    probe = (
+        "\nimport asyncio, json, httpx\n"
+        "async def _probe():\n"
+        f"    async with httpx.AsyncClient() as client:\n"
+        f"        response = await client.get({url!r})\n"
+        "    print(json.dumps({'status': response.status_code, 'body': response.text}))\n"
+        "asyncio.run(_probe())\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_replay_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(tmp_path / "snapshot_set"), "PATH": ""},
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    decoded = json.loads(completed.stdout)
+    assert decoded["status"] == 200
+    assert decoded["body"] == body
+
+
 def test_replay_bootstrap_strict_miss_fails_loudly(tmp_path):
     _record_store(tmp_path)
     probe = (
@@ -312,6 +339,40 @@ def test_replay_bootstrap_strict_miss_fails_loudly(tmp_path):
     )
     assert completed.returncode != 0
     assert "no recorded provider snapshot for request" in completed.stderr
+
+
+def test_record_bootstrap_persists_response_and_skips_secret_material(tmp_path):
+    from research_lab.eval.snapshot_store import dev_record_bootstrap
+
+    snapshot_dir = tmp_path / "record_set"
+    probe = (
+        "\nimport json, os\n"
+        "_rl_dev_record('GET', 'https://api.exa.ai/search?q=clean', None, 200,"
+        " {'content-type': 'application/json'}, '{\"results\": [1]}')\n"
+        "_rl_dev_record('GET', 'https://api.exa.ai/search?q=leaky', None, 200,"
+        " {'content-type': 'application/json'}, '{\"echo\": \"sk-or-abc123\"}')\n"
+        "snapshots = os.path.join(os.environ['RESEARCH_LAB_DEV_SNAPSHOT_DIR'], 'snapshots')\n"
+        "names = sorted(os.listdir(snapshots)) if os.path.isdir(snapshots) else []\n"
+        "bodies = []\n"
+        "for name in names:\n"
+        "    with open(os.path.join(snapshots, name), 'r', encoding='utf-8') as handle:\n"
+        "        bodies.append(json.load(handle)['response']['body_text'])\n"
+        "print(json.dumps({'count': len(names), 'bodies': bodies}))\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_record_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(snapshot_dir), "PATH": ""},
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    decoded = json.loads(completed.stdout)
+    # The clean response persisted; the one carrying secret material did not.
+    assert decoded["count"] == 1
+    assert decoded["bodies"] == ['{"results": [1]}']
+    assert "research_lab_dev_snapshot_secret_material_skipped" in completed.stderr
 
 
 def test_replay_bootstrap_inert_without_snapshot_dir_env():
@@ -349,6 +410,30 @@ def test_replay_seams_serve_requests_and_httpx(tmp_path):
             via_httpx = client.get(url)
         assert via_httpx.status_code == 200
         assert via_httpx.text == body
+
+
+async def test_replay_seam_serves_httpx_async_client(tmp_path):
+    httpx_lib = pytest.importorskip("httpx")
+    recorder = _record_store(tmp_path)
+    body = _record_companies_response(recorder, "acme", [_rich_company()])
+    url = SCRAPINGDOG_URL.format(link_id="acme", key="ASYNCSEAMKEY")
+
+    replayer = _replay_store(tmp_path)
+    with replayer.replay_installed():
+        async with httpx_lib.AsyncClient() as client:
+            via_async = await client.get(url)
+        assert via_async.status_code == 200
+        assert via_async.text == body
+
+
+async def test_replay_seam_async_client_strict_miss(tmp_path):
+    httpx_lib = pytest.importorskip("httpx")
+    _record_store(tmp_path)
+    replayer = _replay_store(tmp_path)
+    with replayer.replay_installed():
+        async with httpx_lib.AsyncClient() as client:
+            with pytest.raises(SnapshotMiss):
+                await client.get("https://api.exa.ai/search")
 
 
 async def test_replay_seam_blocks_aiohttp_live_traffic(tmp_path):

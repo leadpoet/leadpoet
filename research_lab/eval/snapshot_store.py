@@ -364,12 +364,13 @@ class ProviderSnapshotStore:
         """Serve replay responses through in-process HTTP seams.
 
         Monkeypatches the same seams the bug-35 diagnostics hooks cover —
-        ``urllib.request.urlopen``, ``requests.Session.send`` and
-        ``httpx.Client.send`` (the latter two best-effort, only when the
-        library is importable) — so an in-process candidate runner needs no
-        snapshot awareness. ``aiohttp`` replay is not supported: its session
-        request is patched to raise loudly rather than leak live traffic.
-        Patches are process-global while active; run ICPs serially.
+        ``urllib.request.urlopen``, ``requests.Session.send``,
+        ``httpx.Client.send`` and ``httpx.AsyncClient.send`` (the HTTP
+        libraries best-effort, only when importable) — so an in-process
+        candidate runner needs no snapshot awareness. ``aiohttp`` replay is
+        not supported: its session request is patched to raise loudly rather
+        than leak live traffic. Patches are process-global while active; run
+        ICPs serially.
         """
         if self.mode != MODE_REPLAY:
             raise DevSnapshotStoreError("replay_installed requires a replay-mode store")
@@ -446,6 +447,14 @@ class ProviderSnapshotStore:
 
         httpx.Client.send = _replay_send
         restore.append(lambda: setattr(httpx.Client, "send", original_send))
+
+        original_async_send = httpx.AsyncClient.send
+
+        async def _replay_async_send(client, request, *args, **kwargs):  # noqa: ANN001
+            return _replay_send(client, request, *args, **kwargs)
+
+        httpx.AsyncClient.send = _replay_async_send
+        restore.append(lambda: setattr(httpx.AsyncClient, "send", original_async_send))
 
     def _install_aiohttp_guard(self, restore: list[Callable[[], None]]) -> None:
         try:
@@ -759,6 +768,8 @@ _RL_DEV_SNAPSHOT_DIR = os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_DIR", "").strip
 _RL_DEV_MISS_POLICY = (os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_MISS_POLICY", "").strip().lower() or "strict")
 _RL_DEV_AUTH_PARAMS = ("api_key", "apikey", "x-api-key", "authorization", "token", "access_token", "bearer")
 _RL_DEV_EMPTY_BODIES = {"exa": '{"results": []}', "scrapingdog": "{}", "openrouter": "{}"}
+# Keep in sync with research_lab.eval.private_runtime.SECRET_MARKERS.
+_RL_DEV_SECRET_MARKERS = ("sk-or-", "sb_secret_", "aws_secret_access_key", "openrouter_api_key", "scrapingdog_api_key", "exa_api_key", "raw_secret", "service_role")
 
 
 def _rl_dev_canonical_json(data):
@@ -941,6 +952,11 @@ def _rl_dev_install_replay():
             )
 
         _rl_httpx.Client.send = _rl_dev_replay_httpx_send
+
+        async def _rl_dev_replay_httpx_async_send(client, request, *args, **kwargs):
+            return _rl_dev_replay_httpx_send(client, request, *args, **kwargs)
+
+        _rl_httpx.AsyncClient.send = _rl_dev_replay_httpx_async_send
     except Exception:
         pass
 
@@ -984,6 +1000,15 @@ def _rl_dev_record(method, url, body, status, headers, body_text):
                 "body_text": str(body_text or ""),
             },
         }
+        payload_text = _rl_dev_canonical_json(record).lower()
+        if any(marker in payload_text for marker in _RL_DEV_SECRET_MARKERS):
+            import sys
+            sys.stderr.write(
+                "research_lab_dev_snapshot_secret_material_skipped request_key="
+                + request_key
+                + "\n"
+            )
+            return
         path = _rl_dev_snapshot_path(storage_name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:

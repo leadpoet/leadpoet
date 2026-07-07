@@ -289,15 +289,19 @@ def _rank_selected_by_dev_score(
 ) -> list[BuiltCodeEditCandidate]:
     """Intra-run keep-best ordering (§6.3-1).
 
-    When 2+ candidates carry dev scores: scored candidates come first, ordered
-    by ``dev_score`` desc (stable, so ties keep build order), and unscored
-    candidates keep build order after the scored ones. With fewer than two
-    scored candidates the input order is preserved unchanged. Dev scores never
-    affect anything beyond this intra-run ranking."""
+    Whenever at least one candidate carries a dev score: scored candidates
+    come first, ordered by ``dev_score`` desc (stable, so ties keep build
+    order), and unscored candidates keep build order after the scored ones.
+    A single scored candidate must outrank every unscored one — the per-
+    iteration cap truncation keeps only the head of this list, so an
+    unscored-first ordering would discard the only build with evidence.
+    With zero scored candidates the input order is preserved byte-for-byte
+    (dev-eval-off runs keep build order). Dev scores never affect anything
+    beyond this intra-run ranking."""
 
     items = list(candidates)
     scored = [candidate for candidate in items if candidate.dev_score is not None]
-    if len(scored) < 2:
+    if not scored:
         return items
     unscored = [candidate for candidate in items if candidate.dev_score is None]
     scored.sort(key=lambda candidate: -float(candidate.dev_score or 0.0))

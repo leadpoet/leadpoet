@@ -11,10 +11,11 @@ out). This module supplies the production implementation:
    ``scripts/record_research_lab_dev_snapshots.py``) and verify them against
    the manifest's ``icp_set_hash`` (leak/tamper guard).
 3. For each dev ICP, ``docker run`` the candidate's just-built image with the
-   snapshot directory mounted read-only, ``dev_replay_bootstrap()`` prepended
-   to the adapter bootstrap, and ``container_replay_env()`` exported — the
-   container serves all provider traffic from the frozen snapshots and never
-   opens a live connection.
+   snapshot directory mounted read-only, networking disabled
+   (``--network none``), ``dev_replay_bootstrap()`` prepended to the adapter
+   bootstrap, and ``container_replay_env()`` exported — the container serves
+   all provider traffic from the frozen snapshots and cannot open a live
+   connection.
 4. Score the outputs with ``research_lab.eval.dev_eval.evaluate_dev``
    (mechanical scorer, capped-top-5 per-ICP arithmetic) and return
    ``DevEvalResult.to_dict()``.
@@ -306,6 +307,12 @@ class DockerReplayDevEvaluator:
             "run",
             "--rm",
             "-i",
+            # Replay serves every provider call from the mounted snapshot
+            # directory, so the container needs no network at all; with it
+            # removed, any HTTP path the replay seams don't cover fails
+            # loudly (per-ICP failure) instead of reaching live providers.
+            "--network",
+            "none",
             *platform_args,
             "-v",
             f"{Path(snapshot_dir).resolve()}:{CONTAINER_SNAPSHOT_DIR}:ro",

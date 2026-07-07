@@ -263,3 +263,43 @@ async def test_evaluator_books_docker_failures_per_icp_without_aborting(tmp_path
     assert result["aggregate_dev_score"] == 0.0
     assert result["failure_count"] == 2
     assert result["icp_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Default docker invocation (replay containers run with networking disabled)
+# ---------------------------------------------------------------------------
+
+
+def test_default_docker_runner_disables_network_and_mounts_read_only(tmp_path, monkeypatch):
+    import subprocess
+
+    from gateway.research_lab import dev_eval_runner as runner_module
+
+    captured: dict = {}
+
+    def _fake_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["input"] = kwargs.get("input")
+        return subprocess.CompletedProcess(command, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", _fake_run)
+    evaluator = DockerReplayDevEvaluator(snapshot_uri=str(tmp_path))
+    result = evaluator._run_icp_in_docker_default(
+        image_digest=IMAGE_DIGEST,
+        icp=_dev_icp(0),
+        context={"dev_eval": True},
+        snapshot_dir=tmp_path,
+        timeout_seconds=30,
+    )
+    assert result == []
+    command = captured["command"]
+    assert IMAGE_DIGEST in command
+    # The replay container must have no network: every provider call is
+    # served from the mounted snapshot set, so an unpatched HTTP path fails
+    # loudly instead of reaching live providers.
+    assert "--network" in command
+    assert command[command.index("--network") + 1] == "none"
+    mounts = [command[i + 1] for i, part in enumerate(command) if part == "-v"]
+    assert any(mount.endswith(":ro") for mount in mounts)
+    payload = json.loads(captured["input"])
+    assert payload["icp"]["icp_id"] == "dev-0"

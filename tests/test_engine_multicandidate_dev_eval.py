@@ -256,6 +256,7 @@ def _run_engine(
     *,
     draft_responses,
     max_candidates: int = 1,
+    min_iterations: int = 1,
     max_iterations: int = 1,
     dev_evaluator=None,
     manifest_uri: str = "file:///local/manifest.json",
@@ -273,7 +274,7 @@ def _run_engine(
         settings=AutoResearchLoopSettings(
             min_seconds=0,
             max_seconds=300,
-            min_iterations=1,
+            min_iterations=min_iterations,
             max_iterations=max_iterations,
             draft_timeout_seconds=30,
             reflection_timeout_seconds=30,
@@ -693,14 +694,26 @@ def test_rank_is_stable_for_ties():
     assert [c.node_id for c in ranked] == [top.node_id, tie_first.node_id, tie_second.node_id]
 
 
-def test_rank_noop_with_fewer_than_two_scores():
+def test_rank_noop_with_zero_scores():
+    unscored = _built_candidate(0)
+    trailing = _built_candidate(2)
+    assert engine._rank_selected_by_dev_score([]) == []
+    assert engine._rank_selected_by_dev_score([unscored, trailing]) == [unscored, trailing]
+
+
+def test_rank_single_scored_outranks_unscored():
+    # The per-iteration cap truncation keeps only the head of this list, so a
+    # lone scored candidate must move ahead of earlier unscored builds — an
+    # unscored build must never displace the only build with evidence.
     unscored = _built_candidate(0)
     scored = _built_candidate(1, dev_score=7.0)
     trailing = _built_candidate(2)
-    original = [unscored, scored, trailing]
-    assert engine._rank_selected_by_dev_score(original) == original
-    assert engine._rank_selected_by_dev_score([]) == []
-    assert engine._rank_selected_by_dev_score([unscored, trailing]) == [unscored, trailing]
+    ranked = engine._rank_selected_by_dev_score([unscored, scored, trailing])
+    assert [c.node_id for c in ranked] == [
+        scored.node_id,
+        unscored.node_id,
+        trailing.node_id,
+    ]
 
 
 def test_run_ranks_selected_by_dev_score_desc(tmp_path, monkeypatch):
@@ -743,6 +756,61 @@ def test_run_scored_candidates_rank_ahead_of_unscored(tmp_path, monkeypatch):
     assert result.status == "completed"
     assert [candidate.dev_score for candidate in result.selected_candidates] == [7.0, 5.0, None]
     assert result.selected_candidates[2].draft.unified_diff == _diff(1)
+
+
+def test_run_cap_one_lone_scored_build_survives_truncation(tmp_path, monkeypatch):
+    # Build-and-discard shape (cap=1, stop-at-cap off, min-runtime gates keep
+    # the loop searching): the first build's evaluation fails (unscored), the
+    # second scores. The per-iteration cap truncation must keep the scored
+    # build — the run's only candidate with evidence — not the earlier
+    # unscored one.
+    _enable_dev_eval(monkeypatch)
+    monkeypatch.setenv("RESEARCH_LAB_LOOP_STOP_AT_CANDIDATE_CAP", "false")
+    evaluator = _ScriptedDevEvaluator([RuntimeError("dev harness down"), 90.0])
+    result, events, _caller, _builder = _run_engine(
+        tmp_path,
+        draft_responses=[
+            _draft_response([_candidate_doc(0)]),
+            _draft_response([_candidate_doc(1)]),
+        ],
+        max_candidates=1,
+        min_iterations=2,
+        max_iterations=2,
+        dev_evaluator=evaluator,
+    )
+    assert result.status == "completed"
+    # Both drafts were built before the cap truncation picked the finalist.
+    assert len(_events_of(events, "candidate_build_passed")) == 2
+    assert len(result.selected_candidates) == 1
+    finalist = result.selected_candidates[0]
+    assert finalist.dev_score == 90.0
+    assert finalist.draft.unified_diff == _diff(1)
+
+
+def test_run_cap_one_all_unscored_keeps_build_order(tmp_path, monkeypatch):
+    # Same shape but every evaluation fails: with zero scored builds the
+    # ranking must stay a no-op and the first build remains the finalist.
+    _enable_dev_eval(monkeypatch)
+    monkeypatch.setenv("RESEARCH_LAB_LOOP_STOP_AT_CANDIDATE_CAP", "false")
+    evaluator = _ScriptedDevEvaluator(
+        [RuntimeError("dev harness down"), RuntimeError("dev harness down")]
+    )
+    result, events, _caller, _builder = _run_engine(
+        tmp_path,
+        draft_responses=[
+            _draft_response([_candidate_doc(0)]),
+            _draft_response([_candidate_doc(1)]),
+        ],
+        max_candidates=1,
+        min_iterations=2,
+        max_iterations=2,
+        dev_evaluator=evaluator,
+    )
+    assert result.status == "completed"
+    assert len(_events_of(events, "candidate_build_passed")) == 2
+    finalist = result.selected_candidates[0]
+    assert finalist.dev_score is None
+    assert finalist.draft.unified_diff == _diff(0)
 
 
 # ---------------------------------------------------------------------------

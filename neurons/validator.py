@@ -277,24 +277,50 @@ echo "🛑 Auto-updater stopped"
 
 # Skip auto-containerization for worker modes (they should NOT trigger deployment)
 _is_worker_mode = "--mode" in sys.argv and any(
-    m in sys.argv for m in ["qualification_worker", "worker"]
+    m in sys.argv for m in ["qualification_worker", "fulfillment_worker", "worker"]
 )
 
-if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1" and not _is_worker_mode:
-    # Check if proxies are configured for containerization
-    proxies_found = []
-    for i in range(1, 251):  # Check for up to 250 proxies (supports scaling)
-        proxy_var = f"WEBSHARE_PROXY_{i}"
+def _auto_container_env_flag(name: str, default: str = "false") -> bool:
+    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+def _configured_proxy_envs(prefix: str, limit: int):
+    proxies = []
+    placeholder = "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80"
+    for i in range(1, limit + 1):
+        proxy_var = f"{prefix}_{i}"
         proxy_value = os.getenv(proxy_var)
-        if proxy_value and proxy_value != "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80":
-            proxies_found.append((proxy_var, proxy_value))
-    
-    if proxies_found:
+        if proxy_value and proxy_value != placeholder:
+            proxies.append((proxy_var, proxy_value))
+    return proxies
+
+if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1" and not _is_worker_mode:
+    legacy_sourcing_enabled = (
+        _auto_container_env_flag("ENABLE_LEGACY_SOURCING")
+        or _auto_container_env_flag("ENABLE_SOURCING_WORKERS")
+    )
+    qualification_workers_enabled = _auto_container_env_flag("ENABLE_QUALIFICATION_WORKERS")
+    fulfillment_enabled = _auto_container_env_flag("ENABLE_FULFILLMENT")
+
+    sourcing_proxies = _configured_proxy_envs("WEBSHARE_PROXY", 250) if legacy_sourcing_enabled else []
+    qualification_proxies = (
+        _configured_proxy_envs("QUALIFICATION_WEBSHARE_PROXY", 10)
+        if qualification_workers_enabled
+        else []
+    )
+    fulfillment_proxies = (
+        _configured_proxy_envs("FULFILLMENT_WEBSHARE_PROXY", 10)
+        if fulfillment_enabled
+        else []
+    )
+
+    if sourcing_proxies or qualification_proxies or fulfillment_proxies:
         print("════════════════════════════════════════════════════════════════")
         print("🐳 AUTO-CONTAINERIZATION ACTIVATED")
         print("════════════════════════════════════════════════════════════════")
-        print(f"📊 Detected {len(proxies_found)} proxy URLs in environment")
-        print(f"   Total containers: {len(proxies_found) + 1} (1 coordinator + {len(proxies_found)} workers)")
+        print(f"📊 Legacy sourcing workers: {len(sourcing_proxies)}")
+        print(f"📊 Qualification workers: {len(qualification_proxies)}")
+        print(f"📊 Fulfillment workers: {len(fulfillment_proxies)}")
+        print("   Total containers are managed by deploy_dynamic.sh")
         print("")
         print("🔧 Building Docker image and spawning containers...")
         print("   (This may take a few minutes on first run)")
@@ -324,8 +350,7 @@ if __name__ == "__main__" and os.environ.get("LEADPOET_CONTAINER_MODE") != "1" a
                 
                 print("")
                 print("✅ Containerized deployment complete!")
-                print(f"   {len(proxies_found) + 1} validator containers are now running in parallel")
-                print(f"   (1 coordinator + {len(proxies_found)} workers)")
+                print("   Validator coordinator and enabled worker containers are now running")
                 print("")
                 print("📺 Following main validator logs...")
                 print("   (Press Ctrl+C to detach - containers will keep running)")
@@ -2159,12 +2184,16 @@ class Validator(BaseValidatorNeuron):
 
                     # ════════════════════════════════════════════════════════════
                     # QUALIFICATION MODEL EVALUATION (polls gateway for miner models)
-                    # Enable with: export ENABLE_QUALIFICATION_EVALUATION=true
+                    # Requires explicit local worker opt-in.
                     # ════════════════════════════════════════════════════════════
-                    try:
-                        await self.process_qualification_workflow()
-                    except Exception as e:
-                        bt.logging.warning(f"Error in process_qualification_workflow: {e}")
+                    if (
+                        _env_flag("ENABLE_QUALIFICATION_EVALUATION")
+                        and _env_flag("ENABLE_QUALIFICATION_WORKERS")
+                    ):
+                        try:
+                            await self.process_qualification_workflow()
+                        except Exception as e:
+                            bt.logging.warning(f"Error in process_qualification_workflow: {e}")
 
                     # process_broadcast_requests_continuous() runs in background thread
 
@@ -2406,8 +2435,13 @@ class Validator(BaseValidatorNeuron):
             qual_proxies = []
             assignment_ok = True
             if container_mode_check == "coordinator" or container_mode_check is None:
-                # Check if validator-side Research Lab/qualification worker evaluation is enabled.
-                qual_enabled = _env_flag("ENABLE_QUALIFICATION_EVALUATION")
+                # Dedicated qualification workers are opt-in.  The validator
+                # can still fetch score bundles and submit weights without
+                # assigning local qualification work.
+                qual_enabled = (
+                    _env_flag("ENABLE_QUALIFICATION_EVALUATION")
+                    and _env_flag("ENABLE_QUALIFICATION_WORKERS")
+                )
                 qual_proxies = detect_qualification_proxies()
                 
                 if qual_enabled and qual_proxies:

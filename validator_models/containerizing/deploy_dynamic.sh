@@ -124,37 +124,57 @@ fi
 
 RESEARCH_LAB_INTERNAL_API_KEY="${RESEARCH_LAB_INTERNAL_API_KEY:-${LEADPOET_INTERNAL_SECRET:-}}"
 
+is_truthy() {
+    case "${1:-}" in
+        true|TRUE|True|1|yes|YES|Yes|y|Y|on|ON|On) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+ENABLE_LEGACY_SOURCING="${ENABLE_LEGACY_SOURCING:-false}"
+ENABLE_SOURCING_WORKERS="${ENABLE_SOURCING_WORKERS:-$ENABLE_LEGACY_SOURCING}"
+ENABLE_QUALIFICATION_WORKERS="${ENABLE_QUALIFICATION_WORKERS:-false}"
+ENABLE_FULFILLMENT="${ENABLE_FULFILLMENT:-false}"
+
 echo ""
 
 # Auto-detect SOURCING proxies from .env
 PROXIES=()
 PROXY_COUNT=0
 
-# Check for WEBSHARE_PROXY_1, WEBSHARE_PROXY_2, WEBSHARE_PROXY_3, etc.
-for i in {1..250}; do
-    PROXY_VAR="WEBSHARE_PROXY_$i"
-    PROXY_VALUE="${!PROXY_VAR}"
-    
-    if [ -n "$PROXY_VALUE" ] && [ "$PROXY_VALUE" != "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80" ]; then
-        PROXIES+=("$PROXY_VALUE")
-        PROXY_COUNT=$((PROXY_COUNT + 1))
-    fi
-done
+if is_truthy "$ENABLE_SOURCING_WORKERS" || is_truthy "$ENABLE_LEGACY_SOURCING"; then
+    # Check for WEBSHARE_PROXY_1, WEBSHARE_PROXY_2, WEBSHARE_PROXY_3, etc.
+    for i in {1..250}; do
+        PROXY_VAR="WEBSHARE_PROXY_$i"
+        PROXY_VALUE="${!PROXY_VAR}"
+
+        if [ -n "$PROXY_VALUE" ] && [ "$PROXY_VALUE" != "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80" ]; then
+            PROXIES+=("$PROXY_VALUE")
+            PROXY_COUNT=$((PROXY_COUNT + 1))
+        fi
+    done
+else
+    echo "🚫 Legacy sourcing worker deployment disabled (set ENABLE_SOURCING_WORKERS=true to opt in)"
+fi
 
 # Auto-detect QUALIFICATION proxies from .env
 QUAL_PROXIES=()
 QUAL_PROXY_COUNT=0
 
-# Check for QUALIFICATION_WEBSHARE_PROXY_1, QUALIFICATION_WEBSHARE_PROXY_2, etc.
-for i in {1..10}; do
-    PROXY_VAR="QUALIFICATION_WEBSHARE_PROXY_$i"
-    PROXY_VALUE="${!PROXY_VAR}"
-    
-    if [ -n "$PROXY_VALUE" ] && [ "$PROXY_VALUE" != "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80" ]; then
-        QUAL_PROXIES+=("$PROXY_VALUE")
-        QUAL_PROXY_COUNT=$((QUAL_PROXY_COUNT + 1))
-    fi
-done
+if is_truthy "$ENABLE_QUALIFICATION_WORKERS"; then
+    # Check for QUALIFICATION_WEBSHARE_PROXY_1, QUALIFICATION_WEBSHARE_PROXY_2, etc.
+    for i in {1..10}; do
+        PROXY_VAR="QUALIFICATION_WEBSHARE_PROXY_$i"
+        PROXY_VALUE="${!PROXY_VAR}"
+
+        if [ -n "$PROXY_VALUE" ] && [ "$PROXY_VALUE" != "http://YOUR_USERNAME:YOUR_PASSWORD@p.webshare.io:80" ]; then
+            QUAL_PROXIES+=("$PROXY_VALUE")
+            QUAL_PROXY_COUNT=$((QUAL_PROXY_COUNT + 1))
+        fi
+    done
+else
+    echo "🚫 Qualification worker deployment disabled (set ENABLE_QUALIFICATION_WORKERS=true to opt in)"
+fi
 
 # Get enclave CID for TEE signing (if enclave is running)
 ENCLAVE_CID=""
@@ -180,7 +200,7 @@ if [ $QUAL_PROXY_COUNT -gt 0 ]; then
 fi
 echo ""
 
-if [ $PROXY_COUNT -eq 0 ]; then
+if [ $PROXY_COUNT -eq 0 ] && (is_truthy "$ENABLE_SOURCING_WORKERS" || is_truthy "$ENABLE_LEGACY_SOURCING"); then
     echo "⚠️  WARNING: No proxies configured in .env.docker"
     echo ""
     echo "For parallel processing with different IPs, add proxies:"
@@ -188,7 +208,7 @@ if [ $PROXY_COUNT -eq 0 ]; then
     echo "  WEBSHARE_PROXY_2=http://user:pass@p.webshare.io:80"
     echo "  WEBSHARE_PROXY_3=http://user:pass@p.webshare.io:80"
     echo ""
-    echo "Deploying with 1 container (main validator only)..."
+    echo "Deploying with 1 sourcing container (main validator only)..."
     echo ""
 fi
 
@@ -264,7 +284,7 @@ start_container() {
     local PROXY_URL=$2
     local CONTAINER_ID=$3
     local DISPLAY_NAME=$4
-    
+
     echo "🚀 Starting $DISPLAY_NAME..."
     echo "   Container ID: $CONTAINER_ID / $TOTAL_CONTAINERS"
     if [ -n "$PROXY_URL" ]; then
@@ -273,12 +293,12 @@ start_container() {
         echo "   Proxy: None (EC2 native IP)"
     fi
     echo "   Lead distribution: AUTO (gateway MAX_LEADS_PER_EPOCH ÷ $TOTAL_CONTAINERS)"
-    
+
     local PROXY_ARGS=""
     if [ -n "$PROXY_URL" ]; then
         PROXY_ARGS="-e HTTP_PROXY=$PROXY_URL -e HTTPS_PROXY=$PROXY_URL"
     fi
-    
+
     # Determine container mode (ID 0 = coordinator, others = worker)
     local MODE_ARG=""
     local VSOCK_ARG=""
@@ -308,7 +328,7 @@ start_container() {
         LOG_DRIVER_ARGS="--log-driver=awslogs --log-opt awslogs-region=us-east-1 --log-opt awslogs-group=/leadpoet/validator/workers --log-opt awslogs-stream=worker-$CONTAINER_ID --log-opt awslogs-create-group=true"
         echo "   📊 CloudWatch Logs: /leadpoet/validator/workers (stream: worker-$CONTAINER_ID)"
     fi
-    
+
     docker run -d \
       --name "$CONTAINER_NAME" \
       --network host \
@@ -335,6 +355,7 @@ start_container() {
       -e ENABLE_TEE_SUBMISSION="${ENABLE_TEE_SUBMISSION:-false}" \
       -e VALIDATOR_REQUIRE_GATEWAY_WEIGHT_SUBMISSION="${VALIDATOR_REQUIRE_GATEWAY_WEIGHT_SUBMISSION:-true}" \
       -e ENABLE_QUALIFICATION_EVALUATION="${ENABLE_QUALIFICATION_EVALUATION:-false}" \
+      -e ENABLE_QUALIFICATION_WORKERS="${ENABLE_QUALIFICATION_WORKERS:-false}" \
       -e ENABLE_FULFILLMENT="${ENABLE_FULFILLMENT:-false}" \
       -e FULFILLMENT_OPENROUTER_API_KEY="${FULFILLMENT_OPENROUTER_API_KEY:-}" \
       -e FULFILLMENT_WEBSHARE_PROXY_1="${FULFILLMENT_WEBSHARE_PROXY_1:-}" \
@@ -391,7 +412,7 @@ start_container() {
       --container-id "$CONTAINER_ID" \
       --total-containers "$TOTAL_CONTAINERS" \
       $MODE_ARG > /dev/null
-    
+
     echo "   ✅ Started: $CONTAINER_NAME"
     echo ""
 }
@@ -426,28 +447,28 @@ if [ $QUAL_PROXY_COUNT -gt 0 ]; then
     echo "🎯 DEPLOYING QUALIFICATION WORKER CONTAINERS"
     echo "============================================================"
     echo ""
-    
+
     # Stop and remove any existing qualification containers + bare processes
     pkill -9 -f "qualification_worker" 2>/dev/null || true
     for i in $(seq 1 $QUAL_PROXY_COUNT); do
         docker rm -f "leadpoet-qual-worker-$i" 2>/dev/null || true
     done
     sleep 1
-    
+
     for i in $(seq 1 $QUAL_PROXY_COUNT); do
         QUAL_PROXY_VAR="QUALIFICATION_WEBSHARE_PROXY_$i"
         QUAL_PROXY_VALUE="${!QUAL_PROXY_VAR}"
-        
+
         echo "🚀 Starting Qualification Worker $i (Docker container)..."
         if [ -n "$QUAL_PROXY_VALUE" ]; then
             echo "   Proxy: ${QUAL_PROXY_VALUE:0:30}..."
         fi
-        
+
         QUAL_PROXY_ARGS=""
         if [ -n "$QUAL_PROXY_VALUE" ]; then
             QUAL_PROXY_ARGS="-e HTTP_PROXY=$QUAL_PROXY_VALUE -e HTTPS_PROXY=$QUAL_PROXY_VALUE"
         fi
-        
+
         docker run -d \
           --name "leadpoet-qual-worker-$i" \
           --network host \
@@ -480,11 +501,11 @@ if [ $QUAL_PROXY_COUNT -gt 0 ]; then
           leadpoet-validator:latest \
           --mode qualification_worker \
           --container-id "$i" > /dev/null
-        
+
         echo "   ✅ Started: leadpoet-qual-worker-$i"
         echo ""
     done
-    
+
     echo "✅ All $QUAL_PROXY_COUNT qualification worker containers deployed"
     echo "   (--restart unless-stopped: auto-recovers from crashes)"
     echo ""
@@ -501,17 +522,21 @@ fi
 FF_PROXIES=()
 FF_PROXY_COUNT=0
 
-for i in {1..10}; do
-    PROXY_VAR="FULFILLMENT_WEBSHARE_PROXY_$i"
-    PROXY_VALUE="${!PROXY_VAR}"
-    
-    if [ -n "$PROXY_VALUE" ]; then
-        FF_PROXIES+=("$PROXY_VALUE")
-        FF_PROXY_COUNT=$((FF_PROXY_COUNT + 1))
-    else
-        break
-    fi
-done
+if is_truthy "$ENABLE_FULFILLMENT"; then
+    for i in {1..10}; do
+        PROXY_VAR="FULFILLMENT_WEBSHARE_PROXY_$i"
+        PROXY_VALUE="${!PROXY_VAR}"
+
+        if [ -n "$PROXY_VALUE" ]; then
+            FF_PROXIES+=("$PROXY_VALUE")
+            FF_PROXY_COUNT=$((FF_PROXY_COUNT + 1))
+        else
+            break
+        fi
+    done
+else
+    echo "🚫 Fulfillment worker deployment disabled (ENABLE_FULFILLMENT != true)"
+fi
 
 echo "🔍 Auto-detected FULFILLMENT proxies: $FF_PROXY_COUNT"
 
@@ -521,26 +546,26 @@ if [ $FF_PROXY_COUNT -gt 0 ]; then
     echo "🎯 DEPLOYING FULFILLMENT WORKER CONTAINERS"
     echo "============================================================"
     echo ""
-    
+
     for i in $(seq 1 $FF_PROXY_COUNT); do
         docker rm -f "leadpoet-ff-worker-$i" 2>/dev/null || true
     done
     sleep 1
-    
+
     for i in $(seq 1 $FF_PROXY_COUNT); do
         FF_PROXY_VAR="FULFILLMENT_WEBSHARE_PROXY_$i"
         FF_PROXY_VALUE="${!FF_PROXY_VAR}"
-        
+
         echo "🚀 Starting Fulfillment Worker $i (Docker container)..."
         if [ -n "$FF_PROXY_VALUE" ]; then
             echo "   Proxy: ${FF_PROXY_VALUE:0:30}..."
         fi
-        
+
         FF_PROXY_ARGS=""
         if [ -n "$FF_PROXY_VALUE" ]; then
             FF_PROXY_ARGS="-e HTTP_PROXY=$FF_PROXY_VALUE -e HTTPS_PROXY=$FF_PROXY_VALUE"
         fi
-        
+
         docker run -d \
           --name "leadpoet-ff-worker-$i" \
           --network host \
@@ -594,11 +619,11 @@ if [ $FF_PROXY_COUNT -gt 0 ]; then
           leadpoet-validator:latest \
           --mode fulfillment_worker \
           --container-id "$i" > /dev/null
-        
+
         echo "   ✅ Started: leadpoet-ff-worker-$i"
         echo ""
     done
-    
+
     echo "✅ All $FF_PROXY_COUNT fulfillment worker containers deployed"
     echo ""
 fi

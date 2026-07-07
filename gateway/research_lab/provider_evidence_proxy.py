@@ -225,6 +225,19 @@ def _openrouter_generation_id_from_headers(headers: Mapping[str, Any]) -> str:
     return ""
 
 
+def _headers_to_dict(headers: Any) -> dict[str, str]:
+    if headers is None:
+        return {}
+    try:
+        items = headers.items()
+    except Exception:
+        return {}
+    try:
+        return {str(k): str(v) for k, v in items}
+    except Exception:
+        return {}
+
+
 def seed_provider_registry() -> list[ProviderRegistryEntry]:
     """The three pre-registry upstreams, expressed as registry seed entries."""
 
@@ -830,15 +843,12 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         try:
             with urllib.request.urlopen(request, timeout=180) as response:
                 status = int(getattr(response, "status", None) or getattr(response, "code", 0) or 0)
-                response_headers = {str(k): str(v) for k, v in response.headers.items()}
+                response_headers = _headers_to_dict(getattr(response, "headers", None))
                 body = response.read()
         except urllib.error.HTTPError as exc:
             # An HTTP error status is a real, recordable provider outcome.
             status = int(exc.code)
-            try:
-                response_headers = {str(k): str(v) for k, v in (exc.headers or {}).items()}
-            except Exception:
-                response_headers = {}
+            response_headers = _headers_to_dict(getattr(exc, "headers", None))
             try:
                 body = exc.read()
             except Exception:

@@ -19,6 +19,19 @@ after which the same inputs are recorded fresh.
 Credentials live only in this process: inbound requests have credential
 parameters stripped, and upstream calls are re-authenticated from the
 proxy's own environment, so a container never needs (or sees) a real key.
+
+W3 (sourceexperiments.md): upstream routing is a validated, hash-audited
+registry instead of a hardcoded table; every call appends a usage-ledger row
+with caller attribution bound at proxy spawn (or via worker-issued tokens —
+never trusted from container-supplied identity claims); lab/fulfillment keys
+are split behind ``RESEARCH_LAB_PROVIDER_KEY_SPLIT`` which also removes the
+silent ``QUALIFICATION_*`` fallback.
+
+Cost caps: paid live calls are metered per cost scope (the
+``X-Research-Lab-Cost-Scope`` header, e.g. one ICP) against
+``RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP``; a scope over its cap gets a
+402 before any upstream contact, and every response carries the cost event
+headers so the container-side trace tee can attribute spend.
 """
 
 from __future__ import annotations
@@ -33,13 +46,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
-from research_lab.eval.provider_evidence_cache import (
-    canonical_request_fingerprint,
-    load_evidence_cache,
-)
+from research_lab.canonical import sha256_json
 from research_lab.eval.provider_costs import (
     DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP,
     DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
@@ -47,67 +58,308 @@ from research_lab.eval.provider_costs import (
     ProviderCostLedger,
     decimal_from_env,
     estimate_provider_cost,
-    exa_agent_run_status,
     extract_openrouter_cost_dollars,
     redacted_endpoint,
     scrapingdog_credits_for_path,
 )
+from research_lab.eval.provider_evidence_cache import (
+    canonical_request_fingerprint,
+    load_evidence_cache,
+)
 
 PROXY_URL_ENV = "RESEARCH_LAB_EVIDENCE_PROXY_URL"
+REGISTRY_PATH_ENV = "RESEARCH_LAB_PROVIDER_REGISTRY_PATH"
+USAGE_LEDGER_PATH_ENV = "RESEARCH_LAB_PROVIDER_USAGE_LEDGER_PATH"
+KEY_SPLIT_ENV = "RESEARCH_LAB_PROVIDER_KEY_SPLIT"
+CALLER_TOKEN_HEADER = "X-Research-Lab-Caller-Token"
+# W4: a request carrying this header replays from tape/day-cache only — a miss
+# returns 409 instead of a live upstream call (probe live-flag off).
+REPLAY_ONLY_HEADER = "X-Research-Lab-Replay-Only"
+
 logger = logging.getLogger(__name__)
 
-# Upstream routing: first path segment selects the provider. The proxy
-# re-authenticates each upstream call from its own environment.
-_UPSTREAMS: dict[str, dict[str, Any]] = {
-    "exa": {
-        "base": "https://api.exa.ai",
-        "auth": lambda: {"x-api-key": os.getenv("EXA_API_KEY") or ""},
-    },
-    "sd": {
-        "base": "https://api.scrapingdog.com",
-        "auth_param": ("api_key", lambda: os.getenv("SCRAPINGDOG_API_KEY") or os.getenv("QUALIFICATION_SCRAPINGDOG_API_KEY") or ""),
-    },
-    "or": {
-        "base": "https://openrouter.ai",
-        "auth": lambda: {"Authorization": "Bearer " + (os.getenv("OPENROUTER_API_KEY") or os.getenv("QUALIFICATION_OPENROUTER_API_KEY") or os.getenv("OPENROUTER_KEY") or "")},
-    },
+_VALID_AUTH_KINDS = ("header", "query", "bearer", "none")
+
+# Legacy fallback env chains, used ONLY while the key split is off. With
+# RESEARCH_LAB_PROVIDER_KEY_SPLIT on, lab traffic authenticates exclusively
+# from lab-scoped keys and a missing key is a hard, attributed failure —
+# never a silent borrow of fulfillment (QUALIFICATION_*) credentials.
+_LEGACY_CREDENTIAL_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "exa": ("EXA_API_KEY",),
+    "sd": ("SCRAPINGDOG_API_KEY", "QUALIFICATION_SCRAPINGDOG_API_KEY"),
+    "or": ("OPENROUTER_API_KEY", "QUALIFICATION_OPENROUTER_API_KEY", "OPENROUTER_KEY"),
 }
 
-_HOP_HEADERS = {"connection", "keep-alive", "transfer-encoding", "host", "content-length", "authorization", "x-api-key"}
 
-_EXA_AGENT_NONTERMINAL_STATUSES = {"queued", "running", "in_progress", "pending"}
+@dataclass(frozen=True)
+class ProviderRegistryEntry:
+    """One validated upstream in the evidence-proxy routing registry."""
+
+    id: str
+    base_url: str
+    auth_kind: str  # header | query | bearer | none
+    auth_name: str = ""  # header or query-parameter name carrying the credential
+    credential_ref: tuple[str, ...] = ()  # ordered env-var names, first hit wins
+    per_day_quota: int = 0  # live upstream calls per UTC day; 0 = unlimited
+    cost_model: dict[str, Any] = field(default_factory=dict)
+    active_window: str = ""
+    active: bool = True
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "ProviderRegistryEntry":
+        credential_ref = data.get("credential_ref") or ()
+        if isinstance(credential_ref, str):
+            credential_ref = (credential_ref,)
+        return cls(
+            id=str(data.get("id") or ""),
+            base_url=str(data.get("base_url") or ""),
+            auth_kind=str(data.get("auth_kind") or "none"),
+            auth_name=str(data.get("auth_name") or ""),
+            credential_ref=tuple(str(item) for item in credential_ref),
+            per_day_quota=int(data.get("per_day_quota") or 0),
+            cost_model=dict(data.get("cost_model") or {}),
+            active_window=str(data.get("active_window") or ""),
+            active=bool(data.get("active", True)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["credential_ref"] = list(self.credential_ref)
+        return data
+
+    def est_cost_microusd(self) -> int:
+        try:
+            return max(0, int(self.cost_model.get("est_cost_microusd_per_call") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+
+def validate_provider_registry_entries(entries: Sequence[ProviderRegistryEntry]) -> list[str]:
+    errors: list[str] = []
+    seen_ids: set[str] = set()
+    for entry in entries:
+        label = entry.id or "<missing id>"
+        if not entry.id or not entry.id.replace("_", "").replace("-", "").isalnum():
+            errors.append(f"{label}: id must be a non-empty slug")
+        if entry.id in seen_ids:
+            errors.append(f"{label}: duplicate registry id")
+        seen_ids.add(entry.id)
+        if not entry.base_url.startswith("https://"):
+            errors.append(f"{label}: base_url must be https")
+        if entry.auth_kind not in _VALID_AUTH_KINDS:
+            errors.append(f"{label}: unknown auth_kind {entry.auth_kind}")
+        if entry.auth_kind in {"header", "query"} and not entry.auth_name:
+            errors.append(f"{label}: auth_name required for {entry.auth_kind} auth")
+        if entry.auth_kind != "none" and not entry.credential_ref:
+            errors.append(f"{label}: credential_ref required for authenticated upstream")
+        for env_name in entry.credential_ref:
+            if not env_name or "=" in env_name or env_name != env_name.strip():
+                errors.append(f"{label}: credential_ref entries must be env-var names")
+        if entry.per_day_quota < 0:
+            errors.append(f"{label}: per_day_quota must be >= 0")
+    return errors
+
+
+def provider_registry_hash(entries: Sequence[ProviderRegistryEntry]) -> str:
+    return sha256_json({"registry": [entry.to_dict() for entry in sorted(entries, key=lambda e: e.id)]})
+
+
+def seed_provider_registry() -> list[ProviderRegistryEntry]:
+    """The three pre-registry upstreams, expressed as registry seed entries."""
+
+    return [
+        ProviderRegistryEntry(
+            id="exa",
+            base_url="https://api.exa.ai",
+            auth_kind="header",
+            auth_name="x-api-key",
+            credential_ref=("RESEARCH_LAB_EXA_API_KEY", "EXA_API_KEY"),
+            cost_model={"currency": "usd", "est_cost_microusd_per_call": 5_000},
+        ),
+        ProviderRegistryEntry(
+            id="sd",
+            base_url="https://api.scrapingdog.com",
+            auth_kind="query",
+            auth_name="api_key",
+            credential_ref=("RESEARCH_LAB_SCRAPINGDOG_API_KEY", "SCRAPINGDOG_API_KEY"),
+            cost_model={"currency": "usd", "est_cost_microusd_per_call": 1_000},
+        ),
+        ProviderRegistryEntry(
+            id="or",
+            base_url="https://openrouter.ai",
+            auth_kind="bearer",
+            auth_name="Authorization",
+            credential_ref=("RESEARCH_LAB_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"),
+            cost_model={"currency": "usd", "est_cost_microusd_per_call": 2_000},
+        ),
+    ]
+
+
+def load_provider_registry(path: str = "") -> list[ProviderRegistryEntry]:
+    """Load and validate the registry file; fall back to the seed entries.
+
+    A present-but-invalid registry raises rather than silently reverting to the
+    seed: a typo'd registry must fail loudly at spawn, not misroute quietly.
+    """
+
+    resolved = str(path or os.getenv(REGISTRY_PATH_ENV) or "").strip()
+    if not resolved:
+        return seed_provider_registry()
+    with open(resolved, "r", encoding="utf-8") as handle:
+        doc = json.load(handle)
+    raw_entries = doc.get("providers") if isinstance(doc, Mapping) else doc
+    if not isinstance(raw_entries, list) or not raw_entries:
+        raise ValueError("provider registry file must contain a non-empty providers list")
+    entries = [ProviderRegistryEntry.from_mapping(item) for item in raw_entries]
+    errors = validate_provider_registry_entries(entries)
+    if errors:
+        raise ValueError("invalid provider registry: " + "; ".join(errors))
+    return entries
+
+
+def _key_split_enabled(override: bool | None = None) -> bool:
+    if override is not None:
+        return bool(override)
+    return str(os.getenv(KEY_SPLIT_ENV, "") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def resolve_provider_credential(
+    entry: ProviderRegistryEntry,
+    *,
+    key_split: bool | None = None,
+) -> tuple[str, str]:
+    """Return (credential_value, source_env_name).
+
+    Key split ON: only lab-scoped (``RESEARCH_LAB_*``) refs are honored — no
+    fallback to shared or ``QUALIFICATION_*`` keys.
+    Key split OFF: the entry's refs are tried in order, then the legacy
+    fallback chain for the pre-registry providers (pre-W3 behavior).
+    """
+
+    split = _key_split_enabled(key_split)
+    refs = list(entry.credential_ref)
+    if split:
+        refs = [name for name in refs if name.startswith("RESEARCH_LAB_")]
+    else:
+        for legacy in _LEGACY_CREDENTIAL_FALLBACKS.get(entry.id, ()):
+            if legacy not in refs:
+                refs.append(legacy)
+    for env_name in refs:
+        value = (os.getenv(env_name) or "").strip()
+        if value:
+            return value, env_name
+    return "", ""
+
+
+class ProviderUsageLedger:
+    """Per-call usage ledger + per-day live-call counters.
+
+    Rows append to a JSONL file when a path is configured; counters always
+    accumulate in memory so per-day quotas are enforceable either way.
+    """
+
+    def __init__(self, path: str = "") -> None:
+        self._path = str(path or "")
+        self._lock = threading.Lock()
+        self._live_day = _utc_day()
+        self._live_calls: dict[str, int] = {}
+
+    def _roll_day_locked(self) -> None:
+        today = _utc_day()
+        if self._live_day != today:
+            self._live_day = today
+            self._live_calls = {}
+
+    def live_calls_today(self, provider_id: str) -> int:
+        with self._lock:
+            self._roll_day_locked()
+            return self._live_calls.get(provider_id, 0)
+
+    def record(
+        self,
+        *,
+        provider_id: str,
+        endpoint_class: str,
+        fingerprint: str,
+        evidence: str,
+        status: int,
+        est_cost_microusd: int,
+        caller: Mapping[str, Any] | None,
+    ) -> None:
+        with self._lock:
+            self._roll_day_locked()
+            if evidence == "recorded":
+                self._live_calls[provider_id] = self._live_calls.get(provider_id, 0) + 1
+            if not self._path:
+                return
+            row = {
+                "schema_version": "1.0",
+                "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "utc_day": self._live_day,
+                "provider_id": provider_id,
+                "endpoint_class": endpoint_class,
+                "request_fingerprint": fingerprint,
+                "evidence": evidence,
+                "status": int(status),
+                "est_cost_microusd": int(est_cost_microusd),
+                "caller": dict(caller or {}),
+            }
+            try:
+                with open(self._path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+            except Exception:
+                pass
+
+
+def _endpoint_class(rest: str) -> str:
+    """Path-only endpoint class: no query strings, bounded length."""
+
+    path = urllib.parse.urlsplit(rest).path or "/"
+    return path[:200]
+
+
+class CallerTokenMap:
+    """Worker-issued caller tokens → caller context.
+
+    The worker (host side) writes ``{token: {caller fields...}}`` to a file it
+    owns and hands tokens to runs; a container presents the opaque token and
+    the proxy resolves identity from the host-side map. Container-supplied
+    identity FIELDS are never trusted — an unknown token attributes as
+    ``{"caller_kind": "unknown_token"}``.
+    """
+
+    def __init__(self, path: str = "") -> None:
+        self._path = str(path or "")
+        self._lock = threading.Lock()
+        self._mtime = 0.0
+        self._tokens: dict[str, dict[str, Any]] = {}
+
+    def resolve(self, token: str) -> dict[str, Any] | None:
+        if not token or not self._path:
+            return None
+        with self._lock:
+            try:
+                mtime = os.stat(self._path).st_mtime
+            except OSError:
+                return None
+            if mtime != self._mtime:
+                try:
+                    with open(self._path, "r", encoding="utf-8") as handle:
+                        doc = json.load(handle)
+                    self._tokens = {
+                        str(key): dict(value)
+                        for key, value in (doc or {}).items()
+                        if isinstance(value, Mapping)
+                    }
+                    self._mtime = mtime
+                except Exception:
+                    return None
+            context = self._tokens.get(token)
+            return dict(context) if context else None
 
 
 def _utc_day() -> str:
     return time.strftime("%Y-%m-%d", time.gmtime())
-
-
-def _response_is_recordable(provider: str, upstream_url: str, status: int, body: bytes) -> bool:
-    if provider != "exa" or status >= 400:
-        return True
-    try:
-        path = urllib.parse.urlsplit(upstream_url).path
-    except Exception:
-        path = ""
-    if not path.startswith("/agent/runs/"):
-        return True
-    agent_status = exa_agent_run_status(body)
-    return agent_status not in _EXA_AGENT_NONTERMINAL_STATUSES
-
-
-def _record_is_replayable(record: Mapping[str, Any]) -> bool:
-    try:
-        status = int(record.get("status") or 0)
-    except Exception:
-        status = 0
-    if status >= 400:
-        return True
-    try:
-        body = base64.b64decode(record.get("body_b64") or "")
-    except Exception:
-        body = b""
-    agent_status = exa_agent_run_status(body)
-    return agent_status not in _EXA_AGENT_NONTERMINAL_STATUSES
 
 
 class EvidenceStore:
@@ -148,8 +400,7 @@ class EvidenceStore:
                 except Exception:
                     continue
                 for key, record in loaded.items():
-                    if _record_is_replayable(record):
-                        self._baseline.setdefault(key, record)
+                    self._baseline.setdefault(key, record)
         self._day = {}
         if self._day_path and os.path.isfile(self._day_path):
             try:
@@ -161,11 +412,7 @@ class EvidenceStore:
                         self._day = {
                             str(k): dict(v)
                             for k, v in entries.items()
-                            if (
-                                isinstance(v, Mapping)
-                                and isinstance(v.get("status"), int)
-                                and _record_is_replayable(v)
-                            )
+                            if isinstance(v, Mapping) and isinstance(v.get("status"), int)
                         }
             except Exception:
                 self._day = {}
@@ -183,13 +430,8 @@ class EvidenceStore:
 
     def _cached_locked(self, fingerprint: str) -> dict[str, Any] | None:
         record = self._baseline.get(fingerprint)
-        if record is not None and not _record_is_replayable(record):
-            record = None
         if record is None:
             record = self._day.get(fingerprint)
-            if record is not None and not _record_is_replayable(record):
-                self._day.pop(fingerprint, None)
-                record = None
         return dict(record) if record else None
 
     def lookup(self, fingerprint: str) -> dict[str, Any] | None:
@@ -268,21 +510,42 @@ class EvidenceStore:
             return ledger
 
 
+_HOP_HEADERS = {"connection", "keep-alive", "transfer-encoding", "host", "content-length", "authorization", "x-api-key"}
+
+
 class _ProxyHandler(BaseHTTPRequestHandler):
     store: EvidenceStore
+    registry: dict[str, ProviderRegistryEntry]
+    ledger: ProviderUsageLedger
+    caller_context: dict[str, Any]
+    caller_tokens: CallerTokenMap
+    key_split: bool | None
+    # W5 trials: in-memory credential overrides by provider id (e.g. a
+    # KMS-decrypted miner key for a per-trial proxy instance). Never read from
+    # env, never exposed to the container.
+    credential_overrides: dict[str, str]
     protocol_version = "HTTP/1.1"
 
     def log_message(self, *args: Any) -> None:  # quiet; the gateway logs enough
         pass
 
-    def _provider(self) -> tuple[str, str] | None:
+    def _provider(self) -> tuple[ProviderRegistryEntry, str] | None:
         parts = self.path.lstrip("/").split("/", 1)
         name = parts[0] if parts else ""
-        upstream = _UPSTREAMS.get(name)
-        if not upstream:
+        entry = self.registry.get(name)
+        if not entry or not entry.active:
             return None
         rest = "/" + (parts[1] if len(parts) > 1 else "")
-        return name, rest
+        return entry, rest
+
+    def _caller(self) -> dict[str, Any]:
+        token = str(self.headers.get(CALLER_TOKEN_HEADER) or "").strip()
+        if token:
+            resolved = self.caller_tokens.resolve(token)
+            if resolved is not None:
+                return resolved
+            return {"caller_kind": "unknown_token"}
+        return dict(self.caller_context)
 
     def _respond(
         self,
@@ -306,19 +569,43 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+    def _ledger_row(
+        self,
+        entry: ProviderRegistryEntry,
+        rest: str,
+        fingerprint: str,
+        *,
+        evidence: str,
+        status: int,
+        live_cost: bool,
+        est_cost_microusd: int | None = None,
+    ) -> None:
+        if est_cost_microusd is None:
+            est_cost_microusd = entry.est_cost_microusd() if live_cost else 0
+        self.ledger.record(
+            provider_id=entry.id,
+            endpoint_class=_endpoint_class(rest),
+            fingerprint=fingerprint,
+            evidence=evidence,
+            status=status,
+            est_cost_microusd=est_cost_microusd,
+            caller=self._caller(),
+        )
+
     def _handle(self) -> None:
         routed = self._provider()
         if routed is None:
             self._respond(404, b'{"error":"unknown provider route"}')
             return
-        name, rest = routed
-        upstream = _UPSTREAMS[name]
+        entry, rest = routed
         length = int(self.headers.get("Content-Length") or 0)
         request_body = self.rfile.read(length) if length else b""
         # Fingerprint on the UPSTREAM shape of the request so it matches
         # evidence recorded from direct provider calls (baseline tapes).
-        upstream_url = upstream["base"] + rest
+        upstream_url = entry.base_url + rest
         fingerprint = canonical_request_fingerprint(self.command, upstream_url, request_body or None)
+        # Per-scope cost accounting: the container names its scope (one ICP)
+        # and paid live calls in that scope are capped.
         scope = str(self.headers.get("X-Research-Lab-Cost-Scope") or "unscoped").strip() or "unscoped"
         cap_usd = decimal_from_env(
             "RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP",
@@ -336,7 +623,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             "RESEARCH_LAB_SCRAPINGDOG_COST_PER_CREDIT_USD",
             DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
         )
-        ledger = self.store.cost_ledger(scope, cap_usd)
+        cost_ledger = self.store.cost_ledger(scope, cap_usd)
         # Global read-through with single-flight: the first run of the day to
         # make a request calls the provider live while every concurrent
         # identical request (e.g. another candidate on the same ICP) waits and
@@ -348,18 +635,27 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             except Exception:
                 body = b""
             status = int(cached.get("status") or 502)
-            event = ledger.cache_hit_event(
-                provider=name,
-                endpoint=redacted_endpoint(name, upstream_url),
+            event = cost_ledger.cache_hit_event(
+                provider=entry.id,
+                endpoint=redacted_endpoint(entry.id, upstream_url),
                 request_fingerprint=fingerprint,
                 status_code=status,
             )
+            self._ledger_row(entry, rest, fingerprint, evidence="hit", status=status, live_cost=False)
             self._respond(status, body, evidence="hit", headers=event.to_headers())
             return
-        endpoint = redacted_endpoint(name, upstream_url)
-        if name == "sd" and scrapingdog_credits_for_path(urllib.parse.urlsplit(upstream_url).path) is None:
-            event = ledger.block_event(
-                provider=name,
+        if str(self.headers.get(REPLAY_ONLY_HEADER) or "").strip().lower() in {"1", "true", "yes", "on"}:
+            if is_leader:
+                self.store.release_lead(fingerprint)
+            self._ledger_row(entry, rest, fingerprint, evidence="replay_miss", status=409, live_cost=False)
+            self._respond(409, b'{"error":"replay_miss"}')
+            return
+        endpoint = redacted_endpoint(entry.id, upstream_url)
+        # Fail closed on unknown ScrapingDog endpoints: their per-endpoint
+        # credit table is the cost model, so an unmapped path is unpriceable.
+        if entry.id == "sd" and scrapingdog_credits_for_path(urllib.parse.urlsplit(upstream_url).path) is None:
+            event = cost_ledger.block_event(
+                provider=entry.id,
                 endpoint=endpoint,
                 request_fingerprint=fingerprint,
                 reason="unknown_scrapingdog_endpoint",
@@ -374,11 +670,12 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             ).encode("utf-8")
             if is_leader:
                 self.store.release_lead(fingerprint)
+            self._ledger_row(entry, rest, fingerprint, evidence="blocked", status=402, live_cost=False)
             self._respond(402, body, evidence="blocked", headers=event.to_headers())
             return
-        if ledger.should_block_paid_call():
-            event = ledger.block_event(
-                provider=name,
+        if cost_ledger.should_block_paid_call():
+            event = cost_ledger.block_event(
+                provider=entry.id,
                 endpoint=endpoint,
                 request_fingerprint=fingerprint,
                 reason="cost_cap_reached",
@@ -386,7 +683,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             body = json.dumps(
                 {
                     "error": "research_lab_provider_cost_cap_exceeded",
-                    "provider": name,
+                    "provider": entry.id,
                     "endpoint": endpoint,
                 },
                 sort_keys=True,
@@ -394,27 +691,46 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             ).encode("utf-8")
             if is_leader:
                 self.store.release_lead(fingerprint)
+            self._ledger_row(entry, rest, fingerprint, evidence="blocked", status=402, live_cost=False)
             self._respond(402, body, evidence="blocked", headers=event.to_headers())
             return
-        # Live call, re-authenticated from the proxy's own credentials.
+        # Live call: enforce the per-day quota before touching the upstream.
+        if entry.per_day_quota > 0 and self.ledger.live_calls_today(entry.id) >= entry.per_day_quota:
+            if is_leader:
+                self.store.release_lead(fingerprint)
+            self._ledger_row(entry, rest, fingerprint, evidence="quota_exhausted", status=429, live_cost=False)
+            self._respond(429, b'{"error":"provider day quota exhausted"}')
+            return
+        credential = self.credential_overrides.get(entry.id) or ""
+        if not credential:
+            credential, _source = resolve_provider_credential(entry, key_split=self.key_split)
+        if entry.auth_kind != "none" and not credential:
+            # No silent fallback: a missing lab key is an attributed failure.
+            if is_leader:
+                self.store.release_lead(fingerprint)
+            self._ledger_row(entry, rest, fingerprint, evidence="credential_missing", status=502, live_cost=False)
+            self._respond(502, b'{"error":"lab provider credential not configured"}')
+            return
+        # Re-authenticate from the proxy's own credentials.
         target = upstream_url
-        auth_param = upstream.get("auth_param")
-        if auth_param:
-            param, getter = auth_param
+        if entry.auth_kind == "query":
             split = urllib.parse.urlsplit(target)
-            pairs = [(k, v) for k, v in urllib.parse.parse_qsl(split.query, keep_blank_values=True) if k.lower() != param]
-            pairs.append((param, getter()))
+            pairs = [
+                (k, v)
+                for k, v in urllib.parse.parse_qsl(split.query, keep_blank_values=True)
+                if k.lower() != entry.auth_name.lower()
+            ]
+            pairs.append((entry.auth_name, credential))
             target = urllib.parse.urlunsplit(split._replace(query=urllib.parse.urlencode(pairs)))
         headers = {
             k: v
             for k, v in self.headers.items()
             if k.lower() not in _HOP_HEADERS and not k.lower().startswith("x-research-lab")
         }
-        auth = upstream.get("auth")
-        if auth:
-            for key, value in auth().items():
-                if value:
-                    headers[key] = value
+        if entry.auth_kind == "header" and credential:
+            headers[entry.auth_name] = credential
+        elif entry.auth_kind == "bearer" and credential:
+            headers[entry.auth_name or "Authorization"] = "Bearer " + credential
         request = urllib.request.Request(target, data=request_body or None, headers=headers, method=self.command)
         try:
             with urllib.request.urlopen(request, timeout=180) as response:
@@ -432,27 +748,23 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             # waiting caller can retry rather than block on us.
             if is_leader:
                 self.store.release_lead(fingerprint)
-            event = ledger.record_live_event(
-                provider=name,
+            event = cost_ledger.record_live_event(
+                provider=entry.id,
                 request_fingerprint=fingerprint,
                 status_code=502,
                 estimate=ProviderCostEstimate(
-                    provider=name,
+                    provider=entry.id,
                     endpoint=endpoint,
                     billable=False,
                     cost_source="transport_failure_zero_cost",
                 ),
             )
+            self._ledger_row(entry, rest, fingerprint, evidence="error", status=502, live_cost=False)
             self._respond(502, b'{"error":"upstream unreachable"}', evidence="error", headers=event.to_headers())
             return
-        recordable = _response_is_recordable(name, upstream_url, status, body)
-        evidence_label = "recorded" if recordable else "live_unrecorded"
-        if recordable:
-            self.store.record(fingerprint, status, body)
-        elif is_leader:
-            self.store.release_lead(fingerprint)
+        self.store.record(fingerprint, status, body)
         estimate = estimate_provider_cost(
-            provider=name,
+            provider=entry.id,
             upstream_url=upstream_url,
             status=status,
             response_body=body,
@@ -460,23 +772,18 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             scrapingdog_credit_price_usd=credit_price,
         )
         if (
-            name == "or"
+            entry.id == "or"
             and estimate.tracking_failed
             and estimate.tracking_reason == "missing_openrouter_cost"
             and estimate.generation_id
         ):
             try:
                 gen_url = (
-                    _UPSTREAMS["or"]["base"]
+                    entry.base_url
                     + "/api/v1/generation?id="
                     + urllib.parse.quote(estimate.generation_id, safe="")
                 )
-                auth_getter = _UPSTREAMS["or"].get("auth")
-                gen_headers = {
-                    key: value
-                    for key, value in (auth_getter() if auth_getter else {}).items()
-                    if value
-                }
+                gen_headers = {"Authorization": "Bearer " + credential} if credential else {}
                 gen_req = urllib.request.Request(gen_url, headers=gen_headers, method="GET")
                 with urllib.request.urlopen(gen_req, timeout=30) as gen_response:
                     if int(getattr(gen_response, "status", None) or getattr(gen_response, "code", 0) or 0) < 400:
@@ -500,14 +807,30 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                     str(estimate.generation_id or "")[:16],
                     exc,
                 )
-        event = ledger.record_live_event(
-            provider=name,
+        event = cost_ledger.record_live_event(
+            provider=entry.id,
             request_fingerprint=fingerprint,
             status_code=status,
             estimate=estimate,
-            evidence=evidence_label,
         )
-        self._respond(status, body, evidence=evidence_label, headers=event.to_headers())
+        # The usage row carries the measured cost when the estimator priced the
+        # call; the registry's static per-call estimate is the fallback.
+        measured_microusd: int | None = None
+        if estimate.billable and estimate.cost_usd is not None:
+            try:
+                measured_microusd = max(0, int(Decimal(estimate.cost_usd) * 1_000_000))
+            except Exception:
+                measured_microusd = None
+        self._ledger_row(
+            entry,
+            rest,
+            fingerprint,
+            evidence="recorded",
+            status=status,
+            live_cost=True,
+            est_cost_microusd=measured_microusd,
+        )
+        self._respond(status, body, evidence="recorded", headers=event.to_headers())
 
     do_GET = _handle
     do_POST = _handle
@@ -519,10 +842,39 @@ def serve_evidence_proxy(
     port: int = 0,
     baseline_dir: str = "",
     day_cache_path: str = "",
+    registry: Sequence[ProviderRegistryEntry] | None = None,
+    usage_ledger_path: str = "",
+    caller_context: Mapping[str, Any] | None = None,
+    caller_token_map_path: str = "",
+    key_split: bool | None = None,
+    credential_overrides: Mapping[str, str] | None = None,
 ) -> tuple[ThreadingHTTPServer, EvidenceStore, threading.Thread]:
-    """Start the proxy; returns (server, store, thread). Caller owns shutdown."""
+    """Start the proxy; returns (server, store, thread). Caller owns shutdown.
+
+    ``caller_context`` is the spawn-bound identity stamped onto ledger rows
+    when a request carries no worker-issued token. ``key_split=None`` defers
+    to the ``RESEARCH_LAB_PROVIDER_KEY_SPLIT`` env flag at call time.
+    """
+
+    entries = list(registry) if registry is not None else load_provider_registry()
+    errors = validate_provider_registry_entries(entries)
+    if errors:
+        raise ValueError("invalid provider registry: " + "; ".join(errors))
     store = EvidenceStore(baseline_dir=baseline_dir, day_cache_path=day_cache_path)
-    handler = type("BoundProxyHandler", (_ProxyHandler,), {"store": store})
+    ledger = ProviderUsageLedger(usage_ledger_path or os.getenv(USAGE_LEDGER_PATH_ENV) or "")
+    handler = type(
+        "BoundProxyHandler",
+        (_ProxyHandler,),
+        {
+            "store": store,
+            "registry": {entry.id: entry for entry in entries},
+            "ledger": ledger,
+            "caller_context": dict(caller_context or {}),
+            "caller_tokens": CallerTokenMap(caller_token_map_path),
+            "key_split": key_split,
+            "credential_overrides": {str(k): str(v) for k, v in (credential_overrides or {}).items()},
+        },
+    )
     server = ThreadingHTTPServer((host, port), handler)
     thread = threading.Thread(target=server.serve_forever, name="evidence-proxy", daemon=True)
     thread.start()
@@ -537,11 +889,42 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8791)
     parser.add_argument("--baseline-dir", default=os.getenv("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR") or "")
     parser.add_argument("--day-cache", default=os.getenv("RESEARCH_LAB_PROVIDER_EVIDENCE_DAY_CACHE") or "")
-    args = parser.parse_args()
-    server, _store, thread = serve_evidence_proxy(
-        host=args.host, port=args.port, baseline_dir=args.baseline_dir, day_cache_path=args.day_cache
+    parser.add_argument("--registry", default=os.getenv(REGISTRY_PATH_ENV) or "")
+    parser.add_argument("--usage-ledger", default=os.getenv(USAGE_LEDGER_PATH_ENV) or "")
+    parser.add_argument(
+        "--caller-token-map",
+        default=os.getenv("RESEARCH_LAB_PROXY_CALLER_TOKEN_MAP") or "",
     )
-    print(json.dumps({"listening": f"{args.host}:{args.port}"}))
+    args = parser.parse_args()
+    caller_context: dict[str, Any] = {"caller_kind": "evidence_proxy_default"}
+    raw_context = os.getenv("RESEARCH_LAB_PROXY_CALLER_CONTEXT") or ""
+    if raw_context:
+        try:
+            loaded = json.loads(raw_context)
+            if isinstance(loaded, Mapping):
+                caller_context = dict(loaded)
+        except Exception:
+            pass
+    registry = load_provider_registry(args.registry)
+    server, _store, thread = serve_evidence_proxy(
+        host=args.host,
+        port=args.port,
+        baseline_dir=args.baseline_dir,
+        day_cache_path=args.day_cache,
+        registry=registry,
+        usage_ledger_path=args.usage_ledger,
+        caller_context=caller_context,
+        caller_token_map_path=args.caller_token_map,
+    )
+    print(
+        json.dumps(
+            {
+                "listening": f"{args.host}:{args.port}",
+                "registry_hash": provider_registry_hash(registry),
+                "provider_count": len(registry),
+            }
+        )
+    )
     thread.join()
     return 0
 

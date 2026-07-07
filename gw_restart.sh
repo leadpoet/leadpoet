@@ -315,7 +315,18 @@ cd "$GATEWAY_ROOT/tee"
 sudo docker rmi tee-enclave:latest 2>/dev/null || true
 bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"
 sudo docker build --no-cache -f "$GATEWAY_ROOT/tee/Dockerfile.enclave" -t tee-enclave:latest "$GATEWAY_ROOT/"
+set +e
 sudo nitro-cli build-enclave --docker-uri tee-enclave:latest --output-file tee-enclave.eif >/dev/null 2>&1
+ENCLAVE_BUILD_STATUS="$?"
+set -e
+echo "Cleaning temporary enclave Docker image/layers before gateway relaunch"
+sudo docker rmi -f tee-enclave:latest 2>/dev/null || true
+sudo docker builder prune -af 2>/dev/null || true
+df -h / /var/lib/docker 2>/dev/null || df -h /
+if [ "$ENCLAVE_BUILD_STATUS" -ne 0 ]; then
+  echo "ERROR: nitro-cli build-enclave failed with status $ENCLAVE_BUILD_STATUS"
+  exit "$ENCLAVE_BUILD_STATUS"
+fi
 sudo ./start_enclave.sh
 
 echo "Installing Python dependencies"

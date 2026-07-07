@@ -9,6 +9,18 @@ logs/
 *.log
 gateway.log
 validation_artifacts/
+hotpatch-backups/
+*.bak
+*.tmp
+*.pid
+
+# Exclude generated enclave/build artifacts from the next enclave image build.
+# The EIF is produced from the image; copying an old EIF into the image bloats
+# the build context and can exhaust the gateway root volume.
+tee/*.eif
+tee-enclave.eif
+_attested_runtime/**/*.pyc
+_attested_runtime/**/__pycache__/
 
 # Exclude Python cache
 __pycache__/

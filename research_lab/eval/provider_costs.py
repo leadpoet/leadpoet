@@ -24,6 +24,12 @@ DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP = Decimal("0.50")
 DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD = Decimal("0.00005")
 DEFAULT_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS = 5
 DEFAULT_UNKNOWN_ENDPOINT_POLICY = "default_5_credits"
+OPENROUTER_PERPLEXITY_PRICING: dict[str, tuple[Decimal, Decimal, Decimal]] = {
+    # input $/1M tokens, output $/1M tokens, web-search $/request.
+    "perplexity/sonar": (Decimal("1"), Decimal("1"), Decimal("0.005")),
+    "perplexity/sonar-pro": (Decimal("3"), Decimal("15"), Decimal("0.005")),
+    "perplexity/sonar-deep-research": (Decimal("2"), Decimal("8"), Decimal("0.005")),
+}
 
 PROVIDER_COST_HEADER_PREFIX = "X-Research-Lab-Provider-Cost-"
 PROVIDER_COST_SCOPE_HEADER = "X-Research-Lab-Cost-Scope"
@@ -243,11 +249,50 @@ def extract_openrouter_cost_dollars(body: bytes | str | None) -> tuple[Decimal |
                 except Exception:
                     pass
                 break
+        for value in _iter_json_values(parsed, {"model"}):
+            if value:
+                metadata.setdefault("model", str(value)[:160])
+                break
         for value in _iter_json_values(parsed, {"cost", "cost_usd", "cost_dollars", "total_cost", "total_cost_usd"}):
             cost = safe_decimal(value)
             if cost is not None:
                 return cost, metadata
     return None, metadata
+
+
+def openrouter_perplexity_pricing_fallback(
+    *,
+    model: str,
+    prompt_tokens: Any,
+    completion_tokens: Any,
+) -> ProviderCostEstimate | None:
+    normalized = str(model or "").strip().lower()
+    pricing = OPENROUTER_PERPLEXITY_PRICING.get(normalized)
+    if pricing is None:
+        return None
+    try:
+        prompt = max(0, int(prompt_tokens or 0))
+        completion = max(0, int(completion_tokens or 0))
+    except Exception:
+        return None
+    if prompt <= 0 and completion <= 0:
+        return None
+    input_price, output_price, request_price = pricing
+    cost = (
+        (Decimal(prompt) * input_price)
+        + (Decimal(completion) * output_price)
+    ) / Decimal("1000000")
+    cost += request_price
+    return ProviderCostEstimate(
+        provider="or",
+        endpoint="/api/v1/chat/completions",
+        model=str(model or "")[:160],
+        billable=True,
+        cost_usd=cost,
+        cost_source="openrouter_perplexity_token_pricing_fallback",
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+    )
 
 
 _OPENROUTER_GENERATION_ID_KEYS = (
@@ -428,13 +473,24 @@ def estimate_provider_cost(
         model = ""
         if isinstance(parsed_request, Mapping):
             model = str(parsed_request.get("model") or "")[:160]
+        if not model:
+            model = str(metadata.get("model") or "")[:160]
         if cost is None:
+            priced = openrouter_perplexity_pricing_fallback(
+                model=model,
+                prompt_tokens=metadata.get("prompt_tokens"),
+                completion_tokens=metadata.get("completion_tokens"),
+            )
+            if priced is not None:
+                priced.generation_id = openrouter_generation_id(response_body)
+                return priced
             return ProviderCostEstimate(
                 provider=provider,
                 endpoint=endpoint,
                 model=model,
                 generation_id=openrouter_generation_id(response_body),
-                tracking_failed=True,
+                billable=False,
+                cost_source="openrouter_missing_cost_zero_cost",
                 tracking_reason="missing_openrouter_cost",
             )
         return ProviderCostEstimate(

@@ -60,6 +60,7 @@ from research_lab.eval.provider_costs import (
     estimate_provider_cost,
     exa_agent_run_status,
     extract_openrouter_cost_dollars,
+    openrouter_perplexity_pricing_fallback,
     redacted_endpoint,
 )
 from research_lab.eval.provider_evidence_cache import (
@@ -257,6 +258,17 @@ def _reconcile_openrouter_generation_cost(
                         cost_source="openrouter_generation_reconciliation",
                         prompt_tokens=int(reconciled_metadata.get("prompt_tokens") or 0),
                         completion_tokens=int(reconciled_metadata.get("completion_tokens") or 0),
+                        generation_id=generation_id,
+                    )
+                priced = openrouter_perplexity_pricing_fallback(
+                    model=estimate.model or str(reconciled_metadata.get("model") or ""),
+                    prompt_tokens=reconciled_metadata.get("prompt_tokens"),
+                    completion_tokens=reconciled_metadata.get("completion_tokens"),
+                )
+                if priced is not None:
+                    return replace(
+                        priced,
+                        endpoint=estimate.endpoint,
                         generation_id=generation_id,
                     )
         except urllib.error.HTTPError as exc:
@@ -946,9 +958,14 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 estimate = replace(estimate, generation_id=generation_id)
         if (
             entry.id == "or"
-            and estimate.tracking_failed
-            and estimate.tracking_reason == "missing_openrouter_cost"
             and estimate.generation_id
+            and (
+                (
+                    estimate.tracking_failed
+                    and estimate.tracking_reason == "missing_openrouter_cost"
+                )
+                or estimate.cost_source == "openrouter_perplexity_token_pricing_fallback"
+            )
         ):
             estimate = _reconcile_openrouter_generation_cost(
                 entry=entry,

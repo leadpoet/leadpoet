@@ -24,6 +24,7 @@ from research_lab.eval.provider_costs import (
     estimate_provider_cost,
     extract_exa_cost_dollars,
     extract_openrouter_cost_dollars,
+    openrouter_perplexity_pricing_fallback,
     openrouter_generation_id,
     scrapingdog_credits_for_path,
     scrapingdog_credits_for_url,
@@ -259,6 +260,75 @@ def test_exa_and_openrouter_cost_extraction():
     )
 
 
+def test_openrouter_perplexity_pricing_fallback_uses_model_specific_rates():
+    sonar = openrouter_perplexity_pricing_fallback(
+        model="perplexity/sonar",
+        prompt_tokens=1000,
+        completion_tokens=500,
+    )
+    assert sonar is not None
+    assert sonar.billable
+    assert sonar.cost_usd == Decimal("0.0065")
+    assert sonar.cost_source == "openrouter_perplexity_token_pricing_fallback"
+
+    sonar_pro = openrouter_perplexity_pricing_fallback(
+        model="perplexity/sonar-pro",
+        prompt_tokens=1000,
+        completion_tokens=500,
+    )
+    assert sonar_pro is not None
+    assert sonar_pro.cost_usd == Decimal("0.0155")
+
+    deep_research = openrouter_perplexity_pricing_fallback(
+        model="perplexity/sonar-deep-research",
+        prompt_tokens=1000,
+        completion_tokens=500,
+    )
+    assert deep_research is not None
+    assert deep_research.cost_usd == Decimal("0.011")
+
+    assert (
+        openrouter_perplexity_pricing_fallback(
+            model="anthropic/claude-opus-4.1",
+            prompt_tokens=1000,
+            completion_tokens=500,
+        )
+        is None
+    )
+
+
+def test_openrouter_missing_cost_zero_cost_for_non_perplexity_model():
+    estimate = estimate_provider_cost(
+        provider="or",
+        upstream_url="https://openrouter.ai/api/v1/chat/completions",
+        status=200,
+        response_body=b'{"id":"gen-no-cost","usage":{"prompt_tokens":7,"completion_tokens":3}}',
+        request_body=b'{"model":"google/gemini-2.5-pro"}',
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert not estimate.billable
+    assert estimate.cost_usd == Decimal("0")
+    assert estimate.cost_source == "openrouter_missing_cost_zero_cost"
+    assert not estimate.tracking_failed
+    assert estimate.tracking_reason == "missing_openrouter_cost"
+
+
+def test_openrouter_missing_cost_perplexity_fallback_from_response_usage():
+    estimate = estimate_provider_cost(
+        provider="or",
+        upstream_url="https://openrouter.ai/api/v1/chat/completions",
+        status=200,
+        response_body=b'{"id":"gen-sonar-no-cost","usage":{"prompt_tokens":7,"completion_tokens":3}}',
+        request_body=b'{"model":"perplexity/sonar"}',
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert estimate.billable
+    assert estimate.cost_usd == Decimal("0.00501")
+    assert estimate.cost_source == "openrouter_perplexity_token_pricing_fallback"
+    assert not estimate.tracking_failed
+    assert estimate.generation_id == "gen-sonar-no-cost"
+
+
 def test_exa_agent_running_poll_is_not_billable_until_completed():
     running = estimate_provider_cost(
         provider="exa",
@@ -324,33 +394,39 @@ def test_ledger_allows_final_success_to_exceed_cap_then_blocks_later_call():
     assert summary_after_second["blocked_call_count"] == 1
 
 
-def test_ledger_preserves_prior_tracking_failure_reason_for_later_blocks():
+def test_openrouter_missing_cost_zero_event_does_not_block_later_paid_calls():
     ledger = ProviderCostLedger(scope="scope-tracking", cap_usd=Decimal("0.50"))
-    failed = ledger.record_live_event(
+    zero_cost = ledger.record_live_event(
         provider="or",
         request_fingerprint="d" * 64,
         status_code=200,
         estimate=ProviderCostEstimate(
             provider="or",
             endpoint="/api/v1/chat/completions",
-            model="perplexity/sonar",
-            tracking_failed=True,
+            model="google/gemini-2.5-pro",
+            billable=False,
+            cost_source="openrouter_missing_cost_zero_cost",
             tracking_reason="missing_openrouter_cost",
         ),
     )
-    assert failed.tracking_failed
-    assert ledger.should_block_paid_call()
-    assert ledger.block_reason() == "missing_openrouter_cost"
+    assert not zero_cost.tracking_failed
+    assert not ledger.should_block_paid_call()
 
-    blocked = ledger.block_event(
+    paid = ledger.record_live_event(
         provider="exa",
-        endpoint="/search",
         request_fingerprint="e" * 64,
-        reason=ledger.block_reason(),
+        status_code=200,
+        estimate=ProviderCostEstimate(
+            provider="exa",
+            endpoint="/search",
+            billable=True,
+            cost_usd=Decimal("0.01"),
+            cost_source="exa_cost_dollars",
+        ),
     )
-    doc = blocked.to_doc()
-    assert doc["tracking_failed"]
-    assert doc["tracking_reason"] == "missing_openrouter_cost"
+    assert paid.billable
+    assert paid.spent_before_usd == Decimal("0")
+    assert paid.spent_after_usd == Decimal("0.01")
 
 
 def test_cache_hit_adds_zero_cost_to_summary():
@@ -494,6 +570,56 @@ class _FakeOpenRouterBodyIdProvider(BaseHTTPRequestHandler):
                     "total_cost": "0.0041",
                     "native_tokens_prompt": 19,
                     "native_tokens_completion": 6,
+                }
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _FakeOpenRouterGenerationTokensProvider(BaseHTTPRequestHandler):
+    generation_ids: list[str] = []
+
+    def log_message(self, *args):  # noqa: ANN001
+        pass
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
+        body = json.dumps(
+            {
+                "id": "gen-sonar-token-priced-1",
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 3},
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path != "/api/v1/generation":
+            self.send_response(404)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
+        query = dict(urllib.parse.parse_qsl(parsed.query))
+        type(self).generation_ids.append(query.get("id") or "")
+        body = json.dumps(
+            {
+                "data": {
+                    "id": query.get("id"),
+                    "model": "perplexity/sonar-pro",
+                    "tokens_prompt": 1000,
+                    "tokens_completion": 500,
                 }
             }
         ).encode()
@@ -688,7 +814,63 @@ def test_evidence_proxy_reconciles_openrouter_generation_cost_from_body_id():
         upstream.server_close()
 
 
-def test_evidence_proxy_missing_openrouter_cost_blocks_as_tracking_failure_not_cap():
+def test_evidence_proxy_falls_back_to_perplexity_pricing_when_generation_has_tokens_no_cost():
+    _FakeOpenRouterGenerationTokensProvider.generation_ids = []
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeOpenRouterGenerationTokensProvider)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    proxy = None
+    try:
+        registry = [
+            provider_evidence_proxy.ProviderRegistryEntry(
+                id="or",
+                base_url=f"http://127.0.0.1:{upstream.server_address[1]}",
+                auth_kind="none",
+            )
+        ]
+        proxy, _store, _proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
+            host="127.0.0.1",
+            port=0,
+            registry=registry,
+        )
+        request_body = json.dumps(
+            {
+                "model": "perplexity/sonar-pro",
+                "messages": [{"role": "user", "content": "redacted"}],
+            }
+        ).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_address[1]}/or/api/v1/chat/completions",
+            data=request_body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Research-Lab-Cost-Scope": "or-token-priced-scope",
+                "X-Research-Lab-Cost-Cap-Usd": "0.50",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            event = decode_cost_event_header(response.headers.get("X-Research-Lab-Provider-Cost-Event"))
+
+        assert _FakeOpenRouterGenerationTokensProvider.generation_ids == ["gen-sonar-token-priced-1"]
+        assert event is not None
+        assert event["provider"] == "or"
+        assert event["billable"] is True
+        assert event["cost_usd"] == 0.0155
+        assert event["cost_source"] == "openrouter_perplexity_token_pricing_fallback"
+        assert event["tracking_failed"] is False
+        assert event["generation_id"] == "gen-sonar-token-priced-1"
+        assert event["prompt_tokens"] == 1000
+        assert event["completion_tokens"] == 500
+    finally:
+        if proxy is not None:
+            proxy.shutdown()
+            proxy.server_close()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_evidence_proxy_missing_openrouter_cost_zero_cost_does_not_block_later_calls():
     _FakeOpenRouterMissingCostProvider.calls = 0
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeOpenRouterMissingCostProvider)
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
@@ -717,7 +899,7 @@ def test_evidence_proxy_missing_openrouter_cost_blocks_as_tracking_failure_not_c
             url,
             data=json.dumps(
                 {
-                    "model": "perplexity/sonar",
+                    "model": "google/gemini-2.5-pro",
                     "messages": [{"role": "user", "content": "first"}],
                 }
             ).encode(),
@@ -727,35 +909,31 @@ def test_evidence_proxy_missing_openrouter_cost_blocks_as_tracking_failure_not_c
         with urllib.request.urlopen(first_req, timeout=5) as response:
             first_event = decode_cost_event_header(response.headers.get("X-Research-Lab-Provider-Cost-Event"))
         assert first_event is not None
-        assert first_event["tracking_failed"] is True
+        assert first_event["tracking_failed"] is False
         assert first_event["tracking_reason"] == "missing_openrouter_cost"
+        assert first_event["cost_source"] == "openrouter_missing_cost_zero_cost"
         assert first_event["spent_after_usd"] == 0.0
 
         second_req = urllib.request.Request(
             url,
             data=json.dumps(
                 {
-                    "model": "perplexity/sonar",
+                    "model": "google/gemini-2.5-pro",
                     "messages": [{"role": "user", "content": "second"}],
                 }
             ).encode(),
             headers=headers,
             method="POST",
         )
-        try:
-            urllib.request.urlopen(second_req, timeout=5)
-            raise AssertionError("expected second request to be blocked")
-        except urllib.error.HTTPError as exc:
-            body = json.loads(exc.read().decode("utf-8"))
-            blocked_event = decode_cost_event_header(exc.headers.get("X-Research-Lab-Provider-Cost-Event"))
+        with urllib.request.urlopen(second_req, timeout=5) as response:
+            second_event = decode_cost_event_header(response.headers.get("X-Research-Lab-Provider-Cost-Event"))
 
-        assert body["error"] == "research_lab_provider_cost_tracking_failed"
-        assert blocked_event is not None
-        assert blocked_event["tracking_failed"] is True
-        assert blocked_event["tracking_reason"] == "missing_openrouter_cost"
-        assert blocked_event["spent_before_usd"] == 0.0
-        assert blocked_event["spent_after_usd"] == 0.0
-        assert _FakeOpenRouterMissingCostProvider.calls == 1
+        assert second_event is not None
+        assert second_event["tracking_failed"] is False
+        assert second_event["cost_source"] == "openrouter_missing_cost_zero_cost"
+        assert second_event["spent_before_usd"] == 0.0
+        assert second_event["spent_after_usd"] == 0.0
+        assert _FakeOpenRouterMissingCostProvider.calls == 2
     finally:
         if proxy is not None:
             proxy.shutdown()

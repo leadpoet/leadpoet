@@ -27,6 +27,8 @@ from gateway.research_lab.candidate_diagnostics import (
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.code_build import CodeEditCandidateBuilder, CodeEditInfraFailureError
 from gateway.research_lab.code_loop_engine import CodeEditLoopEngine
+from gateway.research_lab.provider_outcome_digest import build_run_provider_outcome_digest
+from gateway.research_lab.provider_probe import build_probe_guard_term_hashes
 from gateway.research_lab.config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
 from gateway.research_lab.dev_eval_runner import build_code_edit_dev_evaluator
 from gateway.research_lab.key_vault import (
@@ -2129,12 +2131,31 @@ class ResearchLabHostedWorker:
             # Evaluated per run so the flag can flip without a worker restart.
             dev_evaluator = build_code_edit_dev_evaluator()
 
+            # W4 probe query guard: hash the current private-window ICP/company
+            # terms for this run. Window unavailable → empty set → the engine
+            # fails CLOSED and disables probes for the run.
+            probe_guard_hashes: frozenset[str] = frozenset()
+            if self.config.loop_provider_probes_enabled:
+                try:
+                    probe_guard_hashes = await build_probe_guard_term_hashes()
+                except Exception as exc:
+                    logger.warning(
+                        "research_lab_probe_guard_window_unavailable run_id=%s error=%s "
+                        "(probes will stay disabled for this run)",
+                        context.run_id,
+                        str(exc)[:200],
+                    )
+
             loop_result = await CodeEditLoopEngine(
                 settings=loop_settings,
                 call_openrouter=_call_loop_model,
                 event_sink=_record_loop_event,
                 builder=code_builder,
                 dev_evaluator=dev_evaluator,
+                probe_private_window_term_hashes=probe_guard_hashes,
+                # W2: sanitized provider-outcome digest from today's recorded
+                # truth (usage ledger + day cache); None when the flag is off.
+                provider_outcome_digest=build_run_provider_outcome_digest(),
             ).run(
                 run_id=context.run_id,
                 ticket=context.ticket,

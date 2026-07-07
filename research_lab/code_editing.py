@@ -137,6 +137,10 @@ class CodeEditSourceInspectionRequest:
     # Only honored when RESEARCH_LAB_SOURCE_ACCESS_V2 is enabled.
     start_line: int = 0
     max_lines: int = 0
+    # probe_provider fields (W4): typed catalog entry + schema-checked params.
+    provider: str = ""
+    endpoint: str = ""
+    params: dict[str, Any] = field(default_factory=dict)
 
     def to_event_doc(self) -> dict[str, Any]:
         payload = {
@@ -149,6 +153,10 @@ class CodeEditSourceInspectionRequest:
             payload["start_line"] = self.start_line
         if self.max_lines > 0:
             payload["max_lines"] = self.max_lines
+        if self.operation == "probe_provider":
+            payload["provider"] = self.provider
+            payload["endpoint"] = self.endpoint
+            payload["params_hash"] = sha256_json({"params": self.params}) if self.params else ""
         return {key: value for key, value in payload.items() if value not in {"", None}}
 
 
@@ -216,6 +224,7 @@ def build_loop_direction_planner_messages(
     runtime_source_index: Mapping[str, Any],
     budget_context: Mapping[str, Any] | None,
     prior_attempts: Sequence[Mapping[str, Any]] | None = None,
+    provider_outcome_digest: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     allowed_lanes = list(LOOP_DIRECTION_ALLOWED_LANES)
     context = {
@@ -228,6 +237,11 @@ def build_loop_direction_planner_messages(
         "prior_attempts": _redacted_mapping({"attempts": list(prior_attempts or [])}).get("attempts", []),
         "allowed_lanes": allowed_lanes,
     }
+    if provider_outcome_digest:
+        # W2: recorded provider truth (error/status histograms, zero-result
+        # rates) sits beside the benchmark summary so plans can target real
+        # provider failure modes instead of guessing them.
+        context["provider_outcome_digest"] = _redacted_mapping(provider_outcome_digest)
     system = (
         "You are Leadpoet Research Lab's loop-direction planner. Convert a miner's "
         "public research focus into a binding, auditable code-edit plan for a later "
@@ -285,9 +299,23 @@ def build_code_edit_source_inspection_messages(
     budget_context: Mapping[str, Any] | None,
     loop_direction_plan: Mapping[str, Any] | None = None,
     max_requests: int = 4,
+    source_access_v2: bool | None = None,
+    provider_probe_catalog: Mapping[str, Any] | None = None,
+    provider_outcome_digest: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
-    """Ask the model which extracted source files it needs before drafting."""
+    """Ask the model which extracted source files it needs before drafting.
 
+    ``source_access_v2`` lets the gateway pass its builder-config decision so
+    the prompt and the gateway resolver flip together; ``None`` falls back to
+    this process's env flag. ``provider_probe_catalog`` (W4) advertises the
+    metered ``probe_provider`` operation with its typed endpoint catalog and
+    remaining budget; ``None`` keeps the operation entirely un-advertised.
+    """
+
+    probes_enabled = bool(provider_probe_catalog)
+    allowed_operations = ["search", "read_file", "finish"]
+    if probes_enabled:
+        allowed_operations.insert(2, "probe_provider")
     context = {
         "ticket": _redacted_mapping(ticket),
         "artifact_manifest": _redacted_mapping(artifact_manifest),
@@ -298,8 +326,12 @@ def build_code_edit_source_inspection_messages(
         "budget_context": _redacted_mapping(budget_context or {}),
         "loop_direction_plan": _redacted_mapping(loop_direction_plan or {}),
         "max_requests": max(1, int(max_requests)),
-        "allowed_operations": ["search", "read_file", "finish"],
+        "allowed_operations": allowed_operations,
     }
+    if probes_enabled:
+        context["provider_probe_catalog"] = _redacted_mapping(provider_probe_catalog or {})
+    if provider_outcome_digest:
+        context["provider_outcome_digest"] = _redacted_mapping(provider_outcome_digest)
     system = (
         "You are Leadpoet Research Lab's source-inspection planner for code-edit "
         "autoresearch. You are inspecting the private sourcing model runtime extracted "
@@ -310,7 +342,8 @@ def build_code_edit_source_inspection_messages(
     )
     ranged_read_shape = ""
     ranged_read_rules = ""
-    if _source_access_v2_enabled():
+    ranged_reads_enabled = _source_access_v2_enabled() if source_access_v2 is None else bool(source_access_v2)
+    if ranged_reads_enabled:
         ranged_read_shape = (
             "{\"requests\":[{\"operation\":\"read_file\",\"path\":\"sourcing_model/foo.py\","
             "\"start_line\":400,\"max_lines\":200,\"rationale\":\"...\"}]}\n"
@@ -318,6 +351,22 @@ def build_code_edit_source_inspection_messages(
         ranged_read_rules = (
             "- Large files may be read in ranges: pass optional start_line (1-based) and max_lines on read_file.\n"
             "- If an earlier read_file result was truncated, request the deeper range you still need instead of guessing.\n"
+            "- After a search match, read a range around the matched line number (e.g. start_line about 40 lines above the hit) before drafting.\n"
+        )
+    probe_shape = ""
+    probe_rules = ""
+    if probes_enabled:
+        probe_shape = (
+            "{\"requests\":[{\"operation\":\"probe_provider\",\"provider\":\"exa\","
+            "\"endpoint\":\"exa.search\",\"params\":{\"query\":\"...\"},\"rationale\":\"...\"}]}\n"
+        )
+        probe_rules = (
+            "- probe_provider runs ONE metered live-or-replayed provider call through the evidence proxy "
+            "to test a sourcing hypothesis (e.g. does this query form return results?).\n"
+            "- Only endpoints listed in provider_probe_catalog are callable; params must match the endpoint schema. No URLs.\n"
+            "- Probes are budgeted (see provider_probe_catalog.budget); prefer reading source first and probe only "
+            "to confirm or refute a specific provider-behavior hypothesis.\n"
+            "- Never probe with company names, ICP text, or anything from the private benchmark; blocked probes still consume a request.\n"
         )
     user = (
         "Return strict JSON only, no markdown.\n\n"
@@ -326,11 +375,13 @@ def build_code_edit_source_inspection_messages(
         "{\"requests\":[{\"operation\":\"search\",\"query\":\"...\",\"rationale\":\"...\"}]}\n"
         "{\"requests\":[{\"operation\":\"read_file\",\"path\":\"sourcing_model/foo.py\",\"rationale\":\"...\"}]}\n"
         + ranged_read_shape
+        + probe_shape
         + "{\"requests\":[{\"operation\":\"finish\",\"rationale\":\"enough exact source has been read\"}]}\n\n"
         "Rules:\n"
         "- Use search to locate relevant code when the exact path is unclear.\n"
         "- Use read_file before proposing edits to any file.\n"
         + ranged_read_rules
+        + probe_rules
         + "- Only request paths listed in runtime_source_index.editable_files.\n"
         "- Do not request Dockerfile, dependency files, lockfiles, env files, CI, credentials, or new files.\n"
         "- Stop with finish once you have enough exact file content to draft a narrow patch.\n"
@@ -356,6 +407,7 @@ def build_code_edit_auto_research_messages(
     budget_context: Mapping[str, Any] | None,
     loop_direction_plan: Mapping[str, Any] | None = None,
     max_candidates: int,
+    provider_outcome_digest: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build the code-edit candidate prompt.
 
@@ -406,6 +458,8 @@ def build_code_edit_auto_research_messages(
             "output_ranking",
         ],
     }
+    if provider_outcome_digest:
+        context["provider_outcome_digest"] = _redacted_mapping(provider_outcome_digest)
     system = (
         "You are Leadpoet Research Lab's code-editing auto-research engine. "
         "Your task is to improve the private sourcing model so it finds more "
@@ -898,11 +952,16 @@ def code_edit_plan_alignment_errors(
     return errors
 
 
+DEFAULT_SOURCE_INSPECTION_OPERATIONS = ("search", "read_file", "finish")
+
+
 def parse_code_edit_source_inspection_response(
     raw_text: str,
     *,
     max_requests: int = 4,
+    allowed_operations: Sequence[str] | None = None,
 ) -> list[CodeEditSourceInspectionRequest]:
+    allowed_ops = tuple(allowed_operations or DEFAULT_SOURCE_INSPECTION_OPERATIONS)
     try:
         decoded = _decode_json_value(raw_text)
     except ValueError:
@@ -912,7 +971,9 @@ def parse_code_edit_source_inspection_response(
         raise
     if isinstance(decoded, str):
         try:
-            return parse_code_edit_source_inspection_response(decoded, max_requests=max_requests)
+            return parse_code_edit_source_inspection_response(
+                decoded, max_requests=max_requests, allowed_operations=allowed_ops
+            )
         except ValueError:
             parsed = _source_inspection_requests_from_text(decoded, max_requests=max_requests)
             if parsed:
@@ -942,8 +1003,11 @@ def parse_code_edit_source_inspection_response(
             "find": "search",
             "done": "finish",
             "stop": "finish",
+            "probe": "probe_provider",
+            "probeprovider": "probe_provider",
+            "provider_probe": "probe_provider",
         }.get(operation, operation)
-        if operation not in {"search", "read_file", "finish"}:
+        if operation not in allowed_ops:
             raise ValueError(f"unsupported source-inspection operation:{operation}")
         query = str(_get_first_present(item, ("query", "search", "pattern", "term")) or "")[:500]
         path = ""
@@ -962,6 +1026,21 @@ def parse_code_edit_source_inspection_response(
                 _get_first_present(item, ("max_lines", "maxLines", "line_limit", "lineLimit", "num_lines", "numLines")),
                 default=0,
             )
+        provider = ""
+        endpoint = ""
+        params: dict[str, Any] = {}
+        if operation == "probe_provider":
+            provider = str(_get_first_present(item, ("provider", "provider_id", "providerId")) or "").strip()[:80]
+            endpoint = str(
+                _get_first_present(item, ("endpoint", "endpoint_id", "endpointId", "catalog_id", "catalogId")) or ""
+            ).strip()[:120]
+            raw_params = _get_first_present(item, ("params", "parameters", "arguments", "args"))
+            if isinstance(raw_params, Mapping):
+                for key, value in list(raw_params.items())[:12]:
+                    if isinstance(value, (str, int, float, bool)):
+                        params[str(key)[:80]] = value[:500] if isinstance(value, str) else value
+            if not endpoint:
+                raise ValueError("source-inspection probe_provider requires endpoint")
         if operation == "search" and not query.strip():
             raise ValueError("source-inspection search requires query")
         if operation == "read_file" and not path:
@@ -977,6 +1056,9 @@ def parse_code_edit_source_inspection_response(
                 rationale=rationale,
                 start_line=max(0, start_line),
                 max_lines=max(0, max_lines),
+                provider=provider,
+                endpoint=endpoint,
+                params=params,
             )
         )
     return parsed

@@ -487,6 +487,10 @@ class ResearchLabGatewayConfig:
     code_edit_allowed_paths_json: str = ""
     code_edit_allowed_exact_paths_json: str = ""
     code_edit_allowed_suffixes_json: str = ""
+    # Source-access v2 (W1): ranged reads honored by BOTH the inspection prompt
+    # and the gateway resolver. One decision so the halves cannot diverge.
+    code_edit_source_access_v2: bool = False
+    code_edit_source_inspection_max_ranges_per_path: int = 3
     code_edit_source_inspection_rounds: int = 3
     # 12 cumulative file reads: 8 caps patch quality on ~300-file trees
     # (fableanalysis §6.4 recommends 12-16).
@@ -495,6 +499,31 @@ class ResearchLabGatewayConfig:
     code_edit_source_inspection_total_bytes: int = 120_000
     code_edit_source_inspection_search_matches: int = 30
     code_edit_patch_repair_attempts: int = 2
+    # W4 probe_provider: metered generation-time provider probes through the
+    # evidence proxy. Default off; §8 launch caps: 4 probes / $0.25 per loop.
+    loop_provider_probes_enabled: bool = False
+    loop_probe_max_probes: int = 4
+    loop_probe_max_cost_microusd: int = 250_000
+    # W5/W6 SOURCE_ADD execution + two-leg emission rewards (§3.4 config,
+    # §8 launch defaults). All default off/inert until the activation session.
+    source_add_enabled: bool = False
+    source_add_rewards_enabled: bool = False
+    # KMS key for miner-submitted source credentials; empty falls back to the
+    # OpenRouter key-vault key at the API layer.
+    source_add_credential_kms_key_id: str = ""
+    source_add_sandbox_image: str = "python:3.11-slim"
+    source_add_trial_timeout_seconds: int = 300
+    source_add_leg1_alpha_percent: float = 1.0
+    source_add_leg2_alpha_percent: float = 5.0
+    source_add_leg2_expiry_months: int = 6
+    # No off-switch in the prod profile: leg 2 is never created without the
+    # ablation attribution pass.
+    source_add_ablation_required: bool = True
+    source_add_acceptance_floor_yield: float = 0.10
+    source_add_max_concurrent_per_hotkey: int = 3
+    source_add_max_per_30d_per_hotkey: int = 10
+    source_add_shadow_window_days: float = 7.0
+    source_add_ablation_threshold_points: float = 0.5
     stale_parent_rebase_enabled: bool = True
     stale_parent_rebase_repair_enabled: bool = True
     stale_parent_rebase_repair_model: str = STALE_PARENT_REBASE_REPAIR_MODEL_ID
@@ -942,6 +971,11 @@ class ResearchLabGatewayConfig:
             code_edit_allowed_paths_json=os.getenv("RESEARCH_LAB_CODE_EDIT_ALLOWED_PATHS_JSON", ""),
             code_edit_allowed_exact_paths_json=os.getenv("RESEARCH_LAB_CODE_EDIT_ALLOWED_EXACT_PATHS_JSON", ""),
             code_edit_allowed_suffixes_json=os.getenv("RESEARCH_LAB_CODE_EDIT_ALLOWED_SUFFIXES_JSON", ""),
+            code_edit_source_access_v2=_truthy("RESEARCH_LAB_SOURCE_ACCESS_V2", "false"),
+            code_edit_source_inspection_max_ranges_per_path=max(
+                1,
+                _int("RESEARCH_LAB_CODE_EDIT_SOURCE_INSPECTION_MAX_RANGES_PER_PATH", 3),
+            ),
             code_edit_source_inspection_rounds=max(
                 1,
                 _int("RESEARCH_LAB_CODE_EDIT_SOURCE_INSPECTION_ROUNDS", 3),
@@ -965,6 +999,42 @@ class ResearchLabGatewayConfig:
             code_edit_patch_repair_attempts=max(
                 0,
                 _int("RESEARCH_LAB_CODE_EDIT_PATCH_REPAIR_ATTEMPTS", 2),
+            ),
+            loop_provider_probes_enabled=_truthy("RESEARCH_LAB_LOOP_PROVIDER_PROBES", "false"),
+            loop_probe_max_probes=max(0, _int("RESEARCH_LAB_LOOP_PROBE_MAX_PROBES", 4)),
+            loop_probe_max_cost_microusd=max(
+                0,
+                _int("RESEARCH_LAB_LOOP_PROBE_MAX_COST_MICROUSD", 250_000),
+            ),
+            source_add_enabled=_truthy("RESEARCH_LAB_SOURCE_ADD_ENABLED", "false"),
+            source_add_rewards_enabled=_truthy("RESEARCH_LAB_SOURCE_ADD_REWARDS_ENABLED", "false"),
+            source_add_credential_kms_key_id=os.getenv("RESEARCH_LAB_SOURCE_ADD_CREDENTIAL_KMS_KEY_ID", ""),
+            source_add_sandbox_image=os.getenv("RESEARCH_LAB_SOURCE_ADD_SANDBOX_IMAGE", "python:3.11-slim"),
+            source_add_trial_timeout_seconds=max(
+                30, _int("RESEARCH_LAB_SOURCE_ADD_TRIAL_TIMEOUT_SECONDS", 300)
+            ),
+            source_add_leg1_alpha_percent=max(
+                0.0, _float("RESEARCH_LAB_SOURCE_ADD_LEG1_ALPHA_PERCENT", 1.0)
+            ),
+            source_add_leg2_alpha_percent=max(
+                0.0, _float("RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT", 5.0)
+            ),
+            source_add_leg2_expiry_months=max(1, _int("RESEARCH_LAB_SOURCE_ADD_LEG2_EXPIRY_MONTHS", 6)),
+            source_add_ablation_required=_truthy("RESEARCH_LAB_SOURCE_ADD_ABLATION_REQUIRED", "true"),
+            source_add_acceptance_floor_yield=max(
+                0.0, _float("RESEARCH_LAB_SOURCE_ADD_ACCEPTANCE_FLOOR_YIELD", 0.10)
+            ),
+            source_add_max_concurrent_per_hotkey=max(
+                1, _int("RESEARCH_LAB_SOURCE_ADD_MAX_CONCURRENT_PER_HOTKEY", 3)
+            ),
+            source_add_max_per_30d_per_hotkey=max(
+                1, _int("RESEARCH_LAB_SOURCE_ADD_MAX_PER_30D_PER_HOTKEY", 10)
+            ),
+            source_add_shadow_window_days=max(
+                0.0, _float("RESEARCH_LAB_SOURCE_ADD_SHADOW_WINDOW_DAYS", 7.0)
+            ),
+            source_add_ablation_threshold_points=max(
+                0.0, _float("RESEARCH_LAB_SOURCE_ADD_ABLATION_THRESHOLD_POINTS", 0.5)
             ),
             stale_parent_rebase_enabled=_truthy("RESEARCH_LAB_STALE_PARENT_REBASE_ENABLED", "true"),
             stale_parent_rebase_repair_enabled=_truthy("RESEARCH_LAB_STALE_PARENT_REBASE_REPAIR_ENABLED", "true"),

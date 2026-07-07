@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import logging
 import os
@@ -41,10 +41,6 @@ def _env_flag(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on"}
-
-
-def _source_access_v2_enabled() -> bool:
-    return _env_flag("RESEARCH_LAB_SOURCE_ACCESS_V2", False)
 
 
 class CodeEditBuildError(RuntimeError):
@@ -114,6 +110,9 @@ class SourceInspectionBatch:
     event_doc: dict[str, Any]
     read_paths: tuple[str, ...]
     bytes_returned: int
+    # Per-path covered line ranges (source-access v2). Full-file coverage is
+    # recorded with the FULL_FILE_RANGE_END sentinel so unranged re-reads skip.
+    read_ranges: dict[str, tuple[tuple[int, int], ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -873,6 +872,44 @@ def _editable_runtime_files(
     return sorted(allowed)[:_SOURCE_CONTEXT_MAX_FILES]
 
 
+# Sentinel end-line marking full-file coverage: an unranged repeat read of a
+# fully-read file is contained in (1, FULL_FILE_RANGE_END) and skips.
+FULL_FILE_RANGE_END = 10**9
+
+
+def _normalize_covered_ranges(
+    already_read_paths: Sequence[str],
+    already_read_ranges: Mapping[str, Sequence[Sequence[int]]] | None,
+) -> dict[str, list[tuple[int, int]]]:
+    covered: dict[str, list[tuple[int, int]]] = {}
+    for path, ranges in (already_read_ranges or {}).items():
+        normalized: list[tuple[int, int]] = []
+        for item in ranges:
+            try:
+                start, end = int(item[0]), int(item[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if start >= 1 and end >= start:
+                normalized.append((start, end))
+        if normalized:
+            covered[str(path)] = normalized
+    for path in already_read_paths:
+        # Legacy path-only bookkeeping: treat as full-file coverage.
+        covered.setdefault(str(path), [(1, FULL_FILE_RANGE_END)])
+    return covered
+
+
+def _requested_range(request: CodeEditSourceInspectionRequest) -> tuple[int, int]:
+    start = int(request.start_line) if request.start_line > 0 else 1
+    if request.max_lines > 0:
+        return start, start + int(request.max_lines) - 1
+    return start, FULL_FILE_RANGE_END
+
+
+def _range_contained(requested: tuple[int, int], covered: Sequence[tuple[int, int]]) -> bool:
+    return any(start <= requested[0] and requested[1] <= end for start, end in covered)
+
+
 def resolve_source_inspection_requests(
     source_context: ParentImageSourceContext,
     requests: Sequence[CodeEditSourceInspectionRequest],
@@ -882,13 +919,18 @@ def resolve_source_inspection_requests(
     max_file_bytes: int,
     max_total_bytes: int,
     max_search_matches: int,
+    source_access_v2: bool = False,
+    already_read_ranges: Mapping[str, Sequence[Sequence[int]]] | None = None,
+    max_ranges_per_path: int = 3,
 ) -> SourceInspectionBatch:
     allowed = set(source_context.editable_files)
     read_paths = set(already_read_paths)
+    covered_ranges = _normalize_covered_ranges(already_read_paths, already_read_ranges)
     remaining_bytes = max(0, int(max_total_bytes))
     max_files = max(1, int(max_files))
     max_file_bytes = max(1, int(max_file_bytes))
     max_search_matches = max(1, int(max_search_matches))
+    max_ranges_per_path = max(1, int(max_ranges_per_path))
     results: list[dict[str, Any]] = []
     event_results: list[dict[str, Any]] = []
     bytes_returned = 0
@@ -941,7 +983,7 @@ def resolve_source_inspection_requests(
                 }
             )
             continue
-        if rel in read_paths:
+        if not source_access_v2 and rel in read_paths:
             event_results.append(
                 {
                     "operation": "read_file",
@@ -950,6 +992,28 @@ def resolve_source_inspection_requests(
                 }
             )
             continue
+        if source_access_v2 and rel in covered_ranges:
+            requested_range = _requested_range(request)
+            if _range_contained(requested_range, covered_ranges[rel]):
+                event_results.append(
+                    {
+                        "operation": "read_file",
+                        "path": rel,
+                        "start_line": requested_range[0],
+                        "skipped": "range_already_read",
+                    }
+                )
+                continue
+            if len(covered_ranges[rel]) >= max_ranges_per_path:
+                event_results.append(
+                    {
+                        "operation": "read_file",
+                        "path": rel,
+                        "start_line": requested_range[0],
+                        "skipped": "max_ranges_reached",
+                    }
+                )
+                continue
         if remaining_bytes <= 0:
             event_results.append(
                 {
@@ -963,23 +1027,42 @@ def resolve_source_inspection_requests(
             source_context.source_root,
             rel,
             max_bytes=min(max_file_bytes, remaining_bytes),
+            start_line=request.start_line if source_access_v2 else 0,
+            max_lines=request.max_lines if source_access_v2 else 0,
+            line_based=source_access_v2,
         )
         returned = int(model_result.get("bytes_returned") or 0)
         read_paths.add(rel)
+        if source_access_v2:
+            start = int(model_result.get("start_line") or 1)
+            end = int(model_result.get("end_line") or 0)
+            if not model_result.get("truncated") and start == 1:
+                # Full-file read: cover all ranges so unranged repeats skip.
+                covered_ranges[rel] = [(1, FULL_FILE_RANGE_END)]
+            elif end >= start:
+                covered_ranges.setdefault(rel, []).append((start, end))
+            else:
+                # Empty range (start past EOF) still counts as an attempt.
+                covered_ranges.setdefault(rel, []).append((start, start))
         remaining_bytes = max(0, remaining_bytes - returned)
         bytes_returned += returned
         results.append(model_result)
-        event_results.append(
-            {
-                "operation": "read_file",
-                "path": rel,
-                "bytes_returned": returned,
-                "truncated": bool(model_result.get("truncated")),
-                "line_count": model_result.get("line_count"),
-                "result_hash": sha256_json(model_result),
-            }
-        )
+        read_event: dict[str, Any] = {
+            "operation": "read_file",
+            "path": rel,
+            "bytes_returned": returned,
+            "truncated": bool(model_result.get("truncated")),
+            "line_count": model_result.get("line_count"),
+            "result_hash": sha256_json(model_result),
+        }
+        if source_access_v2:
+            read_event["start_line"] = model_result.get("start_line")
+            read_event["end_line"] = model_result.get("end_line")
+            read_event["total_line_count"] = model_result.get("total_line_count")
+            read_event["range_truncated"] = bool(model_result.get("range_truncated"))
+        event_results.append(read_event)
 
+    read_ranges = {path: tuple(ranges) for path, ranges in sorted(covered_ranges.items()) if path in read_paths}
     model_context = {
         "schema_version": "1.0",
         "source_tree_hash": source_context.source_tree_hash,
@@ -987,6 +1070,10 @@ def resolve_source_inspection_requests(
         "results": results,
         "bytes_returned": bytes_returned,
     }
+    if source_access_v2:
+        model_context["read_ranges"] = {
+            path: [list(item) for item in ranges] for path, ranges in read_ranges.items()
+        }
     event_doc = {
         "source_tree_hash": source_context.source_tree_hash,
         "read_files": sorted(read_paths),
@@ -1001,6 +1088,7 @@ def resolve_source_inspection_requests(
         event_doc=event_doc,
         read_paths=tuple(sorted(read_paths)),
         bytes_returned=bytes_returned,
+        read_ranges=read_ranges if source_access_v2 else {},
     )
 
 
@@ -1033,22 +1121,69 @@ def _search_source_files(
     return matches
 
 
-def _read_source_file_for_model(source_root: Path, rel: str, *, max_bytes: int) -> dict[str, Any]:
+def _read_source_file_for_model(
+    source_root: Path,
+    rel: str,
+    *,
+    max_bytes: int,
+    start_line: int = 0,
+    max_lines: int = 0,
+    line_based: bool = False,
+) -> dict[str, Any]:
     path = source_root / rel
     try:
         raw_bytes = path.read_bytes()
     except OSError as exc:
         raise CodeEditBuildError(f"source_inspection_read_failed:{rel}") from exc
-    clipped = raw_bytes[: max(1, int(max_bytes))]
-    content = clipped.decode("utf-8", errors="replace")
+    if not line_based:
+        # Legacy behavior (source-access v2 off): whole-file-from-top, byte-clipped.
+        clipped = raw_bytes[: max(1, int(max_bytes))]
+        content = clipped.decode("utf-8", errors="replace")
+        redacted = _redact_source_excerpt(content)
+        return {
+            "operation": "read_file",
+            "path": rel,
+            "size_bytes": len(raw_bytes),
+            "bytes_returned": len(clipped),
+            "truncated": len(raw_bytes) > len(clipped),
+            "line_count": content.count("\n") + (1 if content else 0),
+            "content": redacted,
+            "content_hash": sha256_json({"path": rel, "content": redacted}),
+        }
+    # Source-access v2: slice by lines after decode so drafts get exact hunk
+    # context (no mid-line or mid-multibyte-char cuts), then apply the byte cap
+    # to the slice at line granularity.
+    text = raw_bytes.decode("utf-8", errors="replace")
+    lines = text.splitlines(keepends=True)
+    total_line_count = len(lines)
+    start = max(1, int(start_line) if start_line > 0 else 1)
+    requested = lines[start - 1 : start - 1 + int(max_lines)] if max_lines > 0 else lines[start - 1 :]
+    budget = max(1, int(max_bytes))
+    kept: list[str] = []
+    used = 0
+    for line in requested:
+        encoded_len = len(line.encode("utf-8"))
+        if kept and used + encoded_len > budget:
+            break
+        kept.append(line)
+        used += encoded_len
+        if used >= budget:
+            break
+    content = "".join(kept)
+    end_line = start - 1 + len(kept)
+    range_truncated = len(kept) < len(requested)
     redacted = _redact_source_excerpt(content)
     return {
         "operation": "read_file",
         "path": rel,
         "size_bytes": len(raw_bytes),
-        "bytes_returned": len(clipped),
-        "truncated": len(raw_bytes) > len(clipped),
-        "line_count": content.count("\n") + (1 if content else 0),
+        "bytes_returned": used,
+        "start_line": start,
+        "end_line": end_line,
+        "line_count": len(kept),
+        "total_line_count": total_line_count,
+        "truncated": end_line < total_line_count,
+        "range_truncated": range_truncated,
         "content": redacted,
         "content_hash": sha256_json({"path": rel, "content": redacted}),
     }

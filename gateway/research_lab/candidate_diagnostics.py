@@ -32,6 +32,10 @@ _REASON_SUMMARIES = {
     "loop_direction_plan_invalid": "The loop plan could not be parsed or validated.",
     "binding_plan_source_missing": "The selected plan did not match inspected editable source.",
     "no_viable_patch": "Planner or drafter could not find a safe patch.",
+    "probe_blocked": "A provider probe was blocked by the query guard before upstream contact.",
+    "probe_budget_exhausted": "The loop's provider-probe budget was exhausted.",
+    "probe_upstream_error": "A provider probe failed at the upstream provider.",
+    "provider_probe_refuted_hypothesis": "A provider probe refuted the loop's working hypothesis.",
     "candidate_patch_parse_failed": "Drafted patch response could not be parsed.",
     "candidate_patch_empty_or_noop": "Drafted patch applied but made no repository change.",
     "candidate_patch_apply_failed": "Drafted patch did not apply to the extracted source.",
@@ -157,7 +161,17 @@ def _classify(
     if "candidate_build_failed" in event_types:
         return "candidate_build_failed"
     if "no_viable_patch" in event_types:
+        # W4: a refusal that cites probe evidence is a learning outcome, not a
+        # planner failure — surface it as its own reason.
+        if "probe" in text and "refut" in text:
+            return "provider_probe_refuted_hypothesis"
         return "no_viable_patch"
+    if "probe_budget_exhausted" in text:
+        return "probe_budget_exhausted"
+    if "probe_upstream_error" in text:
+        return "probe_upstream_error"
+    if "probe_blocked" in event_types:
+        return "probe_blocked"
     if "no_valid_image_build_finalists" in text:
         return "no_valid_image_build_finalists"
     return "no_valid_image_build_finalists"

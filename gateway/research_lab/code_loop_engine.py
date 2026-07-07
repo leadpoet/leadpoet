@@ -58,8 +58,16 @@ from research_lab.code_editing import (
     parse_code_edit_response,
     parse_code_edit_source_inspection_response,
 )
+from gateway.research_lab.provider_evidence_proxy import (
+    load_provider_registry as load_provider_registry_entries,
+)
+from gateway.research_lab.provider_probe import (
+    ProbeBudgetState,
+    resolve_provider_probe,
+)
 from research_lab.engine_v1 import ReflectionRecord
 from research_lab.eval import PrivateModelArtifactManifest
+from research_lab.probe_catalog import load_probe_catalog
 from research_lab.observability.langfuse_client import (
     observation as langfuse_observation,
     run_trace_id as langfuse_run_trace_id,
@@ -96,6 +104,25 @@ def _resume_restore_selected_enabled() -> bool:
     """Bug 5 kill switch: restore already-built candidates from the checkpoint on resume."""
 
     return _engine_env_flag("RESEARCH_LAB_LOOP_RESUME_RESTORE_SELECTED", "true")
+
+
+def _loop_provider_probes_enabled(config: Any) -> bool:
+    """W4 probe_provider flag: builder config first, env fallback, default off."""
+
+    attr = getattr(config, "loop_provider_probes_enabled", None)
+    if attr is not None:
+        return bool(attr)
+    return _engine_env_flag("RESEARCH_LAB_LOOP_PROVIDER_PROBES", "false")
+
+
+def _probe_window_guard_required() -> bool:
+    """Fail-closed default: no private-window term hashes → no probes."""
+
+    return _engine_env_flag("RESEARCH_LAB_LOOP_PROBE_REQUIRE_WINDOW_GUARD", "true")
+
+
+def _probe_snapshot_overlay_uri() -> str:
+    return str(os.getenv("RESEARCH_LAB_PROBE_SNAPSHOT_OVERLAY_URI") or "").strip()
 
 
 def _planner_parse_retry_enabled() -> bool:
@@ -361,6 +388,16 @@ class CodeEditLoopEngine:
     # worker wires a container runner (``snapshot_store.container_replay_env``
     # + ``dev_eval.evaluate_dev``) here in a later wave.
     dev_evaluator: Callable[[BuiltCodeEditCandidate], Awaitable[Mapping[str, Any]]] | None = None
+    # W4 probe query guard: hashed private-window ICP/company terms (see
+    # provider_probe.hash_private_window_terms). Plaintext window terms are
+    # never held on the engine; empty means only the forbidden-term screen
+    # applies. The worker wires this per run alongside the private window.
+    probe_private_window_term_hashes: frozenset[str] = frozenset()
+    # W2: sanitized per-parent/day provider-outcome digest
+    # (provider_outcome_digest.build_provider_outcome_digest), wired by the
+    # worker from already-recorded truth. None keeps prompts byte-identical
+    # to pre-W2 behavior.
+    provider_outcome_digest: Mapping[str, Any] | None = None
     # Set by run() so stage/build spans can attach to the run's deterministic
     # Langfuse trace (run_trace_id(run_id)) without threading run_id through
     # every stage-call signature. One engine instance serves one run at a time.
@@ -878,6 +915,43 @@ class CodeEditLoopEngine:
         elapsed = lambda: elapsed_offset + (time.monotonic() - start)
         budget_limit_microusd = _budget_limit_microusd(budget_context)
         built_candidate_total = max(0, int(resume.get("built_candidate_count") or 0))
+        # W4: per-run provider-probe state. Caps persist across iterations and
+        # resume (probe accounting restored from the resume checkpoint).
+        probes_enabled = _loop_provider_probes_enabled(self.builder.config)
+        if probes_enabled and not self.probe_private_window_term_hashes and _probe_window_guard_required():
+            # Fail closed: without the hashed private-window term set the query
+            # guard can only screen forbidden terms — not good enough to let a
+            # loop reach providers. The worker wires the hashes per run.
+            logger.warning(
+                "research_lab_probe_guard_window_terms_missing run_id=%s probes disabled for this run",
+                str(run_id or ""),
+            )
+            probes_enabled = False
+        probe_catalog: list[Any] = []
+        probe_budget = None
+        if probes_enabled:
+            try:
+                probe_catalog = load_probe_catalog()
+            except Exception as exc:
+                logger.warning("research_lab_probe_catalog_load_failed error=%s", str(exc)[:200])
+                probes_enabled = False
+            if probes_enabled:
+                probe_budget = ProbeBudgetState(
+                    max_probes=max(0, int(getattr(self.builder.config, "loop_probe_max_probes", 4))),
+                    max_cost_microusd=max(
+                        0, int(getattr(self.builder.config, "loop_probe_max_cost_microusd", 250_000))
+                    ),
+                    probes_used=max(0, int(resume.get("probe_count") or 0)),
+                    cost_used_microusd=max(0, int(resume.get("probe_cost_microusd") or 0)),
+                )
+        probe_registry_base_urls: dict[str, str] = {}
+        if probes_enabled:
+            try:
+                probe_registry_base_urls = {
+                    entry.id: entry.base_url for entry in load_provider_registry_entries()
+                }
+            except Exception as exc:
+                logger.warning("research_lab_probe_registry_load_failed error=%s", str(exc)[:200])
         within_run_memory_active = _within_run_memory_enabled()
         rejected_diff_hashes: set[str] = set()
         within_run_rejections: list[dict[str, Any]] = []
@@ -1244,6 +1318,7 @@ class CodeEditLoopEngine:
                                 ),
                             },
                             prior_attempts=prior_attempts,
+                            provider_outcome_digest=self.provider_outcome_digest,
                         ),
                         min(settings.draft_timeout_seconds, remaining_call_seconds),
                         self.builder.config.loop_planner_max_tokens,
@@ -1416,6 +1491,7 @@ class CodeEditLoopEngine:
                     stage="pause_before_next_code_edit",
                     loop_direction_plan=loop_direction_plan_doc,
                     built_candidate_count=built_candidate_total,
+                    probe_budget=probe_budget,
                 )
                 _cleanup_source_tmp()
                 return self._result(
@@ -1441,6 +1517,8 @@ class CodeEditLoopEngine:
                 "bytes_returned": 0,
             }
             read_paths: set[str] = set()
+            read_ranges: dict[str, tuple[tuple[int, int], ...]] = {}
+            source_access_v2 = bool(getattr(self.builder.config, "code_edit_source_access_v2", False))
             source_bytes_returned = 0
             budget_exhausted_after_source_inspection = False
             for inspection_round in range(1, max(1, int(self.builder.config.code_edit_source_inspection_rounds)) + 1):
@@ -1497,6 +1575,16 @@ class CodeEditLoopEngine:
                                 ),
                             }),
                             max_requests=4,
+                            source_access_v2=source_access_v2,
+                            provider_outcome_digest=self.provider_outcome_digest,
+                            provider_probe_catalog=(
+                                {
+                                    "endpoints": [endpoint.prompt_summary() for endpoint in probe_catalog],
+                                    "budget": probe_budget.to_context(),
+                                }
+                                if probes_enabled and probe_budget is not None
+                                else None
+                            ),
                         ),
                         min(settings.draft_timeout_seconds, remaining_call_seconds),
                         3000,
@@ -1550,7 +1638,13 @@ class CodeEditLoopEngine:
                         }
                     )
                 try:
-                    requests = parse_code_edit_source_inspection_response(raw_inspection, max_requests=4)
+                    requests = parse_code_edit_source_inspection_response(
+                        raw_inspection,
+                        max_requests=4,
+                        allowed_operations=(
+                            ("search", "read_file", "probe_provider", "finish") if probes_enabled else None
+                        ),
+                    )
                 except Exception as exc:
                     await self.event_sink(
                         AutoResearchLoopEvent(
@@ -1595,12 +1689,74 @@ class CodeEditLoopEngine:
                         },
                     )
                 )
+                probe_requests = [request for request in requests if request.operation == "probe_provider"]
+                if probe_requests and probes_enabled and probe_budget is not None:
+                    proxy_url = str(os.getenv("RESEARCH_LAB_EVIDENCE_PROXY_URL") or "").strip()
+                    live_probes = _engine_env_flag("RESEARCH_LAB_LOOP_PROVIDER_PROBES_LIVE", "false")
+                    for probe_request in probe_requests:
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type="probe_requested",
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                event_doc={
+                                    "iteration": iteration,
+                                    "inspection_round": inspection_round,
+                                    **probe_request.to_event_doc(),
+                                },
+                            )
+                        )
+                        resolution = await asyncio.to_thread(
+                            resolve_provider_probe,
+                            probe_request,
+                            catalog=probe_catalog,
+                            proxy_url=proxy_url,
+                            budget=probe_budget,
+                            live_enabled=live_probes,
+                            private_window_term_hashes=self.probe_private_window_term_hashes,
+                            registry_base_urls=probe_registry_base_urls,
+                            snapshot_overlay_uri=_probe_snapshot_overlay_uri(),
+                        )
+                        # Probe spend charges the run's existing microusd ledger.
+                        actual_cost_microusd += max(0, int(resolution.cost_microusd))
+                        probe_event_type = "probe_blocked" if resolution.outcome == "blocked" else "probe_resolved"
+                        await self.event_sink(
+                            AutoResearchLoopEvent(
+                                event_type=probe_event_type,
+                                loop_status="running",
+                                elapsed_seconds=elapsed(),
+                                cost_ledger=_running_cost_ledger(
+                                    openrouter_calls,
+                                    estimated_cost,
+                                    actual_cost_microusd,
+                                    probe_event_type,
+                                ),
+                                event_doc={
+                                    "iteration": iteration,
+                                    "inspection_round": inspection_round,
+                                    "outcome": resolution.outcome,
+                                    **resolution.event_doc,
+                                },
+                            )
+                        )
+                        source_inspection_context = _merge_source_inspection_context(
+                            source_inspection_context,
+                            {
+                                "source_tree_hash": source_context.source_tree_hash,
+                                "results": [resolution.model_result],
+                            },
+                            total_bytes=source_bytes_returned,
+                            read_paths=read_paths,
+                        )
                 if any(request.operation == "finish" for request in requests):
                     break
+                source_requests = [request for request in requests if request.operation != "probe_provider"]
+                if not source_requests:
+                    continue
                 try:
                     batch = resolve_source_inspection_requests(
                         source_context,
-                        requests,
+                        source_requests,
                         already_read_paths=tuple(sorted(read_paths)),
                         max_files=self.builder.config.code_edit_source_inspection_max_files,
                         max_file_bytes=self.builder.config.code_edit_source_inspection_file_bytes,
@@ -1609,6 +1765,11 @@ class CodeEditLoopEngine:
                             self.builder.config.code_edit_source_inspection_total_bytes - source_bytes_returned,
                         ),
                         max_search_matches=self.builder.config.code_edit_source_inspection_search_matches,
+                        source_access_v2=source_access_v2,
+                        already_read_ranges=read_ranges,
+                        max_ranges_per_path=int(
+                            getattr(self.builder.config, "code_edit_source_inspection_max_ranges_per_path", 3)
+                        ),
                     )
                 except CodeEditBuildError as exc:
                     await self.event_sink(
@@ -1634,6 +1795,8 @@ class CodeEditLoopEngine:
                     break
                 source_bytes_returned += batch.bytes_returned
                 read_paths = set(batch.read_paths)
+                if source_access_v2:
+                    read_ranges = dict(batch.read_ranges)
                 source_inspection_context = _merge_source_inspection_context(
                     source_inspection_context,
                     batch.model_context,
@@ -1931,6 +2094,7 @@ class CodeEditLoopEngine:
                             include_lessons=True,
                         ),
                         max_candidates=draft_parse_limit,
+                        provider_outcome_digest=self.provider_outcome_digest,
                     ),
                     min(settings.draft_timeout_seconds, remaining_call_seconds),
                     3000,
@@ -2583,6 +2747,7 @@ class CodeEditLoopEngine:
                     stage="code_edit_iteration_completed",
                     loop_direction_plan=loop_direction_plan_doc,
                     built_candidate_count=built_candidate_total,
+                    probe_budget=probe_budget,
                 )
             except Exception:
                 # Bug 17: a transient checkpoint-write failure must not fail a run that may
@@ -2650,6 +2815,7 @@ class CodeEditLoopEngine:
                     stage="pause_after_code_edit_minimum_runtime",
                     loop_direction_plan=loop_direction_plan_doc,
                     built_candidate_count=built_candidate_total,
+                    probe_budget=probe_budget,
                 )
                 _cleanup_source_tmp()
                 return self._result(
@@ -2801,6 +2967,7 @@ class CodeEditLoopEngine:
         stage: str,
         loop_direction_plan: Mapping[str, Any] | None = None,
         built_candidate_count: int = 0,
+        probe_budget: ProbeBudgetState | None = None,
     ) -> dict[str, Any]:
         payload = {
             "schema_version": "1.0",
@@ -2855,6 +3022,16 @@ class CodeEditLoopEngine:
             "actual_openrouter_cost_usd": round(int(actual_cost_microusd) / 1_000_000, 6),
             "actual_openrouter_cost_microusd": int(actual_cost_microusd),
             "provider_usage": [dict(item) for item in provider_usage if isinstance(item, Mapping)],
+            # W4 probe accounting survives pause/resume (keys absent pre-probe
+            # so probe-off checkpoints keep their exact prior shape).
+            **(
+                {
+                    "probe_count": int(probe_budget.probes_used),
+                    "probe_cost_microusd": int(probe_budget.cost_used_microusd),
+                }
+                if probe_budget is not None
+                else {}
+            ),
         }
         checkpoint = {**payload, "checkpoint_hash": sha256_json(payload)}
         await self.event_sink(

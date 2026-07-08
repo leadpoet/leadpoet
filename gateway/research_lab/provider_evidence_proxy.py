@@ -923,6 +923,13 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             for k, v in self.headers.items()
             if k.lower() not in _HOP_HEADERS and not k.lower().startswith("x-research-lab")
         }
+        # The day cache records upstream bodies as raw bytes with no header
+        # metadata, so a compressed body replays as undecodable garbage to any
+        # client (the replay carries no Content-Encoding). Force identity on
+        # the upstream request so recorded bodies are always plain: a client's
+        # forwarded Accept-Encoding: gzip must never decide what gets cached.
+        headers = {k: v for k, v in headers.items() if k.lower() != "accept-encoding"}
+        headers["Accept-Encoding"] = "identity"
         if entry.auth_kind == "header" and credential:
             headers[entry.auth_name] = credential
         elif entry.auth_kind == "bearer" and credential:

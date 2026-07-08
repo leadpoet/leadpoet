@@ -383,3 +383,37 @@ class TestDayCacheRecordability:
     def test_errors_never_recordable(self) -> None:
         assert not proxy_module._response_is_recordable("deepline", "https://code.deepline.com/api/v2/runs/x", 500, b"{}")
         assert not proxy_module._response_is_recordable("sd", "https://api.scrapingdog.com/profile", 404, b"{}")
+
+
+class TestUpstreamEncodingIdentity:
+    """A client's Accept-Encoding must never reach the upstream: the day cache
+    stores bodies with no header metadata, so a compressed recorded body would
+    replay as undecodable bytes (no Content-Encoding) to every later caller."""
+
+    def test_upstream_request_forces_identity_encoding(self, proxy_server, monkeypatch):
+        _server, _store, port, _ledger_path = proxy_server
+        monkeypatch.setenv("RESEARCH_LAB_EXA_API_KEY", "lab-key")
+        seen_encoding: list[str] = []
+
+        class _FakeResponse:
+            status = 200
+
+            def read(self):
+                return b'{"live":true,"costDollars":{"total":0.001}}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def _fake_urlopen(request, timeout=0):
+            seen_encoding.append(request.headers.get("Accept-encoding", ""))
+            return _FakeResponse()
+
+        monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+        status, _body, _headers = _request(
+            port, "/exa/search?q=enc1", headers={"Accept-Encoding": "gzip, deflate, br"}
+        )
+        assert status == 200
+        assert seen_encoding == ["identity"]

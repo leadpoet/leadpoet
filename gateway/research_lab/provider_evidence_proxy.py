@@ -504,7 +504,18 @@ _EXA_AGENT_NONTERMINAL_STATUSES = {"queued", "running", "in_progress", "pending"
 
 
 def _response_is_recordable(provider: str, upstream_url: str, status: int, body: bytes) -> bool:
-    if provider != "exa" or status >= 400:
+    # Never record error responses into the day cache.  The cache replays a
+    # recorded response to every identical request for the rest of the UTC
+    # day, so recording a transient provider failure (a 5xx burst, an
+    # unstable endpoint's 410/404 window) poisons that query for the whole
+    # day: retry attempts replay the cached failure instantly instead of
+    # going live, and the day ends with no benchmark even after the provider
+    # recovers.  Failures always retry live; the per-scope cost ledger
+    # bounds what those retries can spend.  (Baseline-tape replay of
+    # recorded errors is unaffected — this gates only NEW day-cache writes.)
+    if status >= 400:
+        return False
+    if provider != "exa":
         return True
     try:
         path = urllib.parse.urlsplit(upstream_url).path

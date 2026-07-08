@@ -259,6 +259,52 @@ async def _lifecycle_tick_inner(supabase) -> None:
     except Exception as e:
         print(f"❌ Promotion step error: {e}")
 
+    # Clean up zero-lead continuation rows for chains that already reached
+    # their target. These rows can be created when a predecessor finalizes
+    # after a successor already exists; leaving them open makes the dashboard
+    # show phantom work and can keep reward/burn state looking active.
+    try:
+        zero_quota = supabase.table("fulfillment_requests") \
+            .select(
+                "request_id, status, num_leads, successor_request_id, "
+                "internal_label, company"
+            ) \
+            .in_("status", [
+                "pending",
+                "open",
+                "continued_open",
+                "commit_closed",
+                "partially_fulfilled",
+            ]) \
+            .lte("num_leads", 0) \
+            .execute()
+        for r in (zero_quota.data or []):
+            rid = r["request_id"]
+            sub_count = supabase.table("fulfillment_submissions") \
+                .select("submission_id", count="exact", head=True) \
+                .eq("request_id", rid) \
+                .execute()
+            if sub_count.count:
+                continue
+            chain_state = _chain_held_state_for_recycle(
+                supabase, rid, r.get("num_leads") or 0,
+            )
+            if chain_state.get("chain_complete"):
+                _retire_completed_chain_continuation(
+                    supabase,
+                    r,
+                    reason="chain_already_complete_zero_quota",
+                    source_statuses=[
+                        "pending",
+                        "open",
+                        "continued_open",
+                        "commit_closed",
+                        "partially_fulfilled",
+                    ],
+                )
+    except Exception as e:
+        print(f"❌ Zero-quota continuation cleanup error: {e}")
+
     # Debug: show all non-terminal request statuses
     all_req = supabase.table("fulfillment_requests") \
         .select("request_id, status, window_end, reveal_window_end") \
@@ -361,6 +407,14 @@ async def _lifecycle_tick_inner(supabase) -> None:
             chain_state = _chain_held_state_for_recycle(
                 supabase, rid, r.get("num_leads") or 0,
             )
+            if chain_state.get("chain_complete"):
+                _retire_completed_chain_continuation(
+                    supabase,
+                    r,
+                    reason="no_reveals_chain_already_complete",
+                    source_statuses=["commit_closed"],
+                )
+                continue
             _recycle_request(
                 supabase, r, now, now_iso,
                 terminal_status=chain_state["recycle_status"] or "recycled",
@@ -538,6 +592,14 @@ async def _lifecycle_tick_inner(supabase) -> None:
                 chain_state = _chain_held_state_for_recycle(
                     supabase, rid, r.get("num_leads") or 0,
                 )
+                if chain_state.get("chain_complete"):
+                    _retire_completed_chain_continuation(
+                        supabase,
+                        r,
+                        reason="no_validators_chain_already_complete",
+                        source_statuses=["scoring", "partially_fulfilled"],
+                    )
+                    continue
                 _recycle_request(
                     supabase, r, now, now_iso,
                     # If prior held leads exist, mark the predecessor
@@ -596,6 +658,14 @@ async def _lifecycle_tick_inner(supabase) -> None:
                 chain_state = _chain_held_state_for_recycle(
                     supabase, rid, r.get("num_leads") or 0,
                 )
+                if chain_state.get("chain_complete"):
+                    _retire_completed_chain_continuation(
+                        supabase,
+                        r,
+                        reason="empty_consensus_chain_already_complete",
+                        source_statuses=["scoring", "partially_fulfilled"],
+                    )
+                    continue
                 _recycle_request(
                     supabase, r, now, now_iso,
                     terminal_status=chain_state["recycle_status"] or "expired",
@@ -889,9 +959,13 @@ def _chain_held_state_for_recycle(supabase, request_id: str, current_num_leads: 
             "successor_num_leads": _chain_target_num_leads(supabase, request_id, current_num_leads),
             "held_companies": [],
             "recycle_status": None,  # caller's terminal_status stands
+            "held_count": 0,
+            "chain_complete": False,
         }
 
     chain_target = _chain_target_num_leads(supabase, request_id, current_num_leads)
+    held_count = len(prior_held)
+    remaining = max(0, chain_target - held_count)
 
     # Hydrate held leads' companies from fulfillment_submissions.
     needed_subs = {r["submission_id"] for r in prior_held}
@@ -913,12 +987,61 @@ def _chain_held_state_for_recycle(supabase, request_id: str, current_num_leads: 
             if company:
                 held_companies.append(company)
 
+    if remaining <= 0:
+        return {
+            "successor_status_target": None,
+            "successor_num_leads": 0,
+            "held_companies": held_companies,
+            "recycle_status": "recycled",
+            "held_count": held_count,
+            "chain_complete": True,
+        }
+
     return {
         "successor_status_target": "continued_open",
-        "successor_num_leads": max(0, chain_target - len(prior_held)),
+        "successor_num_leads": remaining,
         "held_companies": held_companies,
         "recycle_status": "partially_fulfilled",
+        "held_count": held_count,
+        "chain_complete": False,
     }
+
+
+def _retire_completed_chain_continuation(
+    supabase,
+    request: dict,
+    *,
+    reason: str,
+    source_statuses: list,
+) -> bool:
+    """Mark an already-complete zero-quota continuation as recycled.
+
+    Rewards are already written on predecessor consensus rows. This helper
+    deliberately avoids creating a new successor or redistributing rewards.
+    """
+    rid = request["request_id"]
+    try:
+        upd = supabase.table("fulfillment_requests").update({
+            "status": "recycled",
+        }).eq("request_id", rid) \
+          .in_("status", source_statuses) \
+          .execute()
+        if upd.data:
+            _log_event(EventType.FULFILLMENT_RECYCLED, "gateway", {
+                "old_request_id": rid,
+                "new_request_id": None,
+                "reason": reason,
+                "terminal_status": "recycled",
+                "chain_already_complete": True,
+            })
+            print(
+                f"   🧹 {rid[:8]}... recycled without successor "
+                f"(reason={reason}; chain already complete)"
+            )
+            return True
+    except Exception as e:
+        print(f"   ❌ Error retiring completed chain continuation {rid[:8]}...: {e}")
+    return False
 
 
 # Max request_ids per PostgREST ``.in_("request_id", …)`` filter. A long

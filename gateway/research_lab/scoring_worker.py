@@ -7811,6 +7811,12 @@ class ResearchLabGatewayScoringWorker:
             "OPENROUTER_API_KEY",
             "QUALIFICATION_OPENROUTER_API_KEY",
             "OPENROUTER_KEY",
+            # Domain-keyed firmographics fallback for failed LinkedIn
+            # resolution/scrapes inside the model. Absent vars keep the
+            # fallback disabled and the model byte-identical to before.
+            "DEEPLINE_API_KEY",
+            "SOURCING_DEEPLINE_FALLBACK",
+            "SOURCING_DEEPLINE_TIMEOUT_S",
         ):
             value = os.getenv(name)
             if value:

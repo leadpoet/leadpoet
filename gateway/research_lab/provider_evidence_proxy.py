@@ -56,6 +56,7 @@ from research_lab.eval.provider_costs import (
     DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
     ProviderCostEstimate,
     ProviderCostLedger,
+    _deepline_status_from_response,
     decimal_from_env,
     estimate_provider_cost,
     exa_agent_run_status,
@@ -511,6 +512,13 @@ def _utc_day() -> str:
 
 _EXA_AGENT_NONTERMINAL_STATUSES = {"queued", "running", "in_progress", "pending"}
 
+# Deepline play runs are polled at GET /api/v2/runs/<id> until terminal. A
+# nonterminal snapshot recorded into the day cache freezes every later poll of
+# the same URL at that snapshot, so the poller never observes "completed" and
+# burns its whole budget (same failure mode the Exa /agent/runs/ exemption
+# fixes). Only terminal run states may be recorded.
+_DEEPLINE_RUN_NONTERMINAL_STATUSES = {"queued", "running", "in_progress", "pending", "started"}
+
 
 def _response_is_recordable(provider: str, upstream_url: str, status: int, body: bytes) -> bool:
     # Never record error responses into the day cache.  The cache replays a
@@ -524,16 +532,21 @@ def _response_is_recordable(provider: str, upstream_url: str, status: int, body:
     # recorded errors is unaffected — this gates only NEW day-cache writes.)
     if status >= 400:
         return False
-    if provider != "exa":
-        return True
     try:
         path = urllib.parse.urlsplit(upstream_url).path
     except Exception:
         path = ""
-    if not path.startswith("/agent/runs/"):
-        return True
-    agent_status = exa_agent_run_status(body)
-    return agent_status not in _EXA_AGENT_NONTERMINAL_STATUSES
+    if provider == "exa":
+        if not path.startswith("/agent/runs/"):
+            return True
+        agent_status = exa_agent_run_status(body)
+        return agent_status not in _EXA_AGENT_NONTERMINAL_STATUSES
+    if provider == "deepline":
+        if not path.startswith("/api/v2/runs/"):
+            return True
+        run_status = _deepline_status_from_response(body)
+        return run_status not in _DEEPLINE_RUN_NONTERMINAL_STATUSES
+    return True
 
 
 def _record_is_replayable(record: Mapping[str, Any]) -> bool:

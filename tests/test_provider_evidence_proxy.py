@@ -336,3 +336,50 @@ class TestProxyEndToEnd:
         replay = _request(port, "/exa/search?q=live1")
         assert replay[0] == 200
         assert _ledger_rows(ledger_path)[-1]["evidence"] == "hit"
+
+
+class TestDayCacheRecordability:
+    """Nonterminal poll snapshots must never enter the day cache: a recorded
+    "running" replays to every later poll of the same URL, so the poller can
+    never observe the terminal state (poll-freeze)."""
+
+    def _deepline_run_body(self, status: str) -> bytes:
+        return json.dumps(
+            {"schemaVersion": 1, "kind": "play_run", "run": {"id": "play/x/run/1", "status": status}}
+        ).encode()
+
+    def test_deepline_nonterminal_run_poll_not_recordable(self) -> None:
+        for status in ("running", "queued", "pending", "in_progress", "started"):
+            assert not proxy_module._response_is_recordable(
+                "deepline",
+                "https://code.deepline.com/api/v2/runs/play%2Fx%2Frun%2F1",
+                200,
+                self._deepline_run_body(status),
+            )
+
+    def test_deepline_terminal_run_poll_recordable(self) -> None:
+        for status in ("completed", "failed", "cancelled"):
+            assert proxy_module._response_is_recordable(
+                "deepline",
+                "https://code.deepline.com/api/v2/runs/play%2Fx%2Frun%2F1",
+                200,
+                self._deepline_run_body(status),
+            )
+
+    def test_deepline_non_poll_paths_recordable(self) -> None:
+        assert proxy_module._response_is_recordable(
+            "deepline",
+            "https://code.deepline.com/api/v2/plays/run",
+            200,
+            self._deepline_run_body("running"),
+        )
+
+    def test_exa_agent_exemption_unchanged(self) -> None:
+        running = json.dumps({"object": "agent_run", "id": "agent_run_1", "status": "running"}).encode()
+        done = json.dumps({"object": "agent_run", "id": "agent_run_1", "status": "completed"}).encode()
+        assert not proxy_module._response_is_recordable("exa", "https://api.exa.ai/agent/runs/1", 200, running)
+        assert proxy_module._response_is_recordable("exa", "https://api.exa.ai/agent/runs/1", 200, done)
+
+    def test_errors_never_recordable(self) -> None:
+        assert not proxy_module._response_is_recordable("deepline", "https://code.deepline.com/api/v2/runs/x", 500, b"{}")
+        assert not proxy_module._response_is_recordable("sd", "https://api.scrapingdog.com/profile", 404, b"{}")

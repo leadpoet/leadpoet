@@ -809,6 +809,10 @@ async def score_company_autoresearch_intent_signal(
                 # reject so Stage 3 makes the call. Fulfillment calls
                 # _score_single_intent_signal directly and keeps the default.
                 stage1_soft_reject=True,
+                # Research-lab autoresearch path only: skip the keyword/length
+                # genericity pre-gate so the three-stage LLM verifier is the sole
+                # intent judge. Fulfillment keeps the cheap deterministic gate.
+                llm_only_intent_gate=True,
                 verdict_out=signal_verdicts,
             )
         )
@@ -1146,6 +1150,7 @@ async def _score_single_intent_signal(
     product_service_context: str = "",
     trust_signal_date: bool = False,
     stage1_soft_reject: bool = False,
+    llm_only_intent_gate: bool = False,
     verdict_out: Optional[List[dict]] = None,
 ) -> Tuple[float, int, str, Optional[str], int]:
     """
@@ -1223,11 +1228,19 @@ async def _score_single_intent_signal(
     source_str = signal.source.value if hasattr(signal.source, "value") else str(signal.source)
     source_lower = source_str.lower()
 
-    is_generic, generic_reason = is_generic_intent_description(signal.description or "")
-    if is_generic:
-        logger.warning(f"Intent signal rejected: generic/templated — {generic_reason}")
-        _record_verdict("rejected_pregate", rejection_reason="generic_description")
-        return 0.0, 5, "fabricated", None, -1
+    # The keyword/length genericity pre-gate is a cheap deterministic filter that
+    # runs before the three-stage LLM verifier. It has no vocabulary for several
+    # valid intent categories (leadership change, market expansion, regulatory
+    # clearance), so on-topic short descriptions in those categories get rejected
+    # as templated before the content-aware verifier ever sees them. The
+    # research-lab path opts out so the LLM verifier is the sole judge; the
+    # fulfillment/lead path keeps the cheap gate.
+    if not llm_only_intent_gate:
+        is_generic, generic_reason = is_generic_intent_description(signal.description or "")
+        if is_generic:
+            logger.warning(f"Intent signal rejected: generic/templated — {generic_reason}")
+            _record_verdict("rejected_pregate", rejection_reason="generic_description")
+            return 0.0, 5, "fabricated", None, -1
     if source_lower == "other" and len(signal.description or "") < 100:
         logger.warning("Intent signal rejected: 'other' source with short description")
         _record_verdict("rejected_pregate", rejection_reason="other_source_short_description")

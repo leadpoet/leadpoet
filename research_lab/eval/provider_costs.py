@@ -21,7 +21,7 @@ from typing import Any, Mapping, Sequence
 from research_lab.canonical import sha256_json
 
 
-DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP = Decimal("1.00")
+DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP = Decimal("1.50")
 DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD = Decimal("0.00005")
 DEFAULT_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS = 5
 DEFAULT_UNKNOWN_ENDPOINT_POLICY = "default_5_credits"

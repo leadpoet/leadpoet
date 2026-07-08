@@ -780,6 +780,99 @@ async def test_private_baseline_parallel_resumes_completed_icps(monkeypatch):
     assert stats == {"retried": 0, "recovered": 0, "unresolved": 0}
 
 
+def test_private_baseline_retry_runner_gets_fresh_cost_scope(monkeypatch):
+    monkeypatch.setattr(sw.time, "time", lambda: 1234.567)
+    base_scope = "sha256:" + "1" * 64
+    image_digest = "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:" + "a" * 64
+    retry_runner = sw.DockerPrivateModelRunner(
+        sw.DockerPrivateModelSpec(
+            image_digest=image_digest,
+            pull_before_run=False,
+            extra_env={sw.PROVIDER_COST_EVALUATION_SCOPE_ENV: base_scope},
+        )
+    )
+
+    round_one = sw._retry_runner_with_provider_cost_scope(retry_runner, retry_round=1)
+    round_two = sw._retry_runner_with_provider_cost_scope(retry_runner, retry_round=2)
+
+    assert retry_runner.spec.extra_env[sw.PROVIDER_COST_EVALUATION_SCOPE_ENV] == base_scope
+    assert round_one.spec.pull_before_run is False
+    assert round_two.spec.pull_before_run is False
+    assert round_one.spec.image_digest == image_digest
+    assert round_two.spec.image_digest == image_digest
+    assert round_one.spec.extra_env[sw.PROVIDER_COST_EVALUATION_SCOPE_ENV] != base_scope
+    assert (
+        round_one.spec.extra_env[sw.PROVIDER_COST_EVALUATION_SCOPE_ENV]
+        != round_two.spec.extra_env[sw.PROVIDER_COST_EVALUATION_SCOPE_ENV]
+    )
+
+
+@pytest.mark.asyncio
+async def test_private_baseline_retry_round_uses_fresh_cost_scope(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace(
+        private_baseline_concurrency=1,
+        private_baseline_retry_concurrency=1,
+        private_baseline_provider_retry_rounds=1,
+    )
+    window = SimpleNamespace(benchmark_items=[{"icp_ref": "icp-a", "icp_hash": "hash-a"}])
+    image_digest = "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:" + "b" * 64
+    first_runner = sw.DockerPrivateModelRunner(
+        sw.DockerPrivateModelSpec(
+            image_digest=image_digest,
+            pull_before_run=False,
+            extra_env={sw.PROVIDER_COST_EVALUATION_SCOPE_ENV: "sha256:" + "1" * 64},
+        )
+    )
+    retry_runner = sw.DockerPrivateModelRunner(
+        sw.DockerPrivateModelSpec(
+            image_digest=image_digest,
+            pull_before_run=False,
+            extra_env={sw.PROVIDER_COST_EVALUATION_SCOPE_ENV: "sha256:" + "2" * 64},
+        )
+    )
+    seen_scopes: list[str] = []
+
+    async def fake_run_baseline_icp(self, *, runner, item, item_index, **kwargs):  # noqa: ANN001
+        seen_scopes.append(runner.spec.extra_env[sw.PROVIDER_COST_EVALUATION_SCOPE_ENV])
+        retryable = len(seen_scopes) == 1
+        return {
+            "icp_ref": item["icp_ref"],
+            "icp_hash": item["icp_hash"],
+            "score": 0.0 if retryable else 3.0,
+            "company_count": 0 if retryable else 1,
+            "sourced_count": 0 if retryable else 1,
+            "diagnostics": {},
+            "_item_index": item_index,
+            "_retryable": retryable,
+            "_nonempty": not retryable,
+            "_runtime_error": "HTTP 500" if retryable else "",
+            "_retry_backoff_seconds": 0.0,
+        }
+
+    monkeypatch.setattr(
+        sw.ResearchLabGatewayScoringWorker,
+        "_run_baseline_icp",
+        fake_run_baseline_icp,
+    )
+
+    rows, stats = await worker._run_baseline_batch_inner(
+        runner=first_runner,
+        retry_runner=retry_runner,
+        scorer=object(),
+        window=window,
+        run_start=0.0,
+    )
+
+    assert len(seen_scopes) == 2
+    assert seen_scopes[0] == first_runner.spec.extra_env[sw.PROVIDER_COST_EVALUATION_SCOPE_ENV]
+    assert seen_scopes[1] != retry_runner.spec.extra_env[sw.PROVIDER_COST_EVALUATION_SCOPE_ENV]
+    assert seen_scopes[1] != seen_scopes[0]
+    assert rows[0]["score"] == 3.0
+    assert stats == {"retried": 1, "recovered": 1, "unresolved": 0}
+
+
 def test_private_baseline_checkpoint_rejects_unresolved_and_cost_blocked_rows():
     assert sw._baseline_summary_checkpointable(
         {"icp_ref": "ok", "score": 1.0, "company_count": 1, "diagnostics": {}}

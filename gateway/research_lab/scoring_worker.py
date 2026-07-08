@@ -6,6 +6,7 @@ import asyncio
 import concurrent.futures
 import contextlib
 import contextvars
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import functools
 import hashlib
@@ -153,6 +154,39 @@ _POSTGREST_TIMESTAMP_RE = re.compile(
     r"^(?P<prefix>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"
     r"\.(?P<fraction>\d{1,9})(?P<suffix>Z|[+-]\d{2}(?::?\d{2})?)?$"
 )
+
+
+def _retry_runner_with_provider_cost_scope(
+    runner: DockerPrivateModelRunner,
+    *,
+    retry_round: int,
+) -> DockerPrivateModelRunner:
+    """Clone a retry runner with a fresh provider-cost budget scope.
+
+    The Docker runtime hashes this evaluation scope together with the actual
+    ICP payload, so every ICP still gets an independent ledger. The extra retry
+    seed prevents an in-attempt retry from inheriting the first-pass spend.
+    """
+
+    extra_env = dict(runner.spec.extra_env or {})
+    base_scope = str(extra_env.get(PROVIDER_COST_EVALUATION_SCOPE_ENV) or "").strip()
+    retry_scope = sha256_json(
+        {
+            "schema_version": "research_lab_provider_cost_retry_scope.v1",
+            "base_scope": base_scope,
+            "retry_round": int(retry_round),
+            "retry_round_started_at_ms": int(time.time() * 1000),
+        }
+    )
+    extra_env[PROVIDER_COST_EVALUATION_SCOPE_ENV] = retry_scope
+    return DockerPrivateModelRunner(
+        replace(
+            runner.spec,
+            extra_env=extra_env,
+            # The first-pass runner already pulled this immutable digest.
+            pull_before_run=False,
+        )
+    )
 
 
 class StaleParentDuringScoring(RuntimeError):
@@ -7125,6 +7159,10 @@ class ResearchLabGatewayScoringWorker:
                     )
                 )
                 retry_semaphore = asyncio.Semaphore(self.config.private_baseline_retry_concurrency)
+                round_retry_runner = _retry_runner_with_provider_cost_scope(
+                    retry_runner,
+                    retry_round=round_no,
+                )
 
                 async def retry_one(item_index: int) -> dict[str, Any]:
                     async with retry_semaphore:
@@ -7141,7 +7179,7 @@ class ResearchLabGatewayScoringWorker:
                             )
                             await asyncio.sleep(backoff_seconds)
                         entry = await self._run_baseline_icp(
-                            runner=retry_runner,
+                            runner=round_retry_runner,
                             scorer=scorer,
                             item=window.benchmark_items[item_index - 1],
                             item_index=item_index,

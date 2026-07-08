@@ -89,6 +89,7 @@ _LEGACY_CREDENTIAL_FALLBACKS: dict[str, tuple[str, ...]] = {
     "exa": ("EXA_API_KEY",),
     "sd": ("SCRAPINGDOG_API_KEY", "QUALIFICATION_SCRAPINGDOG_API_KEY"),
     "or": ("OPENROUTER_API_KEY", "QUALIFICATION_OPENROUTER_API_KEY", "OPENROUTER_KEY"),
+    "deepline": ("DEEPLINE_API_KEY",),
 }
 
 
@@ -329,6 +330,14 @@ def seed_provider_registry() -> list[ProviderRegistryEntry]:
             auth_name="Authorization",
             credential_ref=("RESEARCH_LAB_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"),
             cost_model={"currency": "usd", "est_cost_microusd_per_call": 2_000},
+        ),
+        ProviderRegistryEntry(
+            id="deepline",
+            base_url="https://code.deepline.com",
+            auth_kind="bearer",
+            auth_name="Authorization",
+            credential_ref=("RESEARCH_LAB_DEEPLINE_API_KEY", "DEEPLINE_API_KEY"),
+            cost_model={"currency": "usd", "est_cost_microusd_per_call": 100_000},
         ),
     ]
 

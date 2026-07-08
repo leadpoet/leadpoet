@@ -76,6 +76,7 @@ DEFAULT_ENV_PASSTHROUGH = (
     "OPENROUTER_API_KEY",
     "QUALIFICATION_OPENROUTER_API_KEY",
     "OPENROUTER_KEY",
+    "DEEPLINE_API_KEY",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
@@ -90,6 +91,7 @@ PROVIDER_KEY_ENV_PASSTHROUGH = (
     "OPENROUTER_API_KEY",
     "QUALIFICATION_OPENROUTER_API_KEY",
     "OPENROUTER_KEY",
+    "DEEPLINE_API_KEY",
 )
 PROVIDER_PROXY_ENV_PASSTHROUGH = (
     "HTTP_PROXY",
@@ -1064,6 +1066,7 @@ def _sanitize_text(text: str) -> str:
         "OPENROUTER_API_KEY",
         "QUALIFICATION_OPENROUTER_API_KEY",
         "OPENROUTER_KEY",
+        "DEEPLINE_API_KEY",
     ):
         value = os.environ.get(env_name)
         if value:
@@ -1159,6 +1162,7 @@ _research_lab_proxy_routes = (
     ("api.exa.ai", "/exa"),
     ("api.scrapingdog.com", "/sd"),
     ("openrouter.ai", "/or"),
+    ("code.deepline.com", "/deepline"),
 )
 
 def _research_lab_proxy_rewrite(url):

@@ -25,6 +25,8 @@ DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP = Decimal("1.00")
 DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD = Decimal("0.00005")
 DEFAULT_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS = 5
 DEFAULT_UNKNOWN_ENDPOINT_POLICY = "default_5_credits"
+DEFAULT_DEEPLINE_COST_PER_CREDIT_USD = Decimal("0.10")
+DEFAULT_DEEPLINE_UNKNOWN_PLAY_CREDITS = 1
 OPENROUTER_PERPLEXITY_PRICING: dict[str, tuple[Decimal, Decimal, Decimal]] = {
     # input $/1M tokens, output $/1M tokens, web-search $/request.
     "perplexity/sonar": (Decimal("1"), Decimal("1"), Decimal("0.005")),
@@ -61,6 +63,12 @@ SCRAPINGDOG_ENDPOINT_CREDITS: dict[str, int] = {
     "/tiktok/profile": 5,
     "/linkedinjobs": 5,
     "/instagram/profile": 15,
+}
+DEEPLINE_PLAY_CREDITS: dict[str, int] = {
+    # The current private sourcing model calls this play via /api/v2/plays/run.
+    # Deepline's API currently returns no billing field for this call, so the
+    # cost tracker falls back to managed-credit pricing for this known play.
+    "company-domain-firmographics": 1,
 }
 
 
@@ -261,6 +269,54 @@ def extract_openrouter_cost_dollars(body: bytes | str | None) -> tuple[Decimal |
     return None, metadata
 
 
+def extract_deepline_cost(body: bytes | str | None) -> tuple[Decimal | None, Decimal | None]:
+    """Return (cost_usd, credits) from Deepline responses when exposed.
+
+    Live Deepline play/run responses currently omit billing fields, but this
+    parser is intentionally tolerant so exact provider-side accounting wins if
+    Deepline adds explicit cost metadata later.
+    """
+
+    parsed = _json_body(body)
+    if parsed is None:
+        return None, None
+    for value in _iter_json_values(
+        parsed,
+        {
+            "cost",
+            "cost_usd",
+            "costUSD",
+            "costDollars",
+            "cost_dollars",
+            "price",
+            "price_usd",
+            "amount_usd",
+            "usd",
+        },
+    ):
+        cost = safe_decimal(value)
+        if cost is not None:
+            return cost, None
+        if isinstance(value, Mapping):
+            for nested_key in ("total", "usd", "amount", "cost", "cost_usd"):
+                cost = safe_decimal(value.get(nested_key))
+                if cost is not None:
+                    return cost, None
+    for value in _iter_json_values(
+        parsed,
+        {"credits", "credit", "credits_used", "credit_cost", "creditCost", "managed_credits"},
+    ):
+        credits = safe_decimal(value)
+        if credits is not None:
+            return None, credits
+        if isinstance(value, Mapping):
+            for nested_key in ("total", "used", "amount", "credits"):
+                credits = safe_decimal(value.get(nested_key))
+                if credits is not None:
+                    return None, credits
+    return None, None
+
+
 def _rough_token_count_from_text(value: Any) -> int:
     """Fallback estimate for providers that omit usage metadata.
 
@@ -440,6 +496,22 @@ def scrapingdog_url_is_mapped(upstream_url: str) -> bool:
     return scrapingdog_endpoint_is_mapped(split.path)
 
 
+def deepline_play_name_from_request(request_body: bytes | str | None) -> str:
+    parsed = _json_body(request_body)
+    if not isinstance(parsed, Mapping):
+        return ""
+    return str(parsed.get("name") or "").strip()
+
+
+def deepline_credits_for_play(play_name: str) -> int:
+    unknown_default = int_from_env(
+        "RESEARCH_LAB_DEEPLINE_UNKNOWN_PLAY_CREDITS",
+        DEFAULT_DEEPLINE_UNKNOWN_PLAY_CREDITS,
+    )
+    normalized = str(play_name or "").strip()
+    return DEEPLINE_PLAY_CREDITS.get(normalized, unknown_default)
+
+
 @dataclass
 class ProviderCostEstimate:
     provider: str
@@ -570,6 +642,53 @@ def estimate_provider_cost(
             prompt_tokens=int(metadata.get("prompt_tokens") or 0),
             completion_tokens=int(metadata.get("completion_tokens") or 0),
             generation_id=openrouter_generation_id(response_body),
+        )
+    if provider == "deepline":
+        try:
+            split = urllib.parse.urlsplit(str(upstream_url or ""))
+            path = split.path or "/"
+        except Exception:
+            path = endpoint
+        if path.startswith("/api/v2/runs/"):
+            return ProviderCostEstimate(
+                provider=provider,
+                endpoint=endpoint,
+                billable=False,
+                cost_source="deepline_run_poll_zero_cost",
+            )
+        if path.rstrip("/") != "/api/v2/plays/run":
+            return ProviderCostEstimate(
+                provider=provider,
+                endpoint=endpoint,
+                billable=False,
+                cost_source="deepline_non_play_endpoint_zero_cost",
+            )
+        exact_cost, credits_value = extract_deepline_cost(response_body)
+        if exact_cost is not None:
+            return ProviderCostEstimate(
+                provider=provider,
+                endpoint=endpoint,
+                billable=True,
+                cost_usd=exact_cost,
+                cost_source="deepline_response_cost",
+            )
+        credit_price = decimal_from_env(
+            "RESEARCH_LAB_DEEPLINE_COST_PER_CREDIT_USD",
+            DEFAULT_DEEPLINE_COST_PER_CREDIT_USD,
+        )
+        if credits_value is None:
+            credits_value = Decimal(deepline_credits_for_play(deepline_play_name_from_request(request_body)))
+            cost_source = "deepline_play_credit_map"
+        else:
+            cost_source = "deepline_response_credits"
+        credits_int = int(credits_value.to_integral_value(rounding=ROUND_HALF_UP))
+        return ProviderCostEstimate(
+            provider=provider,
+            endpoint=endpoint,
+            billable=True,
+            cost_usd=credit_price * credits_value,
+            cost_source=cost_source,
+            credits=credits_int,
         )
     return ProviderCostEstimate(
         provider=provider,

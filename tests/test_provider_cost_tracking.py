@@ -12,8 +12,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from gateway.research_lab import provider_evidence_proxy
 from research_lab.canonical import sha256_json
 from research_lab.eval.private_runtime import (
+    DEFAULT_ENV_PASSTHROUGH,
     DockerPrivateModelRunner,
     DockerPrivateModelSpec,
+    PROVIDER_KEY_ENV_PASSTHROUGH,
     PROVIDER_COST_EVALUATION_SCOPE_ENV,
 )
 from research_lab.eval.provider_costs import (
@@ -21,7 +23,10 @@ from research_lab.eval.provider_costs import (
     ProviderCostEstimate,
     ProviderCostLedger,
     decode_cost_event_header,
+    deepline_credits_for_play,
+    deepline_play_name_from_request,
     estimate_provider_cost,
+    extract_deepline_cost,
     extract_exa_cost_dollars,
     extract_openrouter_cost_dollars,
     openrouter_perplexity_pricing_fallback,
@@ -80,6 +85,15 @@ def test_docker_provider_cost_scope_includes_evaluation_scope(monkeypatch):
     second = _docker_cost_scope_for_seed(monkeypatch, "sha256:" + "2" * 64)
 
     assert first != second
+
+
+def test_default_provider_wiring_includes_deepline():
+    registry = {entry.id: entry for entry in provider_evidence_proxy.seed_provider_registry()}
+    assert registry["deepline"].base_url == "https://code.deepline.com"
+    assert registry["deepline"].auth_kind == "bearer"
+    assert "DEEPLINE_API_KEY" in registry["deepline"].credential_ref
+    assert "DEEPLINE_API_KEY" in DEFAULT_ENV_PASSTHROUGH
+    assert "DEEPLINE_API_KEY" in PROVIDER_KEY_ENV_PASSTHROUGH
 
 
 def test_scrapingdog_cost_map_uses_current_endpoint_credits():
@@ -187,6 +201,77 @@ def test_scrapingdog_company_profile_cost_matches_private_model_call_shape():
         assert failed.credits == 0
         assert failed.cost_usd == Decimal("0")
         assert failed.cost_source == "provider_failure_zero_cost"
+
+
+def test_deepline_cost_parsing_and_fallback_for_private_model_play(monkeypatch):
+    monkeypatch.delenv("RESEARCH_LAB_DEEPLINE_COST_PER_CREDIT_USD", raising=False)
+    request_body = b'{"name":"company-domain-firmographics","input":{"domain":"example.com"}}'
+
+    assert deepline_play_name_from_request(request_body) == "company-domain-firmographics"
+    assert deepline_credits_for_play("company-domain-firmographics") == 1
+    assert extract_deepline_cost(b'{"billing":{"credits":2}}') == (None, Decimal("2"))
+    assert extract_deepline_cost(b'{"billing":{"cost_usd":"0.18"}}') == (Decimal("0.18"), None)
+
+    fallback = estimate_provider_cost(
+        provider="deepline",
+        upstream_url="https://code.deepline.com/api/v2/plays/run",
+        status=200,
+        response_body=b'{"run":{"id":"run_123","status":"running"}}',
+        request_body=request_body,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert fallback.billable
+    assert fallback.credits == 1
+    assert fallback.cost_usd == Decimal("0.10")
+    assert fallback.cost_source == "deepline_play_credit_map"
+
+    response_credits = estimate_provider_cost(
+        provider="deepline",
+        upstream_url="https://code.deepline.com/api/v2/plays/run",
+        status=200,
+        response_body=b'{"billing":{"credits":"1.5"}}',
+        request_body=request_body,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert response_credits.billable
+    assert response_credits.cost_usd == Decimal("0.150")
+    assert response_credits.cost_source == "deepline_response_credits"
+
+    response_cost = estimate_provider_cost(
+        provider="deepline",
+        upstream_url="https://code.deepline.com/api/v2/plays/run",
+        status=200,
+        response_body=b'{"billing":{"cost_usd":"0.27"}}',
+        request_body=request_body,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert response_cost.billable
+    assert response_cost.cost_usd == Decimal("0.27")
+    assert response_cost.cost_source == "deepline_response_cost"
+
+    poll = estimate_provider_cost(
+        provider="deepline",
+        upstream_url="https://code.deepline.com/api/v2/runs/run_123",
+        status=200,
+        response_body=b'{"run":{"status":"completed"}}',
+        request_body=None,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert not poll.billable
+    assert poll.cost_usd == Decimal("0")
+    assert poll.cost_source == "deepline_run_poll_zero_cost"
+
+    failed = estimate_provider_cost(
+        provider="deepline",
+        upstream_url="https://code.deepline.com/api/v2/plays/run",
+        status=500,
+        response_body=b'{"error":"temporary"}',
+        request_body=request_body,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert not failed.billable
+    assert failed.cost_usd == Decimal("0")
+    assert failed.cost_source == "provider_failure_zero_cost"
 
 
 def test_failed_provider_call_adds_zero_cost():
@@ -490,6 +575,32 @@ class _FakeProvider(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class _FakeDeeplineProvider(BaseHTTPRequestHandler):
+    seen_auth_headers: list[str] = []
+
+    def log_message(self, *args):  # noqa: ANN001
+        pass
+
+    def do_POST(self):  # noqa: N802
+        type(self).seen_auth_headers.append(self.headers.get("Authorization") or "")
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
+        body = json.dumps(
+            {
+                "kind": "run",
+                "schemaVersion": "1.0",
+                "run": {"id": "run_deepline_123", "status": "running"},
+                "outputs": {},
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 class _FakeExaAgentProvider(BaseHTTPRequestHandler):
     calls = 0
 
@@ -723,6 +834,60 @@ def test_evidence_proxy_emits_cost_event_header_for_live_success():
             assert event["evidence"] == "recorded"
             assert event["billable"] is True
             assert event["cost_usd"] == 0.0123
+    finally:
+        if proxy is not None:
+            proxy.shutdown()
+            proxy.server_close()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_evidence_proxy_tracks_deepline_private_model_play_run():
+    _FakeDeeplineProvider.seen_auth_headers = []
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeDeeplineProvider)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    proxy = None
+    try:
+        registry = [
+            provider_evidence_proxy.ProviderRegistryEntry(
+                id="deepline",
+                base_url=f"http://127.0.0.1:{upstream.server_address[1]}",
+                auth_kind="bearer",
+                auth_name="Authorization",
+                credential_ref=("DEEPLINE_API_KEY",),
+            )
+        ]
+        proxy, _store, _proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
+            host="127.0.0.1",
+            port=0,
+            registry=registry,
+            credential_overrides={"deepline": "redacted-test-key"},
+        )
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_address[1]}/deepline/api/v2/plays/run",
+            data=json.dumps(
+                {"name": "company-domain-firmographics", "input": {"domain": "example.com"}}
+            ).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "X-Research-Lab-Cost-Scope": "deepline-scope",
+                "X-Research-Lab-Cost-Cap-Usd": "1.00",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            event = decode_cost_event_header(response.headers.get("X-Research-Lab-Provider-Cost-Event"))
+
+        assert _FakeDeeplineProvider.seen_auth_headers == ["Bearer redacted-test-key"]
+        assert event is not None
+        assert event["provider"] == "deepline"
+        assert event["endpoint"] == "/api/v2/plays/run"
+        assert event["billable"] is True
+        assert event["cost_usd"] == 0.1
+        assert event["cost_source"] == "deepline_play_credit_map"
+        assert event["credits"] == 1
+        assert event["tracking_failed"] is False
     finally:
         if proxy is not None:
             proxy.shutdown()

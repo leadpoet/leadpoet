@@ -44,6 +44,37 @@ def _provider_cost_trace_entry(seq: int = 1) -> dict:
 
 
 @pytest.mark.asyncio
+async def test_provider_cost_persists_deepline_provider_label(monkeypatch):
+    inserted: list[dict] = []
+
+    async def capture_insert(table: str, row: dict) -> dict:
+        assert table == "research_lab_provider_cost_events"
+        inserted.append(row)
+        return row
+
+    entry = _provider_cost_trace_entry()
+    entry["provider_cost_event"].update(
+        {
+            "provider": "deepline",
+            "endpoint": "/api/v2/runs/run_123",
+            "cost_source": "deepline_response_credits",
+        }
+    )
+
+    monkeypatch.setattr(sw, "insert_row", capture_insert)
+
+    await sw._persist_provider_cost_events(
+        entries=[entry],
+        run_type="private_baseline_rebenchmark",
+        icp_ref="qualification_icp:test",
+        runner_role="baseline",
+    )
+
+    assert inserted
+    assert inserted[0]["provider"] == "deepline"
+
+
+@pytest.mark.asyncio
 async def test_provider_cost_duplicate_insert_is_idempotent(monkeypatch, caplog):
     async def duplicate_insert(table: str, row: dict) -> dict:
         assert table == "research_lab_provider_cost_events"

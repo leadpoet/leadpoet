@@ -358,7 +358,31 @@ export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 export GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
 export LEADPOET_GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-leadpoet/prod/gateway/env}"
 export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="${RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI:-s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json}"
+export RESEARCH_LAB_EVIDENCE_PROXY_URL="${RESEARCH_LAB_EVIDENCE_PROXY_URL:-http://172.17.0.1:8791}"
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
+
+echo "Starting Research Lab provider evidence proxy"
+mkdir -p /home/ec2-user/research_lab_evidence
+cd /home/ec2-user
+setsid python3 -m gateway.research_lab.provider_evidence_proxy \
+  --host 172.17.0.1 \
+  --port 8791 \
+  --day-cache /home/ec2-user/research_lab_evidence/day_cache.json \
+  >> "$GATEWAY_ROOT/provider_evidence_proxy.log" 2>&1 < /dev/null &
+PROVIDER_PROXY_PID="$!"
+echo "relaunched provider evidence proxy pid: $PROVIDER_PROXY_PID"
+for i in $(seq 1 10); do
+  if ss -ltn "sport = :8791" 2>/dev/null | grep -q ":8791"; then
+    echo "provider evidence proxy listening on :8791 after ${i}s"
+    break
+  fi
+  sleep 1
+done
+if ! ss -ltn "sport = :8791" 2>/dev/null | grep -q ":8791"; then
+  echo "ERROR: provider evidence proxy did not start on :8791"
+  tail -80 "$GATEWAY_ROOT/provider_evidence_proxy.log" || true
+  exit 1
+fi
 
 cd "$GATEWAY_ROOT"
 setsid python3 -u main.py > gateway.log 2>&1 < /dev/null &

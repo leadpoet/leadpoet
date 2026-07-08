@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS public.research_lab_provider_cost_events (
     icp_ref             TEXT        NOT NULL,
     icp_hash            TEXT,
     runner_role         TEXT        NOT NULL DEFAULT 'unknown',
-    provider            TEXT        NOT NULL CHECK (provider IN ('exa', 'or', 'sd', 'unknown')),
+    provider            TEXT        NOT NULL CHECK (provider IN ('exa', 'or', 'sd', 'deepline', 'unknown')),
     endpoint            TEXT        NOT NULL,
     model               TEXT        NOT NULL DEFAULT '',
     request_fingerprint TEXT        NOT NULL CHECK (request_fingerprint ~ '^[0-9a-f]{64}$'),

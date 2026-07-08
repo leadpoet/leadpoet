@@ -1576,7 +1576,7 @@ async def _persist_provider_cost_events(
         if not event:
             continue
         provider = str(event.get("provider") or "unknown")
-        if provider not in {"exa", "or", "sd"}:
+        if provider not in {"exa", "or", "sd", "deepline"}:
             provider = "unknown"
         anchored_payload = {
             "event": event,

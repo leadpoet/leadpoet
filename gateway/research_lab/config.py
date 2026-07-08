@@ -507,9 +507,9 @@ class ResearchLabGatewayConfig:
     loop_probe_max_probes: int = 4
     loop_probe_max_cost_microusd: int = 250_000
     # W5/W6 SOURCE_ADD execution + two-leg emission rewards (§3.4 config,
-    # §8 launch defaults). Intake is live by default; rewards remain gated.
+    # §8 launch defaults). Intake and reward rails are live by default.
     source_add_enabled: bool = True
-    source_add_rewards_enabled: bool = False
+    source_add_rewards_enabled: bool = True
     # KMS key for miner-submitted source credentials; empty falls back to the
     # OpenRouter key-vault key at the API layer.
     source_add_credential_kms_key_id: str = ""
@@ -1016,7 +1016,7 @@ class ResearchLabGatewayConfig:
                 _int("RESEARCH_LAB_LOOP_PROBE_MAX_COST_MICROUSD", 250_000),
             ),
             source_add_enabled=_truthy("RESEARCH_LAB_SOURCE_ADD_ENABLED", "true"),
-            source_add_rewards_enabled=_truthy("RESEARCH_LAB_SOURCE_ADD_REWARDS_ENABLED", "false"),
+            source_add_rewards_enabled=_truthy("RESEARCH_LAB_SOURCE_ADD_REWARDS_ENABLED", "true"),
             source_add_credential_kms_key_id=os.getenv("RESEARCH_LAB_SOURCE_ADD_CREDENTIAL_KMS_KEY_ID", ""),
             source_add_sandbox_image=os.getenv("RESEARCH_LAB_SOURCE_ADD_SANDBOX_IMAGE", "python:3.11-slim"),
             source_add_trial_timeout_seconds=max(

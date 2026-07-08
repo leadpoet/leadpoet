@@ -44,7 +44,12 @@ logger = logging.getLogger(__name__)
 # tick and retries next interval, so a stall becomes a ~30s blip instead of a
 # multi-minute outage. 30s is far above normal PostgREST latency (sub-second to
 # a few seconds), so legitimate queries never trip it.
-_SYNC_HTTP_TIMEOUT_SECONDS = int(os.getenv("SUPABASE_SYNC_TIMEOUT_SECONDS", "30"))
+_SYNC_HTTP_TIMEOUT_SECONDS = int(
+    os.getenv(
+        "SUPABASE_TIMEOUT_SECONDS",
+        os.getenv("SUPABASE_SYNC_TIMEOUT_SECONDS", "8"),
+    )
+)
 
 
 def _apply_sync_timeout(client: Client) -> Client:
@@ -171,4 +176,3 @@ async def get_async_write_client() -> AsyncClient:
         logger.info("✅ Async Supabase WRITE client initialized (SERVICE_ROLE_KEY)")
 
         return _async_write_client
-

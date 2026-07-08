@@ -14,12 +14,18 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Any, Optional
 from datetime import datetime
+import asyncio
+import os
+import time
 
 from gateway.build_info import get_build_info
 from gateway.utils.tee_client import tee_client
 
 
 router = APIRouter()
+_ATTEST_CACHE_TTL_SECONDS = float(os.getenv("GATEWAY_ATTEST_CACHE_TTL_SECONDS", "30"))
+_attest_cache_lock = asyncio.Lock()
+_attest_cache: dict[str, Any] = {"fetched_at_mono": 0.0, "data": None}
 
 
 class AttestationResponse(BaseModel):
@@ -47,6 +53,21 @@ def get_github_commit() -> Optional[str]:
     if build_info.get("is_commit_known") and commit:
         return commit
     return None
+
+
+async def _get_cached_attestation(force: bool = False) -> dict[str, Any]:
+    now = time.monotonic()
+    async with _attest_cache_lock:
+        if (
+            not force
+            and _attest_cache["data"] is not None
+            and now - _attest_cache["fetched_at_mono"] < _ATTEST_CACHE_TTL_SECONDS
+        ):
+            return dict(_attest_cache["data"])
+        data = await tee_client.get_attestation()
+        _attest_cache["data"] = dict(data)
+        _attest_cache["fetched_at_mono"] = time.monotonic()
+        return data
 
 
 @router.get("/attest", response_model=AttestationResponse)
@@ -84,8 +105,8 @@ async def get_attestation():
     **Cost:** Free (no rate limiting - encourage frequent verification!)
     """
     try:
-        # Get attestation from TEE
-        attestation_data = await tee_client.get_attestation()
+        # Get attestation from TEE, with short TTL protection for public polls.
+        attestation_data = await _get_cached_attestation()
         
         # Get GitHub commit hash from the same source used by /build-info.
         build_info = get_build_info()
@@ -128,8 +149,9 @@ async def attestation_health():
         }
     """
     try:
-        # Try to get attestation
-        attestation_data = await tee_client.get_attestation()
+        # Try to get attestation. Force-refresh health checks so operators can
+        # verify the enclave path even when /attest is being served from cache.
+        attestation_data = await _get_cached_attestation(force=True)
         
         # Check if all required fields present
         required_fields = ["attestation_document", "public_key", "code_hash"]

@@ -53,6 +53,7 @@ from supabase import create_client, Client
 # submit hash+values in one request to /validate. No separate reveal phase needed.
 from gateway.api import epoch, validate, manifest, submit, attest, weights, attestation
 from gateway.api import role_translate
+from gateway.api import metrics as metrics_api
 
 # Import qualification router (Lead Qualification Agent Competition - Phase 10)
 from gateway.qualification.api.router import qualification_router
@@ -229,6 +230,7 @@ async def lifespan(app: FastAPI):
     icp_task = None
     fulfillment_task_handle = None
     research_lab_worker_supervisor = None
+    hotkey_bucket_cleanup_task = None
 
     # Now use async_subtensor in a try/finally to ensure cleanup
     try:
@@ -363,6 +365,17 @@ async def lifespan(app: FastAPI):
             from gateway.utils.rate_limiter import rate_limiter_cleanup_task
             rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
             print("✅ Rate limiter cleanup task started")
+
+            async def _hotkey_bucket_cleanup_loop():
+                from gateway.utils.hotkey_bucket import ALL_BUCKETS, RECENT_NONCES
+                while True:
+                    await asyncio.sleep(300)
+                    for bucket in ALL_BUCKETS:
+                        bucket.prune()
+                    RECENT_NONCES.prune()
+
+            hotkey_bucket_cleanup_task = asyncio.create_task(_hotkey_bucket_cleanup_loop())
+            print("✅ Hotkey bucket cleanup task started")
         
             # ICP rotation task (resets daily at 12 AM ET)
             # Note: Initial ICP set already created above (outside skip_bg_tasks check)
@@ -425,6 +438,7 @@ async def lifespan(app: FastAPI):
             anchor_task,
             hourly_batch_task_handle,
             rate_limiter_task,
+            hotkey_bucket_cleanup_task,
             icp_task,
             fulfillment_task_handle,
         ]
@@ -489,6 +503,14 @@ app.add_middleware(
 )
 
 # ============================================================
+# Request Body Guard
+# ============================================================
+
+from gateway.middleware.body_size import BodySizeLimitMiddleware
+
+app.add_middleware(BodySizeLimitMiddleware)
+
+# ============================================================
 # Request Priority Middleware (Validator > Miner)
 # ============================================================
 # Prioritize validator requests (/epoch/, /validate) over miner requests (/presign, /submit)
@@ -536,6 +558,7 @@ app.include_router(attest.router)  # TEE attestation endpoint (legacy /attest)
 app.include_router(attestation.router)  # TEE attestation endpoint (/attestation/document, /attestation/pubkey)
 app.include_router(weights.router)  # Weights submission for auditor validators
 app.include_router(role_translate.router)  # POST /fulfillment/translate-role (DeepL-backed cache)
+app.include_router(metrics_api.router)
 
 # Lead Qualification Agent Competition API (Phase 10)
 app.include_router(qualification_router)
@@ -880,6 +903,8 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=8000,
-        log_level="info"
-       
+        log_level="info",
+        limit_concurrency=int(os.getenv("GATEWAY_UVICORN_LIMIT_CONCURRENCY", "300")),
+        backlog=int(os.getenv("GATEWAY_UVICORN_BACKLOG", "2048")),
+        timeout_keep_alive=int(os.getenv("GATEWAY_UVICORN_KEEPALIVE_SECONDS", "5")),
     )

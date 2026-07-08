@@ -16,6 +16,8 @@ the log at the moment it happens instead of being reconstructed after a
 restart.
 """
 
+from __future__ import annotations
+
 import faulthandler
 import logging
 import os
@@ -32,6 +34,20 @@ STALL_THRESHOLD_SECONDS = float(os.getenv("LOOP_WATCHDOG_STALL_THRESHOLD_SECONDS
 DUMP_COOLDOWN_SECONDS = float(os.getenv("LOOP_WATCHDOG_DUMP_COOLDOWN_SECONDS", "300"))
 
 _started = threading.Event()
+_last_pong_lock = threading.Lock()
+_last_pong_mono = time.monotonic()
+
+
+def _mark_pong(now_mono: float | None = None) -> None:
+    global _last_pong_mono
+    with _last_pong_lock:
+        _last_pong_mono = now_mono if now_mono is not None else time.monotonic()
+
+
+def last_ping_age_seconds() -> float:
+    """Seconds since the event loop last ran the watchdog no-op callback."""
+    with _last_pong_lock:
+        return max(0.0, time.monotonic() - _last_pong_mono)
 
 
 def start_loop_watchdog(loop) -> None:
@@ -53,6 +69,7 @@ def start_loop_watchdog(loop) -> None:
             responded = pong.wait(STALL_THRESHOLD_SECONDS)
             now_mono = time.monotonic()
             if responded:
+                _mark_pong(now_mono)
                 if stall_started_mono is not None:
                     logger.critical(
                         "EVENT LOOP RECOVERED after %.1fs stall",

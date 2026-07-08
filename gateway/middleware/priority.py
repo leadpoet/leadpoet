@@ -1,186 +1,206 @@
-"""
-Request Priority Middleware for Gateway
+"""Bounded request-priority middleware for the gateway."""
 
-Prioritizes validator requests over miner requests to prevent validators
-from timing out during high miner submission traffic.
+from __future__ import annotations
 
-Design:
-- Validator paths get immediate processing (no throttling)
-- Qualification model paths get immediate processing (rare, shouldn't compete with sourcing)
-- Miner sourcing paths are throttled (max concurrent limit)
-- Simple, safe, no changes to database logic
-
-Validator Priority Paths (time-sensitive, can fail if delayed):
-- GET /epoch/{id}/leads (validators fetching leads for validation)
-- POST /validate (validators submitting decision hashes)
-- POST /reveal/ and /reveal/batch (validators revealing decisions)
-- POST /weights/submit (auditor validators submitting weights)
-- /qualification/validator/* (register, request-evaluation, report-results, etc.)
-- /qualification/proxy (API proxy for model evaluation)
-
-Qualification Model Paths (priority - rare, bypasses sourcing throttle):
-- /qualification/model/presign (miners uploading qualification models)
-- /qualification/model/submit (miners submitting qualification models)
-
-Miner Throttled Paths (sourcing only):
-- POST /presign (miners requesting lead presigned URLs)
-- POST /submit (miners submitting leads)
-"""
+import asyncio
+import logging
+import os
+from collections import Counter
+from dataclasses import dataclass
+from typing import Iterable
 
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
-import asyncio
-import os
-import time
 
-# Longest a miner request may queue for a semaphore slot before being shed
-# with a 503.  Miner clients stop reading after ~15s, so a slot granted
-# later than that is spent rendering a response nobody receives — while
-# blocking a slot that could serve a live request.  Shedding early keeps
-# the queue bounded: under overload miners get a fast 503 and retry on
-# their normal polling cadence instead of stacking up behind dead sockets
-# until the queue can never drain.
-MINER_SLOT_WAIT_TIMEOUT_SECONDS = float(
-    os.getenv("MINER_SLOT_WAIT_TIMEOUT_SECONDS", "8")
+from gateway.utils.ops_registry import set_priority_middleware
+
+
+logger = logging.getLogger(__name__)
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+@dataclass(frozen=True)
+class RouteClass:
+    name: str
+    max_concurrent: int
+    max_waiting: int
+    wait_timeout_s: float
+
+
+VALIDATOR_CLASS = RouteClass(
+    "validator",
+    _int_env("VALIDATOR_MAX_CONCURRENT", 75),
+    _int_env("VALIDATOR_MAX_WAITING", 40),
+    _float_env("VALIDATOR_SLOT_WAIT_TIMEOUT_SECONDS", 15),
+)
+MINER_CLASS = RouteClass(
+    "miner",
+    _int_env("MINER_MAX_CONCURRENT", 75),
+    _int_env("MINER_MAX_WAITING", 40),
+    _float_env("MINER_SLOT_WAIT_TIMEOUT_SECONDS", 8),
+)
+OTHER_CLASS = RouteClass(
+    "other",
+    _int_env("OTHER_MAX_CONCURRENT", 150),
+    _int_env("OTHER_MAX_WAITING", 80),
+    _float_env("OTHER_SLOT_WAIT_TIMEOUT_SECONDS", 8),
 )
 
 
+VALIDATOR_EXACT = {
+    "/validate",
+    "/weights/submit",
+    "/fulfillment/scoring",
+    "/fulfillment/score",
+    "/fulfillment/rewards/active",
+}
+VALIDATOR_PREFIXES = (
+    "/epoch/",
+    "/qualification/validator/",
+    "/fulfillment/ban/",
+    "/fulfillment/results/",
+)
+MINER_EXACT = {
+    "/presign",
+    "/submit",
+    "/submit/",
+    "/fulfillment/requests/active",
+    "/fulfillment/commit",
+    "/fulfillment/reveal",
+}
+MINER_PREFIXES = (
+    "/fulfillment/excluded-now/",
+)
+
+
+def _matches(path: str, exact: set[str], prefixes: Iterable[str]) -> bool:
+    return path in exact or any(path.startswith(prefix) for prefix in prefixes)
+
+
+def classify_path(path: str) -> str:
+    if _matches(path, VALIDATOR_EXACT, VALIDATOR_PREFIXES):
+        return "validator"
+    if _matches(path, MINER_EXACT, MINER_PREFIXES):
+        return "miner"
+    return "other"
+
+
+class _Pool:
+    def __init__(self, route_class: RouteClass) -> None:
+        self.route_class = route_class
+        self.semaphore = asyncio.Semaphore(route_class.max_concurrent)
+        self.waiting = 0
+        self.in_flight = 0
+        self.shed = 0
+        self.requests = 0
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> bool:
+        async with self._lock:
+            self.requests += 1
+            if self.waiting >= self.route_class.max_waiting:
+                self.shed += 1
+                return False
+            self.waiting += 1
+        try:
+            await asyncio.wait_for(
+                self.semaphore.acquire(),
+                timeout=self.route_class.wait_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            async with self._lock:
+                self.shed += 1
+            return False
+        finally:
+            async with self._lock:
+                self.waiting = max(0, self.waiting - 1)
+        async with self._lock:
+            self.in_flight += 1
+        return True
+
+    async def release(self) -> None:
+        self.semaphore.release()
+        async with self._lock:
+            self.in_flight = max(0, self.in_flight - 1)
+
+    def snapshot(self) -> dict:
+        return {
+            "requests": self.requests,
+            "shed": self.shed,
+            "waiting": self.waiting,
+            "in_flight": self.in_flight,
+            "max_concurrent": self.route_class.max_concurrent,
+            "max_waiting": self.route_class.max_waiting,
+        }
+
+
 class PriorityMiddleware(BaseHTTPMiddleware):
-    """
-    Prioritize validator and qualification model requests over miner sourcing.
-    
-    Architecture:
-    - Validators bypass throttling (immediate processing)
-    - Qualification model submissions bypass throttling (rare, immediate)
-    - Sourcing miners use a semaphore (max N concurrent)
-    - No changes to request processing logic
-    - Safe: Only adds async waiting, never blocks
-    
-    Args:
-        max_concurrent_miners: Max concurrent miner sourcing requests (default: 20)
-        
-    Example:
-        from gateway.middleware.priority import PriorityMiddleware
-        app.add_middleware(PriorityMiddleware, max_concurrent_miners=20)
-    """
-    
-    def __init__(self, app, max_concurrent_miners: int = 20):
+    def __init__(self, app, max_concurrent_miners: int | None = None):
         super().__init__(app)
-        self.max_concurrent_miners = max_concurrent_miners
-        self.miner_semaphore = asyncio.Semaphore(max_concurrent_miners)
-        
-        # Track metrics
-        self.validator_requests = 0
-        self.qualification_model_requests = 0
-        self.miner_requests = 0
-        self.throttled_miners = 0
-        self.shed_miners = 0
-    
-    def _is_validator_request(self, path: str) -> bool:
-        """Check if request is from a validator (high priority)."""
-        validator_paths = [
-            "/epoch/",                      # GET /epoch/{id}/leads
-            "/validate",                    # POST /validate
-            "/reveal",                      # POST /reveal/ and /reveal/batch
-            "/weights",                     # POST /weights/submit
-            "/qualification/validator/",    # All qualification validator endpoints
-            "/qualification/proxy",         # API proxy for model evaluation
-            "/fulfillment/score",           # Validator fulfillment scoring
-            "/fulfillment/scoring",         # Validator fetching reveals to score
-            "/fulfillment/ban",             # Validator fulfillment ban requests
-            "/fulfillment/rewards/",        # Validator fetching active rewards
-                                            # for weight calculation (time-
-                                            # sensitive; one failed fetch ==
-                                            # one missed epoch of emission).
-            "/fulfillment/results/",        # Validator/dashboard queries
-        ]
-        return any(vpath in path for vpath in validator_paths)
-    
-    def _is_qualification_model_request(self, path: str) -> bool:
-        """Check if request is a qualification model submission (priority)."""
-        return "/qualification/model/" in path
-    
-    def _is_miner_request(self, path: str) -> bool:
-        """Check if request is a sourcing miner submission (throttled)."""
-        miner_paths = [
-            "/presign",                 # POST /presign
-            "/submit",                  # POST /submit
-            "/fulfillment/commit",      # Miner fulfillment commit
-            "/fulfillment/reveal",      # Miner fulfillment reveal
-            "/fulfillment/requests",    # Miner polling active requests
-            "/fulfillment/excluded-now",
-        ]
-        return any(mpath in path for mpath in miner_paths)
-    
+        if max_concurrent_miners is not None and "MINER_MAX_CONCURRENT" not in os.environ:
+            miner_class = RouteClass(
+                MINER_CLASS.name,
+                int(max_concurrent_miners),
+                MINER_CLASS.max_waiting,
+                MINER_CLASS.wait_timeout_s,
+            )
+        else:
+            miner_class = MINER_CLASS
+        self.pools = {
+            "validator": _Pool(VALIDATOR_CLASS),
+            "miner": _Pool(miner_class),
+            "other": _Pool(OTHER_CLASS),
+        }
+        self.path_counts = Counter()
+        set_priority_middleware(self)
+
     async def dispatch(self, request: Request, call_next):
-        """
-        Dispatch request with priority handling.
-        
-        Flow:
-        1. Validator requests → immediate processing
-        2. Qualification model requests → immediate processing
-        3. Sourcing miner requests → wait for semaphore (throttled)
-        4. Other requests → immediate processing (health checks, etc.)
-        """
         path = request.url.path
-        
-        print(f"🔍 MIDDLEWARE: {request.method} {path}")
-        
-        is_validator = self._is_validator_request(path)
-        is_qual_model = self._is_qualification_model_request(path)
-        is_miner = self._is_miner_request(path) and not is_qual_model
-        
-        print(f"   → Validator={is_validator}, QualModel={is_qual_model}, Miner={is_miner}")
-        
-        # PRIORITY 1: Validators bypass throttling
-        if is_validator:
-            self.validator_requests += 1
-            print(f"🔵 VALIDATOR REQUEST (priority): {request.method} {path}")
-            return await call_next(request)
-        
-        # PRIORITY 2: Qualification model submissions bypass throttling
-        if is_qual_model:
-            self.qualification_model_requests += 1
-            print(f"🟣 QUALIFICATION MODEL REQUEST (priority): {request.method} {path}")
-            return await call_next(request)
-        
-        # PRIORITY 3: Sourcing miners are throttled (max N concurrent)
-        if is_miner:
-            self.miner_requests += 1
-            
-            if self.miner_semaphore.locked():
-                self.throttled_miners += 1
-                print(f"⏸️  MINER THROTTLED (queue full): {request.method} {path}")
-                print(f"   📊 Stats: Validators={self.validator_requests}, "
-                      f"QualModels={self.qualification_model_requests}, "
-                      f"Miners={self.miner_requests}, Throttled={self.throttled_miners}")
-            
-            start_wait = time.time()
-            try:
-                await asyncio.wait_for(
-                    self.miner_semaphore.acquire(),
-                    timeout=MINER_SLOT_WAIT_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                self.shed_miners += 1
-                print(f"🛑 MINER SHED (no slot within "
-                      f"{MINER_SLOT_WAIT_TIMEOUT_SECONDS:.0f}s): "
-                      f"{request.method} {path} (shed={self.shed_miners})")
-                return JSONResponse(
-                    status_code=503,
-                    content={"detail": "Gateway at miner capacity — retry shortly"},
-                    headers={"Retry-After": "15"},
-                )
-            try:
-                wait_time = time.time() - start_wait
-                if wait_time > 0.1:
-                    print(f"⏳ MINER WAITED {wait_time:.2f}s for slot: {request.method} {path}")
+        route_class = classify_path(path)
+        pool = self.pools[route_class]
+        self.path_counts[route_class] += 1
 
-                return await call_next(request)
-            finally:
-                self.miner_semaphore.release()
-        
-        # PRIORITY 4: Other requests (health checks, etc.) - immediate
-        return await call_next(request)
+        acquired = await pool.acquire()
+        if not acquired:
+            logger.warning(
+                "gateway_request_shed class=%s method=%s path=%s",
+                route_class,
+                request.method,
+                path,
+            )
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Gateway at capacity - retry shortly"},
+                headers={"Retry-After": "15"},
+            )
 
+        try:
+            return await call_next(request)
+        finally:
+            await pool.release()
+
+    def snapshot(self) -> dict:
+        pool_snaps = {name: pool.snapshot() for name, pool in self.pools.items()}
+        return {
+            "requests_total": dict(self.path_counts),
+            "shed_total": {name: snap["shed"] for name, snap in pool_snaps.items()},
+            "waiting": {name: snap["waiting"] for name, snap in pool_snaps.items()},
+            "in_flight": {name: snap["in_flight"] for name, snap in pool_snaps.items()},
+            "max_concurrent": {
+                name: snap["max_concurrent"] for name, snap in pool_snaps.items()
+            },
+        }

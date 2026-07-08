@@ -36,7 +36,16 @@ from gateway.fulfillment.models import (
     scrub_company_name,
 )
 from gateway.models.events import EventType
-from gateway.utils.bans import is_hotkey_banned, is_hotkey_banned_sync, ban_hotkey
+from gateway.utils.bans import is_hotkey_banned_sync, ban_hotkey
+from gateway.utils.db_executor import run_db
+from gateway.utils.hotkey_bucket import (
+    COMMIT_BUCKETS,
+    POLL_BUCKETS,
+    RECENT_NONCES,
+    REVEAL_BUCKETS,
+    enforce as enforce_hotkey_bucket,
+    observe as observe_hotkey_bucket,
+)
 from gateway.utils.registry import is_registered_hotkey_async
 
 logger = logging.getLogger(__name__)
@@ -855,7 +864,11 @@ async def get_active_requests(miner_hotkey: str = ""):
     # loop saturates and the whole gateway stops answering.  Running the
     # body in a worker thread keeps the loop free; HTTPExceptions raised
     # inside propagate unchanged.
-    return await asyncio.to_thread(_get_active_requests_impl, miner_hotkey)
+    # Observe-only before identity proof. This gives operators visibility into
+    # hotkey-shaped poll floods without letting unauthenticated callers burn a
+    # miner's quota.
+    observe_hotkey_bucket(POLL_BUCKETS, miner_hotkey)
+    return await run_db(_get_active_requests_impl, miner_hotkey)
 
 
 def _get_active_requests_impl(miner_hotkey: str = ""):
@@ -1084,7 +1097,7 @@ async def get_excluded_now(request_id: str):
     # Same reasoning as /requests/active: the held-set loader is a chain of
     # blocking Supabase calls, so it runs in a worker thread to keep the
     # single event loop serving other requests.
-    return await asyncio.to_thread(_get_excluded_now_impl, request_id)
+    return await run_db(_get_excluded_now_impl, request_id)
 
 
 def _get_excluded_now_impl(request_id: str):
@@ -1113,9 +1126,16 @@ async def commit_leads(commit: FulfillmentCommitRequest):
         commit.signature, commit.nonce, commit.timestamp,
     )
 
+    if RECENT_NONCES.first_use(commit.miner_hotkey, commit.nonce):
+        enforce_hotkey_bucket(COMMIT_BUCKETS, commit.miner_hotkey)
+
+    return await run_db(_commit_leads_impl, commit)
+
+
+def _commit_leads_impl(commit: FulfillmentCommitRequest):
     supabase = _get_supabase()
 
-    banned, reason = await is_hotkey_banned(commit.miner_hotkey)
+    banned, reason = is_hotkey_banned_sync(commit.miner_hotkey)
     if banned:
         raise HTTPException(403, detail=f"Hotkey banned: {reason}")
 
@@ -1272,9 +1292,16 @@ async def reveal_leads(reveal: FulfillmentRevealRequest):
         reveal.signature, reveal.nonce, reveal.timestamp,
     )
 
+    if RECENT_NONCES.first_use(reveal.miner_hotkey, reveal.nonce):
+        enforce_hotkey_bucket(REVEAL_BUCKETS, reveal.miner_hotkey)
+
+    return await run_db(_reveal_leads_impl, reveal)
+
+
+def _reveal_leads_impl(reveal: FulfillmentRevealRequest):
     supabase = _get_supabase()
 
-    banned, reason = await is_hotkey_banned(reveal.miner_hotkey)
+    banned, reason = is_hotkey_banned_sync(reveal.miner_hotkey)
     if banned:
         raise HTTPException(403, detail=f"Hotkey banned: {reason}")
 
@@ -1646,8 +1673,7 @@ async def get_scoring_requests(
     # The blocking Supabase work runs OFF the event loop so it can never freeze
     # the gateway (which would time out miner submit/reveal calls and other
     # validators) while this single request assembles its payload.
-    import asyncio
-    return await asyncio.to_thread(_collect_scoring_requests_sync, validator_hotkey)
+    return await run_db(_collect_scoring_requests_sync, validator_hotkey)
 
 
 # ---------------------------------------------------------------
@@ -1671,6 +1697,15 @@ async def submit_scores(
         request_id=request_id,
     )
 
+    return await run_db(
+        _submit_scores_impl,
+        request_id,
+        validator_hotkey,
+        scores,
+    )
+
+
+def _submit_scores_impl(request_id: str, validator_hotkey: str, scores: List[dict]):
     supabase = _get_supabase()
 
     for s in scores:
@@ -1744,7 +1779,7 @@ async def submit_scores(
 # GET /fulfillment/results/{request_id}  — client fetches results
 # ---------------------------------------------------------------
 @fulfillment_router.get("/results/{request_id}")
-async def get_results(request_id: str):
+def get_results(request_id: str):
     if not _enable_fulfillment():
         raise HTTPException(503, detail="Fulfillment system is not enabled")
     if not _is_uuid(request_id):
@@ -1830,8 +1865,7 @@ async def get_active_rewards(current_epoch: int):
     dropping ALL fulfillment rewards some epochs. Offloading keeps it well
     under the 45s budget even during slow spells.
     """
-    import asyncio
-    return await asyncio.to_thread(_collect_active_rewards_sync, current_epoch)
+    return await run_db(_collect_active_rewards_sync, current_epoch)
 
 
 def _collect_active_rewards_sync(current_epoch: int) -> dict:
@@ -1882,7 +1916,7 @@ def _rolling_epoch_window_start(epochs: int = 140) -> datetime:
 
 
 @fulfillment_router.get("/leaderboard")
-async def get_fulfillment_leaderboard(limit: int = 3):
+def get_fulfillment_leaderboard(limit: int = 3):
     """Return top fulfillment miners ranked by `is_winner` count in the last 140 epochs.
 
     Window: rolling 140-epoch window (~7.0 days) anchored to the current

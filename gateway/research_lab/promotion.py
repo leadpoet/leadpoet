@@ -19,6 +19,7 @@ from gateway.research_lab.bundles import contains_secret_material, sha256_json
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.public_benchmarks import build_public_benchmark_report
+from gateway.research_lab.source_add_ablation import AdapterAblationResult, arm_leg2_for_merge
 from gateway.research_lab.store import (
     canonical_hash,
     create_candidate_evaluation_event,
@@ -1444,6 +1445,153 @@ async def latest_public_benchmark_summary() -> dict[str, Any]:
     }
 
 
+_SOURCE_ADD_ATTRIBUTION_KEYS = (
+    "source_add_implementation_attribution",
+    "source_add_implementation_attributions",
+    "source_add_reward_attribution",
+)
+
+
+def _source_add_attribution_docs(score_bundle: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Trusted score-bundle source-add attribution docs.
+
+    The candidate artifact itself is deliberately not scanned here: leg-2 is a
+    reward, so only gateway-produced scoring/promotion evidence may arm it.
+    """
+
+    docs: list[dict[str, Any]] = []
+
+    def _append(value: Any) -> None:
+        if isinstance(value, Mapping):
+            docs.append(dict(value))
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            for item in value:
+                if isinstance(item, Mapping):
+                    docs.append(dict(item))
+
+    for key in _SOURCE_ADD_ATTRIBUTION_KEYS:
+        _append(score_bundle.get(key))
+    nested = score_bundle.get("source_add")
+    if isinstance(nested, Mapping):
+        _append(nested.get("implementation_attribution"))
+        _append(nested.get("implementation_attributions"))
+    return docs
+
+
+def _source_add_string_seq(doc: Mapping[str, Any], *keys: str) -> tuple[str, ...]:
+    values: list[str] = []
+    for key in keys:
+        value = doc.get(key)
+        if isinstance(value, str):
+            if value.strip():
+                values.append(value.strip())
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            values.extend(str(item).strip() for item in value if str(item or "").strip())
+    return tuple(dict.fromkeys(values))
+
+
+def _source_add_float(value: Any, default: float | None = None) -> float | None:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _source_add_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in TRUTHY:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _source_add_first_float(doc: Mapping[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        if key in doc:
+            value = _source_add_float(doc.get(key))
+            if value is not None:
+                return value
+    return None
+
+
+def _source_add_ablation_from_doc(
+    *,
+    doc: Mapping[str, Any],
+    adapter_id: str,
+    registry_provider_id: str,
+    candidate_id: str,
+    threshold_points: float,
+) -> AdapterAblationResult | None:
+    raw = doc.get("ablation_result") or doc.get("ablation")
+    if not isinstance(raw, Mapping):
+        return None
+    on_score = _source_add_first_float(
+        raw,
+        "adapter_on_score",
+        "on_score",
+        "source_enabled_score",
+        "enabled_score",
+    )
+    off_score = _source_add_first_float(
+        raw,
+        "adapter_off_score",
+        "off_score",
+        "source_disabled_score",
+        "disabled_score",
+    )
+    if on_score is None or off_score is None:
+        return None
+    delta = _source_add_float(raw.get("delta_points"), on_score - off_score)
+    threshold = _source_add_float(raw.get("threshold_points"), threshold_points) or threshold_points
+    return AdapterAblationResult(
+        adapter_id=adapter_id,
+        registry_provider_id=registry_provider_id,
+        candidate_ref=str(raw.get("candidate_ref") or candidate_id),
+        holdout_ref=str(raw.get("holdout_ref") or doc.get("holdout_ref") or ""),
+        adapter_on_score=float(on_score),
+        adapter_off_score=float(off_score),
+        delta_points=float(delta if delta is not None else on_score - off_score),
+        threshold_points=float(threshold),
+        passed=_source_add_bool(raw.get("passed"), (on_score - off_score) >= float(threshold)),
+        evaluated_at=str(
+            raw.get("evaluated_at")
+            or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        ),
+        result_hash=str(raw.get("result_hash") or ""),
+    )
+
+
+async def _promotion_reason_recorded(
+    *,
+    candidate_id: str,
+    score_bundle_id: str,
+    reason: str,
+    adapter_id: str,
+) -> bool:
+    rows = await select_many(
+        "research_lab_candidate_promotion_events",
+        columns="promotion_event_id,event_doc,created_at",
+        filters=(
+            ("candidate_id", candidate_id),
+            ("source_score_bundle_id", score_bundle_id),
+            ("event_type", "promotion_checked"),
+        ),
+        order_by=(("created_at", True),),
+        limit=100,
+    )
+    for row in rows:
+        doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
+        if str(doc.get("reason") or "") == reason and str(doc.get("adapter_id") or "") == adapter_id:
+            return True
+    return False
+
+
 class ResearchLabPromotionController:
     """Process scored candidates into active private model versions."""
 
@@ -1555,6 +1703,14 @@ class ResearchLabPromotionController:
                 improvement_points=improvement_points,
                 threshold=threshold,
             )
+            source_add_reward_status = await self._maybe_create_source_add_implementation_rewards(
+                candidate=candidate,
+                score_bundle_row=score_bundle_row,
+                score_bundle=score_bundle,
+                improvement_points=improvement_points,
+                threshold=threshold,
+                champion_reward_status=reward_status,
+            )
             return {
                 "status": "already_promoted",
                 "promotion_event_id": str(merged_event.get("promotion_event_id") or ""),
@@ -1562,6 +1718,7 @@ class ResearchLabPromotionController:
                 "private_source_status": private_source_status,
                 "benchmark_bridge_status": benchmark_bridge_status,
                 **reward_status,
+                **source_add_reward_status,
             }
 
         await create_candidate_promotion_event(
@@ -2069,11 +2226,20 @@ class ResearchLabPromotionController:
             improvement_points=improvement_points,
             threshold=threshold,
         )
+        source_add_reward_status = await self._maybe_create_source_add_implementation_rewards(
+            candidate=candidate,
+            score_bundle_row=score_bundle_row,
+            score_bundle=score_bundle,
+            improvement_points=improvement_points,
+            threshold=threshold,
+            champion_reward_status=reward_status,
+        )
         return {
             "status": "merged",
             "private_model_version_id": str(version_row["private_model_version_id"]),
             "benchmark_bridge_status": benchmark_bridge,
             **reward_status,
+            **source_add_reward_status,
         }
 
     async def _create_promoted_candidate_benchmark_bridge(
@@ -2588,6 +2754,226 @@ class ResearchLabPromotionController:
             event_doc={"champion_reward_id": str(row["champion_reward_id"])},
         )
         return {"champion_reward_status": "created", "champion_reward_id": str(row["champion_reward_id"])}
+
+    async def _maybe_create_source_add_implementation_rewards(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_row: Mapping[str, Any],
+        score_bundle: Mapping[str, Any],
+        improvement_points: float,
+        threshold: float,
+        champion_reward_status: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not getattr(self.config, "source_add_rewards_enabled", False):
+            return {"source_add_reward_status": "disabled"}
+        status = str(champion_reward_status.get("champion_reward_status") or "")
+        if status not in {"created", "already_created"}:
+            return {
+                "source_add_reward_status": "skipped_champion_reward_not_active",
+                "champion_reward_status": status,
+            }
+        attribution_docs = _source_add_attribution_docs(score_bundle)
+        if not attribution_docs:
+            return {"source_add_reward_status": "skipped_no_attribution"}
+        candidate_id = str(candidate["candidate_id"])
+        score_bundle_id = str(score_bundle_row.get("score_bundle_id") or "")
+        routed_registry_ids = sorted(
+            {
+                item
+                for doc in attribution_docs
+                for item in _source_add_string_seq(
+                    doc,
+                    "routed_registry_ids",
+                    "merged_diff_routed_registry_ids",
+                    "registry_provider_ids",
+                    "provider_registry_ids",
+                    "registry_provider_id",
+                    "provider_registry_id",
+                )
+            }
+        )
+        adapter_ids = sorted(
+            {
+                item
+                for doc in attribution_docs
+                for item in _source_add_string_seq(doc, "adapter_id", "adapter_ids")
+            }
+        )
+        if not routed_registry_ids and not adapter_ids:
+            return {"source_add_reward_status": "blocked", "blockers": ["missing_adapter_or_registry_id"]}
+        filters: tuple[tuple[Any, ...], ...]
+        if routed_registry_ids:
+            filters = (("registry_provider_id", "in", routed_registry_ids),)
+        else:
+            filters = (("adapter_id", "in", adapter_ids),)
+        try:
+            catalog_rows = await select_many(
+                "research_lab_source_catalog",
+                columns=(
+                    "catalog_id,adapter_id,miner_ref,registry_provider_id,accepted_at,catalog_doc"
+                ),
+                filters=filters,
+                limit=100,
+            )
+            if adapter_ids:
+                wanted = set(adapter_ids)
+                catalog_rows = [row for row in catalog_rows if str(row.get("adapter_id") or "") in wanted]
+            if not catalog_rows:
+                return {"source_add_reward_status": "blocked", "blockers": ["accepted_source_not_found"]}
+            reward_rows = await select_many(
+                "research_lab_source_add_reward_current",
+                columns="reward_ref,adapter_id,leg,current_reward_status",
+                filters=(("adapter_id", "in", [str(row.get("adapter_id") or "") for row in catalog_rows]),),
+                limit=200,
+            )
+            evaluation_epoch = int(score_bundle.get("evaluation_epoch") or getattr(self.config, "evaluation_epoch", 0) or 0)
+            try:
+                current_epoch, _block, _epoch_source = await resolve_research_lab_evaluation_epoch(
+                    getattr(self.config, "evaluation_epoch", 0)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_source_add_reward_epoch_resolution_failed_using_bundle_epoch "
+                    "candidate=%s error=%s",
+                    _short_ref(candidate_id),
+                    str(exc)[:200],
+                )
+                current_epoch = evaluation_epoch
+            start_epoch = max(int(current_epoch), int(evaluation_epoch)) + 1
+            results: list[dict[str, Any]] = []
+            docs_by_adapter = {
+                adapter_id: doc
+                for doc in attribution_docs
+                for adapter_id in _source_add_string_seq(doc, "adapter_id", "adapter_ids")
+            }
+            docs_by_registry = {
+                registry_id: doc
+                for doc in attribution_docs
+                for registry_id in _source_add_string_seq(
+                    doc,
+                    "routed_registry_ids",
+                    "merged_diff_routed_registry_ids",
+                    "registry_provider_ids",
+                    "provider_registry_ids",
+                    "registry_provider_id",
+                    "provider_registry_id",
+                )
+            }
+            for row in catalog_rows:
+                adapter_id = str(row.get("adapter_id") or "")
+                registry_id = str(row.get("registry_provider_id") or "")
+                if not adapter_id:
+                    continue
+                doc = docs_by_adapter.get(adapter_id) or docs_by_registry.get(registry_id)
+                if not isinstance(doc, Mapping):
+                    continue
+                catalog_registry_ids = [registry_id] if registry_id else []
+                catalog_doc = row.get("catalog_doc") if isinstance(row.get("catalog_doc"), Mapping) else {}
+                catalog_registry_ids.extend(
+                    item
+                    for item in _source_add_string_seq(
+                        catalog_doc,
+                        "registry_provider_ids",
+                        "provider_registry_ids",
+                        "routed_registry_ids",
+                        "registry_provider_id",
+                        "provider_registry_id",
+                    )
+                    if item not in catalog_registry_ids
+                )
+                ablation = _source_add_ablation_from_doc(
+                    doc=doc,
+                    adapter_id=adapter_id,
+                    registry_provider_id=registry_id,
+                    candidate_id=candidate_id,
+                    threshold_points=float(getattr(self.config, "source_add_ablation_threshold_points", 0.5) or 0.5),
+                )
+                reward_doc, blockers = await arm_leg2_for_merge(
+                    adapter_id=adapter_id,
+                    adapter_owner_miner_ref=str(row.get("miner_ref") or ""),
+                    catalog_id=str(row.get("catalog_id") or ""),
+                    catalog_registry_ids=tuple(catalog_registry_ids),
+                    merged=True,
+                    merged_diff_routed_registry_ids=tuple(routed_registry_ids),
+                    merge_cleared_score_bar=True,
+                    shadow_monitor_live=_source_add_bool(doc.get("shadow_monitor_live"), False),
+                    shadow_window_days_elapsed=float(_source_add_float(doc.get("shadow_window_days_elapsed"), 0.0) or 0.0),
+                    shadow_window_survived=_source_add_bool(doc.get("shadow_window_survived"), False),
+                    ablation=ablation,
+                    start_epoch=start_epoch,
+                    accepted_at=str(row.get("accepted_at") or ""),
+                    market_open_at=str(
+                        doc.get("market_open_at")
+                        or catalog_doc.get("market_open_at")
+                        or ""
+                    ),
+                    existing_rewards=reward_rows,
+                    shadow_window_days_required=float(getattr(self.config, "source_add_shadow_window_days", 7.0) or 7.0),
+                    expiry_months=int(getattr(self.config, "source_add_leg2_expiry_months", 6) or 6),
+                    alpha_percent=float(getattr(self.config, "source_add_leg2_alpha_percent", 5.0) or 5.0),
+                    reward_epochs=int(getattr(self.config, "lab_reward_epochs", 20) or 20),
+                    persist=True,
+                )
+                reason = "source_add_leg2_reward_created" if reward_doc else "source_add_leg2_reward_blocked"
+                if not await _promotion_reason_recorded(
+                    candidate_id=candidate_id,
+                    score_bundle_id=score_bundle_id,
+                    reason=reason,
+                    adapter_id=adapter_id,
+                ):
+                    await create_candidate_promotion_event(
+                        candidate_id=candidate_id,
+                        source_score_bundle_id=score_bundle_id,
+                        event_type="promotion_checked",
+                        promotion_status="checked",
+                        improvement_points=improvement_points,
+                        threshold_points=threshold,
+                        worker_ref=self.worker_ref,
+                        event_doc=_db_safe_doc(
+                            {
+                                "reason": reason,
+                                "adapter_id": adapter_id,
+                                "catalog_id": str(row.get("catalog_id") or ""),
+                                "routed_registry_ids": sorted(set(routed_registry_ids) & set(catalog_registry_ids)),
+                                "reward_ref": str((reward_doc or {}).get("reward_ref") or ""),
+                                "blockers": blockers,
+                                "ablation_delta_points": (
+                                    reward_doc.get("trigger_evidence", {}).get("ablation_delta_points")
+                                    if isinstance(reward_doc, Mapping)
+                                    else None
+                                ),
+                            }
+                        ),
+                    )
+                results.append(
+                    {
+                        "adapter_id": adapter_id,
+                        "status": "created" if reward_doc else "blocked",
+                        "reward_ref": str((reward_doc or {}).get("reward_ref") or ""),
+                        "blockers": blockers,
+                    }
+                )
+            created = sum(1 for item in results if item.get("status") == "created")
+            blocked = sum(1 for item in results if item.get("status") == "blocked")
+            return {
+                "source_add_reward_status": "created" if created else "blocked",
+                "created": created,
+                "blocked": blocked,
+                "results": results,
+            }
+        except Exception as exc:  # noqa: BLE001 - source reward failure must not block promotion
+            logger.warning(
+                "research_lab_source_add_leg2_reward_failed candidate=%s score_bundle=%s error=%s",
+                _short_ref(candidate_id),
+                _short_ref(score_bundle_id),
+                _safe_text(str(exc))[:240],
+            )
+            return {
+                "source_add_reward_status": "failed",
+                "error_class": type(exc).__name__,
+                "error_hash": canonical_hash({"error": str(exc), "candidate_id": candidate_id})[:24],
+            }
 
     async def _maybe_finalize_missing_private_source_push(
         self,
@@ -3295,9 +3681,18 @@ async def reconcile_pending_champion_rewards(
             improvement_points=float(event.get("improvement_points") or 0.0),
             threshold=float(event.get("threshold_points") or 0.0),
         )
+        source_add_reward_status = await controller._maybe_create_source_add_implementation_rewards(
+            candidate=candidate,
+            score_bundle_row=bundle_row,
+            score_bundle=score_bundle,
+            improvement_points=float(event.get("improvement_points") or 0.0),
+            threshold=float(event.get("threshold_points") or 0.0),
+            champion_reward_status=reward_status,
+        )
         entry["status"] = str(reward_status.get("champion_reward_status") or "unknown")
         if reward_status.get("champion_reward_id"):
             entry["champion_reward_id"] = str(reward_status["champion_reward_id"])
+        entry["source_add_reward_status"] = source_add_reward_status
         results.append(entry)
     finalized = sum(1 for item in results if item.get("status") in {"created", "would_create_champion_reward"})
     return {

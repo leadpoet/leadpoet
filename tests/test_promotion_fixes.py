@@ -29,6 +29,7 @@ from typing import Any, Mapping
 import pytest
 
 import gateway.research_lab.promotion as promotion
+import gateway.research_lab.store as store_module
 from gateway.research_lab.promotion import (
     ActiveManifestHashMismatchError,
     ActivePrivateModel,
@@ -93,6 +94,7 @@ class FakeStore:
     reward_obligation_writes: list[dict[str, Any]] = field(default_factory=list)
     private_benchmark_writes: list[dict[str, Any]] = field(default_factory=list)
     public_report_writes: list[dict[str, Any]] = field(default_factory=list)
+    generic_insert_writes: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
 
     async def select_many(self, table: str, **kwargs: Any) -> list[dict[str, Any]]:
         self.select_many_calls.append((table, tuple(kwargs.get("filters") or ())))
@@ -171,6 +173,10 @@ class FakeStore:
             {"event_type": "published"},
         )
 
+    async def insert_row(self, table: str, row: dict[str, Any]) -> dict[str, Any]:
+        self.generic_insert_writes.append((table, row))
+        return dict(row)
+
 
 @pytest.fixture
 def store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
@@ -185,6 +191,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
     monkeypatch.setattr(promotion, "create_champion_reward_obligation", fake.create_champion_reward_obligation)
     monkeypatch.setattr(promotion, "create_private_model_benchmark_bundle", fake.create_private_model_benchmark_bundle)
     monkeypatch.setattr(promotion, "create_public_benchmark_report", fake.create_public_benchmark_report)
+    monkeypatch.setattr(store_module, "insert_row", fake.insert_row)
     monkeypatch.setattr(promotion, "sign_digest_with_kms", lambda **kwargs: "kms-signature:test")
     monkeypatch.delenv(promotion.ALLOW_BOOTSTRAP_REGISTER_ENV, raising=False)
     monkeypatch.delenv(promotion.AUTO_COMMIT_HEAD_MISMATCH_RECOVER_ENV, raising=False)
@@ -1230,6 +1237,112 @@ async def test_reward_start_epoch_falls_back_to_bundle_epoch_when_chain_unreacha
     # Degraded but never blocked: the legacy bundle-epoch derivation applies.
     assert result["champion_reward_status"] == "created"
     assert captured[0]["start_epoch"] == 101
+
+
+def _source_add_reward_config() -> Any:
+    return SimpleNamespace(
+        source_add_rewards_enabled=True,
+        source_add_leg2_alpha_percent=5.0,
+        source_add_leg2_expiry_months=6,
+        source_add_shadow_window_days=7.0,
+        source_add_ablation_threshold_points=0.5,
+        lab_reward_epochs=20,
+        evaluation_epoch=0,
+    )
+
+
+def _source_add_attribution_bundle() -> dict[str, Any]:
+    return {
+        "evaluation_epoch": 200,
+        "aggregates": {"per_icp_results": []},
+        "source_add_implementation_attribution": {
+            "adapter_id": "adapter:test-api-source",
+            "routed_registry_ids": ["test_api_source"],
+            "shadow_monitor_live": True,
+            "shadow_window_days_elapsed": 7.25,
+            "shadow_window_survived": True,
+            "market_open_at": "2026-07-20T00:00:00Z",
+            "ablation": {
+                "holdout_ref": "source-add-holdout:test-api-source",
+                "adapter_on_score": 13.4,
+                "adapter_off_score": 12.7,
+                "threshold_points": 0.5,
+                "passed": True,
+                "evaluated_at": "2026-08-01T00:00:00Z",
+            },
+        },
+    }
+
+
+async def test_source_add_leg2_created_when_promoted_champion_has_attribution(store, monkeypatch):
+    store.select_many_results["research_lab_source_catalog"] = [
+        {
+            "catalog_id": "source_catalog:" + "1" * 16,
+            "adapter_id": "adapter:test-api-source",
+            "miner_ref": "hk-source-owner",
+            "registry_provider_id": "test_api_source",
+            "accepted_at": "2026-07-06T00:00:00Z",
+            "catalog_doc": {"market_open_at": "2026-07-20T00:00:00Z"},
+        }
+    ]
+    store.select_many_results["research_lab_source_add_reward_current"] = []
+    store.select_many_results["research_lab_candidate_promotion_events"] = []
+
+    async def _live_epoch(configured: Any = None) -> tuple[int, int | None, str]:
+        return 250, None, "test"
+
+    monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _live_epoch)
+    controller = ResearchLabPromotionController(_source_add_reward_config(), worker_ref="test-worker")
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={
+            "candidate_id": "candidate:" + "1" * 64,
+            "miner_hotkey": "hk-implementer",
+            "ticket_id": "ticket-1",
+            "run_id": "run-1",
+        },
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle=_source_add_attribution_bundle(),
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status={"champion_reward_status": "created", "champion_reward_id": "cr-1"},
+    )
+
+    assert result["source_add_reward_status"] == "created"
+    obligation_rows = [
+        row for table, row in store.generic_insert_writes if table == "research_lab_source_add_reward_obligations"
+    ]
+    assert len(obligation_rows) == 1
+    obligation = obligation_rows[0]
+    assert obligation["adapter_id"] == "adapter:test-api-source"
+    assert obligation["miner_hotkey"] == "hk-source-owner"
+    assert obligation["leg"] == 2
+    assert obligation["reward_kind"] == "source_implementation"
+    assert obligation["alpha_percent"] == pytest.approx(5.0)
+    assert obligation["start_epoch"] == 251
+    assert obligation["trigger_evidence_doc"]["ablation_passed"] is True
+    assert obligation["trigger_evidence_doc"]["ablation_delta_points"] == pytest.approx(0.7)
+    events = [event for event in store.promotion_event_writes if event["event_type"] == "promotion_checked"]
+    assert any((event["event_doc"] or {}).get("reason") == "source_add_leg2_reward_created" for event in events)
+
+
+async def test_source_add_leg2_does_not_self_award_without_gateway_attribution_doc(store):
+    controller = ResearchLabPromotionController(_source_add_reward_config(), worker_ref="test-worker")
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={
+            "candidate_id": "candidate:" + "1" * 64,
+            "miner_hotkey": "hk-implementer",
+            "ticket_id": "ticket-1",
+            "run_id": "run-1",
+            "candidate_model_manifest_doc": {"source_add_implementation_attribution": {"adapter_id": "fake"}},
+        },
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle={"evaluation_epoch": 200, "aggregates": {}},
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status={"champion_reward_status": "created", "champion_reward_id": "cr-1"},
+    )
+    assert result["source_add_reward_status"] == "skipped_no_attribution"
+    assert store.generic_insert_writes == []
 
 
 # ---------------------------------------------------------------------------

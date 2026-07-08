@@ -137,6 +137,8 @@ async def arm_leg2_for_merge(
     existing_rewards: Sequence[Mapping[str, Any]] = (),
     shadow_window_days_required: float | None = None,
     expiry_months: int | None = None,
+    alpha_percent: float | None = None,
+    reward_epochs: int | None = None,
     persist: bool = True,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     """Evaluate the leg-2 trigger and (optionally) persist the reward rows.
@@ -148,6 +150,8 @@ async def arm_leg2_for_merge(
 
     from research_lab.source_add_rewards import (
         DEFAULT_LEG2_EXPIRY_MONTHS,
+        DEFAULT_LEG2_ALPHA_PERCENT,
+        DEFAULT_REWARD_EPOCHS,
         DEFAULT_SHADOW_WINDOW_DAYS,
         create_leg2_reward,
         evaluate_leg2_trigger,
@@ -184,6 +188,8 @@ async def arm_leg2_for_merge(
         start_epoch=int(start_epoch),
         trigger_evidence=evidence,
         existing_rewards=existing_rewards,
+        alpha_percent=float(alpha_percent) if alpha_percent is not None else DEFAULT_LEG2_ALPHA_PERCENT,
+        reward_epochs=int(reward_epochs) if reward_epochs is not None else DEFAULT_REWARD_EPOCHS,
     )
     if record is None:
         return None, ["leg2_already_created"]

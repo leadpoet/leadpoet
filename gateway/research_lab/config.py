@@ -1316,6 +1316,13 @@ class ResearchLabGatewayConfig:
             "evaluation_bundles_enabled": self.evaluation_bundles_enabled,
             "reports_enabled": self.reports_enabled,
             "public_activity_enabled": self.public_activity_enabled,
+            "source_add_enabled": self.source_add_enabled,
+            "source_add": {
+                "enabled": self.source_add_enabled,
+                "rewards_enabled": self.source_add_rewards_enabled,
+                "max_concurrent_per_hotkey": self.source_add_max_concurrent_per_hotkey,
+                "max_per_30d_per_hotkey": self.source_add_max_per_30d_per_hotkey,
+            },
             "shadow_flags": {
                 "RESEARCH_LAB_SHADOW_BUNDLES_ENABLED": self.shadow_bundles_enabled,
                 "RESEARCH_LAB_SHADOW_WEIGHTS_ENABLED": self.shadow_weights_enabled,

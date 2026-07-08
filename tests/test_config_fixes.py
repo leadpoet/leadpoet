@@ -100,6 +100,21 @@ def test_daily_scoring_schedule_env_overrides(clean_env):
     assert ResearchLabGatewayConfig.from_env().baseline_start_utc_offset_seconds == 120
 
 
+def test_source_add_status_defaults_disabled_and_env_gated(clean_env):
+    config = ResearchLabGatewayConfig.from_env()
+    status = config.public_status()
+    assert config.source_add_enabled is False
+    assert status["source_add_enabled"] is False
+    assert status["source_add"]["enabled"] is False
+
+    clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_ENABLED", "true")
+    config = ResearchLabGatewayConfig.from_env()
+    status = config.public_status()
+    assert config.source_add_enabled is True
+    assert status["source_add_enabled"] is True
+    assert status["source_add"]["enabled"] is True
+
+
 def test_hybrid_window_and_public_split_defaults(clean_env):
     """Hybrid benchmark defaults to 10 fresh / 10 retained and 7/3 public."""
     config = ResearchLabGatewayConfig.from_env()

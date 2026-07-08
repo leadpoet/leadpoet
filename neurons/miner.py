@@ -45,6 +45,11 @@ import hashlib
 from urllib.parse import urlparse
 
 from gateway.research_lab.config import DEFAULT_LOOP_START_FEE_USD as RESEARCH_LAB_DEFAULT_LOOP_START_FEE_USD
+from research_lab.source_add_miner import (
+    SOURCE_ADD_SOURCE_KINDS,
+    build_source_add_submission_docs,
+    parse_source_add_domains,
+)
 
 
 class _SilenceInvalidRequest(logging.Filter):
@@ -2330,6 +2335,28 @@ def _research_lab_signed_payload(wallet, payload: dict) -> dict:
     return {**payload, "signature": signature}
 
 
+def _research_lab_source_add_signed_payload(wallet, payload: dict) -> dict:
+    """Sign SOURCE_ADD intake payload without raw adapter credentials.
+
+    The gateway intentionally excludes ``adapter_credential`` from signature
+    verification so miners can submit a key for KMS encryption without binding
+    raw secret material into the signed/audited payload.
+    """
+
+    sign_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"signature", "adapter_credential"}
+    }
+    message = json.dumps(sign_payload, sort_keys=True)
+    signature = wallet.hotkey.sign(message.encode()).hex()
+    signed = {**sign_payload, "signature": signature}
+    adapter_credential = payload.get("adapter_credential")
+    if adapter_credential:
+        signed["adapter_credential"] = adapter_credential
+    return signed
+
+
 def _research_lab_insecure_gateway_allowed(url: str) -> bool:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
@@ -2364,6 +2391,19 @@ def _post_research_lab_json(path: str, payload: dict, *, timeout: int = 60) -> d
             detail = response.text
         return {"error": detail, "status_code": response.status_code}
     return response.json()
+
+
+def _get_research_lab_status(gateway_url: str) -> dict | None:
+    try:
+        response = requests.get(f"{gateway_url.rstrip('/')}/research-lab/status", timeout=10)
+        if response.status_code != 200:
+            print(f"❌ Research Lab status unavailable: HTTP {response.status_code}")
+            print(f"   {response.text[:300]}")
+            return None
+        return response.json()
+    except Exception as exc:
+        print(f"❌ Could not reach Research Lab gateway status: {exc}")
+        return None
 
 
 def _register_research_lab_openrouter_key(wallet, status: dict) -> tuple[str, str] | None:
@@ -2975,6 +3015,122 @@ def run_research_lab_resume_credit_blocked_flow(wallet, config, netuid: int) -> 
         print(f"   - {str(item.get('run_id', '?'))[:13]}: {item.get('status')}" + (f" ({extra})" if extra else ""))
 
 
+def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
+    """Miner-facing SOURCE_ADD suggestion entrypoint.
+
+    The gateway endpoint is launch-gated by RESEARCH_LAB_SOURCE_ADD_ENABLED.
+    Until the operator enables it, this flow exits before collecting source
+    details or credentials.
+    """
+
+    gateway_url = QUALIFICATION_GATEWAY_URL.rstrip("/")
+    print("\n" + "=" * 80)
+    print(" RESEARCH LAB — SUGGEST API SOURCE")
+    print("=" * 80)
+    print("")
+    print(f"Miner hotkey: {wallet.hotkey.ss58_address}")
+    print(f"Gateway: {gateway_url}")
+    print("")
+
+    status = _get_research_lab_status(gateway_url)
+    if status is None:
+        return
+    source_add_status = status.get("source_add") if isinstance(status.get("source_add"), dict) else {}
+    source_add_enabled = bool(status.get("source_add_enabled") or source_add_status.get("enabled"))
+    if not source_add_enabled:
+        print("SOURCE_ADD submissions are not live yet on this gateway.")
+        print("No source details or credentials were collected or sent.")
+        return
+
+    if not _research_lab_raw_key_gateway_allowed(QUALIFICATION_GATEWAY_URL):
+        print("❌ Refusing to send source credentials over an insecure gateway URL.")
+        print("   Set GATEWAY_URL to an https:// gateway. Localhost HTTP is allowed for local/dev testing only.")
+        return
+
+    print("This submits a source/API candidate for operator review.")
+    print("Do not paste API keys into endpoint details; credential entry is hidden and encrypted by the gateway.")
+    print("")
+
+    source_name = input("   Source/API name: ").strip()
+    print("   Source kind:")
+    for index, kind in enumerate(SOURCE_ADD_SOURCE_KINDS, start=1):
+        print(f"     {index}. {kind}")
+    kind_input = input("   Choose source kind [web]: ").strip().lower()
+    if not kind_input:
+        source_kind = "web"
+    elif kind_input.isdigit() and 1 <= int(kind_input) <= len(SOURCE_ADD_SOURCE_KINDS):
+        source_kind = SOURCE_ADD_SOURCE_KINDS[int(kind_input) - 1]
+    else:
+        source_kind = kind_input
+
+    domains = parse_source_add_domains(input("   Base domain(s), comma-separated: ").strip())
+    claimed_output_type = input(
+        "   Claimed output type (intent / firmographic / contact / jobs / social / other): "
+    ).strip()
+    endpoint_summary = input("   Endpoint and response details, no secrets: ").strip()
+    if _looks_like_raw_research_lab_secret(endpoint_summary) or re.search(
+        r"(?i)\b(api[_-]?key|secret|password|token|bearer)\s*[:=]", endpoint_summary
+    ):
+        print("❌ Endpoint details appear to contain credential material. Remove secrets and retry.")
+        return
+
+    credential_supplied = input("   Does this source require a credential for the trial? [y/N]: ").strip().lower()
+    adapter_credential = ""
+    if credential_supplied in {"y", "yes"}:
+        adapter_credential = getpass.getpass("   Source API credential (hidden; encrypted by gateway): ").strip()
+        if not adapter_credential:
+            print("❌ Credential was requested but no credential was entered.")
+            return
+
+    try:
+        manifest, source_brief, idempotency_key = build_source_add_submission_docs(
+            miner_hotkey=wallet.hotkey.ss58_address,
+            source_name=source_name,
+            source_kind=source_kind,
+            declared_base_domains=domains,
+            endpoint_summary=endpoint_summary,
+            claimed_output_type=claimed_output_type,
+            credential_supplied=bool(adapter_credential),
+        )
+    except ValueError as exc:
+        print(f"❌ Invalid source suggestion: {exc}")
+        return
+
+    print("")
+    print("Submission preview:")
+    print(f"   Source: {source_name}")
+    print(f"   Kind: {manifest.get('source_kind')}")
+    print(f"   Domains: {', '.join(manifest.get('declared_base_domains') or [])}")
+    print(f"   Credential supplied: {'yes' if adapter_credential else 'no'}")
+    confirm = input("   Submit for SOURCE_ADD review? [y/N]: ").strip().lower()
+    if confirm not in {"y", "yes"}:
+        print("Cancelled.")
+        return
+
+    import time
+
+    payload = {
+        "miner_hotkey": wallet.hotkey.ss58_address,
+        "timestamp": int(time.time()),
+        "idempotency_key": idempotency_key,
+        "manifest": manifest,
+        "source_brief": source_brief,
+    }
+    if adapter_credential:
+        payload["adapter_credential"] = adapter_credential
+    signed_payload = _research_lab_source_add_signed_payload(wallet, payload)
+    result = _post_research_lab_json("/research-lab/source-adapters", signed_payload, timeout=180)
+    if "error" in result:
+        print(f"❌ SOURCE_ADD submission failed: HTTP {result.get('status_code')}")
+        print(f"   {result['error']}")
+        return
+
+    print("✅ SOURCE_ADD suggestion submitted")
+    print(f"   Submission ID: {result.get('submission_id')}")
+    print(f"   Adapter ID: {result.get('adapter_id')}")
+    print(f"   Stage: {result.get('stage')}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="LeadPoet Miner")
     BaseMinerNeuron.add_args(parser)
@@ -3109,18 +3265,20 @@ def main():
     print("  1. Auto Research  — Check hosted auto-research loop availability (default)")
     print("  2. Fulfillment    — Poll for client ICP requests and fulfill them")
     print("  3. Resume Credit-Blocked — Resume paused auto-research loops after an OpenRouter top-up")
+    print("  4. Suggest API Source — Submit a new API/source candidate when SOURCE_ADD is live")
     print("")
     print("  You can run multiple active modes simultaneously in separate terminals.")
     print("")
 
-    mode_input = input("❓ Select mode (1/2/3) [default: 1]: ").strip()
-    if mode_input not in ("1", "2", "3"):
+    mode_input = input("❓ Select mode (1/2/3/4) [default: 1]: ").strip()
+    if mode_input not in ("1", "2", "3", "4"):
         mode_input = "1"
 
     miner_mode = {
         "1": "research_lab",
         "2": "fulfillment",
         "3": "research_lab_resume_credit",
+        "4": "research_lab_source_add",
     }[mode_input]
     print(f"\n✅ Selected mode: {miner_mode.upper()}")
 
@@ -3143,6 +3301,18 @@ def main():
             run_research_lab_resume_credit_blocked_flow(temp_wallet, config, config.netuid)
         except Exception as e:
             bt.logging.error(f"❌ Error during resume-credit-blocked mode: {e}")
+            import traceback
+            traceback.print_exc()
+        print("\n👋 Done. Run the miner again to select another mode.")
+        raise SystemExit(0)
+
+    if miner_mode == "research_lab_source_add":
+        try:
+            temp_wallet = bt.wallet(config=config)
+            print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
+            run_research_lab_source_add_flow(temp_wallet, config, config.netuid)
+        except Exception as e:
+            bt.logging.error(f"❌ Error during source-add mode: {e}")
             import traceback
             traceback.print_exc()
         print("\n👋 Done. Run the miner again to select another mode.")

@@ -25,6 +25,7 @@ from research_lab.eval.provider_costs import (
     decode_cost_event_header,
     deepline_credits_for_play,
     deepline_play_name_from_request,
+    deepline_stage_credits_from_completed_run,
     estimate_provider_cost,
     extract_deepline_cost,
     extract_exa_cost_dollars,
@@ -208,11 +209,15 @@ def test_deepline_cost_parsing_and_fallback_for_private_model_play(monkeypatch):
     request_body = b'{"name":"company-domain-firmographics","input":{"domain":"example.com"}}'
 
     assert deepline_play_name_from_request(request_body) == "company-domain-firmographics"
-    assert deepline_credits_for_play("company-domain-firmographics") == 1
+    assert deepline_credits_for_play("company-domain-firmographics") == Decimal("0.02")
     assert extract_deepline_cost(b'{"billing":{"credits":2}}') == (None, Decimal("2"))
+    assert extract_deepline_cost(b'{"billing":{"totalCredits":0.02,"totalDeeplineCostUsd":0.001}}') == (
+        None,
+        Decimal("0.02"),
+    )
     assert extract_deepline_cost(b'{"billing":{"cost_usd":"0.18"}}') == (Decimal("0.18"), None)
 
-    fallback = estimate_provider_cost(
+    start = estimate_provider_cost(
         provider="deepline",
         upstream_url="https://code.deepline.com/api/v2/plays/run",
         status=200,
@@ -220,29 +225,28 @@ def test_deepline_cost_parsing_and_fallback_for_private_model_play(monkeypatch):
         request_body=request_body,
         scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
     )
-    assert fallback.billable
-    assert fallback.credits == 1
-    assert fallback.cost_usd == Decimal("0.10")
-    assert fallback.cost_source == "deepline_play_credit_map"
+    assert not start.billable
+    assert start.cost_usd == Decimal("0")
+    assert start.cost_source == "deepline_play_start_zero_cost"
 
     response_credits = estimate_provider_cost(
         provider="deepline",
-        upstream_url="https://code.deepline.com/api/v2/plays/run",
+        upstream_url="https://code.deepline.com/api/v2/runs/run_123",
         status=200,
-        response_body=b'{"billing":{"credits":"1.5"}}',
-        request_body=request_body,
+        response_body=b'{"run":{"status":"completed"},"billing":{"totalCredits":"0.02"}}',
+        request_body=None,
         scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
     )
     assert response_credits.billable
-    assert response_credits.cost_usd == Decimal("0.150")
+    assert response_credits.cost_usd == Decimal("0.002")
     assert response_credits.cost_source == "deepline_response_credits"
 
     response_cost = estimate_provider_cost(
         provider="deepline",
-        upstream_url="https://code.deepline.com/api/v2/plays/run",
+        upstream_url="https://code.deepline.com/api/v2/runs/run_123",
         status=200,
-        response_body=b'{"billing":{"cost_usd":"0.27"}}',
-        request_body=request_body,
+        response_body=b'{"run":{"status":"completed"},"billing":{"cost_usd":"0.27"}}',
+        request_body=None,
         scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
     )
     assert response_cost.billable
@@ -253,13 +257,44 @@ def test_deepline_cost_parsing_and_fallback_for_private_model_play(monkeypatch):
         provider="deepline",
         upstream_url="https://code.deepline.com/api/v2/runs/run_123",
         status=200,
-        response_body=b'{"run":{"status":"completed"}}',
+        response_body=b'{"run":{"status":"running"}}',
         request_body=None,
         scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
     )
     assert not poll.billable
     assert poll.cost_usd == Decimal("0")
-    assert poll.cost_source == "deepline_run_poll_zero_cost"
+    assert poll.cost_source == "deepline_run_nonterminal_zero_cost"
+
+    stage_fallback_body = (
+        b'{"run":{"status":"completed","playName":"company-domain-firmographics"},'
+        b'"steps":[{"status":"completed","name":"Limadata Enrich Company"},'
+        b'{"status":"completed","name":"Crustdata-v2 V2 Enrich Company"},'
+        b'{"status":"failed","name":"Deeplineagent Inference"}]}'
+    )
+    assert deepline_stage_credits_from_completed_run(stage_fallback_body) == Decimal("1.12")
+    stage_fallback = estimate_provider_cost(
+        provider="deepline",
+        upstream_url="https://code.deepline.com/api/v2/runs/run_123",
+        status=200,
+        response_body=stage_fallback_body,
+        request_body=None,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert stage_fallback.billable
+    assert stage_fallback.cost_usd == Decimal("0.1120")
+    assert stage_fallback.cost_source == "deepline_stage_credit_map"
+
+    terminal_failure = estimate_provider_cost(
+        provider="deepline",
+        upstream_url="https://code.deepline.com/api/v2/runs/run_123",
+        status=200,
+        response_body=b'{"run":{"status":"failed"},"billing":{"totalCredits":"9"}}',
+        request_body=None,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert not terminal_failure.billable
+    assert terminal_failure.cost_usd == Decimal("0")
+    assert terminal_failure.cost_source == "deepline_run_terminal_failure_zero_cost"
 
     failed = estimate_provider_cost(
         provider="deepline",
@@ -600,6 +635,22 @@ class _FakeDeeplineProvider(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_GET(self):  # noqa: N802
+        body = json.dumps(
+            {
+                "kind": "run",
+                "schemaVersion": "1.0",
+                "run": {"id": "run_deepline_123", "status": "completed"},
+                "billing": {"totalCredits": 0.02},
+                "outputs": {},
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
 
 class _FakeExaAgentProvider(BaseHTTPRequestHandler):
     calls = 0
@@ -883,11 +934,31 @@ def test_evidence_proxy_tracks_deepline_private_model_play_run():
         assert event is not None
         assert event["provider"] == "deepline"
         assert event["endpoint"] == "/api/v2/plays/run"
-        assert event["billable"] is True
-        assert event["cost_usd"] == 0.1
-        assert event["cost_source"] == "deepline_play_credit_map"
-        assert event["credits"] == 1
+        assert event["billable"] is False
+        assert event["cost_usd"] == 0.0
+        assert event["cost_source"] == "deepline_play_start_zero_cost"
+        assert event["credits"] == 0
         assert event["tracking_failed"] is False
+
+        poll_req = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_address[1]}/deepline/api/v2/runs/run_deepline_123",
+            headers={
+                "X-Research-Lab-Cost-Scope": "deepline-scope",
+                "X-Research-Lab-Cost-Cap-Usd": "1.00",
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(poll_req, timeout=5) as response:
+            poll_event = decode_cost_event_header(
+                response.headers.get("X-Research-Lab-Provider-Cost-Event")
+            )
+        assert poll_event is not None
+        assert poll_event["provider"] == "deepline"
+        assert poll_event["endpoint"] == "/api/v2/runs/run_deepline_123"
+        assert poll_event["billable"] is True
+        assert poll_event["cost_usd"] == 0.002
+        assert poll_event["cost_source"] == "deepline_response_credits"
+        assert poll_event["tracking_failed"] is False
     finally:
         if proxy is not None:
             proxy.shutdown()

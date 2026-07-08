@@ -26,7 +26,7 @@ DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD = Decimal("0.00005")
 DEFAULT_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS = 5
 DEFAULT_UNKNOWN_ENDPOINT_POLICY = "default_5_credits"
 DEFAULT_DEEPLINE_COST_PER_CREDIT_USD = Decimal("0.10")
-DEFAULT_DEEPLINE_UNKNOWN_PLAY_CREDITS = 1
+DEFAULT_DEEPLINE_UNKNOWN_PLAY_CREDITS = Decimal("1")
 OPENROUTER_PERPLEXITY_PRICING: dict[str, tuple[Decimal, Decimal, Decimal]] = {
     # input $/1M tokens, output $/1M tokens, web-search $/request.
     "perplexity/sonar": (Decimal("1"), Decimal("1"), Decimal("0.005")),
@@ -64,11 +64,21 @@ SCRAPINGDOG_ENDPOINT_CREDITS: dict[str, int] = {
     "/linkedinjobs": 5,
     "/instagram/profile": 15,
 }
-DEEPLINE_PLAY_CREDITS: dict[str, int] = {
+DEEPLINE_PLAY_CREDITS: dict[str, Decimal] = {
     # The current private sourcing model calls this play via /api/v2/plays/run.
-    # Deepline's API currently returns no billing field for this call, so the
-    # cost tracker falls back to managed-credit pricing for this known play.
-    "company-domain-firmographics": 1,
+    # The run-detail API returns totalCredits when the run completes. This map
+    # is only a fallback for completed run bodies that omit billing metadata.
+    "company-domain-firmographics": Decimal("0.02"),
+}
+DEEPLINE_STAGE_CREDITS: dict[str, Decimal] = {
+    "company domain firmographics run": Decimal("0.02"),
+    "company-domain-firmographics": Decimal("0.02"),
+    "limadata enrich company": Decimal("0.29"),
+    "limadata_company_enrich": Decimal("0.29"),
+    "crustdata-v2 v2 enrich company": Decimal("0.81"),
+    "crustdata_v2_enrich_company": Decimal("0.81"),
+    "deeplineagent inference": Decimal("0.01"),
+    "deeplineagent_inference": Decimal("0.01"),
 }
 
 
@@ -283,6 +293,27 @@ def extract_deepline_cost(body: bytes | str | None) -> tuple[Decimal | None, Dec
     for value in _iter_json_values(
         parsed,
         {
+            "credits",
+            "credit",
+            "credits_used",
+            "credit_cost",
+            "creditCost",
+            "managed_credits",
+            "totalCredits",
+            "total_credits",
+        },
+    ):
+        credits = safe_decimal(value)
+        if credits is not None:
+            return None, credits
+        if isinstance(value, Mapping):
+            for nested_key in ("total", "used", "amount", "credits", "totalCredits"):
+                credits = safe_decimal(value.get(nested_key))
+                if credits is not None:
+                    return None, credits
+    for value in _iter_json_values(
+        parsed,
+        {
             "cost",
             "cost_usd",
             "costUSD",
@@ -302,18 +333,6 @@ def extract_deepline_cost(body: bytes | str | None) -> tuple[Decimal | None, Dec
                 cost = safe_decimal(value.get(nested_key))
                 if cost is not None:
                     return cost, None
-    for value in _iter_json_values(
-        parsed,
-        {"credits", "credit", "credits_used", "credit_cost", "creditCost", "managed_credits"},
-    ):
-        credits = safe_decimal(value)
-        if credits is not None:
-            return None, credits
-        if isinstance(value, Mapping):
-            for nested_key in ("total", "used", "amount", "credits"):
-                credits = safe_decimal(value.get(nested_key))
-                if credits is not None:
-                    return None, credits
     return None, None
 
 
@@ -503,13 +522,95 @@ def deepline_play_name_from_request(request_body: bytes | str | None) -> str:
     return str(parsed.get("name") or "").strip()
 
 
-def deepline_credits_for_play(play_name: str) -> int:
-    unknown_default = int_from_env(
+def deepline_credits_for_play(play_name: str) -> Decimal:
+    unknown_default = decimal_from_env(
         "RESEARCH_LAB_DEEPLINE_UNKNOWN_PLAY_CREDITS",
         DEFAULT_DEEPLINE_UNKNOWN_PLAY_CREDITS,
     )
     normalized = str(play_name or "").strip()
     return DEEPLINE_PLAY_CREDITS.get(normalized, unknown_default)
+
+
+def _deepline_status_from_response(body: bytes | str | None) -> str:
+    parsed = _json_body(body)
+    if not isinstance(parsed, Mapping):
+        return ""
+    run = parsed.get("run")
+    if isinstance(run, Mapping):
+        status = str(run.get("status") or "").strip().lower()
+        if status:
+            return status
+    return str(parsed.get("status") or "").strip().lower()
+
+
+def _deepline_play_name_from_response(body: bytes | str | None) -> str:
+    parsed = _json_body(body)
+    if not isinstance(parsed, Mapping):
+        return ""
+    for key in ("playName", "play_name", "name"):
+        value = str(parsed.get(key) or "").strip()
+        if value:
+            return value
+    run = parsed.get("run")
+    if isinstance(run, Mapping):
+        for key in ("playName", "play_name", "name"):
+            value = str(run.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _deepline_stage_key(value: Any) -> str:
+    return " ".join(str(value or "").replace("-", " ").strip().lower().split())
+
+
+def deepline_stage_credits_from_completed_run(body: bytes | str | None) -> Decimal:
+    """Fallback managed-credit estimate for completed Deepline run details.
+
+    Deepline currently exposes totalCredits on run-detail responses. If that is
+    absent, use the known stage/play names from Deepline's activity ledger. Only
+    completed runs are billable; running, failed, and cancelled runs return 0.
+    Unknown stage names intentionally add 0 rather than guessing.
+    """
+
+    if _deepline_status_from_response(body) != "completed":
+        return Decimal("0")
+    parsed = _json_body(body)
+    if not isinstance(parsed, Mapping):
+        return Decimal("0")
+
+    total = Decimal("0")
+    play_name = _deepline_play_name_from_response(body)
+    if play_name in DEEPLINE_PLAY_CREDITS:
+        total += DEEPLINE_PLAY_CREDITS[play_name]
+
+    def add_stage(candidate: Any) -> None:
+        nonlocal total
+        normalized = _deepline_stage_key(candidate)
+        if not normalized:
+            return
+        for key, credits in DEEPLINE_STAGE_CREDITS.items():
+            if _deepline_stage_key(key) == normalized:
+                total += credits
+                return
+
+    steps = parsed.get("steps")
+    if isinstance(steps, list):
+        for step in steps:
+            if not isinstance(step, Mapping):
+                continue
+            status = str(step.get("status") or "").strip().lower()
+            if status and status != "completed":
+                continue
+            for key in ("name", "title", "toolName", "tool_name", "operation", "provider", "id", "nodeId"):
+                add_stage(step.get(key))
+
+    billing = parsed.get("billing")
+    if isinstance(billing, Mapping):
+        for event in _iter_json_values(billing, {"operation", "provider", "name", "toolName"}):
+            add_stage(event)
+
+    return total
 
 
 @dataclass
@@ -649,21 +750,53 @@ def estimate_provider_cost(
             path = split.path or "/"
         except Exception:
             path = endpoint
-        if path.startswith("/api/v2/runs/"):
-            return ProviderCostEstimate(
-                provider=provider,
-                endpoint=endpoint,
-                billable=False,
-                cost_source="deepline_run_poll_zero_cost",
-            )
-        if path.rstrip("/") != "/api/v2/plays/run":
+        is_run_detail = path.startswith("/api/v2/runs/")
+        is_play_start = path.rstrip("/") == "/api/v2/plays/run"
+        if not is_run_detail and not is_play_start:
             return ProviderCostEstimate(
                 provider=provider,
                 endpoint=endpoint,
                 billable=False,
                 cost_source="deepline_non_play_endpoint_zero_cost",
             )
+        if is_run_detail:
+            status_text = _deepline_status_from_response(response_body)
+            if status_text and status_text != "completed":
+                return ProviderCostEstimate(
+                    provider=provider,
+                    endpoint=endpoint,
+                    billable=False,
+                    cost_source=(
+                        "deepline_run_nonterminal_zero_cost"
+                        if status_text in {"queued", "running", "in_progress", "pending"}
+                        else "deepline_run_terminal_failure_zero_cost"
+                    ),
+                )
+        if is_play_start:
+            status_text = _deepline_status_from_response(response_body)
+            if status_text and status_text != "completed":
+                return ProviderCostEstimate(
+                    provider=provider,
+                    endpoint=endpoint,
+                    billable=False,
+                    cost_source="deepline_play_start_zero_cost",
+                )
         exact_cost, credits_value = extract_deepline_cost(response_body)
+        credit_price = decimal_from_env(
+            "RESEARCH_LAB_DEEPLINE_COST_PER_CREDIT_USD",
+            DEFAULT_DEEPLINE_COST_PER_CREDIT_USD,
+        )
+        if credits_value is not None:
+            cost_source = "deepline_response_credits"
+            credits_int = int(credits_value.to_integral_value(rounding=ROUND_HALF_UP))
+            return ProviderCostEstimate(
+                provider=provider,
+                endpoint=endpoint,
+                billable=True,
+                cost_usd=credit_price * credits_value,
+                cost_source=cost_source,
+                credits=credits_int,
+            )
         if exact_cost is not None:
             return ProviderCostEstimate(
                 provider=provider,
@@ -672,23 +805,28 @@ def estimate_provider_cost(
                 cost_usd=exact_cost,
                 cost_source="deepline_response_cost",
             )
-        credit_price = decimal_from_env(
-            "RESEARCH_LAB_DEEPLINE_COST_PER_CREDIT_USD",
-            DEFAULT_DEEPLINE_COST_PER_CREDIT_USD,
-        )
-        if credits_value is None:
-            credits_value = Decimal(deepline_credits_for_play(deepline_play_name_from_request(request_body)))
-            cost_source = "deepline_play_credit_map"
-        else:
-            cost_source = "deepline_response_credits"
-        credits_int = int(credits_value.to_integral_value(rounding=ROUND_HALF_UP))
+        if is_run_detail:
+            stage_credits = deepline_stage_credits_from_completed_run(response_body)
+            if stage_credits > 0:
+                return ProviderCostEstimate(
+                    provider=provider,
+                    endpoint=endpoint,
+                    billable=True,
+                    cost_usd=credit_price * stage_credits,
+                    cost_source="deepline_stage_credit_map",
+                    credits=int(stage_credits.to_integral_value(rounding=ROUND_HALF_UP)),
+                )
+            return ProviderCostEstimate(
+                provider=provider,
+                endpoint=endpoint,
+                billable=False,
+                cost_source="deepline_run_poll_zero_cost",
+            )
         return ProviderCostEstimate(
             provider=provider,
             endpoint=endpoint,
-            billable=True,
-            cost_usd=credit_price * credits_value,
-            cost_source=cost_source,
-            credits=credits_int,
+            billable=False,
+            cost_source="deepline_play_start_zero_cost",
         )
     return ProviderCostEstimate(
         provider=provider,

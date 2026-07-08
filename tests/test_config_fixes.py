@@ -120,6 +120,17 @@ def test_source_add_status_defaults_enabled_and_env_gated(clean_env):
     assert status["source_add"]["rewards_enabled"] is False
 
 
+def test_research_lab_reward_allocation_defaults(clean_env):
+    config = ResearchLabGatewayConfig.from_env()
+    assert config.lab_emission_percent == pytest.approx(30.0)
+    assert config.fulfillment_emission_percent == pytest.approx(60.5)
+    assert config.fulfillment_leaderboard_emission_percent == pytest.approx(9.5)
+    assert config.lab_champion_min_alpha_percent == pytest.approx(7.0)
+    assert config.lab_champion_extra_alpha_percent_per_point == pytest.approx(0.3)
+    assert config.lab_champion_max_alpha_percent == pytest.approx(15.0)
+    assert config.provider_cost_cap_usd_per_icp == pytest.approx(1.0)
+
+
 def test_hybrid_window_and_public_split_defaults(clean_env):
     """Hybrid benchmark defaults to 10 fresh / 10 retained and 7/3 public."""
     config = ResearchLabGatewayConfig.from_env()

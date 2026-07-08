@@ -192,11 +192,11 @@ class TestLeg2Creation:
 class TestAllocationRails:
     POLICY = {
         "policy_id": "test-policy",
-        "research_lab_emission_percent": 20.0,
+        "research_lab_emission_percent": 30.0,
         "reward_epochs": 20,
-        "champion_min_alpha_percent": 4.0,
-        "champion_extra_alpha_percent_per_point": 0.2,
-        "champion_max_alpha_percent": 10.0,
+        "champion_min_alpha_percent": 7.0,
+        "champion_extra_alpha_percent_per_point": 0.3,
+        "champion_max_alpha_percent": 15.0,
         "champion_threshold_points": 1.0,
     }
 
@@ -246,7 +246,7 @@ class TestAllocationRails:
         assert by_kind[REWARD_KIND_SOURCE_IMPLEMENTATION]["paid_alpha_percent"] == pytest.approx(5.0)
 
     def test_source_rewards_and_champion_grant_fit_the_cap_concurrently(self):
-        # §3.3 cap fit: champion 10% + leg2 5% + leg1 1% = 16% inside 20%.
+        # Cap fit: champion 15% + leg2 5% + leg1 1% = 21% inside 30%.
         leg1 = create_leg1_reward(adapter_id="adapter:a", miner_ref="miner:owner", start_epoch=100)
         _, _, evidence = evaluate_leg2_trigger(**_trigger_kwargs())
         leg2 = create_leg2_reward(
@@ -264,11 +264,11 @@ class TestAllocationRails:
             "status": "active",
             "start_epoch": 100,
             "epoch_count": 20,
-            "improvement_points": 31.0,  # maxes out at the 10% champion cap
-            "desired_alpha_percent": 10.0,
-            "total_due_alpha_percent": 200.0,
+            "improvement_points": 31.0,  # maxes out at the 15% champion cap
+            "desired_alpha_percent": 15.0,
+            "total_due_alpha_percent": 300.0,
             "paid_alpha_percent_to_date": 0.0,
-            "remaining_alpha_percent": 200.0,
+            "remaining_alpha_percent": 300.0,
         }
         allocation = allocate_research_lab_epoch(
             105,
@@ -277,7 +277,7 @@ class TestAllocationRails:
             [champion, self._source_obligation(leg1), self._source_obligation(leg2)],
         )
         total = allocation["champion_alpha_percent"]
-        assert total == pytest.approx(16.0)
+        assert total == pytest.approx(21.0)
         assert allocation["queued_champion_allocations"] == []
         # Classic champion entries carry no reward_kind — prior shape preserved.
         classic = [e for e in allocation["champion_allocations"] if e["source_id"] == "champion:1"]

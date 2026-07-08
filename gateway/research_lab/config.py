@@ -26,7 +26,7 @@ DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS = 300
 DEFAULT_HOSTED_WORKER_RETRYABLE_FAILURE_LIMIT = 3
 DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS = 15 * 60
 DEFAULT_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS = (23 * 3600) + (30 * 60)
-DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP = 1.50
+DEFAULT_PROVIDER_COST_CAP_USD_PER_ICP = 1.00
 DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD = 0.00005
 DEFAULT_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS = 5
 DEFAULT_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY = "default_5_credits"
@@ -441,16 +441,16 @@ class ResearchLabGatewayConfig:
     reimbursement_material_spend_ratio: float = 0.80
     reimbursement_default_island: str = "generalist"
     reimbursement_usd_per_0_1_percent_epoch: float = 0.162
-    lab_emission_percent: float = 20.0
-    fulfillment_emission_percent: float = 70.5
+    lab_emission_percent: float = 30.0
+    fulfillment_emission_percent: float = 60.5
     fulfillment_leaderboard_emission_percent: float = 9.5
     lab_reward_epochs: int = 20
     lab_reimbursement_allow_overpay_without_champions: bool = True
     lab_reimbursement_max_cost_multiplier_with_champions: float = 1.0
     lab_reimbursement_min_alpha_percent: float = 0.0
-    lab_champion_min_alpha_percent: float = 4.0
-    lab_champion_extra_alpha_percent_per_point: float = 0.2
-    lab_champion_max_alpha_percent: float = 10.0
+    lab_champion_min_alpha_percent: float = 7.0
+    lab_champion_extra_alpha_percent_per_point: float = 0.3
+    lab_champion_max_alpha_percent: float = 15.0
     lab_champion_placeholder_alpha_percent: float = 0.0001
     lab_champion_queue_trigger_ratio: float = 0.50
     # Deprecated compatibility field in public policy docs. The reward bar must
@@ -891,8 +891,8 @@ class ResearchLabGatewayConfig:
                 0.000001,
                 _float("RESEARCH_LAB_REIMBURSEMENT_USD_PER_0_1_PERCENT_EPOCH", 0.162),
             ),
-            lab_emission_percent=max(0.0, _float("RESEARCH_LAB_EMISSION_PERCENT", 20.0)),
-            fulfillment_emission_percent=max(0.0, _float("RESEARCH_LAB_FULFILLMENT_EMISSION_PERCENT", 70.5)),
+            lab_emission_percent=max(0.0, _float("RESEARCH_LAB_EMISSION_PERCENT", 30.0)),
+            fulfillment_emission_percent=max(0.0, _float("RESEARCH_LAB_FULFILLMENT_EMISSION_PERCENT", 60.5)),
             fulfillment_leaderboard_emission_percent=max(
                 0.0,
                 _float("RESEARCH_LAB_FULFILLMENT_LEADERBOARD_EMISSION_PERCENT", 9.5),
@@ -910,12 +910,12 @@ class ResearchLabGatewayConfig:
                 0.0,
                 _float("RESEARCH_LAB_REIMBURSEMENT_MIN_ALPHA_PERCENT", 0.0),
             ),
-            lab_champion_min_alpha_percent=max(0.0, _float("RESEARCH_LAB_CHAMPION_MIN_ALPHA_PERCENT", 4.0)),
+            lab_champion_min_alpha_percent=max(0.0, _float("RESEARCH_LAB_CHAMPION_MIN_ALPHA_PERCENT", 7.0)),
             lab_champion_extra_alpha_percent_per_point=max(
                 0.0,
-                _float("RESEARCH_LAB_CHAMPION_EXTRA_ALPHA_PERCENT_PER_POINT", 0.2),
+                _float("RESEARCH_LAB_CHAMPION_EXTRA_ALPHA_PERCENT_PER_POINT", 0.3),
             ),
-            lab_champion_max_alpha_percent=max(0.0, _float("RESEARCH_LAB_CHAMPION_MAX_ALPHA_PERCENT", 10.0)),
+            lab_champion_max_alpha_percent=max(0.0, _float("RESEARCH_LAB_CHAMPION_MAX_ALPHA_PERCENT", 15.0)),
             lab_champion_placeholder_alpha_percent=max(
                 0.0,
                 _float("RESEARCH_LAB_CHAMPION_PLACEHOLDER_ALPHA_PERCENT", 0.0001),

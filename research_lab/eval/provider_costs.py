@@ -613,6 +613,21 @@ def deepline_stage_credits_from_completed_run(body: bytes | str | None) -> Decim
     return total
 
 
+def _deepline_run_detail_billing_fetch(upstream_url: str) -> bool:
+    try:
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(str(upstream_url or "")).query,
+            keep_blank_values=True,
+        )
+    except Exception:
+        return False
+    for key in ("full", "billing", "includeBilling", "include_billing", "withBilling", "with_billing"):
+        values = query.get(key) or []
+        if any(str(value).strip().lower() in {"1", "true", "yes"} for value in values):
+            return True
+    return False
+
+
 @dataclass
 class ProviderCostEstimate:
     provider: str
@@ -771,6 +786,13 @@ def estimate_provider_cost(
                         if status_text in {"queued", "running", "in_progress", "pending"}
                         else "deepline_run_terminal_failure_zero_cost"
                     ),
+                )
+            if not _deepline_run_detail_billing_fetch(upstream_url):
+                return ProviderCostEstimate(
+                    provider=provider,
+                    endpoint=endpoint,
+                    billable=False,
+                    cost_source="deepline_run_terminal_billing_deferred",
                 )
         if is_play_start:
             status_text = _deepline_status_from_response(response_body)

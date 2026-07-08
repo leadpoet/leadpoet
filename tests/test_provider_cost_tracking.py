@@ -231,7 +231,7 @@ def test_deepline_cost_parsing_and_fallback_for_private_model_play(monkeypatch):
 
     response_credits = estimate_provider_cost(
         provider="deepline",
-        upstream_url="https://code.deepline.com/api/v2/runs/run_123",
+        upstream_url="https://code.deepline.com/api/v2/runs/run_123?full=true",
         status=200,
         response_body=b'{"run":{"status":"completed"},"billing":{"totalCredits":"0.02"}}',
         request_body=None,
@@ -243,7 +243,7 @@ def test_deepline_cost_parsing_and_fallback_for_private_model_play(monkeypatch):
 
     response_cost = estimate_provider_cost(
         provider="deepline",
-        upstream_url="https://code.deepline.com/api/v2/runs/run_123",
+        upstream_url="https://code.deepline.com/api/v2/runs/run_123?full=true",
         status=200,
         response_body=b'{"run":{"status":"completed"},"billing":{"cost_usd":"0.27"}}',
         request_body=None,
@@ -272,9 +272,21 @@ def test_deepline_cost_parsing_and_fallback_for_private_model_play(monkeypatch):
         b'{"status":"failed","name":"Deeplineagent Inference"}]}'
     )
     assert deepline_stage_credits_from_completed_run(stage_fallback_body) == Decimal("1.12")
-    stage_fallback = estimate_provider_cost(
+    plain_terminal_poll = estimate_provider_cost(
         provider="deepline",
         upstream_url="https://code.deepline.com/api/v2/runs/run_123",
+        status=200,
+        response_body=stage_fallback_body,
+        request_body=None,
+        scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
+    )
+    assert not plain_terminal_poll.billable
+    assert plain_terminal_poll.cost_usd == Decimal("0")
+    assert plain_terminal_poll.cost_source == "deepline_run_terminal_billing_deferred"
+
+    stage_fallback = estimate_provider_cost(
+        provider="deepline",
+        upstream_url="https://code.deepline.com/api/v2/runs/run_123?full=true",
         status=200,
         response_body=stage_fallback_body,
         request_body=None,
@@ -955,10 +967,30 @@ def test_evidence_proxy_tracks_deepline_private_model_play_run():
         assert poll_event is not None
         assert poll_event["provider"] == "deepline"
         assert poll_event["endpoint"] == "/api/v2/runs/run_deepline_123"
-        assert poll_event["billable"] is True
-        assert poll_event["cost_usd"] == 0.002
-        assert poll_event["cost_source"] == "deepline_response_credits"
+        assert poll_event["billable"] is False
+        assert poll_event["cost_usd"] == 0.0
+        assert poll_event["cost_source"] == "deepline_run_terminal_billing_deferred"
         assert poll_event["tracking_failed"] is False
+
+        billing_req = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_address[1]}/deepline/api/v2/runs/run_deepline_123?full=true",
+            headers={
+                "X-Research-Lab-Cost-Scope": "deepline-scope",
+                "X-Research-Lab-Cost-Cap-Usd": "1.00",
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(billing_req, timeout=5) as response:
+            billing_event = decode_cost_event_header(
+                response.headers.get("X-Research-Lab-Provider-Cost-Event")
+            )
+        assert billing_event is not None
+        assert billing_event["provider"] == "deepline"
+        assert billing_event["endpoint"] == "/api/v2/runs/run_deepline_123"
+        assert billing_event["billable"] is True
+        assert billing_event["cost_usd"] == 0.002
+        assert billing_event["cost_source"] == "deepline_response_credits"
+        assert billing_event["tracking_failed"] is False
     finally:
         if proxy is not None:
             proxy.shutdown()

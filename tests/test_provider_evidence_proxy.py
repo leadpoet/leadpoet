@@ -29,11 +29,13 @@ class TestRegistryValidation:
     def test_seed_registry_is_valid_and_covers_legacy_providers(self):
         entries = seed_provider_registry()
         assert validate_provider_registry_entries(entries) == []
-        assert {entry.id for entry in entries} == {"exa", "sd", "or"}
+        assert {entry.id for entry in entries} == {"exa", "sd", "or", "deepline"}
         by_id = {entry.id: entry for entry in entries}
         assert by_id["exa"].base_url == "https://api.exa.ai"
         assert by_id["sd"].auth_kind == "query"
         assert by_id["or"].auth_kind == "bearer"
+        assert by_id["deepline"].base_url == "https://code.deepline.com"
+        assert by_id["deepline"].auth_kind == "bearer"
 
     def test_duplicate_ids_rejected(self):
         entries = seed_provider_registry() + [seed_provider_registry()[0]]
@@ -60,7 +62,7 @@ class TestRegistryLoading:
     def test_missing_path_falls_back_to_seed(self, monkeypatch):
         monkeypatch.delenv(proxy_module.REGISTRY_PATH_ENV, raising=False)
         entries = load_provider_registry("")
-        assert {entry.id for entry in entries} == {"exa", "sd", "or"}
+        assert {entry.id for entry in entries} == {"exa", "sd", "or", "deepline"}
 
     def test_file_roundtrip(self, tmp_path):
         path = tmp_path / "registry.json"

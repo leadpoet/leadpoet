@@ -65,7 +65,7 @@ PCR0_CHECK_INTERVAL = int(os.environ.get("PCR0_CHECK_INTERVAL", "480"))  # 8 min
 
 # How many CODE VERSIONS to cache PCR0 for
 # Allows validators on older code to still be accepted
-PCR0_CACHE_SIZE = int(os.environ.get("PCR0_CACHE_SIZE", "10"))
+PCR0_CACHE_SIZE = int(os.environ.get("PCR0_CACHE_SIZE", "20"))
 
 # Git history depth for the builder's working clone.  The historical warm-up
 # advertises "last N commits", but with a depth-1 clone the repo only ever
@@ -75,7 +75,7 @@ PCR0_CACHE_SIZE = int(os.environ.get("PCR0_CACHE_SIZE", "10"))
 # submission 403s until its measurement is hand-added to the static
 # allowlist.  History is metadata-only under --filter=blob:none (blobs fetch
 # on demand at checkout), so a deeper clone costs almost nothing.
-PCR0_GIT_HISTORY_DEPTH = max(1, int(os.environ.get("PCR0_GIT_HISTORY_DEPTH", "20")))
+PCR0_GIT_HISTORY_DEPTH = max(1, int(os.environ.get("PCR0_GIT_HISTORY_DEPTH", "40")))
 
 # Give the gateway process time to finish serving health/readiness before the
 # Docker/Nitro cache warmer starts competing for host resources. Static PCR0

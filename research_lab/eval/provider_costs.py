@@ -865,6 +865,8 @@ class ProviderCostLedger:
         endpoint: str,
         request_fingerprint: str,
         reason: str,
+        status_code: int = 402,
+        evidence: str = "blocked",
     ) -> ProviderCostEvent:
         with self._lock:
             self._blocked = True
@@ -874,7 +876,8 @@ class ProviderCostLedger:
                 provider=provider,
                 endpoint=endpoint,
                 request_fingerprint=request_fingerprint,
-                evidence="blocked",
+                evidence=evidence,
+                status_code=status_code,
                 billable=False,
                 cost_source="blocked_before_paid_call",
                 cap_usd=self.cap_usd,

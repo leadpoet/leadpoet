@@ -29,8 +29,10 @@ SECRET_MARKERS = (
     "sb_secret_",
     "aws_secret_access_key",
     "openrouter_api_key",
+    "openrouter_management_key",
     "scrapingdog_api_key",
     "exa_api_key",
+    "deepline_api_key",
     "raw_secret",
     "service_role",
 )
@@ -66,6 +68,7 @@ PROVIDER_COST_ENV_PASSTHROUGH = (
     "RESEARCH_LAB_SCRAPINGDOG_COST_PER_CREDIT_USD",
     "RESEARCH_LAB_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS",
     "RESEARCH_LAB_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY",
+    "RESEARCH_LAB_PROVIDER_COST_SOFT_STOP",
 )
 PROVIDER_COST_EVALUATION_SCOPE_ENV = "RESEARCH_LAB_PROVIDER_COST_EVALUATION_SCOPE"
 DEFAULT_DOCKER_PLATFORM = "linux/amd64"
@@ -1158,6 +1161,7 @@ _research_lab_in_urlopen = _research_lab_threading.local()
 _research_lab_evidence_proxy = (os.environ.get("RESEARCH_LAB_EVIDENCE_PROXY_URL") or "").strip().rstrip("/")
 _research_lab_provider_cost_scope = (os.environ.get("RESEARCH_LAB_PROVIDER_COST_SCOPE") or "").strip()
 _research_lab_provider_cost_cap_usd = (os.environ.get("RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP") or "").strip()
+_research_lab_provider_cost_soft_stop = (os.environ.get("RESEARCH_LAB_PROVIDER_COST_SOFT_STOP") or "1").strip().lower() not in {"0", "false", "no", "off"}
 _research_lab_proxy_routes = (
     ("api.exa.ai", "/exa"),
     ("api.scrapingdog.com", "/sd"),
@@ -1188,6 +1192,8 @@ def _research_lab_proxy_headers():
         headers["X-Research-Lab-Cost-Scope"] = _research_lab_provider_cost_scope
     if _research_lab_provider_cost_cap_usd:
         headers["X-Research-Lab-Cost-Cap-Usd"] = _research_lab_provider_cost_cap_usd
+    if _research_lab_provider_cost_soft_stop:
+        headers["X-Research-Lab-Budget-Soft-Stop"] = "1"
     return headers
 
 def _research_lab_decode_cost_event_header(headers):
@@ -1233,6 +1239,17 @@ def _research_lab_emit_evidence_marker(headers, method, target, request_body):
         _research_lab_emit_trace(method, target, request_body, None, None, "cache_hit", "", phase="cache_hit")
     elif kind == "recorded":
         _research_lab_emit_trace(method, target, request_body, None, None, "cache_miss", "", phase="cache_miss")
+    elif kind == "budget_soft_stop":
+        _research_lab_emit_trace(
+            method,
+            target,
+            request_body,
+            None,
+            None,
+            "budget_soft_stop",
+            "",
+            phase="budget_soft_stop",
+        )
 
 def _research_lab_install_httpclient_watch():
     if not _research_lab_evidence_cache:

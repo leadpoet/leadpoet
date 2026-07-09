@@ -54,6 +54,11 @@ SCRAPINGDOG_410_MSG = (
     "private model provider-backed sourcing failed before returning companies: "
     "HTTPError: HTTP Error 410: Gone; status=410; url=https://api.scrapingdog.com/linkedin"
 )
+COST_CAP_402_MSG = (
+    "private model provider-backed sourcing failed before returning companies: "
+    "HTTPError: HTTP Error 402: Payment Required; status=402; "
+    "body={\"error\":\"research_lab_provider_cost_cap_exceeded\"}"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -228,6 +233,56 @@ async def test_permanent_provider_error_not_retried_and_scores_zero():
     )
 
 
+async def test_cost_cap_provider_error_not_retried_and_scores_zero_without_output():
+    runner = ScriptedRunner(script={"icp-0": [PrivateModelRuntimeError(COST_CAP_402_MSG)]})
+    rows = await _score_items(runner, _benchmark_items(2))
+
+    assert runner.call_count("icp-0") == 1
+    assert "candidate_model_runtime_provider_error" in rows[0]["failure_reason"]
+    assert evaluator._benchmark_style_score(rows, "candidate_company_scores") == pytest.approx(
+        (0.0 + 50.0) / 2
+    )
+
+
+async def test_cost_cap_trace_preserves_returned_candidate_scores():
+    class CapSoftStopRunner:
+        async def __call__(self, icp, context):
+            private_runtime.publish_incontainer_trace_entries(
+                [
+                    {
+                        "phase": "provider_cost",
+                        "provider_cost_event": {
+                            "provider": "exa",
+                            "endpoint": "/search",
+                            "request_fingerprint": "c" * 64,
+                            "evidence": "budget_soft_stop",
+                            "status_code": 200,
+                            "billable": False,
+                            "cost_usd": 0,
+                            "cost_source": "blocked_before_paid_call",
+                            "cap_usd": 1.0,
+                            "spent_before_usd": 1.0,
+                            "spent_after_usd": 1.0,
+                            "cap_blocked": True,
+                            "tracking_failed": False,
+                            "scope": "scope-cap",
+                        },
+                    }
+                ]
+            )
+            return [{"score": 42.0}]
+
+    rows = await _score_items(
+        CapSoftStopRunner(),
+        _benchmark_items(1),
+        trace_sink=lambda icp_ref, entries: f"s3://trace/{icp_ref}.json",
+    )
+
+    assert rows[0]["candidate_company_scores"] == [42.0]
+    assert rows[0]["provider_cost_cap_blocked"] is True
+    assert "provider_cost_cap_blocked" in rows[0]["failure_reason"]
+
+
 async def test_provider_flake_retry_flag_off_restores_legacy_zeroing(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_EVAL_PROVIDER_FLAKE_RETRY", "false")
     runner = ScriptedRunner(script={"icp-1": [PrivateModelRuntimeError(PROVIDER_RETRYABLE_MSG)]})
@@ -310,6 +365,8 @@ async def test_gate_keeps_retry_exhausted_provider_failures_in_totals():
         ("HTTPError: bad gateway; status=502", True),
         ("URLError: connection reset by peer", True),
         ("adapter failed: exit status 137 (killed)", True),
+        (COST_CAP_402_MSG, False),
+        ("provider_cost_cap_blocked cost_cap_reached", False),
         (PROVIDER_PERMANENT_MSG, False),  # 401 auth
         ("HTTPError: forbidden; status=403", False),
         ("HTTPError: HTTP Error 400: Bad Request; status=400; body=invalid request payload", False),

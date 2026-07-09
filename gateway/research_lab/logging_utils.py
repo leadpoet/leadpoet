@@ -36,9 +36,11 @@ def runtime_error_diagnostics(error_text: str) -> dict[str, Any]:
         provider = "exa"
     elif "openrouter" in lowered:
         provider = "openrouter"
+    elif "deepline" in lowered:
+        provider = "deepline"
 
     status = 0
-    for code in (400, 401, 403, 404, 408, 409, 410, 429, 500, 502, 503, 504):
+    for code in (400, 401, 402, 403, 404, 408, 409, 410, 429, 500, 502, 503, 504):
         if f"http error {code}" in lowered or f"status={code}" in lowered or f'"status":{code}' in lowered:
             status = code
             break

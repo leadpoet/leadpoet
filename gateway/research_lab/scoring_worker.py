@@ -245,6 +245,24 @@ def _env_int(name: str, default: int) -> int:
 # existing call sites and tests stable.
 
 _PROVIDER_429_RETRY_BACKOFF_SECONDS = 15.0
+_PROVIDER_COST_CAP_ERROR_MARKERS = (
+    "research_lab_provider_cost_cap_exceeded",
+    "cost_cap_reached",
+    "provider_cost_cap_blocked",
+    "provider cost cap",
+    "budget_soft_stop",
+)
+
+
+def _provider_cost_cap_error_text(error_text: str) -> bool:
+    lowered = str(error_text or "").lower()
+    if any(marker in lowered for marker in _PROVIDER_COST_CAP_ERROR_MARKERS):
+        return True
+    diagnostics = _runtime_error_diagnostics(error_text)
+    try:
+        return int(diagnostics.get("status") or 0) == 402
+    except (TypeError, ValueError):
+        return False
 
 
 def _baseline_error_is_retryable(error_text: str) -> bool:
@@ -261,6 +279,8 @@ def _baseline_error_is_retryable(error_text: str) -> bool:
     diagnostics = _runtime_error_diagnostics(error_text)
     status = int(diagnostics.get("status") or 0)
     provider = str(diagnostics.get("provider") or "unknown")
+    if _provider_cost_cap_error_text(error_text):
+        return False
     if status in (408, 429) or status >= 500:
         return True
     # Scrapingdog's 400 "Something went wrong or profile not found" is
@@ -269,7 +289,7 @@ def _baseline_error_is_retryable(error_text: str) -> bool:
     # content, so 410 is treated as a terminal provider/data miss.
     if status == 400 and (provider == "scrapingdog" or "something went wrong" in lowered):
         return True
-    if status in (400, 401, 403, 404, 409, 410):
+    if status in (400, 401, 402, 403, 404, 409, 410):
         return False
     if any(
         marker in lowered
@@ -712,14 +732,9 @@ def _baseline_summary_checkpointable(row: Mapping[str, Any]) -> bool:
         if diagnostics.get("runtime_error"):
             return False
         categories = {str(value) for value in diagnostics.get("failure_categories") or []}
-        if categories.intersection(
-            {
-                "runtime_provider_error",
-                "scorer_provider_error",
-                "provider_cost_cap_blocked",
-                "provider_cost_tracking_failed",
-            }
-        ):
+        if categories.intersection({"runtime_provider_error", "scorer_provider_error", "provider_cost_tracking_failed"}):
+            return False
+        if "provider_cost_cap_blocked" in categories and not _baseline_summary_nonempty(row):
             return False
     return bool(str(row.get("icp_ref") or row.get("icp_hash") or ""))
 
@@ -1533,8 +1548,9 @@ def _apply_provider_cost_baseline_outcome(item_summary: dict[str, Any]) -> None:
         categories.add("provider_cost_tracking_failed")
         mutable_diagnostics["provider_cost_tracking_failed"] = True
     mutable_diagnostics["failure_categories"] = sorted(categories)
-    item_summary["score"] = 0.0
-    item_summary["company_count"] = 0
+    if tracking_failed or (cap_blocked and not _baseline_summary_nonempty(item_summary)):
+        item_summary["score"] = 0.0
+        item_summary["company_count"] = 0
     item_summary["diagnostics"] = mutable_diagnostics
 
 
@@ -6939,6 +6955,11 @@ class ResearchLabGatewayScoringWorker:
             trace_context=trace_context,
         )
         _apply_provider_cost_baseline_outcome(item_summary)
+        diagnostics = item_summary.get("diagnostics")
+        if isinstance(diagnostics, Mapping):
+            categories = {str(value) for value in diagnostics.get("failure_categories") or []}
+            if categories.intersection({"provider_cost_cap_blocked", "provider_cost_tracking_failed"}):
+                retryable = False
         item_summary["_item_index"] = item_index
         item_summary["_retryable"] = retryable
         item_summary["_nonempty"] = bool(outputs)

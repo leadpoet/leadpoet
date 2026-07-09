@@ -70,6 +70,18 @@ INCONTAINER_TRACE_KMS_KEY_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID"
 _TOP5_LEADS_PER_ICP = 5
 _EVAL_ENV_TRUTHY = {"1", "true", "yes", "on"}
 _PROVIDER_429_RETRY_BACKOFF_SECONDS = 15.0
+_PROVIDER_COST_CAP_ERROR_MARKERS = (
+    "research_lab_provider_cost_cap_exceeded",
+    "cost_cap_reached",
+    "provider_cost_cap_blocked",
+    "provider cost cap",
+    "budget_soft_stop",
+)
+
+
+def _provider_cost_cap_error_text(error_text: str) -> bool:
+    lowered = str(error_text or "").lower()
+    return any(marker in lowered for marker in _PROVIDER_COST_CAP_ERROR_MARKERS) or _provider_error_status_code(lowered) == 402
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -762,15 +774,19 @@ async def _score_single_icp(
         if isinstance(cost_summary, Mapping) and (
             cost_summary.get("cap_blocked") or int(cost_summary.get("tracking_failed_count") or 0) > 0
         ):
-            row["base_company_scores"] = []
-            row["candidate_company_scores"] = []
+            cap_blocked = bool(cost_summary.get("cap_blocked"))
+            tracking_failed = int(cost_summary.get("tracking_failed_count") or 0) > 0
+            has_scoreable_output = bool(row.get("base_company_scores")) or bool(row.get("candidate_company_scores"))
+            if tracking_failed or (cap_blocked and not has_scoreable_output):
+                row["base_company_scores"] = []
+                row["candidate_company_scores"] = []
             row["hard_failure"] = False
-            row["provider_cost_cap_blocked"] = bool(cost_summary.get("cap_blocked"))
-            row["provider_cost_tracking_failed"] = int(cost_summary.get("tracking_failed_count") or 0) > 0
+            row["provider_cost_cap_blocked"] = cap_blocked
+            row["provider_cost_tracking_failed"] = tracking_failed
             tokens = [token for token in _failure_reason_tokens(row.get("failure_reason"))]
-            if cost_summary.get("cap_blocked") and "provider_cost_cap_blocked" not in tokens:
+            if cap_blocked and "provider_cost_cap_blocked" not in tokens:
                 tokens.append("provider_cost_cap_blocked")
-            if int(cost_summary.get("tracking_failed_count") or 0) > 0 and "provider_cost_tracking_failed" not in tokens:
+            if tracking_failed and "provider_cost_tracking_failed" not in tokens:
                 tokens.append("provider_cost_tracking_failed")
             row["failure_reason"] = ";".join(tokens)
     return row, markers
@@ -853,11 +869,13 @@ def _candidate_error_is_retryable(error_text: str) -> bool:
     """
     lowered = error_text.lower()
     status = _provider_error_status_code(lowered)
+    if _provider_cost_cap_error_text(error_text):
+        return False
     if status in (408, 429) or status >= 500:
         return True
     if status == 400 and "something went wrong" in lowered:
         return True
-    if status in (400, 401, 403, 404, 409, 410):
+    if status in (400, 401, 402, 403, 404, 409, 410):
         return False
     if any(
         marker in lowered
@@ -898,7 +916,7 @@ def _candidate_429_retry_backoff_seconds(error_text: str) -> float:
 def _provider_error_status_code(lowered_error_text: str) -> int:
     # Keep this in sync with gateway logging diagnostics so candidate and
     # baseline retry verdicts see the same provider status codes.
-    for code in (400, 401, 403, 404, 408, 409, 410, 429, 500, 502, 503, 504):
+    for code in (400, 401, 402, 403, 404, 408, 409, 410, 429, 500, 502, 503, 504):
         if (
             f"http error {code}" in lowered_error_text
             or f"status={code}" in lowered_error_text

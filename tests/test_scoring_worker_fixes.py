@@ -922,6 +922,61 @@ def test_private_baseline_checkpoint_rejects_unresolved_and_cost_blocked_rows():
             "diagnostics": {"failure_categories": ["provider_cost_cap_blocked"]},
         }
     )
+    assert sw._baseline_summary_checkpointable(
+        {
+            "icp_ref": "cost-blocked-with-output",
+            "score": 42.0,
+            "company_count": 2,
+            "score_breakdowns": [{"final_score": 40.0}, {"final_score": 44.0}],
+            "diagnostics": {"failure_categories": ["provider_cost_cap_blocked"]},
+        }
+    )
+
+
+def test_private_baseline_cost_cap_is_terminal_and_preserves_partial_scores():
+    for message in (
+        "HTTPError: HTTP Error 402: Payment Required; status=402",
+        "research_lab_provider_cost_cap_exceeded cost_cap_reached",
+        "provider_cost_cap_blocked",
+    ):
+        assert sw._baseline_error_is_retryable(message) is False
+
+    summary = {
+        "score": 36.0,
+        "company_count": 2,
+        "sourced_count": 3,
+        "score_breakdowns": [{"final_score": 30.0}, {"final_score": 42.0}],
+        "diagnostics": {
+            "provider_cost_summary": {
+                "cap_blocked": True,
+                "tracking_failed_count": 0,
+            }
+        },
+    }
+    sw._apply_provider_cost_baseline_outcome(summary)
+
+    assert summary["score"] == 36.0
+    assert summary["company_count"] == 2
+    assert summary["diagnostics"]["provider_cost_cap_blocked"] is True
+
+
+def test_private_baseline_tracking_failure_still_fails_closed():
+    summary = {
+        "score": 36.0,
+        "company_count": 2,
+        "score_breakdowns": [{"final_score": 30.0}, {"final_score": 42.0}],
+        "diagnostics": {
+            "provider_cost_summary": {
+                "cap_blocked": False,
+                "tracking_failed_count": 1,
+            }
+        },
+    }
+    sw._apply_provider_cost_baseline_outcome(summary)
+
+    assert summary["score"] == 0.0
+    assert summary["company_count"] == 0
+    assert summary["diagnostics"]["provider_cost_tracking_failed"] is True
 
 
 def test_candidate_baseline_target_date_respects_quiet_window():

@@ -1205,6 +1205,7 @@ async def _run_fulfillment_stage0_2(
         check_domain_age, check_mx_record, check_spf_dmarc,
         check_head_request, check_dnsbl,
     )
+    from Leadpoet.utils.utils_lead_extraction import get_email
 
     stage0_2_data: dict = {
         "stage_0_hardcoded": {
@@ -1265,11 +1266,22 @@ async def _run_fulfillment_stage0_2(
         rej = rejection or {}
         return rej.get("check_name", "stage0_2_failure"), stage0_2_data
 
+    # Email is OPTIONAL for fulfillment leads. Every email-specific check reads
+    # the email and rejects when it is absent ("No email provided"), which would
+    # wrongly fail an otherwise-valid lead that simply carries no email. So the
+    # email-dependent checks only run when an email is actually present; the
+    # website/company-domain checks (and required-fields) always run.
+    email_present = bool(get_email(validator_dict))
+
     # -- Stage 0: instant checks --
-    for check_func in [
-        check_required_fields, check_email_regex, check_name_email_match,
-        check_general_purpose_email, check_free_email_domain, check_disposable,
-    ]:
+    # check_required_fields does not require an email; the rest read the email.
+    stage0_checks = [check_required_fields]
+    if email_present:
+        stage0_checks += [
+            check_email_regex, check_name_email_match,
+            check_general_purpose_email, check_free_email_domain, check_disposable,
+        ]
+    for check_func in stage0_checks:
         passed, rejection = await check_func(validator_dict)
         if not passed:
             return _fail(rejection)
@@ -1291,19 +1303,22 @@ async def _run_fulfillment_stage0_2(
     # hit this path on 2026-04-21.  check_mx_record and check_spf_dmarc
     # stay hard-gating — a domain with no MX record genuinely can't
     # receive mail.
-    CHECK_INDEX = {0: "check_domain_age", 1: "check_mx_record", 2: "check_spf_dmarc"}
-    DOMAIN_AGE_INDEX = 0
+    # check_domain_age and check_mx_record read the company WEBSITE domain, so
+    # they run regardless of email. check_spf_dmarc reads the EMAIL, so it only
+    # runs when an email is present.
+    dns_specs = [
+        ("check_domain_age", check_domain_age, True),
+        ("check_mx_record", check_mx_record, False),
+    ]
+    if email_present:
+        dns_specs.append(("check_spf_dmarc", check_spf_dmarc, False))
 
     dns_results = await asyncio.gather(
-        check_domain_age(validator_dict),
-        check_mx_record(validator_dict),
-        check_spf_dmarc(validator_dict),
+        *(fn(validator_dict) for _, fn, _ in dns_specs),
         return_exceptions=True,
     )
 
-    for idx, result in enumerate(dns_results):
-        is_domain_age = (idx == DOMAIN_AGE_INDEX)
-
+    for (check_name, _fn, is_domain_age), result in zip(dns_specs, dns_results):
         if isinstance(result, Exception):
             if is_domain_age:
                 # WHOIS flakiness shouldn't tank the lead — rep score
@@ -1314,7 +1329,7 @@ async def _run_fulfillment_stage0_2(
             head_task.cancel()
             return _fail({
                 "stage": "Stage 1: DNS Layer",
-                "check_name": CHECK_INDEX.get(idx, "stage1_dns_failure"),
+                "check_name": check_name,
                 "message": str(result),
                 "failed_fields": ["domain"],
             })
@@ -1336,15 +1351,18 @@ async def _run_fulfillment_stage0_2(
     if not passed:
         return _fail(rejection)
 
-    # -- Stage 2: DNSBL --
-    passed, rejection = await check_dnsbl(validator_dict)
+    # -- Stage 2: DNSBL (checks the EMAIL domain; skipped when no email) --
+    if email_present:
+        passed, rejection = await check_dnsbl(validator_dict)
 
-    stage0_2_data["stage_2_domain"]["dnsbl_checked"] = validator_dict.get("dnsbl_checked", False)
-    stage0_2_data["stage_2_domain"]["dnsbl_blacklisted"] = validator_dict.get("dnsbl_blacklisted", False)
-    stage0_2_data["stage_2_domain"]["dnsbl_list"] = validator_dict.get("dnsbl_list")
+        stage0_2_data["stage_2_domain"]["dnsbl_checked"] = validator_dict.get("dnsbl_checked", False)
+        stage0_2_data["stage_2_domain"]["dnsbl_blacklisted"] = validator_dict.get("dnsbl_blacklisted", False)
+        stage0_2_data["stage_2_domain"]["dnsbl_list"] = validator_dict.get("dnsbl_list")
 
-    if not passed:
-        return _fail(rejection)
+        if not passed:
+            return _fail(rejection)
+    else:
+        stage0_2_data["stage_3_email"]["email_status"] = "not_provided"
 
     stage0_2_data["passed"] = True
     return None, stage0_2_data

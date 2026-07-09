@@ -256,6 +256,11 @@ class ResearchLabCandidateArtifactCreateRequest(BaseModel):
             raise ValueError("image_build candidate requires candidate_model_manifest")
         if not self.candidate_source_diff_hash:
             raise ValueError("image_build candidate requires candidate_source_diff_hash")
+        source_diff_uri = str(self.candidate_build_doc.get("source_diff_artifact_uri") or "").strip()
+        if not source_diff_uri:
+            raise ValueError("image_build candidate requires candidate_build_doc.source_diff_artifact_uri")
+        if self.candidate_build_doc.get("source_diff_artifact_error"):
+            raise ValueError("image_build candidate source diff artifact persistence failed")
         return self
 
 

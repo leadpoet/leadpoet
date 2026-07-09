@@ -1477,15 +1477,6 @@ def _write_private_code_edit_diff_artifact(
 ) -> dict[str, Any]:
     """Persist the successful raw diff privately for stale-parent rebase."""
 
-    manifest_uri = str(parent_artifact.manifest_uri or "")
-    if not manifest_uri.startswith("s3://"):
-        return {"source_diff_artifact_skipped": "parent_manifest_uri_not_s3"}
-    try:
-        bucket, key = _parse_s3_uri(manifest_uri)
-    except ValueError as exc:
-        return {"source_diff_artifact_error": str(exc)[:200]}
-    base_prefix = key.rsplit("/", 1)[0] if "/" in key else "research-lab/sourcing-model"
-    object_key = f"{base_prefix}/candidates/{run_id}/{int(candidate_index)}/source_diff.json"
     payload = {
         "schema_version": "1.0",
         "artifact_type": "research_lab_code_edit_source_diff",
@@ -1499,6 +1490,34 @@ def _write_private_code_edit_diff_artifact(
         "draft_hash": sha256_json(draft.to_dict()),
     }
     artifact_hash = sha256_json(payload)
+    manifest_uri = str(parent_artifact.manifest_uri or "")
+    if not manifest_uri.startswith("s3://"):
+        try:
+            local_dir = Path(tempfile.gettempdir()) / "research-lab-source-diffs"
+            local_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            local_path = local_dir / (
+                f"{sha256_json({'run_id': str(run_id), 'candidate_index': int(candidate_index), 'hash': source_diff_hash})}.json"
+            )
+            local_path.write_text(
+                json.dumps({**payload, "artifact_hash": artifact_hash}, sort_keys=True),
+                encoding="utf-8",
+            )
+            return {
+                "source_diff_artifact_uri": local_path.resolve().as_uri(),
+                "source_diff_artifact_hash": artifact_hash,
+                "source_diff_artifact_storage": "local_file",
+            }
+        except Exception as exc:
+            return {
+                "source_diff_artifact_hash": artifact_hash,
+                "source_diff_artifact_error": str(exc)[:300],
+            }
+    try:
+        bucket, key = _parse_s3_uri(manifest_uri)
+    except ValueError as exc:
+        return {"source_diff_artifact_error": str(exc)[:200]}
+    base_prefix = key.rsplit("/", 1)[0] if "/" in key else "research-lab/sourcing-model"
+    object_key = f"{base_prefix}/candidates/{run_id}/{int(candidate_index)}/source_diff.json"
     try:
         import boto3  # type: ignore
 

@@ -976,3 +976,49 @@ async def test_scorer_crash_yields_crash_trace_row(enabled):
     assert node1["score_bundle_ref"] == "score_bundle:unavailable"
     assert node1["trace_doc"]["scoring_crashed"] is True
     assert node1["trace_doc"]["scoring_failure_event_type"] == "failed"
+
+
+async def test_score_bundle_projects_first_class_champion_and_baseline_traces(tables, enabled):
+    tables = copy.deepcopy(tables)
+    gate = tables["research_lab_candidate_evaluation_events"][0]["event_doc"][
+        "private_holdout_gate"
+    ]
+    gate["baseline_benchmark_bundle_id"] = "benchmark-20260709-a0"
+    gate["baseline_benchmark_hash"] = sha256_json({"benchmark": "20260709-a0"})
+
+    store = FakeStore(tables)
+    result = await project_run(RUN_ID, store=store, dry_run=False)
+    assert result.status == "projected", result.errors
+
+    from gateway.research_lab.trajectory_projector import (
+        EXECUTION_TRACES_TABLE,
+        execution_trace_id_for_baseline_arm_side,
+        execution_trace_id_for_champion_side,
+        execution_trace_id_for_node,
+    )
+
+    trace_rows = {
+        row["run_id"]: row for row in store.inserted[EXECUTION_TRACES_TABLE]
+    }
+    candidate_trace_id = execution_trace_id_for_node(RUN_ID, "node-1")
+    champion_trace_id = execution_trace_id_for_champion_side(RUN_ID, SCORE_BUNDLE_ID)
+    baseline_ref = "benchmark_bundle:benchmark-20260709-a0"
+    baseline_trace_id = execution_trace_id_for_baseline_arm_side(
+        RUN_ID, baseline_ref, SCORE_BUNDLE_ID
+    )
+
+    assert candidate_trace_id in trace_rows
+    assert trace_rows[candidate_trace_id]["role"] == "candidate"
+    assert trace_rows[champion_trace_id]["role"] == "champion"
+    assert trace_rows[champion_trace_id]["score_bundle_ref"] == SCORE_BUNDLE_ID
+    assert trace_rows[champion_trace_id]["trace_doc"]["trace_kind"] == (
+        "champion_comparison_side"
+    )
+    assert trace_rows[baseline_trace_id]["role"] == "baseline_arm"
+    assert trace_rows[baseline_trace_id]["score_bundle_ref"] == baseline_ref
+    assert trace_rows[baseline_trace_id]["trace_doc"]["trace_kind"] == (
+        "baseline_arm_comparison_side"
+    )
+    assert trace_rows[baseline_trace_id]["trace_doc"]["candidate_score_bundle_ref"] == (
+        SCORE_BUNDLE_ID
+    )

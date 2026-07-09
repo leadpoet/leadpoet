@@ -499,6 +499,7 @@ def test_candidate_artifact_contract_requires_image_build() -> None:
         candidate_patch_manifest=compat_manifest,
         candidate_model_manifest=candidate.to_dict(),
         candidate_source_diff_hash=sha256_json({"diff": "safe"}),
+        candidate_build_doc={"source_diff_artifact_uri": "file:///tmp/research-lab-fixture-source-diff.json"},
     )
     reparsed = ResearchLabCandidateArtifactCreateRequest.model_validate(request.model_dump(mode="json"))
     assert reparsed.candidate_kind == "image_build"
@@ -512,6 +513,7 @@ def test_candidate_artifact_contract_requires_image_build() -> None:
             candidate_kind="patch",
             private_model_manifest=parent.to_dict(),
             candidate_patch_manifest=compat_manifest,
+            candidate_build_doc={"source_diff_artifact_uri": "file:///tmp/research-lab-fixture-source-diff.json"},
         )
     except ValueError:
         return
@@ -622,6 +624,7 @@ async def test_stale_parent_rebase_queues_current_parent_candidate() -> None:
                 build_doc = {
                     "schema_version": "1.1",
                     "source_diff_hash": source_diff_hash,
+                    "source_diff_artifact_uri": str(diff_path),
                     "candidate_model_manifest_hash": candidate_manifest.manifest_hash,
                 }
                 return SimpleNamespace(
@@ -756,6 +759,7 @@ async def test_stale_parent_rebase_routes_apply_failure_to_repair() -> None:
             build_doc = {
                 "schema_version": "1.1",
                 "source_diff_hash": source_diff_hash,
+                "source_diff_artifact_uri": str(diff_path),
                 "candidate_model_manifest_hash": candidate_manifest.manifest_hash,
             }
             return SimpleNamespace(

@@ -43,6 +43,8 @@ from gateway.research_lab.trajectory_projector import (
     build_trajectory_projection,
     evidence_bundle_id_for_node,
     evidence_bundle_id_for_score_bundle,
+    execution_trace_id_for_baseline_arm_side,
+    execution_trace_id_for_champion_side,
     execution_trace_id_for_node,
     execution_trace_id_for_run,
     execution_trace_id_for_score_bundle,
@@ -649,6 +651,11 @@ ORPHAN_TRACE_ID = execution_trace_id_for_score_bundle(RUN_ID, ORPHAN_SCORE_BUNDL
 ORPHAN_EVIDENCE_ID = evidence_bundle_id_for_score_bundle(
     RUN_ID, ORPHAN_SCORE_BUNDLE_ID
 )
+CHAMPION_TRACE_ID = execution_trace_id_for_champion_side(RUN_ID, SCORE_BUNDLE_ID)
+BASELINE_BUNDLE_REF = "benchmark_bundle:benchmark-run1"
+BASELINE_TRACE_ID = execution_trace_id_for_baseline_arm_side(
+    RUN_ID, BASELINE_BUNDLE_REF, SCORE_BUNDLE_ID
+)
 
 
 # ---------------------------------------------------------------------------
@@ -726,8 +733,8 @@ async def test_projection_writes_trace_and_evidence_rows(tables, enabled):
     store = FakeStore(tables)
     result = await project_run(RUN_ID, store=store, dry_run=False)
     assert result.status == "projected", result.errors
-    # engine row + node-1 row + node-2 row (node-2 has a draft raw trace)
-    assert result.execution_trace_count == 3
+    # engine row + node-1 row + node-2 row + champion/baseline comparison rows.
+    assert result.execution_trace_count == 5
     assert result.evidence_bundle_count == 1
     assert result.provider_usage_ledger_count == 4
 
@@ -743,7 +750,11 @@ async def test_projection_writes_trace_and_evidence_rows(tables, enabled):
         ENGINE_TRACE_ID,
         NODE1_TRACE_ID,
         execution_trace_id_for_node(RUN_ID, "node-2"),
+        CHAMPION_TRACE_ID,
+        BASELINE_TRACE_ID,
     }
+    assert by_id[CHAMPION_TRACE_ID]["role"] == "champion"
+    assert by_id[BASELINE_TRACE_ID]["role"] == "baseline_arm"
     assert evidence_rows[0]["bundle_id"] == EVIDENCE_ID
     assert evidence_rows[0]["run_id"] == RUN_ID
 
@@ -903,7 +914,7 @@ async def test_orphan_score_bundle_gets_fallback_trace_and_evidence_rows(
     result = await project_run(RUN_ID, store=store, dry_run=False)
 
     assert result.status == "projected", result.errors
-    assert result.execution_trace_count == 4
+    assert result.execution_trace_count == 6
     assert result.evidence_bundle_count == 2
     traces = {row["run_id"]: row for row in store.inserted[EXECUTION_TRACES_TABLE]}
     fallback_trace = traces[ORPHAN_TRACE_ID]
@@ -971,7 +982,7 @@ async def test_corpus_source_record_carries_prefixed_refs(tables):
     assert projection.errors == []
     record = projection.corpus_source_record
     assert validate_trajectory_corpus_source_record(record) == []
-    assert len(record.execution_trace_refs) == 3
+    assert len(record.execution_trace_refs) == 5
     assert all(ref.startswith("execution_trace:") for ref in record.execution_trace_refs)
     assert record.evidence_bundle_refs == (f"evidence_bundle:{EVIDENCE_ID}",)
 
@@ -1018,7 +1029,7 @@ async def test_traces_backfill_adds_rows_without_touching_events(tables, enabled
 
     result = await backfill_run_corpus_trace_rows(RUN_ID, store=store, dry_run=False)
     assert result.status == "traces_backfilled"
-    assert result.execution_trace_count == 3
+    assert result.execution_trace_count == 5
     assert result.evidence_bundle_count == 1
     assert result.provider_usage_ledger_count == 4
     # deterministic ids: restored rows carry the same ids
@@ -1138,7 +1149,7 @@ async def test_traces_backfill_dry_run_writes_nothing(tables, disabled):
 
     result = await backfill_run_corpus_trace_rows(RUN_ID, store=store, dry_run=True)
     assert result.status == "traces_dry_run"
-    assert result.execution_trace_count == 3
+    assert result.execution_trace_count == 5
     assert result.evidence_bundle_count == 1
     assert store.write_count() == writes
 
@@ -1152,10 +1163,11 @@ async def test_traces_backfill_skips_unprojected_and_disabled(tables, disabled):
     # not projected yet -> --backfill owns it
     result = await backfill_run_corpus_trace_rows(RUN_ID, store=store, dry_run=True)
     assert result.status == "skipped_unprojected"
-    # disabled flag blocks writes (dry-run above stays available)
+    # Unprojected runs are rejected before the disabled-write gate.
     blocked = await backfill_run_corpus_trace_rows(RUN_ID, store=store, dry_run=False)
-    assert blocked.status == "skipped_disabled"
-    assert await backfill_corpus_trace_rows(dry_run=False, store=store) == []
+    assert blocked.status == "skipped_unprojected"
+    batch = await backfill_corpus_trace_rows(dry_run=False, store=store)
+    assert [item.status for item in batch] == ["skipped_unprojected"]
     assert store.write_count() == 0
 
 
@@ -1230,8 +1242,11 @@ async def test_historical_run_without_pointers_still_gets_valid_evidence(enabled
     # No raw traces anywhere: no engine row, no node-2 row; the scored node
     # still gets a pointer row (score bundle IS a pointer).
     trace_rows = store.inserted[EXECUTION_TRACES_TABLE]
-    assert [row["run_id"] for row in trace_rows] == [NODE1_TRACE_ID]
-    node1 = trace_rows[0]
+    assert {row["run_id"] for row in trace_rows} == {
+        NODE1_TRACE_ID,
+        CHAMPION_TRACE_ID,
+    }
+    node1 = {row["run_id"]: row for row in trace_rows}[NODE1_TRACE_ID]
     _assert_trace_row_matches_sql(node1)
     assert node1["calls"] == []
     assert node1["score_bundle_ref"] == SCORE_BUNDLE_ID
@@ -1307,7 +1322,7 @@ async def test_project_run_dry_run_reports_trace_counts_without_writes(tables, d
     store = FakeStore(tables)
     result = await project_run(RUN_ID, store=store, dry_run=True)
     assert result.status == "dry_run"
-    assert result.execution_trace_count == 3
+    assert result.execution_trace_count == 5
     assert result.evidence_bundle_count == 1
     assert store.write_count() == 0
 

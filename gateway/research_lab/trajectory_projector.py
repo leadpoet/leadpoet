@@ -306,6 +306,26 @@ def execution_trace_id_for_score_bundle(run_id: str, score_bundle_id: str) -> st
     )
 
 
+def execution_trace_id_for_champion_side(run_id: str, score_bundle_id: str) -> str:
+    """Deterministic comparison-side champion trace for a scored candidate."""
+    return _deterministic_uuid(
+        "execution_trace", str(run_id), "champion_side", str(score_bundle_id)
+    )
+
+
+def execution_trace_id_for_baseline_arm_side(
+    run_id: str, baseline_ref: str, score_bundle_id: str
+) -> str:
+    """Deterministic comparison-side baseline trace for a scored candidate."""
+    return _deterministic_uuid(
+        "execution_trace",
+        str(run_id),
+        "baseline_arm_side",
+        str(baseline_ref or ""),
+        str(score_bundle_id),
+    )
+
+
 def evidence_bundle_id_for_node(run_id: str, node_id: str, score_bundle_id: str) -> str:
     """Deterministic ``evidence_bundles.bundle_id`` for a scored node."""
     return _deterministic_uuid(
@@ -1686,6 +1706,107 @@ def _build_corpus_trace_rows(
                     "created_at": evidence_created_at,
                 }
             )
+            champion_trace_id = execution_trace_id_for_champion_side(
+                run_id, state.score_bundle_id
+            )
+            champion_artifact_hash = str(
+                (bundle_row or {}).get("parent_artifact_hash")
+                or bundle_doc.get("parent_artifact_hash")
+                or champion_base
+            )
+            execution_trace_rows.append(
+                {
+                    "run_id": champion_trace_id,
+                    "schema_version": "1.0",
+                    "artifact_hash": champion_artifact_hash,
+                    "role": "champion",
+                    "rung": "L0",
+                    "status": _score_bundle_execution_status(bundle_row),
+                    "lane_id": None,
+                    "icp_set_hash": node_icp_set_hash,
+                    "eval_version": _eval_version_doc(bundle_row),
+                    "calls": [],
+                    "evidence_bundles": [],
+                    "judge_verdicts": [],
+                    "outputs_ref": f"artifact:{champion_artifact_hash}",
+                    "score_bundle_ref": score_bundle_ref,
+                    "cost_ledger": {
+                        "cost_ledger_ref": cost_ledger_ref,
+                        "comparison_side": "champion",
+                    },
+                    "attestation_ref": None,
+                    "trace_doc": sanitize_capture_payload(
+                        {
+                            "trace_kind": "champion_comparison_side",
+                            "node_id": node_id,
+                            "lab_run_ref": run_ref,
+                            "trajectory_ref": trajectory_ref,
+                            "candidate_ref": (
+                                f"candidate:{state.candidate_id}" if state.candidate_id else None
+                            ),
+                            "score_bundle_ref": score_bundle_ref,
+                            "score_bundle_hash": score_bundle_hash,
+                            "champion_artifact_hash": champion_artifact_hash,
+                            "candidate_artifact_hash": state.candidate_artifact_hash,
+                            "holdout_gate": _holdout_gate_summary(gate) or None,
+                            "trajectory_axis": axis_rollup([]),
+                        }
+                    ),
+                    "created_at": evidence_created_at,
+                }
+            )
+            gate_summary = _holdout_gate_summary(gate)
+            baseline_benchmark_ref = str(
+                gate_summary.get("baseline_benchmark_bundle_ref") or ""
+            )
+            if baseline_benchmark_ref:
+                baseline_trace_id = execution_trace_id_for_baseline_arm_side(
+                    run_id, baseline_benchmark_ref, state.score_bundle_id
+                )
+                execution_trace_rows.append(
+                    {
+                        "run_id": baseline_trace_id,
+                        "schema_version": "1.0",
+                        "artifact_hash": champion_artifact_hash,
+                        "role": "baseline_arm",
+                        "rung": "L0",
+                        "status": _score_bundle_execution_status(bundle_row),
+                        "lane_id": None,
+                        "icp_set_hash": node_icp_set_hash,
+                        "eval_version": _eval_version_doc(bundle_row),
+                        "calls": [],
+                        "evidence_bundles": [],
+                        "judge_verdicts": [],
+                        "outputs_ref": f"artifact:{champion_artifact_hash}",
+                        "score_bundle_ref": baseline_benchmark_ref,
+                        "cost_ledger": {
+                            "cost_ledger_ref": cost_ledger_ref,
+                            "comparison_side": "baseline_arm",
+                        },
+                        "attestation_ref": None,
+                        "trace_doc": sanitize_capture_payload(
+                            {
+                                "trace_kind": "baseline_arm_comparison_side",
+                                "node_id": node_id,
+                                "lab_run_ref": run_ref,
+                                "trajectory_ref": trajectory_ref,
+                                "candidate_ref": (
+                                    f"candidate:{state.candidate_id}"
+                                    if state.candidate_id
+                                    else None
+                                ),
+                                "candidate_score_bundle_ref": score_bundle_ref,
+                                "baseline_benchmark_bundle_ref": baseline_benchmark_ref,
+                                "score_bundle_hash": score_bundle_hash,
+                                "baseline_artifact_hash": champion_artifact_hash,
+                                "candidate_artifact_hash": state.candidate_artifact_hash,
+                                "holdout_gate": gate_summary or None,
+                                "trajectory_axis": axis_rollup([]),
+                            }
+                        ),
+                        "created_at": evidence_created_at,
+                    }
+                )
 
         trace_doc = sanitize_capture_payload(
             {

@@ -57,6 +57,7 @@ TRACE_ENV_NAMES = (
     "RESEARCH_LAB_BENCHMARK_SCRAPINGDOG_API_KEY",
     "RESEARCH_LAB_BENCHMARK_OPENROUTER_API_KEY",
     "RESEARCH_LAB_BENCHMARK_SCORER_MAX_CONCURRENCY",
+    "RESEARCH_LAB_COMPANY_LABEL_EXAMPLES_CAPTURE",
 )
 
 MANIFEST_URI = "s3://lab-bucket/research-lab/sourcing-model/manifest.json"
@@ -66,6 +67,7 @@ MANIFEST_URI = "s3://lab-bucket/research-lab/sourcing-model/manifest.json"
 def _clear_trace_env(monkeypatch):
     for name in TRACE_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("RESEARCH_LAB_COMPANY_LABEL_EXAMPLES_CAPTURE", "false")
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +644,108 @@ async def test_trace_capturing_scorer_capture_error_contained(monkeypatch):
     )
     breakdowns = await wrapper.score_with_breakdowns(COMPANIES, _benchmark_item("a")["icp"], False)
     assert [b["final_score"] for b in breakdowns] == [72.5, 0.0]
+
+
+async def test_company_label_examples_capture_positive_negative_sanitized(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_COMPANY_LABEL_EXAMPLES_CAPTURE", "true")
+    inserted: list[dict[str, Any]] = []
+
+    async def capture_insert(table: str, row: dict[str, Any]) -> dict[str, Any]:
+        assert table == sw._COMPANY_LABEL_EXAMPLES_TABLE
+        inserted.append(dict(row))
+        return row
+
+    monkeypatch.setattr(sw, "insert_row", capture_insert)
+    outputs = [
+        {
+            **COMPANIES[0],
+            "score": 91,
+            "intent": {
+                "source": "company_site",
+                "signal": "Hiring sales engineers",
+                "url": "https://user:pass@example.com/jobs?token=secret#frag",
+                "date": "2026-07-01",
+            },
+            "required_attribute": {
+                "evidence_url": "https://example.com/about?api_key=secret"
+            },
+        },
+        {**COMPANIES[1], "score": 10},
+    ]
+
+    written = await sw._persist_company_label_examples(
+        context_ref="candidate:cand-1",
+        icp_ref="icp:a",
+        icp_hash="hash-a",
+        is_reference_model=False,
+        outputs=outputs,
+        breakdowns=BREAKDOWNS,
+        scorer_trace_pointer={"s3_ref": "s3://trace/scorer.json", "sha256": "sha256:abc"},
+        candidate_id="cand-1",
+        model_manifest_hash="sha256:model",
+        run_id="11111111-1111-4111-8111-111111111111",
+        ticket_id="22222222-2222-4222-8222-222222222222",
+        score_bundle_id="score_bundle:abc",
+    )
+
+    assert written == 2
+    assert [row["model_side"] for row in inserted] == ["candidate", "candidate"]
+    assert inserted[0]["company_name"] == "TraceCo"
+    assert inserted[0]["final_score"] == 72.5
+    assert inserted[0]["failure_reason"] is None
+    assert inserted[1]["final_score"] == 0.0
+    assert inserted[1]["failure_reason"] == "intent_fabricated"
+    assert inserted[0]["intent_evidence_url"] == "https://example.com/jobs"
+    assert inserted[0]["attribute_evidence_url"] == "https://example.com/about"
+    assert inserted[0]["raw_trace_refs"] == [
+        {
+            "kind": "scorer_judgment_trace",
+            "s3_ref": "s3://trace/scorer.json",
+            "sha256": "sha256:abc",
+        }
+    ]
+    serialized = json.dumps(inserted)
+    assert "RAW-PAGE-EVIDENCE-MUST-NOT-PERSIST" not in serialized
+    assert "token=secret" not in serialized
+    assert "user:pass" not in serialized
+
+
+async def test_company_label_examples_insert_failure_logs_and_continues(monkeypatch, caplog):
+    monkeypatch.setenv("RESEARCH_LAB_COMPANY_LABEL_EXAMPLES_CAPTURE", "true")
+    calls = 0
+
+    async def failing_insert(table: str, row: dict[str, Any]) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("duplicate key value violates unique constraint")
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(sw, "insert_row", failing_insert)
+    with caplog.at_level(logging.WARNING, logger="gateway.research_lab.scoring_worker"):
+        written = await sw._persist_company_label_examples(
+            context_ref="daily-baseline",
+            icp_ref="icp:a",
+            icp_hash="hash-a",
+            is_reference_model=True,
+            outputs=COMPANIES,
+            breakdowns=BREAKDOWNS,
+        )
+
+    assert written == 0
+    assert calls == 2
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum("research_lab_company_label_example_insert_failed" in msg for msg in messages) == 1
+    assert sw._model_side_for_label(
+        is_reference_model=True,
+        candidate_id=None,
+        context_ref="daily-baseline",
+    ) == "baseline_arm"
+    assert sw._model_side_for_label(
+        is_reference_model=True,
+        candidate_id="cand-1",
+        context_ref="candidate:cand-1",
+    ) == "champion"
 
 
 async def test_candidate_wiring_through_real_evaluator(fake_s3, monkeypatch):

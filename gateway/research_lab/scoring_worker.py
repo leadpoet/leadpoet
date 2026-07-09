@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 from typing import Any, Callable, Mapping
+from urllib.parse import urlsplit, urlunsplit
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
@@ -1029,10 +1030,21 @@ def _scorer_trace_company_identity(output: Any) -> dict[str, Any]:
 
 _REJECTED_COMPANIES_CAPTURE_ENV = "RESEARCH_LAB_REJECTED_COMPANIES_CAPTURE"
 _REJECTED_COMPANIES_TABLE = "research_lab_rejected_companies"
+_COMPANY_LABEL_EXAMPLES_CAPTURE_ENV = "RESEARCH_LAB_COMPANY_LABEL_EXAMPLES_CAPTURE"
+_COMPANY_LABEL_EXAMPLES_TABLE = "research_lab_company_label_examples"
 
 
 def _rejected_companies_capture_enabled() -> bool:
     return os.getenv(_REJECTED_COMPANIES_CAPTURE_ENV, "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _company_label_examples_capture_enabled() -> bool:
+    return os.getenv(_COMPANY_LABEL_EXAMPLES_CAPTURE_ENV, "true").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -1058,6 +1070,190 @@ def _optional_bool(value: Any) -> bool | None:
     if text in {"false", "0", "no"}:
         return False
     return None
+
+
+def _optional_text(value: Any, limit: int = 500) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = re.sub(r"(?i)sk-or-v1-[A-Za-z0-9_-]+", "[redacted-openrouter-key]", text)
+    text = re.sub(r"(?i)sb_secret_[A-Za-z0-9_-]+", "[redacted-supabase-service-key]", text)
+    text = re.sub(r"(?i)://([^/\s:@]+):([^/@\s]+)@", "://[redacted-credentials]@", text)
+    return text[:limit]
+
+
+def _optional_public_url(value: Any, limit: int = 500) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        parts = None
+    if parts and parts.scheme in {"http", "https"} and parts.netloc:
+        safe_netloc = parts.hostname or ""
+        if parts.port:
+            safe_netloc = f"{safe_netloc}:{parts.port}"
+        # Query/fragment frequently contain tokens or tracking IDs.
+        return urlunsplit((parts.scheme, safe_netloc, parts.path[:limit], "", ""))[:limit]
+    text = _optional_text(raw, limit=limit)
+    return text[:limit] if text else None
+
+
+def _company_identity_key(identity: Mapping[str, Any]) -> str:
+    return "".join(
+        ch
+        for ch in (
+            identity.get("company_name")
+            or identity.get("company_website")
+            or identity.get("company_linkedin")
+            or ""
+        ).lower()
+        if ch.isalnum()
+    )
+
+
+def _is_duplicate_insert_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "duplicate key" in text or "unique constraint" in text or "23505" in text
+
+
+def _model_side_for_label(*, is_reference_model: bool, candidate_id: str | None, context_ref: str) -> str:
+    if not is_reference_model:
+        return "candidate"
+    if candidate_id:
+        return "champion"
+    return "baseline_arm"
+
+
+async def _persist_company_label_examples(
+    *,
+    context_ref: str,
+    icp_ref: str,
+    icp_hash: str,
+    is_reference_model: bool,
+    outputs: Any,
+    breakdowns: Any,
+    scorer_trace_pointer: Mapping[str, Any] | None = None,
+    candidate_id: str | None = None,
+    model_manifest_hash: str | None = None,
+    run_id: str | None = None,
+    ticket_id: str | None = None,
+    score_bundle_id: str | None = None,
+) -> int:
+    """Best-effort positive/negative company-label capture for offline corpus use.
+
+    Full scorer docs remain in SSE-KMS S3; this table stores only identity,
+    scores, pass/fail flags, and trace pointers. A failure here must never
+    change scoring, promotion, reward, or weight behavior.
+    """
+    if not _company_label_examples_capture_enabled() or not breakdowns:
+        return 0
+    now = datetime.now(timezone.utc).isoformat()
+    model_side = _model_side_for_label(
+        is_reference_model=bool(is_reference_model),
+        candidate_id=str(candidate_id) if candidate_id else None,
+        context_ref=str(context_ref or ""),
+    )
+    pointer = dict(scorer_trace_pointer or {}) if isinstance(scorer_trace_pointer, Mapping) else {}
+    scorer_trace_ref = str(pointer.get("s3_ref") or "")
+    scorer_trace_sha256 = str(pointer.get("sha256") or "")
+    raw_trace_refs = [
+        {
+            "kind": "scorer_judgment_trace",
+            "s3_ref": scorer_trace_ref,
+            "sha256": scorer_trace_sha256,
+        }
+    ] if scorer_trace_ref or scorer_trace_sha256 else []
+    written = 0
+    for index, (output, breakdown) in enumerate(zip(outputs or (), breakdowns or ())):
+        if not isinstance(output, Mapping) or not isinstance(breakdown, Mapping):
+            continue
+        identity = _scorer_trace_company_identity(output)
+        company_key = _company_identity_key(identity)
+        failure_reason = str(breakdown.get("failure_reason") or "").strip()
+        intent_doc = output.get("intent") if isinstance(output.get("intent"), Mapping) else {}
+        attr_doc = (
+            output.get("required_attribute")
+            if isinstance(output.get("required_attribute"), Mapping)
+            else {}
+        )
+        dedup_key = sha256_json(
+            {
+                "context_ref": str(context_ref),
+                "icp_hash": str(icp_hash or ""),
+                "icp_ref": str(icp_ref),
+                "model_side": model_side,
+                "candidate_id": str(candidate_id or ""),
+                "company": company_key,
+                "failure_reason": failure_reason,
+                "index": index if not company_key else None,
+            }
+        )
+        row = {
+            "label_id": deterministic_uuid("research_lab_company_label", dedup_key),
+            "context_ref": str(context_ref),
+            "run_id": str(run_id) if run_id else None,
+            "ticket_id": str(ticket_id) if ticket_id else None,
+            "candidate_id": str(candidate_id) if candidate_id else None,
+            "score_bundle_id": str(score_bundle_id) if score_bundle_id else None,
+            "model_manifest_hash": str(model_manifest_hash) if model_manifest_hash else None,
+            "model_side": model_side,
+            "is_reference_model": bool(is_reference_model),
+            "icp_ref": str(icp_ref),
+            "icp_hash": str(icp_hash or ""),
+            "company_name": identity.get("company_name") or None,
+            "company_website": identity.get("company_website") or None,
+            "company_linkedin": identity.get("company_linkedin") or None,
+            "industry": identity.get("industry") or None,
+            "sub_industry": identity.get("sub_industry") or None,
+            "employee_count": identity.get("employee_count") or None,
+            "company_stage": identity.get("company_stage") or None,
+            "city": identity.get("city") or None,
+            "state": identity.get("state") or None,
+            "country": identity.get("country") or None,
+            "model_claimed_score": _optional_score(output.get("score")),
+            "intent_source": _optional_text(intent_doc.get("source"), 80),
+            "intent_claimed_signal": _optional_text(intent_doc.get("signal"), 200),
+            "intent_evidence_url": _optional_public_url(intent_doc.get("url")),
+            "intent_evidence_date": _optional_text(intent_doc.get("date"), 40),
+            "attribute_evidence_url": _optional_public_url(attr_doc.get("evidence_url")),
+            "final_score": float(breakdown.get("final_score", 0.0) or 0.0),
+            "failure_reason": _optional_text(failure_reason, 500),
+            "failure_stage": _optional_text(breakdown.get("stage_failed"), 120),
+            "fit_passed": _optional_bool(breakdown.get("fit_passed")),
+            "attribute_passed": _optional_bool(breakdown.get("attribute_passed")),
+            "intent_passed": _optional_bool(breakdown.get("intent_passed")),
+            "icp_fit": _optional_score(breakdown.get("icp_fit")),
+            "intent_signal_raw": _optional_score(breakdown.get("intent_signal_raw")),
+            "time_decay_multiplier": _optional_score(breakdown.get("time_decay_multiplier")),
+            "intent_signal": _optional_score(breakdown.get("intent_signal_final")),
+            "scorer_trace_ref": scorer_trace_ref or None,
+            "scorer_trace_sha256": scorer_trace_sha256 or None,
+            "raw_trace_refs": raw_trace_refs,
+            "capture_doc": {
+                "capture_kind": "scorer_company_label",
+                "source": "score_with_breakdowns",
+                "company_identity_present": bool(company_key),
+            },
+            "captured_at": now,
+            "dedup_key": dedup_key,
+        }
+        try:
+            await insert_row(_COMPANY_LABEL_EXAMPLES_TABLE, row)
+            written += 1
+        except Exception as exc:  # noqa: BLE001 - capture must never affect scoring
+            if _is_duplicate_insert_error(exc):
+                continue
+            logger.warning(
+                "research_lab_company_label_example_insert_failed context=%s icp_ref=%s model_side=%s error=%s",
+                compact_ref(str(context_ref)),
+                compact_ref(str(icp_ref)),
+                model_side,
+                _short_error(exc),
+            )
+            continue
+    return written
 
 
 async def _persist_rejected_companies(
@@ -1435,6 +1631,8 @@ class _TraceCapturingCompanyScorer:
         inner: Any = None,
         candidate_id: str | None = None,
         candidate_model_manifest_hash: str | None = None,
+        run_id: str | None = None,
+        ticket_id: str | None = None,
     ):
         self._inner = inner if inner is not None else QualificationStyleCompanyScorer()
         self._recorder = recorder
@@ -1444,6 +1642,8 @@ class _TraceCapturingCompanyScorer:
         self._candidate_model_manifest_hash = (
             str(candidate_model_manifest_hash) if candidate_model_manifest_hash else None
         )
+        self._run_id = str(run_id) if run_id else None
+        self._ticket_id = str(ticket_id) if ticket_id else None
         self._pointer_map = pointer_map
         # Per-ICP funnel counts (sourced -> fit -> verified -> intent -> scored)
         # for the candidate model, keyed by icp_ref. Read back onto each per-ICP
@@ -1531,6 +1731,19 @@ class _TraceCapturingCompanyScorer:
                     )
             # Persist rejected companies for false-rejection analysis (candidate
             # path). Best-effort; never affects scoring.
+            await _persist_company_label_examples(
+                context_ref=self._context_ref,
+                icp_ref=icp_ref,
+                icp_hash=icp_hash,
+                is_reference_model=bool(is_reference_model),
+                outputs=list(companies or ()),
+                breakdowns=breakdowns,
+                scorer_trace_pointer=pointer,
+                candidate_id=getattr(self, "_candidate_id", None),
+                model_manifest_hash=getattr(self, "_candidate_model_manifest_hash", None),
+                run_id=getattr(self, "_run_id", None),
+                ticket_id=getattr(self, "_ticket_id", None),
+            )
             await _persist_rejected_companies(
                 context_ref=self._context_ref,
                 icp_ref=icp_ref,
@@ -3702,6 +3915,8 @@ class ResearchLabGatewayScoringWorker:
                 pointer_map=scorer_trace_pointers,
                 candidate_id=candidate_id,
                 candidate_model_manifest_hash=getattr(artifact, "manifest_hash", None),
+                run_id=str(candidate.get("run_id") or ""),
+                ticket_id=str(candidate.get("ticket_id") or ""),
             )
             last_freshness_check_at = 0.0
             claim_lost_event = asyncio.Event()
@@ -6906,6 +7121,16 @@ class ResearchLabGatewayScoringWorker:
                 if pointer:
                     diagnostics_updates["scorer_trace_ref"] = pointer["s3_ref"]
                     diagnostics_updates["scorer_trace_sha256"] = pointer["sha256"]
+                await _persist_company_label_examples(
+                    context_ref=context_ref,
+                    icp_ref=label,
+                    icp_hash=str(item.get("icp_hash") or ""),
+                    is_reference_model=True,
+                    outputs=outputs,
+                    breakdowns=score_breakdowns,
+                    scorer_trace_pointer=pointer,
+                    model_manifest_hash=str(trace_context.get("private_model_manifest_hash") or ""),
+                )
                 # Persist model-sourced companies the harness rejected, for later
                 # false-rejection analysis (best-effort; never blocks scoring).
                 await _persist_rejected_companies(

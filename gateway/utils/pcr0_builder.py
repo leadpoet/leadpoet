@@ -65,7 +65,7 @@ PCR0_CHECK_INTERVAL = int(os.environ.get("PCR0_CHECK_INTERVAL", "480"))  # 8 min
 
 # How many CODE VERSIONS to cache PCR0 for
 # Allows validators on older code to still be accepted
-PCR0_CACHE_SIZE = int(os.environ.get("PCR0_CACHE_SIZE", "3"))
+PCR0_CACHE_SIZE = int(os.environ.get("PCR0_CACHE_SIZE", "10"))
 
 # Git history depth for the builder's working clone.  The historical warm-up
 # advertises "last N commits", but with a depth-1 clone the repo only ever
@@ -976,7 +976,7 @@ async def check_and_build_pcr0():
     2. Compute content hash of all monitored files
     3. If content hash changed from last build → rebuild PCR0
     4. Cache the PCR0 (keyed by content hash)
-    5. Keep last 3 PCR0 values for validators on different versions
+    5. Keep recent PCR0 values for validators on different versions
     """
     global _last_content_hash, _build_in_progress, _pcr0_cache
     

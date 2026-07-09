@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+import json
 
 import pytest
 
@@ -275,3 +276,53 @@ async def test_build_manifest_from_projected_rows_no_fixtures():
     reconstructed = next(r for r in manifest.source_records if r.trajectory_id == "traj-2")
     assert reconstructed.split_cluster_key == "sha256:brief-cluster-B"
     assert reconstructed.execution_trace_refs == ("execution_trace:trace-uuid-2",)
+
+
+class FakeS3:
+    def __init__(self):
+        self.objects: dict[tuple[str, str], bytes] = {}
+
+    def put_object(self, *, Bucket, Key, Body, ContentType):
+        self.objects[(Bucket, Key)] = Body if isinstance(Body, bytes) else bytes(Body)
+        return {"ETag": "fake"}
+
+
+async def test_export_projected_corpus_to_s3_writes_sanitized_shards_and_manifest():
+    envelope = {
+        "trajectory_id": "traj-export-1",
+        "run_id": "run-export-1",
+        "island": "lead_generation",
+        "brief_id": "brief-export-1",
+        "brief_sanitized_ref": "sha256:brief-export-cluster",
+        "corpus_source_record": _record("traj-export-1", "train").to_dict(),
+        "created_at": "2026-07-09T00:00:00Z",
+    }
+    store = FakeStore({ce.RESEARCH_TRAJECTORIES_TABLE: [envelope]})
+    s3 = FakeS3()
+
+    result = await ce.export_projected_corpus_to_s3(
+        store=store,
+        bucket="research-lab-test",
+        s3_prefix="exports/test-corpus",
+        corpus_id="corpus:test-export",
+        split_policy=_policy(),
+        max_rows=10,
+        shard_size=1,
+        s3_client=s3,
+    )
+
+    assert result["trajectory_count"] == 1
+    assert result["shard_count"] == 1
+    assert result["manifest_uri"] == "s3://research-lab-test/exports/test-corpus/manifest.json"
+    manifest_body = s3.objects[("research-lab-test", "exports/test-corpus/manifest.json")]
+    manifest = json.loads(manifest_body.decode("utf-8"))
+    assert manifest["export_schema_version"] == "research_lab_trajectory_corpus_export.v1"
+    assert manifest["sanitization"]["raw_prompts"] == "excluded"
+    shard_uri = manifest["source_record_shards"][0]["s3_uri"]
+    assert shard_uri == "s3://research-lab-test/exports/test-corpus/shards/part-00000.jsonl"
+    shard_body = s3.objects[("research-lab-test", "exports/test-corpus/shards/part-00000.jsonl")]
+    shard_text = shard_body.decode("utf-8")
+    assert "raw_prompt" not in shard_text
+    assert "provider_response" not in shard_text
+    assert "sk-or-" not in shard_text
+    assert "traj-export-1" in shard_text

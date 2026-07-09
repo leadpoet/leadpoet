@@ -226,11 +226,11 @@ def _drafts_per_call_limit() -> int:
 
 
 def _dev_eval_enabled() -> bool:
-    """§6.3-1 L1 dev-eval rung flag (default OFF — no frozen snapshot set exists
-    yet): score built candidates through the wired ``dev_evaluator`` seam.
+    """§6.3-1 L1 dev-eval rung flag (default ON when a dev evaluator is wired):
+    score built candidates through the wired ``dev_evaluator`` seam.
     Dev scores are ranking-only within a run and strictly best-effort."""
 
-    return _engine_env_flag("RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED", "false")
+    return _engine_env_flag("RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED", "true")
 
 
 def _dev_snapshot_uri() -> str:
@@ -1192,10 +1192,10 @@ class CodeEditLoopEngine:
                 # survive only inside the captured request body (S3-only,
                 # unqueryable). One pointer-scale allocator_decision event per
                 # run start records WHICH cell priors aimed this run — the
-                # meta-allocator's own future training data. Gated until
-                # scripts/64 extends the loop-event CHECK.
+                # meta-allocator's own future training data. scripts/64 extends
+                # the loop-event CHECK for this event type.
                 if cell_yield_priors_doc is not None and _engine_env_flag(
-                    "RESEARCH_LAB_ALLOCATOR_DECISION_EVENTS_ENABLED", "false"
+                    "RESEARCH_LAB_ALLOCATOR_DECISION_EVENTS_ENABLED", "true"
                 ):
                     priors_rows = (
                         cell_yield_priors_doc.get("priors")

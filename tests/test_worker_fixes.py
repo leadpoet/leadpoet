@@ -41,6 +41,29 @@ def hosted_worker():
     return worker_mod.ResearchLabHostedWorker(ResearchLabGatewayConfig(), worker_ref="worker-a")
 
 
+def test_dev_eval_candidate_width_is_separate_from_paid_finalist_count():
+    config = ResearchLabGatewayConfig(
+        hosted_worker_max_candidates=1,
+        hosted_worker_dev_eval_candidate_width=4,
+        hosted_worker_paid_finalist_count=1,
+        min_compute_budget_usd=1,
+        default_compute_budget_usd=10,
+    )
+    worker = worker_mod.ResearchLabHostedWorker(config, worker_ref="worker-a")
+    model_doc = {
+        "max_candidates": 1,
+        "dev_eval_candidate_width": 4,
+        "paid_finalist_count": 1,
+    }
+    budget_context = {"requested_compute_budget_usd": 10}
+
+    max_candidates = worker._max_candidates_for_run(budget_context, model_doc)
+    paid_finalists = worker._paid_finalist_count_for_run(model_doc, max_candidates)
+
+    assert max_candidates == 4
+    assert paid_finalists == 1
+
+
 def _make_context(queue_events=(), receipt_id=None):
     queue_row = {
         "run_id": RUN_ID,

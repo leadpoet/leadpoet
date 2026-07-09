@@ -88,6 +88,9 @@ PER_ICP_CAPTURE_PASSTHROUGH_KEYS = (
     # why loop lead-funnel / intent-pass-rate panels had no data.
     "funnel",
     "evidence_types",
+    # Immutable per-ICP context stamps used by trajectory/corpus joins and
+    # later analysis. These carry only refs/hashes, never private ICP text.
+    "evaluation_context",
 )
 
 
@@ -504,6 +507,7 @@ def build_research_evaluation_score_bundle(
     candidate_model_manifest_hash: str | None = None,
     candidate_source_diff_hash: str | None = None,
     candidate_build_ref: str | None = None,
+    serving_model_version: Mapping[str, Any] | None = None,
     policy: Mapping[str, Any] | None = None,
     signature_ref: str = "",
 ) -> dict[str, Any]:
@@ -570,6 +574,8 @@ def build_research_evaluation_score_bundle(
         bundle["candidate_source_diff_hash"] = str(candidate_source_diff_hash)
     if candidate_build_ref:
         bundle["candidate_build_ref"] = str(candidate_build_ref)
+    if isinstance(serving_model_version, Mapping) and serving_model_version:
+        bundle["serving_model_version"] = dict(serving_model_version)
     score_hash = score_bundle_hash(bundle)
     return {**bundle, "score_bundle_hash": score_hash, "anchored_hash": score_hash}
 

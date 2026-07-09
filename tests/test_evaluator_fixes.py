@@ -20,8 +20,11 @@ import sys
 import pytest
 
 from leadpoet_verifier import aggregation
+from leadpoet_verifier.research_evaluation import verify_research_evaluation_score_bundle
 from research_lab.canonical import sha256_json
 from research_lab.eval import evaluator
+from research_lab.eval.artifacts import PrivateModelArtifactManifest
+from research_lab.eval.benchmark import SealedBenchmarkSet
 from research_lab.eval import private_runtime
 from research_lab.eval.private_runtime import PrivateModelRuntimeError
 
@@ -841,3 +844,71 @@ async def test_bundle_keeps_retry_exhausted_provider_failures_in_aggregate_and_h
         (expected_clean_icp + 0.0 + expected_clean_icp) / 3
     )
     assert bundle["score_bundle_hash"] == bundle["anchored_hash"]
+
+
+def test_score_bundle_records_serving_version_and_per_icp_context():
+    parent = _artifact_manifest("parent-versioned")
+    candidate = _artifact_manifest("candidate-versioned")
+    benchmark = SealedBenchmarkSet(
+        benchmark_id="rolling:bench",
+        icp_set_hash=sha256_json({"window": "2026-07-09"}),
+        split_ref="s3://research-lab-test/split.json",
+        item_refs=("icp-a",),
+        scoring_version="scoring-v1",
+    )
+    bundle = evaluator.build_score_bundle_from_scored_icps(
+        artifact_manifest=PrivateModelArtifactManifest.from_mapping(parent),
+        benchmark=benchmark,
+        patch_manifest={
+            "parent_artifact_hash": parent["model_artifact_hash"],
+            "patch_kind": "image_build",
+        },
+        candidate_artifact_manifest=PrivateModelArtifactManifest.from_mapping(candidate),
+        per_icp_results=[
+            {
+                "icp_ref": "icp-a",
+                "icp_hash": sha256_json({"icp": "a"}),
+                "base_company_scores": [10.0],
+                "candidate_company_scores": [20.0, 30.0],
+                "status": "completed",
+            }
+        ],
+        run_context={
+            "run_id": "run-versioned",
+            "ticket_id": "ticket-versioned",
+            "candidate_id": "candidate-row-1",
+            "private_model_version_id": "private-version-1",
+            "miner_hotkey": "hotkey-versioned",
+            "island": "generalist",
+            "evaluation_epoch": 77,
+            "benchmark_date": "2026-07-09",
+            "benchmark_attempt": 2,
+            "run_scope": "candidate_scoring",
+            "rolling_window_hash": benchmark.icp_set_hash,
+            "provider_cache_day": "2026-07-09",
+            "evaluator_version": "eval-versioned",
+            "execution_trace_ref": "execution_trace:run-versioned",
+            "cost_ledger_ref": "cost_ledger:run-versioned",
+            "signature_ref": "kms-signature:test",
+            "candidate_source_diff_hash": sha256_json({"diff": "x"}),
+            "candidate_build_ref": "candidate_build:image",
+        },
+        policy={"reference_evaluation_mode": "paired_base"},
+    )
+
+    verification = verify_research_evaluation_score_bundle(bundle)
+    assert verification["passed"], verification["errors"]
+    serving = bundle["serving_model_version"]
+    assert serving["result_role"] == "candidate_scoring"
+    assert serving["candidate_id"] == "candidate-row-1"
+    assert serving["parent_model"]["model_artifact_hash"] == parent["model_artifact_hash"]
+    assert serving["candidate_model"]["model_artifact_hash"] == candidate["model_artifact_hash"]
+    assert serving["version_stamp_hash"].startswith("sha256:")
+    row = bundle["aggregates"]["per_icp_results"][0]
+    context = row["evaluation_context"]
+    assert context["schema_version"] == "research_lab_evaluation_context.v1"
+    assert context["run_id"] == "run-versioned"
+    assert context["candidate_id"] == "candidate-row-1"
+    assert context["icp_set_hash"] == benchmark.icp_set_hash
+    assert context["serving_model_version_hash"] == serving["version_stamp_hash"]
+    assert context["result_row_hash"].startswith("sha256:")

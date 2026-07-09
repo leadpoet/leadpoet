@@ -63,7 +63,7 @@ projected before this feature get their ``execution_traces`` /
 
 Flags / entry points:
 
-* ``RESEARCH_LAB_TRAJECTORY_PROJECTOR_ENABLED`` (default false) gates all
+* ``RESEARCH_LAB_TRAJECTORY_PROJECTOR_ENABLED`` (default true) gates all
   writes; dry-run projection is always allowed (read-only).
 * ``project_run(run_id, ...)`` and ``project_completed_runs(...)`` for a
   worker periodic pass or cron (wiring is a follow-up, not done here).
@@ -207,7 +207,7 @@ def _schema_event_fields() -> frozenset[str]:
 
 
 def projector_enabled() -> bool:
-    return os.getenv(PROJECTOR_ENABLED_ENV, "").strip().lower() in {
+    return os.getenv(PROJECTOR_ENABLED_ENV, "true").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -1452,10 +1452,9 @@ def _node_execution_status(state: "_NodeState") -> str:
 
 def _execution_trace_trajectory_id_enabled() -> bool:
     """P18: include the explicit ``trajectory_id`` join key on execution trace
-    rows. Requires the scripts/64 column — leave off until applied (an unknown
-    column fails the insert)."""
+    rows. Requires the scripts/64 column."""
     return os.getenv(
-        "RESEARCH_LAB_EXECUTION_TRACE_TRAJECTORY_ID_ENABLED", ""
+        "RESEARCH_LAB_EXECUTION_TRACE_TRAJECTORY_ID_ENABLED", "true"
     ).strip().lower() in {"1", "true", "yes", "on"}
 
 

@@ -1632,6 +1632,102 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
+def _artifact_version_doc(artifact: PrivateModelArtifactManifest) -> dict[str, Any]:
+    return {
+        "model_artifact_hash": artifact.model_artifact_hash,
+        "manifest_hash": artifact.manifest_hash,
+        "manifest_uri": artifact.manifest_uri,
+        "git_commit_sha": artifact.git_commit_sha,
+        "image_digest": artifact.image_digest,
+        "config_hash": artifact.config_hash,
+        "component_registry_version": artifact.component_registry_version,
+        "scoring_adapter_version": artifact.scoring_adapter_version,
+        "build_id": artifact.build_id,
+    }
+
+
+def _serving_model_version_doc(
+    *,
+    artifact: PrivateModelArtifactManifest,
+    benchmark_set: SealedBenchmarkSet,
+    run_context: Mapping[str, Any],
+    candidate_artifact: PrivateModelArtifactManifest | None,
+    candidate_patch_hash: str,
+) -> dict[str, Any]:
+    """Pointer-only version stamp for Research Lab results.
+
+    This intentionally contains immutable refs/hashes only. It lets later
+    analysis join score outcomes back to the exact artifact/image/benchmark
+    without exposing private ICP text or provider payloads.
+    """
+
+    doc: dict[str, Any] = {
+        "schema_version": "research_lab_serving_model_version.v1",
+        "result_role": "candidate_scoring" if candidate_artifact is not None else "baseline_scoring",
+        "run_id": str(run_context.get("run_id") or ""),
+        "ticket_id": str(run_context.get("ticket_id") or ""),
+        "candidate_id": str(run_context.get("candidate_id") or ""),
+        "private_model_version_id": str(run_context.get("private_model_version_id") or ""),
+        "evaluation_epoch": int(run_context.get("evaluation_epoch") or 0),
+        "benchmark_date": str(run_context.get("benchmark_date") or ""),
+        "benchmark_attempt": run_context.get("benchmark_attempt"),
+        "run_scope": str(run_context.get("run_scope") or ""),
+        "benchmark_id": benchmark_set.benchmark_id,
+        "benchmark_split_ref": benchmark_set.split_ref,
+        "icp_set_hash": benchmark_set.icp_set_hash,
+        "scoring_code_version": benchmark_set.scoring_version,
+        "evaluator_version": str(run_context.get("evaluator_version") or ""),
+        "parent_model": _artifact_version_doc(artifact),
+        "candidate_patch_hash": candidate_patch_hash,
+        "candidate_source_diff_hash": str(run_context.get("candidate_source_diff_hash") or ""),
+        "candidate_build_ref": str(run_context.get("candidate_build_ref") or ""),
+    }
+    if candidate_artifact is not None:
+        doc["candidate_model"] = _artifact_version_doc(candidate_artifact)
+    doc["version_stamp_hash"] = sha256_json({key: value for key, value in doc.items() if key != "version_stamp_hash"})
+    return doc
+
+
+def _enrich_per_icp_evaluation_context(
+    per_icp_results: Sequence[Mapping[str, Any]],
+    *,
+    benchmark_set: SealedBenchmarkSet,
+    run_context: Mapping[str, Any],
+    serving_model_version_hash: str,
+) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for index, row in enumerate(per_icp_results):
+        item = dict(row)
+        existing = item.get("evaluation_context") if isinstance(item.get("evaluation_context"), Mapping) else {}
+        icp_ref = str(item.get("icp_ref") or item.get("icp_hash") or "")
+        icp_hash = str(item.get("icp_hash") or "")
+        result_hash_payload = {key: value for key, value in item.items() if key != "evaluation_context"}
+        context_doc = {
+            **dict(existing),
+            "schema_version": "research_lab_evaluation_context.v1",
+            "result_index": int(index),
+            "icp_ref": icp_ref,
+            "icp_hash": icp_hash,
+            "benchmark_id": benchmark_set.benchmark_id,
+            "benchmark_split_ref": benchmark_set.split_ref,
+            "icp_set_hash": benchmark_set.icp_set_hash,
+            "input_window_hash": str(run_context.get("rolling_window_hash") or benchmark_set.icp_set_hash),
+            "run_id": str(run_context.get("run_id") or ""),
+            "ticket_id": str(run_context.get("ticket_id") or ""),
+            "candidate_id": str(run_context.get("candidate_id") or ""),
+            "evaluation_epoch": int(run_context.get("evaluation_epoch") or 0),
+            "benchmark_date": str(run_context.get("benchmark_date") or ""),
+            "benchmark_attempt": run_context.get("benchmark_attempt"),
+            "run_scope": str(run_context.get("run_scope") or ""),
+            "provider_cache_day": str(run_context.get("provider_cache_day") or run_context.get("cache_day") or ""),
+            "serving_model_version_hash": serving_model_version_hash,
+            "result_row_hash": sha256_json(result_hash_payload),
+        }
+        item["evaluation_context"] = context_doc
+        enriched.append(item)
+    return enriched
+
+
 def build_score_bundle_from_scored_icps(
     *,
     artifact_manifest: PrivateModelArtifactManifest | Mapping[str, Any],
@@ -1675,6 +1771,24 @@ def build_score_bundle_from_scored_icps(
         raise ValueError("; ".join(errors))
     if not per_icp_results:
         raise RealEvaluatorRequired("real scored ICP results are required")
+    candidate_patch_hash = (
+        sha256_json(dict(patch_manifest))
+        if image_candidate
+        else patch.manifest_hash()
+    )
+    serving_model_version = _serving_model_version_doc(
+        artifact=artifact,
+        benchmark_set=benchmark_set,
+        run_context=run_context,
+        candidate_artifact=candidate_artifact,
+        candidate_patch_hash=candidate_patch_hash,
+    )
+    enriched_per_icp_results = _enrich_per_icp_evaluation_context(
+        per_icp_results,
+        benchmark_set=benchmark_set,
+        run_context=run_context,
+        serving_model_version_hash=str(serving_model_version["version_stamp_hash"]),
+    )
 
     bundle = build_research_evaluation_score_bundle(
         run_id=str(run_context["run_id"]),
@@ -1690,14 +1804,12 @@ def build_score_bundle_from_scored_icps(
         ),
         private_model_manifest_hash=artifact.manifest_hash,
         candidate_patch_hash=(
-            sha256_json(dict(patch_manifest))
-            if image_candidate
-            else patch.manifest_hash()
+            candidate_patch_hash
         ),
         icp_set_hash=benchmark_set.icp_set_hash,
         scoring_version=benchmark_set.scoring_version,
         evaluator_version=str(run_context["evaluator_version"]),
-        per_icp_results=per_icp_results,
+        per_icp_results=enriched_per_icp_results,
         evidence_bundle_refs=tuple(str(item) for item in run_context.get("evidence_bundle_refs", ())),
         execution_trace_ref=str(run_context["execution_trace_ref"]),
         cost_ledger_ref=str(run_context["cost_ledger_ref"]),
@@ -1709,12 +1821,13 @@ def build_score_bundle_from_scored_icps(
         ),
         candidate_source_diff_hash=run_context.get("candidate_source_diff_hash") or None,
         candidate_build_ref=run_context.get("candidate_build_ref") or None,
+        serving_model_version=serving_model_version,
         policy=policy or {},
         signature_ref=str(run_context.get("signature_ref") or ""),
     )
     extra_fields = dict(extra_bundle_fields or {})
     scoring_health = build_scoring_health_doc(
-        per_icp_results,
+        enriched_per_icp_results,
         private_holdout_gate=extra_fields.get("private_holdout_gate"),
     )
     enriched = {

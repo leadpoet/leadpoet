@@ -17,6 +17,7 @@ from typing import Any, Mapping, Sequence
 
 import pytest
 
+import gateway.research_lab.trajectory_projector as trajectory_projector_mod
 from gateway.research_lab.trajectory_projector import (
     CANONICAL_EVENT_TYPES,
     PROJECTOR_ENABLED_ENV,
@@ -45,6 +46,14 @@ CANDIDATE_1 = "55555555-5555-4555-8555-555555555551"
 CANDIDATE_3 = "55555555-5555-4555-8555-555555555553"
 VERSION_ID = "66666666-6666-4666-8666-666666666666"
 SCORE_BUNDLE_ID = "score_bundle:abc123"
+
+
+def test_projector_and_trace_join_keys_default_on(monkeypatch):
+    monkeypatch.delenv(PROJECTOR_ENABLED_ENV, raising=False)
+    monkeypatch.delenv("RESEARCH_LAB_EXECUTION_TRACE_TRAJECTORY_ID_ENABLED", raising=False)
+
+    assert trajectory_projector_mod.projector_enabled() is True
+    assert trajectory_projector_mod._execution_trace_trajectory_id_enabled() is True
 
 
 # ---------------------------------------------------------------------------
@@ -494,7 +503,7 @@ def enabled(monkeypatch):
 
 @pytest.fixture
 def disabled(monkeypatch):
-    monkeypatch.delenv(PROJECTOR_ENABLED_ENV, raising=False)
+    monkeypatch.setenv(PROJECTOR_ENABLED_ENV, "false")
     return monkeypatch
 
 

@@ -262,14 +262,15 @@ def build_run_provider_outcome_digest(
     *,
     candidate_snapshot_miss_counts: Mapping[str, int] | None = None,
 ) -> dict[str, Any] | None:
-    """Worker-side digest from on-disk recorded truth. Flag-gated, default off.
+    """Worker-side digest from on-disk recorded truth. Flag-gated, default on.
 
     Reads today's W3 usage-ledger rows and evidence day-cache outcomes; returns
-    None (prompt-inert) when ``RESEARCH_LAB_PROVIDER_OUTCOME_DIGEST`` is off or
+    None (prompt-inert) when ``RESEARCH_LAB_PROVIDER_OUTCOME_DIGEST=false`` or
     nothing recorded yet.
     """
 
-    if str(os.getenv(PROVIDER_OUTCOME_DIGEST_ENV, "") or "").strip().lower() not in {"1", "true", "yes", "on"}:
+    raw = str(os.getenv(PROVIDER_OUTCOME_DIGEST_ENV, "true") or "").strip().lower()
+    if raw not in {"1", "true", "yes", "on"}:
         return None
     ledger_path = str(os.getenv("RESEARCH_LAB_PROVIDER_USAGE_LEDGER_PATH") or "").strip()
     day_cache_path = str(os.getenv("RESEARCH_LAB_PROVIDER_EVIDENCE_DAY_CACHE") or "").strip()

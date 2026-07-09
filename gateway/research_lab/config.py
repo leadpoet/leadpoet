@@ -344,6 +344,8 @@ class ResearchLabGatewayConfig:
     hosted_worker_poll_seconds: int = 15
     hosted_worker_max_runs: int = 0
     hosted_worker_max_candidates: int = 1
+    hosted_worker_dev_eval_candidate_width: int = 3
+    hosted_worker_paid_finalist_count: int = 1
     hosted_worker_dry_run: bool = False
     hosted_worker_id: str = ""
     hosted_worker_index: int = 0
@@ -507,10 +509,14 @@ class ResearchLabGatewayConfig:
     code_edit_source_inspection_search_matches: int = 30
     code_edit_patch_repair_attempts: int = 2
     # W4 probe_provider: metered generation-time provider probes through the
-    # evidence proxy. Default off; §8 launch caps: 4 probes / $0.25 per loop.
-    loop_provider_probes_enabled: bool = False
+    # evidence proxy. Enabled by default with strict launch caps.
+    loop_provider_probes_enabled: bool = True
     loop_probe_max_probes: int = 4
     loop_probe_max_cost_microusd: int = 250_000
+    corpus_export_enabled: bool = False
+    corpus_export_interval_seconds: int = 3600
+    corpus_export_s3_prefix: str = ""
+    corpus_export_max_rows: int = 1000
     # W5/W6 SOURCE_ADD execution + two-leg emission rewards (§3.4 config,
     # §8 launch defaults). Intake and reward rails are live by default.
     source_add_enabled: bool = True
@@ -629,6 +635,14 @@ class ResearchLabGatewayConfig:
             hosted_worker_poll_seconds=_int("RESEARCH_LAB_HOSTED_WORKER_POLL_SECONDS", 15),
             hosted_worker_max_runs=_int("RESEARCH_LAB_HOSTED_WORKER_MAX_RUNS", 0),
             hosted_worker_max_candidates=max(1, _int("RESEARCH_LAB_HOSTED_WORKER_MAX_CANDIDATES", 1)),
+            hosted_worker_dev_eval_candidate_width=max(
+                1,
+                _int("RESEARCH_LAB_LOOP_DEV_EVAL_CANDIDATE_WIDTH", 3),
+            ),
+            hosted_worker_paid_finalist_count=max(
+                1,
+                _int("RESEARCH_LAB_LOOP_PAID_FINALIST_COUNT", 1),
+            ),
             hosted_worker_dry_run=_truthy("RESEARCH_LAB_HOSTED_WORKER_DRY_RUN", "false"),
             hosted_worker_id=os.getenv("RESEARCH_LAB_HOSTED_WORKER_ID", ""),
             hosted_worker_index=worker_index,
@@ -1032,12 +1046,19 @@ class ResearchLabGatewayConfig:
                 0,
                 _int("RESEARCH_LAB_CODE_EDIT_PATCH_REPAIR_ATTEMPTS", 2),
             ),
-            loop_provider_probes_enabled=_truthy("RESEARCH_LAB_LOOP_PROVIDER_PROBES", "false"),
+            loop_provider_probes_enabled=_truthy("RESEARCH_LAB_LOOP_PROVIDER_PROBES", "true"),
             loop_probe_max_probes=max(0, _int("RESEARCH_LAB_LOOP_PROBE_MAX_PROBES", 4)),
             loop_probe_max_cost_microusd=max(
                 0,
                 _int("RESEARCH_LAB_LOOP_PROBE_MAX_COST_MICROUSD", 250_000),
             ),
+            corpus_export_enabled=_truthy("RESEARCH_LAB_CORPUS_EXPORT_ENABLED", "false"),
+            corpus_export_interval_seconds=max(
+                300,
+                _int("RESEARCH_LAB_CORPUS_EXPORT_INTERVAL_SECONDS", 3600),
+            ),
+            corpus_export_s3_prefix=os.getenv("RESEARCH_LAB_CORPUS_EXPORT_S3_PREFIX", ""),
+            corpus_export_max_rows=max(1, _int("RESEARCH_LAB_CORPUS_EXPORT_MAX_ROWS", 1000)),
             source_add_enabled=_truthy("RESEARCH_LAB_SOURCE_ADD_ENABLED", "true"),
             source_add_rewards_enabled=_truthy("RESEARCH_LAB_SOURCE_ADD_REWARDS_ENABLED", "true"),
             source_add_credential_kms_key_id=os.getenv("RESEARCH_LAB_SOURCE_ADD_CREDENTIAL_KMS_KEY_ID", ""),
@@ -1116,6 +1137,8 @@ class ResearchLabGatewayConfig:
         default_doc = {
             "model": self.auto_research_model,
             "max_candidates": self.hosted_worker_max_candidates,
+            "dev_eval_candidate_width": self.hosted_worker_dev_eval_candidate_width,
+            "paid_finalist_count": self.hosted_worker_paid_finalist_count,
             "max_tokens": self.auto_research_max_tokens,
             "description": "Default hosted auto-research model",
         }
@@ -1133,6 +1156,8 @@ class ResearchLabGatewayConfig:
                 return self.default_auto_research_model_tier, self.auto_research_model, {
                     "model": self.auto_research_model,
                     "max_candidates": self.hosted_worker_max_candidates,
+                    "dev_eval_candidate_width": self.hosted_worker_dev_eval_candidate_width,
+                    "paid_finalist_count": self.hosted_worker_paid_finalist_count,
                     "max_tokens": self.auto_research_max_tokens,
                 }
             raise ValueError("no hosted auto-research model is configured")
@@ -1187,6 +1212,8 @@ class ResearchLabGatewayConfig:
                 in {
                     "model",
                     "max_candidates",
+                    "dev_eval_candidate_width",
+                    "paid_finalist_count",
                     "max_compute_budget_usd",
                     "max_tokens",
                     "description",
@@ -1409,6 +1436,8 @@ class ResearchLabGatewayConfig:
                 "dry_run": self.hosted_worker_dry_run,
                 "poll_seconds": self.hosted_worker_poll_seconds,
                 "max_candidates": self.hosted_worker_max_candidates,
+                "dev_eval_candidate_width": self.hosted_worker_dev_eval_candidate_width,
+                "paid_finalist_count": self.hosted_worker_paid_finalist_count,
                 "worker_id": self.hosted_worker_id,
                 "worker_index": self.hosted_worker_index,
                 "total_workers": self.hosted_worker_total_workers,
@@ -1536,6 +1565,14 @@ class ResearchLabGatewayConfig:
                     tier: {
                         "model_configured": bool(doc.get("model")),
                         "max_candidates": doc.get("max_candidates", self.hosted_worker_max_candidates),
+                        "dev_eval_candidate_width": doc.get(
+                            "dev_eval_candidate_width",
+                            self.hosted_worker_dev_eval_candidate_width,
+                        ),
+                        "paid_finalist_count": doc.get(
+                            "paid_finalist_count",
+                            self.hosted_worker_paid_finalist_count,
+                        ),
                         "max_compute_budget_usd": doc.get("max_compute_budget_usd", self.max_compute_budget_usd),
                         "max_tokens": doc.get("max_tokens", self.auto_research_max_tokens),
                         "reasoning_effort": doc.get("reasoning_effort"),

@@ -25,6 +25,7 @@ Everything here is read-only against the corpus tables and never writes.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Mapping, Sequence
 
 from research_lab.axis_provenance import AXIS_A, AXIS_B
@@ -33,6 +34,7 @@ from research_lab.trajectory_corpus import (
     CorpusSplitPolicyRecord,
     TrajectoryCorpusSourceRecord,
     build_trajectory_corpus_manifest,
+    validate_trajectory_corpus_manifest,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,8 @@ RESEARCH_TRAJECTORIES_TABLE = "research_trajectories"
 EXECUTION_TRACES_TABLE = "execution_traces"
 EVIDENCE_BUNDLES_TABLE = "evidence_bundles"
 RESULTS_LEDGER_TABLE = "research_lab_results_ledger"
+DEFAULT_CORPUS_EXPORT_PREFIX = "research-lab/trajectory-corpus-exports"
+DEFAULT_CORPUS_SHARD_SIZE = 500
 
 
 async def _load_side_refs(store: Any, run_id: str) -> dict[str, tuple[str, ...]]:
@@ -121,6 +125,140 @@ async def build_manifest_from_projected_rows(
         uses_local_fixtures=False,
         local_only=False,
     )
+
+
+def default_split_policy() -> CorpusSplitPolicyRecord:
+    return CorpusSplitPolicyRecord(
+        split_policy_id="research_lab_trajectory_corpus_hash_split:v1",
+        train_percent=80,
+        validation_percent=10,
+        holdout_percent=10,
+        deterministic_seed_ref="research_lab_trajectory_corpus_export:v1",
+        group_by_fields=("split_cluster_key", "brief_id", "customer_ref"),
+        state="ready_after_measured_data",
+    )
+
+
+def _jsonl_bytes(rows: Sequence[Mapping[str, Any]]) -> bytes:
+    import json
+
+    return (
+        "\n".join(json.dumps(dict(row), sort_keys=True, separators=(",", ":"), default=str) for row in rows)
+        + ("\n" if rows else "")
+    ).encode("utf-8")
+
+
+def _json_bytes(row: Mapping[str, Any]) -> bytes:
+    import json
+
+    return json.dumps(dict(row), sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+
+
+def _split_s3_uri(uri_or_prefix: str, *, default_bucket: str = "") -> tuple[str, str]:
+    value = str(uri_or_prefix or "").strip()
+    if value.startswith("s3://"):
+        rest = value[5:]
+        bucket, _, prefix = rest.partition("/")
+        if not bucket:
+            raise ValueError("S3 URI requires a bucket")
+        return bucket, prefix.strip("/")
+    if not default_bucket:
+        raise ValueError("corpus export requires an S3 URI or default bucket")
+    return default_bucket, value.strip("/")
+
+
+async def export_projected_corpus_to_s3(
+    *,
+    store: Any,
+    bucket: str = "",
+    s3_prefix: str = "",
+    corpus_id: str = "",
+    split_policy: CorpusSplitPolicyRecord | Mapping[str, Any] | None = None,
+    max_rows: int = 1000,
+    shard_size: int = DEFAULT_CORPUS_SHARD_SIZE,
+    s3_client: Any = None,
+) -> dict[str, Any]:
+    """Write sanitized projected trajectory corpus shards plus a manifest.
+
+    The export is pointer-scale only: each JSONL row is the sanitized
+    ``TrajectoryCorpusSourceRecord`` from the projector, not raw prompts,
+    provider responses, private ICP text, or trace bodies. The write path is
+    deterministic for ``corpus_id`` and therefore safe to rerun.
+    """
+
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    resolved_corpus_id = str(corpus_id or f"trajectory_corpus:{day}")
+    policy = split_policy or default_split_policy()
+    manifest = await build_manifest_from_projected_rows(
+        store=store,
+        corpus_id=resolved_corpus_id,
+        split_policy=policy,
+        max_rows=max_rows,
+    )
+    manifest_doc = manifest.to_dict()
+    manifest_errors = validate_trajectory_corpus_manifest(manifest)
+    records = [record.to_dict() for record in manifest.source_records]
+    shard_size = max(1, int(shard_size or DEFAULT_CORPUS_SHARD_SIZE))
+    shards = [records[index : index + shard_size] for index in range(0, len(records), shard_size)]
+    bucket_name, prefix = _split_s3_uri(
+        s3_prefix or f"{DEFAULT_CORPUS_EXPORT_PREFIX}/{resolved_corpus_id}",
+        default_bucket=bucket,
+    )
+    prefix = prefix.rstrip("/")
+    shard_refs: list[dict[str, Any]] = []
+    client = s3_client
+    if client is None:
+        import boto3
+
+        client = boto3.client("s3")
+    for index, shard_rows in enumerate(shards):
+        key = f"{prefix}/shards/part-{index:05d}.jsonl"
+        body = _jsonl_bytes(shard_rows)
+        client.put_object(
+            Bucket=bucket_name,
+            Key=key,
+            Body=body,
+            ContentType="application/x-ndjson",
+        )
+        shard_refs.append(
+            {
+                "index": index,
+                "row_count": len(shard_rows),
+                "s3_uri": f"s3://{bucket_name}/{key}",
+                "sha256": sha256_json({"body": body.decode("utf-8")}),
+            }
+        )
+    export_doc = {
+        **manifest_doc,
+        "export_schema_version": "research_lab_trajectory_corpus_export.v1",
+        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "source": "projected_research_lab_rows",
+        "sanitization": {
+            "raw_prompts": "excluded",
+            "provider_responses": "excluded",
+            "private_icp_text": "excluded",
+            "trace_bodies": "excluded",
+            "secrets": "excluded",
+        },
+        "manifest_validation_errors": manifest_errors,
+        "source_record_shards": shard_refs,
+    }
+    export_doc["export_hash"] = sha256_json({key: value for key, value in export_doc.items() if key != "export_hash"})
+    manifest_key = f"{prefix}/manifest.json"
+    client.put_object(
+        Bucket=bucket_name,
+        Key=manifest_key,
+        Body=_json_bytes(export_doc),
+        ContentType="application/json",
+    )
+    return {
+        "corpus_id": resolved_corpus_id,
+        "trajectory_count": int(manifest.trajectory_count),
+        "shard_count": len(shard_refs),
+        "manifest_uri": f"s3://{bucket_name}/{manifest_key}",
+        "export_hash": export_doc["export_hash"],
+        "validation_error_count": len(manifest_errors),
+    }
 
 
 def bind_readiness_gates(

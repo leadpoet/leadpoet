@@ -97,7 +97,7 @@ def _channel(*, enabled: bool, prefix: str, kms_key: str) -> dict[str, Any]:
 def collect_capture_health(config: "ResearchLabGatewayConfig") -> dict[str, Any]:
     """Build the structured capture health block (pure env/config, no I/O)."""
     trace_kms = str(os.getenv(TRACE_KMS_KEY_ENV, "") or "").strip()
-    projector_on = str(os.getenv(PROJECTOR_ENABLED_ENV, "")).strip().lower() in _TRUTHY
+    projector_on = str(os.getenv(PROJECTOR_ENABLED_ENV, "true")).strip().lower() in _TRUTHY
     channels = {
         "raw_trace": _channel(
             enabled=_flag(RAW_TRACE_CAPTURE_ENABLED_ENV, "true"),

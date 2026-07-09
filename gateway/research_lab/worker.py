@@ -1501,6 +1501,7 @@ class ResearchLabHostedWorker:
             )
         try:
             from gateway.research_lab.trajectory_projector import (
+                GatewayProjectorStore,
                 backfill_corpus_trace_rows,
                 project_completed_runs,
                 projector_enabled,
@@ -1522,11 +1523,52 @@ class ResearchLabHostedWorker:
                         trace_backfill_max_candidates,
                     ),
                 )
+                await self._maybe_export_trajectory_corpus(GatewayProjectorStore())
         except Exception as exc:
             logger.warning(
                 "research_lab_periodic_trajectory_projection_failed worker_ref=%s error=%s",
                 self.worker_ref,
                 str(exc)[:200],
+            )
+
+    async def _maybe_export_trajectory_corpus(self, projector_store: Any) -> None:
+        if not self.config.corpus_export_enabled:
+            return
+        total_workers = max(1, int(self.config.hosted_worker_total_workers or 1))
+        worker_index = int(self.config.hosted_worker_index or 0) % total_workers
+        if worker_index != 0:
+            return
+        now = time.monotonic()
+        last = float(getattr(self, "_last_corpus_export_at", 0.0) or 0.0)
+        interval = max(300, int(self.config.corpus_export_interval_seconds or 3600))
+        if last and now - last < interval:
+            return
+        self._last_corpus_export_at = now
+        try:
+            from gateway.research_lab.corpus_export import export_projected_corpus_to_s3
+
+            manifest_uri = str(self.config.private_model_manifest_uri or "")
+            default_bucket = ""
+            if manifest_uri.startswith("s3://"):
+                default_bucket = manifest_uri[5:].split("/", 1)[0]
+            result = await export_projected_corpus_to_s3(
+                store=projector_store,
+                bucket=default_bucket,
+                s3_prefix=self.config.corpus_export_s3_prefix,
+                max_rows=self.config.corpus_export_max_rows,
+            )
+            logger.info(
+                "research_lab_trajectory_corpus_exported worker_ref=%s manifest_uri=%s rows=%s shards=%s",
+                self.worker_ref,
+                result.get("manifest_uri"),
+                result.get("trajectory_count"),
+                result.get("shard_count"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_trajectory_corpus_export_failed worker_ref=%s error=%s",
+                self.worker_ref,
+                str(exc)[:240],
             )
 
     async def _maybe_reconcile_terminal_tickets(self) -> None:
@@ -1866,6 +1908,7 @@ class ResearchLabHostedWorker:
             str(budget_context.get("research_model_tier") or "")
         )
         max_candidates = self._max_candidates_for_run(budget_context, model_doc)
+        paid_finalist_count = self._paid_finalist_count_for_run(model_doc, max_candidates)
         resume_state = await latest_auto_research_checkpoint(context.run_id)
 
         active_start = await load_active_private_model(self.config, register_bootstrap=True)
@@ -1907,7 +1950,8 @@ class ResearchLabHostedWorker:
                         ("Min runtime", f"{self.config.auto_research_min_seconds}s"),
                         ("Max runtime", f"{self.config.auto_research_max_seconds}s"),
                         ("Max iterations", self.config.auto_research_max_iterations),
-                        ("Max candidates", max_candidates),
+                        ("Dev-eval candidates", max_candidates),
+                        ("Paid finalists", paid_finalist_count),
                     ),
                 )
             )
@@ -2199,6 +2243,7 @@ class ResearchLabHostedWorker:
                     },
                 )
             final_artifact = artifact
+            paid_finalist_candidates = tuple(loop_result.selected_candidates[:paid_finalist_count])
             finalists = [
                 {
                     "candidate_kind": "image_build",
@@ -2246,7 +2291,7 @@ class ResearchLabHostedWorker:
                     "dev_score_version": candidate.dev_score_version,
                     "redacted_public_summary": candidate.draft.redacted_summary,
                 }
-                for candidate in loop_result.selected_candidates
+                for candidate in paid_finalist_candidates
             ]
 
         candidate_ids: list[str] = []
@@ -2367,6 +2412,12 @@ class ResearchLabHostedWorker:
             "provider_usage": list(loop_result.provider_usage) or self._provider_usage(context),
             "candidate_ids": list(candidate_ids),
             "reimbursement": reimbursement_decision or {"status": "not_written"},
+            "candidate_selection_policy": {
+                "dev_eval_candidate_width": int(max_candidates),
+                "paid_finalist_count": int(paid_finalist_count),
+                "selected_candidate_count": len(loop_result.selected_candidates),
+                "submitted_finalist_count": len(candidate_ids),
+            },
         }
 
         completion_queue_doc = {
@@ -4382,10 +4433,23 @@ class ResearchLabHostedWorker:
         return context_doc
 
     def _max_candidates_for_run(self, budget_context: Mapping[str, Any], model_doc: Mapping[str, Any]) -> int:
-        configured = int(model_doc.get("max_candidates") or self.config.hosted_worker_max_candidates)
+        configured = int(
+            model_doc.get("dev_eval_candidate_width")
+            or model_doc.get("max_candidates")
+            or self.config.hosted_worker_dev_eval_candidate_width
+            or self.config.hosted_worker_max_candidates
+        )
         budget = float(budget_context.get("requested_compute_budget_usd") or self.config.default_compute_budget_usd)
         budget_limited = max(1, min(configured, int(max(1.0, budget // max(1.0, self.config.min_compute_budget_usd)))))
-        return max(1, min(self.config.hosted_worker_max_candidates, budget_limited))
+        return max(1, min(self.config.hosted_worker_dev_eval_candidate_width, budget_limited))
+
+    def _paid_finalist_count_for_run(self, model_doc: Mapping[str, Any], max_candidates: int) -> int:
+        configured = int(
+            model_doc.get("paid_finalist_count")
+            or self.config.hosted_worker_paid_finalist_count
+            or 1
+        )
+        return max(1, min(int(max_candidates), configured))
 
     def _auto_research_max_tokens_for_call(
         self,

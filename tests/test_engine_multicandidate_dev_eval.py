@@ -323,17 +323,18 @@ def test_multi_candidate_flag_defaults_on(monkeypatch):
     assert engine._multi_candidate_drafts_enabled() is False
 
 
-@pytest.mark.parametrize(
-    "helper,env",
-    [
-        (engine._dev_eval_enabled, "RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED"),
-        (engine._dev_plateau_stop_enabled, "RESEARCH_LAB_LOOP_DEV_PLATEAU_STOP"),
-    ],
-)
-def test_dev_flags_default_off_and_enableable(helper, env, monkeypatch):
-    assert helper() is False
-    monkeypatch.setenv(env, "true")
-    assert helper() is True
+def test_dev_eval_flag_defaults_on_and_disableable(monkeypatch):
+    monkeypatch.delenv("RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED", raising=False)
+    assert engine._dev_eval_enabled() is True
+    monkeypatch.setenv("RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED", "false")
+    assert engine._dev_eval_enabled() is False
+
+
+def test_dev_plateau_flag_defaults_off_and_enableable(monkeypatch):
+    monkeypatch.delenv("RESEARCH_LAB_LOOP_DEV_PLATEAU_STOP", raising=False)
+    assert engine._dev_plateau_stop_enabled() is False
+    monkeypatch.setenv("RESEARCH_LAB_LOOP_DEV_PLATEAU_STOP", "true")
+    assert engine._dev_plateau_stop_enabled() is True
 
 
 @pytest.mark.parametrize(

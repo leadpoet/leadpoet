@@ -156,6 +156,150 @@ _POSTGREST_TIMESTAMP_RE = re.compile(
 )
 
 
+def _artifact_serving_version_doc(artifact: PrivateModelArtifactManifest) -> dict[str, Any]:
+    return {
+        "model_artifact_hash": artifact.model_artifact_hash,
+        "manifest_hash": artifact.manifest_hash,
+        "manifest_uri": artifact.manifest_uri,
+        "git_commit_sha": artifact.git_commit_sha,
+        "image_digest": artifact.image_digest,
+        "config_hash": artifact.config_hash,
+        "component_registry_version": artifact.component_registry_version,
+        "scoring_adapter_version": artifact.scoring_adapter_version,
+        "build_id": artifact.build_id,
+    }
+
+
+def _baseline_serving_model_version_doc(
+    *,
+    artifact: PrivateModelArtifactManifest,
+    benchmark_date: str,
+    benchmark_attempt: int,
+    rolling_window_hash: str,
+    evaluation_epoch: int,
+) -> dict[str, Any]:
+    doc = {
+        "schema_version": "research_lab_serving_model_version.v1",
+        "result_role": "private_baseline_rebenchmark",
+        "run_id": f"private_baseline_rebenchmark:{benchmark_date}:attempt:{benchmark_attempt}",
+        "ticket_id": "",
+        "candidate_id": "",
+        "private_model_version_id": "",
+        "evaluation_epoch": int(evaluation_epoch),
+        "benchmark_date": str(benchmark_date),
+        "benchmark_attempt": int(benchmark_attempt),
+        "run_scope": "private_baseline_rebenchmark",
+        "benchmark_id": f"rolling_icp_window:{rolling_window_hash}",
+        "benchmark_split_ref": f"research_lab_rolling_icp_window:{rolling_window_hash}",
+        "icp_set_hash": str(rolling_window_hash),
+        "scoring_code_version": "qualification-company-scorer:v1",
+        "evaluator_version": "leadpoet-gateway-private-baseline:v1",
+        "parent_model": _artifact_serving_version_doc(artifact),
+        "candidate_patch_hash": "",
+        "candidate_source_diff_hash": "",
+        "candidate_build_ref": "",
+    }
+    doc["version_stamp_hash"] = sha256_json({key: value for key, value in doc.items() if key != "version_stamp_hash"})
+    return doc
+
+
+def _public_serving_model_version_doc(serving_doc: Mapping[str, Any]) -> dict[str, Any]:
+    parent = serving_doc.get("parent_model") if isinstance(serving_doc.get("parent_model"), Mapping) else {}
+    doc = {
+        "schema_version": str(serving_doc.get("schema_version") or ""),
+        "result_role": str(serving_doc.get("result_role") or ""),
+        "run_id": str(serving_doc.get("run_id") or ""),
+        "evaluation_epoch": int(serving_doc.get("evaluation_epoch") or 0),
+        "benchmark_date": str(serving_doc.get("benchmark_date") or ""),
+        "benchmark_attempt": serving_doc.get("benchmark_attempt"),
+        "run_scope": str(serving_doc.get("run_scope") or ""),
+        "icp_set_hash": str(serving_doc.get("icp_set_hash") or ""),
+        "scoring_code_version": str(serving_doc.get("scoring_code_version") or ""),
+        "evaluator_version": str(serving_doc.get("evaluator_version") or ""),
+        "model_artifact_hash": str(parent.get("model_artifact_hash") or ""),
+        "manifest_hash": str(parent.get("manifest_hash") or ""),
+        "git_commit_sha": str(parent.get("git_commit_sha") or ""),
+        "version_stamp_hash": str(serving_doc.get("version_stamp_hash") or ""),
+    }
+    doc["public_stamp_hash"] = sha256_json({key: value for key, value in doc.items() if key != "public_stamp_hash"})
+    return doc
+
+
+def _with_baseline_evaluation_contexts(
+    per_icp_summaries: list[dict[str, Any]],
+    *,
+    benchmark_date: str,
+    benchmark_attempt: int,
+    rolling_window_hash: str,
+    evaluation_epoch: int,
+    serving_model_version_hash: str,
+) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for index, summary in enumerate(per_icp_summaries):
+        item = dict(summary)
+        existing = item.get("evaluation_context") if isinstance(item.get("evaluation_context"), Mapping) else {}
+        result_payload = {key: value for key, value in item.items() if key != "evaluation_context"}
+        item["evaluation_context"] = {
+            **dict(existing),
+            "schema_version": "research_lab_evaluation_context.v1",
+            "result_index": int(index),
+            "icp_ref": str(item.get("icp_ref") or ""),
+            "icp_hash": str(item.get("icp_hash") or ""),
+            "benchmark_id": f"rolling_icp_window:{rolling_window_hash}",
+            "benchmark_split_ref": f"research_lab_rolling_icp_window:{rolling_window_hash}",
+            "icp_set_hash": str(rolling_window_hash),
+            "input_window_hash": str(rolling_window_hash),
+            "run_id": f"private_baseline_rebenchmark:{benchmark_date}:attempt:{benchmark_attempt}",
+            "ticket_id": "",
+            "candidate_id": "",
+            "evaluation_epoch": int(evaluation_epoch),
+            "benchmark_date": str(benchmark_date),
+            "benchmark_attempt": int(benchmark_attempt),
+            "run_scope": "private_baseline_rebenchmark",
+            "provider_cache_day": str(benchmark_date),
+            "serving_model_version_hash": str(serving_model_version_hash),
+            "result_row_hash": sha256_json(result_payload),
+        }
+        enriched.append(item)
+    return enriched
+
+
+def _daily_noise_budget_doc(
+    *,
+    benchmark_date: str,
+    rolling_window_hash: str,
+    per_icp_summaries: list[Mapping[str, Any]],
+    aggregate_score: float,
+) -> dict[str, Any]:
+    scores = [float(row.get("score") or 0.0) for row in per_icp_summaries]
+    count = len(scores)
+    mean = sum(scores) / count if count else 0.0
+    variance = (
+        sum((score - mean) ** 2 for score in scores) / (count - 1)
+        if count > 1
+        else 0.0
+    )
+    sd = variance ** 0.5
+    se = sd / (count ** 0.5) if count else 0.0
+    return {
+        "schema_version": "research_lab_daily_noise_budget.v1",
+        "benchmark_date": str(benchmark_date),
+        "rolling_window_hash": str(rolling_window_hash),
+        "icp_count": count,
+        "aggregate_score": round(float(aggregate_score), 6),
+        "mean_icp_score": round(mean, 6),
+        "sample_sd": round(sd, 6),
+        "standard_error": round(se, 6),
+        "confidence_band_95": {
+            "lower": round(mean - 1.96 * se, 6),
+            "upper": round(mean + 1.96 * se, 6),
+        },
+        "zero_score_count": sum(1 for score in scores if score <= 0.0),
+        "high_volatility": bool(count >= 5 and sd >= 25.0),
+        "observability_only": True,
+    }
+
+
 def _retry_runner_with_provider_cost_scope(
     runner: DockerPrivateModelRunner,
     *,
@@ -2684,6 +2828,7 @@ class ResearchLabGatewayScoringWorker:
                 "proxy_ref_hash": self.proxy_ref_hash,
                 "private_holdout_gate": _candidate_gate_event_doc(gate_result),
                 "scoring_health_gate": scoring_health_gate,
+                "serving_model_version": score_bundle.get("serving_model_version") or {},
                 "scored_via": "global_icp_queue",
             },
         )
@@ -3803,6 +3948,7 @@ class ResearchLabGatewayScoringWorker:
                     "proxy_ref_hash": self.proxy_ref_hash,
                     "private_holdout_gate": _candidate_gate_event_doc(gate_result),
                     "scoring_health_gate": scoring_health_gate,
+                    "serving_model_version": score_bundle.get("serving_model_version") or {},
                     # §5.4 pointers only ({icp_ref: {s3_ref, sha256}}) — never
                     # judgment content (audit-scan poison).
                     **(
@@ -3828,6 +3974,7 @@ class ResearchLabGatewayScoringWorker:
                     "elapsed_seconds": round(time.time() - start, 3),
                     "private_holdout_gate": _candidate_gate_event_doc(gate_result),
                     "scoring_health_gate": scoring_health_gate,
+                    "serving_model_version": score_bundle.get("serving_model_version") or {},
                 },
             )
             if private_holdout_rejected:
@@ -4181,6 +4328,7 @@ class ResearchLabGatewayScoringWorker:
                 "proxy_ref_hash": self.proxy_ref_hash,
                 "private_holdout_gate": _candidate_gate_event_doc(gate_result),
                 "scoring_health_gate": scoring_health_gate,
+                "serving_model_version": score_bundle.get("serving_model_version") or {},
                 "reused_signed_score_bundle": True,
             },
         )
@@ -4201,6 +4349,7 @@ class ResearchLabGatewayScoringWorker:
                     "elapsed_seconds": round(time.time() - start, 3),
                     "private_holdout_gate": _candidate_gate_event_doc(gate_result),
                     "scoring_health_gate": scoring_health_gate,
+                    "serving_model_version": score_bundle.get("serving_model_version") or {},
                     "reused_signed_score_bundle": True,
                 },
             )
@@ -4377,6 +4526,7 @@ class ResearchLabGatewayScoringWorker:
                 "candidate_kind": str(candidate.get("candidate_kind") or ""),
                 "decision_path": "public_holdout_rejected",
                 "promotion_metric": metric.event_doc(),
+                "serving_model_version": score_bundle.get("serving_model_version") or {},
             },
         )
         await create_candidate_promotion_event(
@@ -4397,6 +4547,7 @@ class ResearchLabGatewayScoringWorker:
                 "delta_lcb": round(delta_lcb, 6),
                 "candidate_kind": str(candidate.get("candidate_kind") or ""),
                 "promotion_metric": metric.event_doc(),
+                "serving_model_version": score_bundle.get("serving_model_version") or {},
             },
         )
         return {"status": "rejected_public_holdout_gate"}
@@ -4788,6 +4939,11 @@ class ResearchLabGatewayScoringWorker:
         )
         if not isinstance(score_bundle, Mapping):
             return None
+        score_bundle_serving_version = (
+            score_bundle.get("serving_model_version")
+            if isinstance(score_bundle.get("serving_model_version"), Mapping)
+            else {}
+        )
         attempt = int(state.get("attempts") or 0) + 1
         candidate_parent = str(candidate.get("parent_artifact_hash") or "")
         first_pass_points = _safe_float(hold.get("improvement_points"), default=0.0)
@@ -4812,6 +4968,7 @@ class ResearchLabGatewayScoringWorker:
                 "attempt": attempt,
                 "worker_ref": self.worker_ref,
                 "proxy_ref_hash": self.proxy_ref_hash,
+                "serving_model_version": score_bundle_serving_version,
             },
         )
         # Post-write claim confirm (write-then-verify, like
@@ -4897,6 +5054,7 @@ class ResearchLabGatewayScoringWorker:
                         "unhealthy_measurement": isinstance(exc, ConfirmationMeasurementUnhealthy),
                         "error_diagnostics": _event_error_diagnostics(exc),
                         "elapsed_seconds": round(time.time() - start, 3),
+                        "serving_model_version": score_bundle_serving_version,
                     },
                 )
             except Exception:  # noqa: BLE001
@@ -4966,6 +5124,7 @@ class ResearchLabGatewayScoringWorker:
                         6,
                     ),
                 },
+                "serving_model_version": score_bundle_serving_version,
             },
         )
         logger.info(
@@ -6547,13 +6706,36 @@ class ResearchLabGatewayScoringWorker:
             public_total_icps=self.config.public_benchmark_public_total_icps,
             public_weak_total=self.config.public_benchmark_public_weak_total,
         )
+        serving_model_version = _baseline_serving_model_version_doc(
+            artifact=artifact,
+            benchmark_date=today,
+            benchmark_attempt=benchmark_attempt,
+            rolling_window_hash=window.window_hash,
+            evaluation_epoch=evaluation_epoch,
+        )
+        per_icp_summaries = _with_baseline_evaluation_contexts(
+            per_icp_summaries,
+            benchmark_date=today,
+            benchmark_attempt=benchmark_attempt,
+            rolling_window_hash=window.window_hash,
+            evaluation_epoch=evaluation_epoch,
+            serving_model_version_hash=str(serving_model_version["version_stamp_hash"]),
+        )
+        noise_budget = _daily_noise_budget_doc(
+            benchmark_date=today,
+            rolling_window_hash=window.window_hash,
+            per_icp_summaries=per_icp_summaries,
+            aggregate_score=aggregate_score,
+        )
         score_summary_doc = {
             "schema_version": "1.0",
             "benchmark_quality": "passed",
             "benchmark_attempt": benchmark_attempt,
             "rolling_window_hash": window.window_hash,
+            "serving_model_version": serving_model_version,
             "per_icp_summaries": per_icp_summaries,
             "visibility_split": visibility_split,
+            "daily_noise_budget": noise_budget,
             "aggregate_score": aggregate_score,
             "baseline_health": baseline_health,
             "elapsed_seconds": round(time.time() - start, 3),
@@ -6604,6 +6786,14 @@ class ResearchLabGatewayScoringWorker:
             public_weak_per_day=self.config.public_benchmark_public_weak_per_day,
             public_total_icps=self.config.public_benchmark_public_total_icps,
             public_weak_total=self.config.public_benchmark_public_weak_total,
+        )
+        public_report_doc = {
+            **public_report_doc,
+            "serving_model_version": _public_serving_model_version_doc(serving_model_version),
+            "daily_noise_budget": noise_budget,
+        }
+        public_report_doc["report_public_hash"] = sha256_json(
+            {key: value for key, value in public_report_doc.items() if key != "report_public_hash"}
         )
         public_report, _report_event = await create_public_benchmark_report(
             benchmark_date=today,
@@ -7810,10 +8000,15 @@ class ResearchLabGatewayScoringWorker:
         context = {
             "run_id": str(candidate["run_id"]),
             "ticket_id": str(candidate["ticket_id"]),
+            "candidate_id": str(candidate["candidate_id"]),
             "miner_hotkey": str(candidate["miner_hotkey"]),
             "island": str(candidate.get("island") or "generalist"),
             "evaluation_epoch": int(evaluation_epoch),
             "evaluator_version": "leadpoet-gateway-qualification-worker:research-lab:v1",
+            "run_scope": "candidate_scoring",
+            "rolling_window_hash": str(window_hash),
+            "provider_cache_day": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "private_model_version_id": str(candidate.get("private_model_version_id") or ""),
             "evidence_bundle_refs": [f"research_lab_rolling_icp_window:{window_hash}"],
             "execution_trace_ref": execution_trace_ref,
             "cost_ledger_ref": "cost_ledger:" + canonical_hash(

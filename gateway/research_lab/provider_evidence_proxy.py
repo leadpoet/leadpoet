@@ -61,7 +61,6 @@ from research_lab.eval.provider_costs import (
     estimate_provider_cost,
     exa_agent_run_status,
     extract_openrouter_cost_dollars,
-    openrouter_perplexity_pricing_fallback,
     redacted_endpoint,
 )
 from research_lab.eval.provider_evidence_cache import (
@@ -77,6 +76,12 @@ CALLER_TOKEN_HEADER = "X-Research-Lab-Caller-Token"
 # W4: a request carrying this header replays from tape/day-cache only — a miss
 # returns 409 instead of a live upstream call (probe live-flag off).
 REPLAY_ONLY_HEADER = "X-Research-Lab-Replay-Only"
+OPENROUTER_MANAGEMENT_CREDENTIAL_REFS = (
+    "RESEARCH_LAB_OPENROUTER_MANAGEMENT_KEY",
+    "OPENROUTER_MANAGEMENT_KEY",
+    "OPENROUTER_API_MANAGEMENT_KEY",
+    "OR_MANAGEMENT_KEY",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -230,58 +235,75 @@ def _openrouter_generation_id_from_headers(headers: Mapping[str, Any]) -> str:
     return ""
 
 
+def _normalize_openrouter_key(value: str) -> str:
+    raw = str(value or "").strip()
+    prefix = "sk-or-v1-"
+    if raw.lower().startswith(prefix):
+        return prefix + raw[len(prefix):]
+    return raw
+
+
+def resolve_openrouter_management_credential() -> tuple[str, str]:
+    for env_name in OPENROUTER_MANAGEMENT_CREDENTIAL_REFS:
+        value = _normalize_openrouter_key(os.getenv(env_name) or "")
+        if value:
+            return value, env_name
+    return "", ""
+
+
 def _reconcile_openrouter_generation_cost(
     *,
     entry: ProviderRegistryEntry,
     credential: str,
+    management_credential: str = "",
     estimate: ProviderCostEstimate,
 ) -> ProviderCostEstimate:
     generation_id = str(estimate.generation_id or "").strip()
     if not generation_id:
         return estimate
     gen_url = entry.base_url + "/api/v1/generation?id=" + urllib.parse.quote(generation_id, safe="")
-    gen_headers = {"Authorization": "Bearer " + credential} if credential else {}
-    gen_req = urllib.request.Request(gen_url, headers=gen_headers, method="GET")
+    credentials: list[str] = []
+    for candidate in (management_credential, credential):
+        normalized = _normalize_openrouter_key(candidate)
+        if normalized and normalized not in credentials:
+            credentials.append(normalized)
+    if not credentials:
+        return estimate
     last_error: Exception | None = None
-    for attempt in range(3):
-        try:
-            with urllib.request.urlopen(gen_req, timeout=30) as gen_response:
-                if int(getattr(gen_response, "status", None) or getattr(gen_response, "code", 0) or 0) >= 400:
-                    continue
-                generation_body = gen_response.read()
-                reconciled_cost, reconciled_metadata = extract_openrouter_cost_dollars(generation_body)
-                if reconciled_cost is not None:
-                    return ProviderCostEstimate(
-                        provider="or",
-                        endpoint=estimate.endpoint,
-                        model=estimate.model,
-                        billable=True,
-                        cost_usd=reconciled_cost,
-                        cost_source="openrouter_generation_reconciliation",
-                        prompt_tokens=int(reconciled_metadata.get("prompt_tokens") or 0),
-                        completion_tokens=int(reconciled_metadata.get("completion_tokens") or 0),
-                        generation_id=generation_id,
-                    )
-                priced = openrouter_perplexity_pricing_fallback(
-                    model=estimate.model or str(reconciled_metadata.get("model") or ""),
-                    prompt_tokens=reconciled_metadata.get("prompt_tokens"),
-                    completion_tokens=reconciled_metadata.get("completion_tokens"),
-                )
-                if priced is not None:
-                    return replace(
-                        priced,
-                        endpoint=estimate.endpoint,
-                        generation_id=generation_id,
-                    )
-        except urllib.error.HTTPError as exc:
-            last_error = exc
-            if exc.code not in {404, 409, 425, 429, 500, 502, 503, 504}:
-                break
-        except Exception as exc:
-            last_error = exc
-            break
-        if attempt < 2:
-            time.sleep(0.5 * (attempt + 1))
+    for attempt, delay in enumerate((0.0, 1.0, 2.0, 4.0, 8.0)):
+        if delay:
+            time.sleep(delay)
+        for token in credentials:
+            gen_headers = {"Authorization": "Bearer " + token}
+            gen_req = urllib.request.Request(gen_url, headers=gen_headers, method="GET")
+            try:
+                with urllib.request.urlopen(gen_req, timeout=30) as gen_response:
+                    if int(getattr(gen_response, "status", None) or getattr(gen_response, "code", 0) or 0) >= 400:
+                        continue
+                    generation_body = gen_response.read()
+                    reconciled_cost, reconciled_metadata = extract_openrouter_cost_dollars(generation_body)
+                    if reconciled_cost is not None:
+                        return ProviderCostEstimate(
+                            provider="or",
+                            endpoint=estimate.endpoint,
+                            model=estimate.model or str(reconciled_metadata.get("model") or "")[:160],
+                            billable=True,
+                            cost_usd=reconciled_cost,
+                            cost_source="openrouter_generation_reconciliation",
+                            prompt_tokens=int(reconciled_metadata.get("prompt_tokens") or 0),
+                            completion_tokens=int(reconciled_metadata.get("completion_tokens") or 0),
+                            generation_id=generation_id,
+                        )
+                    return estimate
+            except urllib.error.HTTPError as exc:
+                last_error = exc
+                if exc.code in {401, 403} and token == credentials[-1]:
+                    return estimate
+                continue
+            except Exception as exc:
+                last_error = exc
+                if attempt == 4 and token == credentials[-1]:
+                    break
     if last_error is not None:
         logger.warning(
             "research_lab_openrouter_generation_cost_reconcile_failed generation_id_prefix=%s error=%s",
@@ -1000,16 +1022,15 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             entry.id == "or"
             and estimate.generation_id
             and (
-                (
-                    estimate.tracking_failed
-                    and estimate.tracking_reason == "missing_openrouter_cost"
-                )
-                or estimate.cost_source == "openrouter_perplexity_token_pricing_fallback"
+                estimate.tracking_reason == "missing_openrouter_cost"
+                or estimate.cost_source == "openrouter_missing_cost_zero_cost"
             )
         ):
+            management_credential, _management_source = resolve_openrouter_management_credential()
             estimate = _reconcile_openrouter_generation_cost(
                 entry=entry,
                 credential=credential,
+                management_credential=management_credential,
                 estimate=estimate,
             )
         event = cost_ledger.record_live_event(

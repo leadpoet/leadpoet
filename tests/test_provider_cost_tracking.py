@@ -30,7 +30,6 @@ from research_lab.eval.provider_costs import (
     extract_deepline_cost,
     extract_exa_cost_dollars,
     extract_openrouter_cost_dollars,
-    openrouter_perplexity_pricing_fallback,
     openrouter_generation_id,
     scrapingdog_credits_for_path,
     scrapingdog_credits_for_url,
@@ -392,53 +391,6 @@ def test_exa_and_openrouter_cost_extraction():
     )
 
 
-def test_openrouter_perplexity_pricing_fallback_uses_model_specific_rates():
-    sonar = openrouter_perplexity_pricing_fallback(
-        model="perplexity/sonar",
-        prompt_tokens=1000,
-        completion_tokens=500,
-    )
-    assert sonar is not None
-    assert sonar.billable
-    assert sonar.cost_usd == Decimal("0.0065")
-    assert sonar.cost_source == "openrouter_perplexity_token_pricing_fallback"
-
-    sonar_pro = openrouter_perplexity_pricing_fallback(
-        model="perplexity/sonar-pro",
-        prompt_tokens=1000,
-        completion_tokens=500,
-    )
-    assert sonar_pro is not None
-    assert sonar_pro.cost_usd == Decimal("0.0155")
-
-    deep_research = openrouter_perplexity_pricing_fallback(
-        model="perplexity/sonar-deep-research",
-        prompt_tokens=1000,
-        completion_tokens=500,
-    )
-    assert deep_research is not None
-    assert deep_research.cost_usd == Decimal("0.011")
-
-    request_only = openrouter_perplexity_pricing_fallback(
-        model="perplexity/sonar",
-        prompt_tokens=0,
-        completion_tokens=0,
-    )
-    assert request_only is not None
-    assert request_only.billable
-    assert request_only.cost_usd == Decimal("0.005")
-    assert request_only.cost_source == "openrouter_perplexity_token_pricing_fallback"
-
-    assert (
-        openrouter_perplexity_pricing_fallback(
-            model="anthropic/claude-opus-4.1",
-            prompt_tokens=1000,
-            completion_tokens=500,
-        )
-        is None
-    )
-
-
 def test_openrouter_missing_cost_zero_cost_for_non_perplexity_model():
     estimate = estimate_provider_cost(
         provider="or",
@@ -455,7 +407,7 @@ def test_openrouter_missing_cost_zero_cost_for_non_perplexity_model():
     assert estimate.tracking_reason == "missing_openrouter_cost"
 
 
-def test_openrouter_missing_cost_perplexity_fallback_from_response_usage():
+def test_openrouter_missing_cost_for_perplexity_is_zero_until_reconciled():
     estimate = estimate_provider_cost(
         provider="or",
         upstream_url="https://openrouter.ai/api/v1/chat/completions",
@@ -464,14 +416,15 @@ def test_openrouter_missing_cost_perplexity_fallback_from_response_usage():
         request_body=b'{"model":"perplexity/sonar"}',
         scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
     )
-    assert estimate.billable
-    assert estimate.cost_usd == Decimal("0.00501")
-    assert estimate.cost_source == "openrouter_perplexity_token_pricing_fallback"
+    assert not estimate.billable
+    assert estimate.cost_usd == Decimal("0")
+    assert estimate.cost_source == "openrouter_missing_cost_zero_cost"
     assert not estimate.tracking_failed
+    assert estimate.tracking_reason == "missing_openrouter_cost"
     assert estimate.generation_id == "gen-sonar-no-cost"
 
 
-def test_openrouter_missing_cost_perplexity_fallback_estimates_missing_usage():
+def test_openrouter_missing_cost_for_perplexity_without_usage_is_zero_until_reconciled():
     estimate = estimate_provider_cost(
         provider="or",
         upstream_url="https://openrouter.ai/api/v1/chat/completions",
@@ -486,13 +439,12 @@ def test_openrouter_missing_cost_perplexity_fallback_estimates_missing_usage():
         ),
         scrapingdog_credit_price_usd=DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD,
     )
-    assert estimate.billable
-    assert estimate.cost_usd > Decimal("0.005")
-    assert estimate.cost_source == "openrouter_perplexity_token_pricing_fallback"
+    assert not estimate.billable
+    assert estimate.cost_usd == Decimal("0")
+    assert estimate.cost_source == "openrouter_missing_cost_zero_cost"
     assert not estimate.tracking_failed
+    assert estimate.tracking_reason == "missing_openrouter_cost"
     assert estimate.generation_id == "gen-sonar-no-usage"
-    assert estimate.prompt_tokens > 0
-    assert estimate.completion_tokens > 0
 
 
 def test_exa_agent_running_poll_is_not_billable_until_completed():
@@ -788,6 +740,59 @@ class _FakeOpenRouterBodyIdProvider(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class _FakeOpenRouterManagementReconciliationProvider(BaseHTTPRequestHandler):
+    post_auth_headers: list[str] = []
+    generation_auth_headers: list[str] = []
+
+    def log_message(self, *args):  # noqa: ANN001
+        pass
+
+    def do_POST(self):  # noqa: N802
+        type(self).post_auth_headers.append(self.headers.get("Authorization") or "")
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
+        body = json.dumps(
+            {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 3},
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("X-OpenRouter-Generation-Id", "gen-management-cost-1")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802
+        type(self).generation_auth_headers.append(self.headers.get("Authorization") or "")
+        parsed = urllib.parse.urlsplit(self.path)
+        if (
+            parsed.path != "/api/v1/generation"
+            or self.headers.get("Authorization") != "Bearer sk-or-v1-management-test"
+        ):
+            self.send_response(404)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
+        body = json.dumps(
+            {
+                "data": {
+                    "total_cost": "0.0027",
+                    "native_tokens_prompt": 13,
+                    "native_tokens_completion": 4,
+                }
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 class _FakeOpenRouterGenerationTokensProvider(BaseHTTPRequestHandler):
     generation_ids: list[str] = []
 
@@ -1011,13 +1016,16 @@ def test_evidence_proxy_reconciles_openrouter_generation_cost_from_header():
             provider_evidence_proxy.ProviderRegistryEntry(
                 id="or",
                 base_url=f"http://127.0.0.1:{upstream.server_address[1]}",
-                auth_kind="none",
+                auth_kind="bearer",
+                auth_name="Authorization",
+                credential_ref=("OPENROUTER_API_KEY",),
             )
         ]
         proxy, _store, _proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
             host="127.0.0.1",
             port=0,
             registry=registry,
+            credential_overrides={"or": "normal-openrouter-key"},
         )
         request_body = json.dumps(
             {
@@ -1071,13 +1079,16 @@ def test_evidence_proxy_reconciles_openrouter_generation_cost_from_body_id():
             provider_evidence_proxy.ProviderRegistryEntry(
                 id="or",
                 base_url=f"http://127.0.0.1:{upstream.server_address[1]}",
-                auth_kind="none",
+                auth_kind="bearer",
+                auth_name="Authorization",
+                credential_ref=("OPENROUTER_API_KEY",),
             )
         ]
         proxy, _store, _proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
             host="127.0.0.1",
             port=0,
             registry=registry,
+            credential_overrides={"or": "normal-openrouter-key"},
         )
         request_body = json.dumps(
             {
@@ -1116,7 +1127,72 @@ def test_evidence_proxy_reconciles_openrouter_generation_cost_from_body_id():
         upstream.server_close()
 
 
-def test_evidence_proxy_falls_back_to_perplexity_pricing_when_generation_has_tokens_no_cost():
+def test_evidence_proxy_uses_openrouter_management_key_for_generation_reconciliation(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_OPENROUTER_MANAGEMENT_KEY", "Sk-or-v1-management-test")
+    _FakeOpenRouterManagementReconciliationProvider.post_auth_headers = []
+    _FakeOpenRouterManagementReconciliationProvider.generation_auth_headers = []
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeOpenRouterManagementReconciliationProvider)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    proxy = None
+    try:
+        registry = [
+            provider_evidence_proxy.ProviderRegistryEntry(
+                id="or",
+                base_url=f"http://127.0.0.1:{upstream.server_address[1]}",
+                auth_kind="bearer",
+                auth_name="Authorization",
+                credential_ref=("OPENROUTER_API_KEY",),
+            )
+        ]
+        proxy, _store, _proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
+            host="127.0.0.1",
+            port=0,
+            registry=registry,
+            credential_overrides={"or": "normal-openrouter-key"},
+        )
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_address[1]}/or/api/v1/chat/completions",
+            data=json.dumps(
+                {
+                    "model": "perplexity/sonar",
+                    "messages": [{"role": "user", "content": "redacted"}],
+                }
+            ).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "X-Research-Lab-Cost-Scope": "or-management-scope",
+                "X-Research-Lab-Cost-Cap-Usd": "0.50",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            event = decode_cost_event_header(response.headers.get("X-Research-Lab-Provider-Cost-Event"))
+
+        assert _FakeOpenRouterManagementReconciliationProvider.post_auth_headers == [
+            "Bearer normal-openrouter-key"
+        ]
+        assert _FakeOpenRouterManagementReconciliationProvider.generation_auth_headers == [
+            "Bearer sk-or-v1-management-test"
+        ]
+        assert event is not None
+        assert event["provider"] == "or"
+        assert event["billable"] is True
+        assert event["cost_usd"] == 0.0027
+        assert event["cost_source"] == "openrouter_generation_reconciliation"
+        assert event["tracking_failed"] is False
+        assert event["generation_id"] == "gen-management-cost-1"
+        assert event["prompt_tokens"] == 13
+        assert event["completion_tokens"] == 4
+    finally:
+        if proxy is not None:
+            proxy.shutdown()
+            proxy.server_close()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_evidence_proxy_records_zero_cost_when_generation_has_tokens_but_no_cost():
     _FakeOpenRouterGenerationTokensProvider.generation_ids = []
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FakeOpenRouterGenerationTokensProvider)
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
@@ -1127,13 +1203,16 @@ def test_evidence_proxy_falls_back_to_perplexity_pricing_when_generation_has_tok
             provider_evidence_proxy.ProviderRegistryEntry(
                 id="or",
                 base_url=f"http://127.0.0.1:{upstream.server_address[1]}",
-                auth_kind="none",
+                auth_kind="bearer",
+                auth_name="Authorization",
+                credential_ref=("OPENROUTER_API_KEY",),
             )
         ]
         proxy, _store, _proxy_thread = provider_evidence_proxy.serve_evidence_proxy(
             host="127.0.0.1",
             port=0,
             registry=registry,
+            credential_overrides={"or": "normal-openrouter-key"},
         )
         request_body = json.dumps(
             {
@@ -1157,13 +1236,11 @@ def test_evidence_proxy_falls_back_to_perplexity_pricing_when_generation_has_tok
         assert _FakeOpenRouterGenerationTokensProvider.generation_ids == ["gen-sonar-token-priced-1"]
         assert event is not None
         assert event["provider"] == "or"
-        assert event["billable"] is True
-        assert event["cost_usd"] == 0.0155
-        assert event["cost_source"] == "openrouter_perplexity_token_pricing_fallback"
+        assert event["billable"] is False
+        assert event["cost_usd"] == 0.0
+        assert event["cost_source"] == "openrouter_missing_cost_zero_cost"
         assert event["tracking_failed"] is False
         assert event["generation_id"] == "gen-sonar-token-priced-1"
-        assert event["prompt_tokens"] == 1000
-        assert event["completion_tokens"] == 500
     finally:
         if proxy is not None:
             proxy.shutdown()

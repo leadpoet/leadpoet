@@ -4364,7 +4364,7 @@ class Validator(BaseValidatorNeuron):
                 else:
                     require_gateway_submission = _env_flag(
                         "VALIDATOR_REQUIRE_GATEWAY_WEIGHT_SUBMISSION",
-                        _research_lab_production_subnet_default(),
+                        False,
                     )
                     if require_gateway_submission:
                         print(

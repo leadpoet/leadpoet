@@ -956,6 +956,34 @@ def build_results_ledger_rows(
     rows: list[dict[str, Any]] = []
     for patch_run in patch_runs:
         status = _ledger_status(patch_run.result)
+        score_bundle = dict(patch_run.score_bundle or {})
+        serving = score_bundle.get("serving_model_version")
+        serving_doc = {
+            "schema_version": "1.0",
+            "source": "hosted_loop_score_bundle",
+            "private_model_version_id": score_bundle.get("private_model_version_id"),
+            "version_hash": (
+                (serving or {}).get("version_hash")
+                if isinstance(serving, Mapping)
+                else score_bundle.get("serving_model_version_hash")
+            ),
+            "model_artifact_hash": (
+                (serving or {}).get("model_artifact_hash")
+                if isinstance(serving, Mapping)
+                else score_bundle.get("candidate_artifact_hash")
+            ),
+            "private_model_manifest_hash": (
+                (serving or {}).get("private_model_manifest_hash")
+                if isinstance(serving, Mapping)
+                else score_bundle.get("private_model_manifest_hash")
+            ),
+            "candidate_id": score_bundle.get("candidate_id"),
+            "score_bundle_id": score_bundle.get("score_bundle_id"),
+            "score_bundle_hash": score_bundle.get("score_bundle_hash"),
+        }
+        serving_doc = {
+            key: value for key, value in serving_doc.items() if value not in (None, "", [], {})
+        }
         row = {
             "ledger_row_id": _uuid(f"{trajectory['trajectory_id']}:{patch_run.node_id}:ledger"),
             "schema_version": "1.0",
@@ -969,6 +997,13 @@ def build_results_ledger_rows(
             "cost_usd": round(patch_run.total_cost_cents / 100.0, 6),
             "status": status,
             "description": _public_patch_summary(patch_run),
+            "serving_model_version_hash": str(serving_doc.get("version_hash") or ""),
+            "serving_model_manifest_hash": str(serving_doc.get("private_model_manifest_hash") or ""),
+            "serving_model_artifact_hash": str(serving_doc.get("model_artifact_hash") or ""),
+            "private_model_version_id": str(serving_doc.get("private_model_version_id") or ""),
+            "candidate_id": str(serving_doc.get("candidate_id") or ""),
+            "score_bundle_id": str(serving_doc.get("score_bundle_id") or ""),
+            "serving_model_version_doc": serving_doc,
             "created_at": created_at,
         }
         rows.append(row)

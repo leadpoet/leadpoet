@@ -32,6 +32,7 @@ from gateway.utils.rate_limiter import reserve_submission_slot
 from .allocations import build_research_lab_allocation_bundle
 from .arweave_audit import latest_arweave_anchor
 from .bundles import build_research_lab_audit_bundle, build_shadow_report_bundle, contains_secret_material
+from .candidate_generation_report import fetch_candidate_generation_failure_report
 from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
 from .key_vault import (
     OpenRouterKeyVaultError,
@@ -1445,6 +1446,72 @@ async def get_public_benchmark_report_by_date(benchmark_date: str):
     if not rows:
         raise HTTPException(status_code=404, detail="Research Lab public benchmark report not found")
     return rows[0]
+
+
+@router.get("/reports/candidate-generation-failures")
+async def get_research_lab_candidate_generation_failure_report(
+    days: int = Query(default=7, ge=0, le=90),
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    _require_internal_key(config, x_leadpoet_internal_key)
+    try:
+        return await fetch_candidate_generation_failure_report(days)
+    except Exception as exc:
+        _raise_storage_error(exc)
+
+
+@router.get("/reports/daily-noise-budget/latest")
+async def get_latest_research_lab_daily_noise_budget_report(
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    _require_internal_key(config, x_leadpoet_internal_key)
+    try:
+        rows = await select_many(
+            "research_lab_daily_noise_budget_report_current",
+            filters=(),
+            order_by=(("benchmark_date", True), ("benchmark_attempt", True), ("created_at", True)),
+            limit=1,
+        )
+    except Exception as exc:
+        _raise_storage_error(exc)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Research Lab daily noise budget report not found")
+    return rows[0]
+
+
+@router.get("/reports/daily-noise-budget/{benchmark_date}")
+async def get_research_lab_daily_noise_budget_report_by_date(
+    benchmark_date: str,
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    _require_internal_key(config, x_leadpoet_internal_key)
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", benchmark_date):
+        raise HTTPException(status_code=400, detail="benchmark_date must be YYYY-MM-DD")
+    try:
+        rows = await select_many(
+            "research_lab_daily_noise_budget_report_current",
+            filters=(("benchmark_date", benchmark_date),),
+            order_by=(("benchmark_attempt", True), ("created_at", True)),
+            limit=10,
+        )
+    except Exception as exc:
+        _raise_storage_error(exc)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Research Lab daily noise budget report not found")
+    return {
+        "schema_version": "1.0",
+        "benchmark_date": benchmark_date,
+        "reports": rows,
+    }
 
 
 @router.get("/audit/latest/{epoch}")

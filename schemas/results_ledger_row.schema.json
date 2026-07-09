@@ -70,6 +70,33 @@
       "minLength": 1,
       "maxLength": 2048
     },
+    "serving_model_version_hash": {
+      "type": "string",
+      "maxLength": 100
+    },
+    "serving_model_manifest_hash": {
+      "type": "string",
+      "maxLength": 100
+    },
+    "serving_model_artifact_hash": {
+      "type": "string",
+      "maxLength": 100
+    },
+    "private_model_version_id": {
+      "type": "string",
+      "maxLength": 160
+    },
+    "candidate_id": {
+      "type": "string",
+      "maxLength": 160
+    },
+    "score_bundle_id": {
+      "type": "string",
+      "maxLength": 160
+    },
+    "serving_model_version_doc": {
+      "type": "object"
+    },
     "created_at": {
       "type": "string",
       "format": "date-time"

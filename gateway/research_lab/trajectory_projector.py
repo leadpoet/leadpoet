@@ -378,6 +378,75 @@ def _score_bundle_gate_from_row(bundle_row: Mapping[str, Any] | None) -> Mapping
     return gate if isinstance(gate, Mapping) else {}
 
 
+def _score_bundle_serving_version_doc_from_row(bundle_row: Mapping[str, Any] | None) -> dict[str, Any]:
+    doc = _score_bundle_doc_from_row(bundle_row)
+    serving = doc.get("serving_model_version")
+    if not isinstance(serving, Mapping):
+        serving = {}
+    return {
+        key: value
+        for key, value in sanitize_capture_payload(
+            {
+                "schema_version": "1.0",
+                "source": "score_bundle",
+                "private_model_version_id": (
+                    serving.get("private_model_version_id")
+                    or doc.get("private_model_version_id")
+                ),
+                "version_hash": serving.get("version_hash") or doc.get("serving_model_version_hash"),
+                "model_artifact_hash": (
+                    serving.get("model_artifact_hash")
+                    or doc.get("candidate_artifact_hash")
+                    or (bundle_row or {}).get("candidate_artifact_hash")
+                ),
+                "private_model_manifest_hash": (
+                    serving.get("private_model_manifest_hash")
+                    or doc.get("private_model_manifest_hash")
+                    or doc.get("model_manifest_hash")
+                ),
+                "candidate_id": _score_bundle_candidate_id_from_row(bundle_row or {}),
+                "score_bundle_id": (bundle_row or {}).get("score_bundle_id"),
+                "score_bundle_hash": (bundle_row or {}).get("score_bundle_hash") or doc.get("score_bundle_hash"),
+                "evaluation_epoch": (bundle_row or {}).get("evaluation_epoch") or doc.get("evaluation_epoch"),
+            }
+        ).items()
+        if value not in (None, "", [], {})
+    }
+
+
+def _ledger_serving_version_fields(
+    *,
+    state: Any,
+    bundle_row: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    version_doc = _score_bundle_serving_version_doc_from_row(bundle_row)
+    private_model_version_id = (
+        str(getattr(state, "private_model_version_id", "") or "")
+        or str(version_doc.get("private_model_version_id") or "")
+    )
+    candidate_id = (
+        str(getattr(state, "candidate_id", "") or "")
+        or str(version_doc.get("candidate_id") or "")
+    )
+    score_bundle_id = (
+        str(getattr(state, "score_bundle_id", "") or "")
+        or str(version_doc.get("score_bundle_id") or "")
+    )
+    return {
+        "serving_model_version_hash": str(version_doc.get("version_hash") or ""),
+        "serving_model_manifest_hash": str(version_doc.get("private_model_manifest_hash") or ""),
+        "serving_model_artifact_hash": str(
+            version_doc.get("model_artifact_hash")
+            or getattr(state, "candidate_artifact_hash", "")
+            or ""
+        ),
+        "private_model_version_id": private_model_version_id,
+        "candidate_id": candidate_id,
+        "score_bundle_id": score_bundle_id,
+        "serving_model_version_doc": version_doc,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Protected-material sanitization (mirrors trajectory_corpus scanner rules)
 # ---------------------------------------------------------------------------
@@ -2158,6 +2227,7 @@ class _NodeState:
     evaluated: bool = False
     gate_doc: Mapping[str, Any] | None = None
     score_bundle_id: str | None = None
+    private_model_version_id: str | None = None
     promotion_passed: bool = False
     version_created: bool = False
     selected: bool = False
@@ -2669,6 +2739,8 @@ def build_trajectory_projection(
             version_id = str(row.get("private_model_version_id") or "")
             if version_id:
                 version_ids.append(version_id)
+                if state:
+                    state.private_model_version_id = version_id
             _append_canonical_event(
                 canonical,
                 ts=_ts(row.get("created_at"), last_ts),
@@ -2721,6 +2793,7 @@ def build_trajectory_projection(
     ledger_rows: list[dict[str, Any]] = []
     for ordered_node_id in node_order:
         state = nodes[ordered_node_id]
+        bundle_row = bundles_by_id.get(state.score_bundle_id or "")
         status = _ledger_status(state)
         delta = (
             _f(state.gate_doc.get(TARGETED_METRIC)) if state.gate_doc else None
@@ -2747,6 +2820,10 @@ def build_trajectory_projection(
                 "cost_usd": round(max(0.0, state.cost_usd), 6),
                 "status": status,
                 "description": description,
+                **_ledger_serving_version_fields(
+                    state=state,
+                    bundle_row=bundle_row,
+                ),
                 "source_event_seq": (
                     state.evaluated_seq
                     if state.evaluated_seq is not None

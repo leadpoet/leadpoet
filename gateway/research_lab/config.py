@@ -426,6 +426,8 @@ class ResearchLabGatewayConfig:
     loop_planner_max_tokens: int = 12000
     loop_planner_temperature: float = 0.40
     loop_planner_allow_non_zdr: bool = False
+    ranked_path_fallback_enabled: bool = True
+    ranked_path_fallback_max_paths: int = 3
     loop_executor_model: str = ""
     loop_executor_reasoning_effort: str = ""
     loop_alignment_judge_model: str = ""
@@ -858,6 +860,14 @@ class ResearchLabGatewayConfig:
                 max(0.0, _float("RESEARCH_LAB_LOOP_PLANNER_TEMPERATURE", 0.40)),
             ),
             loop_planner_allow_non_zdr=_truthy("RESEARCH_LAB_LOOP_PLANNER_ALLOW_NON_ZDR"),
+            ranked_path_fallback_enabled=_truthy(
+                "RESEARCH_LAB_RANKED_PATH_FALLBACK_ENABLED",
+                "true",
+            ),
+            ranked_path_fallback_max_paths=max(
+                1,
+                _int("RESEARCH_LAB_RANKED_PATH_FALLBACK_MAX_PATHS", 3),
+            ),
             loop_executor_model=os.getenv("RESEARCH_LAB_LOOP_EXECUTOR_MODEL", ""),
             loop_executor_reasoning_effort=os.getenv("RESEARCH_LAB_LOOP_EXECUTOR_REASONING_EFFORT", ""),
             loop_alignment_judge_model=os.getenv("RESEARCH_LAB_LOOP_ALIGNMENT_JUDGE_MODEL", ""),
@@ -1464,6 +1474,8 @@ class ResearchLabGatewayConfig:
                     "enabled": self.loop_planner_enabled,
                     "model_configured": bool(self.loop_planner_model),
                     "fallback_model_count": len(self.loop_planner_fallback_models),
+                    "ranked_path_fallback_enabled": self.ranked_path_fallback_enabled,
+                    "ranked_path_fallback_max_paths": self.ranked_path_fallback_max_paths,
                     "reasoning_effort": _normalize_auto_research_reasoning_effort(
                         self.loop_planner_reasoning_effort
                     ),

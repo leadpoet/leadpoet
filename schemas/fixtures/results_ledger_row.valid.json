@@ -11,5 +11,16 @@
   "cost_usd": 0.33,
   "status": "keep",
   "description": "Source-routing swap improved L1 fixture coverage without schema regressions.",
+  "serving_model_version_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+  "serving_model_manifest_hash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+  "serving_model_artifact_hash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+  "private_model_version_id": "private_model_version:sha256:9999999999999999999999999999999999999999999999999999999999999999",
+  "candidate_id": "candidate:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "score_bundle_id": "score_bundle:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "serving_model_version_doc": {
+    "schema_version": "1.0",
+    "source": "score_bundle",
+    "model_artifact_hash": "sha256:8888888888888888888888888888888888888888888888888888888888888888"
+  },
   "created_at": "2026-06-16T00:04:00Z"
 }

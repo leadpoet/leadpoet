@@ -32,8 +32,15 @@ def _draft(**overrides):
         expected_improvement="+2 companies per ICP",
         risk="slower sourcing",
         lane="provider",
-        target_files=("sourcing_model.py",),
-        unified_diff="--- a/sourcing_model.py\n+++ b/sourcing_model.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n",
+        target_files=("sourcing_model/discovery.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/discovery.py b/sourcing_model/discovery.py\n"
+            "--- a/sourcing_model/discovery.py\n"
+            "+++ b/sourcing_model/discovery.py\n"
+            "@@ -1 +1 @@\n"
+            "-x = 1\n"
+            "+x = 2\n"
+        ),
         redacted_summary="widen fan-out",
         test_plan="run adapter smoke",
         rollback_plan="revert diff",
@@ -63,7 +70,7 @@ def _manifest():
 def _build_result():
     return CodeEditBuildResult(
         candidate_model_manifest=_manifest(),
-        code_edit_manifest={"target_files": ["sourcing_model.py"], "kind": "code_edit"},
+        code_edit_manifest={"target_files": ["sourcing_model/discovery.py"], "kind": "code_edit"},
         source_diff_hash="sha256:" + "f" * 64,
         build_doc={"build_doc_hash": "sha256:" + "1" * 64, "source_diff_artifact_uri": "s3://test-bucket/diff.json"},
     )
@@ -72,14 +79,15 @@ def _build_result():
 def _source_context(tmp_path):
     source_root = tmp_path / "source"
     source_root.mkdir(exist_ok=True)
-    (source_root / "sourcing_model.py").write_text("x = 1\n", encoding="utf-8")
+    (source_root / "sourcing_model").mkdir(exist_ok=True)
+    (source_root / "sourcing_model" / "discovery.py").write_text("x = 1\n", encoding="utf-8")
     return ParentImageSourceContext(
         source_root=source_root,
         source_mode="extracted",
         parent_image_digest_hash="sha256:" + "9" * 64,
         source_tree_hash="sha256:" + "8" * 64,
-        top_level_paths=("sourcing_model.py",),
-        editable_files=("sourcing_model.py",),
+        top_level_paths=("sourcing_model/",),
+        editable_files=("sourcing_model/discovery.py",),
         file_previews=(),
     )
 
@@ -332,6 +340,8 @@ class _NoCandidateBuilder:
             code_edit_source_inspection_total_bytes=16000,
             code_edit_source_inspection_search_matches=5,
             code_edit_patch_repair_attempts=0,
+            ranked_path_fallback_enabled=True,
+            ranked_path_fallback_max_paths=3,
         )
 
     def prepare_parent_source_context(self, *, parent_artifact, workspace_dir):
@@ -351,6 +361,16 @@ class _PlannerNoCandidateBuilder(_NoCandidateBuilder):
     def __init__(self, source_context):
         super().__init__(source_context)
         self.config.loop_planner_enabled = True
+
+
+class _PlannerBuildsCandidateBuilder(_PlannerNoCandidateBuilder):
+    def __init__(self, source_context):
+        super().__init__(source_context)
+        self.builds = []
+
+    def build(self, *, draft, parent_artifact, run_id, candidate_index, source_context):
+        self.builds.append((draft.plan_path_id, candidate_index))
+        return _build_result()
 
 
 def _loop_direction_plan_payload(**overrides):
@@ -471,7 +491,7 @@ async def test_unimplementable_binding_plan_stops_after_one_draft(tmp_path):
             )
         if stage == "source_inspection":
             return OpenRouterCallResult(
-                content='{"requests":[{"operation":"read_file","path":"sourcing_model.py"}]}',
+                content='{"requests":[{"operation":"read_file","path":"sourcing_model/discovery.py"}]}',
                 provider_usage={"provider": "openrouter", "response_id": "inspect", "cost_microusd": 1000},
                 cost_microusd=1000,
             )
@@ -535,13 +555,326 @@ async def test_unimplementable_binding_plan_stops_after_one_draft(tmp_path):
     assert terminal.event_doc["run_summary"]["stop_reason"] == "binding_plan_unimplementable"
 
 
+async def test_ranked_path_fallback_tries_next_path_and_builds_candidate(tmp_path):
+    events = []
+    calls = []
+    builder = _PlannerBuildsCandidateBuilder(_source_context(tmp_path))
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        calls.append(stage)
+        if stage == "loop_planner":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    _loop_direction_plan_payload(
+                        required_lane="provider_fallback",
+                        required_mechanism="salvage a missing provider-specific function",
+                        allowed_lanes=["provider_fallback", "source_routing"],
+                        ranked_paths=[
+                            {
+                                "path_id": "missing_provider_hook",
+                                "lane": "provider_fallback",
+                                "mechanism": "edit provider hook that is absent",
+                            },
+                            {
+                                "path_id": "source_routing_path",
+                                "lane": "source_routing",
+                                "mechanism": "widen source routing in an editable file",
+                                "target_behavior": ["preserve scoring contract"],
+                            },
+                        ],
+                        selected_path_id="missing_provider_hook",
+                    )
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "planner", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        if stage == "source_inspection":
+            return OpenRouterCallResult(
+                content='{"requests":[{"operation":"read_file","path":"sourcing_model/discovery.py"}]}',
+                provider_usage={"provider": "openrouter", "response_id": "inspect", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        if stage == "code_edit_draft" and calls.count("code_edit_draft") == 1:
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "no_viable_patch": True,
+                        "reason": "required file is not present in editable_files; provider hook does not exist",
+                    }
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "draft-1", "cost_microusd": 2000},
+                cost_microusd=2000,
+            )
+        if stage == "code_edit_fallback":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "no_viable_patch": True,
+                        "reason": "fallback could not repair missing provider hook",
+                    }
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "fallback", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        if stage == "code_edit_draft":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {"candidates": [_draft(lane="source_routing", plan_path_id="source_routing_path").to_dict()]}
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "draft-2", "cost_microusd": 2000},
+                cost_microusd=2000,
+            )
+        raise AssertionError(f"unexpected stage: {stage}")
+
+    async def event_sink(event):
+        events.append(event)
+
+    result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=6,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=builder,
+    ).run(
+        run_id="run-ranked-path-fallback",
+        ticket={
+            "ticket_id": "ticket-ranked-path-fallback",
+            "miner_hotkey": "hotkey",
+            "island": "generalist",
+            "brief_sanitized_ref": "brief",
+            "ticket_doc": {"brief_public_summary": "try alternate ranked paths"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+        requested_loop_count=1,
+    )
+
+    assert result.status == "completed"
+    assert len(result.selected_candidates) == 1
+    assert builder.builds == [("source_routing_path", 0)]
+    fallback_events = [
+        event
+        for event in events
+        if event.event_doc.get("ranked_path_fallback_attempted") is True
+    ]
+    assert fallback_events
+    fallback_doc = fallback_events[0].event_doc
+    assert fallback_doc["previous_path_id"] == "missing_provider_hook"
+    assert fallback_doc["next_path_id"] == "source_routing_path"
+    assert fallback_doc["fallback_index"] == 1
+    assert fallback_doc["terminal_after_ranked_paths_exhausted"] is False
+    assert calls.count("code_edit_draft") == 2
+
+
+async def test_ranked_path_fallback_disabled_preserves_terminal_behavior(tmp_path):
+    events = []
+    calls = []
+    builder = _PlannerNoCandidateBuilder(_source_context(tmp_path))
+    builder.config.ranked_path_fallback_enabled = False
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        calls.append(stage)
+        if stage == "loop_planner":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    _loop_direction_plan_payload(
+                        ranked_paths=[
+                            {"path_id": "first_path", "lane": "provider_fallback", "mechanism": "missing hook"},
+                            {"path_id": "second_path", "lane": "source_routing", "mechanism": "editable fallback"},
+                        ],
+                        selected_path_id="first_path",
+                    )
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "planner", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        if stage == "source_inspection":
+            return OpenRouterCallResult(
+                content='{"requests":[{"operation":"read_file","path":"sourcing_model/discovery.py"}]}',
+                provider_usage={"provider": "openrouter", "response_id": "inspect", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        if stage == "code_edit_draft":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "no_viable_patch": True,
+                        "reason": "required file is not present in editable_files; no hook exists",
+                    }
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "draft", "cost_microusd": 2000},
+                cost_microusd=2000,
+            )
+        if stage == "code_edit_fallback":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "no_viable_patch": True,
+                        "reason": "fallback disabled case still has no candidate",
+                    }
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "fallback", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        raise AssertionError(f"unexpected stage: {stage}")
+
+    async def event_sink(event):
+        events.append(event)
+
+    result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=6,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=builder,
+    ).run(
+        run_id="run-ranked-path-disabled",
+        ticket={
+            "ticket_id": "ticket-ranked-path-disabled",
+            "miner_hotkey": "hotkey",
+            "island": "generalist",
+            "brief_sanitized_ref": "brief",
+            "ticket_doc": {"brief_public_summary": "fallback disabled"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+        requested_loop_count=1,
+    )
+
+    assert result.status == "failed"
+    assert result.stop_reason == "binding_plan_unimplementable"
+    assert calls.count("code_edit_draft") == 1
+    assert not [event for event in events if event.event_doc.get("ranked_path_fallback_attempted")]
+
+
+async def test_ranked_path_fallback_exhaustion_keeps_no_buildable_diagnostics(tmp_path):
+    events = []
+    calls = []
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        calls.append(stage)
+        if stage == "loop_planner":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    _loop_direction_plan_payload(
+                        ranked_paths=[
+                            {"path_id": "first_path", "lane": "provider_fallback", "mechanism": "missing hook"},
+                            {"path_id": "second_path", "lane": "source_routing", "mechanism": "also missing"},
+                        ],
+                        selected_path_id="first_path",
+                    )
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "planner", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        if stage == "source_inspection":
+            return OpenRouterCallResult(
+                content='{"requests":[{"operation":"read_file","path":"sourcing_model/discovery.py"}]}',
+                provider_usage={"provider": "openrouter", "response_id": "inspect", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        if stage == "code_edit_draft":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "no_viable_patch": True,
+                        "reason": "required file is not present in editable_files; planned source path missing",
+                    }
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "draft", "cost_microusd": 2000},
+                cost_microusd=2000,
+            )
+        if stage == "code_edit_fallback":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "no_viable_patch": True,
+                        "reason": "fallback could not repair missing ranked path",
+                    }
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "fallback", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        raise AssertionError(f"unexpected stage: {stage}")
+
+    async def event_sink(event):
+        events.append(event)
+
+    result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=6,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=_PlannerNoCandidateBuilder(_source_context(tmp_path)),
+    ).run(
+        run_id="run-ranked-path-exhausted",
+        ticket={
+            "ticket_id": "ticket-ranked-path-exhausted",
+            "miner_hotkey": "hotkey",
+            "island": "generalist",
+            "brief_sanitized_ref": "brief",
+            "ticket_doc": {"brief_public_summary": "all ranked paths fail"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+        requested_loop_count=1,
+    )
+
+    assert result.status == "failed"
+    assert result.stop_reason == "binding_plan_unimplementable"
+    assert calls.count("code_edit_draft") == 2
+    exhausted = [
+        event
+        for event in events
+        if event.event_doc.get("terminal_after_ranked_paths_exhausted") is True
+    ]
+    assert exhausted
+    assert events[-1].event_doc["run_summary"]["stop_reason"] == "binding_plan_unimplementable"
+
+
 async def test_no_candidate_loop_failed_carries_final_cost_ledger(tmp_path):
     events = []
 
     async def call_model(messages, timeout_seconds, max_tokens, stage):
         if stage == "source_inspection":
             return OpenRouterCallResult(
-                content='{"requests":[{"operation":"read_file","path":"sourcing_model.py"}]}',
+                content='{"requests":[{"operation":"read_file","path":"sourcing_model/discovery.py"}]}',
                 provider_usage={"provider": "openrouter", "response_id": "inspect", "cost_microusd": 1000},
                 cost_microusd=1000,
             )
@@ -651,7 +984,7 @@ async def test_repair_call_failure_records_exception_cost_in_running_ledger(tmp_
             artifact=_manifest(),
             source_context=_source_context(tmp_path),
             source_inspection_context={},
-            read_paths=("sourcing_model.py",),
+            read_paths=("sourcing_model/discovery.py",),
             budget_context={"requested_compute_budget_usd": 5.0},
             budget_limit_microusd=5_000_000,
             elapsed=lambda: 0.0,

@@ -167,6 +167,88 @@ def _binding_plan_unimplementable_reason(reason: str) -> bool:
     return bool(text and any(marker in text for marker in _UNIMPLEMENTABLE_PLAN_MARKERS))
 
 
+def _ranked_path_fallback_enabled(config: Any) -> bool:
+    attr = getattr(config, "ranked_path_fallback_enabled", None)
+    if attr is not None:
+        return bool(attr)
+    return _engine_env_flag("RESEARCH_LAB_RANKED_PATH_FALLBACK_ENABLED", "true")
+
+
+def _ranked_path_fallback_max_paths(config: Any) -> int:
+    attr = getattr(config, "ranked_path_fallback_max_paths", None)
+    if attr is None:
+        raw = os.getenv("RESEARCH_LAB_RANKED_PATH_FALLBACK_MAX_PATHS", "3")
+        try:
+            attr = int(raw)
+        except (TypeError, ValueError):
+            attr = 3
+    return max(1, int(attr))
+
+
+def _ranked_path_id(path: Mapping[str, Any] | None) -> str:
+    if not isinstance(path, Mapping):
+        return ""
+    return str(path.get("path_id") or path.get("id") or path.get("selected_path_id") or "").strip()
+
+
+def _loop_plan_selected_path_id(plan_doc: Mapping[str, Any] | None) -> str:
+    if not isinstance(plan_doc, Mapping):
+        return ""
+    return str(plan_doc.get("selected_path_id") or "").strip()
+
+
+def _ranked_path_fallback_plan(
+    base_plan_doc: Mapping[str, Any] | None,
+    *,
+    attempted_path_ids: set[str],
+    max_paths: int,
+    fallback_index: int,
+) -> dict[str, Any] | None:
+    if not isinstance(base_plan_doc, Mapping):
+        return None
+    ranked_paths = base_plan_doc.get("ranked_paths")
+    if not isinstance(ranked_paths, (list, tuple)):
+        return None
+    checked = 0
+    for raw_path in ranked_paths:
+        if not isinstance(raw_path, Mapping):
+            continue
+        path_id = _ranked_path_id(raw_path)
+        if not path_id or path_id in attempted_path_ids:
+            continue
+        checked += 1
+        if checked > max_paths:
+            return None
+        candidate = dict(base_plan_doc)
+        candidate["no_new_safe_path"] = False
+        candidate["selected_path_id"] = path_id
+        candidate["required_lane"] = str(raw_path.get("lane") or raw_path.get("required_lane") or candidate.get("required_lane") or "")
+        candidate["required_mechanism"] = str(
+            raw_path.get("mechanism")
+            or raw_path.get("required_mechanism")
+            or raw_path.get("hypothesis")
+            or candidate.get("required_mechanism")
+            or ""
+        )
+        for source_key, target_key in (
+            ("target_behavior", "target_behavior"),
+            ("must_inspect", "must_inspect"),
+            ("allowed_lanes", "allowed_lanes"),
+            ("success_criteria", "success_criteria"),
+            ("anti_overfit_checks", "anti_overfit_checks"),
+        ):
+            if source_key in raw_path:
+                candidate[target_key] = raw_path[source_key]
+        candidate["ranked_path_fallback"] = {
+            "schema_version": "1.0",
+            "fallback_index": max(1, int(fallback_index)),
+            "path_id": path_id,
+            "source_plan_hash": str(base_plan_doc.get("plan_hash") or ""),
+        }
+        return loop_direction_plan_from_mapping(candidate).to_dict()
+    return None
+
+
 def _stop_at_candidate_cap_enabled() -> bool:
     """Bug 20 kill switch: stop iterating/building once max_candidates is reached (no build-and-discard)."""
 
@@ -1262,6 +1344,120 @@ class CodeEditLoopEngine:
         binding_plan_terminal_without_candidate = False
         last_checkpoint: dict[str, Any] | None = None
         stop_reason = "max_iterations"
+        ranked_path_base_doc: dict[str, Any] = dict(loop_direction_plan_doc or {})
+        ranked_path_attempted_ids: set[str] = set()
+        selected_path_id = _loop_plan_selected_path_id(loop_direction_plan_doc)
+        if selected_path_id:
+            ranked_path_attempted_ids.add(selected_path_id)
+        ranked_path_fallback_count = 0
+
+        async def _activate_ranked_path_fallback(*, trigger: str, reason: str) -> bool:
+            nonlocal loop_direction_plan_doc
+            nonlocal planner_terminal_without_candidate
+            nonlocal binding_plan_terminal_without_candidate
+            nonlocal stop_reason
+            nonlocal ranked_path_fallback_count
+
+            if not _ranked_path_fallback_enabled(self.builder.config):
+                return False
+            if not ranked_path_base_doc:
+                return False
+            max_ranked_paths = _ranked_path_fallback_max_paths(self.builder.config)
+            if len(ranked_path_attempted_ids) >= max_ranked_paths:
+                return False
+            next_index = ranked_path_fallback_count + 1
+            previous_path_id = _loop_plan_selected_path_id(loop_direction_plan_doc)
+            next_plan = _ranked_path_fallback_plan(
+                ranked_path_base_doc,
+                attempted_path_ids=ranked_path_attempted_ids,
+                max_paths=max_ranked_paths,
+                fallback_index=next_index,
+            )
+            if not next_plan:
+                if ranked_path_fallback_count > 0:
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="no_viable_patch",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "ranked_path_fallback_exhausted",
+                            ),
+                            event_doc={
+                                "schema_version": "1.0",
+                                "stage": "ranked_path_fallback",
+                                "trigger": str(trigger or "")[:120],
+                                "reason": safe_event_error_text(reason),
+                                "ranked_path_fallback_attempted": False,
+                                "previous_path_id": previous_path_id,
+                                "next_path_id": "",
+                                "fallback_index": ranked_path_fallback_count,
+                                "terminal_after_ranked_paths_exhausted": True,
+                                "source_plan_hash": ranked_path_base_doc.get("plan_hash"),
+                                "focus_signature_hash": _focus_signature_hash(ticket),
+                            },
+                        )
+                    )
+                return False
+            next_path_id = _loop_plan_selected_path_id(next_plan)
+            if not next_path_id:
+                return False
+            ranked_path_attempted_ids.add(next_path_id)
+            ranked_path_fallback_count = next_index
+            loop_direction_plan_doc = next_plan
+            planner_terminal_without_candidate = False
+            binding_plan_terminal_without_candidate = False
+            stop_reason = "max_iterations"
+            event_doc = {
+                "schema_version": "1.0",
+                "stage": "ranked_path_fallback",
+                "trigger": str(trigger or "")[:120],
+                "reason": safe_event_error_text(reason),
+                "ranked_path_fallback_attempted": True,
+                "previous_path_id": previous_path_id,
+                "next_path_id": next_path_id,
+                "fallback_index": ranked_path_fallback_count,
+                "terminal_after_ranked_paths_exhausted": False,
+                "loop_direction_plan_hash": next_plan.get("plan_hash"),
+                "source_plan_hash": ranked_path_base_doc.get("plan_hash"),
+                "focus_signature_hash": _focus_signature_hash(ticket),
+            }
+            await self.event_sink(
+                AutoResearchLoopEvent(
+                    event_type="candidate_generation_fallback_requested",
+                    loop_status="running",
+                    elapsed_seconds=elapsed(),
+                    cost_ledger=_running_cost_ledger(
+                        openrouter_calls,
+                        estimated_cost,
+                        actual_cost_microusd,
+                        "ranked_path_fallback_attempted",
+                    ),
+                    event_doc=event_doc,
+                )
+            )
+            await self.event_sink(
+                AutoResearchLoopEvent(
+                    event_type="loop_direction_planned",
+                    loop_status="running",
+                    elapsed_seconds=elapsed(),
+                    cost_ledger=_running_cost_ledger(
+                        openrouter_calls,
+                        estimated_cost,
+                        actual_cost_microusd,
+                        "ranked_path_fallback_selected",
+                    ),
+                    event_doc={
+                        **event_doc,
+                        "loop_direction_plan": next_plan,
+                    },
+                )
+            )
+            return True
+
         if (
             self.builder.config.loop_planner_enabled
             and loop_direction_plan_doc is None
@@ -1372,6 +1568,11 @@ class CodeEditLoopEngine:
                     try:
                         loop_plan = parse_loop_direction_plan_response(raw_plan)
                         loop_direction_plan_doc = loop_plan.to_dict()
+                        ranked_path_base_doc = dict(loop_direction_plan_doc)
+                        ranked_path_attempted_ids.clear()
+                        initial_path_id = _loop_plan_selected_path_id(loop_direction_plan_doc)
+                        if initial_path_id:
+                            ranked_path_attempted_ids.add(initial_path_id)
                     except Exception as exc:
                         if planner_attempt >= planner_attempt_limit and not _planner_parse_retry_enabled():
                             stop_reason = "loop_direction_plan_parse_failed"
@@ -1449,6 +1650,11 @@ class CodeEditLoopEngine:
                                 },
                             )
                         )
+                        if await _activate_ranked_path_fallback(
+                            trigger="loop_direction_no_new_safe_path",
+                            reason=loop_plan.reason or "planner returned no_new_safe_path",
+                        ):
+                            stop_reason = "max_iterations"
                     break
         elif not self.builder.config.loop_planner_enabled:
             loop_direction_plan_doc = None
@@ -2201,6 +2407,11 @@ class CodeEditLoopEngine:
                             )
                             if fallback_drafts:
                                 binding_plan_terminal_without_candidate = False
+                            elif terminal_binding_plan:
+                                await _activate_ranked_path_fallback(
+                                    trigger="binding_plan_unimplementable",
+                                    reason=no_viable_reason,
+                                )
                         else:
                             await self.event_sink(
                                 AutoResearchLoopEvent(

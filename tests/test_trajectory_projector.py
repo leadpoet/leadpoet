@@ -460,6 +460,14 @@ def happy_path_tables() -> dict[str, list[dict[str, Any]]]:
             "evaluation_epoch": 412,
             "candidate_artifact_hash": artifact_1,
             "score_bundle_hash": "sha256:bundle",
+            "score_bundle_doc": {
+                "serving_model_version": {
+                    "version_hash": "sha256:" + "6" * 64,
+                    "model_artifact_hash": artifact_1,
+                    "private_model_manifest_hash": "sha256:" + "7" * 64,
+                    "private_model_version_id": VERSION_ID,
+                }
+            },
         }
     ]
     return {
@@ -595,6 +603,13 @@ async def test_happy_path_projects_schema_valid_rows(tables, enabled):
     assert keep_row["delta_vs_parent"] == pytest.approx(3.2)
     assert keep_row["targeted_metric"] == "candidate_delta_vs_daily_baseline"
     assert keep_row["commit"] == "sha256:source-diff-1"
+    assert keep_row["serving_model_version_hash"] == "sha256:" + "6" * 64
+    assert keep_row["serving_model_manifest_hash"] == "sha256:" + "7" * 64
+    assert keep_row["serving_model_artifact_hash"] == "sha256:candidate-artifact-1"
+    assert keep_row["private_model_version_id"] == VERSION_ID
+    assert keep_row["candidate_id"] == CANDIDATE_1
+    assert keep_row["score_bundle_id"] == SCORE_BUNDLE_ID
+    assert keep_row["serving_model_version_doc"]["source"] == "score_bundle"
     assert "evidence_quality" in keep_row["description"]
     for row in ledger:
         schema_row = {k: v for k, v in row.items() if k != "source_event_seq"}

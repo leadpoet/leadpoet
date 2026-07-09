@@ -387,8 +387,7 @@ def allocate_research_lab_epoch(
             reimbursement_allocations = _allocate_reimbursements_no_champions(reimbursements, lab_cap)
             _cap_allocation_sections_to_pool((reimbursement_allocations,), lab_cap)
         else:
-            champion_reserve = _minimum_champion_reserve(champions, lab_cap, policy)
-            reimbursement_pool = max(Decimal("0"), lab_cap - champion_reserve)
+            reimbursement_pool = _reimbursement_pool_with_champions(champions, lab_cap, policy)
             reimbursement_allocations = _allocate_reimbursements_with_champions(reimbursements, reimbursement_pool)
             _cap_allocation_sections_to_pool((reimbursement_allocations,), reimbursement_pool)
         reimbursement_paid = sum(_decimal(item["paid_alpha_percent"]) for item in reimbursement_allocations)
@@ -1106,6 +1105,19 @@ def _minimum_champion_reserve(
     reserve = _decimal(oldest["desired_alpha_percent"])
     reserve += placeholder * Decimal(max(0, len(champions) - 1))
     return min(lab_cap, max(Decimal("0"), reserve))
+
+
+def _reimbursement_pool_with_champions(
+    champions: Sequence[Mapping[str, Any]],
+    lab_cap: Decimal,
+    policy: Mapping[str, Any],
+) -> Decimal:
+    champion_reserve = _minimum_champion_reserve(champions, lab_cap, policy)
+    queue_trigger_ratio = _decimal(policy.get("champion_queue_trigger_ratio", "0.50"))
+    if queue_trigger_ratio < 0:
+        raise ValueError("champion_queue_trigger_ratio must be non-negative")
+    reimbursement_share_cap = lab_cap * min(queue_trigger_ratio, Decimal("1"))
+    return min(max(Decimal("0"), lab_cap - champion_reserve), reimbursement_share_cap)
 
 
 def _allocate_reimbursements_no_champions(

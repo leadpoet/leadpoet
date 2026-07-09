@@ -234,11 +234,33 @@ def _run_lab_allocator_simulations() -> None:
     allocation = allocate_research_lab_epoch(100, policy, crowded_reimbursements, two_champions)
     _assert_cap(allocation, 20.0)
     _assert_close(allocation["unallocated_percent"], 0.0, "crowded reimbursements should not leave lab capacity unassigned")
-    if allocation["reimbursement_alpha_percent"] >= 16.0:
-        raise AssertionError("crowded reimbursements should scale down to reserve champion capacity")
+    _assert_close(
+        allocation["reimbursement_alpha_percent"],
+        10.0,
+        "crowded reimbursements with champions should cap at the queue trigger ratio",
+    )
+    _assert_close(
+        allocation["champion_alpha_percent"],
+        10.0,
+        "remaining half of lab capacity should flow to champions",
+    )
+
+    crowded_overflow_champions = [
+        _champion_obligation(201, start_epoch=90, improvement_points=100.0),
+        _champion_obligation(202, start_epoch=91, improvement_points=100.0),
+        _champion_obligation(203, start_epoch=92, improvement_points=100.0),
+    ]
+    allocation = allocate_research_lab_epoch(100, policy, crowded_reimbursements, crowded_overflow_champions)
+    _assert_cap(allocation, 20.0)
+    _assert_close(
+        allocation["reimbursement_alpha_percent"],
+        9.9998,
+        "champion placeholder reserve should still reduce the reimbursement pool",
+        tolerance=0.0001,
+    )
     if not allocation["queued_champion_allocations"]:
-        raise AssertionError("queue trigger should queue additional champions when reimbursements crowd champion capacity")
-    if min(item["paid_alpha_percent"] for item in allocation["queued_champion_allocations"]) <= 0:
+        raise AssertionError("overflow champions should queue when reimbursements crowd champion capacity")
+    if max(item["paid_alpha_percent"] for item in allocation["queued_champion_allocations"]) <= 0:
         raise AssertionError("queued champions should receive a positive placeholder")
 
     quiet_and_generalist = [

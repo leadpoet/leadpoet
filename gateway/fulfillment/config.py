@@ -110,6 +110,22 @@ if FULFILLMENT_MINER_SUBMISSION_MULTIPLIER < 1.0:
     )
     FULFILLMENT_MINER_SUBMISSION_MULTIPLIER = 1.0
 
+# Email verification (TrueList). Re-enabled after commit 3eeb717f disabled it on
+# the assumption emails were validated out-of-band; in practice contact emails are
+# pattern-guessed (first.last@ / first@) so unverified invalids were shipping.
+# When true, every lead's email is verified via TrueList and a lead whose PRESENT
+# email is not deliverable (accept_all / no_mailbox / unavailable) is rejected;
+# leads with no email are not gated (email stays optional). Env-toggled so ops can
+# dial it back instantly if verification volume/latency ever hurts lead throughput.
+FULFILLMENT_VERIFY_EMAIL = os.getenv("FULFILLMENT_VERIFY_EMAIL", "true").lower() == "true"
+# Whether a present-but-undeliverable email REJECTS the lead. Kept OFF by default:
+# a live TrueList sample of currently-delivered leads showed ~90% would fail
+# verification because contact emails are pattern-guessed upstream, so hard-gating
+# now would collapse fulfillment volume and miner payouts. With gate off, emails are
+# still verified and ``email_verified`` is recorded accurately (invalids are visible,
+# not silently trusted) — turn the gate on only once email SOURCING produces real,
+# mostly-deliverable addresses.
+FULFILLMENT_EMAIL_GATE = os.getenv("FULFILLMENT_EMAIL_GATE", "false").lower() == "true"
 FULFILLMENT_MIN_INTENT_SCORE = float(os.getenv("FULFILLMENT_MIN_INTENT_SCORE", "5.0"))
 FULFILLMENT_INTENT_QUALITY_FLOOR = float(os.getenv("FULFILLMENT_INTENT_QUALITY_FLOOR", "5.0"))
 FULFILLMENT_INTENT_BREADTH_WEIGHT = float(os.getenv("FULFILLMENT_INTENT_BREADTH_WEIGHT", "0.10"))

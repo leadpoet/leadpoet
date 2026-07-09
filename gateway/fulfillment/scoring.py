@@ -19,6 +19,8 @@ from gateway.fulfillment.config import (
     FULFILLMENT_MIN_INTENT_SCORE,
     FULFILLMENT_INTENT_QUALITY_FLOOR,
     FULFILLMENT_INTENT_BREADTH_WEIGHT,
+    FULFILLMENT_VERIFY_EMAIL,
+    FULFILLMENT_EMAIL_GATE,
 )
 from gateway.fulfillment.models import (
     FulfillmentLead,
@@ -520,14 +522,27 @@ async def score_fulfillment_lead(
     openrouter_key = os.environ.get("OPENROUTER_KEY", "")
 
     if scrapingdog_key:
-        # --- Email (no longer verified or used as a gate) ---
-        # Contact emails are sourced out-of-band, not from miner
-        # submissions, so email is optional and never verified.  We keep
-        # ``email_verified`` purely as a recorded/consensus flag: it stays
-        # False unless an email_result is somehow already present and says
-        # email_ok, but it NEVER rejects a lead.  Verification is skipped
-        # upstream in score_fulfillment_batch (email_result is None here).
+        # --- Email verification (TrueList) ---
+        # Email is optional: a lead with NO email is not gated. But a lead that
+        # DOES carry an email must have a deliverable one — a present email that
+        # TrueList cannot confirm as ``email_ok`` (accept_all, no_mailbox, or
+        # verification unavailable) rejects the lead, so pattern-guessed invalids
+        # (first.last@ / first@ on the wrong domain) never ship as valid leads.
+        # Record the verified status accurately (invalids are visible, not trusted).
         email_verified = bool(email_result and email_result.get("status") == "email_ok")
+        # Only REJECT on a bad email when the gate is explicitly enabled AND the
+        # lead carries an email. Default-off: guessed-email sourcing means a hard
+        # gate would reject ~90% of leads today (measured via live TrueList).
+        if FULFILLMENT_EMAIL_GATE and lead.email and not email_verified:
+            batch_status = email_result.get("status") if email_result else None
+            _email_reason = (
+                f"email_{batch_status}" if batch_status else "email_verification_unavailable"
+            )
+            return FulfillmentScoreResult(
+                tier1_passed=True, tier2_passed=False,
+                failure_reason=_email_reason,
+                failure_detail=_build_failure_detail(_email_reason),
+            )
 
         # --- Company verification (always uses ScrapingDog LinkedIn) ---
         # Location is only a verification criterion when the ICP actually
@@ -963,11 +978,13 @@ async def score_fulfillment_batch(
     """Score a batch of fulfillment leads with two-stage email verification."""
     seen_companies: Set[str] = set()
 
-    # Email is no longer verified — contact emails are sourced out-of-band,
-    # not from miner submissions, so email is optional and never gates a
-    # lead.  Skip the TrueList/ScrapingDog batch entirely (no API calls, no
-    # cost); per-lead scorers see email_result=None and never reject on it.
-    email_results_map: dict = {}
+    # Verify every lead's email up-front via TrueList inline (thorough → enhanced
+    # retry on inconclusive verdicts) so each per-lead scorer just reads the
+    # precomputed status. Leads with no email are skipped by the verifier and are
+    # not gated downstream. Toggle off with FULFILLMENT_VERIFY_EMAIL=false.
+    email_results_map: dict = (
+        await _run_batch_email_verification(leads) if FULFILLMENT_VERIFY_EMAIL else {}
+    )
 
     # Role-match pre-pass: anything that hits Path 2 (token overlap >= 50%
     # but no Path 1 title+function overlap) used to auto-accept and was

@@ -270,7 +270,7 @@ def _reconcile_openrouter_generation_cost(
     if not credentials:
         return estimate
     last_error: Exception | None = None
-    for attempt, delay in enumerate((0.0, 1.0, 2.0, 4.0, 8.0)):
+    for attempt, delay in enumerate((0.0, 2.0, 5.0, 10.0, 20.0)):
         if delay:
             time.sleep(delay)
         for token in credentials:

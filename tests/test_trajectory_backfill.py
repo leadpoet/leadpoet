@@ -130,7 +130,7 @@ class _ExplodingStore:
 
 
 async def test_backfill_write_mode_requires_projector_flag(monkeypatch) -> None:
-    monkeypatch.delenv(PROJECTOR_ENABLED_ENV, raising=False)
+    monkeypatch.setenv(PROJECTOR_ENABLED_ENV, "false")
     result = await backfill_run_corpus_trace_rows(
         RUN_ID, store=_ExplodingStore(), dry_run=False
     )

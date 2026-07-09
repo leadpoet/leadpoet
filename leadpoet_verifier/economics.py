@@ -31,6 +31,7 @@ DEFAULT_RESEARCH_LAB_CHAMPION_MIN_ALPHA_PERCENT = Decimal("7.0")
 DEFAULT_RESEARCH_LAB_CHAMPION_EXTRA_ALPHA_PERCENT_PER_POINT = Decimal("0.3")
 DEFAULT_RESEARCH_LAB_CHAMPION_MAX_ALPHA_PERCENT = Decimal("15.0")
 DEFAULT_RESEARCH_LAB_CHAMPION_PLACEHOLDER_ALPHA_PERCENT = Decimal("0.0001")
+DEFAULT_RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO = Decimal("0.50")
 DEFAULT_RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS = Decimal("1.0")
 DEFAULT_RESEARCH_LAB_CHAMPION_EVAL_DAYS = 10
 DEFAULT_RESEARCH_LAB_CHAMPION_ICPS_PER_DAY = 6
@@ -1113,7 +1114,9 @@ def _reimbursement_pool_with_champions(
     policy: Mapping[str, Any],
 ) -> Decimal:
     champion_reserve = _minimum_champion_reserve(champions, lab_cap, policy)
-    queue_trigger_ratio = _decimal(policy.get("champion_queue_trigger_ratio", "0.50"))
+    queue_trigger_ratio = _decimal(
+        policy.get("champion_queue_trigger_ratio", DEFAULT_RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO)
+    )
     if queue_trigger_ratio < 0:
         raise ValueError("champion_queue_trigger_ratio must be non-negative")
     reimbursement_share_cap = lab_cap * min(queue_trigger_ratio, Decimal("1"))

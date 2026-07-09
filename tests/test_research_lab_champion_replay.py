@@ -6,7 +6,11 @@ from gateway.research_lab.allocations import (
     _champion_paid_alpha_to_date_from_snapshots,
     _champion_replay_obligation,
 )
-from leadpoet_verifier.economics import allocate_research_lab_epoch
+from gateway.research_lab.config import ResearchLabGatewayConfig
+from leadpoet_verifier.economics import (
+    DEFAULT_RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO,
+    allocate_research_lab_epoch,
+)
 
 
 def _policy(*, lab_cap: float = 20.0) -> dict[str, object]:
@@ -198,6 +202,21 @@ def test_low_desired_champion_still_caps_reimbursements_at_queue_trigger_ratio()
     assert allocation["champion_alpha_percent"] == pytest.approx(15.0)
     assert _reimbursement_paid_for_uid(allocation, 1) == pytest.approx(15.0 / 19.0)
     assert allocation["unallocated_percent"] == pytest.approx(0.0)
+
+
+def test_champion_queue_trigger_default_is_shared_by_gateway_and_verifier():
+    assert ResearchLabGatewayConfig().lab_champion_queue_trigger_ratio == pytest.approx(
+        float(DEFAULT_RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO)
+    )
+    policy = _policy(lab_cap=30.0)
+    policy.pop("champion_queue_trigger_ratio")
+    reimbursements = [_reimbursement(uid, spend_usd=500.0) for uid in range(1, 20)]
+    champion = [_champion(99, start_epoch=10, desired=7.0)]
+
+    allocation = allocate_research_lab_epoch(12, policy, reimbursements, champion)
+
+    assert allocation["reimbursement_alpha_percent"] == pytest.approx(15.0)
+    assert allocation["champion_alpha_percent"] == pytest.approx(15.0)
 
 
 def test_no_champion_reimbursements_can_use_full_lab_cap_pro_rata():

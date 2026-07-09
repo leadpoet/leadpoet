@@ -15,6 +15,8 @@ import logging
 import os
 from typing import Any, Mapping, Optional
 
+from leadpoet_verifier.economics import DEFAULT_RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO
+
 
 TRUTHY = {"1", "true", "yes", "on"}
 logger = logging.getLogger(__name__)
@@ -455,7 +457,7 @@ class ResearchLabGatewayConfig:
     lab_champion_extra_alpha_percent_per_point: float = 0.3
     lab_champion_max_alpha_percent: float = 15.0
     lab_champion_placeholder_alpha_percent: float = 0.0001
-    lab_champion_queue_trigger_ratio: float = 0.50
+    lab_champion_queue_trigger_ratio: float = float(DEFAULT_RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO)
     # Deprecated compatibility field in public policy docs. The reward bar must
     # mirror the merge bar (`improvement_threshold_points`) so a candidate cannot
     # merge without earning the same champion reward eligibility threshold.
@@ -937,7 +939,13 @@ class ResearchLabGatewayConfig:
             ),
             lab_champion_queue_trigger_ratio=min(
                 1.0,
-                max(0.0, _float("RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO", 0.50)),
+                max(
+                    0.0,
+                    _float(
+                        "RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO",
+                        float(DEFAULT_RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO),
+                    ),
+                ),
             ),
             lab_champion_threshold_points=improvement_threshold_points,
             lab_champion_eval_days=max(1, _int("RESEARCH_LAB_CHAMPION_EVAL_DAYS", 10)),

@@ -58,8 +58,18 @@ _REASON_CATEGORIES: list[tuple[str, str]] = [
 _DECAY_BANDS = {1.0: "fresh_<=2mo", 0.5: "aging_2-12mo_or_undated", 0.25: "stale_>12mo"}
 
 
-def _categorize_reason(reason: Optional[str]) -> str:
-    r = (reason or "").strip().lower()
+def _categorize_reason(reason: Any) -> str:
+    # failure_reason is usually a string, but the scorer sometimes emits a
+    # structured dict/list (e.g. {"code": ...}); coerce so a non-string shape
+    # can never raise here and blank out the whole ICP's funnel/stats.
+    if isinstance(reason, Mapping):
+        reason = reason.get("code") or reason.get("reason") or reason.get("category") or ""
+    elif isinstance(reason, (list, tuple)):
+        reason = reason[0] if reason else ""
+    # Codes arrive underscore- or space-delimited depending on the source;
+    # normalize to spaces so both "company_stage_mismatch" and the human
+    # "company stage mismatch" match the needle table below.
+    r = str(reason or "").strip().lower().replace("_", " ")
     if not r:
         return "other"
     for needle, cat in _REASON_CATEGORIES:

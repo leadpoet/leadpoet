@@ -1352,13 +1352,26 @@ class _TraceCapturingCompanyScorer:
             if pointer and self._pointer_map is not None:
                 self._pointer_map[icp_ref] = dict(pointer)
             if not is_reference_model and icp_ref:
-                stats = build_icp_stats(
-                    sourced_count=len(companies or ()),
-                    breakdowns=breakdowns,
-                )
-                funnel = stats.get("funnel")
-                if isinstance(funnel, Mapping):
-                    self._funnel_map[icp_ref] = dict(funnel)
+                # Isolated from the outer trace-capture guard: a stats failure
+                # must not also drop the judgment pointer, and it must log with
+                # a distinct tag (a silent failure here blanks the per-ICP
+                # funnel for the whole candidate — a real regression once went
+                # unnoticed because it shared the generic wrapper warning).
+                try:
+                    stats = build_icp_stats(
+                        sourced_count=len(companies or ()),
+                        breakdowns=breakdowns,
+                    )
+                    funnel = stats.get("funnel")
+                    if isinstance(funnel, Mapping):
+                        self._funnel_map[icp_ref] = dict(funnel)
+                except Exception:  # noqa: BLE001 - stats never affect scoring
+                    logger.warning(
+                        "research_lab_scorer_funnel_stats_failed context=%s icp_ref=%s",
+                        compact_ref(self._context_ref),
+                        compact_ref(icp_ref),
+                        exc_info=True,
+                    )
             # Persist rejected companies for false-rejection analysis (candidate
             # path). Best-effort; never affects scoring.
             await _persist_rejected_companies(

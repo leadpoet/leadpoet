@@ -102,6 +102,35 @@ async def test_fetch_candidate_generation_failure_report_uses_paginated_select(m
 
     async def fake_select_all(table, **kwargs):
         calls.append((table, kwargs))
+        if table == "research_lab_public_loop_card_current":
+            return [
+                {
+                    "current_run_id": "run-a",
+                    "ticket_id": "ticket-run-a",
+                    "current_outcome_label": "no_buildable_candidate",
+                    "current_event_type": "loop_failed",
+                    "current_candidate_count": 0,
+                    "current_event_doc": {
+                        "candidate_generation_failure": {
+                            "primary_reason": "binding_plan_source_missing",
+                            "latest_stage": "loop_failed",
+                        }
+                    },
+                }
+            ]
+        if table == "research_lab_auto_research_loop_events" and any(
+            flt == ("event_type", "in", ["loop_failed", "no_buildable_candidate"])
+            for flt in kwargs.get("filters", ())
+        ):
+            return [{"run_id": "run-b", "event_type": "loop_failed", "event_doc": {"run_summary": {}}}]
+        if table == "research_lab_auto_research_loop_events" and any(
+            len(flt) == 3 and flt[0] == "run_id" and flt[1] == "in"
+            for flt in kwargs.get("filters", ())
+        ):
+            return [
+                {"run_id": "run-a", "event_type": "loop_failed", "event_doc": {"run_summary": {}}},
+                {"run_id": "run-b", "event_type": "loop_failed", "event_doc": {"run_summary": {}}},
+            ]
         return []
 
     monkeypatch.setattr(report_mod, "select_all", fake_select_all)
@@ -109,9 +138,56 @@ async def test_fetch_candidate_generation_failure_report_uses_paginated_select(m
     report = await report_mod.fetch_candidate_generation_failure_report(7)
 
     assert report["schema_version"] == "1.0"
+    assert report["partial"] is False
     assert [table for table, _kwargs in calls] == [
-        "research_lab_auto_research_loop_events",
         "research_lab_public_loop_card_current",
+        "research_lab_auto_research_loop_events",
+        "research_lab_auto_research_loop_events",
     ]
-    assert all(kwargs["max_rows"] == 50000 for _table, kwargs in calls)
+    assert calls[0][1]["columns"] == report_mod._PUBLIC_CARD_COLUMNS
+    assert ("current_outcome_label", "no_buildable_candidate") in calls[0][1]["filters"]
+    assert calls[1][1]["columns"] == report_mod._LOOP_EVENT_COLUMNS
+    assert ("event_type", "in", ["loop_failed", "no_buildable_candidate"]) in calls[1][1]["filters"]
+    assert calls[2][1]["columns"] == report_mod._LOOP_EVENT_COLUMNS
+    assert any(
+        len(flt) == 3 and flt[0] == "run_id" and flt[1] == "in" and set(flt[2]) == {"run-a", "run-b"}
+        for flt in calls[2][1]["filters"]
+    )
     assert all(kwargs["allow_partial"] is True for _table, kwargs in calls)
+
+
+async def test_fetch_candidate_generation_failure_report_returns_partial_on_event_fetch_failure(monkeypatch):
+    calls = []
+
+    async def fake_select_all(table, **kwargs):
+        calls.append((table, kwargs))
+        if table == "research_lab_public_loop_card_current":
+            return [
+                {
+                    "current_run_id": "run-a",
+                    "ticket_id": "ticket-run-a",
+                    "current_outcome_label": "no_buildable_candidate",
+                    "current_event_type": "loop_failed",
+                    "current_candidate_count": 0,
+                    "current_event_doc": {
+                        "candidate_generation_failure": {
+                            "primary_reason": "no_viable_patch",
+                            "latest_stage": "loop_failed",
+                        }
+                    },
+                }
+            ]
+        raise TimeoutError("synthetic event fetch timeout")
+
+    monkeypatch.setattr(report_mod, "select_all", fake_select_all)
+
+    report = await report_mod.fetch_candidate_generation_failure_report(1)
+
+    assert report["partial"] is True
+    assert report["partial_reason"] == "optimized_event_fetch_failed:TimeoutError"
+    assert report["total_no_buildable_candidate"] == 1
+    assert report["counts"]["by_primary_reason"] == {"no_viable_patch": 1}
+    assert [table for table, _kwargs in calls] == [
+        "research_lab_public_loop_card_current",
+        "research_lab_auto_research_loop_events",
+    ]

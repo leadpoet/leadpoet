@@ -3041,7 +3041,9 @@ class ResearchLabGatewayScoringWorker:
                 "proxy_ref_hash": self.proxy_ref_hash,
                 "private_holdout_gate": _candidate_gate_event_doc(gate_result),
                 "scoring_health_gate": scoring_health_gate,
-                "serving_model_version": score_bundle.get("serving_model_version") or {},
+                "serving_model_version": _serving_model_version_event_doc(
+                    score_bundle.get("serving_model_version")
+                ),
                 "scored_via": "global_icp_queue",
             },
         )
@@ -4163,7 +4165,9 @@ class ResearchLabGatewayScoringWorker:
                     "proxy_ref_hash": self.proxy_ref_hash,
                     "private_holdout_gate": _candidate_gate_event_doc(gate_result),
                     "scoring_health_gate": scoring_health_gate,
-                    "serving_model_version": score_bundle.get("serving_model_version") or {},
+                    "serving_model_version": _serving_model_version_event_doc(
+                        score_bundle.get("serving_model_version")
+                    ),
                     # §5.4 pointers only ({icp_ref: {s3_ref, sha256}}) — never
                     # judgment content (audit-scan poison).
                     **(
@@ -4189,7 +4193,9 @@ class ResearchLabGatewayScoringWorker:
                     "elapsed_seconds": round(time.time() - start, 3),
                     "private_holdout_gate": _candidate_gate_event_doc(gate_result),
                     "scoring_health_gate": scoring_health_gate,
-                    "serving_model_version": score_bundle.get("serving_model_version") or {},
+                    "serving_model_version": _serving_model_version_event_doc(
+                        score_bundle.get("serving_model_version")
+                    ),
                 },
             )
             if private_holdout_rejected:
@@ -4543,7 +4549,9 @@ class ResearchLabGatewayScoringWorker:
                 "proxy_ref_hash": self.proxy_ref_hash,
                 "private_holdout_gate": _candidate_gate_event_doc(gate_result),
                 "scoring_health_gate": scoring_health_gate,
-                "serving_model_version": score_bundle.get("serving_model_version") or {},
+                "serving_model_version": _serving_model_version_event_doc(
+                    score_bundle.get("serving_model_version")
+                ),
                 "reused_signed_score_bundle": True,
             },
         )
@@ -4564,7 +4572,9 @@ class ResearchLabGatewayScoringWorker:
                     "elapsed_seconds": round(time.time() - start, 3),
                     "private_holdout_gate": _candidate_gate_event_doc(gate_result),
                     "scoring_health_gate": scoring_health_gate,
-                    "serving_model_version": score_bundle.get("serving_model_version") or {},
+                    "serving_model_version": _serving_model_version_event_doc(
+                        score_bundle.get("serving_model_version")
+                    ),
                     "reused_signed_score_bundle": True,
                 },
             )
@@ -4741,7 +4751,9 @@ class ResearchLabGatewayScoringWorker:
                 "candidate_kind": str(candidate.get("candidate_kind") or ""),
                 "decision_path": "public_holdout_rejected",
                 "promotion_metric": metric.event_doc(),
-                "serving_model_version": score_bundle.get("serving_model_version") or {},
+                "serving_model_version": _serving_model_version_event_doc(
+                    score_bundle.get("serving_model_version")
+                ),
             },
         )
         await create_candidate_promotion_event(
@@ -4762,7 +4774,9 @@ class ResearchLabGatewayScoringWorker:
                 "delta_lcb": round(delta_lcb, 6),
                 "candidate_kind": str(candidate.get("candidate_kind") or ""),
                 "promotion_metric": metric.event_doc(),
-                "serving_model_version": score_bundle.get("serving_model_version") or {},
+                "serving_model_version": _serving_model_version_event_doc(
+                    score_bundle.get("serving_model_version")
+                ),
             },
         )
         return {"status": "rejected_public_holdout_gate"}
@@ -8602,6 +8616,44 @@ def _candidate_gate_event_doc(value: Any) -> dict[str, Any]:
         "private_holdout_icp_count": _safe_int(value.get("private_holdout_icp_count"), default=0),
         "private_holdout_evaluated": bool(value.get("private_holdout_evaluated")),
     }
+
+
+def _serving_model_version_event_doc(value: Any) -> dict[str, Any]:
+    """Join-safe serving-model metadata for DB event docs.
+
+    Scoring score bundles may carry private manifest/image fields such as
+    image_digest. Scoring dispatch/event tables intentionally reject those raw
+    fields, so keep only hashes and ids that are useful for joins.
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    doc: dict[str, Any] = {
+        "schema_version": "1.0",
+        "private_model_version_id": str(value.get("private_model_version_id") or ""),
+        "version_hash": str(
+            value.get("version_hash")
+            or value.get("serving_model_version_hash")
+            or ""
+        ),
+        "model_artifact_hash": str(
+            value.get("model_artifact_hash")
+            or value.get("serving_model_artifact_hash")
+            or value.get("artifact_hash")
+            or ""
+        ),
+        "private_model_manifest_hash": str(
+            value.get("private_model_manifest_hash")
+            or value.get("serving_model_manifest_hash")
+            or value.get("manifest_hash")
+            or ""
+        ),
+        "candidate_id": str(value.get("candidate_id") or ""),
+        "score_bundle_id": str(value.get("score_bundle_id") or ""),
+        "score_bundle_hash": str(value.get("score_bundle_hash") or ""),
+    }
+    if value.get("evaluation_epoch") not in (None, ""):
+        doc["evaluation_epoch"] = _safe_int(value.get("evaluation_epoch"), default=0)
+    return {key: item for key, item in doc.items() if item not in ("", None, [], {})}
 
 
 def _compact_scoring_health_doc(value: Any) -> dict[str, Any]:

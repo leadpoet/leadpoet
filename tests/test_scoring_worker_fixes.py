@@ -8,6 +8,7 @@ scoping), and the same-day baseline replacement guard.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -18,6 +19,36 @@ from gateway.research_lab.promotion import (
     PrivateModelLineageUnavailableError,
     PromotionPausedError,
 )
+
+
+def test_serving_model_version_event_doc_strips_dispatch_forbidden_fields():
+    doc = sw._serving_model_version_event_doc(
+        {
+            "private_model_version_id": "private_model_version:abc",
+            "version_hash": "sha256:" + "1" * 64,
+            "model_artifact_hash": "sha256:" + "2" * 64,
+            "private_model_manifest_hash": "sha256:" + "3" * 64,
+            "candidate_id": "candidate:" + "4" * 64,
+            "score_bundle_id": "score_bundle:" + "5" * 64,
+            "score_bundle_hash": "sha256:" + "6" * 64,
+            "evaluation_epoch": "23852",
+            "image_digest": "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:" + "7" * 64,
+            "private_model_manifest_doc": {"raw": "do-not-store"},
+            "candidate_patch_manifest": {"raw": "do-not-store"},
+            "proxy_url": "http://user:pass@example.test:8080",
+        }
+    )
+
+    dumped = json.dumps(doc, sort_keys=True)
+    assert doc["version_hash"] == "sha256:" + "1" * 64
+    assert doc["model_artifact_hash"] == "sha256:" + "2" * 64
+    assert doc["private_model_manifest_hash"] == "sha256:" + "3" * 64
+    assert doc["evaluation_epoch"] == 23852
+    assert "image_digest" not in dumped
+    assert ".dkr.ecr." not in dumped
+    assert "private_model_manifest_doc" not in dumped
+    assert "candidate_patch_manifest" not in dumped
+    assert "proxy_url" not in dumped
 
 
 def _provider_cost_trace_entry(seq: int = 1) -> dict:

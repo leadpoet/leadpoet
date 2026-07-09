@@ -755,6 +755,15 @@ async def _score_single_icp(
             funnel = None
         if isinstance(funnel, Mapping):
             row["funnel"] = dict(funnel)
+    # Per-evidence-type intent stats (intent pass rate panel); duck-typed.
+    evidence_types_for = getattr(scorer, "scorer_evidence_types_for", None)
+    if callable(evidence_types_for):
+        try:
+            evidence_types = evidence_types_for(row["icp_ref"] or row["icp_hash"])
+        except Exception:  # noqa: BLE001 - evidence pickup is best-effort
+            evidence_types = None
+        if isinstance(evidence_types, Mapping) and evidence_types:
+            row["evidence_types"] = dict(evidence_types)
     if trace_sink is not None and trace_entries:
         # POINTERS ONLY (fableanalysis §9.1 item 5): rows/bundles must never
         # carry decoded bodies — the protected-material scanner rejects records

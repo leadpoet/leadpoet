@@ -1305,6 +1305,7 @@ class _TraceCapturingCompanyScorer:
         # for the candidate model, keyed by icp_ref. Read back onto each per-ICP
         # row via scorer_funnel_for.
         self._funnel_map: dict[str, dict[str, Any]] = {}
+        self._evidence_types_map: dict[str, dict[str, Any]] = {}
         # The evaluator hands the scorer the raw ICP payload, not the benchmark
         # item, so refs are recovered via the payload's canonical hash.
         self._icp_refs: dict[str, tuple[str, str]] = {}
@@ -1358,13 +1359,25 @@ class _TraceCapturingCompanyScorer:
                 # funnel for the whole candidate — a real regression once went
                 # unnoticed because it shared the generic wrapper warning).
                 try:
+                    # Per-breakdown intent-signal evidence lists feed the
+                    # evidence-type (intent pass rate) panel; absent on the
+                    # default scorer, so this stays best-effort.
+                    signal_details = [
+                        (b.get("intent_signals_detail") or [])
+                        if isinstance(b, Mapping) else []
+                        for b in (breakdowns or [])
+                    ]
                     stats = build_icp_stats(
                         sourced_count=len(companies or ()),
                         breakdowns=breakdowns,
+                        signal_details=signal_details if any(signal_details) else None,
                     )
                     funnel = stats.get("funnel")
                     if isinstance(funnel, Mapping):
                         self._funnel_map[icp_ref] = dict(funnel)
+                    evidence_types = stats.get("evidence_types")
+                    if isinstance(evidence_types, Mapping) and evidence_types:
+                        self._evidence_types_map[icp_ref] = dict(evidence_types)
                 except Exception:  # noqa: BLE001 - stats never affect scoring
                     logger.warning(
                         "research_lab_scorer_funnel_stats_failed context=%s icp_ref=%s",
@@ -1406,6 +1419,12 @@ class _TraceCapturingCompanyScorer:
         row into the bundle. Duck-typed; the default scorer has no funnel."""
         funnel = self._funnel_map.get(str(icp_ref))
         return dict(funnel) if isinstance(funnel, Mapping) else None
+
+    def scorer_evidence_types_for(self, icp_ref: str) -> dict[str, Any] | None:
+        """Return this ICP's per-evidence-type intent stats (intent pass rate
+        panel). Duck-typed; the default scorer has none."""
+        evidence = self._evidence_types_map.get(str(icp_ref))
+        return dict(evidence) if isinstance(evidence, Mapping) else None
 
 
 def _upload_baseline_incontainer_trace(

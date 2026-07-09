@@ -82,6 +82,12 @@ PER_ICP_CAPTURE_PASSTHROUGH_KEYS = (
     "provider_excluded",
     "sourced_zero_no_error",
     "reference_sourced_zero_no_error",
+    # Per-ICP diagnostics the scorer wrapper attaches for miner-facing loop
+    # charts. These were computed and set on the evaluator row but silently
+    # dropped here because the row is rebuilt from this allow-list — which is
+    # why loop lead-funnel / intent-pass-rate panels had no data.
+    "funnel",
+    "evidence_types",
 )
 
 

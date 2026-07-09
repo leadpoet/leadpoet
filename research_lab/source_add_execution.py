@@ -47,6 +47,9 @@ DEFAULT_MAX_SUBMISSIONS_PER_30D_PER_HOTKEY = 10
 class SourceAddFunnelStage(str, Enum):
     SUBMITTED = "submitted"
     MANIFEST_VALIDATED = "manifest_validated"
+    PROVENANCE_PRECHECK_PASSED = "provenance_precheck_passed"
+    NEEDS_MANUAL_REVIEW = "needs_manual_review"
+    REJECTED_PRECHECK = "rejected_precheck"
     STATIC_SCAN_PASSED = "static_scan_passed"
     LLM_REVIEW_PASSED = "llm_review_passed"
     TRIAL_COMPLETED = "trial_completed"
@@ -103,6 +106,8 @@ class SourceAddSubmissionRecord:
     trial_diagnostics: dict[str, Any] = field(default_factory=dict)
     measured_trial_yield: float = -1.0
     acceptance_human_gate_passed: bool = False
+    precheck_status: str = ""
+    precheck_doc: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -295,6 +300,29 @@ def _advance(record: SourceAddSubmissionRecord, stage: SourceAddFunnelStage, **u
         stage_history=record.stage_history + (stage.value,),
         **updates,
     )
+
+
+def apply_provenance_precheck_result(
+    record: SourceAddSubmissionRecord,
+    *,
+    precheck_status: str,
+    precheck_doc: Mapping[str, Any],
+) -> SourceAddSubmissionRecord:
+    """Advance intake to the provenance precheck outcome.
+
+    This gate never accepts a source into the catalog. It only classifies the
+    submitted adapter for operator review or early fake/test rejection.
+    """
+
+    normalized = str(precheck_status or "").strip().lower()
+    if normalized == SourceAddFunnelStage.PROVENANCE_PRECHECK_PASSED.value:
+        stage = SourceAddFunnelStage.PROVENANCE_PRECHECK_PASSED
+    elif normalized == SourceAddFunnelStage.REJECTED_PRECHECK.value:
+        stage = SourceAddFunnelStage.REJECTED_PRECHECK
+    else:
+        normalized = SourceAddFunnelStage.NEEDS_MANUAL_REVIEW.value
+        stage = SourceAddFunnelStage.NEEDS_MANUAL_REVIEW
+    return _advance(record, stage, precheck_status=normalized, precheck_doc=dict(precheck_doc or {}))
 
 
 def run_static_scan_stage(

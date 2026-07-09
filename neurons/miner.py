@@ -46,9 +46,9 @@ from urllib.parse import urlparse
 
 from gateway.research_lab.config import DEFAULT_LOOP_START_FEE_USD as RESEARCH_LAB_DEFAULT_LOOP_START_FEE_USD
 from research_lab.source_add_miner import (
+    SOURCE_ADD_AUTH_TYPES,
     SOURCE_ADD_SOURCE_KINDS,
     build_source_add_submission_docs,
-    parse_source_add_domains,
 )
 
 
@@ -2549,6 +2549,96 @@ def _research_lab_prompt_int(label: str, *, default: int, minimum: int, maximum:
         return parsed
 
 
+def _research_lab_prompt_required_text(label: str, *, max_length: int = 1000) -> str:
+    while True:
+        value = input(label).strip()
+        if not value:
+            print("❌ This field is required.")
+            continue
+        if len(value) > max_length:
+            print(f"❌ Value must be at most {max_length} characters.")
+            continue
+        if _looks_like_raw_research_lab_secret(value) or re.search(
+            r"(?i)\b(api[_-]?key|secret|password|token)\s*[:=]",
+            value,
+        ):
+            print("❌ This field appears to contain credential material. Remove secrets and retry.")
+            continue
+        return value
+
+
+def _research_lab_prompt_optional_text(label: str, *, max_length: int = 1000) -> str:
+    value = input(label).strip()
+    if not value:
+        return ""
+    if len(value) > max_length:
+        print(f"   Truncating to {max_length} characters.")
+        value = value[:max_length]
+    if _looks_like_raw_research_lab_secret(value) or re.search(
+        r"(?i)\b(api[_-]?key|secret|password|token)\s*[:=]",
+        value,
+    ):
+        raise ValueError("optional text appears to contain credential material")
+    return value
+
+
+def _research_lab_prompt_source_add_auth_type() -> str:
+    print("   Auth type:")
+    for index, auth_type in enumerate(SOURCE_ADD_AUTH_TYPES, start=1):
+        print(f"     {index}. {auth_type}")
+    while True:
+        value = input("   Choose auth type [none]: ").strip().lower()
+        if not value:
+            return "none"
+        if value.isdigit() and 1 <= int(value) <= len(SOURCE_ADD_AUTH_TYPES):
+            return SOURCE_ADD_AUTH_TYPES[int(value) - 1]
+        if value in SOURCE_ADD_AUTH_TYPES:
+            return value
+        print("❌ Choose an auth type from the list.")
+
+
+def _research_lab_prompt_source_add_endpoint_examples() -> list[dict[str, str]]:
+    examples: list[dict[str, str]] = []
+    print("")
+    print("Endpoint examples help reviewers and the integration loop understand the API.")
+    while True:
+        print(f"   Endpoint example #{len(examples) + 1}")
+        method = input("     Method [GET]: ").strip().upper() or "GET"
+        path = _research_lab_prompt_required_text("     Path (example: /v1/search): ", max_length=160)
+        purpose = _research_lab_prompt_required_text("     Purpose: ", max_length=300)
+        example_query = _research_lab_prompt_required_text(
+            "     Example query/body without secrets: ",
+            max_length=500,
+        )
+        examples.append(
+            {
+                "method": method,
+                "path": path,
+                "purpose": purpose,
+                "example_query": example_query,
+            }
+        )
+        if len(examples) >= 12:
+            print("   Maximum endpoint examples reached.")
+            break
+        another = input("   Add another endpoint example? [y/N]: ").strip().lower()
+        if another not in {"y", "yes"}:
+            break
+    return examples
+
+
+def _research_lab_prompt_source_add_third_party_refs() -> list[str]:
+    raw = input("   Optional third-party reference URLs, comma-separated: ").strip()
+    if not raw:
+        return []
+    refs = []
+    for item in re.split(r"[\s,]+", raw):
+        cleaned = item.strip()
+        if cleaned:
+            refs.append(cleaned)
+    return refs[:8]
+
+
 RESEARCH_LAB_RESEARCH_AREA_CHOICES: tuple[tuple[str, str, str], ...] = (
     ("1", "generalist", "Broad improvements across all lead types"),
 )
@@ -3016,7 +3106,7 @@ def run_research_lab_resume_credit_blocked_flow(wallet, config, netuid: int) -> 
 
 
 def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
-    """Miner-facing SOURCE_ADD suggestion entrypoint.
+    """Miner-facing SOURCE_ADD API submission entrypoint.
 
     The gateway endpoint is launch-gated by RESEARCH_LAB_SOURCE_ADD_ENABLED.
     Until the operator enables it, this flow exits before collecting source
@@ -3025,7 +3115,7 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
 
     gateway_url = QUALIFICATION_GATEWAY_URL.rstrip("/")
     print("\n" + "=" * 80)
-    print(" RESEARCH LAB — SUGGEST API SOURCE")
+    print(" RESEARCH LAB — SUBMIT API SOURCE")
     print("=" * 80)
     print("")
     print(f"Miner hotkey: {wallet.hotkey.ss58_address}")
@@ -3047,11 +3137,12 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
         print("   Set GATEWAY_URL to an https:// gateway. Localhost HTTP is allowed for local/dev testing only.")
         return
 
-    print("This submits a source/API candidate for operator review.")
-    print("Do not paste API keys into endpoint details; credential entry is hidden and encrypted by the gateway.")
+    print("This submits a structured source/API candidate for operator review.")
+    print("Do not paste API keys into docs, endpoint examples, rate limits, or provenance notes.")
+    print("Credential entry is hidden and encrypted by the gateway.")
     print("")
 
-    source_name = input("   Source/API name: ").strip()
+    source_name = _research_lab_prompt_required_text("   Source/API name: ", max_length=160)
     print("   Source kind:")
     for index, kind in enumerate(SOURCE_ADD_SOURCE_KINDS, start=1):
         print(f"     {index}. {kind}")
@@ -3063,19 +3154,28 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
     else:
         source_kind = kind_input
 
-    domains = parse_source_add_domains(input("   Base domain(s), comma-separated: ").strip())
-    claimed_output_type = input(
-        "   Claimed output type (intent / firmographic / contact / jobs / social / other): "
-    ).strip()
-    endpoint_summary = input("   Endpoint and response details, no secrets: ").strip()
-    if _looks_like_raw_research_lab_secret(endpoint_summary) or re.search(
-        r"(?i)\b(api[_-]?key|secret|password|token|bearer)\s*[:=]", endpoint_summary
-    ):
-        print("❌ Endpoint details appear to contain credential material. Remove secrets and retry.")
+    api_base_url = _research_lab_prompt_required_text("   API base URL: ", max_length=500)
+    documentation_url = _research_lab_prompt_required_text("   Documentation URL: ", max_length=500)
+    auth_type = _research_lab_prompt_source_add_auth_type()
+    rate_limit_notes = _research_lab_prompt_required_text("   Rate-limit notes: ", max_length=1000)
+    endpoint_examples = _research_lab_prompt_source_add_endpoint_examples()
+    try:
+        data_provenance_notes = _research_lab_prompt_optional_text(
+            "   Optional data provenance notes: ",
+            max_length=1000,
+        )
+        third_party_refs = _research_lab_prompt_source_add_third_party_refs()
+    except ValueError as exc:
+        print(f"❌ Invalid source submission: {exc}")
         return
 
-    credential_supplied = input("   Does this source require a credential for the trial? [y/N]: ").strip().lower()
     adapter_credential = ""
+    credential_prompt = "y" if auth_type != "none" else "n"
+    credential_supplied = input(
+        f"   Submit a credential for encrypted operator trial? [{'Y/n' if auth_type != 'none' else 'y/N'}]: "
+    ).strip().lower()
+    if not credential_supplied:
+        credential_supplied = credential_prompt
     if credential_supplied in {"y", "yes"}:
         adapter_credential = getpass.getpass("   Source API credential (hidden; encrypted by gateway): ").strip()
         if not adapter_credential:
@@ -3083,23 +3183,31 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
             return
 
     try:
-        manifest, source_brief, idempotency_key = build_source_add_submission_docs(
+        manifest, source_brief, idempotency_key, source_metadata = build_source_add_submission_docs(
             miner_hotkey=wallet.hotkey.ss58_address,
             source_name=source_name,
             source_kind=source_kind,
-            declared_base_domains=domains,
-            endpoint_summary=endpoint_summary,
-            claimed_output_type=claimed_output_type,
+            api_base_url=api_base_url,
+            documentation_url=documentation_url,
+            auth_type=auth_type,
+            endpoint_examples=endpoint_examples,
+            rate_limit_notes=rate_limit_notes,
+            data_provenance_notes=data_provenance_notes,
+            third_party_refs=third_party_refs,
             credential_supplied=bool(adapter_credential),
         )
     except ValueError as exc:
-        print(f"❌ Invalid source suggestion: {exc}")
+        print(f"❌ Invalid source submission: {exc}")
         return
 
     print("")
     print("Submission preview:")
     print(f"   Source: {source_name}")
     print(f"   Kind: {manifest.get('source_kind')}")
+    print(f"   API base URL: {source_metadata.get('api_base_url')}")
+    print(f"   Documentation URL: {source_metadata.get('documentation_url')}")
+    print(f"   Auth type: {source_metadata.get('auth_type')}")
+    print(f"   Endpoint examples: {len(source_metadata.get('endpoint_examples') or [])}")
     print(f"   Domains: {', '.join(manifest.get('declared_base_domains') or [])}")
     print(f"   Credential supplied: {'yes' if adapter_credential else 'no'}")
     confirm = input("   Submit for SOURCE_ADD review? [y/N]: ").strip().lower()
@@ -3115,6 +3223,7 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
         "idempotency_key": idempotency_key,
         "manifest": manifest,
         "source_brief": source_brief,
+        "source_metadata": source_metadata,
     }
     if adapter_credential:
         payload["adapter_credential"] = adapter_credential
@@ -3125,10 +3234,14 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
         print(f"   {result['error']}")
         return
 
-    print("✅ SOURCE_ADD suggestion submitted")
+    print("✅ SOURCE_ADD submission received")
     print(f"   Submission ID: {result.get('submission_id')}")
     print(f"   Adapter ID: {result.get('adapter_id')}")
     print(f"   Stage: {result.get('stage')}")
+    if result.get("precheck_status"):
+        print(f"   Precheck: {result.get('precheck_status')}")
+    for reason in (result.get("precheck_reasons") or [])[:8]:
+        print(f"     - {reason}")
 
 
 def main():
@@ -3265,7 +3378,7 @@ def main():
     print("  1. Auto Research  — Check hosted auto-research loop availability (default)")
     print("  2. Fulfillment    — Poll for client ICP requests and fulfill them")
     print("  3. Resume Credit-Blocked — Resume paused auto-research loops after an OpenRouter top-up")
-    print("  4. Suggest API Source — Submit a new API/source candidate when SOURCE_ADD is live")
+    print("  4. Submit API Source — Submit a structured API/source candidate when SOURCE_ADD is live")
     print("")
     print("  You can run multiple active modes simultaneously in separate terminals.")
     print("")

@@ -101,11 +101,19 @@ class ResearchLabSourceAdapterSubmissionRequest(SignedResearchLabRequest):
 
     manifest: dict[str, Any] = Field()
     source_brief: Optional[str] = Field(default=None, max_length=2000)
+    source_metadata: Optional[dict[str, Any]] = Field(default=None)
     adapter_credential: Optional[str] = Field(default=None, min_length=8, max_length=512)
 
     @field_validator("source_brief")
     @classmethod
     def brief_has_no_secret_material(cls, value: Optional[str]) -> Optional[str]:
+        if value:
+            reject_secret_material(value)
+        return value
+
+    @field_validator("source_metadata")
+    @classmethod
+    def metadata_has_no_secret_material(cls, value: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
         if value:
             reject_secret_material(value)
         return value
@@ -121,6 +129,8 @@ class ResearchLabSourceAdapterSubmissionResponse(BaseModel):
     adapter_id: str
     stage: str
     credential_ref: Optional[str] = None
+    precheck_status: Optional[str] = None
+    precheck_reasons: list[str] = Field(default_factory=list)
 
 
 class ResearchLabOpenRouterKeyRegisterRequest(SignedResearchLabRequest):

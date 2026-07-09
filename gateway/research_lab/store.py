@@ -102,6 +102,7 @@ async def persist_source_add_submission(record_doc: dict[str, Any]) -> None:
     yield_value = record_doc.get("measured_trial_yield")
     measured_yield = float(yield_value) if isinstance(yield_value, (int, float)) and float(yield_value) >= 0 else None
     last_seq = len(stage_history) - 1
+    precheck_doc = record_doc.get("precheck_doc") if isinstance(record_doc.get("precheck_doc"), Mapping) else {}
     for seq, stage in enumerate(stage_history):
         row = {
             "submission_id": submission_id,
@@ -111,6 +112,8 @@ async def persist_source_add_submission(record_doc: dict[str, Any]) -> None:
             "seq": seq,
             "measured_trial_yield": measured_yield if seq == last_seq else None,
             "submission_doc": record_doc if seq == last_seq else {},
+            "precheck_status": str(record_doc.get("precheck_status") or "") if seq == last_seq else "",
+            "precheck_doc": dict(precheck_doc) if seq == last_seq else {},
         }
         try:
             await insert_row("research_lab_source_add_submissions", row)

@@ -11,6 +11,7 @@ from research_lab.source_add_execution import (
     SourceAddFunnelStage,
     SourceAddRejectionReason,
     SourceAddSuggestionDoc,
+    apply_provenance_precheck_result,
     apply_trial_result,
     evaluate_source_add_acceptance,
     intake_source_add_submission,
@@ -111,6 +112,21 @@ class TestIntake:
         record, errors = _intake(manifest_doc=_manifest_doc(credential_policy="credential_ref_only"))
         assert record is None
         assert any("requires a key at intake" in error for error in errors)
+
+    def test_provenance_precheck_advances_without_accepting(self):
+        record, errors = _intake()
+        assert errors == []
+
+        updated = apply_provenance_precheck_result(
+            record,
+            precheck_status=SourceAddFunnelStage.PROVENANCE_PRECHECK_PASSED.value,
+            precheck_doc={"reasons": ["provenance_reference_backed"]},
+        )
+
+        assert updated.stage == SourceAddFunnelStage.PROVENANCE_PRECHECK_PASSED.value
+        assert updated.precheck_status == SourceAddFunnelStage.PROVENANCE_PRECHECK_PASSED.value
+        assert updated.precheck_doc["reasons"] == ["provenance_reference_backed"]
+        assert SourceAddFunnelStage.ACCEPTED.value not in updated.stage_history
 
 
 class TestStaticScan:

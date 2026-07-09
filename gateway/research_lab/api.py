@@ -77,6 +77,7 @@ from .public_activity import (
     safe_project_public_loop_activity,
 )
 from .promotion import private_repo_head_alignment_status
+from .source_add_provenance import PRECHECK_MANUAL, SourceAddProvenanceResult, evaluate_source_add_provenance
 from .store import (
     canonical_hash,
     create_candidate_evaluation_event,
@@ -98,7 +99,7 @@ from .store import (
     update_row,
 )
 from research_lab.improvement_engine.config import ImprovementEngineConfig
-from research_lab.source_add_execution import intake_source_add_submission
+from research_lab.source_add_execution import apply_provenance_precheck_result, intake_source_add_submission
 from research_lab.improvement_engine.fix_generator import sanitized_miner_opportunity
 from research_lab.improvement_engine.scanner import scan_for_issues
 
@@ -330,8 +331,32 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
     if errors or record is None:
         raise HTTPException(status_code=400, detail="; ".join(errors or ["submission rejected"]))
 
+    source_metadata = dict(payload.source_metadata or {})
     try:
-        await persist_source_add_submission(record.to_dict())
+        precheck = await asyncio.to_thread(
+            evaluate_source_add_provenance,
+            source_name=record.manifest.source_name,
+            source_kind=record.manifest.source_kind,
+            declared_base_domains=record.manifest.declared_base_domains,
+            source_metadata=source_metadata,
+        )
+    except Exception as exc:
+        logger.warning("SOURCE_ADD_PROVENANCE_PRECHECK_ERROR type=%s", type(exc).__name__)
+        precheck = SourceAddProvenanceResult(
+            PRECHECK_MANUAL,
+            ("precheck_internal_error",),
+            {"error_type": type(exc).__name__},
+        )
+    record = apply_provenance_precheck_result(
+        record,
+        precheck_status=precheck.precheck_status,
+        precheck_doc=precheck.to_record_doc(),
+    )
+    record_doc = record.to_dict()
+    record_doc["source_metadata"] = source_metadata
+
+    try:
+        await persist_source_add_submission(record_doc)
     except Exception as exc:
         _raise_storage_error(exc)
 
@@ -340,6 +365,8 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
         adapter_id=record.adapter_id,
         stage=record.stage,
         credential_ref=record.credential_envelope.get("credential_ref") or None,
+        precheck_status=record.precheck_status or None,
+        precheck_reasons=list((record.precheck_doc or {}).get("reasons") or []),
     )
 
 

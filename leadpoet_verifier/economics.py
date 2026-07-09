@@ -1198,27 +1198,34 @@ def _allocate_champions(
         else:
             queued_indices.append(index)
 
-    # Preserve the legacy "use the full lab slice" behavior only for non-replay
-    # fixtures with no waiting champions. Replay-tracked production rewards are
-    # capped by their remaining balance, and queued rewards receive capacity
-    # chronologically instead of older active champions being overpaid.
-    replay_tracked = any(
-        {"remaining_alpha_percent", "paid_alpha_percent_to_date", "total_due_alpha_percent"}.intersection(champion.keys())
-        for champion in champions
-    )
-    if remaining_pool > 0 and active_indices and not queued_indices and not replay_tracked:
+    # Surplus lab emissions always flow to active champions instead of
+    # burning: once every champion's per-epoch due is funded (chronologically,
+    # so capacity-starved queued rewards drain the pool before any surplus
+    # exists), the remainder splits across active champions by improvement
+    # points. Replay tracking still caps each champion's *due* at its
+    # remaining balance; the surplus split deliberately pays beyond it, which
+    # retires obligations early and hands the slice back to the
+    # no-champion reimbursement overpay path once no active champions remain.
+    # SOURCE_ADD legs and other labeled grants ride these rails with fixed
+    # owner-set sizes; only genuine champion rewards share the surplus.
+    surplus_indices = [
+        index
+        for index in active_indices
+        if champions[index].get("reward_kind") in (None, "", "champion")
+    ]
+    if remaining_pool > 0 and surplus_indices:
         weights = [
             max(Decimal("0"), _decimal(champions[index].get("improvement_points", 0)))
-            for index in active_indices
+            for index in surplus_indices
         ]
         weight_sum = sum(weights, Decimal("0"))
         if weight_sum <= 0:
-            weights = [_decimal(champions[index]["desired_alpha_percent"]) for index in active_indices]
+            weights = [_decimal(champions[index]["desired_alpha_percent"]) for index in surplus_indices]
             weight_sum = sum(weights, Decimal("0"))
         if weight_sum <= 0:
-            weights = [Decimal("1") for _ in active_indices]
-            weight_sum = Decimal(len(active_indices))
-        for index, weight in zip(active_indices, weights):
+            weights = [Decimal("1") for _ in surplus_indices]
+            weight_sum = Decimal(len(surplus_indices))
+        for index, weight in zip(surplus_indices, weights):
             paid[index] += remaining_pool * weight / weight_sum
         remaining_pool = Decimal("0")
 

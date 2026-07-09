@@ -111,7 +111,7 @@ def test_champion_replay_state_sums_prior_paid_alpha_from_snapshots():
     assert replay["remaining_alpha_percent"] == pytest.approx(78.0)
 
 
-def test_replay_tracked_champion_final_epoch_cannot_overpay_remaining_balance():
+def test_replay_tracked_champion_final_epoch_due_capped_surplus_still_flows():
     champions = [
         _champion(1, start_epoch=10, desired=5.0, remaining=1.0),
         _champion(2, start_epoch=11, desired=5.0, remaining=5.0),
@@ -119,9 +119,21 @@ def test_replay_tracked_champion_final_epoch_cannot_overpay_remaining_balance():
 
     allocation = allocate_research_lab_epoch(50, _policy(lab_cap=20.0), [], champions)
 
-    assert _paid_for_uid(allocation, 1) == pytest.approx(1.0)
-    assert _paid_for_uid(allocation, 2) == pytest.approx(5.0)
-    assert allocation["unallocated_percent"] == pytest.approx(14.0)
+    # Dues stay capped by each reward's remaining balance (1.0 and 5.0), and
+    # the 14.0 surplus splits across active champions by improvement points
+    # (equal here) instead of burning as unallocated emission.
+    assert _paid_for_uid(allocation, 1) == pytest.approx(8.0)
+    assert _paid_for_uid(allocation, 2) == pytest.approx(12.0)
+    assert allocation["unallocated_percent"] == pytest.approx(0.0)
     first = allocation["champion_allocations"][0]
     assert first["remaining_alpha_percent_before_epoch"] == pytest.approx(1.0)
     assert first["remaining_alpha_percent_after_epoch"] == pytest.approx(0.0)
+
+
+def test_active_champion_absorbs_full_lab_slice_no_burn():
+    champions = [_champion(1, start_epoch=10, desired=4.0, remaining=70.0)]
+
+    allocation = allocate_research_lab_epoch(50, _policy(lab_cap=20.0), [], champions)
+
+    assert _paid_for_uid(allocation, 1) == pytest.approx(20.0)
+    assert allocation["unallocated_percent"] == pytest.approx(0.0)

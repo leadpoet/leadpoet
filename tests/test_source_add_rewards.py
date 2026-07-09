@@ -277,7 +277,13 @@ class TestAllocationRails:
             [champion, self._source_obligation(leg1), self._source_obligation(leg2)],
         )
         total = allocation["champion_alpha_percent"]
-        assert total == pytest.approx(21.0)
+        # Dues fit inside the cap (champion 15 + leg2 5 + leg1 1 = 21); the 9%
+        # surplus flows to the genuine champion instead of burning, while the
+        # fixed-size SOURCE_ADD legs stay at their owner-set amounts.
+        assert total == pytest.approx(30.0)
+        assert allocation["unallocated_percent"] == pytest.approx(0.0)
+        by_source = {e["source_id"]: e for e in allocation["champion_allocations"]}
+        assert by_source["champion:1"]["paid_alpha_percent"] == pytest.approx(24.0)
         assert allocation["queued_champion_allocations"] == []
         # Classic champion entries carry no reward_kind — prior shape preserved.
         classic = [e for e in allocation["champion_allocations"] if e["source_id"] == "champion:1"]

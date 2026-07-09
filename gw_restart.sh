@@ -322,6 +322,30 @@ sudo mkdir -p /home/ec2-user/tee
 rm -f "$GATEWAY_ROOT/tee/tee-enclave.eif"
 sudo docker rmi tee-enclave:latest 2>/dev/null || true
 bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"
+
+# Preflight: verify the worker import graph against the freshly staged
+# attested runtime BEFORE building the enclave or relaunching anything.
+# A gateway/ tree that imports names the staged top-level packages do not
+# export would otherwise crash-loop every worker on its next respawn
+# (2026-07-09 incident: config.py imported a constant an unstaged
+# _attested_runtime/leadpoet_verifier/economics.py did not have).
+echo "Preflight: importing worker module against staged attested runtime"
+if ! python3 - <<'PREFLIGHT'
+import sys
+sys.path.insert(0, "/home/ec2-user/gateway/_attested_runtime")
+sys.path.insert(1, "/home/ec2-user")
+import importlib
+importlib.import_module("gateway.research_lab.worker_process")
+importlib.import_module("gateway.research_lab.config")
+importlib.import_module("leadpoet_verifier.economics")
+print("preflight imports OK")
+PREFLIGHT
+then
+  echo "ERROR: worker import preflight FAILED against staged runtime."
+  echo "The gateway/ code and staged top-level packages are out of sync;"
+  echo "fix the missing sync (git pull / rsync the top-level packages) and rerun."
+  exit 1
+fi
 sudo docker build --no-cache -f "$GATEWAY_ROOT/tee/Dockerfile.enclave" -t tee-enclave:latest "$GATEWAY_ROOT/"
 set +e
 sudo nitro-cli build-enclave --docker-uri tee-enclave:latest --output-file /home/ec2-user/tee/tee-enclave.eif >/dev/null 2>&1

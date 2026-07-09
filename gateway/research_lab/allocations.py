@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
+import os
 from typing import Any, Mapping
 
+from gateway.research_lab.alpha_pricing import inject_alpha_price_valuation, resolve_epoch_alpha_price_valuation
 from gateway.research_lab.bundles import contains_secret_material, sha256_json
 from gateway.research_lab.chain import resolve_hotkey_uids
 from gateway.research_lab.config import ResearchLabGatewayConfig
@@ -28,6 +30,16 @@ async def build_research_lab_allocation_bundle(
 ) -> dict[str, Any]:
     """Build a sanitized Research Lab allocation bundle for one epoch."""
     policy = config.reimbursement_policy_doc(enabled=True)
+    alpha_valuation = await resolve_epoch_alpha_price_valuation(
+        network=_bittensor_network(),
+        netuid=int(netuid),
+        epoch=int(epoch),
+        enabled=bool(config.reimbursement_dynamic_alpha_price_enabled),
+        require_live=bool(config.reimbursement_require_live_alpha_price),
+        miner_alpha_per_epoch=config.reimbursement_miner_alpha_per_epoch,
+        static_usd_per_0_1_percent_epoch=config.reimbursement_usd_per_0_1_percent_epoch,
+    )
+    policy = inject_alpha_price_valuation(policy, alpha_valuation)
     reimbursement_obligations, reimbursement_skipped = await _active_reimbursement_obligations(int(epoch), policy=policy)
     champion_obligations, champion_skipped = await _active_champion_obligations(int(epoch), netuid=int(netuid))
     allocation = allocate_research_lab_epoch(
@@ -366,6 +378,10 @@ def _decimal(value: Any) -> Decimal:
 
 def _rate_float(value: Decimal) -> float:
     return float(value.quantize(RATE_QUANT, rounding=ROUND_HALF_UP))
+
+
+def _bittensor_network() -> str:
+    return (os.getenv("BITTENSOR_NETWORK") or os.getenv("SUBTENSOR_NETWORK") or "finney").strip() or "finney"
 
 
 def _utc_now_iso() -> str:

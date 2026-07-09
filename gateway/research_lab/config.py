@@ -441,6 +441,9 @@ class ResearchLabGatewayConfig:
     reimbursement_material_spend_ratio: float = 0.80
     reimbursement_default_island: str = "generalist"
     reimbursement_usd_per_0_1_percent_epoch: float = 0.162
+    reimbursement_dynamic_alpha_price_enabled: bool = True
+    reimbursement_require_live_alpha_price: bool = False
+    reimbursement_miner_alpha_per_epoch: float = 147.6
     lab_emission_percent: float = 30.0
     fulfillment_emission_percent: float = 60.5
     fulfillment_leaderboard_emission_percent: float = 9.5
@@ -891,6 +894,18 @@ class ResearchLabGatewayConfig:
                 0.000001,
                 _float("RESEARCH_LAB_REIMBURSEMENT_USD_PER_0_1_PERCENT_EPOCH", 0.162),
             ),
+            reimbursement_dynamic_alpha_price_enabled=_truthy(
+                "RESEARCH_LAB_REIMBURSEMENT_DYNAMIC_ALPHA_PRICE_ENABLED",
+                "true",
+            ),
+            reimbursement_require_live_alpha_price=_truthy(
+                "RESEARCH_LAB_REIMBURSEMENT_REQUIRE_LIVE_ALPHA_PRICE",
+                "false",
+            ),
+            reimbursement_miner_alpha_per_epoch=max(
+                0.000001,
+                _float("RESEARCH_LAB_REIMBURSEMENT_MINER_ALPHA_PER_EPOCH", 147.6),
+            ),
             lab_emission_percent=max(0.0, _float("RESEARCH_LAB_EMISSION_PERCENT", 30.0)),
             fulfillment_emission_percent=max(0.0, _float("RESEARCH_LAB_FULFILLMENT_EMISSION_PERCENT", 60.5)),
             fulfillment_leaderboard_emission_percent=max(
@@ -1233,6 +1248,9 @@ class ResearchLabGatewayConfig:
             "material_spend_ratio": self.reimbursement_material_spend_ratio,
             "default_island": self.reimbursement_default_island,
             "usd_per_0_1_percent_epoch": self.reimbursement_usd_per_0_1_percent_epoch,
+            "dynamic_alpha_price_enabled": self.reimbursement_dynamic_alpha_price_enabled,
+            "require_live_alpha_price": self.reimbursement_require_live_alpha_price,
+            "miner_alpha_per_epoch": self.reimbursement_miner_alpha_per_epoch,
             "distinct_funded_hotkey_weight": 1,
             "paid_loop_weight": 1,
             "unique_brief_weight": 1,
@@ -1347,6 +1365,9 @@ class ResearchLabGatewayConfig:
                 "reimbursement_epochs": self.reimbursement_epochs,
                 "material_spend_ratio": self.reimbursement_material_spend_ratio,
                 "usd_per_0_1_percent_epoch": self.reimbursement_usd_per_0_1_percent_epoch,
+                "dynamic_alpha_price_enabled": self.reimbursement_dynamic_alpha_price_enabled,
+                "require_live_alpha_price": self.reimbursement_require_live_alpha_price,
+                "miner_alpha_per_epoch": self.reimbursement_miner_alpha_per_epoch,
                 "loop_start_fee_included": False,
                 "lab_emission_percent": self.lab_emission_percent,
                 "fulfillment_emission_percent": self.fulfillment_emission_percent,

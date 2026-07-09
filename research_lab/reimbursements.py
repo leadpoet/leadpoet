@@ -540,9 +540,9 @@ def verify_research_lab_reimbursements(fixture_path: Path | str = FIXTURE_PATH) 
     generalist_snapshot = IslandParticipationSnapshot.from_mapping(fixture["snapshots"]["generalist_default"])
     no_usage = ReimbursementCapUsage.from_mapping(fixture["cap_usage"]["none"])
 
-    _assert(compute_rebate_rate(low_snapshot, policy) == Decimal("1.000000"), "specialized low participation gives max rate")
-    _assert(compute_rebate_rate(high_snapshot, policy) == Decimal("0.250000"), "specialized high participation gives min rate")
-    _assert(compute_rebate_rate(generalist_snapshot, policy) == Decimal("0.500000"), "generalist starts at base rate")
+    _assert(compute_rebate_rate(low_snapshot, policy) == Decimal("1.000000"), "low participation targets full eligible compute spend")
+    _assert(compute_rebate_rate(high_snapshot, policy) == Decimal("1.000000"), "high participation still targets full eligible compute spend")
+    _assert(compute_rebate_rate(generalist_snapshot, policy) == Decimal("1.000000"), "generalist default targets full eligible compute spend")
 
     low_run = ResearchRunCostRecord.from_mapping(fixture["runs"]["eligible_low"])
     low_award = compute_reimbursement_award(low_run, low_snapshot, policy, no_usage)
@@ -573,7 +573,7 @@ def verify_research_lab_reimbursements(fixture_path: Path | str = FIXTURE_PATH) 
         policy,
         no_usage,
     )
-    _assert(high_award.target_reimbursement_microusd == fixture["expectations"]["high_target_microusd"], "high target matches min rate")
+    _assert(high_award.target_reimbursement_microusd == fixture["expectations"]["high_target_microusd"], "high target matches full eligible spend")
 
     generalist_award = compute_reimbursement_award(
         fixture["runs"]["generalist_five_dollar"],
@@ -584,7 +584,7 @@ def verify_research_lab_reimbursements(fixture_path: Path | str = FIXTURE_PATH) 
     _assert(
         generalist_award.target_reimbursement_microusd
         == fixture["expectations"]["generalist_five_dollar_target_microusd"],
-        "generalist default reimburses at base rate",
+        "generalist default targets full eligible spend",
     )
 
     low_actual_award = compute_reimbursement_award(

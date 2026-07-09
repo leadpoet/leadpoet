@@ -2,8 +2,8 @@
   "policy": {
     "policy_id": "alpha-reimbursement-local-v1",
     "enabled": true,
-    "min_rebate_rate": 0.25,
-    "base_rebate_rate": 0.5,
+    "min_rebate_rate": 1.0,
+    "base_rebate_rate": 1.0,
     "max_rebate_rate": 1.0,
     "high_participation_target": 10,
     "reimbursement_epochs": 30,
@@ -22,8 +22,8 @@
   "disabled_policy": {
     "policy_id": "alpha-reimbursement-disabled-local-v1",
     "enabled": false,
-    "min_rebate_rate": 0.25,
-    "base_rebate_rate": 0.5,
+    "min_rebate_rate": 1.0,
+    "base_rebate_rate": 1.0,
     "max_rebate_rate": 1.0,
     "high_participation_target": 10,
     "reimbursement_epochs": 30,
@@ -272,8 +272,8 @@
   "expectations": {
     "funded_budget_cost_microusd": 10000000,
     "low_target_microusd": 10000000,
-    "high_target_microusd": 2500000,
-    "generalist_five_dollar_target_microusd": 2500000,
+    "high_target_microusd": 10000000,
+    "generalist_five_dollar_target_microusd": 5000000,
     "low_actual_cost_basis_microusd": 2000000,
     "per_run_cap_target_microusd": 50000000,
     "hotkey_cap_target_microusd": 5000000,

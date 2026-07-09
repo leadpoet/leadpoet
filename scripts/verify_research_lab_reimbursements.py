@@ -44,8 +44,8 @@ def _run_simulations() -> None:
     policy = {
         "policy_id": "alpha-reimbursement-simulation-v1",
         "enabled": True,
-        "min_rebate_rate": 0.25,
-        "base_rebate_rate": 0.5,
+        "min_rebate_rate": 1.0,
+        "base_rebate_rate": 1.0,
         "max_rebate_rate": 1.0,
         "high_participation_target": 10,
         "reimbursement_epochs": 30,
@@ -64,12 +64,12 @@ def _run_simulations() -> None:
     quiet_specialized = _snapshot("evidence-routing", 0)
 
     cases = [
-        ("ten_generalist_material", _run("run-10", "generalist", 10, 8), generalist, 5_000_000),
-        ("five_generalist_material", _run("run-5", "generalist", 5, 4), generalist, 2_500_000),
-        ("ten_generalist_low_actual", _run("run-2", "generalist", 10, 2), generalist, 1_000_000),
+        ("ten_generalist_material", _run("run-10", "generalist", 10, 8), generalist, 10_000_000),
+        ("five_generalist_material", _run("run-5", "generalist", 5, 4), generalist, 5_000_000),
+        ("ten_generalist_low_actual", _run("run-2", "generalist", 10, 2), generalist, 2_000_000),
         ("ten_generalist_zero_actual", _run("run-0", "generalist", 10, 0), generalist, 0),
         ("ten_specialized_quiet", _run("run-special", "evidence-routing", 10, 8), quiet_specialized, 10_000_000),
-        ("ten_generalist_crowded", _run("run-crowded", "generalist", 10, 8), crowded, 2_500_000),
+        ("ten_generalist_crowded", _run("run-crowded", "generalist", 10, 8), crowded, 10_000_000),
     ]
     schedules = []
     for name, run, snapshot, expected_target in cases:
@@ -114,7 +114,7 @@ def _run_simulations() -> None:
         policy,
         no_usage,
     )
-    if int(failed_partial.target_reimbursement_microusd) != 1_000_000:
+    if int(failed_partial.target_reimbursement_microusd) != 2_000_000:
         raise AssertionError("failed partial-spend run should reimburse from actual spend below material threshold")
 
     failed_zero = compute_reimbursement_award(

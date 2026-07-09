@@ -429,8 +429,8 @@ class ResearchLabGatewayConfig:
     loop_alignment_judge_max_tokens: int = 1600
     loop_alignment_judge_temperature: float = 0.0
     reimbursement_policy_id: str = "alpha-reimbursement-production-v1"
-    reimbursement_min_rebate_rate: float = 0.25
-    reimbursement_base_rebate_rate: float = 0.50
+    reimbursement_min_rebate_rate: float = 1.0
+    reimbursement_base_rebate_rate: float = 1.0
     reimbursement_max_rebate_rate: float = 1.0
     reimbursement_high_participation_target: float = 10.0
     reimbursement_epochs: int = 20
@@ -855,8 +855,8 @@ class ResearchLabGatewayConfig:
                 "RESEARCH_LAB_REIMBURSEMENT_POLICY_ID",
                 "alpha-reimbursement-production-v1",
             ),
-            reimbursement_min_rebate_rate=max(0.0, _float("RESEARCH_LAB_REIMBURSEMENT_MIN_REBATE_RATE", 0.25)),
-            reimbursement_base_rebate_rate=max(0.0, _float("RESEARCH_LAB_REIMBURSEMENT_BASE_REBATE_RATE", 0.50)),
+            reimbursement_min_rebate_rate=max(0.0, _float("RESEARCH_LAB_REIMBURSEMENT_MIN_REBATE_RATE", 1.0)),
+            reimbursement_base_rebate_rate=max(0.0, _float("RESEARCH_LAB_REIMBURSEMENT_BASE_REBATE_RATE", 1.0)),
             reimbursement_max_rebate_rate=max(0.0, _float("RESEARCH_LAB_REIMBURSEMENT_MAX_REBATE_RATE", 1.0)),
             reimbursement_high_participation_target=max(
                 0.01,

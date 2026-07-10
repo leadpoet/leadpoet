@@ -393,6 +393,9 @@ class ResearchLabGatewayConfig:
     scoring_health_max_candidate_zero_company_rate: float = 0.50
     scoring_health_max_provider_error_rate: float = 0.10
     scoring_health_max_timeout_rate: float = 0.10
+    # Additive execution telemetry for both daily baselines and authoritative
+    # candidate scoring. Disabled until migration 83 is applied.
+    scoring_telemetry_v2_enabled: bool = False
     private_baseline_rebenchmark_enabled: bool = True
     private_baseline_concurrency: int = 1
     private_baseline_retry_concurrency: int = 2
@@ -771,6 +774,10 @@ class ResearchLabGatewayConfig:
             scoring_health_max_timeout_rate=min(
                 1.0,
                 max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_TIMEOUT_RATE", 0.10)),
+            ),
+            scoring_telemetry_v2_enabled=_truthy(
+                "RESEARCH_LAB_SCORING_TELEMETRY_V2",
+                "false",
             ),
             private_baseline_rebenchmark_enabled=_truthy(
                 "RESEARCH_LAB_PRIVATE_BASELINE_REBENCHMARK_ENABLED",
@@ -1565,6 +1572,7 @@ class ResearchLabGatewayConfig:
                     "max_provider_error_rate": self.scoring_health_max_provider_error_rate,
                     "max_timeout_rate": self.scoring_health_max_timeout_rate,
                 },
+                "scoring_telemetry_v2_enabled": self.scoring_telemetry_v2_enabled,
                 "private_baseline_rebenchmark_enabled": self.private_baseline_rebenchmark_enabled,
                 "private_baseline_concurrency": self.private_baseline_concurrency,
                 "private_baseline_retry_concurrency": self.private_baseline_retry_concurrency,

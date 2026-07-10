@@ -88,6 +88,18 @@ from gateway.research_lab.public_benchmarks import (
     build_public_benchmark_report,
     sanitize_benchmark_item_summary,
 )
+from gateway.research_lab.scoring_telemetry import (
+    ScoringTelemetrySession,
+    allocate_scoring_run,
+    checkpoint_telemetry_index,
+    emit_icp_event,
+    emit_run_event,
+    load_scoring_session,
+    opaque_checkpoint_ref,
+    private_baseline_benchmark_id,
+    result_metrics,
+    telemetry_enabled as scoring_telemetry_enabled,
+)
 from gateway.research_lab.trajectory_projector import execution_trace_id_for_node
 from gateway.research_lab.store import (
     canonical_hash,
@@ -948,7 +960,8 @@ def _store_scoring_progress(
     window_hash: str,
     candidate_artifact_hash: str,
     rows: list[dict[str, Any]],
-) -> None:
+    telemetry_index: Mapping[str, Any] | None = None,
+) -> str:
     import boto3  # type: ignore
 
     doc = {
@@ -960,12 +973,17 @@ def _store_scoring_progress(
         "completed_icp_count": len(rows),
         "per_icp_results": rows,
     }
+    if telemetry_index:
+        # Observation-only top-level index. Never copied into per_icp_results
+        # or the signed score bundle.
+        doc["telemetry_index"] = dict(telemetry_index)
     boto3.client("s3").put_object(
         Bucket=bucket,
         Key=object_key,
         Body=json.dumps(doc, sort_keys=True, default=str).encode("utf-8"),
         ContentType="application/json",
     )
+    return canonical_hash(doc)
 
 
 def _baseline_progress_s3_location(
@@ -1080,7 +1098,8 @@ def _store_baseline_scoring_progress(
     window_hash: str,
     private_model_artifact_hash: str,
     rows: list[dict[str, Any]],
-) -> None:
+    telemetry_index: Mapping[str, Any] | None = None,
+) -> str:
     import boto3  # type: ignore
 
     safe_rows = [
@@ -1097,12 +1116,15 @@ def _store_baseline_scoring_progress(
         "completed_icp_count": len(safe_rows),
         "per_icp_results": safe_rows,
     }
+    if telemetry_index:
+        doc["telemetry_index"] = dict(telemetry_index)
     boto3.client("s3").put_object(
         Bucket=bucket,
         Key=object_key,
         Body=json.dumps(doc, sort_keys=True, default=str).encode("utf-8"),
         ContentType="application/json",
     )
+    return canonical_hash(doc)
 
 
 # --- §5.4 scorer-judge traces + baseline in-container trace collection ------
@@ -2143,7 +2165,20 @@ async def _persist_provider_cost_events(
     candidate_id: str = "",
     benchmark_date: str = "",
     rolling_window_hash: str = "",
-) -> None:
+    scoring_id: str = "",
+    scoring_run_id: str = "",
+    icp_execution_id: str = "",
+) -> bool:
+    all_persisted = True
+    telemetry_ids = (str(scoring_id or ""), str(scoring_run_id or ""), str(icp_execution_id or ""))
+    if any(telemetry_ids) and not all(telemetry_ids):
+        logger.warning(
+            "research_lab_provider_cost_telemetry_ids_incomplete scoring_id=%s scoring_run_id=%s icp_execution_id=%s",
+            compact_ref(telemetry_ids[0]),
+            compact_ref(telemetry_ids[1]),
+            compact_ref(telemetry_ids[2]),
+        )
+        telemetry_ids = ("", "", "")
     for entry in entries:
         event = cost_event_from_trace_entry(entry)
         if not event:
@@ -2158,6 +2193,14 @@ async def _persist_provider_cost_events(
             "runner_role": str(entry.get("runner_role") or runner_role or "unknown"),
             "trace_seq": entry.get("seq"),
         }
+        if all(telemetry_ids):
+            anchored_payload.update(
+                {
+                    "scoring_id": telemetry_ids[0],
+                    "scoring_run_id": telemetry_ids[1],
+                    "icp_execution_id": telemetry_ids[2],
+                }
+            )
         anchored_hash = sha256_json(anchored_payload)
         row = {
             "event_id": deterministic_uuid("provider_cost_event", anchored_hash),
@@ -2192,6 +2235,14 @@ async def _persist_provider_cost_events(
             },
             "anchored_hash": anchored_hash,
         }
+        if all(telemetry_ids):
+            row.update(
+                {
+                    "scoring_id": telemetry_ids[0],
+                    "scoring_run_id": telemetry_ids[1],
+                    "icp_execution_id": telemetry_ids[2],
+                }
+            )
         try:
             await insert_row("research_lab_provider_cost_events", row)
         except Exception as exc:  # noqa: BLE001 - telemetry must not affect scoring
@@ -2210,6 +2261,8 @@ async def _persist_provider_cost_events(
                 provider,
                 exc_info=True,
             )
+            all_persisted = False
+    return all_persisted
 
 
 def _baseline_max_unresolved_icps() -> int:
@@ -3168,7 +3221,10 @@ class ResearchLabGatewayScoringWorker:
             "private_items": private_items,
             "items_by_ref": {_ref(it): it for it in items},
             "baseline_public_score": float(gate.get("baseline_public_score") or 0.0),
-            "trace_sink": self._candidate_incontainer_trace_sink(candidate_id),
+            "trace_sink": self._candidate_incontainer_trace_sink(
+                candidate_id,
+                persist_costs=not scoring_telemetry_enabled(self.config),
+            ),
         }
 
     async def _queue_assemble_candidate(
@@ -3223,6 +3279,8 @@ class ResearchLabGatewayScoringWorker:
                 score_bundle=score_bundle,
             )
         )
+        if isinstance(ctx, dict):
+            ctx["score_bundle_id"] = str(bundle["score_bundle_id"])
         await self._create_scored_evaluation_event(
             candidate=candidate,
             candidate_id=candidate_id,
@@ -3246,6 +3304,18 @@ class ResearchLabGatewayScoringWorker:
             candidate_id=candidate_id,
             run_id=str(candidate.get("run_id") or ""),
             ticket_id=str(candidate.get("ticket_id") or ""),
+            scoring_id=(
+                ctx["telemetry_session"].run.scoring_id
+                if isinstance(ctx.get("telemetry_session"), ScoringTelemetrySession)
+                and ctx["telemetry_session"].run is not None
+                else None
+            ),
+            scoring_run_id=(
+                ctx["telemetry_session"].run.scoring_run_id
+                if isinstance(ctx.get("telemetry_session"), ScoringTelemetrySession)
+                and ctx["telemetry_session"].run is not None
+                else None
+            ),
         )
 
     async def _run_global_icp_queue_pass(self) -> list[str]:
@@ -3258,9 +3328,24 @@ class ResearchLabGatewayScoringWorker:
         """
         ctx_cache: dict[str, dict[str, Any]] = {}
 
-        async def _ctx(candidate_id: str) -> dict[str, Any] | None:
-            if candidate_id in ctx_cache:
-                return ctx_cache[candidate_id]
+        async def _ctx(
+            candidate_id: str,
+            queue_generation_id: str,
+            scoring_run_id: str = "",
+        ) -> dict[str, Any] | None:
+            cache_key = queue_generation_id or candidate_id
+            if cache_key in ctx_cache:
+                return ctx_cache[cache_key]
+            if queue_generation_id and (not candidate_id or not scoring_run_id):
+                generation_row = await select_one(
+                    global_icp_queue.CANDIDATE_TABLE,
+                    filters=(("queue_generation_id", queue_generation_id),),
+                )
+                if generation_row is not None:
+                    candidate_id = candidate_id or str(generation_row.get("candidate_id") or "")
+                    scoring_run_id = scoring_run_id or str(
+                        generation_row.get("scoring_run_id") or ""
+                    )
             row = await select_one(
                 "research_lab_candidate_evaluation_current",
                 filters=(("candidate_id", candidate_id),),
@@ -3268,7 +3353,17 @@ class ResearchLabGatewayScoringWorker:
             if row is None:
                 return None
             ctx = await self._build_queue_candidate_context(dict(row))
-            ctx_cache[candidate_id] = ctx
+            telemetry_session = await load_scoring_session(scoring_run_id)
+            ctx["telemetry_session"] = telemetry_session
+            ctx["queue_generation_id"] = queue_generation_id
+            if scoring_telemetry_enabled(self.config) and telemetry_session is None:
+                # Allocation/hydration failed: preserve legacy provider-cost
+                # capture rather than silently dropping spend rows.
+                ctx["trace_sink"] = self._candidate_incontainer_trace_sink(
+                    candidate_id,
+                    persist_costs=True,
+                )
+            ctx_cache[cache_key] = ctx
             return ctx
 
         # 1. Enqueue queued candidates not already in the job queue.
@@ -3281,8 +3376,6 @@ class ResearchLabGatewayScoringWorker:
         )
         for offset, row in enumerate(queued):
             cid = str(row.get("candidate_id") or "")
-            if await select_one(global_icp_queue.CANDIDATE_TABLE, filters=(("candidate_id", cid),)) is not None:
-                continue
             try:
                 ctx = await self._build_queue_candidate_context(dict(row))
             except Exception:
@@ -3292,8 +3385,62 @@ class ResearchLabGatewayScoringWorker:
                     exc_info=True,
                 )
                 continue
-            ctx_cache[cid] = ctx
-            enqueued = await global_icp_queue.enqueue_candidate(
+            active_generation = await select_one(
+                global_icp_queue.CANDIDATE_TABLE,
+                filters=(
+                    ("candidate_id", cid),
+                    ("window_hash", ctx["window"].window_hash),
+                    ("assembly_status", "in", ("pending", "assembling")),
+                ),
+            )
+            if active_generation is not None:
+                # Re-fill idempotently so a transient crash between the
+                # generation row and its job inserts cannot wedge this
+                # candidate forever.
+                await global_icp_queue.enqueue_candidate(
+                    candidate_id=cid,
+                    window_hash=ctx["window"].window_hash,
+                    public_items=ctx["public_items"],
+                    private_items=ctx["private_items"],
+                    baseline_public_score=ctx["baseline_public_score"],
+                    worker_ref=self.worker_ref,
+                    seq_base=offset * 10_000,
+                    scoring_run_id=str(active_generation.get("scoring_run_id") or ""),
+                )
+                continue
+            telemetry_session: ScoringTelemetrySession | None = None
+            if scoring_telemetry_enabled(self.config):
+                telemetry_run = await allocate_scoring_run(
+                    identity_doc={
+                        "run_type": "candidate_scoring",
+                        "candidate_id": cid,
+                        "source_run_id": str(row.get("run_id") or ""),
+                        "rolling_window_hash": ctx["window"].window_hash,
+                        "reference_artifact_hash": ctx["artifact"].model_artifact_hash,
+                        "candidate_artifact_hash": ctx["candidate_artifact"].model_artifact_hash,
+                        "evaluation_epoch": int(ctx["run_context"].get("evaluation_epoch") or 0),
+                        "scheduler_type": "global_icp_queue",
+                    },
+                    run_type="candidate_scoring",
+                    worker_ref=self.worker_ref,
+                    expected_icp_count=len(ctx["public_items"]) + len(ctx["private_items"]),
+                    scheduler_type="global_icp_queue",
+                    candidate_id=cid,
+                    source_run_id=str(row.get("run_id") or ""),
+                    ticket_id=str(row.get("ticket_id") or ""),
+                    rolling_window_hash=ctx["window"].window_hash,
+                    reference_artifact_hash=ctx["artifact"].model_artifact_hash,
+                    reference_manifest_hash=ctx["artifact"].manifest_hash,
+                    candidate_artifact_hash=ctx["candidate_artifact"].model_artifact_hash,
+                    candidate_manifest_hash=ctx["candidate_artifact"].manifest_hash,
+                    baseline_benchmark_bundle_id=str(
+                        ctx["gate"].get("baseline_benchmark_bundle_id") or ""
+                    ),
+                    evaluation_epoch=int(ctx["run_context"].get("evaluation_epoch") or 0),
+                )
+                if telemetry_run is not None:
+                    telemetry_session = ScoringTelemetrySession(telemetry_run)
+            queue_generation_id = await global_icp_queue.enqueue_candidate(
                 candidate_id=cid,
                 window_hash=ctx["window"].window_hash,
                 public_items=ctx["public_items"],
@@ -3301,8 +3448,72 @@ class ResearchLabGatewayScoringWorker:
                 baseline_public_score=ctx["baseline_public_score"],
                 worker_ref=self.worker_ref,
                 seq_base=offset * 10_000,
+                scoring_run_id=(
+                    telemetry_session.run.scoring_run_id
+                    if telemetry_session is not None and telemetry_session.run is not None
+                    else ""
+                ),
             )
-            if enqueued:
+            if queue_generation_id:
+                ctx["telemetry_session"] = telemetry_session
+                ctx["queue_generation_id"] = queue_generation_id
+                # The context is built before telemetry allocation. If that
+                # best-effort allocation failed, restore the legacy trace sink
+                # so provider spend is still persisted for the fresh queue
+                # generation (the cache-hit hydration path does this too).
+                if telemetry_session is None:
+                    ctx["trace_sink"] = self._candidate_incontainer_trace_sink(
+                        cid,
+                        persist_costs=True,
+                    )
+                ctx_cache[queue_generation_id] = ctx
+                if telemetry_session is not None:
+                    jobs = await select_many(
+                        global_icp_queue.JOB_TABLE,
+                        filters=(("queue_generation_id", queue_generation_id),),
+                        order_by=(("phase", False), ("item_index", False)),
+                        limit=1000,
+                    )
+                    for job in jobs:
+                        await telemetry_session.plan(
+                            icp_ref=str(job.get("icp_ref") or ""),
+                            icp_hash=str(
+                                ctx["items_by_ref"]
+                                .get(str(job.get("icp_ref") or ""), {})
+                                .get("icp_hash")
+                                or ""
+                            ),
+                            icp_ordinal=int(job.get("item_index") or 0),
+                            model_role="candidate",
+                            phase=str(job.get("phase") or "all"),
+                            held=str(job.get("phase") or "") == "private",
+                            source_job_id=str(job.get("job_id") or ""),
+                        )
+                    await emit_run_event(telemetry_session.run, "assigned")
+                    await emit_run_event(telemetry_session.run, "started")
+                await create_scoring_dispatch_event(
+                    dispatch_type="candidate_scoring",
+                    dispatch_status="assigned",
+                    worker_ref=self.worker_ref,
+                    proxy_ref_hash=self.proxy_ref_hash,
+                    candidate_id=cid,
+                    run_id=str(row.get("run_id") or ""),
+                    ticket_id=str(row.get("ticket_id") or ""),
+                    scoring_id=(
+                        telemetry_session.run.scoring_id
+                        if telemetry_session is not None and telemetry_session.run is not None
+                        else None
+                    ),
+                    scoring_run_id=(
+                        telemetry_session.run.scoring_run_id
+                        if telemetry_session is not None and telemetry_session.run is not None
+                        else None
+                    ),
+                    event_doc={
+                        "queue_generation_id": queue_generation_id,
+                        "rolling_window_hash": ctx["window"].window_hash,
+                    },
+                )
                 await create_candidate_evaluation_event(
                     candidate_id=cid,
                     run_id=str(row.get("run_id") or ""),
@@ -3311,18 +3522,88 @@ class ResearchLabGatewayScoringWorker:
                     candidate_status="evaluating",
                     evaluator_ref=self.worker_ref,
                     reason="global_icp_queue_enqueued",
-                    event_doc={"worker_ref": self.worker_ref, "scored_via": "global_icp_queue"},
+                    event_doc={
+                        "worker_ref": self.worker_ref,
+                        "scored_via": "global_icp_queue",
+                        "queue_generation_id": queue_generation_id,
+                    },
+                )
+            elif telemetry_session is not None:
+                await emit_run_event(
+                    telemetry_session.run,
+                    "cancelled",
+                    failure_category="queue_generation_lost",
                 )
 
         assembled: list[str] = []
+        queue_heartbeat_tasks: dict[str, tuple[asyncio.Event, asyncio.Task[Any]]] = {}
 
         async def score_icp(job: Mapping[str, Any]) -> dict[str, Any]:
-            ctx = await _ctx(str(job.get("candidate_id") or ""))
+            candidate_id = str(job.get("candidate_id") or "")
+            queue_generation_id = str(job.get("queue_generation_id") or "")
+            ctx = await _ctx(
+                candidate_id,
+                queue_generation_id,
+                str(job.get("scoring_run_id") or ""),
+            )
             if ctx is None:
                 return {}
             item = ctx["items_by_ref"].get(str(job.get("icp_ref") or ""))
             if item is None:
                 return {}
+            telemetry_session = ctx.get("telemetry_session")
+            if not isinstance(telemetry_session, ScoringTelemetrySession):
+                telemetry_session = None
+            queue_attempt_base = max(0, int(job.get("attempt_count") or 1) - 1) * 100
+
+            async def _queue_lifecycle(
+                action: str,
+                payload: Mapping[str, Any],
+            ) -> Mapping[str, Any] | None:
+                if telemetry_session is None:
+                    return None
+                shifted = {
+                    **dict(payload),
+                    "icp_ref": str(job.get("icp_ref") or ""),
+                    "icp_hash": str(item.get("icp_hash") or ""),
+                    "icp_ordinal": int(job.get("item_index") or 0),
+                    "model_role": "candidate",
+                    "phase": str(job.get("phase") or "all"),
+                    "source_job_id": str(job.get("job_id") or ""),
+                    "retry_round": queue_attempt_base
+                    + max(0, int(payload.get("retry_round") or 0)),
+                }
+                return await telemetry_session.lifecycle(action, shifted)
+
+            async def _queue_attempt_cost_sink(
+                icp_ref: str,
+                entries: list[dict[str, Any]],
+                execution_context: Mapping[str, Any],
+            ) -> None:
+                persisted = await _persist_provider_cost_events(
+                    entries=entries,
+                    run_type="candidate_scoring",
+                    icp_ref=icp_ref,
+                    icp_hash=str(item.get("icp_hash") or ""),
+                    runner_role="candidate",
+                    candidate_id=candidate_id,
+                    rolling_window_hash=str(job.get("window_hash") or ""),
+                    scoring_id=str(execution_context.get("scoring_id") or ""),
+                    scoring_run_id=str(execution_context.get("scoring_run_id") or ""),
+                    icp_execution_id=str(execution_context.get("icp_execution_id") or ""),
+                )
+                if not persisted and telemetry_session is not None:
+                    telemetry_session.degraded = True
+
+            if telemetry_session is not None:
+                heartbeat_stop = asyncio.Event()
+                heartbeat_task = asyncio.create_task(
+                    telemetry_session.heartbeat_loop(heartbeat_stop)
+                )
+                queue_heartbeat_tasks[str(job.get("job_id") or "")] = (
+                    heartbeat_stop,
+                    heartbeat_task,
+                )
             results = await score_private_model_pair_items(
                 benchmark_items=[item],
                 base_runner=None,
@@ -3333,14 +3614,146 @@ class ResearchLabGatewayScoringWorker:
                 runtime_patch=None,
                 parent_freshness_check=None,
                 trace_sink=ctx["trace_sink"],
+                scoring_telemetry_hook=_queue_lifecycle if telemetry_session is not None else None,
+                attempt_cost_sink=(
+                    _queue_attempt_cost_sink if telemetry_session is not None else None
+                ),
             )
             return dict(results[0]) if results else {}
+
+        async def _job_completed(
+            job: Mapping[str, Any],
+            result_doc: Mapping[str, Any],
+            failed: bool,
+            committed: bool,
+            error: BaseException | None,
+        ) -> None:
+            heartbeat = queue_heartbeat_tasks.pop(str(job.get("job_id") or ""), None)
+            if heartbeat is not None:
+                heartbeat[0].set()
+                await heartbeat[1]
+            ctx = await _ctx(
+                str(job.get("candidate_id") or ""),
+                str(job.get("queue_generation_id") or ""),
+                str(job.get("scoring_run_id") or ""),
+            )
+            telemetry_session = ctx.get("telemetry_session") if ctx is not None else None
+            if not isinstance(telemetry_session, ScoringTelemetrySession):
+                return
+            execution = telemetry_session.execution_for(
+                icp_ref=str(job.get("icp_ref") or ""),
+                model_role="candidate",
+            )
+            if not committed:
+                await emit_icp_event(
+                    execution,
+                    "cancelled",
+                    failure_category="queue_result_cas_lost",
+                    error=error,
+                )
+                if execution is not None:
+                    telemetry_session.terminal_execution_ids.add(execution.icp_execution_id)
+                return
+            if failed:
+                await emit_icp_event(
+                    execution,
+                    "failed",
+                    retryable=False,
+                    failure_category="queue_job_failed",
+                    error=error,
+                )
+                if execution is not None:
+                    telemetry_session.terminal_execution_ids.add(execution.icp_execution_id)
+                return
+            await telemetry_session.complete_result(
+                result_doc,
+                model_role="candidate",
+                checkpoint_ref=opaque_checkpoint_ref(
+                    str(job.get("queue_generation_id") or ""),
+                    str(job.get("job_id") or ""),
+                ),
+                checkpoint_hash=canonical_hash(dict(result_doc)),
+                checkpoint_persisted=True,
+                outcome="global_queue_job_done",
+            )
+
+        async def _stale_job_recovered(job: Mapping[str, Any]) -> None:
+            telemetry_session = await load_scoring_session(str(job.get("scoring_run_id") or ""))
+            if telemetry_session is None:
+                return
+            execution = telemetry_session.execution_for(
+                icp_ref=str(job.get("icp_ref") or ""),
+                model_role="candidate",
+            )
+            await emit_icp_event(
+                execution,
+                "cancelled",
+                failure_category="queue_lease_expired",
+            )
+
+        async def _gate_decided(queue_generation_id: str, decision: str) -> None:
+            ctx = await _ctx("", queue_generation_id)
+            if ctx is None:
+                candidate_row = await select_one(
+                    global_icp_queue.CANDIDATE_TABLE,
+                    filters=(("queue_generation_id", queue_generation_id),),
+                )
+                if candidate_row is None:
+                    return
+                ctx = await _ctx(
+                    str(candidate_row.get("candidate_id") or ""),
+                    queue_generation_id,
+                    str(candidate_row.get("scoring_run_id") or ""),
+                )
+            telemetry_session = ctx.get("telemetry_session") if ctx is not None else None
+            if not isinstance(telemetry_session, ScoringTelemetrySession):
+                return
+            private_jobs = await select_many(
+                global_icp_queue.JOB_TABLE,
+                filters=(("queue_generation_id", queue_generation_id), ("phase", "private")),
+                limit=1000,
+            )
+            for private_job in private_jobs:
+                if decision == "rejected":
+                    await telemetry_session.skip_unstarted(
+                        icp_ref=str(private_job.get("icp_ref") or ""),
+                        model_role="candidate",
+                        failure_category="public_gate_rejected",
+                    )
+                else:
+                    await emit_icp_event(
+                        telemetry_session.execution_for(
+                            icp_ref=str(private_job.get("icp_ref") or ""),
+                            model_role="candidate",
+                            retry_round=0,
+                        ),
+                        "queued",
+                        event_ordinal=1,
+                        event_doc={"released_from_hold": True},
+                    )
+
+        async def _candidate_assembled(queue_generation_id: str, candidate_id: str) -> None:
+            ctx = await _ctx(candidate_id, queue_generation_id)
+            telemetry_session = ctx.get("telemetry_session") if ctx is not None else None
+            if not isinstance(telemetry_session, ScoringTelemetrySession):
+                return
+            await emit_run_event(
+                telemetry_session.run,
+                "completed",
+                score_bundle_id=str(ctx.get("score_bundle_id") or ""),
+                telemetry_degraded=telemetry_session.degraded,
+                event_doc={"queue_generation_id": queue_generation_id},
+            )
 
         def compute_public_score(public_docs: Sequence[Mapping[str, Any]]) -> float:
             return float(_queue_benchmark_style_score(public_docs, "candidate_company_scores"))
 
-        async def assemble(candidate_id: str, docs: Mapping[str, Any]) -> None:
-            ctx = await _ctx(candidate_id)
+        async def assemble(
+            queue_generation_id: str,
+            candidate_id: str,
+            docs: Mapping[str, Any],
+        ) -> None:
+            ctx = await _ctx(candidate_id, queue_generation_id)
             if ctx is None:
                 raise RuntimeError("assemble context missing")
             await self._queue_assemble_candidate(candidate_id, docs, ctx)
@@ -3352,6 +3765,10 @@ class ResearchLabGatewayScoringWorker:
             score_icp=score_icp,
             compute_public_score=compute_public_score,
             assemble_candidate=assemble,
+            job_completed=_job_completed,
+            stale_job_recovered=_stale_job_recovered,
+            gate_decided=_gate_decided,
+            candidate_assembled=_candidate_assembled,
         )
         logger.info(
             "research_lab_global_icp_queue_pass worker_ref=%s counters=%s assembled=%s",
@@ -3976,6 +4393,8 @@ class ResearchLabGatewayScoringWorker:
         start = time.time()
         scored_event_written = False
         scored_score_bundle_id = ""
+        telemetry_session: ScoringTelemetrySession | None = None
+        assigned_dispatch_event: Mapping[str, Any] = {}
         try:
             evaluation_epoch = await self._resolve_evaluation_epoch()
             stale_result = await self._maybe_rebase_stale_candidate_before_scoring(
@@ -4024,15 +4443,6 @@ class ResearchLabGatewayScoringWorker:
                     )
                 )
                 return
-            assigned_dispatch_event = await create_scoring_dispatch_event(
-                dispatch_type="candidate_scoring",
-                dispatch_status="assigned",
-                worker_ref=self.worker_ref,
-                proxy_ref_hash=self.proxy_ref_hash,
-                candidate_id=candidate_id,
-                run_id=str(candidate["run_id"]),
-                ticket_id=str(candidate["ticket_id"]),
-            )
             logger.info(
                 format_worker_block(
                     "RESEARCH LAB CANDIDATE SCORING STARTED",
@@ -4077,12 +4487,107 @@ class ResearchLabGatewayScoringWorker:
                 # landed but its `scored` event write failed; reuse the bundle
                 # instead of producing a divergent second evaluation.
                 scored_score_bundle_id = str(reused_bundle_row["score_bundle_id"])
+                reused_doc = (
+                    reused_bundle_row.get("score_bundle_doc")
+                    if isinstance(reused_bundle_row.get("score_bundle_doc"), Mapping)
+                    else {}
+                )
+                reused_window_hash = str(
+                    reused_doc.get("icp_set_hash")
+                    or reused_bundle_row.get("icp_set_hash")
+                    or ""
+                )
+                if scoring_telemetry_enabled(self.config):
+                    reused_results = (
+                        list(reused_doc.get("per_icp_results") or ())
+                        if isinstance(reused_doc.get("per_icp_results"), list)
+                        else []
+                    )
+                    reused_run = await allocate_scoring_run(
+                        identity_doc={
+                            "run_type": "candidate_scoring",
+                            "candidate_id": candidate_id,
+                            "source_run_id": str(candidate.get("run_id") or ""),
+                            "rolling_window_hash": reused_window_hash,
+                            "reference_artifact_hash": artifact.model_artifact_hash,
+                            "candidate_artifact_hash": candidate_artifact.model_artifact_hash,
+                            "evaluation_epoch": evaluation_epoch,
+                            "scoring_version": str(reused_doc.get("scoring_version") or ""),
+                            "evaluator_version": str(reused_doc.get("evaluator_version") or ""),
+                        },
+                        run_type="candidate_scoring",
+                        worker_ref=self.worker_ref,
+                        expected_icp_count=len(reused_results),
+                        scheduler_type="serial",
+                        candidate_id=candidate_id,
+                        source_run_id=str(candidate.get("run_id") or ""),
+                        ticket_id=str(candidate.get("ticket_id") or ""),
+                        rolling_window_hash=reused_window_hash,
+                        reference_artifact_hash=artifact.model_artifact_hash,
+                        reference_manifest_hash=artifact.manifest_hash,
+                        candidate_artifact_hash=candidate_artifact.model_artifact_hash,
+                        candidate_manifest_hash=candidate_artifact.manifest_hash,
+                        source_score_bundle_id=scored_score_bundle_id,
+                        evaluation_epoch=evaluation_epoch,
+                    )
+                    telemetry_session = ScoringTelemetrySession(reused_run)
+                    await emit_run_event(reused_run, "assigned")
+                    await emit_run_event(reused_run, "started")
+                    for item_index, result_row in enumerate(reused_results):
+                        if not isinstance(result_row, Mapping):
+                            continue
+                        item_ref = str(
+                            result_row.get("icp_ref") or result_row.get("icp_hash") or ""
+                        )
+                        await telemetry_session.plan(
+                            icp_ref=item_ref,
+                            icp_hash=str(result_row.get("icp_hash") or ""),
+                            icp_ordinal=item_index,
+                            model_role="candidate",
+                            execution_kind="checkpoint_reuse",
+                        )
+                        await telemetry_session.complete_result(
+                            result_row,
+                            model_role="candidate",
+                            checkpoint_ref=opaque_checkpoint_ref(
+                                "score_bundle",
+                                scored_score_bundle_id,
+                            ),
+                            checkpoint_hash=str(reused_doc.get("score_bundle_hash") or ""),
+                            checkpoint_persisted=True,
+                            outcome="reused_score_bundle",
+                        )
+                reuse_dispatch_ids = (
+                    telemetry_session.run.linked_ids()
+                    if telemetry_session is not None and telemetry_session.run is not None
+                    else {}
+                )
+                await create_scoring_dispatch_event(
+                    dispatch_type="candidate_scoring",
+                    dispatch_status="assigned",
+                    worker_ref=self.worker_ref,
+                    proxy_ref_hash=self.proxy_ref_hash,
+                    candidate_id=candidate_id,
+                    run_id=str(candidate["run_id"]),
+                    ticket_id=str(candidate["ticket_id"]),
+                    rolling_window_hash=reused_window_hash or None,
+                    scoring_id=reuse_dispatch_ids.get("scoring_id"),
+                    scoring_run_id=reuse_dispatch_ids.get("scoring_run_id"),
+                    event_doc={"reused_signed_score_bundle": True},
+                )
                 await self._complete_candidate_from_reused_bundle(
                     candidate,
                     candidate_id=candidate_id,
                     bundle_row=reused_bundle_row,
                     evaluation_epoch=evaluation_epoch,
                     start=start,
+                    telemetry_session=telemetry_session,
+                )
+                await emit_run_event(
+                    telemetry_session.run if telemetry_session is not None else None,
+                    "completed",
+                    score_bundle_id=scored_score_bundle_id,
+                    event_doc={"outcome": "reused_score_bundle"},
                 )
                 scored_event_written = True
                 return
@@ -4090,6 +4595,69 @@ class ResearchLabGatewayScoringWorker:
                 artifact=artifact,
             )
             await create_rolling_icp_window(window)
+            if scoring_telemetry_enabled(self.config):
+                scheduler_type = "serial"
+                try:
+                    candidate_concurrency = max(
+                        1,
+                        int(os.getenv("RESEARCH_LAB_EVAL_CANDIDATE_CONCURRENCY", "1")),
+                    )
+                except ValueError:
+                    candidate_concurrency = 1
+                if candidate_concurrency > 1:
+                    scheduler_type = (
+                        "work_conserving"
+                        if _env_flag("RESEARCH_LAB_EVAL_WORK_CONSERVING")
+                        else "fixed_wave"
+                    )
+                telemetry_run = await allocate_scoring_run(
+                    identity_doc={
+                        "run_type": "candidate_scoring",
+                        "candidate_id": candidate_id,
+                        "source_run_id": str(candidate.get("run_id") or ""),
+                        "rolling_window_hash": window.window_hash,
+                        "reference_artifact_hash": artifact.model_artifact_hash,
+                        "candidate_artifact_hash": candidate_artifact.model_artifact_hash,
+                        "baseline_benchmark_bundle_id": str(
+                            private_holdout_gate.get("baseline_benchmark_bundle_id") or ""
+                        ),
+                        "evaluation_epoch": evaluation_epoch,
+                        "scoring_version": "qualification-company-scorer:v1",
+                        "evaluator_version": "leadpoet-gateway-qualification-worker:research-lab:v1",
+                    },
+                    run_type="candidate_scoring",
+                    worker_ref=self.worker_ref,
+                    expected_icp_count=len(window.benchmark_items),
+                    scheduler_type=scheduler_type,
+                    candidate_id=candidate_id,
+                    source_run_id=str(candidate.get("run_id") or ""),
+                    ticket_id=str(candidate.get("ticket_id") or ""),
+                    rolling_window_hash=window.window_hash,
+                    reference_artifact_hash=artifact.model_artifact_hash,
+                    reference_manifest_hash=artifact.manifest_hash,
+                    candidate_artifact_hash=candidate_artifact.model_artifact_hash,
+                    candidate_manifest_hash=candidate_artifact.manifest_hash,
+                    baseline_benchmark_bundle_id=str(
+                        private_holdout_gate.get("baseline_benchmark_bundle_id") or ""
+                    ),
+                    evaluation_epoch=evaluation_epoch,
+                )
+                telemetry_session = ScoringTelemetrySession(telemetry_run)
+                await emit_run_event(telemetry_run, "assigned")
+                await emit_run_event(telemetry_run, "started")
+            dispatch_ids = telemetry_session.run.linked_ids() if telemetry_session and telemetry_session.run else {}
+            assigned_dispatch_event = await create_scoring_dispatch_event(
+                dispatch_type="candidate_scoring",
+                dispatch_status="assigned",
+                worker_ref=self.worker_ref,
+                proxy_ref_hash=self.proxy_ref_hash,
+                candidate_id=candidate_id,
+                run_id=str(candidate["run_id"]),
+                ticket_id=str(candidate["ticket_id"]),
+                rolling_window_hash=window.window_hash,
+                scoring_id=dispatch_ids.get("scoring_id"),
+                scoring_run_id=dispatch_ids.get("scoring_run_id"),
+            )
             benchmark = SealedBenchmarkSet(
                 benchmark_id=window.benchmark_id,
                 icp_set_hash=window.window_hash,
@@ -4174,6 +4742,7 @@ class ResearchLabGatewayScoringWorker:
             resume_results: list[dict[str, Any]] | None = None
             icp_checkpoint = None
             progress_rows: list[dict[str, Any]] = []
+            telemetry_completed_refs: set[str] = set()
             progress_location = (
                 _scoring_progress_s3_location(
                     artifact.manifest_uri, candidate_id, window.window_hash
@@ -4206,10 +4775,49 @@ class ResearchLabGatewayScoringWorker:
                     )
                 progress_rows = [dict(row) for row in resume_results or []]
 
+                public_refs = {
+                    str(ref)
+                    for ref in (private_holdout_gate.get("public_icp_refs") or ())
+                    if str(ref)
+                }
+                resumed_by_ref = _progress_rows_by_icp_ref(progress_rows)
+                if telemetry_session is not None:
+                    checkpoint_ref = opaque_checkpoint_ref(progress_bucket, progress_key)
+                    for item_index, item in enumerate(window.benchmark_items):
+                        item_ref = str(item.get("icp_ref") or item.get("icp_hash") or "")
+                        resumed_row = resumed_by_ref.get(item_ref)
+                        await telemetry_session.plan(
+                            icp_ref=item_ref,
+                            icp_hash=str(item.get("icp_hash") or ""),
+                            icp_ordinal=item_index,
+                            model_role="candidate",
+                            phase="public" if item_ref in public_refs else "private",
+                            held=item_ref not in public_refs and resumed_row is None,
+                            execution_kind=(
+                                "checkpoint_reuse" if resumed_row is not None else "model_invocation"
+                            ),
+                        )
+                        if resumed_row is not None:
+                            await telemetry_session.complete_result(
+                                resumed_row,
+                                model_role="candidate",
+                                checkpoint_ref=checkpoint_ref,
+                                checkpoint_persisted=True,
+                                outcome="checkpoint_reuse",
+                            )
+                            telemetry_completed_refs.add(item_ref)
+
                 async def _checkpoint_completed_icp(row: Mapping[str, Any]) -> None:
                     progress_rows.append(dict(row))
+                    checkpoint_persisted = False
+                    checkpoint_hash = ""
                     try:
-                        await asyncio.to_thread(
+                        telemetry_index = checkpoint_telemetry_index(
+                            telemetry_session,
+                            progress_rows,
+                            model_role="candidate",
+                        )
+                        checkpoint_hash = await asyncio.to_thread(
                             _store_scoring_progress,
                             progress_bucket,
                             progress_key,
@@ -4217,21 +4825,80 @@ class ResearchLabGatewayScoringWorker:
                             window_hash=window.window_hash,
                             candidate_artifact_hash=candidate_artifact.model_artifact_hash,
                             rows=progress_rows,
+                            telemetry_index=telemetry_index,
                         )
+                        checkpoint_persisted = True
                     except Exception as exc:
                         logger.warning(
                             "research_lab_scoring_progress_store_failed candidate_id=%s error=%s",
                             compact_ref(candidate_id),
                             str(exc)[:200],
                         )
+                    if telemetry_session is not None:
+                        failure_reason = str(row.get("failure_reason") or "")
+                        latch_skipped = "candidate_model_runtime_skipped_after_" in failure_reason
+                        outcome = (
+                            "latch_skip"
+                            if latch_skipped
+                            else "scoreable_failure_zero"
+                            if failure_reason and not row.get("candidate_company_scores")
+                            else "scored"
+                        )
+                        await telemetry_session.complete_result(
+                            row,
+                            model_role="candidate",
+                            checkpoint_ref=opaque_checkpoint_ref(progress_bucket, progress_key),
+                            checkpoint_hash=checkpoint_hash,
+                            checkpoint_persisted=checkpoint_persisted,
+                            outcome=outcome,
+                            terminal_event="skipped" if latch_skipped else "completed",
+                        )
+                        telemetry_completed_refs.add(
+                            str(row.get("icp_ref") or row.get("icp_hash") or "")
+                        )
 
                 icp_checkpoint = _checkpoint_completed_icp
+
+            elif telemetry_session is not None:
+                public_refs = {
+                    str(ref)
+                    for ref in (private_holdout_gate.get("public_icp_refs") or ())
+                    if str(ref)
+                }
+                for item_index, item in enumerate(window.benchmark_items):
+                    item_ref = str(item.get("icp_ref") or item.get("icp_hash") or "")
+                    await telemetry_session.plan(
+                        icp_ref=item_ref,
+                        icp_hash=str(item.get("icp_hash") or ""),
+                        icp_ordinal=item_index,
+                        model_role="candidate",
+                        phase="public" if item_ref in public_refs else "private",
+                        held=item_ref not in public_refs,
+                    )
 
             def _heartbeat_progress_snapshot() -> Mapping[str, Any]:
                 return {
                     "completed_icp_count": len(progress_rows),
                     "rolling_window_hash": window.window_hash,
                 }
+
+            async def _candidate_attempt_cost_sink(
+                icp_ref: str,
+                entries: list[dict[str, Any]],
+                execution_context: Mapping[str, Any],
+            ) -> None:
+                persisted = await _persist_provider_cost_events(
+                    entries=entries,
+                    run_type="candidate_scoring",
+                    icp_ref=icp_ref,
+                    runner_role="candidate",
+                    candidate_id=candidate_id,
+                    scoring_id=str(execution_context.get("scoring_id") or ""),
+                    scoring_run_id=str(execution_context.get("scoring_run_id") or ""),
+                    icp_execution_id=str(execution_context.get("icp_execution_id") or ""),
+                )
+                if not persisted and telemetry_session is not None:
+                    telemetry_session.degraded = True
 
             heartbeat_task = asyncio.create_task(
                 self._candidate_scoring_heartbeat(
@@ -4241,6 +4908,12 @@ class ResearchLabGatewayScoringWorker:
                     claim_lost=claim_lost_event,
                     progress_snapshot=_heartbeat_progress_snapshot,
                 )
+            )
+            telemetry_heartbeat_stop = asyncio.Event()
+            telemetry_heartbeat_task = (
+                asyncio.create_task(telemetry_session.heartbeat_loop(telemetry_heartbeat_stop))
+                if telemetry_session is not None
+                else None
             )
             langfuse_obs = None
             langfuse_trace_id = ""
@@ -4293,13 +4966,27 @@ class ResearchLabGatewayScoringWorker:
                             resume_results=resume_results,
                             # In-container traces upload keyed by candidate; the
                             # evaluator puts the returned refs into per-ICP rows.
-                            trace_sink=self._candidate_incontainer_trace_sink(candidate_id),
+                            trace_sink=self._candidate_incontainer_trace_sink(
+                                candidate_id,
+                                persist_costs=telemetry_session is None,
+                            ),
+                            scoring_telemetry_hook=(
+                                telemetry_session.lifecycle if telemetry_session is not None else None
+                            ),
+                            attempt_cost_sink=(
+                                _candidate_attempt_cost_sink
+                                if telemetry_session is not None
+                                else None
+                            ),
                         )
                         langfuse_trace_id = finish_score_bundle_observation(langfuse_obs, score_bundle)
                     finally:
                         heartbeat_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await heartbeat_task
+                        if telemetry_heartbeat_task is not None:
+                            telemetry_heartbeat_stop.set()
+                            await telemetry_heartbeat_task
             except StaleParentDuringScoring as stale_exc:
                 stale_result = await self._queue_stale_parent_rebase(
                     candidate,
@@ -4334,7 +5021,49 @@ class ResearchLabGatewayScoringWorker:
                         ),
                     )
                 )
+                if telemetry_session is not None:
+                    await telemetry_session.cancel_active(
+                        failure_category="stale_parent_superseded",
+                        error=stale_exc,
+                    )
+                    await emit_run_event(
+                        telemetry_session.run,
+                        "cancelled",
+                        failure_category="stale_parent_superseded",
+                        error=stale_exc,
+                        event_doc={"outcome": "superseded"},
+                    )
                 return
+            if telemetry_session is not None:
+                aggregates = (
+                    score_bundle.get("aggregates")
+                    if isinstance(score_bundle.get("aggregates"), Mapping)
+                    else {}
+                )
+                for result_row in aggregates.get("per_icp_results") or ():
+                    if not isinstance(result_row, Mapping):
+                        continue
+                    result_ref = str(
+                        result_row.get("icp_ref") or result_row.get("icp_hash") or ""
+                    )
+                    if result_ref in telemetry_completed_refs:
+                        continue
+                    failure_reason = str(result_row.get("failure_reason") or "")
+                    latch_skipped = "candidate_model_runtime_skipped_after_" in failure_reason
+                    await telemetry_session.complete_result(
+                        result_row,
+                        model_role="candidate",
+                        checkpoint_persisted=False,
+                        outcome=(
+                            "latch_skip"
+                            if latch_skipped
+                            else "scoreable_failure_zero"
+                            if failure_reason and not result_row.get("candidate_company_scores")
+                            else "scored"
+                        ),
+                        terminal_event="skipped" if latch_skipped else "completed",
+                    )
+                    telemetry_completed_refs.add(result_ref)
             gate_result = score_bundle.get("private_holdout_gate")
             if attested_scoring_mode() != "off":
                 aggregate_doc = score_bundle.get("aggregates")
@@ -4433,11 +5162,32 @@ class ResearchLabGatewayScoringWorker:
                 ticket_id=str(candidate["ticket_id"]),
                 rolling_window_hash=window.window_hash,
                 score_bundle_id=str(bundle["score_bundle_id"]),
+                scoring_id=(
+                    telemetry_session.run.scoring_id
+                    if telemetry_session is not None and telemetry_session.run is not None
+                    else None
+                ),
+                scoring_run_id=(
+                    telemetry_session.run.scoring_run_id
+                    if telemetry_session is not None and telemetry_session.run is not None
+                    else None
+                ),
                 event_doc={
                     "elapsed_seconds": round(time.time() - start, 3),
                     "private_holdout_gate": _candidate_gate_event_doc(gate_result),
                     "scoring_health_gate": scoring_health_gate,
                     "serving_model_version": _event_serving_model_version(score_bundle),
+                },
+            )
+            await emit_run_event(
+                telemetry_session.run if telemetry_session is not None else None,
+                "completed",
+                score_bundle_id=str(bundle["score_bundle_id"]),
+                telemetry_degraded=bool(telemetry_session and telemetry_session.degraded),
+                event_doc={
+                    "outcome": (
+                        "public_gate_rejected" if private_holdout_rejected else "scored"
+                    )
                 },
             )
             if private_holdout_rejected:
@@ -4532,6 +5282,19 @@ class ResearchLabGatewayScoringWorker:
                     retry_after_seconds,
                     str(exc)[:240],
                 )
+                if telemetry_session is not None:
+                    await telemetry_session.cancel_active(
+                        failure_category="baseline_not_ready",
+                        error=exc,
+                    )
+                    await emit_run_event(
+                        telemetry_session.run,
+                        "cancelled",
+                        retryable=True,
+                        failure_category="baseline_not_ready",
+                        error=exc,
+                        event_doc={"outcome": "paused_for_baseline"},
+                    )
                 return
             if retryable and claim_attempts < max_attempts:
                 retry_after_seconds = int(self.config.scoring_worker_retryable_failure_retry_seconds)
@@ -4563,6 +5326,18 @@ class ResearchLabGatewayScoringWorker:
                     max_attempts,
                     str(exc)[:240],
                 )
+                if telemetry_session is not None:
+                    await telemetry_session.cancel_active(
+                        failure_category=failure_class,
+                        error=exc,
+                    )
+                    await emit_run_event(
+                        telemetry_session.run,
+                        "failed",
+                        retryable=True,
+                        failure_category=failure_class,
+                        error=exc,
+                    )
                 return
             await create_candidate_evaluation_event(
                 candidate_id=candidate_id,
@@ -4591,6 +5366,16 @@ class ResearchLabGatewayScoringWorker:
                 candidate_id=candidate_id,
                 run_id=str(candidate["run_id"]),
                 ticket_id=str(candidate["ticket_id"]),
+                scoring_id=(
+                    telemetry_session.run.scoring_id
+                    if telemetry_session is not None and telemetry_session.run is not None
+                    else None
+                ),
+                scoring_run_id=(
+                    telemetry_session.run.scoring_run_id
+                    if telemetry_session is not None and telemetry_session.run is not None
+                    else None
+                ),
                 event_doc={
                     "failure_class": failure_class,
                     "retryable": bool(retryable),
@@ -4599,6 +5384,18 @@ class ResearchLabGatewayScoringWorker:
                     "error_diagnostics": _event_error_diagnostics(exc),
                 },
             )
+            if telemetry_session is not None:
+                await telemetry_session.cancel_active(
+                    failure_category=failure_class,
+                    error=exc,
+                )
+                await emit_run_event(
+                    telemetry_session.run,
+                    "failed",
+                    retryable=bool(retryable),
+                    failure_category=failure_class,
+                    error=exc,
+                )
             await self._maybe_finalize_candidate_receipt(candidate)
             await safe_project_public_loop_activity(
                 str(candidate["ticket_id"]),
@@ -4754,6 +5551,7 @@ class ResearchLabGatewayScoringWorker:
         bundle_row: Mapping[str, Any],
         evaluation_epoch: int,
         start: float,
+        telemetry_session: ScoringTelemetrySession | None = None,
     ) -> None:
         """Finish a candidate from its already-signed bundle (bug #12): write the
         scored event, then mirror the normal post-scored side-effect sequence."""
@@ -4808,6 +5606,16 @@ class ResearchLabGatewayScoringWorker:
                 ticket_id=str(candidate["ticket_id"]),
                 rolling_window_hash=rolling_window_hash or None,
                 score_bundle_id=score_bundle_id,
+                scoring_id=(
+                    telemetry_session.run.scoring_id
+                    if telemetry_session is not None and telemetry_session.run is not None
+                    else None
+                ),
+                scoring_run_id=(
+                    telemetry_session.run.scoring_run_id
+                    if telemetry_session is not None and telemetry_session.run is not None
+                    else None
+                ),
                 event_doc={
                     "elapsed_seconds": round(time.time() - start, 3),
                     "private_holdout_gate": _candidate_gate_event_doc(gate_result),
@@ -5503,6 +6311,21 @@ class ResearchLabGatewayScoringWorker:
                 start=start,
             )
         except Exception as exc:  # noqa: BLE001 - infra failure re-holds, bounded by budget
+            telemetry_session = getattr(self, "_confirmation_telemetry_session", None)
+            if isinstance(telemetry_session, ScoringTelemetrySession):
+                await telemetry_session.cancel_active(
+                    failure_category="confirmation_measurement_failed",
+                    error=exc,
+                )
+                await emit_run_event(
+                    telemetry_session.run,
+                    "failed",
+                    retryable=True,
+                    failure_category="confirmation_measurement_failed",
+                    error=exc,
+                    telemetry_degraded=telemetry_session.degraded,
+                )
+            self._confirmation_telemetry_session = None
             try:
                 await create_candidate_promotion_event(
                     candidate_id=candidate_id,
@@ -5562,7 +6385,7 @@ class ResearchLabGatewayScoringWorker:
                 "promotion_status": str((result or {}).get("status") or ""),
             }
         confirmation_doc = dict(measurement.get("confirmation") or {})
-        await create_candidate_promotion_event(
+        result_event = await create_candidate_promotion_event(
             candidate_id=candidate_id,
             source_score_bundle_id=score_bundle_id,
             event_type="promotion_checked",
@@ -5596,6 +6419,16 @@ class ResearchLabGatewayScoringWorker:
                 "serving_model_version": score_bundle_serving_version,
             },
         )
+        telemetry_session = getattr(self, "_confirmation_telemetry_session", None)
+        if isinstance(telemetry_session, ScoringTelemetrySession):
+            await emit_run_event(
+                telemetry_session.run,
+                "completed",
+                promotion_event_id=str(result_event.get("promotion_event_id") or ""),
+                telemetry_degraded=telemetry_session.degraded,
+                event_doc={"confirmation_attempt": attempt},
+            )
+        self._confirmation_telemetry_session = None
         logger.info(
             format_worker_block(
                 "RESEARCH LAB CONFIRMATION RERUN RECORDED",
@@ -5670,6 +6503,49 @@ class ResearchLabGatewayScoringWorker:
         # confirmation ran on a newly rotated window.
         await create_rolling_icp_window(window)
 
+        confirmation_telemetry_session: ScoringTelemetrySession | None = None
+        if scoring_telemetry_enabled(self.config):
+            telemetry_run = await allocate_scoring_run(
+                identity_doc={
+                    "run_type": "promotion_confirmation",
+                    "candidate_id": str(candidate.get("candidate_id") or ""),
+                    "source_score_bundle_id": str(hold.get("source_score_bundle_id") or ""),
+                    "attempt": int(attempt),
+                    "rolling_window_hash": window.window_hash,
+                    "reference_artifact_hash": active.artifact.model_artifact_hash,
+                    "candidate_artifact_hash": candidate_artifact.model_artifact_hash,
+                },
+                run_type="promotion_confirmation",
+                worker_ref=self.worker_ref,
+                # Progress is projected per model_role; both sides share the
+                # same ICP set, so the denominator is N (not 2N).
+                expected_icp_count=len(window.benchmark_items),
+                scheduler_type="confirmation_pair",
+                minimum_run_attempt=attempt,
+                candidate_id=str(candidate.get("candidate_id") or ""),
+                source_score_bundle_id=str(hold.get("source_score_bundle_id") or ""),
+                rolling_window_hash=window.window_hash,
+                reference_artifact_hash=active.artifact.model_artifact_hash,
+                reference_manifest_hash=active.artifact.manifest_hash,
+                candidate_artifact_hash=candidate_artifact.model_artifact_hash,
+                candidate_manifest_hash=candidate_artifact.manifest_hash,
+                evaluation_epoch=int(score_bundle.get("evaluation_epoch") or 0),
+            )
+            if telemetry_run is not None:
+                confirmation_telemetry_session = ScoringTelemetrySession(telemetry_run)
+                for item_index, item in enumerate(window.benchmark_items):
+                    item_ref = str(item.get("icp_ref") or item.get("icp_hash") or "")
+                    for model_role in ("reference", "candidate"):
+                        await confirmation_telemetry_session.plan(
+                            icp_ref=item_ref,
+                            icp_hash=str(item.get("icp_hash") or ""),
+                            icp_ordinal=item_index,
+                            model_role=model_role,
+                        )
+                await emit_run_event(confirmation_telemetry_session.run, "assigned")
+                await emit_run_event(confirmation_telemetry_session.run, "started")
+        self._confirmation_telemetry_session = confirmation_telemetry_session
+
         # Trace scope (§5.4 + in-container capture): keyed per candidate,
         # attempt, and side so confirmation docs never collide across attempts
         # or candidates. Carried via an instance attribute (not a new call
@@ -5680,6 +6556,14 @@ class ResearchLabGatewayScoringWorker:
             "manifest_uri": str(active.artifact.manifest_uri or ""),
             "evaluation_epoch": int(score_bundle.get("evaluation_epoch") or 0),
         }
+        confirmation_heartbeat_stop = asyncio.Event()
+        confirmation_heartbeat_task = (
+            asyncio.create_task(
+                confirmation_telemetry_session.heartbeat_loop(confirmation_heartbeat_stop)
+            )
+            if confirmation_telemetry_session is not None
+            else None
+        )
         try:
             champion_summaries, champion_stats = await self._run_confirmation_side(
                 artifact=active.artifact,
@@ -5695,12 +6579,32 @@ class ResearchLabGatewayScoringWorker:
             )
         finally:
             self._confirmation_trace_scope = None
+            if confirmation_heartbeat_task is not None:
+                confirmation_heartbeat_stop.set()
+                await confirmation_heartbeat_task
         baseline_scores, baseline_unresolved, baseline_nonempty = _collect_confirmation_scores(
             champion_summaries
         )
         candidate_scores, candidate_unresolved, candidate_nonempty = _collect_confirmation_scores(
             candidate_summaries
         )
+        if confirmation_telemetry_session is not None:
+            for summary in champion_summaries:
+                if not summary.get("_runtime_error"):
+                    await confirmation_telemetry_session.complete_result(
+                        summary,
+                        model_role="reference",
+                        checkpoint_persisted=False,
+                        outcome="confirmation_measurement",
+                    )
+            for summary in candidate_summaries:
+                if not summary.get("_runtime_error"):
+                    await confirmation_telemetry_session.complete_result(
+                        summary,
+                        model_role="candidate",
+                        checkpoint_persisted=False,
+                        outcome="confirmation_measurement",
+                    )
         if baseline_nonempty <= 0:
             raise PrivateModelRuntimeError(
                 f"confirmation baseline returned zero companies across all {len(window.benchmark_items)} ICPs"
@@ -5779,6 +6683,12 @@ class ResearchLabGatewayScoringWorker:
         except (TypeError, ValueError):
             confirmation_attempt = None
         confirmation_candidate_id = str(confirmation_scope.get("candidate_id") or "")
+        telemetry_session = getattr(self, "_confirmation_telemetry_session", None)
+        if not isinstance(telemetry_session, ScoringTelemetrySession):
+            telemetry_session = None
+        telemetry_model_role = (
+            "reference" if mode_label == "confirmation_baseline" else "candidate"
+        )
         runner = DockerPrivateModelRunner(
             DockerPrivateModelSpec(
                 image_digest=artifact.image_digest,
@@ -5827,6 +6737,8 @@ class ResearchLabGatewayScoringWorker:
             run_start=run_start,
             mode_label=mode_label,
             trace_context=self._confirmation_side_trace_context(mode_label=mode_label),
+            telemetry_session=telemetry_session,
+            telemetry_model_role=telemetry_model_role,
         )
         return summaries, {
             "retried": int(stats.get("retried") or 0),
@@ -6553,6 +7465,15 @@ class ResearchLabGatewayScoringWorker:
 
     async def _contain_private_baseline_publication_failure(self, exc: BaseException) -> dict[str, Any]:
         context = dict(self._active_baseline_context or {})
+        telemetry_session = context.get("telemetry_session")
+        if not isinstance(telemetry_session, ScoringTelemetrySession):
+            telemetry_session = None
+        telemetry_heartbeat_stop = context.get("telemetry_heartbeat_stop")
+        if isinstance(telemetry_heartbeat_stop, asyncio.Event):
+            telemetry_heartbeat_stop.set()
+        telemetry_heartbeat_task = context.get("telemetry_heartbeat_task")
+        if isinstance(telemetry_heartbeat_task, asyncio.Task):
+            await telemetry_heartbeat_task
         today = str(context.get("benchmark_date") or "")
         window_hash = str(context.get("rolling_window_hash") or "")
         manifest_hash = str(context.get("private_model_manifest_hash") or "")
@@ -6585,6 +7506,16 @@ class ResearchLabGatewayScoringWorker:
                 proxy_ref_hash=self.proxy_ref_hash,
                 rolling_window_hash=window_hash or None,
                 benchmark_bundle_id=str(context.get("benchmark_bundle_id") or "") or None,
+                scoring_id=(
+                    telemetry_session.run.scoring_id
+                    if telemetry_session is not None and telemetry_session.run is not None
+                    else None
+                ),
+                scoring_run_id=(
+                    telemetry_session.run.scoring_run_id
+                    if telemetry_session is not None and telemetry_session.run is not None
+                    else None
+                ),
                 event_doc=event_doc,
             )
         except Exception as dispatch_exc:  # noqa: BLE001 - preserve the in-process terminal latch
@@ -6594,6 +7525,21 @@ class ResearchLabGatewayScoringWorker:
                 today,
                 benchmark_attempt,
                 _short_error(dispatch_exc),
+            )
+        if telemetry_session is not None:
+            await telemetry_session.cancel_active(
+                failure_category="baseline_publication_failed",
+                error=exc,
+            )
+            await emit_run_event(
+                telemetry_session.run,
+                "failed",
+                retryable=False,
+                failure_category="baseline_publication_failed",
+                error=exc,
+                benchmark_bundle_id=str(context.get("benchmark_bundle_id") or ""),
+                telemetry_degraded=telemetry_session.degraded,
+                event_doc={"failure_stage": event_doc["failure_stage"]},
             )
         logger.exception(
             format_worker_block(
@@ -6915,6 +7861,38 @@ class ResearchLabGatewayScoringWorker:
             benchmark_date=today,
             rolling_window_hash=window.window_hash,
         )
+        baseline_telemetry_session: ScoringTelemetrySession | None = None
+        if scoring_telemetry_enabled(self.config):
+            telemetry_run = await allocate_scoring_run(
+                identity_doc={
+                    "run_type": "private_baseline_rebenchmark",
+                    "benchmark_date": today,
+                    "rolling_window_hash": window.window_hash,
+                    "reference_artifact_hash": artifact.model_artifact_hash,
+                    "reference_manifest_hash": artifact.manifest_hash,
+                    "evaluation_epoch": evaluation_epoch,
+                    "scoring_worker_source_hash": _scoring_worker_source_hash(),
+                },
+                run_type="private_baseline_rebenchmark",
+                worker_ref=self.worker_ref,
+                expected_icp_count=len(window.benchmark_items),
+                scheduler_type=(
+                    "fixed_wave" if self.config.private_baseline_concurrency > 1 else "serial"
+                ),
+                minimum_run_attempt=benchmark_attempt,
+                benchmark_id=private_baseline_benchmark_id(
+                    benchmark_date=today,
+                    rolling_window_hash=window.window_hash,
+                    reference_artifact_hash=artifact.model_artifact_hash,
+                ),
+                benchmark_date=today,
+                rolling_window_hash=window.window_hash,
+                reference_artifact_hash=artifact.model_artifact_hash,
+                reference_manifest_hash=artifact.manifest_hash,
+                evaluation_epoch=evaluation_epoch,
+            )
+            if telemetry_run is not None:
+                baseline_telemetry_session = ScoringTelemetrySession(telemetry_run)
         per_icp_summaries: list[dict[str, Any]] = []
         nonempty_output_count = 0
         retried_total = 0
@@ -6961,10 +7939,47 @@ class ResearchLabGatewayScoringWorker:
                     )
                 )
 
+        if baseline_telemetry_session is not None:
+            resumed_by_ref = _progress_rows_by_icp_ref(baseline_progress_rows)
+            checkpoint_ref = (
+                opaque_checkpoint_ref(*baseline_progress_location)
+                if baseline_progress_location is not None
+                else ""
+            )
+            for item_index, item in enumerate(window.benchmark_items):
+                item_ref = str(item.get("icp_ref") or item.get("icp_hash") or "")
+                resumed_row = resumed_by_ref.get(item_ref)
+                await baseline_telemetry_session.plan(
+                    icp_ref=item_ref,
+                    icp_hash=str(item.get("icp_hash") or ""),
+                    icp_ordinal=item_index,
+                    model_role="reference",
+                    execution_kind=(
+                        "checkpoint_reuse" if resumed_row is not None else "model_invocation"
+                    ),
+                )
+                if resumed_row is not None:
+                    await baseline_telemetry_session.complete_result(
+                        resumed_row,
+                        model_role="reference",
+                        checkpoint_ref=checkpoint_ref,
+                        checkpoint_persisted=True,
+                        outcome="checkpoint_reuse",
+                    )
+
         baseline_progress_lock = asyncio.Lock()
 
         async def _checkpoint_completed_baseline_icp(row: Mapping[str, Any]) -> None:
-            if baseline_progress_location is None or not _baseline_summary_checkpointable(row):
+            if not _baseline_summary_checkpointable(row):
+                return
+            if baseline_progress_location is None:
+                if baseline_telemetry_session is not None:
+                    await baseline_telemetry_session.complete_result(
+                        row,
+                        model_role="reference",
+                        checkpoint_persisted=False,
+                        outcome="scored_without_checkpoint",
+                    )
                 return
             async with baseline_progress_lock:
                 progress_bucket, progress_key = baseline_progress_location
@@ -6975,7 +7990,12 @@ class ResearchLabGatewayScoringWorker:
                     return
                 by_ref[ref] = public_row
                 baseline_progress_rows[:] = list(by_ref.values())
-                await asyncio.to_thread(
+                telemetry_index = checkpoint_telemetry_index(
+                    baseline_telemetry_session,
+                    baseline_progress_rows,
+                    model_role="reference",
+                )
+                checkpoint_hash = await asyncio.to_thread(
                     _store_baseline_scoring_progress,
                     progress_bucket,
                     progress_key,
@@ -6983,6 +8003,16 @@ class ResearchLabGatewayScoringWorker:
                     window_hash=window.window_hash,
                     private_model_artifact_hash=artifact.model_artifact_hash,
                     rows=baseline_progress_rows,
+                    telemetry_index=telemetry_index,
+                )
+            if baseline_telemetry_session is not None:
+                await baseline_telemetry_session.complete_result(
+                    row,
+                    model_role="reference",
+                    checkpoint_ref=opaque_checkpoint_ref(*baseline_progress_location),
+                    checkpoint_hash=checkpoint_hash,
+                    checkpoint_persisted=True,
+                    outcome="scored",
                 )
 
         self._active_baseline_context = {
@@ -6993,14 +8023,38 @@ class ResearchLabGatewayScoringWorker:
             "selected_icp_count": len(window.item_refs),
             "started_at": start,
             "publication_stage": "computation",
+            "telemetry_session": baseline_telemetry_session,
         }
+        baseline_telemetry_heartbeat_stop: asyncio.Event | None = None
+        baseline_telemetry_heartbeat_task: asyncio.Task[Any] | None = None
+
+        async def _stop_baseline_telemetry_heartbeat() -> None:
+            if baseline_telemetry_heartbeat_stop is not None:
+                baseline_telemetry_heartbeat_stop.set()
+            if baseline_telemetry_heartbeat_task is not None:
+                await baseline_telemetry_heartbeat_task
+
         try:
+            await emit_run_event(
+                baseline_telemetry_session.run if baseline_telemetry_session is not None else None,
+                "assigned",
+            )
             lease_event = await create_scoring_dispatch_event(
                 dispatch_type="private_baseline_rebenchmark",
                 dispatch_status="assigned",
                 worker_ref=self.worker_ref,
                 proxy_ref_hash=self.proxy_ref_hash,
                 rolling_window_hash=window.window_hash,
+                scoring_id=(
+                    baseline_telemetry_session.run.scoring_id
+                    if baseline_telemetry_session is not None and baseline_telemetry_session.run is not None
+                    else None
+                ),
+                scoring_run_id=(
+                    baseline_telemetry_session.run.scoring_run_id
+                    if baseline_telemetry_session is not None and baseline_telemetry_session.run is not None
+                    else None
+                ),
                 event_doc={
                     "benchmark_date": today,
                     "benchmark_attempt": benchmark_attempt,
@@ -7031,7 +8085,37 @@ class ResearchLabGatewayScoringWorker:
                         ),
                     )
                 )
+                if baseline_telemetry_session is not None:
+                    await baseline_telemetry_session.cancel_active(
+                        failure_category="baseline_lease_lost"
+                    )
+                    await emit_run_event(
+                        baseline_telemetry_session.run,
+                        "cancelled",
+                        failure_category="baseline_lease_lost",
+                    )
                 return {"status": "baseline_leased_elsewhere", "benchmark_date": today}
+            await emit_run_event(
+                baseline_telemetry_session.run if baseline_telemetry_session is not None else None,
+                "started",
+            )
+            baseline_telemetry_heartbeat_stop = asyncio.Event()
+            baseline_telemetry_heartbeat_task = (
+                asyncio.create_task(
+                    baseline_telemetry_session.heartbeat_loop(
+                        baseline_telemetry_heartbeat_stop
+                    )
+                )
+                if baseline_telemetry_session is not None
+                else None
+            )
+            if self._active_baseline_context is not None:
+                self._active_baseline_context.update(
+                    {
+                        "telemetry_heartbeat_stop": baseline_telemetry_heartbeat_stop,
+                        "telemetry_heartbeat_task": baseline_telemetry_heartbeat_task,
+                    }
+                )
             total_icps = len(window.benchmark_items)
             parallel_mode = self.config.private_baseline_concurrency > 1
             if parallel_mode:
@@ -7065,6 +8149,8 @@ class ResearchLabGatewayScoringWorker:
                     icp_checkpoint=_checkpoint_completed_baseline_icp,
                     expected_repo_main_git_sha=baseline_repo_main_sha,
                     benchmark_date=today,
+                    telemetry_session=baseline_telemetry_session,
+                    telemetry_model_role="reference",
                 )
                 retried_total = int(retry_stats.get("retried") or 0)
                 recovered_total = int(retry_stats.get("recovered") or 0)
@@ -7117,6 +8203,14 @@ class ResearchLabGatewayScoringWorker:
                         ),
                     )
                 )
+                if baseline_telemetry_session is not None:
+                    await baseline_telemetry_session.attempt_started(
+                        icp_ref=label,
+                        icp_hash=str(item.get("icp_hash") or ""),
+                        icp_ordinal=max(0, item_index - 1),
+                        model_role="reference",
+                        retry_round=0,
+                    )
                 runtime_error = ""
                 # In-container trace collection (§9.1): asyncio.to_thread copies
                 # the contextvars context, so the runner thread sees the
@@ -7150,11 +8244,30 @@ class ResearchLabGatewayScoringWorker:
                     if serial_trace_token is not None:
                         end_incontainer_trace_collection(serial_trace_token)
                 item_elapsed = time.time() - item_start
+                if baseline_telemetry_session is not None and not runtime_error:
+                    await baseline_telemetry_session.lifecycle(
+                        "sourcing_completed",
+                        {
+                            "icp_ref": label,
+                            "model_role": "reference",
+                            "retry_round": 0,
+                            "sourced_company_count": len(outputs),
+                        },
+                    )
                 if outputs:
                     nonempty_output_count += 1
                 score_breakdowns: list[dict[str, Any]] = []
                 scorer_error = ""
                 if outputs:
+                    if baseline_telemetry_session is not None:
+                        await baseline_telemetry_session.lifecycle(
+                            "scoring_started",
+                            {
+                                "icp_ref": label,
+                                "model_role": "reference",
+                                "retry_round": 0,
+                            },
+                        )
                     try:
                         score_breakdowns = await self._score_baseline_outputs(
                             scorer=scorer,
@@ -7199,17 +8312,6 @@ class ResearchLabGatewayScoringWorker:
                         ),
                     )
                 )
-                if (
-                    item_index >= PRIVATE_BASELINE_FAST_EMPTY_ABORT_AFTER
-                    and nonempty_output_count <= 0
-                    and time.time() - start < PRIVATE_BASELINE_FAST_EMPTY_ABORT_SECONDS
-                ):
-                    raise PrivateModelRuntimeError(
-                        "private baseline fast-empty guard tripped: "
-                        f"first {item_index} ICPs returned zero companies in {time.time() - start:.1f}s. "
-                        "The private model is not executing the full provider-backed sourcing path; "
-                        "check Docker env passthrough, provider keys, proxy connectivity, and ICP canonicalization."
-                    )
                 item_summary = sanitize_benchmark_item_summary(
                     item=item,
                     score=icp_score,
@@ -7239,8 +8341,37 @@ class ResearchLabGatewayScoringWorker:
                     score_breakdowns=score_breakdowns,
                     trace_entries=serial_trace_entries,
                     trace_context=baseline_trace_context,
+                    telemetry_session=baseline_telemetry_session,
+                    telemetry_model_role="reference",
                 )
                 _apply_provider_cost_baseline_outcome(item_summary)
+                if (
+                    item_index >= PRIVATE_BASELINE_FAST_EMPTY_ABORT_AFTER
+                    and nonempty_output_count <= 0
+                    and time.time() - start < PRIVATE_BASELINE_FAST_EMPTY_ABORT_SECONDS
+                ):
+                    raise PrivateModelRuntimeError(
+                        "private baseline fast-empty guard tripped: "
+                        f"first {item_index} ICPs returned zero companies in {time.time() - start:.1f}s. "
+                        "The private model is not executing the full provider-backed sourcing path; "
+                        "check Docker env passthrough, provider keys, proxy connectivity, and ICP canonicalization."
+                    )
+                if baseline_telemetry_session is not None and (runtime_error or scorer_error):
+                    await baseline_telemetry_session.lifecycle(
+                        "attempt_failed",
+                        {
+                            "icp_ref": label,
+                            "model_role": "reference",
+                            "retry_round": 0,
+                            "retryable": False,
+                            "failure_category": (
+                                "runtime_provider_error"
+                                if runtime_error
+                                else "scorer_provider_error"
+                            ),
+                            "error": runtime_error or scorer_error,
+                        },
+                    )
                 await _checkpoint_completed_baseline_icp(item_summary)
                 per_icp_summaries.append(item_summary)
             if nonempty_output_count <= 0:
@@ -7276,12 +8407,23 @@ class ResearchLabGatewayScoringWorker:
                     baseline_health={**baseline_health, "gate_passed": False},
                 )
         except Exception as exc:
+            await _stop_baseline_telemetry_heartbeat()
             await create_scoring_dispatch_event(
                 dispatch_type="private_baseline_rebenchmark",
                 dispatch_status="failed",
                 worker_ref=self.worker_ref,
                 proxy_ref_hash=self.proxy_ref_hash,
                 rolling_window_hash=window.window_hash,
+                scoring_id=(
+                    baseline_telemetry_session.run.scoring_id
+                    if baseline_telemetry_session is not None and baseline_telemetry_session.run is not None
+                    else None
+                ),
+                scoring_run_id=(
+                    baseline_telemetry_session.run.scoring_run_id
+                    if baseline_telemetry_session is not None and baseline_telemetry_session.run is not None
+                    else None
+                ),
                 event_doc={
                     "benchmark_date": today,
                     "benchmark_attempt": benchmark_attempt,
@@ -7300,6 +8442,19 @@ class ResearchLabGatewayScoringWorker:
                     "elapsed_seconds": round(time.time() - start, 3),
                 },
             )
+            if baseline_telemetry_session is not None:
+                await baseline_telemetry_session.cancel_active(
+                    failure_category="baseline_computation_failed",
+                    error=exc,
+                )
+                await emit_run_event(
+                    baseline_telemetry_session.run,
+                    "failed",
+                    retryable=True,
+                    failure_category="baseline_computation_failed",
+                    error=exc,
+                    telemetry_degraded=baseline_telemetry_session.degraded,
+                )
             logger.exception(
                 format_worker_block(
                     "RESEARCH LAB PRIVATE BASELINE FAILED",
@@ -7319,6 +8474,7 @@ class ResearchLabGatewayScoringWorker:
                 "rolling_window_hash": window.window_hash,
                 "error": str(exc)[:300],
             }
+        await _stop_baseline_telemetry_heartbeat()
         if self._active_baseline_context is not None:
             self._active_baseline_context["publication_stage"] = "pre_record_conflict_check"
         pre_record_conflict = await self._same_day_reference_recorded_while_running(
@@ -7327,6 +8483,15 @@ class ResearchLabGatewayScoringWorker:
             manifest_hash=artifact.manifest_hash,
         )
         if pre_record_conflict is not None:
+            if baseline_telemetry_session is not None:
+                await baseline_telemetry_session.cancel_active(
+                    failure_category="baseline_reference_conflict"
+                )
+                await emit_run_event(
+                    baseline_telemetry_session.run,
+                    "cancelled",
+                    failure_category="baseline_reference_conflict",
+                )
             logger.warning(
                 format_worker_block(
                     "RESEARCH LAB PRIVATE BASELINE COMPLETED BUT REFERENCE ALREADY RECORDED",
@@ -7443,6 +8608,16 @@ class ResearchLabGatewayScoringWorker:
             proxy_ref_hash=self.proxy_ref_hash,
             rolling_window_hash=window.window_hash,
             benchmark_bundle_id=str(bundle["benchmark_bundle_id"]),
+            scoring_id=(
+                baseline_telemetry_session.run.scoring_id
+                if baseline_telemetry_session is not None and baseline_telemetry_session.run is not None
+                else None
+            ),
+            scoring_run_id=(
+                baseline_telemetry_session.run.scoring_run_id
+                if baseline_telemetry_session is not None and baseline_telemetry_session.run is not None
+                else None
+            ),
             event_doc={
                 "benchmark_date": today,
                 "benchmark_attempt": benchmark_attempt,
@@ -7492,6 +8667,20 @@ class ResearchLabGatewayScoringWorker:
         if self._active_baseline_context is not None:
             self._active_baseline_context["publication_stage"] = "audit_bundle_write"
         await self._write_audit_bundle(evaluation_epoch)
+        await emit_run_event(
+            baseline_telemetry_session.run if baseline_telemetry_session is not None else None,
+            "completed",
+            benchmark_bundle_id=str(bundle["benchmark_bundle_id"]),
+            telemetry_degraded=(
+                baseline_telemetry_session.degraded
+                if baseline_telemetry_session is not None
+                else False
+            ),
+            event_doc={
+                "public_report_id": str(public_report["report_id"]),
+                "selected_icp_count": len(window.item_refs),
+            },
+        )
         self._baseline_publication_failures_in_process.discard(publication_scope_key)
         self._baseline_publication_failure_logged_key = None
         logger.info(
@@ -7628,6 +8817,8 @@ class ResearchLabGatewayScoringWorker:
         score_breakdowns: list[dict[str, Any]],
         trace_entries: list[dict[str, Any]] | None,
         trace_context: Mapping[str, Any] | None,
+        telemetry_session: ScoringTelemetrySession | None = None,
+        telemetry_model_role: str = "reference",
     ) -> None:
         """Best-effort §5.4 scorer-trace capture plus in-container trace
         publication for one baseline/champion ICP.
@@ -7679,7 +8870,15 @@ class ResearchLabGatewayScoringWorker:
                 )
             if trace_entries:
                 drop_state = trace_context.get("incontainer_drop_state")
-                await _persist_provider_cost_events(
+                execution = (
+                    telemetry_session.execution_for(
+                        icp_ref=label,
+                        model_role=telemetry_model_role,
+                    )
+                    if telemetry_session is not None
+                    else None
+                )
+                persisted = await _persist_provider_cost_events(
                     entries=trace_entries,
                     run_type=str(trace_context.get("run_type") or "private_baseline_rebenchmark"),
                     icp_ref=label,
@@ -7687,7 +8886,14 @@ class ResearchLabGatewayScoringWorker:
                     runner_role="baseline",
                     benchmark_date=str(trace_context.get("benchmark_date") or ""),
                     rolling_window_hash=str(trace_context.get("rolling_window_hash") or ""),
+                    scoring_id=str(execution.scoring_id if execution is not None else ""),
+                    scoring_run_id=str(execution.scoring_run_id if execution is not None else ""),
+                    icp_execution_id=str(
+                        execution.icp_execution_id if execution is not None else ""
+                    ),
                 )
+                if not persisted and telemetry_session is not None:
+                    telemetry_session.degraded = True
                 diagnostics_updates.update(
                     await _publish_baseline_incontainer_trace(
                         context_ref=context_ref,
@@ -7707,7 +8913,12 @@ class ResearchLabGatewayScoringWorker:
                 exc_info=True,
             )
 
-    def _candidate_incontainer_trace_sink(self, candidate_id: str) -> Any:
+    def _candidate_incontainer_trace_sink(
+        self,
+        candidate_id: str,
+        *,
+        persist_costs: bool = True,
+    ) -> Any:
         """Candidate-scoped in-container trace/cost sink for the evaluator.
 
         Provider-cost events must be persisted even when full in-container
@@ -7736,13 +8947,14 @@ class ResearchLabGatewayScoringWorker:
         safe_candidate = _trace_path_segment(candidate_id, fallback="candidate")
 
         async def _sink(icp_ref: str, entries: list[dict[str, Any]]) -> str:
-            await _persist_provider_cost_events(
-                entries=entries,
-                run_type="candidate_scoring",
-                icp_ref=str(icp_ref),
-                runner_role="candidate",
-                candidate_id=candidate_id,
-            )
+            if persist_costs:
+                await _persist_provider_cost_events(
+                    entries=entries,
+                    run_type="candidate_scoring",
+                    icp_ref=str(icp_ref),
+                    runner_role="candidate",
+                    candidate_id=candidate_id,
+                )
             if not upload_enabled:
                 return ""
             return await asyncio.to_thread(
@@ -7771,6 +8983,9 @@ class ResearchLabGatewayScoringWorker:
         trace_context: Mapping[str, Any] | None = None,
         expected_repo_main_git_sha: str = "",
         benchmark_date: str = "",
+        telemetry_session: ScoringTelemetrySession | None = None,
+        telemetry_model_role: str = "reference",
+        retry_round: int = 0,
     ) -> dict[str, Any]:
         """Run one benchmark ICP (docker sourcing + scoring) and build its summary.
 
@@ -7794,6 +9009,14 @@ class ResearchLabGatewayScoringWorker:
         loop = asyncio.get_running_loop()
         item_start = time.time()
         label = str(item.get("icp_ref") or item.get("icp_hash") or "unknown_icp")
+        if telemetry_session is not None:
+            await telemetry_session.attempt_started(
+                icp_ref=label,
+                icp_hash=str(item.get("icp_hash") or ""),
+                icp_ordinal=max(0, item_index - 1),
+                model_role=telemetry_model_role,
+                retry_round=retry_round,
+            )
         await self._ensure_private_baseline_repo_head_unchanged(
             expected_git_sha=expected_repo_main_git_sha,
             benchmark_date=benchmark_date,
@@ -7863,8 +9086,27 @@ class ResearchLabGatewayScoringWorker:
             if trace_token is not None:
                 end_incontainer_trace_collection(trace_token)
         item_elapsed = time.time() - item_start
+        if telemetry_session is not None and not runtime_error:
+            await telemetry_session.lifecycle(
+                "sourcing_completed",
+                {
+                    "icp_ref": label,
+                    "model_role": telemetry_model_role,
+                    "retry_round": retry_round,
+                    "sourced_company_count": len(outputs),
+                },
+            )
         score_breakdowns: list[dict[str, Any]] = []
         if outputs:
+            if telemetry_session is not None:
+                await telemetry_session.lifecycle(
+                    "scoring_started",
+                    {
+                        "icp_ref": label,
+                        "model_role": telemetry_model_role,
+                        "retry_round": retry_round,
+                    },
+                )
             try:
                 score_breakdowns = await self._score_baseline_outputs(
                     scorer=scorer,
@@ -7944,6 +9186,8 @@ class ResearchLabGatewayScoringWorker:
             score_breakdowns=score_breakdowns,
             trace_entries=trace_entries,
             trace_context=trace_context,
+            telemetry_session=telemetry_session,
+            telemetry_model_role=telemetry_model_role,
         )
         _apply_provider_cost_baseline_outcome(item_summary)
         diagnostics = item_summary.get("diagnostics")
@@ -7956,6 +9200,20 @@ class ResearchLabGatewayScoringWorker:
         item_summary["_nonempty"] = bool(outputs)
         item_summary["_runtime_error"] = runtime_error or scorer_error
         item_summary["_retry_backoff_seconds"] = retry_backoff_seconds
+        if telemetry_session is not None and (runtime_error or scorer_error):
+            await telemetry_session.lifecycle(
+                "attempt_failed",
+                {
+                    "icp_ref": label,
+                    "model_role": telemetry_model_role,
+                    "retry_round": retry_round,
+                    "retryable": retryable,
+                    "failure_category": (
+                        "runtime_provider_error" if runtime_error else "scorer_provider_error"
+                    ),
+                    "error": runtime_error or scorer_error,
+                },
+            )
         return item_summary
 
     async def _score_baseline_outputs(
@@ -8029,6 +9287,8 @@ class ResearchLabGatewayScoringWorker:
         icp_checkpoint: Callable[[dict[str, Any]], Any] | None = None,
         expected_repo_main_git_sha: str = "",
         benchmark_date: str = "",
+        telemetry_session: ScoringTelemetrySession | None = None,
+        telemetry_model_role: str = "reference",
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Run all benchmark ICPs concurrently, then retry transient failures.
 
@@ -8050,6 +9310,8 @@ class ResearchLabGatewayScoringWorker:
                 icp_checkpoint=icp_checkpoint,
                 expected_repo_main_git_sha=expected_repo_main_git_sha,
                 benchmark_date=benchmark_date,
+                telemetry_session=telemetry_session,
+                telemetry_model_role=telemetry_model_role,
             )
 
     async def _run_baseline_batch_inner(
@@ -8066,6 +9328,8 @@ class ResearchLabGatewayScoringWorker:
         icp_checkpoint: Callable[[dict[str, Any]], Any] | None = None,
         expected_repo_main_git_sha: str = "",
         benchmark_date: str = "",
+        telemetry_session: ScoringTelemetrySession | None = None,
+        telemetry_model_role: str = "reference",
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Run all benchmark ICPs concurrently, then retry transient failures.
 
@@ -8139,6 +9403,9 @@ class ResearchLabGatewayScoringWorker:
                         trace_context=trace_context,
                         expected_repo_main_git_sha=expected_repo_main_git_sha,
                         benchmark_date=benchmark_date,
+                        telemetry_session=telemetry_session,
+                        telemetry_model_role=telemetry_model_role,
+                        retry_round=0,
                     )
                     if icp_checkpoint is not None and _baseline_summary_checkpointable(entry):
                         await icp_checkpoint(entry)
@@ -8211,6 +9478,9 @@ class ResearchLabGatewayScoringWorker:
                             trace_context=trace_context,
                             expected_repo_main_git_sha=expected_repo_main_git_sha,
                             benchmark_date=benchmark_date,
+                            telemetry_session=telemetry_session,
+                            telemetry_model_role=telemetry_model_role,
+                            retry_round=round_no,
                         )
                         if icp_checkpoint is not None and _baseline_summary_checkpointable(entry):
                             await icp_checkpoint(entry)

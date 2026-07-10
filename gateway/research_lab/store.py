@@ -865,6 +865,8 @@ async def create_scoring_dispatch_event(
     rolling_window_hash: str | None = None,
     score_bundle_id: str | None = None,
     benchmark_bundle_id: str | None = None,
+    scoring_id: str | None = None,
+    scoring_run_id: str | None = None,
     event_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = {
@@ -880,12 +882,29 @@ async def create_scoring_dispatch_event(
         "proxy_ref_hash": proxy_ref_hash,
         "event_doc": event_doc or {},
     }
+    legacy_anchor_payload = dict(payload)
+    # Migration 83 columns are opt-in: omit them entirely for legacy writers
+    # so code can be deployed disabled without requiring schema cache refresh.
+    if scoring_id or scoring_run_id:
+        if not scoring_id or not scoring_run_id:
+            raise ValueError("scoring dispatch telemetry ids must be provided together")
+        payload["scoring_id"] = scoring_id
+        payload["scoring_run_id"] = scoring_run_id
     dispatch_event_id = str(uuid4())
     row = {
         "dispatch_event_id": dispatch_event_id,
         "schema_version": "1.0",
         **payload,
-        "anchored_hash": canonical_hash(scoring_dispatch_event_anchor_payload(payload, dispatch_event_id)),
+        # Preserve the existing dispatch/audit anchor contract. The additive
+        # telemetry link is independently append-only, FK-constrained, and
+        # hash-anchored in the V2 tables; enabling or degrading telemetry must
+        # not perturb legacy audit bundle inputs.
+        "anchored_hash": canonical_hash(
+            scoring_dispatch_event_anchor_payload(
+                legacy_anchor_payload,
+                dispatch_event_id,
+            )
+        ),
     }
     return await insert_row("research_lab_scoring_dispatch_events", row)
 

@@ -36,6 +36,7 @@ from .private_runtime import (
     end_incontainer_trace_collection,
     ensure_private_model_outputs,
     incontainer_trace_capture_enabled,
+    publish_incontainer_trace_entries,
 )
 from .provider_costs import summarize_provider_cost_trace_entries
 
@@ -56,6 +57,58 @@ IcpCheckpoint = Callable[[Mapping[str, Any]], Union[Awaitable[None], None]]
 # as the row's ``incontainer_trace_ref`` pointer. Sink failures are logged and
 # swallowed — capture never fails a run.
 TraceSink = Callable[[str, "list[dict[str, Any]]"], Union[Awaitable[Any], Any]]
+# Optional gateway-supplied observer. It is intentionally a callback instead
+# of a gateway import so the open evaluator remains reusable and telemetry
+# cannot become a scoring dependency.
+ScoringTelemetryHook = Callable[
+    [str, Mapping[str, Any]],
+    Union[Awaitable[Mapping[str, Any] | None], Mapping[str, Any] | None],
+]
+AttemptCostSink = Callable[
+    [str, "list[dict[str, Any]]", Mapping[str, Any]],
+    Union[Awaitable[None], None],
+]
+
+
+async def _emit_scoring_telemetry(
+    hook: ScoringTelemetryHook | None,
+    action: str,
+    payload: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    if hook is None:
+        return None
+    try:
+        result = hook(action, dict(payload))
+        if inspect.isawaitable(result):
+            result = await result
+        return dict(result) if isinstance(result, Mapping) else None
+    except Exception:  # noqa: BLE001 - observation cannot affect scoring
+        logger.warning(
+            "research_lab_scoring_telemetry_hook_failed action=%s",
+            action,
+            exc_info=True,
+        )
+        return None
+
+
+async def _emit_attempt_costs(
+    sink: AttemptCostSink | None,
+    icp_ref: str,
+    entries: list[dict[str, Any]],
+    context: Mapping[str, Any] | None,
+) -> None:
+    if sink is None or not entries:
+        return
+    try:
+        result = sink(str(icp_ref), list(entries), dict(context or {}))
+        if inspect.isawaitable(result):
+            await result
+    except Exception:  # noqa: BLE001 - cost telemetry cannot affect scoring
+        logger.warning(
+            "research_lab_scoring_attempt_cost_sink_failed icp_ref=%s",
+            str(icp_ref)[:120],
+            exc_info=True,
+        )
 
 # Default trace sink configuration (used when no ``trace_sink`` is injected):
 # with the S3 prefix set, one JSON object per ICP is uploaded to
@@ -194,6 +247,8 @@ async def evaluate_private_model_pair(
     icp_checkpoint: IcpCheckpoint | None = None,
     resume_results: Sequence[Mapping[str, Any]] | None = None,
     trace_sink: TraceSink | None = None,
+    scoring_telemetry_hook: ScoringTelemetryHook | None = None,
+    attempt_cost_sink: AttemptCostSink | None = None,
 ) -> dict[str, Any]:
     """Run a real paired base-vs-candidate evaluation.
 
@@ -271,6 +326,8 @@ async def evaluate_private_model_pair(
             icp_checkpoint=icp_checkpoint,
             resume_results=resume_results,
             trace_sink=resolved_trace_sink,
+            scoring_telemetry_hook=scoring_telemetry_hook,
+            attempt_cost_sink=attempt_cost_sink,
         )
         return build_score_bundle_from_scored_icps(
             artifact_manifest=artifact,
@@ -295,6 +352,8 @@ async def evaluate_private_model_pair(
         icp_checkpoint=icp_checkpoint,
         resume_results=resume_results,
         trace_sink=resolved_trace_sink,
+        scoring_telemetry_hook=scoring_telemetry_hook,
+        attempt_cost_sink=attempt_cost_sink,
     )
     return build_score_bundle_from_scored_icps(
         artifact_manifest=artifact,
@@ -320,6 +379,8 @@ async def score_private_model_pair_items(
     icp_checkpoint: IcpCheckpoint | None = None,
     resume_results: Sequence[Mapping[str, Any]] | None = None,
     trace_sink: TraceSink | None = None,
+    scoring_telemetry_hook: ScoringTelemetryHook | None = None,
+    attempt_cost_sink: AttemptCostSink | None = None,
 ) -> list[dict[str, Any]]:
     """Score a subset of private benchmark items without building a bundle.
 
@@ -376,6 +437,8 @@ async def score_private_model_pair_items(
             concurrency=concurrency,
             legacy_timeout_latch=legacy_timeout_latch,
             provider_flake_retry=provider_flake_retry,
+            scoring_telemetry_hook=scoring_telemetry_hook,
+            attempt_cost_sink=attempt_cost_sink,
         )
     per_icp_results: list[dict[str, Any]] = []
     candidate_runtime_skip_reason = ""
@@ -415,6 +478,8 @@ async def score_private_model_pair_items(
                         legacy_timeout_latch=legacy_timeout_latch,
                         provider_flake_retry=provider_flake_retry,
                         trace_sink=effective_trace_sink,
+                        scoring_telemetry_hook=scoring_telemetry_hook,
+                        attempt_cost_sink=attempt_cost_sink,
                     )
                     for _position, entry in pending
                 ),
@@ -478,6 +543,8 @@ async def _score_items_work_conserving(
     concurrency: int,
     legacy_timeout_latch: bool,
     provider_flake_retry: bool,
+    scoring_telemetry_hook: ScoringTelemetryHook | None,
+    attempt_cost_sink: AttemptCostSink | None,
 ) -> list[dict[str, Any]]:
     """Work-conserving ICP scheduler: exactly ``concurrency`` jobs in flight.
 
@@ -529,6 +596,8 @@ async def _score_items_work_conserving(
                     legacy_timeout_latch=legacy_timeout_latch,
                     provider_flake_retry=provider_flake_retry,
                     trace_sink=trace_sink,
+                    scoring_telemetry_hook=scoring_telemetry_hook,
+                    attempt_cost_sink=attempt_cost_sink,
                 )
             except BaseException as exc:  # noqa: BLE001 - settle-then-raise
                 async with lock:
@@ -616,12 +685,16 @@ async def _score_single_icp(
     legacy_timeout_latch: bool,
     provider_flake_retry: bool,
     trace_sink: TraceSink | None = None,
+    scoring_telemetry_hook: ScoringTelemetryHook | None = None,
+    attempt_cost_sink: AttemptCostSink | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run and score one benchmark ICP.
 
     Returns ``(row, markers)`` where ``markers`` carries the latch signals the
     ordered driver loop needs (``timed_out``, ``latch_reason``, ``skipped``).
     """
+    item_ref = str(item.get("icp_ref") or item.get("icp_hash") or "")
+    item_hash = str(item.get("icp_hash") or "")
     await _run_parent_freshness_check(
         parent_freshness_check,
         {
@@ -673,6 +746,18 @@ async def _score_single_icp(
             candidate_outputs = []
             failure_reasons.append(candidate_runtime_skip_reason)
             markers["skipped"] = True
+            await _emit_scoring_telemetry(
+                scoring_telemetry_hook,
+                "attempt_skipped",
+                {
+                    "icp_ref": item_ref,
+                    "icp_hash": item_hash,
+                    "icp_ordinal": item_index,
+                    "model_role": "candidate",
+                    "retry_round": 0,
+                    "failure_category": candidate_runtime_skip_reason,
+                },
+            )
         else:
             # Hold one shared pool slot only while the candidate model actually
             # runs, so total concurrent candidate-model containers stay pinned
@@ -686,6 +771,10 @@ async def _score_single_icp(
                     item_label=str(item.get("icp_ref") or item.get("icp_hash") or ""),
                     legacy_timeout_latch=legacy_timeout_latch,
                     provider_flake_retry=provider_flake_retry,
+                    item_hash=item_hash,
+                    item_ordinal=item_index,
+                    scoring_telemetry_hook=scoring_telemetry_hook,
+                    attempt_cost_sink=attempt_cost_sink,
                 )
             if candidate_failure_reason:
                 failure_reasons.append(candidate_failure_reason)
@@ -695,6 +784,17 @@ async def _score_single_icp(
                         markers["latch_reason"] = _candidate_runtime_skip_reason(candidate_failure_reason)
                 else:
                     markers["latch_reason"] = _candidate_runtime_skip_reason(candidate_failure_reason)
+        if not markers["skipped"]:
+            await _emit_scoring_telemetry(
+                scoring_telemetry_hook,
+                "scoring_started",
+                {
+                    "icp_ref": item_ref,
+                    "icp_hash": item_hash,
+                    "icp_ordinal": item_index,
+                    "model_role": "candidate",
+                },
+            )
         base_scores = await _maybe_await(scorer(base_outputs, icp, True)) if base_runner is not None else []
         candidate_scores = await _maybe_await(scorer(candidate_outputs, icp, False))
     finally:
@@ -809,6 +909,10 @@ async def _run_candidate_with_retries(
     item_label: str,
     legacy_timeout_latch: bool,
     provider_flake_retry: bool,
+    item_hash: str = "",
+    item_ordinal: int = 0,
+    scoring_telemetry_hook: ScoringTelemetryHook | None = None,
+    attempt_cost_sink: AttemptCostSink | None = None,
 ) -> tuple[list[Mapping[str, Any]], str, bool]:
     """Run the candidate for one ICP with baseline-matched retry rounds.
 
@@ -820,24 +924,72 @@ async def _run_candidate_with_retries(
     max_attempts = 1 + _candidate_provider_retry_rounds()
     while True:
         attempts += 1
+        retry_round = attempts - 1
+        attempt_context = await _emit_scoring_telemetry(
+            scoring_telemetry_hook,
+            "attempt_started",
+            {
+                "icp_ref": item_label,
+                "icp_hash": item_hash,
+                "icp_ordinal": item_ordinal,
+                "model_role": "candidate",
+                "retry_round": retry_round,
+            },
+        )
+        attempt_entries: list[dict[str, Any]] = []
+        attempt_trace_token = None
+        caught_error: PrivateModelRuntimeError | None = None
+        failure_reason = ""
+        will_retry = False
+        outputs: Sequence[Mapping[str, Any]] = ()
+        if attempt_cost_sink is not None and incontainer_trace_capture_enabled():
+            attempt_entries, attempt_trace_token = begin_incontainer_trace_collection()
         try:
             outputs = ensure_private_model_outputs(
                 await _call_model_runner(candidate_runner, icp, candidate_context),
                 context_label=f"candidate model for ICP {item_label}",
                 require_non_empty=False,
             )
-            return list(outputs), "", False
         except PrivateModelRuntimeError as exc:
+            caught_error = exc
             failure_reason = _scoreable_candidate_runtime_failure_reason(exc)
             if not failure_reason:
                 raise
-            if attempts < max_attempts and _candidate_failure_should_retry(
+            will_retry = attempts < max_attempts and _candidate_failure_should_retry(
                 failure_reason,
                 str(exc),
                 legacy_timeout_latch=legacy_timeout_latch,
                 provider_flake_retry=provider_flake_retry,
-            ):
-                backoff_seconds = _candidate_429_retry_backoff_seconds(str(exc))
+            )
+        finally:
+            if attempt_trace_token is not None:
+                end_incontainer_trace_collection(attempt_trace_token)
+                await _emit_attempt_costs(
+                    attempt_cost_sink,
+                    item_label,
+                    attempt_entries,
+                    attempt_context,
+                )
+                # Restore the exact legacy outer trace contents/order. IDs are
+                # carried only out-of-band to the cost sink, never serialized.
+                publish_incontainer_trace_entries(attempt_entries)
+        if caught_error is not None:
+            if will_retry:
+                await _emit_scoring_telemetry(
+                    scoring_telemetry_hook,
+                    "attempt_failed",
+                    {
+                        "icp_ref": item_label,
+                        "icp_hash": item_hash,
+                        "icp_ordinal": item_ordinal,
+                        "model_role": "candidate",
+                        "retry_round": retry_round,
+                        "retryable": True,
+                        "failure_category": failure_reason,
+                        "error": str(caught_error),
+                    },
+                )
+                backoff_seconds = _candidate_429_retry_backoff_seconds(str(caught_error))
                 if backoff_seconds > 0:
                     logger.warning(
                         "research_lab_candidate_rate_limit_retry_backoff item_ref=%s attempt=%s/%s backoff_seconds=%.1f",
@@ -848,7 +1000,23 @@ async def _run_candidate_with_retries(
                     )
                     await asyncio.sleep(backoff_seconds)
                 continue
+            # The caller turns retry-exhausted runtime failures into the
+            # canonical scoreable-zero row and checkpoints that result. Leave
+            # this final attempt non-terminal until that callback runs.
             return [], failure_reason, False
+        await _emit_scoring_telemetry(
+            scoring_telemetry_hook,
+            "sourcing_completed",
+            {
+                "icp_ref": item_label,
+                "icp_hash": item_hash,
+                "icp_ordinal": item_ordinal,
+                "model_role": "candidate",
+                "retry_round": retry_round,
+                "sourced_company_count": len(outputs),
+            },
+        )
+        return list(outputs), "", False
 
 
 def _candidate_failure_should_retry(
@@ -1314,6 +1482,8 @@ async def _score_with_private_holdout_gate(
     icp_checkpoint: IcpCheckpoint | None = None,
     resume_results: Sequence[Mapping[str, Any]] | None = None,
     trace_sink: TraceSink | None = None,
+    scoring_telemetry_hook: ScoringTelemetryHook | None = None,
+    attempt_cost_sink: AttemptCostSink | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     public_refs = {
         str(item)
@@ -1347,6 +1517,8 @@ async def _score_with_private_holdout_gate(
         icp_checkpoint=icp_checkpoint,
         resume_results=resume_results,
         trace_sink=trace_sink,
+        scoring_telemetry_hook=scoring_telemetry_hook,
+        attempt_cost_sink=attempt_cost_sink,
     )
     # Public gate decides whether the private holdout runs at all; the shared
     # assembler below reproduces the same decision when building the result.
@@ -1354,6 +1526,17 @@ async def _score_with_private_holdout_gate(
     candidate_public_score = _benchmark_style_score(public_results, "candidate_company_scores")
     passed_public_gate = candidate_public_score + 1e-9 >= baseline_public_score
     if not passed_public_gate:
+        for item in private_items:
+            await _emit_scoring_telemetry(
+                scoring_telemetry_hook,
+                "gate_skipped",
+                {
+                    "icp_ref": str(item.get("icp_ref") or item.get("icp_hash") or ""),
+                    "icp_hash": str(item.get("icp_hash") or ""),
+                    "model_role": "candidate",
+                    "failure_category": "public_gate_rejected",
+                },
+            )
         return build_holdout_gate_result(
             public_results=public_results,
             private_results=(),
@@ -1374,6 +1557,8 @@ async def _score_with_private_holdout_gate(
         icp_checkpoint=icp_checkpoint,
         resume_results=resume_results,
         trace_sink=trace_sink,
+        scoring_telemetry_hook=scoring_telemetry_hook,
+        attempt_cost_sink=attempt_cost_sink,
     )
     return build_holdout_gate_result(
         public_results=public_results,

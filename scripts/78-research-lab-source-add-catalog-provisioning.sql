@@ -47,6 +47,24 @@ CREATE INDEX IF NOT EXISTS idx_research_lab_source_add_provisioning_identity
     ON public.research_lab_source_add_provisioning_events (source_identity_hash)
     WHERE source_identity_hash <> '';
 
+REVOKE ALL ON TABLE public.research_lab_source_add_provisioning_events FROM anon;
+REVOKE ALL ON TABLE public.research_lab_source_add_provisioning_events FROM authenticated;
+GRANT SELECT, INSERT ON TABLE public.research_lab_source_add_provisioning_events TO service_role;
+
+ALTER TABLE public.research_lab_source_add_provisioning_events ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS research_lab_source_add_provisioning_service_select
+    ON public.research_lab_source_add_provisioning_events;
+CREATE POLICY research_lab_source_add_provisioning_service_select
+    ON public.research_lab_source_add_provisioning_events
+    FOR SELECT TO service_role USING (true);
+
+DROP POLICY IF EXISTS research_lab_source_add_provisioning_service_insert
+    ON public.research_lab_source_add_provisioning_events;
+CREATE POLICY research_lab_source_add_provisioning_service_insert
+    ON public.research_lab_source_add_provisioning_events
+    FOR INSERT TO service_role WITH CHECK (true);
+
 CREATE OR REPLACE VIEW public.research_lab_source_add_provisioning_current
 WITH (security_invoker = true) AS
 SELECT DISTINCT ON (p.adapter_id)
@@ -71,6 +89,10 @@ SELECT DISTINCT ON (p.adapter_id)
 FROM public.research_lab_source_add_provisioning_events p
 JOIN public.research_lab_source_catalog c ON c.catalog_id = p.catalog_id
 ORDER BY p.adapter_id, p.seq DESC, p.created_at DESC;
+
+REVOKE ALL ON TABLE public.research_lab_source_add_provisioning_current FROM anon;
+REVOKE ALL ON TABLE public.research_lab_source_add_provisioning_current FROM authenticated;
+GRANT SELECT ON TABLE public.research_lab_source_add_provisioning_current TO service_role;
 
 CREATE OR REPLACE FUNCTION public.prevent_research_lab_source_add_provisioning_mutation()
 RETURNS trigger

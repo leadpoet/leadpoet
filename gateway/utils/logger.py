@@ -253,7 +253,10 @@ async def _log_event_legacy_format(event: Dict[str, Any]) -> Dict[str, Any]:
                 "ts": event.get("ts"),
                 "payload_hash": event.get("payload_hash"),
                 "build_id": event.get("build_id") or BUILD_ID,
-                "signature": event.get("signature"),
+                # Legacy/non-TEE callers cannot provide a real enclave
+                # signature, but production transparency_log requires the
+                # column. Signed callers use _log_event_signed_format.
+                "signature": event.get("signature") or "",
                 "payload": payload,
                 "email_hash": email_hash,
                 "linkedin_combo_hash": linkedin_combo_hash,

@@ -170,6 +170,7 @@ if _REPO_ROOT not in sys.path:
 import asyncio
 import logging
 import base64
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import bittensor as bt
@@ -185,6 +186,10 @@ from leadpoet_canonical.weights import (
 )
 from leadpoet_canonical.chain import normalize_chain_weights
 from leadpoet_canonical.events import verify_log_entry
+from leadpoet_canonical.auditor_v2 import (
+    load_identity_cache,
+    verify_attested_weight_bundle_v2,
+)
 
 # Constants from canonical module
 from leadpoet_canonical.constants import EPOCH_LENGTH, WEIGHT_SUBMISSION_BLOCK
@@ -199,6 +204,11 @@ logger = logging.getLogger(__name__)
 
 # default gateway URL
 DEFAULT_GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
+
+
+def _attested_v2_mode() -> str:
+    value = str(os.environ.get("AUDITOR_ATTESTED_WEIGHT_MODE", "off") or "off").strip().lower()
+    return value if value in {"off", "shadow", "required"} else "off"
 
 # Auditors skip PCR0 verification (requires nitro-cli to verify independently)
 # AWS cert chain + COSE signature verification proves it's a REAL Nitro enclave
@@ -681,6 +691,55 @@ class AuditorValidator:
             return None
         except Exception as e:
             print(f"❌ Failed to fetch current weights: {e}")
+            return None
+
+    async def fetch_attested_weights_v2(self, epoch_id: int) -> Optional[Dict]:
+        """Fetch the additive v2 sidecar; never substitutes for the v1 bundle."""
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{self.gateway_url}/weights/v2/latest/{self.config.netuid}/{int(epoch_id)}"
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                    if response.status == 404:
+                        return None
+                    if response.status != 200:
+                        logger.warning(
+                            "auditor_v2_fetch_failed epoch=%s status=%s",
+                            epoch_id,
+                            response.status,
+                        )
+                        return None
+                    value = await response.json()
+                    return value if isinstance(value, dict) else None
+        except Exception as exc:
+            logger.warning(
+                "auditor_v2_fetch_failed epoch=%s error_type=%s error=%s",
+                epoch_id,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            return None
+
+    def verify_attested_weights_v2(self, bundle: Dict) -> Optional[Dict]:
+        """Verify all v2 receipts against auditor-owned independent PCR0 builds."""
+
+        cache_file = str(os.environ.get("AUDITOR_INDEPENDENT_PCR0_CACHE_FILE", "") or "").strip()
+        if not cache_file:
+            logger.warning("auditor_v2_identity_cache_missing")
+            return None
+        try:
+            cache = load_identity_cache(Path(cache_file).expanduser())
+            return verify_attested_weight_bundle_v2(
+                bundle,
+                identity_cache=cache,
+                require_allocation_ancestry=True,
+            )
+        except Exception as exc:
+            logger.error(
+                "auditor_v2_verification_failed error_type=%s error=%s",
+                type(exc).__name__,
+                str(exc)[:240],
+            )
             return None
     
     async def fetch_gateway_attestation(self) -> bool:
@@ -1196,21 +1255,19 @@ class AuditorValidator:
         print(f"{'='*60}")
         logger.info("Auditor validator starting")
         
-        # Fetch gateway pubkey (for log verification)
-        # NOTE: Gateway attestation is OPTIONAL - gateway runs on EC2 host, not in enclave
-        # The CRITICAL verification is the VALIDATOR attestation (validator DOES run in enclave)
+        # Fetch the gateway enclave pubkey and attestation for log verification.
+        # This legacy startup check remains non-fatal for v1 compatibility; required
+        # v2 verification independently enforces every receipt and role PCR0.
         if await self.fetch_gateway_attestation():
             print(f"✅ Gateway pubkey fetched: {self.gateway_pubkey[:16]}...")
-            # Gateway attestation verification is optional since gateway doesn't run in Nitro
             if self.gateway_attestation:
                 if self.verify_gateway_attestation():
                     logger.info(f"Gateway attestation verified (trust_level={self.trust_level})")
                 else:
-                    # Non-fatal - gateway may not have attestation
-                    print(f"ℹ️  Gateway attestation not available (gateway runs on EC2 host, not enclave)")
+                    print(f"ℹ️  Gateway attestation did not pass the legacy startup check")
             else:
-                print(f"ℹ️  Gateway runs on EC2 host (no Nitro attestation)")
-                print(f"   This is expected - only the PRIMARY VALIDATOR runs in Nitro Enclave")
+                print(f"ℹ️  Gateway attestation document was not returned")
+                print(f"   Legacy v1 startup continues; required v2 verification remains fail-closed")
         else:
             logger.warning("Could not fetch gateway info")
             print(f"⚠️ Could not fetch gateway info")
@@ -1243,6 +1300,49 @@ class AuditorValidator:
                             print(f"   ⏳ Weights not yet published. Waiting 30s...")
                             await asyncio.sleep(30)  # CRITICAL: Prevent hot-loop DOSing gateway
                             continue
+
+                        attested_v2_mode = _attested_v2_mode()
+                        if attested_v2_mode != "off":
+                            v2_bundle = await self.fetch_attested_weights_v2(target_epoch)
+                            v2_verified = (
+                                self.verify_attested_weights_v2(v2_bundle)
+                                if isinstance(v2_bundle, dict)
+                                else None
+                            )
+                            if v2_verified is not None:
+                                v1_pairs = list(
+                                    zip(
+                                        weights_data.get("uids", []),
+                                        weights_data.get("weights_u16", []),
+                                    )
+                                )
+                                v2_pairs = list(
+                                    zip(
+                                        v2_verified.get("uids", []),
+                                        v2_verified.get("weights_u16", []),
+                                    )
+                                )
+                                if v1_pairs != v2_pairs:
+                                    logger.error(
+                                        "auditor_v2_differs_from_v1 epoch=%s",
+                                        target_epoch,
+                                    )
+                                    v2_verified = None
+                            if v2_verified is None:
+                                print("   ⚠️  Attested v2 receipt-chain verification unavailable or failed")
+                                if attested_v2_mode == "required":
+                                    print("   🔥 BURNING 100% TO UID 0 (required v2 verification failed)")
+                                    self.submit_burn_weights_to_uid0(
+                                        target_epoch,
+                                        "attested_v2_verification_failed",
+                                    )
+                                    continue
+                            else:
+                                print(
+                                    "   ✅ Attested v2 receipt chain verified against "
+                                    f"{len(v2_verified['independent_receipt_identities'])} "
+                                    "independent PCR0 identities"
+                                )
                         
                         # Extract VALIDATOR attestation from weight bundle
                         if not self.extract_validator_attestation(weights_data):
@@ -1471,4 +1571,3 @@ EXAMPLES:
 
 if __name__ == "__main__":
     main()
-

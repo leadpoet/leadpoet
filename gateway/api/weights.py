@@ -22,6 +22,7 @@ Security:
 - All events are signed and hash-chained for auditor verification
 """
 
+import asyncio
 import os
 import base64
 import hashlib
@@ -32,7 +33,7 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime
-from typing import List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -43,6 +44,11 @@ from leadpoet_canonical.chain import normalize_chain_weights
 from leadpoet_canonical.binding import verify_binding_message
 from leadpoet_canonical.timestamps import canonical_timestamp
 from leadpoet_canonical.constants import EPOCH_LENGTH, WEIGHT_SUBMISSION_BLOCK
+from leadpoet_canonical.attested_receipts import SCORING_PURPOSES, WEIGHT_PURPOSE
+from leadpoet_canonical.weight_bundle_v2 import (
+    WEIGHT_BUNDLE_V2_SCHEMA_VERSION,
+    validate_weight_bundle_v2,
+)
 from gateway.research_lab.arweave_audit import publish_research_lab_epoch_audit
 from gateway.research_lab.config import ResearchLabGatewayConfig
 
@@ -67,6 +73,7 @@ PCR0_ALLOWLIST_URL = os.environ.get(
 )
 _COMMIT_HASH_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 _NOTES_COMMIT_RE = re.compile(r"\bcommit\s+([0-9a-fA-F]{7,40})\b")
+_PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
 
 # PCR0 is the ROOT OF TRUST - code_hash in user_data is INFORMATIONAL only
 # The verify_nitro_attestation_full function checks PCR0 against the allowlist
@@ -222,6 +229,32 @@ class WeightSubmissionResponse(BaseModel):
     weight_submission_event_hash: Optional[str] = None
 
 
+class WeightSubmissionV2(BaseModel):
+    """Enclave-computed weight snapshot, result, and receipt ancestry."""
+
+    schema_version: str
+    validator_hotkey: str
+    binding_message: str
+    validator_hotkey_signature: str
+    weight_snapshot: Dict[str, Any]
+    weight_result: Dict[str, Any]
+    weights_signature: str
+    weight_receipt: Dict[str, Any]
+    parent_receipts: List[Dict[str, Any]]
+
+
+class WeightSubmissionV2Response(BaseModel):
+    success: bool
+    mode: str
+    epoch_id: int
+    weights_count: int
+    weights_hash: str
+    weight_receipt_hash: str
+    pcr0_commit_hash: str
+    persistence_status: str
+    message: str
+
+
 # ============================================================================
 # Verification Helpers
 # ============================================================================
@@ -279,6 +312,81 @@ def verify_validator_attestation(
         return False, {"error": str(e)}
 
 
+def verify_validator_attestation_v2(
+    *,
+    receipt: Dict[str, Any],
+    expected_epoch_id: int,
+) -> tuple:
+    """Require genuine Nitro plus the dynamic Git-derived validator PCR0 path."""
+
+    try:
+        from leadpoet_canonical.nitro import verify_nitro_attestation_full
+
+        valid, data = verify_nitro_attestation_full(
+            attestation_b64=str(receipt.get("attestation_document_b64") or ""),
+            expected_pubkey=str(receipt.get("enclave_pubkey") or ""),
+            expected_purpose=WEIGHT_PURPOSE,
+            expected_epoch_id=expected_epoch_id,
+            role="validator",
+        )
+        if not valid:
+            return False, data
+        if data.get("purpose") != WEIGHT_PURPOSE:
+            return False, {**data, "error": "v2 attestation purpose is missing or incorrect"}
+        if int(data.get("epoch_id")) != int(expected_epoch_id):
+            return False, {**data, "error": "v2 attestation epoch binding is incorrect"}
+        if data.get("pcr0_verification_mode") != "dynamic_github":
+            return False, {**data, "error": "v2 requires dynamic Git-derived PCR0 verification"}
+        if data.get("pcr0_commit") != receipt.get("commit_sha"):
+            return False, {**data, "error": "v2 PCR0 commit does not match receipt commit"}
+        return True, data
+    except Exception as exc:
+        logger.error("[ATTESTATION_V2] Verification failed: %s", exc)
+        return False, {"error": str(exc)}
+
+
+def verify_scoring_receipt_attestation_v2(receipt: Dict[str, Any]) -> tuple:
+    """Verify AWS Nitro authenticity and exact bindings for one scoring receipt.
+
+    The primary validator separately checks this PCR0 against an independently
+    rebuilt gateway EIF before it creates the v2 weight receipt. This gateway
+    check proves every supplied ancestor is a genuine Nitro receipt with exact
+    role/purpose/epoch/key binding; it deliberately does not use the v1 static
+    gateway allowlist as v2 proof.
+    """
+
+    purpose = str(receipt.get("purpose") or "")
+    epoch_id = int(receipt.get("epoch_id", -1))
+    if purpose not in SCORING_PURPOSES:
+        return False, {"error": "v2 scoring receipt purpose is invalid"}
+    try:
+        from leadpoet_canonical.nitro import verify_nitro_attestation_full
+
+        valid, data = verify_nitro_attestation_full(
+            attestation_b64=str(receipt.get("attestation_document_b64") or ""),
+            expected_pubkey=str(receipt.get("enclave_pubkey") or ""),
+            expected_purpose=purpose,
+            expected_epoch_id=epoch_id,
+            role="gateway",
+            skip_pcr0_verification=True,
+        )
+        if not valid:
+            return False, data
+        if data.get("purpose") != purpose:
+            return False, {**data, "error": "v2 scoring attestation purpose is missing or incorrect"}
+        if int(data.get("epoch_id", -1)) != epoch_id:
+            return False, {**data, "error": "v2 scoring attestation epoch binding is incorrect"}
+        if data.get("enclave_pubkey") != receipt.get("enclave_pubkey"):
+            return False, {**data, "error": "v2 scoring attestation key binding is incorrect"}
+        pcr0 = str(data.get("pcr0") or "").lower()
+        if not _PCR0_RE.fullmatch(pcr0) or pcr0 == "0" * 96:
+            return False, {**data, "error": "v2 scoring attestation PCR0 is invalid"}
+        return True, data
+    except Exception as exc:
+        logger.error("[SCORING_ATTESTATION_V2] Verification failed: %s", exc)
+        return False, {"error": str(exc)}
+
+
 def verify_ed25519_signature(digest_bytes: bytes, signature_hex: str, pubkey_hex: str) -> bool:
     """
     Verify an Ed25519 signature over raw digest bytes.
@@ -300,6 +408,172 @@ def verify_ed25519_signature(digest_bytes: bytes, signature_hex: str, pubkey_hex
 # ============================================================================
 # Endpoints
 # ============================================================================
+
+@router.post("/submit/v2")
+async def submit_weights_v2(submission: WeightSubmissionV2) -> WeightSubmissionV2Response:
+    """Verify enclave-computed weights in non-authoritative shadow mode."""
+
+    mode = str(os.environ.get("GATEWAY_WEIGHT_SUBMISSION_V2_MODE", "off") or "off").strip().lower()
+    if mode not in {"off", "shadow", "required"}:
+        mode = "off"
+    if mode == "off":
+        raise HTTPException(status_code=503, detail="v2 weight verification is disabled")
+
+    try:
+        verified = validate_weight_bundle_v2(
+            submission.model_dump(mode="python"),
+            require_allocation_ancestry=(mode == "required"),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid v2 weight bundle: {exc}") from exc
+
+    if not PRIMARY_VALIDATOR_HOTKEYS:
+        logger.warning("PRIMARY_VALIDATOR_HOTKEYS not configured for v2 shadow verification")
+    elif submission.validator_hotkey not in PRIMARY_VALIDATOR_HOTKEYS:
+        raise HTTPException(status_code=403, detail="Unauthorized validator hotkey")
+    if ALLOWED_NETUIDS and verified["netuid"] not in ALLOWED_NETUIDS:
+        raise HTTPException(status_code=400, detail=f"Invalid netuid: {verified['netuid']}")
+
+    subtensor = get_subtensor()
+    gateway_block = await asyncio.to_thread(subtensor.get_current_block)
+    if abs(gateway_block - verified["block"]) > MAX_BLOCK_DRIFT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Block drift too large: submitted {verified['block']}, gateway sees {gateway_block}",
+        )
+    gateway_epoch = gateway_block // EPOCH_LENGTH
+    valid_epochs = (
+        {gateway_epoch, gateway_epoch - 1}
+        if gateway_block % EPOCH_LENGTH < 30
+        else {gateway_epoch}
+    )
+    if verified["epoch_id"] not in valid_epochs:
+        raise HTTPException(
+            status_code=400,
+            detail=f"epoch_id {verified['epoch_id']} not in valid range {valid_epochs}",
+        )
+    if verified["epoch_id"] != verified["block"] // EPOCH_LENGTH:
+        raise HTTPException(status_code=400, detail="epoch_id does not match submitted block")
+    if verified["block"] % EPOCH_LENGTH < WEIGHT_SUBMISSION_BLOCK - 15:
+        raise HTTPException(status_code=400, detail="Block is too early for weight submission")
+
+    attestation_valid, attestation_data = await asyncio.to_thread(
+        verify_validator_attestation_v2,
+        receipt=submission.weight_receipt,
+        expected_epoch_id=verified["epoch_id"],
+    )
+    if not attestation_valid:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Invalid v2 validator attestation: {attestation_data.get('error', 'unknown')}",
+        )
+    for parent_receipt in submission.parent_receipts:
+        parent_valid, parent_data = await asyncio.to_thread(
+            verify_scoring_receipt_attestation_v2,
+            parent_receipt,
+        )
+        if not parent_valid:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Invalid v2 scoring receipt attestation: "
+                    f"{parent_data.get('error', 'unknown')}"
+                ),
+            )
+    validator_code_hash = str(attestation_data.get("code_hash") or "")
+    if not validator_code_hash:
+        raise HTTPException(status_code=403, detail="v2 attestation is missing code_hash")
+    if not verify_binding_message(
+        submission.binding_message,
+        submission.validator_hotkey_signature,
+        submission.validator_hotkey,
+        expected_netuid=verified["netuid"],
+        expected_chain=EXPECTED_CHAIN,
+        expected_enclave_pubkey=verified["validator_enclave_pubkey"],
+        expected_code_hash=validator_code_hash,
+    ):
+        raise HTTPException(status_code=403, detail="Invalid v2 hotkey binding")
+
+    persistence_status = "disabled"
+    persistence_enabled = str(
+        os.environ.get("GATEWAY_WEIGHT_SUBMISSION_V2_PERSIST_ENABLED", "false")
+        or "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if persistence_enabled:
+        try:
+            from gateway.research_lab.attested_receipt_store import (
+                persist_attested_weight_bundle,
+            )
+
+            await persist_attested_weight_bundle(
+                bundle=submission.model_dump(mode="python"),
+                validator_pcr0=str(attestation_data.get("pcr0") or ""),
+                verification_mode=mode,
+            )
+            persistence_status = "persisted"
+        except Exception as exc:
+            logger.error(
+                "weight_submission_v2_sidecar_persist_failed epoch=%s "
+                "error_type=%s error=%s",
+                verified["epoch_id"],
+                type(exc).__name__,
+                str(exc)[:240],
+            )
+            persistence_status = "failed"
+            if mode == "required":
+                raise HTTPException(
+                    status_code=503,
+                    detail="v2 required receipt-sidecar persistence failed",
+                ) from exc
+
+    if mode == "required":
+        raise HTTPException(
+            status_code=503,
+            detail="v2 required publication remains locked until receipt-sidecar persistence is enabled",
+        )
+    logger.info(
+        "weight_submission_v2_shadow_verified epoch=%s hash=%s receipt=%s commit=%s",
+        verified["epoch_id"],
+        verified["weights_hash"],
+        verified["weight_receipt_hash"],
+        attestation_data["pcr0_commit"],
+    )
+    return WeightSubmissionV2Response(
+        success=True,
+        mode="shadow",
+        epoch_id=verified["epoch_id"],
+        weights_count=len(verified["uids"]),
+        weights_hash=verified["weights_hash"],
+        weight_receipt_hash=verified["weight_receipt_hash"],
+        pcr0_commit_hash=attestation_data["pcr0_commit"],
+        persistence_status=persistence_status,
+        message="V2 bundle verified in shadow mode; v1 remains authoritative",
+    )
+
+
+@router.get("/v2/latest/{netuid}/{epoch_id}")
+async def get_attested_weights_v2(netuid: int, epoch_id: int) -> Dict[str, Any]:
+    """Return one persisted v2 shadow bundle for independent auditor checks."""
+
+    try:
+        from gateway.research_lab.attested_receipt_store import (
+            load_attested_weight_bundle,
+        )
+
+        bundle = await load_attested_weight_bundle(netuid=int(netuid), epoch_id=int(epoch_id))
+    except Exception as exc:
+        logger.error(
+            "weight_submission_v2_sidecar_load_failed netuid=%s epoch=%s "
+            "error_type=%s error=%s",
+            netuid,
+            epoch_id,
+            type(exc).__name__,
+            str(exc)[:240],
+        )
+        raise HTTPException(status_code=500, detail="v2 weight sidecar verification failed") from exc
+    if bundle is None:
+        raise HTTPException(status_code=404, detail="v2 weight bundle not found")
+    return bundle
 
 @router.post("/submit")
 async def submit_weights(submission: WeightSubmission) -> WeightSubmissionResponse:

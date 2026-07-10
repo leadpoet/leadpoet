@@ -12,6 +12,8 @@ import socket
 import json
 import asyncio
 import subprocess
+import base64
+import hashlib
 from typing import Dict, List, Optional
 from datetime import datetime
 
@@ -24,6 +26,18 @@ PARENT_CID = 3
 
 # RPC port for TEE communication
 RPC_PORT = 5000
+MAX_RPC_REQUEST_BYTES = 64 * 1024 * 1024
+MAX_RPC_RESPONSE_BYTES = 256 * 1024 * 1024
+
+
+def _recv_exact(sock: socket.socket, size: int) -> bytes:
+    output = bytearray()
+    while len(output) < size:
+        chunk = sock.recv(min(64 * 1024, size - len(output)))
+        if not chunk:
+            break
+        output.extend(chunk)
+    return bytes(output)
 
 
 class TEEClient:
@@ -148,25 +162,26 @@ class TEEClient:
         
         # Send request (with length prefix)
         request_length = len(request_bytes)
+        if request_length < 2 or request_length > MAX_RPC_REQUEST_BYTES:
+            raise RuntimeError("RPC request size is outside the allowed range")
         length_prefix = request_length.to_bytes(4, byteorder='big')
         
         try:
             self._socket.sendall(length_prefix + request_bytes)
             
             # Receive response (read length prefix first)
-            response_length_bytes = self._socket.recv(4)
+            response_length_bytes = _recv_exact(self._socket, 4)
             if len(response_length_bytes) != 4:
                 raise RuntimeError("Failed to read response length")
             
             response_length = int.from_bytes(response_length_bytes, byteorder='big')
+            if response_length < 2 or response_length > MAX_RPC_RESPONSE_BYTES:
+                raise RuntimeError("RPC response size is outside the allowed range")
             
             # Read response body
-            response_bytes = b""
-            while len(response_bytes) < response_length:
-                chunk = self._socket.recv(min(4096, response_length - len(response_bytes)))
-                if not chunk:
-                    raise RuntimeError("Connection closed by enclave")
-                response_bytes += chunk
+            response_bytes = _recv_exact(self._socket, response_length)
+            if len(response_bytes) != response_length:
+                raise RuntimeError("Connection closed by enclave")
             
             # Parse response
             response = json.loads(response_bytes.decode('utf-8'))
@@ -285,6 +300,70 @@ class TEEClient:
             }
         """
         return await self._send_rpc("build_checkpoint", {})
+
+    async def scoring_configure_runtime(
+        self,
+        *,
+        environment: Dict,
+        configuration_hash: str,
+    ) -> Dict:
+        """Provision reviewed scoring env values once without logging them."""
+        return await self._send_rpc(
+            "scoring_configure_runtime",
+            {
+                "schema_version": "leadpoet.gateway_scoring_runtime.v1",
+                "environment": environment,
+                "configuration_hash": configuration_hash,
+            },
+        )
+
+    async def scoring_health(self) -> Dict:
+        """Return attested-scoring mode, bounds, and queue health."""
+        return await self._send_rpc("scoring_health", {})
+
+    async def scoring_submit_job(self, manifest: Dict) -> Dict:
+        return await self._send_rpc("scoring_submit_job", {"manifest": manifest})
+
+    async def scoring_put_chunk(
+        self,
+        *,
+        job_id: str,
+        offset: int,
+        data: bytes,
+    ) -> Dict:
+        return await self._send_rpc(
+            "scoring_put_chunk",
+            {
+                "job_id": job_id,
+                "offset": offset,
+                "data_b64": base64.b64encode(data).decode("ascii"),
+                "chunk_sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+            },
+        )
+
+    async def scoring_seal_job(self, job_id: str) -> Dict:
+        return await self._send_rpc("scoring_seal_job", {"job_id": job_id})
+
+    async def scoring_get_status(self, job_id: str) -> Dict:
+        return await self._send_rpc("scoring_get_status", {"job_id": job_id})
+
+    async def scoring_cancel_job(self, job_id: str) -> Dict:
+        return await self._send_rpc("scoring_cancel_job", {"job_id": job_id})
+
+    async def scoring_get_result(
+        self,
+        job_id: str,
+        *,
+        offset: int = 0,
+        max_bytes: int = 512 * 1024,
+    ) -> Dict:
+        return await self._send_rpc(
+            "scoring_get_result",
+            {"job_id": job_id, "offset": offset, "max_bytes": max_bytes},
+        )
+
+    async def scoring_get_receipt(self, job_id: str) -> Dict:
+        return await self._send_rpc("scoring_get_receipt", {"job_id": job_id})
     
     def close(self):
         """Close vsock connection."""

@@ -30,7 +30,9 @@ import json
 import sys
 import os
 import hashlib
+import base64
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Any, Optional
 from threading import Lock
 print("🐛 DEBUG: Standard library imports OK", flush=True)
@@ -71,6 +73,7 @@ PARENT_CID = 3
 
 # RPC port for communication
 RPC_PORT = 5000
+MAX_RPC_REQUEST_BYTES = 64 * 1024 * 1024
 
 # Note: The enclave's actual CID (e.g., 16, 26, 27) is assigned by AWS
 # and visible to the parent EC2, but the enclave binds to VMADDR_CID_ANY
@@ -110,6 +113,15 @@ pcr_measurements: Dict[str, str] = {
     "PCR2": None
 }
 pcr_measurements_lock = Lock()
+
+# Lazily initialized so the existing event/checkpoint service has no scoring
+# startup dependency while attested scoring is disabled (the default).
+scoring_job_manager = None
+scoring_job_manager_lock = Lock()
+scoring_egress_proxy = None
+scoring_egress_proxy_lock = Lock()
+scoring_runtime_configuration = None
+scoring_runtime_configuration_lock = Lock()
 
 print("=" * 80, flush=True)
 print("🐛 DEBUG: All imports and global state OK", flush=True)
@@ -728,7 +740,12 @@ def set_pcr_measurements(pcr0: str = None, pcr1: str = None, pcr2: str = None) -
     }
 
 
-def get_attestation_document_with_pcrs(pcr0: str = None, pcr1: str = None, pcr2: str = None) -> Dict[str, Any]:
+def get_attestation_document_with_pcrs(
+    pcr0: str = None,
+    pcr1: str = None,
+    pcr2: str = None,
+    user_data_fields: Dict[str, Any] = None,
+) -> Dict[str, Any]:
     """
     Generate attestation document using hardware PCR measurements.
     
@@ -766,6 +783,12 @@ def get_attestation_document_with_pcrs(pcr0: str = None, pcr1: str = None, pcr2:
         "version": "1.0.0",
         "timestamp": datetime.utcnow().isoformat()
     }
+    if user_data_fields:
+        allowed_fields = {"purpose", "epoch_id", "job_id", "config_hash", "input_root"}
+        unknown_fields = set(user_data_fields) - allowed_fields
+        if unknown_fields:
+            raise ValueError("Unsupported attestation user_data fields")
+        user_data_dict.update(user_data_fields)
     user_data_bytes = json.dumps(user_data_dict).encode('utf-8')
     
     # Determine source (hardware if PCRs non-zero, development if zeros)
@@ -907,6 +930,197 @@ def get_cached_attestation_hash() -> str:
 # RPC HANDLER (vsock Request/Response)
 # ============================================================================
 
+def _scoring_runtime_paths() -> None:
+    gateway_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    app_root = os.path.dirname(gateway_root)
+    staged_runtime = os.path.join(gateway_root, "_attested_runtime")
+    for path in (staged_runtime, app_root):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+
+def _scoring_attestation_document_b64(manifest: Dict[str, Any]) -> str:
+    document = get_attestation_document_with_pcrs(
+        user_data_fields={
+            "purpose": manifest["purpose"],
+            "epoch_id": manifest["epoch_id"],
+            "job_id": manifest["job_id"],
+            "config_hash": manifest["config_hash"],
+            "input_root": manifest["payload_sha256"],
+        },
+    )
+    encoded = str(document.get("attestation_document") or "")
+    if not encoded:
+        raise RuntimeError("hardware attestation document is unavailable")
+    try:
+        raw = bytes.fromhex(encoded)
+    except ValueError as exc:
+        raise RuntimeError("hardware attestation document is invalid") from exc
+    return base64.b64encode(raw).decode("ascii")
+
+
+def get_scoring_egress_proxy():
+    global scoring_egress_proxy
+    with scoring_egress_proxy_lock:
+        if scoring_egress_proxy is not None:
+            return scoring_egress_proxy
+        from gateway.tee.egress_proxy import EnclaveEgressProxy, configured_proxy_ports
+
+        local_port, forwarder_port = configured_proxy_ports()
+        scoring_egress_proxy = EnclaveEgressProxy(
+            recv_exact=_recv_exact,
+            local_port=local_port,
+            forwarder_port=forwarder_port,
+        )
+        scoring_egress_proxy.start()
+        print(
+            "[TEE] Scoring egress proxy initialized local_port=%s forwarder_port=%s"
+            % (local_port, forwarder_port),
+            flush=True,
+        )
+        return scoring_egress_proxy
+
+
+def configure_scoring_runtime(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Provision the reviewed scoring environment once, before any job runs."""
+
+    global scoring_runtime_configuration
+    from gateway.tee.scoring_executor import (
+        SCORING_RUNTIME_ENV_NAMES,
+        configuration_hash,
+        normalize_runtime_environment,
+    )
+
+    if not isinstance(params, dict) or set(params) != {
+        "schema_version",
+        "environment",
+        "configuration_hash",
+    }:
+        raise ValueError("scoring runtime configuration fields do not match the schema")
+    if params.get("schema_version") != "leadpoet.gateway_scoring_runtime.v1":
+        raise ValueError("unsupported scoring runtime configuration schema")
+    environment = normalize_runtime_environment(params.get("environment"))
+    expected_hash = configuration_hash(environment)
+    if params.get("configuration_hash") != expected_hash:
+        raise ValueError("scoring runtime configuration hash mismatch")
+    with scoring_job_manager_lock:
+        with scoring_runtime_configuration_lock:
+            if scoring_runtime_configuration is not None:
+                if scoring_runtime_configuration["configuration_hash"] != expected_hash:
+                    raise ValueError("scoring runtime configuration is immutable for enclave lifetime")
+                return dict(scoring_runtime_configuration)
+            if scoring_job_manager is not None:
+                raise ValueError("scoring runtime must be configured before scoring manager initialization")
+            for name in SCORING_RUNTIME_ENV_NAMES:
+                value = environment[name]
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+            scoring_runtime_configuration = {
+                "schema_version": "leadpoet.gateway_scoring_runtime.v1",
+                "status": "configured",
+                "configuration_hash": expected_hash,
+                "configured_variable_count": sum(
+                    1 for value in environment.values() if value is not None
+                ),
+            }
+            return dict(scoring_runtime_configuration)
+
+
+def get_scoring_job_manager():
+    global scoring_job_manager
+    with scoring_job_manager_lock:
+        if scoring_job_manager is not None:
+            return scoring_job_manager
+        _scoring_runtime_paths()
+        from gateway.tee.scoring_import_closure import verify_staged_manifest
+        from gateway.tee.build_identity import load_identity
+        from gateway.tee.scoring_job_manager import ScoringJobManager
+
+        gateway_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        manifest = verify_staged_manifest(gateway_root=Path(gateway_root))
+        identity = load_identity(gateway_root=Path(gateway_root))
+        if identity["scoring_manifest_hash"] != manifest["manifest_hash"]:
+            raise RuntimeError("gateway enclave build identity manifest mismatch")
+        configured_mode = str(
+            os.getenv("RESEARCH_LAB_ATTESTED_SCORING_MODE", "off") or "off"
+        ).strip().lower()
+        if configured_mode != "off":
+            get_scoring_egress_proxy()
+        scoring_job_manager = ScoringJobManager(
+            build_manifest_hash=str(manifest["manifest_hash"]),
+            commit_sha=str(identity["commit_sha"]),
+            signer=sign_data,
+            public_key_supplier=lambda: get_public_key_bytes().hex(),
+            attestation_supplier=_scoring_attestation_document_b64,
+        )
+        print(
+            "[TEE] Attested scoring initialized mode=%s commit=%s manifest=%s" % (
+                scoring_job_manager.mode,
+                scoring_job_manager.commit_sha[:12],
+                str(manifest["manifest_hash"])[:23],
+            ),
+            flush=True,
+        )
+        return scoring_job_manager
+
+
+def handle_scoring_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        if method == "scoring_configure_runtime":
+            return {"result": configure_scoring_runtime(params)}
+        manager = get_scoring_job_manager()
+        if method == "scoring_health":
+            result = manager.health()
+            if getattr(manager, "mode", "off") != "off":
+                result["egress_proxy"] = get_scoring_egress_proxy().status()
+            if hasattr(manager, "build_manifest_hash"):
+                result["runtime_configuration"] = (
+                    dict(scoring_runtime_configuration)
+                    if scoring_runtime_configuration is not None
+                    else {"status": "not_configured"}
+                )
+        elif method == "scoring_submit_job":
+            manifest = params.get("manifest")
+            if (
+                isinstance(manifest, dict)
+                and manifest.get("operation") == "qualification_company_scores"
+                and scoring_runtime_configuration is None
+            ):
+                raise ValueError("qualification scoring runtime is not configured")
+            result = manager.submit(manifest)
+        elif method == "scoring_put_chunk":
+            result = manager.put_chunk(
+                job_id=params.get("job_id"),
+                offset=params.get("offset"),
+                data_b64=params.get("data_b64"),
+                chunk_sha256=params.get("chunk_sha256"),
+            )
+        elif method == "scoring_seal_job":
+            result = manager.seal(params.get("job_id"))
+        elif method == "scoring_get_status":
+            result = manager.status(params.get("job_id"))
+        elif method == "scoring_cancel_job":
+            result = manager.cancel(params.get("job_id"))
+        elif method == "scoring_get_result":
+            result = manager.result_chunk(
+                job_id=params.get("job_id"),
+                offset=params.get("offset", 0),
+                max_bytes=params.get("max_bytes", 512 * 1024),
+            )
+        elif method == "scoring_get_receipt":
+            result = manager.receipt(params.get("job_id"))
+        else:
+            return {"status": "error", "error": "Unknown scoring method"}
+        return {"result": result}
+    except Exception as exc:
+        print(
+            "[TEE] Attested scoring RPC rejected method=%s type=%s" % (method, type(exc).__name__),
+            flush=True,
+        )
+        return {"status": "error", "error": str(exc)}
+
 def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """
     Handle RPC method call from parent EC2.
@@ -922,6 +1136,7 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
     - get_attestation: Get attestation document
     - set_pcr_measurements: Set PCR measurements from parent EC2
     - sign_checkpoint: Sign checkpoint header
+    - scoring_*: Submit, inspect, cancel, and retrieve bounded scoring jobs
     
     Args:
         method: RPC method name
@@ -983,6 +1198,9 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
                     "checkpoint_hash": checkpoint_hash.hex()
                 }
             }
+
+        elif method.startswith("scoring_"):
+            return handle_scoring_rpc(method, params)
         
         else:
             return {"error": f"Unknown method: {method}"}
@@ -997,6 +1215,18 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
 # ============================================================================
 # VSOCK SERVER (Parent EC2 ↔ Enclave Communication)
 # ============================================================================
+
+def _recv_exact(conn: Any, size: int) -> bytes:
+    """Read an exact bounded frame segment or return the partial bytes."""
+
+    output = bytearray()
+    while len(output) < size:
+        chunk = conn.recv(min(64 * 1024, size - len(output)))
+        if not chunk:
+            break
+        output.extend(chunk)
+    return bytes(output)
+
 
 def start_vsock_server():
     """
@@ -1067,7 +1297,7 @@ def start_vsock_server():
             
             # Receive request with length prefix (4 bytes, big-endian)
             # Protocol: [4-byte length][JSON data]
-            length_bytes = conn.recv(4)
+            length_bytes = _recv_exact(conn, 4)
             
             if len(length_bytes) != 4:
                 print(f"[TEE] ⚠️ Invalid request (no length prefix)", flush=True)
@@ -1075,14 +1305,13 @@ def start_vsock_server():
                 continue
             
             request_length = int.from_bytes(length_bytes, byteorder='big')
+            if request_length < 2 or request_length > MAX_RPC_REQUEST_BYTES:
+                print(f"[TEE] ⚠️ Request length outside limit: {request_length}", flush=True)
+                conn.close()
+                continue
             
             # Receive JSON data
-            request_data = b""
-            while len(request_data) < request_length:
-                chunk = conn.recv(min(4096, request_length - len(request_data)))
-                if not chunk:
-                    break
-                request_data += chunk
+            request_data = _recv_exact(conn, request_length)
             
             if len(request_data) != request_length:
                 print(f"[TEE] ⚠️ Incomplete request (expected {request_length}, got {len(request_data)})", flush=True)

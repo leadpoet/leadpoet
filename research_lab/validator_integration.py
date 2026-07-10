@@ -17,6 +17,13 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from leadpoet_canonical.attested_receipts import (
+    SCORING_ROLE,
+    SCORING_PURPOSES,
+    sha256_json as attested_sha256_json,
+    validate_signed_receipt,
+    verify_receipt_lineage,
+)
 from leadpoet_verifier.golden_vectors import run_golden_vectors
 from leadpoet_verifier.economics import DEFAULT_RESEARCH_LAB_EMISSION_PERCENT, allocate_research_lab_epoch
 from leadpoet_verifier.research_evaluation import (
@@ -37,6 +44,22 @@ from .production_shadow import (
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "validator_integration_fixtures.json"
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
 PERCENT_EPSILON = 0.000001
+ATTESTED_ALLOCATION_SCHEMA_VERSION = "leadpoet.attested_allocation_bundle.v2"
+ATTESTED_ALLOCATION_PURPOSE = "research_lab.allocation.v1"
+
+
+def load_independent_gateway_identity(commit_sha: str) -> dict[str, Any] | None:
+    """Load a repeated-build gateway PCR0 record for one exact commit."""
+
+    from validator_tee.host.gateway_pcr0_builder import load_cached_gateway_identity
+
+    configured = str(os.getenv("VALIDATOR_GATEWAY_PCR0_CACHE_FILE", "") or "").strip()
+    cache_path = (
+        Path(configured).expanduser()
+        if configured
+        else Path.home() / ".cache" / "leadpoet" / "gateway-pcr0-cache.json"
+    )
+    return load_cached_gateway_identity(cache_path, str(commit_sha or "").strip().lower())
 
 
 def _request_headers(*, include_internal_key: bool = False) -> dict[str, str]:
@@ -346,6 +369,49 @@ def fetch_research_lab_allocation_bundle(
         return json.loads(response.read().decode("utf-8"))
 
 
+def fetch_research_lab_attested_allocation_bundle(
+    gateway_url: str,
+    epoch: int,
+    *,
+    timeout_seconds: int = 30,
+) -> dict[str, Any]:
+    """Fetch the additive enclave receipt for one live allocation bundle."""
+
+    base = gateway_url.rstrip("/")
+    request = Request(
+        f"{base}/research-lab/allocations/attested/{int(epoch)}",
+        headers=_request_headers(),
+        method="GET",
+    )
+    with urlopen(request, timeout=timeout_seconds) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def verify_gateway_allocation_attestation(
+    *,
+    receipt: Mapping[str, Any],
+    expected_epoch_id: int,
+    expected_pcr0: str | None,
+    expected_purpose: str = ATTESTED_ALLOCATION_PURPOSE,
+) -> tuple[bool, dict[str, Any]]:
+    """Verify AWS Nitro and optionally an independently rebuilt gateway PCR0."""
+
+    from leadpoet_canonical.nitro import verify_nitro_attestation_full
+
+    return verify_nitro_attestation_full(
+        attestation_b64=str(receipt.get("attestation_document_b64") or ""),
+        expected_pcr0=expected_pcr0,
+        expected_pubkey=str(receipt.get("enclave_pubkey") or ""),
+        expected_purpose=expected_purpose,
+        expected_epoch_id=expected_epoch_id,
+        role="gateway",
+        # Never consult the static gateway allowlist for v2. Without an
+        # independently rebuilt expected PCR0, this verifies AWS authenticity
+        # only and reports required_ready=False below.
+        skip_pcr0_verification=not bool(expected_pcr0),
+    )
+
+
 def verify_research_lab_shadow_bundle(
     bundle: Mapping[str, Any],
     *,
@@ -522,6 +588,279 @@ def verify_research_lab_allocation_bundle(
         "validator_lab_cap_ceiling_percent": validator_lab_cap_ceiling,
         "allocation_doc": dict(allocation_doc or {}),
         "on_chain_submission_allowed": not errors,
+    }
+
+
+def verify_research_lab_attested_allocation_bundle(
+    document: Mapping[str, Any],
+    *,
+    flags: ResearchLabValidatorFlags | Mapping[str, Any] | None = None,
+    expected_gateway_pcr0: str | None = None,
+    expected_gateway_commit: str | None = None,
+    expected_gateway_identities: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Verify allocation arithmetic, receipt roots, Nitro, and rebuild identity."""
+
+    errors: list[str] = []
+    expected_fields = {
+        "schema_version",
+        "bundle",
+        "receipt",
+        "parent_receipts",
+        "lineage_bindings",
+        "lineage_complete",
+        "gateway_pcr0",
+        "persistence_status",
+    }
+    if not isinstance(document, Mapping) or set(document) != expected_fields:
+        return {
+            "passed": False,
+            "required_ready": False,
+            "errors": ["attested_allocation_fields_invalid"],
+        }
+    if document.get("schema_version") != ATTESTED_ALLOCATION_SCHEMA_VERSION:
+        errors.append("attested_allocation_schema_invalid")
+
+    bundle = document.get("bundle")
+    receipt = document.get("receipt")
+    parent_receipts_value = document.get("parent_receipts")
+    lineage_bindings_value = document.get("lineage_bindings")
+    lineage_complete = document.get("lineage_complete")
+    if not isinstance(bundle, Mapping):
+        errors.append("attested_allocation_bundle_missing")
+        bundle = {}
+    if not isinstance(receipt, Mapping):
+        errors.append("attested_allocation_receipt_missing")
+        receipt = {}
+    if not isinstance(parent_receipts_value, list):
+        errors.append("attested_allocation_parent_receipts_invalid")
+        parent_receipts_value = []
+    if not isinstance(lineage_bindings_value, list):
+        errors.append("attested_allocation_lineage_bindings_invalid")
+        lineage_bindings_value = []
+    if not isinstance(lineage_complete, bool):
+        errors.append("attested_allocation_lineage_complete_invalid")
+        lineage_complete = False
+    elif not lineage_complete:
+        errors.append("attested_allocation_lineage_incomplete")
+
+    allocation_verification = verify_research_lab_allocation_bundle(bundle, flags=flags)
+    allocation_hash = str(bundle.get("allocation_hash") or "")
+    errors.extend(
+        "allocation:%s" % error
+        for error in allocation_verification.get("errors", [])
+    )
+
+    parent_receipts: dict[str, Mapping[str, Any]] = {}
+    normalized_bindings: list[dict[str, str]] = []
+    try:
+        for parent in parent_receipts_value:
+            if not isinstance(parent, Mapping):
+                raise ValueError("parent receipt is not an object")
+            validate_signed_receipt(parent)
+            parent_hash = str(parent.get("receipt_hash") or "")
+            if parent_hash in parent_receipts:
+                raise ValueError("parent receipt is duplicated")
+            parent_receipts[parent_hash] = parent
+
+        for binding in lineage_bindings_value:
+            if not isinstance(binding, Mapping) or set(binding) != {
+                "score_bundle_id",
+                "score_bundle_hash",
+                "receipt_hash",
+                "receipt_purpose",
+            }:
+                raise ValueError("lineage binding fields are invalid")
+            score_bundle_id = str(binding.get("score_bundle_id") or "")
+            score_bundle_hash = str(binding.get("score_bundle_hash") or "")
+            receipt_hash_value = str(binding.get("receipt_hash") or "")
+            receipt_purpose = str(binding.get("receipt_purpose") or "")
+            if not score_bundle_hash.startswith("sha256:"):
+                raise ValueError("lineage score bundle hash is invalid")
+            if score_bundle_id != "score_bundle:" + score_bundle_hash.split(":", 1)[1]:
+                raise ValueError("lineage score bundle id does not match its hash")
+            parent = parent_receipts.get(receipt_hash_value)
+            if parent is None:
+                raise ValueError("lineage binding receipt is missing")
+            if parent.get("purpose") != receipt_purpose or receipt_purpose not in SCORING_PURPOSES:
+                raise ValueError("lineage binding receipt purpose is invalid")
+            if parent.get("evidence_roots", {}).get("score_bundle") != score_bundle_hash:
+                raise ValueError("lineage binding receipt does not bind score bundle")
+            if receipt_purpose != "research_lab.promotion_decision.v1":
+                raise ValueError("champion allocation requires a promotion decision receipt")
+            if parent.get("evidence_roots", {}).get(
+                "promotion_decision_status"
+            ) != attested_sha256_json({"status": "promotion_passed"}):
+                raise ValueError("promotion decision receipt is not a passed gate")
+            normalized_bindings.append(
+                {
+                    "score_bundle_id": score_bundle_id,
+                    "score_bundle_hash": score_bundle_hash,
+                    "receipt_hash": receipt_hash_value,
+                    "receipt_purpose": receipt_purpose,
+                }
+            )
+
+        source_state = bundle.get("source_state") if isinstance(bundle.get("source_state"), Mapping) else {}
+        expected_score_bundle_ids = sorted(
+            {
+                str(item.get("score_bundle_id") or "")
+                for item in (source_state.get("champion_obligations") or [])
+                if isinstance(item, Mapping)
+                and str(item.get("score_bundle_id") or "").startswith("score_bundle:")
+            }
+        )
+        bound_score_bundle_ids = sorted(
+            {item["score_bundle_id"] for item in normalized_bindings}
+        )
+        if bound_score_bundle_ids != expected_score_bundle_ids:
+            errors.append("attested_allocation_lineage_obligations_diverged")
+
+        validate_signed_receipt(receipt)
+        if receipt.get("role") != SCORING_ROLE:
+            errors.append("attested_allocation_receipt_role_invalid")
+        if receipt.get("purpose") != ATTESTED_ALLOCATION_PURPOSE:
+            errors.append("attested_allocation_receipt_purpose_invalid")
+        if receipt.get("status") != "succeeded":
+            errors.append("attested_allocation_receipt_not_successful")
+        if int(receipt.get("epoch_id", -1)) != int(bundle.get("epoch", -2)):
+            errors.append("attested_allocation_receipt_epoch_diverged")
+
+        receipt_input = {
+            "epoch": int(source_state.get("epoch")),
+            "policy": source_state.get("policy"),
+            "active_reimbursement_obligations": source_state.get("reimbursement_obligations"),
+            "active_champion_obligations": source_state.get("champion_obligations"),
+            "receipt_lineage_bindings": sorted(
+                normalized_bindings,
+                key=lambda item: (item["score_bundle_id"], item["receipt_hash"]),
+            ),
+        }
+        if receipt.get("input_root") != attested_sha256_json(receipt_input):
+            errors.append("attested_allocation_receipt_input_diverged")
+        receipt_output = {"allocation": bundle.get("allocation_doc")}
+        if receipt.get("output_root") != attested_sha256_json(receipt_output):
+            errors.append("attested_allocation_receipt_output_diverged")
+        expected_direct_parents = sorted(
+            {item["receipt_hash"] for item in normalized_bindings}
+        )
+        if receipt.get("parent_receipt_hashes") != expected_direct_parents:
+            errors.append("attested_allocation_direct_parents_diverged")
+        if receipt.get("evidence_roots") != {"allocation": allocation_hash}:
+            errors.append("attested_allocation_evidence_diverged")
+        ordered_lineage = verify_receipt_lineage(receipt, parent_receipts)
+        if set(ordered_lineage) != set(parent_receipts) | {str(receipt["receipt_hash"])}:
+            raise ValueError("allocation receipt contains disconnected lineage")
+        for score_receipt in parent_receipts.values():
+            if score_receipt.get("purpose") not in {
+                "research_lab.candidate_score.v1",
+                "research_lab.baseline_score.v1",
+                "research_lab.benchmark.v1",
+                "research_lab.rebenchmark.v1",
+            }:
+                continue
+            baseline_hash = str(
+                score_receipt.get("evidence_roots", {}).get("baseline_score_summary")
+                or ""
+            )
+            if not baseline_hash:
+                continue
+            score_lineage = set(verify_receipt_lineage(score_receipt, parent_receipts))
+            baseline_matches = [
+                ancestor
+                for ancestor in parent_receipts.values()
+                if str(ancestor.get("receipt_hash") or "") in score_lineage
+                and ancestor.get("purpose")
+                in {
+                    "research_lab.baseline_score.v1",
+                    "research_lab.benchmark.v1",
+                    "research_lab.rebenchmark.v1",
+                }
+                and ancestor.get("evidence_roots", {}).get("baseline_score_summary")
+                == baseline_hash
+            ]
+            if not baseline_matches:
+                raise ValueError("score receipt baseline ancestry is incomplete")
+    except Exception as exc:
+        errors.append("attested_allocation_receipt_invalid:%s" % str(exc)[:120])
+
+    identities = {
+        str(commit or "").lower(): dict(identity)
+        for commit, identity in dict(expected_gateway_identities or {}).items()
+        if isinstance(identity, Mapping)
+    }
+    if expected_gateway_commit and expected_gateway_pcr0:
+        identities[str(expected_gateway_commit).lower()] = {
+            "commit_sha": str(expected_gateway_commit).lower(),
+            "pcr0": str(expected_gateway_pcr0).lower(),
+        }
+    all_gateway_identities_supplied = True
+    attestation_data: dict[str, Any] = {}
+    receipts_to_verify = [receipt, *parent_receipts.values()]
+    for index, candidate_receipt in enumerate(receipts_to_verify):
+        if not isinstance(candidate_receipt, Mapping):
+            continue
+        commit_sha = str(candidate_receipt.get("commit_sha") or "").lower()
+        identity = identities.get(commit_sha)
+        expected_pcr0_for_receipt = str((identity or {}).get("pcr0") or "") or None
+        if expected_pcr0_for_receipt is None:
+            all_gateway_identities_supplied = False
+        try:
+            valid, candidate_attestation = verify_gateway_allocation_attestation(
+                receipt=candidate_receipt,
+                expected_epoch_id=int(candidate_receipt.get("epoch_id", -1)),
+                expected_pcr0=expected_pcr0_for_receipt,
+                expected_purpose=str(candidate_receipt.get("purpose") or ""),
+            )
+            if index == 0:
+                attestation_data = dict(candidate_attestation)
+            if not valid:
+                errors.append(
+                    "attested_allocation_nitro_invalid:%s"
+                    % str(candidate_attestation.get("error") or "unknown")[:120]
+                )
+            if candidate_attestation.get("purpose") != candidate_receipt.get("purpose"):
+                errors.append("attested_allocation_attestation_purpose_invalid")
+            if int(candidate_attestation.get("epoch_id", -1)) != int(candidate_receipt.get("epoch_id", -2)):
+                errors.append("attested_allocation_attestation_epoch_diverged")
+            if candidate_attestation.get("enclave_pubkey") != candidate_receipt.get("enclave_pubkey"):
+                errors.append("attested_allocation_attestation_pubkey_diverged")
+            if expected_pcr0_for_receipt and candidate_attestation.get("pcr0") != expected_pcr0_for_receipt:
+                errors.append("attested_allocation_independent_pcr0_diverged")
+        except Exception as exc:
+            errors.append("attested_allocation_nitro_verification_failed:%s" % str(exc)[:120])
+
+    gateway_pcr0 = str(document.get("gateway_pcr0") or "").lower()
+    if attestation_data.get("pcr0") != gateway_pcr0:
+        errors.append("attested_allocation_gateway_pcr0_diverged")
+
+    if expected_gateway_commit and receipt.get("commit_sha") != expected_gateway_commit:
+        errors.append("attested_allocation_gateway_commit_diverged")
+    persistence_ready = document.get("persistence_status") == "persisted"
+    required_ready = (
+        not errors
+        and all_gateway_identities_supplied
+        and bool(lineage_complete)
+        and persistence_ready
+    )
+    return {
+        "passed": not errors,
+        "required_ready": required_ready,
+        "errors": errors,
+        "allocation_verification": allocation_verification,
+        "receipt_hash": receipt.get("receipt_hash"),
+        "receipt": dict(receipt),
+        "gateway_pcr0": attestation_data.get("pcr0"),
+        "gateway_commit": receipt.get("commit_sha"),
+        "independent_gateway_identity_supplied": all_gateway_identities_supplied,
+        "lineage_complete": bool(lineage_complete),
+        "lineage_receipt_count": len(parent_receipts),
+        "persistence_ready": persistence_ready,
+        "pcr0_verification_mode": (
+            "independent_expected_pcr0"
+            if all_gateway_identities_supplied
+            else "aws_signature_only"
+        ),
     }
 
 

@@ -48,6 +48,13 @@ node_modules/
 docker-compose*.yml
 Dockerfile*
 .dockerignore
+BUILD_INFO.json
+
+# The staging script creates the complete normalized image source. Docker sees
+# no live gateway files other than this tree, so host metadata cannot affect PCR0.
+*
+!_enclave_source/
+!_enclave_source/**
 
 # Exclude test and temp files
 *.swp

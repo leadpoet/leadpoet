@@ -1995,6 +1995,34 @@ class QualificationStyleCompanyScorer:
     under a Leadpoet-native package.
     """
 
+    def __init__(
+        self,
+        *,
+        attested_epoch_id: int | None = None,
+        attested_purpose: str = "",
+    ) -> None:
+        self._attested_epoch_id = (
+            int(attested_epoch_id) if attested_epoch_id is not None else None
+        )
+        self._attested_purpose = str(attested_purpose or "")
+        self._attested_receipts: list[dict[str, Any]] = []
+
+    def _record_attested_outcome(self, outcome: Mapping[str, Any] | None) -> None:
+        if not isinstance(outcome, Mapping):
+            return
+        receipt = outcome.get("receipt")
+        if not isinstance(receipt, Mapping) or not receipt.get("receipt_hash"):
+            return
+        receipt_hash = str(receipt["receipt_hash"])
+        if any(item.get("receipt_hash") == receipt_hash for item in self._attested_receipts):
+            return
+        self._attested_receipts.append(dict(receipt))
+
+    def attested_receipts(self) -> list[dict[str, Any]]:
+        """Return sidecar receipts without changing the scorer result contract."""
+
+        return [dict(item) for item in self._attested_receipts]
+
     async def __call__(
         self,
         companies: Sequence[Mapping[str, Any]],
@@ -2005,6 +2033,79 @@ class QualificationStyleCompanyScorer:
         return [float(item.get("final_score", 0.0) or 0.0) for item in breakdowns]
 
     async def score_with_breakdowns(
+        self,
+        companies: Sequence[Mapping[str, Any]],
+        icp: Mapping[str, Any],
+        is_reference_model: bool,
+    ) -> list[dict[str, Any]]:
+        attested_mode = str(
+            os.getenv("RESEARCH_LAB_ATTESTED_SCORING_MODE", "off") or "off"
+        ).strip().lower()
+        attested_enabled = (
+            attested_mode in {"shadow", "required"}
+            and self._attested_epoch_id is not None
+            and self._attested_epoch_id > 0
+            and bool(self._attested_purpose)
+        )
+        if not attested_enabled:
+            return await self._score_with_breakdowns_impl(
+                companies,
+                icp,
+                is_reference_model,
+            )
+
+        if attested_mode == "required":
+            from gateway.research_lab.attested_scoring import (
+                execute_required_qualification_company_scores,
+            )
+
+            attestation: dict[str, Any] = {}
+            result = await execute_required_qualification_company_scores(
+                epoch_id=int(self._attested_epoch_id),
+                purpose=self._attested_purpose,
+                companies=[dict(item) for item in companies],
+                icp=dict(icp),
+                is_reference_model=bool(is_reference_model),
+                attestation_out=attestation,
+            )
+            self._record_attested_outcome(attestation)
+            return result
+
+        from research_lab.eval.http_tape import record_provider_http_tape
+
+        with record_provider_http_tape() as recorder:
+            breakdowns = await self._score_with_breakdowns_impl(
+                companies,
+                icp,
+                is_reference_model,
+            )
+        try:
+            provider_tape = recorder.document()
+            from gateway.research_lab.attested_scoring import (
+                compare_qualification_company_scores,
+            )
+
+            attestation = await compare_qualification_company_scores(
+                epoch_id=int(self._attested_epoch_id),
+                purpose=self._attested_purpose,
+                companies=[dict(item) for item in companies],
+                icp=dict(icp),
+                is_reference_model=bool(is_reference_model),
+                provider_tape=provider_tape,
+                expected_breakdowns=breakdowns,
+            )
+            self._record_attested_outcome(attestation)
+        except Exception as exc:
+            if attested_mode == "required":
+                raise
+            logger.error(
+                "research_lab_attested_company_scoring_shadow_failed "
+                "error_type=%s",
+                type(exc).__name__,
+            )
+        return breakdowns
+
+    async def _score_with_breakdowns_impl(
         self,
         companies: Sequence[Mapping[str, Any]],
         icp: Mapping[str, Any],

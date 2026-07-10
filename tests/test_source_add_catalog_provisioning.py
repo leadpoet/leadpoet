@@ -1,14 +1,16 @@
 from datetime import datetime, timedelta, timezone
+import base64
 from types import SimpleNamespace
 
 import pytest
 
-from gateway.research_lab import api
+from gateway.research_lab import api, source_add_catalog
 from gateway.research_lab.models import ResearchLabSourceAdapterProvisionRequest
 from gateway.research_lab.source_add_catalog import (
     PROVISION_STATUS_ELIGIBLE,
     provider_registry_entries_from_provisioned_rows,
     probe_endpoints_from_provisioned_rows,
+    source_add_row_credential_ready,
 )
 from gateway.research_lab.source_add_llm_judge import _parse_verdict
 from gateway.research_lab.source_add_provenance import PRECHECK_MANUAL, PRECHECK_PASSED, SourceAddProvenanceResult
@@ -192,6 +194,7 @@ async def test_owner_provision_endpoint_appends_catalog_and_provisioning(monkeyp
     monkeypatch.setattr(api, "select_one", fake_select_one)
     monkeypatch.setattr(api, "insert_row", fake_insert_row)
     monkeypatch.setattr(api, "next_event_seq", fake_next_event_seq)
+    monkeypatch.setattr(api, "reserved_builtin_provider_ids_sync", lambda: set())
 
     response = await api.provision_research_lab_source_adapter(
         "source_add_submission:" + "a" * 16,
@@ -222,6 +225,69 @@ async def test_owner_provision_endpoint_appends_catalog_and_provisioning(monkeyp
     assert "api_credential" not in str(writes)
 
 
+@pytest.mark.asyncio
+async def test_owner_cannot_mark_authenticated_source_eligible_with_unresolved_env_ref(monkeypatch):
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
+    monkeypatch.delenv("SYNTHETIC_SOURCE_CREDENTIAL", raising=False)
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                source_add_enabled=True,
+                source_add_credential_kms_key_id="",
+                openrouter_key_kms_key_id="",
+            )
+        ),
+    )
+    submission_doc = {
+        "adapter_id": "adapter:test-source",
+        "miner_hotkey": "hk-owner",
+        "manifest": _manifest_doc(),
+        "source_metadata": {"api_base_url": "https://api.test-source.example"},
+    }
+
+    async def fake_select_one(table, **_kwargs):
+        assert table == "research_lab_source_add_submission_current"
+        return {
+            "submission_id": "source_add_submission:" + "c" * 16,
+            "adapter_id": "adapter:test-source",
+            "miner_hotkey": "hk-owner",
+            "stage": "provenance_precheck_passed",
+            "submission_doc": submission_doc,
+            "source_identity_hash": "sha256:" + "2" * 64,
+        }
+
+    monkeypatch.setattr(api, "select_one", fake_select_one)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        await api.provision_research_lab_source_adapter(
+            "source_add_submission:" + "c" * 16,
+            ResearchLabSourceAdapterProvisionRequest(
+                registry_provider_id="test_source_auth",
+                provision_status=PROVISION_STATUS_ELIGIBLE,
+                auth_kind="header",
+                auth_name="x-synthetic-key",
+                credential_env_refs=["SYNTHETIC_SOURCE_CREDENTIAL"],
+                probe_endpoints=[
+                    {
+                        "endpoint_id": "test_source_auth.search",
+                        "provider_id": "test_source_auth",
+                        "method": "GET",
+                        "path": "/search",
+                        "params": [],
+                    }
+                ],
+            ),
+            authorization="Bearer service-role-test",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "cannot become provisioned_autoresearch_eligible" in exc_info.value.detail
+
+
 def test_provisioned_rows_build_provider_and_probe_catalog_entries():
     row = {
         "adapter_id": "adapter:test-source",
@@ -250,6 +316,78 @@ def test_provisioned_rows_build_provider_and_probe_catalog_entries():
     assert providers[0].id == "test_source"
     assert providers[0].base_url == "https://api.test-source.example"
     assert probes[0].endpoint_id == "test_source.search"
+
+
+def test_provisioned_source_loader_paginates_beyond_postgrest_default(monkeypatch):
+    source_rows = [
+        {
+            "adapter_id": f"adapter:source-{index}",
+            "provision_status": PROVISION_STATUS_ELIGIBLE,
+            "provision_doc": {
+                "provider_registry_entry": {
+                    "id": f"source_{index}",
+                    "base_url": f"https://source-{index}.invalid",
+                    "auth_kind": "none",
+                    "credential_ref": [],
+                }
+            },
+            "credential_envelope": {},
+        }
+        for index in range(750)
+    ]
+    ranges = []
+
+    class Response:
+        def __init__(self, data):
+            self.data = data
+
+    class Query:
+        def __init__(self):
+            self.start = 0
+            self.end = 0
+
+        def select(self, *_args):
+            return self
+
+        def eq(self, *_args):
+            return self
+
+        def range(self, start, end):
+            self.start, self.end = start, end
+            ranges.append((start, end))
+            return self
+
+        def execute(self):
+            return Response(source_rows[self.start : self.end + 1])
+
+    class Client:
+        def table(self, table):
+            assert table == "research_lab_source_add_provisioning_current"
+            return Query()
+
+    monkeypatch.setattr(source_add_catalog, "get_write_client", lambda: Client())
+    loaded = source_add_catalog.load_provisioned_source_rows_sync(raise_on_error=True)
+    assert len(loaded) == 750
+    assert ranges == [(0, 499), (500, 999)]
+
+
+def test_source_add_encrypted_credential_envelope_must_be_well_formed():
+    row = {
+        "provision_doc": {
+            "provider_registry_entry": {
+                "auth_kind": "header",
+                "credential_ref": ["encrypted_ref:source_add:synthetic"],
+            }
+        },
+        "credential_envelope": {
+            "ciphertext_b64": "not-base64",
+            "kms_key_id": "alias/synthetic",
+            "credential_ref": "encrypted_ref:source_add:synthetic",
+        },
+    }
+    assert source_add_row_credential_ready(row) is False
+    row["credential_envelope"]["ciphertext_b64"] = base64.b64encode(b"encrypted-payload").decode()
+    assert source_add_row_credential_ready(row) is True
 
 
 def test_llm_judge_verdict_parser_accepts_helped_json():

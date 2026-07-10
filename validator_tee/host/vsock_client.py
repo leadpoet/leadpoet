@@ -24,6 +24,18 @@ from typing import Dict, Any, Optional
 AF_VSOCK = 40
 PARENT_CID = 3
 RPC_PORT = 5001  # Must match tee_service.py
+MAX_RPC_REQUEST_BYTES = 8 * 1024 * 1024
+MAX_RPC_RESPONSE_BYTES = 16 * 1024 * 1024
+
+
+def _recv_exact(sock: socket.socket, size: int) -> bytes:
+    output = bytearray()
+    while len(output) < size:
+        chunk = sock.recv(min(64 * 1024, size - len(output)))
+        if not chunk:
+            break
+        output.extend(chunk)
+    return bytes(output)
 
 
 def get_enclave_cid() -> Optional[int]:
@@ -123,16 +135,20 @@ class ValidatorEnclaveClient:
             
             # Send request
             request_data = json.dumps(request).encode()
-            sock.sendall(request_data)
-            sock.shutdown(socket.SHUT_WR)
+            if len(request_data) < 2 or len(request_data) > MAX_RPC_REQUEST_BYTES:
+                raise RuntimeError("Enclave request size is outside the allowed range")
+            sock.sendall(len(request_data).to_bytes(4, byteorder="big") + request_data)
             
             # Receive response
-            response_data = b""
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                response_data += chunk
+            prefix = _recv_exact(sock, 4)
+            if len(prefix) != 4:
+                raise RuntimeError("Failed to read enclave response length")
+            response_length = int.from_bytes(prefix, byteorder="big")
+            if response_length < 2 or response_length > MAX_RPC_RESPONSE_BYTES:
+                raise RuntimeError("Enclave response size is outside the allowed range")
+            response_data = _recv_exact(sock, response_length)
+            if len(response_data) != response_length:
+                raise RuntimeError("Enclave response body is incomplete")
             
             response = json.loads(response_data.decode())
             
@@ -225,6 +241,20 @@ class ValidatorEnclaveClient:
         """
         return self._send_request({"command": "health"})
 
+    def compute_weights_v2(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        """Ask the enclave to derive and sign weights from a canonical snapshot."""
+        response = self._send_request({
+            "command": "compute_weights_v2",
+            "snapshot": snapshot,
+        })
+        return {
+            "weight_result": response["weight_result"],
+            "weights_signature": response["weights_signature"],
+            "receipt": response["receipt"],
+            "attestation_user_data": response["attestation_user_data"],
+            "attestation_is_mock": response.get("attestation_is_mock", False),
+        }
+
 
 # ============================================================================
 # MODULE-LEVEL CONVENIENCE FUNCTIONS
@@ -261,6 +291,11 @@ def get_enclave_attestation(epoch_id: int) -> Dict[str, Any]:
     return _get_client().get_attestation(epoch_id)
 
 
+def compute_weights_via_enclave_v2(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Compute and sign final weights inside the validator enclave."""
+    return _get_client().compute_weights_v2(snapshot)
+
+
 def is_enclave_available() -> bool:
     """Check if enclave is available."""
     try:
@@ -268,4 +303,3 @@ def is_enclave_available() -> bool:
         return cid is not None
     except:
         return False
-

@@ -25,6 +25,16 @@ from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
 from gateway.research_lab.bundles import build_research_lab_audit_bundle
+from gateway.research_lab.attested_scoring import (
+    attested_scoring_mode,
+    canonical_json_bytes as attested_canonical_json_bytes,
+    compare_baseline_score_summary as compare_attested_baseline_score_summary,
+    compare_promotion_metric as compare_attested_promotion_metric,
+    compare_score_bundle as compare_attested_score_bundle,
+    persist_attested_outcome_artifact_links,
+    resolve_attested_artifact_lineage,
+    sha256_bytes as attested_sha256_bytes,
+)
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.code_build import (
     CodeEditBuildError,
@@ -118,6 +128,14 @@ from research_lab.eval import (
     private_model_env_passthrough,
     sign_digest_with_kms,
 )
+from research_lab.eval.baseline_summary import (
+    artifact_serving_version_doc as shared_artifact_serving_version_doc,
+    baseline_serving_model_version_doc as shared_baseline_serving_model_version_doc,
+    build_baseline_health as shared_build_baseline_health,
+    build_baseline_score_summary,
+    daily_noise_budget_doc as shared_daily_noise_budget_doc,
+    with_baseline_evaluation_contexts as shared_with_baseline_evaluation_contexts,
+)
 from research_lab.eval.miner_report_stats import build_icp_stats
 from research_lab.eval.evaluator import (
     INCONTAINER_TRACE_KMS_KEY_ENV,
@@ -156,6 +174,102 @@ _POSTGREST_TIMESTAMP_RE = re.compile(
     r"^(?P<prefix>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"
     r"\.(?P<fraction>\d{1,9})(?P<suffix>Z|[+-]\d{2}(?::?\d{2})?)?$"
 )
+
+
+def _attested_score_bundle_evidence_roots(
+    *,
+    artifact: PrivateModelArtifactManifest,
+    candidate_artifact: PrivateModelArtifactManifest,
+    per_icp_results: Any,
+    evidence_bundle_refs: Any,
+    private_holdout_gate: Mapping[str, Any],
+) -> dict[str, str]:
+    roots = {
+        "parent_model_manifest": str(artifact.manifest_hash),
+        "candidate_model_manifest": str(candidate_artifact.manifest_hash),
+        "model_outputs": attested_sha256_bytes(attested_canonical_json_bytes(per_icp_results)),
+        "provider_evidence_refs": attested_sha256_bytes(
+            attested_canonical_json_bytes(list(evidence_bundle_refs or ()))
+        ),
+    }
+    image_digest = str(candidate_artifact.image_digest or "")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest):
+        roots["candidate_model_image"] = image_digest
+    baseline_hash = str(
+        private_holdout_gate.get("baseline_benchmark_hash")
+        if isinstance(private_holdout_gate, Mapping)
+        else ""
+    ).lower()
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", baseline_hash):
+        roots["baseline_score_summary"] = baseline_hash
+    return roots
+
+
+async def _compare_candidate_score_bundle_in_enclave(
+    *,
+    evaluation_epoch: int,
+    artifact: PrivateModelArtifactManifest,
+    benchmark: SealedBenchmarkSet,
+    patch: Mapping[str, Any],
+    candidate_artifact: PrivateModelArtifactManifest,
+    per_icp_results: Any,
+    run_context: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    private_holdout_gate: Mapping[str, Any],
+    expected_score_bundle: Mapping[str, Any],
+    parent_receipts: list[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if attested_scoring_mode() == "off":
+        return {"status": "off"}
+    normalized_parents: dict[str, dict[str, Any]] = {}
+    direct_parent_hashes: set[str] = set()
+    for receipt in parent_receipts or []:
+        if not isinstance(receipt, Mapping):
+            continue
+        receipt_hash = str(receipt.get("receipt_hash") or "")
+        if receipt_hash:
+            normalized_parents[receipt_hash] = dict(receipt)
+            direct_parent_hashes.add(receipt_hash)
+    baseline_bundle_id = str(
+        private_holdout_gate.get("baseline_benchmark_bundle_id") or ""
+    )
+    baseline_summary_hash = str(
+        private_holdout_gate.get("baseline_benchmark_hash") or ""
+    ).lower()
+    if baseline_bundle_id and re.fullmatch(r"sha256:[0-9a-f]{64}", baseline_summary_hash):
+        baseline_receipt, baseline_lineage = await resolve_attested_artifact_lineage(
+            artifact_kind="benchmark_score_summary",
+            artifact_ref=baseline_bundle_id,
+            artifact_hash=baseline_summary_hash,
+        )
+        if baseline_receipt is not None:
+            direct_parent_hashes.add(str(baseline_receipt["receipt_hash"]))
+            for receipt in baseline_lineage:
+                normalized_parents[str(receipt["receipt_hash"])] = dict(receipt)
+    return await compare_attested_score_bundle(
+        epoch_id=int(evaluation_epoch),
+        purpose="research_lab.candidate_score.v1",
+        build_payload={
+            "artifact_manifest": artifact.to_dict(),
+            "benchmark": benchmark.to_dict(),
+            "patch_manifest": dict(patch),
+            "candidate_artifact_manifest": candidate_artifact.to_dict(),
+            "per_icp_results": list(per_icp_results or ()),
+            "run_context": dict(run_context),
+            "policy": dict(policy),
+            "extra_bundle_fields": {"private_holdout_gate": dict(private_holdout_gate)},
+        },
+        expected_score_bundle=expected_score_bundle,
+        parent_receipts=list(normalized_parents.values()),
+        direct_parent_receipt_hashes=sorted(direct_parent_hashes),
+        evidence_roots=_attested_score_bundle_evidence_roots(
+            artifact=artifact,
+            candidate_artifact=candidate_artifact,
+            per_icp_results=per_icp_results,
+            evidence_bundle_refs=run_context.get("evidence_bundle_refs"),
+            private_holdout_gate=private_holdout_gate,
+        ),
+    )
 
 
 @functools.lru_cache(maxsize=1)
@@ -229,21 +343,30 @@ def _baseline_publication_retry_decision(
     return (not bool(authorization)), authorization
 
 
-def _artifact_serving_version_doc(artifact: PrivateModelArtifactManifest) -> dict[str, Any]:
+def _artifact_manifest_mapping(artifact: Any) -> dict[str, Any]:
+    if isinstance(artifact, Mapping):
+        return dict(artifact)
+    to_dict = getattr(artifact, "to_dict", None)
+    if callable(to_dict):
+        return dict(to_dict())
     return {
-        "model_artifact_hash": artifact.model_artifact_hash,
-        "manifest_hash": artifact.manifest_hash,
-        "manifest_uri": artifact.manifest_uri,
-        "git_commit_sha": artifact.git_commit_sha,
-        # score_summary_doc is stored in a DB column that forbids raw ECR refs
-        # and the literal key name image_digest. Keep lineage joinability without
-        # leaking the registry reference into benchmark bundle docs.
-        "image_ref_hash": sha256_json({"image_ref": artifact.image_digest}),
-        "config_hash": artifact.config_hash,
-        "component_registry_version": artifact.component_registry_version,
-        "scoring_adapter_version": artifact.scoring_adapter_version,
-        "build_id": artifact.build_id,
+        field: getattr(artifact, field, None)
+        for field in (
+            "model_artifact_hash",
+            "manifest_hash",
+            "manifest_uri",
+            "git_commit_sha",
+            "image_digest",
+            "config_hash",
+            "component_registry_version",
+            "scoring_adapter_version",
+            "build_id",
+        )
     }
+
+
+def _artifact_serving_version_doc(artifact: PrivateModelArtifactManifest) -> dict[str, Any]:
+    return shared_artifact_serving_version_doc(_artifact_manifest_mapping(artifact))
 
 
 def _baseline_serving_model_version_doc(
@@ -254,29 +377,13 @@ def _baseline_serving_model_version_doc(
     rolling_window_hash: str,
     evaluation_epoch: int,
 ) -> dict[str, Any]:
-    doc = {
-        "schema_version": "research_lab_serving_model_version.v1",
-        "result_role": "private_baseline_rebenchmark",
-        "run_id": f"private_baseline_rebenchmark:{benchmark_date}:attempt:{benchmark_attempt}",
-        "ticket_id": "",
-        "candidate_id": "",
-        "private_model_version_id": "",
-        "evaluation_epoch": int(evaluation_epoch),
-        "benchmark_date": str(benchmark_date),
-        "benchmark_attempt": int(benchmark_attempt),
-        "run_scope": "private_baseline_rebenchmark",
-        "benchmark_id": f"rolling_icp_window:{rolling_window_hash}",
-        "benchmark_split_ref": f"research_lab_rolling_icp_window:{rolling_window_hash}",
-        "icp_set_hash": str(rolling_window_hash),
-        "scoring_code_version": "qualification-company-scorer:v1",
-        "evaluator_version": "leadpoet-gateway-private-baseline:v1",
-        "parent_model": _artifact_serving_version_doc(artifact),
-        "candidate_patch_hash": "",
-        "candidate_source_diff_hash": "",
-        "candidate_build_ref": "",
-    }
-    doc["version_stamp_hash"] = sha256_json({key: value for key, value in doc.items() if key != "version_stamp_hash"})
-    return doc
+    return shared_baseline_serving_model_version_doc(
+        artifact=_artifact_manifest_mapping(artifact),
+        benchmark_date=benchmark_date,
+        benchmark_attempt=benchmark_attempt,
+        rolling_window_hash=rolling_window_hash,
+        evaluation_epoch=evaluation_epoch,
+    )
 
 
 def _public_serving_model_version_doc(serving_doc: Mapping[str, Any]) -> dict[str, Any]:
@@ -320,34 +427,14 @@ def _with_baseline_evaluation_contexts(
     evaluation_epoch: int,
     serving_model_version_hash: str,
 ) -> list[dict[str, Any]]:
-    enriched: list[dict[str, Any]] = []
-    for index, summary in enumerate(per_icp_summaries):
-        item = dict(summary)
-        existing = item.get("evaluation_context") if isinstance(item.get("evaluation_context"), Mapping) else {}
-        result_payload = {key: value for key, value in item.items() if key != "evaluation_context"}
-        item["evaluation_context"] = {
-            **dict(existing),
-            "schema_version": "research_lab_evaluation_context.v1",
-            "result_index": int(index),
-            "icp_ref": str(item.get("icp_ref") or ""),
-            "icp_hash": str(item.get("icp_hash") or ""),
-            "benchmark_id": f"rolling_icp_window:{rolling_window_hash}",
-            "benchmark_split_ref": f"research_lab_rolling_icp_window:{rolling_window_hash}",
-            "icp_set_hash": str(rolling_window_hash),
-            "input_window_hash": str(rolling_window_hash),
-            "run_id": f"private_baseline_rebenchmark:{benchmark_date}:attempt:{benchmark_attempt}",
-            "ticket_id": "",
-            "candidate_id": "",
-            "evaluation_epoch": int(evaluation_epoch),
-            "benchmark_date": str(benchmark_date),
-            "benchmark_attempt": int(benchmark_attempt),
-            "run_scope": "private_baseline_rebenchmark",
-            "provider_cache_day": str(benchmark_date),
-            "serving_model_version_hash": str(serving_model_version_hash),
-            "result_row_hash": sha256_json(result_payload),
-        }
-        enriched.append(item)
-    return enriched
+    return shared_with_baseline_evaluation_contexts(
+        per_icp_summaries,
+        benchmark_date=benchmark_date,
+        benchmark_attempt=benchmark_attempt,
+        rolling_window_hash=rolling_window_hash,
+        evaluation_epoch=evaluation_epoch,
+        serving_model_version_hash=serving_model_version_hash,
+    )
 
 
 def _daily_noise_budget_doc(
@@ -357,33 +444,12 @@ def _daily_noise_budget_doc(
     per_icp_summaries: list[Mapping[str, Any]],
     aggregate_score: float,
 ) -> dict[str, Any]:
-    scores = [float(row.get("score") or 0.0) for row in per_icp_summaries]
-    count = len(scores)
-    mean = sum(scores) / count if count else 0.0
-    variance = (
-        sum((score - mean) ** 2 for score in scores) / (count - 1)
-        if count > 1
-        else 0.0
+    return shared_daily_noise_budget_doc(
+        benchmark_date=benchmark_date,
+        rolling_window_hash=rolling_window_hash,
+        per_icp_summaries=per_icp_summaries,
+        aggregate_score=aggregate_score,
     )
-    sd = variance ** 0.5
-    se = sd / (count ** 0.5) if count else 0.0
-    return {
-        "schema_version": "research_lab_daily_noise_budget.v1",
-        "benchmark_date": str(benchmark_date),
-        "rolling_window_hash": str(rolling_window_hash),
-        "icp_count": count,
-        "aggregate_score": round(float(aggregate_score), 6),
-        "mean_icp_score": round(mean, 6),
-        "sample_sd": round(sd, 6),
-        "standard_error": round(se, 6),
-        "confidence_band_95": {
-            "lower": round(mean - 1.96 * se, 6),
-            "upper": round(mean + 1.96 * se, 6),
-        },
-        "zero_score_count": sum(1 for score in scores if score <= 0.0),
-        "high_volatility": bool(count >= 5 and sd >= 25.0),
-        "observability_only": True,
-    }
 
 
 def _retry_runner_with_provider_cost_scope(
@@ -1718,8 +1784,17 @@ class _TraceCapturingCompanyScorer:
         candidate_model_manifest_hash: str | None = None,
         run_id: str | None = None,
         ticket_id: str | None = None,
+        attested_epoch_id: int | None = None,
+        attested_purpose: str = "",
     ):
-        self._inner = inner if inner is not None else QualificationStyleCompanyScorer()
+        self._inner = (
+            inner
+            if inner is not None
+            else QualificationStyleCompanyScorer(
+                attested_epoch_id=attested_epoch_id,
+                attested_purpose=attested_purpose,
+            )
+        )
         self._recorder = recorder
         self._context_ref = str(context_ref)
         self._manifest_uri = str(manifest_uri or "")
@@ -1867,6 +1942,14 @@ class _TraceCapturingCompanyScorer:
         panel). Duck-typed; the default scorer has none."""
         evidence = self._evidence_types_map.get(str(icp_ref))
         return dict(evidence) if isinstance(evidence, Mapping) else None
+
+    def attested_receipts(self) -> list[dict[str, Any]]:
+        """Expose the inner scorer's additive receipt sidecars."""
+
+        supplier = getattr(self._inner, "attested_receipts", None)
+        if not callable(supplier):
+            return []
+        return [dict(item) for item in supplier() if isinstance(item, Mapping)]
 
 
 def _upload_baseline_incontainer_trace(
@@ -2184,11 +2267,6 @@ def _candidate_baseline_target_date(now: datetime, *, quiet_start_seconds: int) 
     return utc_now.date().isoformat()
 
 
-def _summary_has_unresolved_runtime_error(item_summary: Mapping[str, Any]) -> bool:
-    diagnostics = item_summary.get("diagnostics")
-    return isinstance(diagnostics, Mapping) and bool(diagnostics.get("runtime_error"))
-
-
 def _build_baseline_health(
     *,
     per_icp_summaries: list[dict[str, Any]],
@@ -2201,17 +2279,12 @@ def _build_baseline_health(
     Retry-exhausted provider errors are scored as zero ICPs and recorded here
     for audit; they must not reject and re-run the whole benchmark.
     """
-    unresolved = sum(
-        1 for summary in per_icp_summaries if _summary_has_unresolved_runtime_error(summary)
+    return shared_build_baseline_health(
+        per_icp_summaries=per_icp_summaries,
+        retried=retried,
+        recovered=recovered,
+        max_unresolved_icps=max_unresolved_icps,
     )
-    return {
-        "unresolved_provider_errors": unresolved,
-        "gate_passed": unresolved <= max_unresolved_icps,
-        "decision": "observe_only",
-        "retried": int(retried),
-        "recovered": int(recovered),
-        "max_unresolved_icps": int(max_unresolved_icps),
-    }
 
 
 class CandidateBaselineNotReady(RuntimeError):
@@ -3087,7 +3160,10 @@ class ResearchLabGatewayScoringWorker:
             "benchmark": benchmark,
             "runner": runner,
             "run_context": run_context,
-            "scorer": QualificationStyleCompanyScorer(),
+            "scorer": QualificationStyleCompanyScorer(
+                attested_epoch_id=evaluation_epoch,
+                attested_purpose="research_lab.candidate_score.v1",
+            ),
             "public_items": public_items,
             "private_items": private_items,
             "items_by_ref": {_ref(it): it for it in items},
@@ -3117,6 +3193,19 @@ class ResearchLabGatewayScoringWorker:
             run_context={**ctx["run_context"], "signature_ref": "pending"},
             policy={},
             extra_bundle_fields={"private_holdout_gate": gate_result},
+        )
+        await _compare_candidate_score_bundle_in_enclave(
+            evaluation_epoch=int(ctx["run_context"]["evaluation_epoch"]),
+            artifact=ctx["artifact"],
+            benchmark=ctx["benchmark"],
+            patch=ctx["patch"],
+            candidate_artifact=ctx["candidate_artifact"],
+            per_icp_results=_results,
+            run_context={**ctx["run_context"], "signature_ref": "pending"},
+            policy={},
+            private_holdout_gate=gate_result,
+            expected_score_bundle=score_bundle,
+            parent_receipts=ctx["scorer"].attested_receipts(),
         )
         scoring_health_gate = self._scoring_health_gate_result(score_bundle)
         signature_ref = await asyncio.to_thread(
@@ -4033,6 +4122,8 @@ class ResearchLabGatewayScoringWorker:
                 window_hash=window.window_hash,
                 evaluation_epoch=evaluation_epoch,
             )
+            evaluation_policy = self._evaluation_policy()
+            unsigned_run_context = {**run_context, "signature_ref": "pending"}
             # §5.4 scorer-judge traces: wrap the qualification scorer so every
             # per-company judgment is captured (pointer-only in event docs) at
             # the evaluator's scoring boundary; behavior-identical to the
@@ -4048,6 +4139,8 @@ class ResearchLabGatewayScoringWorker:
                 candidate_model_manifest_hash=getattr(artifact, "manifest_hash", None),
                 run_id=str(candidate.get("run_id") or ""),
                 ticket_id=str(candidate.get("ticket_id") or ""),
+                attested_epoch_id=evaluation_epoch,
+                attested_purpose="research_lab.candidate_score.v1",
             )
             last_freshness_check_at = 0.0
             claim_lost_event = asyncio.Event()
@@ -4192,8 +4285,8 @@ class ResearchLabGatewayScoringWorker:
                             base_runner=None,
                             candidate_runner=candidate_runner,
                             company_scorer=candidate_company_scorer,
-                            run_context={**run_context, "signature_ref": "pending"},
-                            policy=self._evaluation_policy(),
+                            run_context=unsigned_run_context,
+                            policy=evaluation_policy,
                             private_holdout_gate=private_holdout_gate,
                             parent_freshness_check=parent_freshness_check,
                             icp_checkpoint=icp_checkpoint,
@@ -4243,6 +4336,30 @@ class ResearchLabGatewayScoringWorker:
                 )
                 return
             gate_result = score_bundle.get("private_holdout_gate")
+            if attested_scoring_mode() != "off":
+                aggregate_doc = score_bundle.get("aggregates")
+                per_icp_results = (
+                    aggregate_doc.get("per_icp_results")
+                    if isinstance(aggregate_doc, Mapping)
+                    else None
+                )
+                if not isinstance(per_icp_results, list):
+                    raise RuntimeError("score bundle is missing per_icp_results for attested comparison")
+                if not isinstance(gate_result, Mapping):
+                    raise RuntimeError("score bundle is missing private_holdout_gate for attested comparison")
+                await _compare_candidate_score_bundle_in_enclave(
+                    evaluation_epoch=evaluation_epoch,
+                    artifact=artifact,
+                    benchmark=benchmark,
+                    patch=patch,
+                    candidate_artifact=candidate_artifact,
+                    per_icp_results=per_icp_results,
+                    run_context=unsigned_run_context,
+                    policy=evaluation_policy,
+                    private_holdout_gate=gate_result,
+                    expected_score_bundle=score_bundle,
+                    parent_receipts=candidate_company_scorer.attested_receipts(),
+                )
             private_holdout_rejected = (
                 isinstance(gate_result, Mapping)
                 and str(gate_result.get("decision") or "") == "rejected_before_private_holdout"
@@ -4853,6 +4970,16 @@ class ResearchLabGatewayScoringWorker:
         aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
         metric = promotion_improvement_metric(score_bundle)
         improvement_points = float(metric.improvement_points)
+        await compare_attested_promotion_metric(
+            epoch_id=(
+                score_bundle.get("evaluation_epoch")
+                or getattr(self.config, "evaluation_epoch", 0)
+                or 0
+            ),
+            score_bundle=score_bundle,
+            expected_improvement_points=improvement_points,
+            expected_event_doc=metric.event_doc(),
+        )
         delta_lcb = float(aggregates.get("delta_lcb") or 0.0)
         candidate_parent = str(candidate.get("parent_artifact_hash") or score_bundle.get("parent_artifact_hash") or "")
         await create_candidate_promotion_event(
@@ -5551,6 +5678,7 @@ class ResearchLabGatewayScoringWorker:
             "candidate_id": str(candidate.get("candidate_id") or "candidate"),
             "attempt": int(attempt),
             "manifest_uri": str(active.artifact.manifest_uri or ""),
+            "evaluation_epoch": int(score_bundle.get("evaluation_epoch") or 0),
         }
         try:
             champion_summaries, champion_stats = await self._run_confirmation_side(
@@ -5687,7 +5815,10 @@ class ResearchLabGatewayScoringWorker:
                 pull_before_run=False,
             )
         )
-        scorer = QualificationStyleCompanyScorer()
+        scorer = QualificationStyleCompanyScorer(
+            attested_epoch_id=int(confirmation_scope.get("evaluation_epoch") or 0),
+            attested_purpose="research_lab.rebenchmark.v1",
+        )
         summaries, stats = await self._run_baseline_batch(
             runner=runner,
             retry_runner=retry_runner,
@@ -6769,7 +6900,10 @@ class ResearchLabGatewayScoringWorker:
                 ),
             )
         )
-        scorer = QualificationStyleCompanyScorer()
+        scorer = QualificationStyleCompanyScorer(
+            attested_epoch_id=evaluation_epoch,
+            attested_purpose="research_lab.rebenchmark.v1",
+        )
         # Trace scope (§5.4 + in-container capture): keyed per day, attempt,
         # and window so a deliberate same-day replacement never overwrites the
         # prior attempt's docs.
@@ -7212,49 +7346,53 @@ class ResearchLabGatewayScoringWorker:
             }
         if self._active_baseline_context is not None:
             self._active_baseline_context["publication_stage"] = "score_summary_build"
-        visibility_split = build_benchmark_visibility_split(
-            rolling_window_hash=window.window_hash,
-            benchmark_items=window.benchmark_items,
-            per_icp_summaries=per_icp_summaries,
-            public_icps_per_day=self.config.public_benchmark_public_icps_per_day,
-            public_weak_per_day=self.config.public_benchmark_public_weak_per_day,
-            public_total_icps=self.config.public_benchmark_public_total_icps,
-            public_weak_total=self.config.public_benchmark_public_weak_total,
-        )
-        serving_model_version = _baseline_serving_model_version_doc(
-            artifact=artifact,
-            benchmark_date=today,
-            benchmark_attempt=benchmark_attempt,
-            rolling_window_hash=window.window_hash,
-            evaluation_epoch=evaluation_epoch,
-        )
-        per_icp_summaries = _with_baseline_evaluation_contexts(
-            per_icp_summaries,
-            benchmark_date=today,
-            benchmark_attempt=benchmark_attempt,
-            rolling_window_hash=window.window_hash,
-            evaluation_epoch=evaluation_epoch,
-            serving_model_version_hash=str(serving_model_version["version_stamp_hash"]),
-        )
-        noise_budget = _daily_noise_budget_doc(
-            benchmark_date=today,
-            rolling_window_hash=window.window_hash,
-            per_icp_summaries=per_icp_summaries,
-            aggregate_score=aggregate_score,
-        )
-        score_summary_doc = {
-            "schema_version": "1.0",
-            "benchmark_quality": "passed",
+        baseline_summary_payload = {
+            "artifact_manifest": artifact.to_dict(),
+            "benchmark_date": today,
             "benchmark_attempt": benchmark_attempt,
             "rolling_window_hash": window.window_hash,
-            "serving_model_version": serving_model_version,
-            "per_icp_summaries": per_icp_summaries,
-            "visibility_split": visibility_split,
-            "daily_noise_budget": noise_budget,
-            "aggregate_score": aggregate_score,
-            "baseline_health": baseline_health,
-            "elapsed_seconds": round(time.time() - start, 3),
+            "evaluation_epoch": evaluation_epoch,
+            "benchmark_items": list(window.benchmark_items),
+            "per_icp_summaries": list(per_icp_summaries),
+            "public_icps_per_day": self.config.public_benchmark_public_icps_per_day,
+            "public_weak_per_day": self.config.public_benchmark_public_weak_per_day,
+            "public_total_icps": self.config.public_benchmark_public_total_icps,
+            "public_weak_total": self.config.public_benchmark_public_weak_total,
+            "retried": retried_total,
+            "recovered": recovered_total,
+            "max_unresolved_icps": _baseline_max_unresolved_icps(),
+            "day_jump_points": day_jump_points,
+            # The old path captured elapsed time after constructing the other
+            # summary fields. Build once before taking the timestamp to retain
+            # that observable ordering, then bind the exact value below.
+            "elapsed_seconds": 0.0,
         }
+        baseline_summary_result = build_baseline_score_summary(**baseline_summary_payload)
+        baseline_summary_payload["elapsed_seconds"] = round(time.time() - start, 3)
+        score_summary_doc = {
+            **baseline_summary_result["score_summary_doc"],
+            "elapsed_seconds": baseline_summary_payload["elapsed_seconds"],
+        }
+        baseline_summary_result = {
+            **baseline_summary_result,
+            "score_summary_doc": score_summary_doc,
+        }
+        if baseline_summary_result["aggregate_score"] != aggregate_score:
+            raise RuntimeError("shared baseline aggregate diverged from existing calculation")
+        if baseline_summary_result["baseline_health"] != baseline_health:
+            raise RuntimeError("shared baseline health diverged from existing calculation")
+        aggregate_score = baseline_summary_result["aggregate_score"]
+        baseline_health = baseline_summary_result["baseline_health"]
+        serving_model_version = baseline_summary_result["serving_model_version"]
+        per_icp_summaries = baseline_summary_result["per_icp_summaries"]
+        visibility_split = baseline_summary_result["visibility_split"]
+        noise_budget = baseline_summary_result["daily_noise_budget"]
+        attested_baseline_outcome = await compare_attested_baseline_score_summary(
+            epoch_id=evaluation_epoch,
+            build_payload=baseline_summary_payload,
+            expected_result=baseline_summary_result,
+            parent_receipts=scorer.attested_receipts(),
+        )
         bundle_hash = canonical_hash(score_summary_doc)
         if self._active_baseline_context is not None:
             self._active_baseline_context["publication_stage"] = "kms_signature"
@@ -7279,6 +7417,21 @@ class ResearchLabGatewayScoringWorker:
             proxy_ref_hash=self.proxy_ref_hash,
             signature_ref=signature_ref,
             score_summary_doc=score_summary_doc,
+        )
+        await persist_attested_outcome_artifact_links(
+            attested_baseline_outcome,
+            artifact_links=[
+                {
+                    "artifact_kind": "benchmark_score_summary",
+                    "artifact_ref": str(bundle["benchmark_bundle_id"]),
+                    "artifact_hash": bundle_hash,
+                },
+                {
+                    "artifact_kind": "benchmark_bundle",
+                    "artifact_ref": str(bundle["benchmark_bundle_id"]),
+                    "artifact_hash": str(bundle["benchmark_bundle_hash"]),
+                },
+            ],
         )
         if self._active_baseline_context is not None:
             self._active_baseline_context["benchmark_bundle_id"] = str(bundle["benchmark_bundle_id"])

@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from gateway.research_lab.bundles import contains_secret_material, sha256_json
+from gateway.research_lab.attested_scoring import (
+    compare_promotion_gate_decision,
+    compare_promotion_metric,
+)
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.public_benchmarks import build_public_benchmark_report
@@ -41,6 +45,12 @@ from research_lab.eval import (
     load_private_artifact_manifest,
     sign_digest_with_kms,
     validate_private_model_artifact_manifest,
+)
+from research_lab.eval.promotion_metric import (
+    PromotionGateDecision,
+    PromotionImprovementMetric,
+    promotion_gate_decision,
+    promotion_improvement_metric,
 )
 
 
@@ -385,119 +395,6 @@ class RepoHeadManifestNotReadyError(PromotionPausedError):
 class ActivePrivateModel:
     artifact: PrivateModelArtifactManifest
     version_row: dict[str, Any] | None = None
-
-
-@dataclass(frozen=True)
-class PromotionImprovementMetric:
-    improvement_points: float
-    basis: str
-    daily_baseline_available: bool
-    baseline_aggregate_score: float | None = None
-    candidate_total_score: float | None = None
-    candidate_delta_vs_daily_baseline: float | None = None
-    # Explicit "can't compute" rejection (§0-N3): set on holdout-gated bundles
-    # whose stored-baseline basis is unavailable, so a future
-    # improvement_threshold_points=0 can never promote unmeasured candidates.
-    rejection_status: str | None = None
-    # Symmetric ICP exclusion (§5.2-1): ICPs excluded from the candidate totals
-    # due to unresolved provider errors, mirrored out of the baseline basis.
-    provider_excluded_icp_ids: tuple[str, ...] = ()
-    baseline_basis_adjusted: bool = False
-    unadjusted_baseline_aggregate_score: float | None = None
-
-    def event_doc(self) -> dict[str, Any]:
-        return {
-            "improvement_basis": self.basis,
-            "daily_baseline_available": self.daily_baseline_available,
-            "baseline_aggregate_score": self.baseline_aggregate_score,
-            "candidate_total_score": self.candidate_total_score,
-            "candidate_delta_vs_daily_baseline": self.candidate_delta_vs_daily_baseline,
-            "rejection_status": self.rejection_status,
-            "provider_excluded_icp_ids": list(self.provider_excluded_icp_ids),
-            "baseline_basis_adjusted": self.baseline_basis_adjusted,
-            "unadjusted_baseline_aggregate_score": self.unadjusted_baseline_aggregate_score,
-        }
-
-
-def promotion_improvement_metric(
-    score_bundle: Mapping[str, Any],
-    *,
-    baseline_score_summary_doc: Mapping[str, Any] | None = None,
-) -> PromotionImprovementMetric:
-    """Return the promotion metric without re-running the active parent model.
-
-    Candidate score bundles emitted by the private-holdout path are judged
-    against the stored daily baseline aggregate. Older non-holdout bundles keep
-    their legacy paired mean-delta path for compatibility with historical tests
-    and tooling, but any bundle that carries a holdout gate must provide the
-    stored-baseline final delta to be promotable.
-
-    An unavailable basis is an explicit rejection (``rejection_status`` set,
-    §0-N3) rather than a silent 0.0 improvement.
-
-    Provider/runtime health and provider-exclusion audit fields do not change
-    the promotion basis. A candidate promotes only when its stored final score
-    beats the stored daily baseline aggregate by the configured threshold.
-    """
-
-    aggregates = score_bundle.get("aggregates") if isinstance(score_bundle.get("aggregates"), Mapping) else {}
-    gate = score_bundle.get("private_holdout_gate")
-    if isinstance(gate, Mapping):
-        decision = str(gate.get("decision") or "")
-        baseline_aggregate = _optional_float(gate.get("baseline_aggregate_score"))
-        candidate_total = _optional_float(gate.get("candidate_total_score"))
-        excluded_icp_ids = _provider_excluded_icp_ids(aggregates)
-        daily_delta = _optional_float(gate.get("candidate_delta_vs_daily_baseline"))
-        if daily_delta is None and baseline_aggregate is not None and candidate_total is not None:
-            daily_delta = candidate_total - baseline_aggregate
-        if (
-            decision == "private_holdout_approved"
-            and bool(gate.get("private_holdout_evaluated"))
-            and daily_delta is not None
-        ):
-            return PromotionImprovementMetric(
-                improvement_points=float(daily_delta),
-                basis="stored_daily_baseline_total_delta",
-                daily_baseline_available=True,
-                baseline_aggregate_score=baseline_aggregate,
-                candidate_total_score=candidate_total,
-                candidate_delta_vs_daily_baseline=float(daily_delta),
-                provider_excluded_icp_ids=excluded_icp_ids,
-                baseline_basis_adjusted=False,
-                unadjusted_baseline_aggregate_score=None,
-            )
-        unavailable_reason = decision or "missing_decision"
-        return PromotionImprovementMetric(
-            improvement_points=0.0,
-            basis=f"stored_daily_baseline_unavailable:{unavailable_reason}",
-            daily_baseline_available=False,
-            baseline_aggregate_score=baseline_aggregate,
-            candidate_total_score=candidate_total,
-            candidate_delta_vs_daily_baseline=daily_delta,
-            rejection_status="rejected_basis_unavailable",
-            provider_excluded_icp_ids=excluded_icp_ids,
-            baseline_basis_adjusted=False,
-            unadjusted_baseline_aggregate_score=None,
-        )
-
-    legacy_delta = _optional_float(aggregates.get("mean_delta")) or 0.0
-    return PromotionImprovementMetric(
-        improvement_points=float(legacy_delta),
-        basis="legacy_paired_mean_delta_no_holdout_gate",
-        daily_baseline_available=False,
-    )
-
-
-def _provider_excluded_icp_ids(aggregates: Mapping[str, Any]) -> tuple[str, ...]:
-    value = aggregates.get("provider_excluded_icp_ids")
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        return ()
-    seen: list[str] = []
-    for item in value:
-        text = str(item or "").strip()
-        if text and text not in seen:
-            seen.append(text)
-    return tuple(seen)
 
 
 def _baseline_per_icp_scores(doc: Mapping[str, Any] | None) -> dict[str, float]:
@@ -1612,12 +1509,39 @@ class ResearchLabPromotionController:
         candidate_kind = str(candidate.get("candidate_kind") or "patch")
         metric = promotion_improvement_metric(score_bundle)
         improvement_points = float(metric.improvement_points)
+        evaluation_epoch = int(
+            score_bundle.get("evaluation_epoch")
+            or getattr(self.config, "evaluation_epoch", 0)
+            or 0
+        )
+        metric_outcome = await compare_promotion_metric(
+            epoch_id=evaluation_epoch,
+            score_bundle=score_bundle,
+            expected_improvement_points=improvement_points,
+            expected_event_doc=metric.event_doc(),
+        )
         delta_lcb = float((score_bundle.get("aggregates") or {}).get("delta_lcb") or 0.0)
         threshold = float(self.config.improvement_threshold_points)
         rolling_window_hash = str(score_bundle.get("icp_set_hash") or "")
         score_bundle_id = str(score_bundle_row.get("score_bundle_id") or "")
 
         if not self.config.auto_promotion_enabled:
+            gate_decision = promotion_gate_decision(
+                score_bundle,
+                candidate_kind=candidate_kind,
+                candidate_parent=candidate_parent,
+                active_parent=candidate_parent,
+                threshold_points=threshold,
+                auto_promotion_enabled=False,
+            )
+            await self._compare_attested_gate_decision(
+                evaluation_epoch=evaluation_epoch,
+                score_bundle=score_bundle,
+                gate_decision=gate_decision,
+                candidate_parent=candidate_parent,
+                active_parent=candidate_parent,
+                metric_outcome=metric_outcome,
+            )
             await create_candidate_promotion_event(
                 candidate_id=str(candidate["candidate_id"]),
                 source_score_bundle_id=score_bundle_id,
@@ -1721,6 +1645,23 @@ class ResearchLabPromotionController:
                 **reward_status,
                 **source_add_reward_status,
             }
+
+        gate_decision = promotion_gate_decision(
+            score_bundle,
+            candidate_kind=candidate_kind,
+            candidate_parent=candidate_parent,
+            active_parent=active_parent,
+            threshold_points=threshold,
+            auto_promotion_enabled=True,
+        )
+        await self._compare_attested_gate_decision(
+            evaluation_epoch=evaluation_epoch,
+            score_bundle=score_bundle,
+            gate_decision=gate_decision,
+            candidate_parent=candidate_parent,
+            active_parent=active_parent,
+            metric_outcome=metric_outcome,
+        )
 
         await create_candidate_promotion_event(
             candidate_id=str(candidate["candidate_id"]),
@@ -1853,6 +1794,30 @@ class ResearchLabPromotionController:
         if bypassed_gates:
             result = {**result, "bypassed_gates": bypassed_gates}
         return result
+
+    async def _compare_attested_gate_decision(
+        self,
+        *,
+        evaluation_epoch: int,
+        score_bundle: Mapping[str, Any],
+        gate_decision: PromotionGateDecision,
+        candidate_parent: str,
+        active_parent: str,
+        metric_outcome: Mapping[str, Any],
+    ) -> None:
+        await compare_promotion_gate_decision(
+            epoch_id=int(evaluation_epoch),
+            score_bundle=score_bundle,
+            decision_payload={
+                "candidate_kind": gate_decision.candidate_kind,
+                "candidate_parent": str(candidate_parent),
+                "active_parent": str(active_parent),
+                "threshold_points": gate_decision.threshold_points,
+                "auto_promotion_enabled": gate_decision.auto_promotion_enabled,
+            },
+            expected_decision=gate_decision.to_dict(),
+            metric_outcome=metric_outcome,
+        )
 
     async def _confirmation_rerun_gate(
         self,

@@ -8,6 +8,7 @@ import os
 from typing import Any, Mapping
 
 from gateway.research_lab.alpha_pricing import inject_alpha_price_valuation, resolve_epoch_alpha_price_valuation
+from gateway.research_lab.attested_scoring import compare_allocation
 from gateway.research_lab.bundles import contains_secret_material, sha256_json
 from gateway.research_lab.chain import resolve_hotkey_uids
 from gateway.research_lab.config import ResearchLabGatewayConfig
@@ -27,6 +28,7 @@ async def build_research_lab_allocation_bundle(
     epoch: int,
     netuid: int,
     persist_snapshot: bool = False,
+    attestation_out: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a sanitized Research Lab allocation bundle for one epoch."""
     policy = config.reimbursement_policy_doc(enabled=True)
@@ -42,12 +44,26 @@ async def build_research_lab_allocation_bundle(
     policy = inject_alpha_price_valuation(policy, alpha_valuation)
     reimbursement_obligations, reimbursement_skipped = await _active_reimbursement_obligations(int(epoch), policy=policy)
     champion_obligations, champion_skipped = await _active_champion_obligations(int(epoch), netuid=int(netuid))
+    allocation_inputs = {
+        "epoch": int(epoch),
+        "policy": policy,
+        "active_reimbursement_obligations": reimbursement_obligations,
+        "active_champion_obligations": champion_obligations,
+    }
     allocation = allocate_research_lab_epoch(
-        int(epoch),
-        policy,
-        reimbursement_obligations,
-        champion_obligations,
+        allocation_inputs["epoch"],
+        allocation_inputs["policy"],
+        allocation_inputs["active_reimbursement_obligations"],
+        allocation_inputs["active_champion_obligations"],
     )
+    attestation = await compare_allocation(
+        epoch_id=int(epoch),
+        payload=allocation_inputs,
+        expected_allocation=allocation,
+    )
+    if attestation_out is not None:
+        attestation_out.clear()
+        attestation_out.update(attestation)
     live_allocation_enabled = bool(config.reimbursements_enabled or config.weight_mutation_enabled)
     snapshot_status = "active" if live_allocation_enabled else "shadow"
     if persist_snapshot and config.production_writes_enabled:

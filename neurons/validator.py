@@ -42,7 +42,7 @@ from Leadpoet.validator import reward as reward_module
 from Leadpoet.utils import cloud_db as cloud_db_module
 from Leadpoet.validator.reward import start_epoch_monitor, stop_epoch_monitor
 import asyncio
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Mapping, Optional, Any
 from aiohttp import web
 from Leadpoet.utils.cloud_db import (
     fetch_prospects_from_cloud,
@@ -85,6 +85,12 @@ from pathlib import Path
 import warnings
 import subprocess
 import aiohttp
+from leadpoet_canonical.weight_computation import (
+    WEIGHT_SNAPSHOT_SCHEMA_VERSION,
+    compute_final_weights as compute_canonical_final_weights,
+    research_lab_uid_weights_from_allocation as canonical_research_lab_uid_weights_from_allocation,
+    weight_config_hash as canonical_weight_config_hash,
+)
 
 # ════════════════════════════════════════════════════════════════════════════
 # TEE SIGNING IMPORTS (Phase 2.3 - Validator TEE Weight Submission)
@@ -94,6 +100,7 @@ try:
     from validator_tee import (
         initialize_enclave_keypair,
         sign_weights,
+        compute_weights_v2,
         get_enclave_pubkey,
         get_attestation_document_b64,
         get_attestation,
@@ -101,6 +108,7 @@ try:
         is_keypair_initialized,
         is_enclave_running,
     )
+    from validator_tee.host.weight_shadow import build_weight_bundle_v2, execute_attested_weight_mode
     from leadpoet_canonical.weights import normalize_to_u16, normalize_to_u16_with_uids, bundle_weights_hash
     from leadpoet_canonical.binding import create_binding_message
     TEE_AVAILABLE = True
@@ -465,6 +473,89 @@ def _research_lab_production_subnet_default() -> bool:
     return network == "finney" and netuid == "71"
 
 
+def _attested_weight_mode() -> str:
+    value = str(os.environ.get("VALIDATOR_ATTESTED_WEIGHT_MODE", "off") or "off").strip().lower()
+    return value if value in {"off", "shadow", "required"} else "off"
+
+
+def _current_validator_commit_sha() -> str:
+    for key in ("GITHUB_SHA", "GIT_COMMIT_HASH", "GIT_COMMIT"):
+        value = str(os.environ.get(key) or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", value):
+            return value
+    try:
+        value = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        ).stdout.strip().lower()
+    except Exception:
+        value = ""
+    if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", value):
+        raise RuntimeError("validator full commit SHA is unavailable")
+    return value
+
+
+def _finalize_attested_weight_snapshot(values: Dict[str, Any]) -> Dict[str, Any]:
+    """Bind the exact behavior configuration and validate the immutable snapshot."""
+
+    snapshot = dict(values)
+    snapshot["schema_version"] = WEIGHT_SNAPSHOT_SCHEMA_VERSION
+    snapshot["config_hash"] = canonical_weight_config_hash(snapshot)
+    compute_canonical_final_weights(snapshot)
+    return snapshot
+
+
+async def _compute_attested_weight_shadow(
+    *,
+    mode: str,
+    snapshot: Dict[str, Any],
+    host_uids: List[int],
+    host_weights: List[float],
+) -> Optional[Dict[str, Any]]:
+    """Compute and verify enclave weights without changing the host vector."""
+
+    if mode == "off":
+        return None
+    def _log_error(exc: Exception) -> None:
+        bt.logging.error(
+            "validator_attested_weight_failed mode=%s epoch=%s error_type=%s error=%s",
+            mode,
+            snapshot.get("epoch_id"),
+            type(exc).__name__,
+            exc,
+        )
+
+    def _unavailable(_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        raise RuntimeError("validator TEE modules are unavailable")
+
+    compute_callable = compute_weights_v2 if TEE_AVAILABLE else _unavailable
+    try:
+        response = await execute_attested_weight_mode(
+            mode=mode,
+            snapshot=snapshot,
+            host_uids=host_uids,
+            host_weights=host_weights,
+            compute_weights=compute_callable,
+            on_error=_log_error,
+        )
+        if response is None:
+            return None
+        bt.logging.info(
+            "validator_attested_weight_match epoch=%s hash=%s receipt=%s",
+            snapshot["epoch_id"],
+            response["weight_result"]["weights_hash"],
+            response["receipt"]["receipt_hash"],
+        )
+        return dict(response)
+    except Exception as exc:
+        if mode == "required":
+            raise RuntimeError("required validator enclave weight computation failed") from exc
+        return None
+
+
 def _research_lab_allocation_has_live_payments(allocation_doc: Any) -> bool:
     if not isinstance(allocation_doc, dict):
         return False
@@ -502,67 +593,11 @@ def _research_lab_uid_weights_from_allocation(
     metagraph: Any,
     reserved_share: float,
 ) -> tuple[dict[int, float], float, dict[str, float]]:
-    if not isinstance(allocation_doc, dict) or not allocation_doc:
-        return {}, float(reserved_share), {
-            "paid": 0.0,
-            "burn": float(reserved_share),
-            "unallocated": float(reserved_share),
-            "deregistered": 0.0,
-        }
-
-    lab_cap_share = max(
-        0.0,
-        min(float(reserved_share), float(allocation_doc.get("lab_cap_percent") or 0.0) / 100.0),
+    return canonical_research_lab_uid_weights_from_allocation(
+        allocation_doc,
+        metagraph_hotkeys=metagraph.hotkeys,
+        reserved_share=reserved_share,
     )
-    unallocated_share = min(
-        lab_cap_share,
-        max(0.0, float(allocation_doc.get("unallocated_percent") or 0.0) / 100.0),
-    )
-    uid_weights: dict[int, float] = {}
-    paid_share = 0.0
-    deregistered_share = 0.0
-
-    for section in (
-        "reimbursement_allocations",
-        "champion_allocations",
-        "queued_champion_allocations",
-    ):
-        for row in allocation_doc.get(section) or []:
-            if not isinstance(row, dict):
-                continue
-            pct = max(0.0, float(row.get("paid_alpha_percent") or 0.0) / 100.0)
-            if pct <= 0:
-                continue
-            paid_share += pct
-            try:
-                uid = int(row.get("uid"))
-                expected_hotkey = str(row.get("miner_hotkey") or "")
-                actual_hotkey = metagraph.hotkeys[uid]
-            except Exception:
-                deregistered_share += pct
-                continue
-            if expected_hotkey and actual_hotkey != expected_hotkey:
-                deregistered_share += pct
-                continue
-            uid_weights[uid] = uid_weights.get(uid, 0.0) + pct
-
-    payable_cap = max(0.0, lab_cap_share - unallocated_share)
-    if paid_share > payable_cap and paid_share > 0:
-        scale = payable_cap / paid_share
-        uid_weights = {uid: weight * scale for uid, weight in uid_weights.items()}
-        deregistered_share *= scale
-        paid_share = payable_cap
-
-    reported_total = paid_share + unallocated_share
-    rounding_gap = max(0.0, lab_cap_share - reported_total)
-    reserved_gap = max(0.0, float(reserved_share) - lab_cap_share)
-    burn_share = unallocated_share + deregistered_share + rounding_gap + reserved_gap
-    return uid_weights, burn_share, {
-        "paid": paid_share,
-        "burn": burn_share,
-        "unallocated": unallocated_share + rounding_gap + reserved_gap,
-        "deregistered": deregistered_share,
-    }
 
 
 def _verify_burn_target_owner(metagraph: Any, uid: int, expected_hotkey: Optional[str]) -> bool:
@@ -3420,8 +3455,8 @@ class Validator(BaseValidatorNeuron):
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _get_fulfillment_emission_share(
-        self, current_epoch: int, fulfillment_pool: float,
-    ) -> tuple:
+        self, current_epoch: int, fulfillment_pool: float, *, include_status: bool = False,
+    ) -> Any:
         """Compute fulfillment emission from active rewards, capped to the pool.
 
         Queries the gateway for active (unexpired) fulfillment rewards, sums them
@@ -3441,22 +3476,27 @@ class Validator(BaseValidatorNeuron):
             per_miner = gateway_get_all_fulfillment_rewards(self.wallet, current_epoch)
 
             if not per_miner:
-                return 0.0, {}
+                result = (0.0, {}, True)
+                return result if include_status else result[:2]
 
             raw_total = sum(per_miner.values())
             if raw_total <= 0:
-                return 0.0, {}
+                result = (0.0, {}, True)
+                return result if include_status else result[:2]
 
             if raw_total <= fulfillment_pool:
-                return raw_total, dict(per_miner)
+                result = (raw_total, dict(per_miner), True)
+                return result if include_status else result[:2]
 
             scale_factor = fulfillment_pool / raw_total
             scaled = {hk: pct * scale_factor for hk, pct in per_miner.items()}
-            return fulfillment_pool, scaled
+            result = (fulfillment_pool, scaled, True)
+            return result if include_status else result[:2]
 
         except Exception as e:
             bt.logging.warning(f"Fulfillment emission share error (safe fallback): {e}")
-            return 0.0, {}
+            result = (0.0, {}, False)
+            return result if include_status else result[:2]
 
     async def _research_lab_pre_weight_submission_guard(self, current_epoch: int) -> dict:
         """Fetch and verify Research Lab shadow output before any set_weights call.
@@ -3486,13 +3526,16 @@ class Validator(BaseValidatorNeuron):
                 ResearchLabValidatorFlags,
                 allocation_referenced_score_bundle_ids,
                 build_research_lab_allocation_component,
+                fetch_research_lab_attested_allocation_bundle,
                 fetch_research_lab_evaluation_bundle_page,
                 fetch_research_lab_score_bundle,
                 build_research_lab_weight_component,
                 fetch_research_lab_allocation_bundle,
                 fetch_research_lab_shadow_bundle,
+                load_independent_gateway_identity,
                 merge_research_lab_evaluation_bundle_page,
                 verify_research_lab_allocation_bundle,
+                verify_research_lab_attested_allocation_bundle,
                 verify_research_lab_evaluation_bundle_page,
                 verify_research_lab_shadow_bundle,
                 write_research_lab_validator_artifact,
@@ -3558,6 +3601,9 @@ class Validator(BaseValidatorNeuron):
             allocation_component = None
             allocation_bundle = None
             allocation_verification = None
+            attested_allocation_verification = None
+            attested_allocation_receipt = None
+            attested_allocation_parent_receipts = []
             if flags.live_allocation_enabled():
                 print(f"   Fetching Research Lab live allocation for epoch {current_epoch}")
                 allocation_bundle = await asyncio.to_thread(fetch_research_lab_allocation_bundle, gateway_url, current_epoch)
@@ -3590,6 +3636,99 @@ class Validator(BaseValidatorNeuron):
                     f"champions={float(allocation_doc.get('champion_alpha_percent') or 0):.4f}%, "
                     f"queued={float(allocation_doc.get('queued_champion_alpha_percent') or 0):.4f}%)"
                 )
+                attested_mode = _attested_weight_mode()
+                if attested_mode != "off":
+                    try:
+                        attested_allocation = await asyncio.to_thread(
+                            fetch_research_lab_attested_allocation_bundle,
+                            gateway_url,
+                            current_epoch,
+                        )
+                        attested_receipt = attested_allocation.get("receipt", {})
+                        attested_lineage_receipts = attested_allocation.get("parent_receipts", [])
+                        if not isinstance(attested_lineage_receipts, list):
+                            attested_lineage_receipts = []
+                        expected_gateway_identity = load_independent_gateway_identity(
+                            str(attested_receipt.get("commit_sha") or "")
+                        )
+                        expected_gateway_identities = {}
+                        for lineage_receipt in [attested_receipt, *attested_lineage_receipts]:
+                            if not isinstance(lineage_receipt, Mapping):
+                                continue
+                            lineage_commit = str(lineage_receipt.get("commit_sha") or "")
+                            if not lineage_commit or lineage_commit in expected_gateway_identities:
+                                continue
+                            lineage_identity = load_independent_gateway_identity(lineage_commit)
+                            if lineage_identity:
+                                expected_gateway_identities[lineage_commit] = lineage_identity
+                        attested_allocation_verification = (
+                            verify_research_lab_attested_allocation_bundle(
+                                attested_allocation,
+                                flags=flags,
+                                expected_gateway_pcr0=(
+                                    str(expected_gateway_identity.get("pcr0") or "")
+                                    if expected_gateway_identity
+                                    else None
+                                ),
+                                expected_gateway_commit=(
+                                    str(expected_gateway_identity.get("commit_sha") or "")
+                                    if expected_gateway_identity
+                                    else None
+                                ),
+                                expected_gateway_identities=expected_gateway_identities,
+                            )
+                        )
+                        attested_bundle = attested_allocation.get("bundle", {})
+                        if (
+                            attested_bundle.get("source_state_hash")
+                            != allocation_bundle.get("source_state_hash")
+                            or attested_bundle.get("allocation_hash")
+                            != allocation_bundle.get("allocation_hash")
+                        ):
+                            attested_allocation_verification = {
+                                **attested_allocation_verification,
+                                "passed": False,
+                                "required_ready": False,
+                                "errors": [
+                                    *list(attested_allocation_verification.get("errors") or []),
+                                    "attested_allocation_differs_from_live_bundle",
+                                ],
+                            }
+                        if attested_allocation_verification.get("passed"):
+                            attested_allocation_receipt = dict(attested_allocation["receipt"])
+                            attested_allocation_parent_receipts = [
+                                dict(item)
+                                for item in attested_lineage_receipts
+                                if isinstance(item, Mapping)
+                            ]
+                            print(
+                                "   ✅ Research Lab allocation receipt verified: "
+                                f"{attested_allocation_receipt.get('receipt_hash')} "
+                                f"({attested_allocation_verification.get('pcr0_verification_mode')})"
+                            )
+                        else:
+                            print(
+                                "   ⚠️ Research Lab allocation receipt shadow verification failed: "
+                                f"{attested_allocation_verification.get('errors')}"
+                            )
+                        if attested_mode == "required" and not (
+                            attested_allocation_verification.get("required_ready")
+                        ):
+                            return _research_lab_failed_closed(
+                                "research_lab_attested_allocation_not_required_ready",
+                                errors=list(attested_allocation_verification.get("errors") or [])
+                                or ["independent_gateway_pcr0_not_verified"],
+                            )
+                    except Exception as exc:
+                        if attested_mode == "required":
+                            return _research_lab_failed_closed(
+                                "research_lab_attested_allocation_fetch_failed",
+                                errors=[str(exc)],
+                            )
+                        print(
+                            "   ⚠️ Research Lab attested allocation shadow unavailable: "
+                            f"{str(exc)[:180]}"
+                        )
 
             evaluation_verification = None
             if flags.evaluation_verify_enabled:
@@ -3670,6 +3809,9 @@ class Validator(BaseValidatorNeuron):
                 "component": component,
                 "allocation_component": allocation_component,
                 "allocation_verification": allocation_verification,
+                "attested_allocation_verification": attested_allocation_verification,
+                "attested_allocation_receipt": attested_allocation_receipt,
+                "attested_allocation_parent_receipts": attested_allocation_parent_receipts,
                 "weight_vector_hash": verification.get("weight_vector_hash"),
                 "evaluation_verification": evaluation_verification,
             }
@@ -3731,9 +3873,44 @@ class Validator(BaseValidatorNeuron):
                 if isinstance(research_lab_allocation_component, dict)
                 else {}
             )
+            research_lab_allocation_receipt = (
+                research_lab_guard.get("attested_allocation_receipt")
+                if isinstance(research_lab_guard, dict)
+                and isinstance(research_lab_guard.get("attested_allocation_receipt"), dict)
+                else None
+            )
+            research_lab_allocation_parent_receipts = (
+                research_lab_guard.get("attested_allocation_parent_receipts")
+                if isinstance(research_lab_guard, dict)
+                and isinstance(
+                    research_lab_guard.get("attested_allocation_parent_receipts"),
+                    list,
+                )
+                else []
+            )
+            attested_parent_receipts = (
+                [
+                    research_lab_allocation_receipt,
+                    *[
+                        dict(item)
+                        for item in research_lab_allocation_parent_receipts
+                        if isinstance(item, Mapping)
+                    ],
+                ]
+                if research_lab_allocation_receipt is not None
+                else []
+            )
+            research_lab_allocation_receipt_hash = (
+                str(research_lab_allocation_receipt.get("receipt_hash") or "")
+                if research_lab_allocation_receipt is not None
+                else ""
+            )
             research_lab_has_live_allocations = _research_lab_allocation_has_live_payments(
                 research_lab_allocation_doc
             )
+            attested_weight_mode = _attested_weight_mode()
+            attested_weight_snapshot = None
+            attested_weight_response = None
             
             # ═══════════════════════════════════════════════════════════════════
             # Load current epoch data (may be empty if gateway was down)
@@ -3822,10 +3999,13 @@ class Validator(BaseValidatorNeuron):
             # rolling-window leaderboard bonus.  The leaderboard is a permanent
             # feature of the fulfillment track — it is NEVER toggled off; only
             # the split ratio between per-epoch and weekly is tunable here.
+            RESEARCH_LAB_FALLBACK_SHARE = _env_percent_share(
+                "RESEARCH_LAB_EMISSION_PERCENT", 20.0,
+            )
             RESEARCH_LAB_SHARE = _doc_percent_share(
                 research_lab_allocation_doc,
                 "lab_cap_percent",
-                _env_percent_share("RESEARCH_LAB_EMISSION_PERCENT", 20.0),
+                RESEARCH_LAB_FALLBACK_SHARE,
             )
             # FULFILLMENT LEADERBOARD BONUS — added 2026-04-30, restored 2026-05-15,
             # bumped to 9.5% + switched to rolling window on 2026-05-17, changed
@@ -3869,8 +4049,11 @@ class Validator(BaseValidatorNeuron):
             # This ensures banned miners cannot receive sourcing emissions even if
             # new leads continue to trickle in with positive scores.
             # ═══════════════════════════════════════════════════════════════════
+            banned_hotkeys = set()
+            banned_lookup_ok = False
             try:
                 banned_hotkeys = self._get_all_banned_hotkeys()
+                banned_lookup_ok = True
                 if banned_hotkeys:
                     self._apply_banned_hotkey_sourcing_penalties(banned_hotkeys)
             except Exception as e:
@@ -3881,6 +4064,59 @@ class Validator(BaseValidatorNeuron):
             # This ensures we still distribute rolling share even if gateway was down
             # ═══════════════════════════════════════════════════════════════════
             rolling_scores, rolling_lead_count = self.get_rolling_epoch_scores(current_epoch, window=ROLLING_WINDOW)
+
+            def _weight_snapshot(
+                *,
+                champion_uid_value=None,
+                effective_champion_share_value=0.0,
+                fulfillment_share_value=0.0,
+                fulfillment_rows_value=None,
+                fulfillment_fetch_ok_value=True,
+                leaderboard_entries_value=None,
+                leaderboard_fetch_ok_value=True,
+            ):
+                return _finalize_attested_weight_snapshot({
+                    "netuid": int(self.config.netuid),
+                    "epoch_id": int(current_epoch),
+                    "block": int(current_block),
+                    "commit_sha": _current_validator_commit_sha(),
+                    "parent_receipt_hashes": (
+                        [research_lab_allocation_receipt_hash]
+                        if research_lab_allocation_receipt_hash
+                        else []
+                    ),
+                    "research_lab_allocation_receipt_hash": research_lab_allocation_receipt_hash,
+                    "burn_target_uid": BURN_TARGET_UID,
+                    "expected_burn_target_hotkey": EXPECTED_BURN_TARGET_HOTKEY,
+                    "metagraph_hotkeys": list(self.metagraph.hotkeys),
+                    "banned_hotkeys": sorted(str(hotkey) for hotkey in banned_hotkeys),
+                    "banned_lookup_ok": bool(banned_lookup_ok),
+                    "ff_enabled": bool(ff_enabled),
+                    "base_burn_share": BASE_BURN_SHARE,
+                    "champion_share": CHAMPION_SHARE,
+                    "champion_uid": champion_uid_value,
+                    "effective_champion_share": effective_champion_share_value,
+                    "research_lab_fallback_share": RESEARCH_LAB_FALLBACK_SHARE,
+                    "research_lab_allocation_doc": research_lab_allocation_doc,
+                    "leaderboard_bonus_share": LEADERBOARD_BONUS_SHARE,
+                    "leaderboard_rank_shares": [
+                        LEADERBOARD_TOP1_PCT,
+                        LEADERBOARD_TOP2_PCT,
+                        LEADERBOARD_TOP3_PCT,
+                    ],
+                    "leaderboard_entries": list(leaderboard_entries_value or []),
+                    "leaderboard_fetch_ok": bool(leaderboard_fetch_ok_value),
+                    "fulfillment_share": float(fulfillment_share_value),
+                    "fulfillment_rows": list(fulfillment_rows_value or []),
+                    "fulfillment_fetch_ok": bool(fulfillment_fetch_ok_value),
+                    "rolling_lead_count": int(rolling_lead_count),
+                    "rolling_scores": [
+                        {"hotkey": str(hotkey), "score": score}
+                        for hotkey, score in rolling_scores.items()
+                    ],
+                    "sourcing_floor_threshold": SOURCING_FLOOR_THRESHOLD,
+                    "min_total_rep_for_distribution": MIN_TOTAL_REP_FOR_DISTRIBUTION,
+                })
             
             # ═══════════════════════════════════════════════════════════════════
             # Check if we have ANYTHING to submit (current OR rolling)
@@ -3903,6 +4139,28 @@ class Validator(BaseValidatorNeuron):
                         EXPECTED_BURN_TARGET_HOTKEY,
                     ):
                         return False
+
+                    if attested_weight_mode != "off":
+                        attested_weight_snapshot = _weight_snapshot()
+                        attested_response = await _compute_attested_weight_shadow(
+                            mode=attested_weight_mode,
+                            snapshot=attested_weight_snapshot,
+                            host_uids=[BURN_TARGET_UID],
+                            host_weights=[1.0],
+                        )
+                        if attested_response is not None:
+                            self._last_attested_weight_v2_response = attested_response
+                            attested_weight_response = attested_response
+                            v2_result = await self._submit_weights_v2(
+                                snapshot=attested_weight_snapshot,
+                                enclave_response=attested_weight_response,
+                                parent_receipts=attested_parent_receipts,
+                            )
+                            if attested_weight_mode == "required" and not (
+                                v2_result and v2_result.get("weight_submission_event_hash")
+                            ):
+                                print("   ❌ Required v2 gateway publication failed; refusing chain submission")
+                                return False
                     
                     result = self.subtensor.set_weights(
                         netuid=self.config.netuid,
@@ -4039,6 +4297,28 @@ class Validator(BaseValidatorNeuron):
                 ):
                     return False
 
+                if attested_weight_mode != "off":
+                    attested_weight_snapshot = _weight_snapshot()
+                    attested_response = await _compute_attested_weight_shadow(
+                        mode=attested_weight_mode,
+                        snapshot=attested_weight_snapshot,
+                        host_uids=[BURN_TARGET_UID],
+                        host_weights=[1.0],
+                    )
+                    if attested_response is not None:
+                        self._last_attested_weight_v2_response = attested_response
+                        attested_weight_response = attested_response
+                        v2_result = await self._submit_weights_v2(
+                            snapshot=attested_weight_snapshot,
+                            enclave_response=attested_weight_response,
+                            parent_receipts=attested_parent_receipts,
+                        )
+                        if attested_weight_mode == "required" and not (
+                            v2_result and v2_result.get("weight_submission_event_hash")
+                        ):
+                            print("   ❌ Required v2 gateway publication failed; refusing chain submission")
+                            return False
+
                 result = self.subtensor.set_weights(
                     netuid=self.config.netuid,
                     wallet=self.wallet,
@@ -4103,12 +4383,22 @@ class Validator(BaseValidatorNeuron):
             # ════════════════════════════════════════════════════════════════
             fulfillment_share = 0.0
             fulfillment_per_miner = {}
+            fulfillment_fetch_ok = True
             unused_fulfillment = 0.0 if ff_enabled else effective_fulfillment_pool
             try:
                 if ff_enabled:
-                    fulfillment_share, fulfillment_per_miner = self._get_fulfillment_emission_share(
-                        current_epoch, effective_fulfillment_pool,
-                    )
+                    if attested_weight_mode == "off":
+                        fulfillment_share, fulfillment_per_miner = self._get_fulfillment_emission_share(
+                            current_epoch, effective_fulfillment_pool,
+                        )
+                    else:
+                        fulfillment_share, fulfillment_per_miner, fulfillment_fetch_ok = (
+                            self._get_fulfillment_emission_share(
+                                current_epoch,
+                                effective_fulfillment_pool,
+                                include_status=True,
+                            )
+                        )
                     unused_fulfillment = effective_fulfillment_pool - fulfillment_share
                     if fulfillment_share > 0:
                         print(f"      Fulfillment active: {fulfillment_share*100:.4f}% used of {effective_fulfillment_pool*100:.0f}% pool "
@@ -4118,6 +4408,7 @@ class Validator(BaseValidatorNeuron):
             except Exception as e:
                 fulfillment_share = 0.0
                 fulfillment_per_miner = {}
+                fulfillment_fetch_ok = False
                 unused_fulfillment = effective_fulfillment_pool
                 print(f"      Fulfillment emission error (safe fallback — full pool to burn): {e}")
 
@@ -4132,6 +4423,8 @@ class Validator(BaseValidatorNeuron):
             # but #2 and #3 still pay out, etc.
             # ════════════════════════════════════════════════════════════════
             leaderboard_per_uid: dict = {}      # {uid: pct_to_award}
+            leaderboard_entries = []
+            leaderboard_fetch_ok = True
             # When ff is disabled, the entire LEADERBOARD_BONUS_SHARE flows to
             # burn (mirroring how the fulfillment pool burns when disabled).
             # When ff is enabled, the burn starts at 0 and grows for any
@@ -4142,6 +4435,14 @@ class Validator(BaseValidatorNeuron):
                 if ff_enabled and effective_leaderboard_share > 0:
                     from Leadpoet.utils.cloud_db import gateway_get_fulfillment_leaderboard
                     leaders = gateway_get_fulfillment_leaderboard(self.wallet, limit=3)
+                    leaderboard_entries = [
+                        {
+                            "miner_hotkey": str(entry.get("miner_hotkey") or ""),
+                            "wins": entry.get("wins", 0),
+                        }
+                        for entry in leaders
+                        if isinstance(entry, dict)
+                    ]
                     rank_pcts = [
                         LEADERBOARD_TOP1_PCT,
                         LEADERBOARD_TOP2_PCT,
@@ -4180,6 +4481,8 @@ class Validator(BaseValidatorNeuron):
                 # Any failure: zero out bonuses, full leaderboard pool burns.
                 leaderboard_per_uid = {}
                 leaderboard_burn = effective_leaderboard_share
+                leaderboard_entries = []
+                leaderboard_fetch_ok = False
                 print(
                     f"      Leaderboard emission error "
                     f"(safe fallback — full {effective_leaderboard_share*100:.2f}% to burn): {e}"
@@ -4345,6 +4648,33 @@ class Validator(BaseValidatorNeuron):
             if any(weight < 0 for weight in normalized_weights):
                 print(f"   ❌ ERROR: Negative weight remained after sanitization: {normalized_weights}")
                 return False
+
+            if attested_weight_mode != "off":
+                attested_weight_snapshot = _weight_snapshot(
+                    champion_uid_value=champion_uid,
+                    effective_champion_share_value=effective_champion_share,
+                    fulfillment_share_value=fulfillment_share,
+                    fulfillment_rows_value=[
+                        {"hotkey": str(hotkey), "share": share}
+                        for hotkey, share in fulfillment_per_miner.items()
+                    ],
+                    fulfillment_fetch_ok_value=fulfillment_fetch_ok,
+                    leaderboard_entries_value=leaderboard_entries,
+                    leaderboard_fetch_ok_value=leaderboard_fetch_ok,
+                )
+                attested_response = await _compute_attested_weight_shadow(
+                    mode=attested_weight_mode,
+                    snapshot=attested_weight_snapshot,
+                    host_uids=list(uids),
+                    host_weights=list(normalized_weights),
+                )
+                if attested_response is not None:
+                    self._last_attested_weight_v2_response = attested_response
+                    attested_weight_response = attested_response
+                    if attested_weight_mode == "required":
+                        enclave_result = attested_response["weight_result"]
+                        uids = list(enclave_result["uids"])
+                        normalized_weights = list(enclave_result["weights"])
             
             # ═══════════════════════════════════════════════════════════════════
             # TEE GATEWAY SUBMISSION (Phase 2.3)
@@ -4353,15 +4683,32 @@ class Validator(BaseValidatorNeuron):
             tee_event_hash = None
             if TEE_AVAILABLE and os.environ.get("ENABLE_TEE_SUBMISSION", "").lower() == "true":
                 print(f"\n🔐 TEE weight submission enabled - submitting to gateway first...")
-                tee_event_hash = await self._submit_weights_to_gateway(
-                    epoch_id=current_epoch,
-                    block=current_block,
-                    uids=uids,
-                    weights=normalized_weights,
-                )
+                v2_result = None
+                if attested_weight_response is not None and attested_weight_snapshot is not None:
+                    v2_result = await self._submit_weights_v2(
+                        snapshot=attested_weight_snapshot,
+                        enclave_response=attested_weight_response,
+                        parent_receipts=attested_parent_receipts,
+                    )
+                if attested_weight_mode == "required":
+                    tee_event_hash = (
+                        v2_result.get("weight_submission_event_hash")
+                        if isinstance(v2_result, dict)
+                        else None
+                    )
+                else:
+                    tee_event_hash = await self._submit_weights_to_gateway(
+                        epoch_id=current_epoch,
+                        block=current_block,
+                        uids=uids,
+                        weights=normalized_weights,
+                    )
                 if tee_event_hash:
                     print(f"   ✅ Gateway accepted weights (hash: {tee_event_hash[:16]}...)")
                 else:
+                    if attested_weight_mode == "required":
+                        print("   ❌ Required v2 gateway publication failed; refusing chain submission")
+                        return False
                     require_gateway_submission = _env_flag(
                         "VALIDATOR_REQUIRE_GATEWAY_WEIGHT_SUBMISSION",
                         _research_lab_production_subnet_default(),
@@ -4375,6 +4722,9 @@ class Validator(BaseValidatorNeuron):
                         return False
                     print(f"   ⚠️ Gateway submission failed - proceeding to chain anyway")
             elif TEE_AVAILABLE:
+                if attested_weight_mode == "required":
+                    print("\n❌ Required v2 weight publication needs ENABLE_TEE_SUBMISSION=true")
+                    return False
                 print(f"\nℹ️ TEE available but submission disabled (set ENABLE_TEE_SUBMISSION=true to enable)")
             
             # Submit to Bittensor chain
@@ -4419,6 +4769,76 @@ class Validator(BaseValidatorNeuron):
             bt.logging.error(traceback.format_exc())
             return False
     
+    async def _submit_weights_v2(
+        self,
+        *,
+        snapshot: Dict[str, Any],
+        enclave_response: Dict[str, Any],
+        parent_receipts: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Send an enclave-computed bundle to the additive v2 verification path."""
+
+        gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
+        try:
+            receipt = enclave_response["receipt"]
+            user_data = enclave_response["attestation_user_data"]
+            enclave_pubkey = str(receipt["enclave_pubkey"])
+            code_hash = str(user_data["code_hash"])
+            expected_chain = os.environ.get(
+                "EXPECTED_CHAIN",
+                "wss://entrypoint-finney.opentensor.ai:443",
+            )
+            try:
+                git_commit_short = subprocess.check_output(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip()
+            except Exception:
+                git_commit_short = "unknown"
+            binding_message = create_binding_message(
+                netuid=int(snapshot["netuid"]),
+                chain=expected_chain,
+                enclave_pubkey=enclave_pubkey,
+                validator_code_hash=code_hash,
+                version=git_commit_short,
+            )
+            hotkey_signature = self.wallet.hotkey.sign(binding_message.encode()).hex()
+            submission = build_weight_bundle_v2(
+                snapshot=snapshot,
+                enclave_response=enclave_response,
+                validator_hotkey=self.wallet.hotkey.ss58_address,
+                binding_message=binding_message,
+                validator_hotkey_signature=hotkey_signature,
+                parent_receipts=list(parent_receipts or []),
+            )
+            print("📡 Submitting enclave-computed weights to gateway v2...")
+            print(f"   Endpoint: {gateway_url}/weights/submit/v2")
+            print(
+                f"   Epoch: {snapshot['epoch_id']}, Block: {snapshot['block']}, "
+                f"UIDs: {len(enclave_response['weight_result']['sparse_uids'])}"
+            )
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{gateway_url}/weights/submit/v2",
+                    json=submission,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        print(f"✅ Gateway v2 verification accepted ({result.get('mode', 'unknown')})")
+                        return result
+                    error = await response.text()
+                    print(f"⚠️ Gateway v2 verification rejected: {response.status}")
+                    print(f"   Error: {error[:200]}...")
+                    return None
+        except aiohttp.ClientError as exc:
+            bt.logging.error(f"Network error submitting v2 weights to gateway: {exc}")
+            return None
+        except Exception as exc:
+            bt.logging.error(f"Error submitting v2 weights to gateway: {exc}")
+            return None
+
     async def _submit_weights_to_gateway(
         self,
         epoch_id: int,

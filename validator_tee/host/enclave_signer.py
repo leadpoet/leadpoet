@@ -278,6 +278,20 @@ def sign_weights(
     return weights_hash, signature_hex
 
 
+def compute_weights_v2(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Compute and sign final weights inside the existing validator enclave."""
+
+    client = _ensure_enclave_connected()
+    result = client.compute_weights_v2(snapshot)
+    logger.info(
+        "Computed weights inside enclave: epoch=%s uids=%s hash=%s...",
+        snapshot.get("epoch_id"),
+        len((result.get("weight_result") or {}).get("uids") or []),
+        str((result.get("weight_result") or {}).get("weights_hash") or "")[:16],
+    )
+    return result
+
+
 # sign_digest removed - all signing must go through enclave
 
 
@@ -357,4 +371,3 @@ def get_signer_state() -> dict:
         "attestation_cache_size": len(_ATTESTATION_CACHE),
         "cached_epochs": list(_ATTESTATION_CACHE.keys()),
     }
-

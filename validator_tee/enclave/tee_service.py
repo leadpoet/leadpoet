@@ -43,6 +43,14 @@ print("🐛 DEBUG: Cryptography imports OK", flush=True)
 # CBOR for attestation documents
 import cbor2
 
+from leadpoet_canonical.attested_receipts import (
+    WEIGHT_PURPOSE,
+    WEIGHT_ROLE,
+    build_receipt_body,
+    create_signed_receipt,
+)
+from leadpoet_canonical.weight_computation import compute_final_weights, sha256_json
+
 print("🐛 DEBUG: CBOR imports OK", flush=True)
 
 # ============================================================================
@@ -53,6 +61,8 @@ AF_VSOCK = 40  # Address family for vsock
 VMADDR_CID_ANY = 0xFFFFFFFF  # Bind to any CID (inside enclave)
 PARENT_CID = 3  # Parent EC2's CID
 RPC_PORT = 5001  # Use different port from gateway (5001 vs 5000)
+MAX_RPC_REQUEST_BYTES = 8 * 1024 * 1024
+MAX_RPC_RESPONSE_BYTES = 16 * 1024 * 1024
 
 
 # ============================================================================
@@ -139,9 +149,10 @@ def compute_code_hash() -> str:
     
     # Hash critical files in the enclave
     critical_files = [
-        "/app/validator_tee/tee_service.py",
-        "/app/validator_tee/enclave_signer.py",
+        "/app/validator_tee/enclave/tee_service.py",
         "/app/leadpoet_canonical/weights.py",
+        "/app/leadpoet_canonical/weight_computation.py",
+        "/app/leadpoet_canonical/attested_receipts.py",
     ]
     
     for filepath in sorted(critical_files):
@@ -205,7 +216,7 @@ def sign_weights_hash(weights_hash: str) -> str:
 # ATTESTATION DOCUMENT
 # ============================================================================
 
-def get_attestation_document(epoch_id: int) -> Dict[str, Any]:
+def get_attestation_document(epoch_id: int, purpose: str = "validator_weights") -> Dict[str, Any]:
     """
     Get attestation document with epoch_id binding.
     
@@ -226,7 +237,7 @@ def get_attestation_document(epoch_id: int) -> Dict[str, Any]:
     
     # Build user_data for attestation
     user_data = {
-        "purpose": "validator_weights",
+        "purpose": str(purpose),
         "epoch_id": epoch_id,
         "enclave_pubkey": public_key_hex,
         "code_hash": compute_code_hash(),
@@ -262,7 +273,6 @@ def get_attestation_document(epoch_id: int) -> Dict[str, Any]:
             "user_data": user_data,
             "is_mock": False
         }
-        
     except Exception as e:
         # Fall back to mock attestation (for development/testing)
         print(f"[TEE] ⚠️ NSM not available ({e}), using mock attestation", flush=True)
@@ -282,6 +292,46 @@ def get_attestation_document(epoch_id: int) -> Dict[str, Any]:
         }
 
 
+def compute_and_sign_weights_v2(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Compute final weights inside the enclave and sign only that result."""
+
+    result = compute_final_weights(snapshot)
+    signature = sign_weights_hash(result["weights_hash"])
+    attestation = get_attestation_document(result["epoch_id"], purpose=WEIGHT_PURPOSE)
+    evidence_roots = {}
+    allocation_receipt_hash = str(snapshot.get("research_lab_allocation_receipt_hash") or "")
+    if allocation_receipt_hash:
+        evidence_roots["research_lab_allocation_receipt"] = allocation_receipt_hash
+    body = build_receipt_body(
+        role=WEIGHT_ROLE,
+        purpose=WEIGHT_PURPOSE,
+        job_id="validator-weights:%s:%s" % (result["epoch_id"], result["snapshot_hash"].split(":", 1)[1][:32]),
+        epoch_id=result["epoch_id"],
+        commit_sha=str(snapshot["commit_sha"]),
+        build_manifest_hash="sha256:" + compute_code_hash(),
+        config_hash=str(snapshot["config_hash"]),
+        input_root=result["snapshot_hash"],
+        output_root=sha256_json(result),
+        evidence_roots=evidence_roots,
+        parent_receipt_hashes=snapshot["parent_receipt_hashes"],
+        status="succeeded",
+        issued_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    receipt = create_signed_receipt(
+        body=body,
+        enclave_pubkey=get_public_key(),
+        attestation_document_b64=attestation["attestation_b64"],
+        sign_digest=lambda digest: private_key.sign(digest),
+    )
+    return {
+        "weight_result": result,
+        "weights_signature": signature,
+        "receipt": receipt,
+        "attestation_user_data": attestation["user_data"],
+        "attestation_is_mock": bool(attestation.get("is_mock")),
+    }
+
+
 # ============================================================================
 # RPC HANDLER
 # ============================================================================
@@ -294,6 +344,7 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
     - get_public_key: Return enclave's public key
     - sign_weights: Sign a weights hash
     - get_attestation: Get attestation document for epoch
+    - compute_weights_v2: Compute and sign final weights from an immutable snapshot
     - health: Health check
     """
     command = request.get("command")
@@ -329,6 +380,15 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
                 "status": "ok",
                 **attestation
             }
+
+        elif command == "compute_weights_v2":
+            snapshot = request.get("snapshot")
+            if not isinstance(snapshot, dict):
+                return {"status": "error", "error": "Missing or invalid snapshot"}
+            return {
+                "status": "ok",
+                **compute_and_sign_weights_v2(snapshot),
+            }
         
         elif command == "health":
             return {
@@ -349,6 +409,46 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
 # ============================================================================
 # VSOCK SERVER
 # ============================================================================
+
+def _recv_exact(client: Any, size: int) -> bytes:
+    output = bytearray()
+    while len(output) < size:
+        chunk = client.recv(min(64 * 1024, size - len(output)))
+        if not chunk:
+            break
+        output.extend(chunk)
+    return bytes(output)
+
+
+def _receive_request(client: Any) -> tuple[Dict[str, Any], bool]:
+    """Receive bounded length-prefixed JSON, with old EOF framing support."""
+
+    prefix = _recv_exact(client, 4)
+    if len(prefix) != 4:
+        raise ValueError("incomplete request prefix")
+    if prefix.startswith(b"{"):
+        data = bytearray(prefix)
+        while True:
+            chunk = client.recv(64 * 1024)
+            if not chunk:
+                break
+            data.extend(chunk)
+            if len(data) > MAX_RPC_REQUEST_BYTES:
+                raise ValueError("legacy request exceeds maximum size")
+        request_data = bytes(data)
+        length_prefixed = False
+    else:
+        request_length = int.from_bytes(prefix, byteorder="big")
+        if request_length < 2 or request_length > MAX_RPC_REQUEST_BYTES:
+            raise ValueError("request length is outside the allowed range")
+        request_data = _recv_exact(client, request_length)
+        if len(request_data) != request_length:
+            raise ValueError("request body is incomplete")
+        length_prefixed = True
+    request = json.loads(request_data.decode("utf-8"))
+    if not isinstance(request, dict):
+        raise ValueError("request must be a JSON object")
+    return request, length_prefixed
 
 def run_vsock_server():
     """
@@ -371,29 +471,16 @@ def run_vsock_server():
             client, addr = server.accept()
             print(f"[TEE] Connection from CID {addr[0]}", flush=True)
             
-            # Receive request
-            data = b""
-            while True:
-                chunk = client.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-                # Check for end of JSON
-                try:
-                    request = json.loads(data.decode())
-                    break
-                except json.JSONDecodeError:
-                    continue
-            
-            if data:
-                request = json.loads(data.decode())
-                print(f"[TEE] Request: {request.get('command')}", flush=True)
-                
-                # Handle request
-                response = handle_request(request)
-                
-                # Send response
-                response_data = json.dumps(response).encode()
+            request, length_prefixed = _receive_request(client)
+            print(f"[TEE] Request: {request.get('command')}", flush=True)
+
+            response = handle_request(request)
+            response_data = json.dumps(response).encode()
+            if len(response_data) > MAX_RPC_RESPONSE_BYTES:
+                raise ValueError("response exceeds maximum size")
+            if length_prefixed:
+                client.sendall(len(response_data).to_bytes(4, byteorder="big") + response_data)
+            else:
                 client.sendall(response_data)
             
             client.close()
@@ -428,4 +515,3 @@ if __name__ == "__main__":
     
     # Start vsock server
     run_vsock_server()
-

@@ -69,6 +69,16 @@ from research_lab.eval.provider_evidence_cache import (
     canonical_request_fingerprint,
     load_evidence_cache,
 )
+from gateway.research_lab.provider_capabilities import (
+    EffectiveProviderCapabilities,
+    LiveTextModelCatalog,
+    capability_catalog_enabled,
+    capability_enforcement_mode,
+    capability_refresh_seconds,
+    load_effective_provider_capabilities_sync,
+    normalize_candidate_route,
+    provider_request_allowed,
+)
 
 PROXY_URL_ENV = "RESEARCH_LAB_EVIDENCE_PROXY_URL"
 REGISTRY_PATH_ENV = "RESEARCH_LAB_PROVIDER_REGISTRY_PATH"
@@ -116,6 +126,12 @@ class ProviderRegistryEntry:
     cost_model: dict[str, Any] = field(default_factory=dict)
     active_window: str = ""
     active: bool = True
+    capability_policy: dict[str, Any] = field(default_factory=dict)
+    planner_summary: dict[str, Any] = field(default_factory=dict)
+    probe_endpoints: tuple[dict[str, Any], ...] = ()
+    origin: str = "legacy_fallback"
+    reward_eligible: bool = False
+    credential_ready: bool | None = None
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "ProviderRegistryEntry":
@@ -132,11 +148,26 @@ class ProviderRegistryEntry:
             cost_model=dict(data.get("cost_model") or {}),
             active_window=str(data.get("active_window") or ""),
             active=bool(data.get("active", True)),
+            capability_policy=dict(data.get("capability_policy") or {}),
+            planner_summary=dict(data.get("planner_summary") or {}),
+            probe_endpoints=tuple(
+                dict(item)
+                for item in (data.get("probe_endpoints") or [])
+                if isinstance(item, Mapping)
+            ),
+            origin=str(data.get("origin") or "legacy_fallback"),
+            reward_eligible=bool(data.get("reward_eligible", False)),
+            credential_ready=(
+                bool(data.get("credential_ready"))
+                if data.get("credential_ready") is not None
+                else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["credential_ref"] = list(self.credential_ref)
+        data["probe_endpoints"] = [dict(item) for item in self.probe_endpoints]
         return data
 
     def est_cost_microusd(self) -> int:
@@ -422,32 +453,12 @@ def seed_provider_registry() -> list[ProviderRegistryEntry]:
     ]
 
 
-def load_provider_registry(path: str = "") -> list[ProviderRegistryEntry]:
-    """Load and validate the registry file; fall back to the seed entries.
-
-    A present-but-invalid registry raises rather than silently reverting to the
-    seed: a typo'd registry must fail loudly at spawn, not misroute quietly.
-    """
+def _load_static_provider_registry(path: str = "") -> list[ProviderRegistryEntry]:
+    """Load the continuity registry without consulting remote capability state."""
 
     resolved = str(path or os.getenv(REGISTRY_PATH_ENV) or "").strip()
     if not resolved:
-        entries = seed_provider_registry()
-        try:
-            from gateway.research_lab.source_add_catalog import (
-                load_provisioned_source_rows_sync,
-                provider_registry_entries_from_provisioned_rows,
-            )
-
-            provisioned = provider_registry_entries_from_provisioned_rows(load_provisioned_source_rows_sync())
-            existing = {entry.id for entry in entries}
-            entries.extend(entry for entry in provisioned if entry.id not in existing)
-        except Exception as exc:  # noqa: BLE001 - static registry must remain available
-            logger.warning("source_add_provider_registry_extension_failed error=%s", str(exc)[:200])
-        errors = validate_provider_registry_entries(entries)
-        if errors:
-            logger.warning("source_add_provider_registry_extension_invalid errors=%s", "; ".join(errors[:5]))
-            return seed_provider_registry()
-        return entries
+        return seed_provider_registry()
     with open(resolved, "r", encoding="utf-8") as handle:
         doc = json.load(handle)
     raw_entries = doc.get("providers") if isinstance(doc, Mapping) else doc
@@ -458,6 +469,61 @@ def load_provider_registry(path: str = "") -> list[ProviderRegistryEntry]:
     if errors:
         raise ValueError("invalid provider registry: " + "; ".join(errors))
     return entries
+
+
+def _entries_from_capabilities(
+    capabilities: EffectiveProviderCapabilities,
+) -> list[ProviderRegistryEntry]:
+    entries = [ProviderRegistryEntry.from_mapping(item) for item in capabilities.providers]
+    errors = validate_provider_registry_entries(entries)
+    if errors:
+        raise ValueError("invalid effective provider registry: " + "; ".join(errors))
+    return entries
+
+
+def load_provider_registry_with_capabilities(
+    path: str = "",
+    *,
+    strict_remote: bool = False,
+) -> tuple[list[ProviderRegistryEntry], EffectiveProviderCapabilities]:
+    """Load private capabilities + ready SOURCE_ADD rows over continuity routes."""
+
+    static_entries = _load_static_provider_registry(path)
+    if capability_catalog_enabled():
+        capabilities = load_effective_provider_capabilities_sync(
+            [entry.to_dict() for entry in static_entries],
+            strict_remote=strict_remote,
+        )
+    else:
+        capabilities = load_effective_provider_capabilities_sync(
+            [entry.to_dict() for entry in static_entries],
+            strict_remote=False,
+            private_row_loader=lambda: None,
+            source_row_loader=lambda: (),
+        )
+    return _entries_from_capabilities(capabilities), capabilities
+
+
+def load_provider_registry(path: str = "") -> list[ProviderRegistryEntry]:
+    """Compatibility wrapper returning the current effective routing entries."""
+
+    entries, _capabilities = load_provider_registry_with_capabilities(path)
+    return entries
+
+
+def reserved_builtin_provider_ids_sync(path: str = "") -> set[str]:
+    """Provider IDs that SOURCE_ADD may never replace."""
+
+    static_ids = {entry.id for entry in _load_static_provider_registry(path)}
+    try:
+        _entries, capabilities = load_provider_registry_with_capabilities(path)
+    except Exception:
+        return static_ids
+    return static_ids | {
+        str(item.get("id") or "")
+        for item in capabilities.providers
+        if str(item.get("origin") or "") == "builtin"
+    }
 
 
 def _key_split_enabled(override: bool | None = None) -> bool:
@@ -844,12 +910,107 @@ class EvidenceStore:
             return ledger
 
 
+class ProviderRegistryState:
+    """Atomic effective-registry holder with last-known-good refresh."""
+
+    def __init__(
+        self,
+        *,
+        entries: Sequence[ProviderRegistryEntry],
+        capabilities: EffectiveProviderCapabilities,
+        registry_path: str = "",
+        refresh_enabled: bool = False,
+        refresh_seconds: int | None = None,
+        loader: Any | None = None,
+    ) -> None:
+        self._lock = threading.RLock()
+        self._entries = {entry.id: entry for entry in entries}
+        self._capabilities = capabilities
+        self._registry_path = str(registry_path or "")
+        self._refresh_enabled = bool(refresh_enabled)
+        self._refresh_seconds = max(10, int(refresh_seconds or capability_refresh_seconds()))
+        self._loader = loader or (
+            lambda: load_provider_registry_with_capabilities(
+                self._registry_path,
+                strict_remote=True,
+            )
+        )
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def resolve(self, provider_id: str) -> ProviderRegistryEntry | None:
+        with self._lock:
+            return self._entries.get(str(provider_id or ""))
+
+    def capabilities(self) -> EffectiveProviderCapabilities:
+        with self._lock:
+            return self._capabilities
+
+    def diagnostic(self) -> dict[str, Any]:
+        return self.capabilities().diagnostic()
+
+    def refresh_once(self) -> bool:
+        try:
+            entries, capabilities = self._loader()
+            errors = validate_provider_registry_entries(entries)
+            if errors:
+                raise ValueError("invalid refreshed provider registry: " + "; ".join(errors))
+        except Exception as exc:
+            logger.warning(
+                "research_lab_provider_capability_refresh_failed retained_last_known_good=true error=%s",
+                str(exc)[:200],
+            )
+            return False
+        with self._lock:
+            self._entries = {entry.id: entry for entry in entries}
+            self._capabilities = capabilities
+        diagnostic = capabilities.diagnostic()
+        logger.info(
+            "research_lab_provider_capability_refresh_succeeded capability_hash=%s provider_count=%d credential_ready_count=%d private_snapshot_loaded=%s",
+            diagnostic["capability_hash"],
+            diagnostic["provider_count"],
+            diagnostic["credential_ready_count"],
+            diagnostic["private_snapshot_loaded"],
+        )
+        return True
+
+    def start(self) -> None:
+        if not self._refresh_enabled or self._thread is not None:
+            return
+
+        def _run() -> None:
+            while not self._stop.wait(self._refresh_seconds):
+                self.refresh_once()
+
+        self._thread = threading.Thread(
+            target=_run,
+            name="provider-capability-refresh",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+
+
+class _CapabilityAwareHTTPServer(ThreadingHTTPServer):
+    registry_state: ProviderRegistryState
+
+    def server_close(self) -> None:
+        self.registry_state.stop()
+        super().server_close()
+
+
 _HOP_HEADERS = {"connection", "keep-alive", "transfer-encoding", "host", "content-length", "authorization", "x-api-key"}
 
 
 class _ProxyHandler(BaseHTTPRequestHandler):
     store: EvidenceStore
     registry: dict[str, ProviderRegistryEntry]
+    registry_state: ProviderRegistryState
     ledger: ProviderUsageLedger
     caller_context: dict[str, Any]
     caller_tokens: CallerTokenMap
@@ -858,6 +1019,8 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     # KMS-decrypted miner key for a per-trial proxy instance). Never read from
     # env, never exposed to the container.
     credential_overrides: dict[str, str]
+    model_catalog: LiveTextModelCatalog
+    enforcement_mode: str
     protocol_version = "HTTP/1.1"
 
     def log_message(self, *args: Any) -> None:  # quiet; the gateway logs enough
@@ -866,7 +1029,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     def _provider(self) -> tuple[ProviderRegistryEntry, str] | None:
         parts = self.path.lstrip("/").split("/", 1)
         name = parts[0] if parts else ""
-        entry = self.registry.get(name)
+        entry = self.registry_state.resolve(name)
         if not entry or not entry.active:
             return None
         rest = "/" + (parts[1] if len(parts) > 1 else "")
@@ -934,10 +1097,64 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         entry, rest = routed
         length = int(self.headers.get("Content-Length") or 0)
         request_body = self.rfile.read(length) if length else b""
+        normalized_route = normalize_candidate_route(rest)
+        if normalized_route is None:
+            self._respond(400, b'{"error":"unsafe provider route"}')
+            return
+        normalized_path, normalized_query = normalized_route
+        rest = normalized_path + (("?" + normalized_query) if normalized_query else "")
+        route_allowed, route_reason, _normalized_path = provider_request_allowed(
+            entry.to_dict(),
+            self.command,
+            rest,
+        )
         # Fingerprint on the UPSTREAM shape of the request so it matches
         # evidence recorded from direct provider calls (baseline tapes).
         upstream_url = entry.base_url + rest
         fingerprint = canonical_request_fingerprint(self.command, upstream_url, request_body or None)
+        enforce_route = (
+            self.enforcement_mode == "enforce"
+            or entry.origin == "source_add"
+            or route_reason in {"unsafe_route", "blocked_route"}
+        )
+        if not route_allowed and enforce_route:
+            self._ledger_row(entry, rest, fingerprint, evidence="blocked", status=403, live_cost=False)
+            self._respond(403, b'{"error":"provider route not allowed"}', evidence="blocked")
+            return
+        if not route_allowed:
+            logger.warning(
+                "research_lab_provider_capability_route_observed provider_hash=%s route_hash=%s reason=%s",
+                sha256_json({"provider": entry.id}),
+                sha256_json({"method": self.command, "path": normalized_path}),
+                route_reason,
+            )
+        model_policy = (
+            entry.capability_policy.get("model_policy")
+            if isinstance(entry.capability_policy, Mapping)
+            and isinstance(entry.capability_policy.get("model_policy"), Mapping)
+            else {}
+        )
+        if str(model_policy.get("kind") or "none") == "live_text_catalog":
+            try:
+                request_doc = json.loads(request_body.decode("utf-8")) if request_body else {}
+            except Exception:
+                request_doc = {}
+            model_id = str(request_doc.get("model") or "") if isinstance(request_doc, Mapping) else ""
+            model_allowed, model_status = self.model_catalog.validate_model(
+                entry.to_dict(),
+                model_id,
+            )
+            if not model_allowed and self.enforcement_mode == "enforce":
+                self._ledger_row(entry, rest, fingerprint, evidence="blocked", status=403, live_cost=False)
+                self._respond(403, b'{"error":"text model not allowed"}', evidence="blocked")
+                return
+            if not model_allowed:
+                logger.warning(
+                    "research_lab_provider_model_observed provider_hash=%s model_hash=%s status=%s",
+                    sha256_json({"provider": entry.id}),
+                    sha256_json({"model": model_id}),
+                    model_status,
+                )
         # Per-scope cost accounting: the container names its scope (one ICP)
         # and paid live calls in that scope are capped.
         scope = str(self.headers.get("X-Research-Lab-Cost-Scope") or "unscoped").strip() or "unscoped"
@@ -1186,6 +1403,12 @@ def serve_evidence_proxy(
     caller_token_map_path: str = "",
     key_split: bool | None = None,
     credential_overrides: Mapping[str, str] | None = None,
+    dynamic_registry: bool | None = None,
+    registry_path: str = "",
+    registry_loader: Any | None = None,
+    registry_refresh_seconds: int | None = None,
+    enforcement_mode: str | None = None,
+    model_catalog: LiveTextModelCatalog | None = None,
 ) -> tuple[ThreadingHTTPServer, EvidenceStore, threading.Thread]:
     """Start the proxy; returns (server, store, thread). Caller owns shutdown.
 
@@ -1194,10 +1417,32 @@ def serve_evidence_proxy(
     to the ``RESEARCH_LAB_PROVIDER_KEY_SPLIT`` env flag at call time.
     """
 
-    entries = list(registry) if registry is not None else load_provider_registry()
+    if registry is not None:
+        entries = list(registry)
+        capabilities = load_effective_provider_capabilities_sync(
+            [entry.to_dict() for entry in entries],
+            strict_remote=False,
+            private_row_loader=lambda: None,
+            source_row_loader=lambda: (),
+        )
+    else:
+        entries, capabilities = load_provider_registry_with_capabilities(registry_path)
     errors = validate_provider_registry_entries(entries)
     if errors:
         raise ValueError("invalid provider registry: " + "; ".join(errors))
+    refresh_enabled = (
+        bool(dynamic_registry)
+        if dynamic_registry is not None
+        else registry is None and capability_catalog_enabled()
+    )
+    registry_state = ProviderRegistryState(
+        entries=entries,
+        capabilities=capabilities,
+        registry_path=registry_path,
+        refresh_enabled=refresh_enabled,
+        refresh_seconds=registry_refresh_seconds,
+        loader=registry_loader,
+    )
     store = EvidenceStore(baseline_dir=baseline_dir, day_cache_path=day_cache_path)
     ledger = ProviderUsageLedger(usage_ledger_path or os.getenv(USAGE_LEDGER_PATH_ENV) or "")
     handler = type(
@@ -1206,14 +1451,19 @@ def serve_evidence_proxy(
         {
             "store": store,
             "registry": {entry.id: entry for entry in entries},
+            "registry_state": registry_state,
             "ledger": ledger,
             "caller_context": dict(caller_context or {}),
             "caller_tokens": CallerTokenMap(caller_token_map_path),
             "key_split": key_split,
             "credential_overrides": {str(k): str(v) for k, v in (credential_overrides or {}).items()},
+            "model_catalog": model_catalog or LiveTextModelCatalog(),
+            "enforcement_mode": str(enforcement_mode or capability_enforcement_mode()),
         },
     )
-    server = ThreadingHTTPServer((host, port), handler)
+    server = _CapabilityAwareHTTPServer((host, port), handler)
+    server.registry_state = registry_state
+    registry_state.start()
     thread = threading.Thread(target=server.serve_forever, name="evidence-proxy", daemon=True)
     thread.start()
     return server, store, thread
@@ -1243,13 +1493,13 @@ def main() -> int:
                 caller_context = dict(loaded)
         except Exception:
             pass
-    registry = load_provider_registry(args.registry)
     server, _store, thread = serve_evidence_proxy(
         host=args.host,
         port=args.port,
         baseline_dir=args.baseline_dir,
         day_cache_path=args.day_cache,
-        registry=registry,
+        registry_path=args.registry,
+        dynamic_registry=True,
         usage_ledger_path=args.usage_ledger,
         caller_context=caller_context,
         caller_token_map_path=args.caller_token_map,
@@ -1258,8 +1508,7 @@ def main() -> int:
         json.dumps(
             {
                 "listening": f"{args.host}:{args.port}",
-                "registry_hash": provider_registry_hash(registry),
-                "provider_count": len(registry),
+                **server.registry_state.diagnostic(),
             }
         )
     )

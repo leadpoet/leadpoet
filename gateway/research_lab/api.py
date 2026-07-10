@@ -91,6 +91,8 @@ from .source_add_catalog import (
     provisioning_ref,
     reject_source_add_secret_text,
     sanitize_source_add_doc,
+    source_add_encrypted_envelope_valid,
+    source_add_env_ref_resolves,
 )
 from .store import (
     canonical_hash,
@@ -113,7 +115,12 @@ from .store import (
     select_one,
     update_row,
 )
-from gateway.research_lab.provider_evidence_proxy import ProviderRegistryEntry, validate_provider_registry_entries
+from gateway.research_lab.provider_evidence_proxy import (
+    ProviderRegistryEntry,
+    reserved_builtin_provider_ids_sync,
+    validate_provider_registry_entries,
+)
+from gateway.research_lab.provider_capabilities import validate_capability_provider_doc
 from research_lab.probe_catalog import ProviderProbeEndpoint, validate_probe_catalog
 from research_lab.improvement_engine.config import ImprovementEngineConfig
 from research_lab.source_add import SourceAddAdapterManifest
@@ -769,6 +776,11 @@ async def provision_research_lab_source_adapter(
     probe_errors = validate_probe_catalog(probe_objects)
     if probe_errors:
         raise HTTPException(status_code=400, detail="invalid probe_endpoints: " + "; ".join(probe_errors[:5]))
+    if status == PROVISION_STATUS_ELIGIBLE and not probe_objects:
+        raise HTTPException(
+            status_code=400,
+            detail="provisioned_autoresearch_eligible source requires at least one typed probe endpoint",
+        )
     probe_endpoints = [item.to_dict() for item in probe_objects]
 
     credential_envelope: dict[str, str] = {}
@@ -793,9 +805,28 @@ async def provision_research_lab_source_adapter(
             "encryption_context_hash": str(envelope.get("encryption_context_hash") or ""),
             "credential_ref": f"encrypted_ref:source_add:{canonical_hash({'adapter_id': adapter_id, 'miner': miner_hotkey})[-32:]}",
         }
+        if not source_add_encrypted_envelope_valid(credential_envelope):
+            raise HTTPException(status_code=500, detail="SOURCE_ADD credential encryption returned an invalid envelope")
         credential_refs = [credential_envelope["credential_ref"]]
     if auth_kind != "none" and not credential_refs:
         raise HTTPException(status_code=400, detail="authenticated source requires credential_env_refs or api_credential")
+    if (
+        status == PROVISION_STATUS_ELIGIBLE
+        and auth_kind != "none"
+        and not credential_envelope
+        and not any(source_add_env_ref_resolves(ref) for ref in credential_refs)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "authenticated source cannot become provisioned_autoresearch_eligible "
+                "until an encrypted credential or configured environment reference resolves"
+            ),
+        )
+
+    reserved_provider_ids = await asyncio.to_thread(reserved_builtin_provider_ids_sync)
+    if payload.registry_provider_id in reserved_provider_ids:
+        raise HTTPException(status_code=409, detail="registry_provider_id is reserved by a built-in provider")
 
     source_identity_ref = str(row.get("source_identity_hash") or doc.get("source_identity_hash") or "").strip()
     if not source_identity_ref:
@@ -812,8 +843,34 @@ async def provision_research_lab_source_adapter(
         credential_ref=tuple(credential_refs),
         cost_model=dict(payload.cost_model or {}),
         active=status == PROVISION_STATUS_ELIGIBLE,
+        capability_policy={
+            "routes": [
+                {"method": endpoint.method, "path": endpoint.path}
+                for endpoint in probe_objects
+            ],
+            "blocked_routes": [],
+            "allow_unlisted_paths": False,
+            "unlisted_methods": [],
+            "model_policy": {"kind": "none"},
+        },
+        planner_summary={
+            "provider_alias": payload.registry_provider_id,
+            "endpoint_families": [
+                {
+                    "endpoint_id": endpoint.endpoint_id,
+                    "description": endpoint.description[:200],
+                }
+                for endpoint in probe_objects
+            ],
+            "model_policy": "",
+            "probe_metadata": [endpoint.endpoint_id for endpoint in probe_objects],
+        },
+        probe_endpoints=tuple(probe_endpoints),
+        origin="source_add",
+        reward_eligible=True,
     )
     registry_errors = validate_provider_registry_entries([registry_entry])
+    registry_errors.extend(validate_capability_provider_doc(registry_entry.to_dict()))
     if registry_errors:
         raise HTTPException(status_code=400, detail="invalid provider registry entry: " + "; ".join(registry_errors[:5]))
     if payload.operator_notes:
@@ -2214,6 +2271,60 @@ async def get_research_lab_live_allocation(epoch: int):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Research Lab allocation unavailable: {str(exc)[:200]}") from exc
+
+
+@router.get("/allocations/attested/{epoch}")
+async def get_research_lab_attested_allocation(epoch: int):
+    """Return the unchanged live allocation plus its enclave-signed sidecar."""
+
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
+    _require_enabled(config.shadow_bundles_enabled, "Research Lab report bundles are disabled")
+    attestation: dict[str, Any] = {}
+    try:
+        bundle = await build_research_lab_allocation_bundle(
+            config=config,
+            epoch=int(epoch),
+            netuid=BITTENSOR_NETUID,
+            persist_snapshot=bool(config.reimbursements_enabled or config.weight_mutation_enabled),
+            attestation_out=attestation,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Research Lab attested allocation unavailable: {str(exc)[:200]}",
+        ) from exc
+    if attestation.get("status") != "matched":
+        raise HTTPException(
+            status_code=503,
+            detail=f"Research Lab attested allocation is not ready: {attestation.get('status', 'unknown')}",
+        )
+    receipt = attestation.get("receipt")
+    pcr0 = str(attestation.get("pcr0") or "")
+    parent_receipts = attestation.get("parent_receipts")
+    lineage_bindings = attestation.get("lineage_bindings")
+    lineage_complete = attestation.get("lineage_complete")
+    if (
+        not isinstance(receipt, Mapping)
+        or not re.fullmatch(r"[0-9a-f]{96}", pcr0)
+        or not isinstance(parent_receipts, list)
+        or not isinstance(lineage_bindings, list)
+        or not isinstance(lineage_complete, bool)
+    ):
+        raise HTTPException(status_code=503, detail="Research Lab attested allocation receipt is incomplete")
+    return {
+        "schema_version": "leadpoet.attested_allocation_bundle.v2",
+        "bundle": bundle,
+        "receipt": receipt,
+        "parent_receipts": parent_receipts,
+        "lineage_bindings": lineage_bindings,
+        "lineage_complete": lineage_complete,
+        "gateway_pcr0": pcr0,
+        "persistence_status": str(attestation.get("persistence_status") or "disabled"),
+    }
 
 
 async def _verify_signed_miner(payload: object) -> None:

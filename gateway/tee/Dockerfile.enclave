@@ -1,22 +1,40 @@
-FROM amazonlinux:2
+FROM python:3.9.24-slim-bookworm@sha256:9b89d7e0d7e84de70c5e441198fdccb25b8d38310b0ccde36dbcd79a175fc1d9
 
-# Install Python 3 and pip (keep minimal for small enclave size)
-# Amazon Linux 2 has Python 3.7 by default, which is sufficient for our needs
-RUN yum install -y \
-    python3 \
-    python3-pip \
-    && yum clean all
+# Docker BuildKit consumes this predefined build argument when normalizing
+# image/layer creation timestamps. The value is also exported below for tools.
+ARG SOURCE_DATE_EPOCH=0
 
-# Copy requirements and install dependencies
-COPY tee/requirements.txt /tmp/requirements.txt
-RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt
+# The scoring implementation uses Python 3.9 syntax. The exact x86_64 base
+# manifest and all wheels are immutable inputs to independent PCR0 rebuilds.
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONHASHSEED=0
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+ENV PYTHONPATH=/app:/app/gateway/_attested_runtime
+
+# Install the exact live scoring dependency closure from the offline wheelhouse.
+COPY _enclave_source/tee/requirements-scoring-py39.in /tmp/requirements-scoring-py39.in
+COPY _enclave_source/tee/requirements-scoring-py39.lock /tmp/requirements-scoring-py39.lock
+COPY _enclave_source/tee/scoring_wheelhouse.py /tmp/scoring_wheelhouse.py
+COPY _enclave_source/tee/wheelhouse/ /tmp/wheelhouse/
+RUN python3 /tmp/scoring_wheelhouse.py verify-wheelhouse \
+        --input /tmp/requirements-scoring-py39.in \
+        --lock /tmp/requirements-scoring-py39.lock \
+        --wheelhouse /tmp/wheelhouse \
+    && python3 -m pip install --no-index --find-links=/tmp/wheelhouse --no-deps --no-cache-dir --no-compile --require-hashes -r /tmp/requirements-scoring-py39.lock \
+    && python3 /tmp/scoring_wheelhouse.py verify-installed \
+        --lock /tmp/requirements-scoring-py39.lock \
+    && (find /usr -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete 2>/dev/null || true) \
+    && (find /usr -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true) \
+    && (find /usr -exec touch -h -d @0 {} + 2>/dev/null || true) \
+    && rm -rf /tmp/wheelhouse /tmp/requirements-scoring-py39.in \
+        /tmp/requirements-scoring-py39.lock /tmp/scoring_wheelhouse.py
 
 # Set working directory
 WORKDIR /app
 
 # Copy ENTIRE gateway directory for code_hash verification
 # Build context must be gateway root, not tee/ subdirectory
-COPY . /app/gateway/
+COPY _enclave_source/ /app/gateway/
 
 # These packages are imported by Research Lab as top-level modules at runtime.
 # They must be staged into the gateway build context before enclave build so
@@ -27,6 +45,12 @@ RUN test -d /app/gateway/_attested_runtime/research_lab \
     && test -d /app/gateway/_attested_runtime/leadpoet_canonical \
     && test -d /app/gateway/_attested_runtime/qualification \
     && test -d /app/gateway/_attested_runtime/validator_models
+
+RUN python3 /app/gateway/tee/scoring_import_closure.py verify-staged \
+    --gateway-root /app/gateway
+RUN python3 /app/gateway/tee/build_identity.py verify \
+    --gateway-root /app/gateway
+RUN python3 -c "import gateway.qualification.models; import qualification.scoring.lead_scorer; import qualification.scoring.intent_verification_three_stage; import research_lab.eval.evaluator; import research_lab.eval.http_tape"
 
 # Create keys directory
 RUN mkdir -p /app/gateway/keys

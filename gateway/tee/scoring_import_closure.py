@@ -1,10 +1,11 @@
-"""Build and verify the gateway enclave's Research Lab scoring import closure.
+"""Build and verify the gateway enclave's Research Lab execution import closure.
 
 The production gateway checkout is split: ``gateway/`` lives under
 ``$HOME/gateway`` while shared packages live under ``$HOME`` and are staged
 under ``gateway/_attested_runtime`` before the EIF build. This module records
-the exact local Python files reachable from the scoring entrypoints and fails
-the build if any recorded file is absent or has different contents.
+the exact local Python files reachable from the scoring and auto-research
+entrypoints and fails the build if any recorded file is absent or has different
+contents.
 
 It is deliberately static analysis. Importing scoring modules here would run
 configuration and provider initialization during the image build.
@@ -49,6 +50,20 @@ ENTRYPOINT_MODULES = (
     "research_lab.eval.evaluator",
     "qualification.scoring.lead_scorer",
     "leadpoet_canonical.attested_receipts",
+)
+
+# Auto-research remains host-orchestrated today, but its complete executable
+# source must still be an explicit measured input. Listing the authority roots
+# here makes newly introduced imports part of the fail-closed closure instead of
+# relying only on the broad gateway tree COPY performed by the outer build.
+AUTORESEARCH_ENTRYPOINT_MODULES = (
+    "gateway.research_lab.worker_process",
+    "gateway.research_lab.worker",
+    "gateway.research_lab.code_loop_engine",
+    "gateway.research_lab.loop_engine",
+    "gateway.research_lab.code_build",
+    "gateway.research_lab.dev_eval_runner",
+    "research_lab.code_editing",
 )
 
 # The evaluator loads these with importlib so AST imports cannot discover them.
@@ -223,7 +238,13 @@ def _parents(module_name: str) -> Iterable[str]:
 
 
 def discover_scoring_modules(index: Dict[str, Path]) -> Tuple[str, ...]:
-    roots = tuple(dict.fromkeys(ENTRYPOINT_MODULES + DYNAMIC_IMPORT_MODULES))
+    roots = tuple(
+        dict.fromkeys(
+            ENTRYPOINT_MODULES
+            + AUTORESEARCH_ENTRYPOINT_MODULES
+            + DYNAMIC_IMPORT_MODULES
+        )
+    )
     missing_roots = [module for module in roots if module not in index]
     if missing_roots:
         raise ScoringClosureError("scoring entrypoint modules are missing: %s" % ", ".join(missing_roots))
@@ -296,6 +317,7 @@ def build_manifest(*, gateway_root: Path, source_root: Path) -> dict:
     body = {
         "schema_version": SCHEMA_VERSION,
         "entrypoint_modules": list(ENTRYPOINT_MODULES),
+        "autoresearch_entrypoint_modules": list(AUTORESEARCH_ENTRYPOINT_MODULES),
         "dynamic_import_modules": list(DYNAMIC_IMPORT_MODULES),
         "environment_variables": sorted(environment_variables),
         "files": files,
@@ -324,6 +346,14 @@ def verify_staged_manifest(*, gateway_root: Path, manifest_path: Optional[Path] 
         raise ScoringClosureError("cannot read scoring import manifest: %s" % exc) from exc
     if manifest.get("schema_version") != SCHEMA_VERSION:
         raise ScoringClosureError("unsupported scoring import manifest schema")
+    if manifest.get("entrypoint_modules") != list(ENTRYPOINT_MODULES):
+        raise ScoringClosureError("scoring import manifest entrypoints are invalid")
+    if manifest.get("autoresearch_entrypoint_modules") != list(
+        AUTORESEARCH_ENTRYPOINT_MODULES
+    ):
+        raise ScoringClosureError("auto-research import manifest entrypoints are invalid")
+    if manifest.get("dynamic_import_modules") != list(DYNAMIC_IMPORT_MODULES):
+        raise ScoringClosureError("scoring dynamic import manifest roots are invalid")
     files = manifest.get("files")
     if not isinstance(files, list) or not files:
         raise ScoringClosureError("scoring import manifest has no files")

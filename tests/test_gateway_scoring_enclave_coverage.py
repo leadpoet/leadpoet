@@ -9,6 +9,7 @@ import sys
 import pytest
 
 from gateway.tee.scoring_import_closure import (
+    AUTORESEARCH_ENTRYPOINT_MODULES,
     DYNAMIC_IMPORT_MODULES,
     ENTRYPOINT_MODULES,
     ScoringClosureError,
@@ -48,7 +49,18 @@ def test_scoring_import_closure_contains_authority_modules():
     modules = {item["module"] for item in manifest["files"]}
 
     assert set(ENTRYPOINT_MODULES) <= modules
+    assert set(AUTORESEARCH_ENTRYPOINT_MODULES) <= modules
     assert set(DYNAMIC_IMPORT_MODULES) <= modules
+    assert manifest["autoresearch_entrypoint_modules"] == list(
+        AUTORESEARCH_ENTRYPOINT_MODULES
+    )
+    assert "gateway.research_lab.worker_process" in modules
+    assert "gateway.research_lab.worker" in modules
+    assert "gateway.research_lab.code_loop_engine" in modules
+    assert "gateway.research_lab.loop_engine" in modules
+    assert "gateway.research_lab.code_build" in modules
+    assert "gateway.research_lab.dev_eval_runner" in modules
+    assert "research_lab.code_editing" in modules
     assert "research_lab.eval.evaluator" in modules
     assert "research_lab.eval.baseline_summary" in modules
     assert "research_lab.eval.promotion_metric" in modules
@@ -86,6 +98,22 @@ def test_staged_manifest_fails_closed_on_tampered_dependency(tmp_path: Path):
         verify_staged_manifest(gateway_root=tmp_path, manifest_path=manifest_path)
 
 
+def test_staged_manifest_fails_closed_when_autoresearch_root_is_omitted(
+    tmp_path: Path,
+):
+    manifest = build_manifest(gateway_root=ROOT / "gateway", source_root=ROOT)
+    _stage_manifest_files(manifest, tmp_path)
+    manifest["autoresearch_entrypoint_modules"] = manifest[
+        "autoresearch_entrypoint_modules"
+    ][1:]
+    manifest_path = tmp_path / "_attested_runtime" / "scoring_import_closure.json"
+    write_manifest(manifest, manifest_path)
+    normalize_runtime_tree(tmp_path / "_attested_runtime")
+
+    with pytest.raises(ScoringClosureError, match="auto-research.*entrypoints"):
+        verify_staged_manifest(gateway_root=tmp_path, manifest_path=manifest_path)
+
+
 def test_gateway_eif_build_enforces_scoring_manifest():
     dockerfile = (ROOT / "gateway" / "tee" / "Dockerfile.enclave").read_text(encoding="utf-8")
     stage_script = (ROOT / "gateway" / "tee" / "stage_attested_runtime.sh").read_text(encoding="utf-8")
@@ -115,6 +143,29 @@ def test_gateway_eif_build_enforces_scoring_manifest():
     assert 'GATEWAY_ENCLAVE_CPU_COUNT 2' in start_script
     assert 'GATEWAY_ENCLAVE_MEMORY_MB 8192' in start_script
     assert '/home/ec2-user/.config/leadpoet/gateway.env' in start_script
+
+
+def test_existing_restart_scripts_preserve_attested_build_paths():
+    gateway_restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    validator_restart = (ROOT / "validator_restart.sh").read_text(encoding="utf-8")
+    validator_build = (
+        ROOT / "validator_tee" / "scripts" / "build_enclave.sh"
+    ).read_text(encoding="utf-8")
+    validator_dockerfile = (
+        ROOT / "validator_tee" / "Dockerfile.enclave"
+    ).read_text(encoding="utf-8")
+
+    assert 'bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"' in gateway_restart
+    assert (
+        'docker build --no-cache -f "$GATEWAY_ROOT/tee/Dockerfile.enclave"'
+        in gateway_restart
+    )
+    assert "nitro-cli build-enclave --docker-uri tee-enclave:latest" in gateway_restart
+    assert "sudo ./start_enclave.sh" in gateway_restart
+    assert 'bash validator_tee/scripts/build_enclave.sh' in validator_restart
+    assert "nitro-cli run-enclave" in validator_restart
+    assert '"gateway/research_lab"' in validator_build
+    assert "COPY gateway/research_lab/ /app/gateway/research_lab/" in validator_dockerfile
 
 
 def test_gateway_build_identity_resolve_command_returns_exact_commit(tmp_path: Path):

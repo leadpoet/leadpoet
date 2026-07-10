@@ -164,7 +164,10 @@ def _artifact_serving_version_doc(artifact: PrivateModelArtifactManifest) -> dic
         "manifest_hash": artifact.manifest_hash,
         "manifest_uri": artifact.manifest_uri,
         "git_commit_sha": artifact.git_commit_sha,
-        "image_digest": artifact.image_digest,
+        # score_summary_doc is stored in a DB column that forbids raw ECR refs
+        # and the literal key name image_digest. Keep lineage joinability without
+        # leaking the registry reference into benchmark bundle docs.
+        "image_ref_hash": sha256_json({"image_ref": artifact.image_digest}),
         "config_hash": artifact.config_hash,
         "component_registry_version": artifact.component_registry_version,
         "scoring_adapter_version": artifact.scoring_adapter_version,

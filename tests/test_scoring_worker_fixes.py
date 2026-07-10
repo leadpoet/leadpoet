@@ -106,6 +106,36 @@ def test_event_serving_model_version_handles_empty_score_bundle():
     assert EVENT_DOC_BANNED_RE.search(json.dumps(doc, sort_keys=True)) is None
 
 
+def test_baseline_serving_model_version_is_score_summary_db_safe():
+    artifact = SimpleNamespace(
+        model_artifact_hash="sha256:" + "1" * 64,
+        manifest_hash="sha256:" + "2" * 64,
+        manifest_uri="s3://leadpoet-private-model-artifacts/example/current.json",
+        git_commit_sha="abcdef123456",
+        image_digest=(
+            "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:"
+            + "7" * 64
+        ),
+        config_hash="sha256:" + "8" * 64,
+        component_registry_version="registry:v1",
+        scoring_adapter_version="adapter:v1",
+        build_id="build-1",
+    )
+
+    doc = sw._baseline_serving_model_version_doc(
+        artifact=artifact,
+        benchmark_date="2026-07-10",
+        benchmark_attempt=0,
+        rolling_window_hash="sha256:" + "9" * 64,
+        evaluation_epoch=12345,
+    )
+
+    dumped = json.dumps({"serving_model_version": doc}, sort_keys=True)
+    assert EVENT_DOC_BANNED_RE.search(dumped) is None
+    assert doc["parent_model"]["image_ref_hash"].startswith("sha256:")
+    assert "image_digest" not in doc["parent_model"]
+
+
 def _provider_cost_trace_entry(seq: int = 1) -> dict:
     return {
         "seq": seq,

@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 AUDIT_SECRET_SCAN_MODE_ENV_VAR = "RESEARCH_LAB_AUDIT_SECRET_SCAN_MODE"
 AUDIT_SECRET_SCAN_MODE_REDACT = "redact"
 AUDIT_SECRET_SCAN_MODE_RAISE = "raise"
+AUDIT_INLINE_VALUE_MAX_BYTES = 16 * 1024
+_AUDIT_COMPACTION_EXEMPT_FIELDS = {
+    ("score_bundle_rows", "score_bundle_doc"),
+}
 SHADOW_REPORT_ALLOWLIST_ENV_VAR = "RESEARCH_LAB_SHADOW_REPORT_ALLOWLIST"
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -310,6 +314,7 @@ def build_research_lab_audit_bundle(
         source_state,
         error_message="Research Lab audit source state contains private or secret material",
     )
+    source_state, value_commitments = _compact_oversized_audit_values(source_state)
 
     source_state_hash = sha256_json(source_state)
     bundle_without_id = {
@@ -325,6 +330,7 @@ def build_research_lab_audit_bundle(
         "source_state_hash": source_state_hash,
         "source_state": source_state,
         "secret_scan": secret_scan,
+        "value_commitments": value_commitments,
         "observability": {
             "ticket_count": len(ticket_rows),
             "run_queue_count": len(queue_rows),
@@ -353,6 +359,7 @@ def build_research_lab_audit_bundle(
                 "score_bundle_aggregates_recompute",
                 "promotion_events_reference_score_bundles",
                 "public_benchmark_reports_are_sanitized",
+                "oversized_value_commitments_match_source_rows",
             ],
             "private_model_recompute": "forbidden_for_main_validators_v1",
         },
@@ -424,6 +431,83 @@ def _redact_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact_value(item) for item in value]
     return value
+
+
+def _compact_oversized_audit_values(
+    source_state: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Replace oversized row fields with deterministic content commitments.
+
+    The append-only source tables remain authoritative. The signed audit row
+    commits to large nested documents without duplicating hundreds of
+    megabytes into one JSONB value, which would make PostgreSQL's safety check
+    and insert exceed the statement timeout.
+    """
+
+    compacted: dict[str, Any] = {}
+    field_stats: dict[tuple[str, str], dict[str, int]] = {}
+    value_count = 0
+    canonical_bytes_committed = 0
+    for source_name, rows in source_state.items():
+        if not isinstance(rows, list):
+            compacted[str(source_name)] = rows
+            continue
+        compacted_rows: list[Any] = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                compacted_rows.append(row)
+                continue
+            compacted_row: dict[str, Any] = {}
+            for field_name, value in row.items():
+                if (str(source_name), str(field_name)) in _AUDIT_COMPACTION_EXEMPT_FIELDS:
+                    compacted_row[str(field_name)] = value
+                    continue
+                canonical_value = canonical_json(value).encode("utf-8")
+                canonical_size = len(canonical_value)
+                if canonical_size <= AUDIT_INLINE_VALUE_MAX_BYTES:
+                    compacted_row[str(field_name)] = value
+                    continue
+                value_type = (
+                    "object"
+                    if isinstance(value, Mapping)
+                    else "array"
+                    if isinstance(value, list)
+                    else "string"
+                    if isinstance(value, str)
+                    else type(value).__name__
+                )
+                compacted_row[str(field_name)] = {
+                    "_audit_value_commitment": {
+                        "schema_version": "research_lab_audit_value_commitment.v1",
+                        "sha256": "sha256:" + hashlib.sha256(canonical_value).hexdigest(),
+                        "canonical_bytes": canonical_size,
+                        "value_type": value_type,
+                    }
+                }
+                key = (str(source_name), str(field_name))
+                stats = field_stats.setdefault(key, {"count": 0, "canonical_bytes": 0})
+                stats["count"] += 1
+                stats["canonical_bytes"] += canonical_size
+                value_count += 1
+                canonical_bytes_committed += canonical_size
+            compacted_rows.append(compacted_row)
+        compacted[str(source_name)] = compacted_rows
+    fields = [
+        {
+            "source": source_name,
+            "field": field_name,
+            "count": stats["count"],
+            "canonical_bytes": stats["canonical_bytes"],
+        }
+        for (source_name, field_name), stats in sorted(field_stats.items())
+    ]
+    return compacted, {
+        "schema_version": "research_lab_audit_value_commitment_summary.v1",
+        "inline_max_bytes": AUDIT_INLINE_VALUE_MAX_BYTES,
+        "value_count": value_count,
+        "canonical_bytes_committed": canonical_bytes_committed,
+        "fields": fields,
+    }
 
 
 def _extract_verified_shadow_weight_vector(weight_input_snapshots: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -586,9 +670,6 @@ _AUDIT_LOOP_EVENT_FIELDS = {
     "elapsed_seconds",
     "candidate_artifact_hash",
     "candidate_patch_hash",
-    "provider_usage",
-    "cost_ledger",
-    "event_doc",
     "anchored_hash",
     "created_at",
 }

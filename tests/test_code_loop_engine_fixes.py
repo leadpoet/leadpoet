@@ -184,6 +184,10 @@ def _engine_instance():
     )
 
 
+def test_run_uses_module_asyncio_without_accidental_local_shadowing():
+    assert "asyncio" not in engine.CodeEditLoopEngine.run.__code__.co_varnames
+
+
 def test_restore_selected_from_resume(fake_boto3):
     write_doc = asyncio.run(
         engine._write_private_loop_candidate_artifact(

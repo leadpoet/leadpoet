@@ -3020,8 +3020,6 @@ class CodeEditLoopEngine:
                 # elapses is pure waste. Proceed straight to finalization.
                 remaining_minimum = 0.0
             if remaining_minimum > 0 and remaining_maximum > 0:
-                import asyncio
-
                 sleep_remaining = min(remaining_minimum, remaining_maximum)
                 while sleep_remaining > 0:
                     await asyncio.sleep(min(5.0, sleep_remaining))

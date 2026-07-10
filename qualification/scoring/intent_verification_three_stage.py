@@ -64,7 +64,7 @@ import logging
 import os
 import re
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import urlparse, urlunsplit
 
 import httpx
@@ -1189,7 +1189,34 @@ async def _call_openrouter(
                     "_error": f"http_{r.status_code}",
                     "_body": r.text[:400],
                 }
-            resp = r.json()
+            try:
+                resp = r.json()
+                if not isinstance(resp, Mapping):
+                    raise ValueError("OpenRouter response envelope must be an object")
+            except (json.JSONDecodeError, ValueError) as exc:
+                logger.warning(
+                    "intent_three_stage_openrouter_envelope_json_invalid "
+                    "model=%s attempt=%s error_class=%s",
+                    model,
+                    attempt + 1,
+                    type(exc).__name__,
+                )
+                record_openrouter_trace(
+                    channel="qualification",
+                    purpose="intent_three_stage_verify",
+                    stage="scorer_judgment",
+                    model_id=model,
+                    request_body=body,
+                    response_doc={
+                        "http_status": r.status_code,
+                        "parse_error_class": type(exc).__name__,
+                    },
+                    outcome="invalid_json_envelope",
+                )
+                if attempt == 2:
+                    return {"_error": "invalid_json_envelope"}
+                await asyncio.sleep(1)
+                continue
             provider_usage = record_openrouter_trace(
                 channel="qualification",
                 purpose="intent_three_stage_verify",
@@ -1203,17 +1230,35 @@ async def _call_openrouter(
                 provider_usage.setdefault("reasoning_capture", {})[
                     "request_dropped"
                 ] = True
-            content = (resp.get("choices") or [{}])[0].get(
-                "message", {}
-            ).get("content", "")
+            choices = resp.get("choices")
+            first_choice = choices[0] if isinstance(choices, list) and choices else {}
+            message = first_choice.get("message") if isinstance(first_choice, Mapping) else {}
+            content = message.get("content", "") if isinstance(message, Mapping) else ""
+            if not isinstance(content, str):
+                content = ""
+            ans = None
             try:
                 ans = json.loads(content)
-            except Exception:
+            except (json.JSONDecodeError, TypeError):
                 m = re.search(r"\{[\s\S]*\}", content)
-                ans = (
-                    json.loads(m.group(0))
-                    if m else {"_raw_unparsed": content[:400]}
+                try:
+                    ans = json.loads(m.group(0)) if m else None
+                except (json.JSONDecodeError, TypeError):
+                    ans = None
+            if not isinstance(ans, Mapping):
+                logger.warning(
+                    "intent_three_stage_openrouter_content_json_invalid "
+                    "model=%s attempt=%s",
+                    model,
+                    attempt + 1,
                 )
+                if attempt == 2:
+                    return {
+                        "_error": "invalid_json_content",
+                        "provider_usage": provider_usage,
+                    }
+                await asyncio.sleep(1)
+                continue
             return {
                 "answer": ans,
                 "citations": resp.get("citations") or [],

@@ -7,10 +7,12 @@ shadow report allowlist conversion in ``gateway/research_lab/bundles.py``.
 
 import copy
 import hashlib
+import json
 
 import pytest
 
 from gateway.research_lab.bundles import (
+    AUDIT_INLINE_VALUE_MAX_BYTES,
     AUDIT_SECRET_SCAN_MODE_ENV_VAR,
     SECRET_MARKERS,
     SHADOW_REPORT_ALLOWLIST_ENV_VAR,
@@ -91,7 +93,10 @@ def _fake_store_rows() -> dict[str, list[dict]]:
                 "event_type": "failed",
                 "candidate_status": "failed",
                 "reason": POISONED_SUPABASE_ERROR,
-                "event_doc": {"error": POISONED_ECR_ERROR},
+                "event_doc": {
+                    "error": POISONED_ECR_ERROR,
+                    "detail": "prompt leak: judge_prompt text should never appear",
+                },
                 "created_at": "2026-06-02T00:00:00Z",
             }
         ],
@@ -102,12 +107,15 @@ def _fake_store_rows() -> dict[str, list[dict]]:
                 "seq": 1,
                 "event_type": "failed",
                 "loop_status": "failed",
+                "provider_usage": [{"provider": "openrouter", "cost": 1}],
+                "cost_ledger": {"total": 1},
                 "event_doc": {
                     "errors": [
                         {"error": POISONED_ECR_ERROR},
                         {"error": "prompt leak: judge_prompt text should never appear"},
                     ]
                 },
+                "anchored_hash": "sha256:" + "6" * 64,
                 "created_at": "2026-06-02T01:00:00Z",
             }
         ],
@@ -298,6 +306,78 @@ def test_audit_bundle_clean_rows_report_zero_redactions():
     rows["dispatch_event_rows"] = []
     bundle = _build_audit_bundle_from_fake_store(rows)
     assert bundle["secret_scan"] == {"mode": "redact", "redaction_count": 0, "redactions": []}
+
+
+def test_audit_bundle_commits_oversized_nested_values_without_mutating_source():
+    rows = _fake_store_rows()
+    oversized_doc = {"trace": "x" * (AUDIT_INLINE_VALUE_MAX_BYTES + 1024)}
+    rows["candidate_event_rows"][0]["event_doc"] = oversized_doc
+    snapshot = copy.deepcopy(rows)
+
+    bundle = _build_audit_bundle_from_fake_store(rows)
+
+    stored = bundle["source_state"]["candidate_event_rows"][0]["event_doc"]
+    commitment = stored["_audit_value_commitment"]
+    assert commitment == {
+        "schema_version": "research_lab_audit_value_commitment.v1",
+        "sha256": sha256_json(oversized_doc),
+        "canonical_bytes": len(
+            json.dumps(
+                oversized_doc,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                default=str,
+            ).encode("utf-8")
+        ),
+        "value_type": "object",
+    }
+    summary = bundle["value_commitments"]
+    assert summary["value_count"] == 1
+    assert summary["canonical_bytes_committed"] == commitment["canonical_bytes"]
+    assert summary["fields"] == [
+        {
+            "source": "candidate_event_rows",
+            "field": "event_doc",
+            "count": 1,
+            "canonical_bytes": commitment["canonical_bytes"],
+        }
+    ]
+    assert bundle["source_state_hash"] == sha256_json(bundle["source_state"])
+    assert rows == snapshot
+
+
+def test_audit_bundle_loop_events_use_anchored_refs_not_duplicate_trace_docs():
+    rows = _fake_store_rows()
+
+    bundle = _build_audit_bundle_from_fake_store(rows)
+
+    stored = bundle["source_state"]["auto_research_loop_event_rows"][0]
+    assert stored["anchored_hash"] == "sha256:" + "6" * 64
+    assert "event_doc" not in stored
+    assert "provider_usage" not in stored
+    assert "cost_ledger" not in stored
+
+
+def test_audit_bundle_keeps_score_bundle_docs_inline_for_validator_recompute():
+    rows = _fake_store_rows()
+    score_bundle_doc = {"payload": "x" * (AUDIT_INLINE_VALUE_MAX_BYTES + 1024)}
+
+    bundle = build_research_lab_audit_bundle(
+        epoch=123,
+        ticket_rows=rows["ticket_rows"],
+        queue_rows=rows["queue_rows"],
+        receipt_rows=rows["receipt_rows"],
+        candidate_rows=rows["candidate_rows"],
+        candidate_event_rows=rows["candidate_event_rows"],
+        loop_event_rows=rows["loop_event_rows"],
+        dispatch_event_rows=rows["dispatch_event_rows"],
+        rolling_window_rows=rows["rolling_window_rows"],
+        benchmark_rows=rows["benchmark_rows"],
+        score_bundle_rows=[{"score_bundle_doc": score_bundle_doc}],
+    )
+
+    assert bundle["source_state"]["score_bundle_rows"][0]["score_bundle_doc"] == score_bundle_doc
 
 
 def _shadow_rows() -> dict[str, list[dict]]:

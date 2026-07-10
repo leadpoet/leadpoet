@@ -57,4 +57,7 @@ RUN mkdir -p /app/gateway/keys
 
 # Run the TEE service
 # -u flag: unbuffered output (CRITICAL for debugging - shows prints immediately)
-ENTRYPOINT ["python3", "-u", "/app/gateway/tee/tee_service.py"]
+# Absolute interpreter path: the EIF conversion of this reproducible image
+# does not carry the image PATH into the enclave init, so a bare "python3"
+# fails execvpe at boot. tee_service bootstraps sys.path itself.
+ENTRYPOINT ["/usr/local/bin/python3", "-u", "/app/gateway/tee/tee_service.py"]

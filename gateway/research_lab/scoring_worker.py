@@ -3331,6 +3331,8 @@ class ResearchLabGatewayScoringWorker:
         """Observability alerts (structured logs) for candidates stuck beyond their
         expected windows. Read-only; never mutates. Best-effort (swallows query errors).
         """
+        if self.config.scoring_worker_index != 0:
+            return
         try:
             try:
                 retry_seconds = int(self.config.scoring_worker_baseline_not_ready_retry_seconds or 900)
@@ -3375,7 +3377,7 @@ class ResearchLabGatewayScoringWorker:
             )
             stale_parent_rows = await select_many(
                 "research_lab_candidate_evaluation_current",
-                columns="candidate_id,current_status_at",
+                columns="candidate_id,ticket_id,current_status_at",
                 filters=(
                     ("current_candidate_status", "rejected"),
                     ("current_reason", "stale_parent_needs_rescore"),
@@ -3395,8 +3397,33 @@ class ResearchLabGatewayScoringWorker:
                     filters=(("candidate_id", candidate_id), ("event_type", "rebase_queued")),
                     limit=1,
                 )
-                if not existing:
-                    overdue.append(candidate_id)
+                if existing:
+                    continue
+                ticket_id = str(row.get("ticket_id") or "")
+                if ticket_id:
+                    regeneration_events = await select_many(
+                        "research_loop_run_queue_events",
+                        columns="run_id,event_doc",
+                        filters=(
+                            ("ticket_id", ticket_id),
+                            ("reason", "regenerate_after_rebase_unavailable"),
+                        ),
+                        limit=200,
+                    )
+                    if any(
+                        str(
+                            (
+                                event.get("event_doc")
+                                if isinstance(event.get("event_doc"), Mapping)
+                                else {}
+                            ).get("regenerated_from_candidate_id")
+                            or ""
+                        )
+                        == candidate_id
+                        for event in regeneration_events
+                    ):
+                        continue
+                overdue.append(candidate_id)
             if overdue:
                 overdue_key = sha256_json({"candidates": sorted(overdue), "sla_seconds": sla_seconds})
                 if overdue_key not in self._stale_parent_overdue_warning_keys:

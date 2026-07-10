@@ -1638,3 +1638,101 @@ def test_private_holdout_gate_carries_per_icp_baseline_scores():
     }
     assert gate["baseline_public_score"] == 10.0
     assert gate["baseline_private_holdout_icp_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_stuck_candidate_alerts_are_owned_by_worker_zero(monkeypatch):
+    worker = sw.ResearchLabGatewayScoringWorker(
+        sw.ResearchLabGatewayConfig(
+            scoring_worker_index=1,
+            scoring_worker_total_workers=2,
+        )
+    )
+
+    async def unexpected_select_many(*args, **kwargs):
+        raise AssertionError("non-owner scoring worker must not query fleet-wide alerts")
+
+    monkeypatch.setattr(sw, "select_many", unexpected_select_many)
+
+    await worker._alert_stuck_candidates()
+
+
+@pytest.mark.asyncio
+async def test_stale_parent_alert_ignores_rebase_and_regeneration_recovery(monkeypatch, caplog):
+    worker = sw.ResearchLabGatewayScoringWorker(sw.ResearchLabGatewayConfig())
+    recovered_candidate = "candidate:" + "1" * 64
+    rebased_candidate = "candidate:" + "2" * 64
+
+    async def fake_select_many(table, *, columns, filters, order_by=(), limit=100):
+        filter_map = dict(filters)
+        if table == "research_lab_candidate_evaluation_current":
+            if filter_map.get("current_reason") == "baseline_not_ready":
+                return []
+            return [
+                {
+                    "candidate_id": recovered_candidate,
+                    "ticket_id": "ticket-recovered",
+                    "current_status_at": "2020-01-01T00:00:00+00:00",
+                },
+                {
+                    "candidate_id": rebased_candidate,
+                    "ticket_id": "ticket-rebased",
+                    "current_status_at": "2020-01-01T00:00:00+00:00",
+                },
+            ]
+        if table == "research_lab_candidate_promotion_events":
+            if filter_map.get("candidate_id") == rebased_candidate:
+                return [{"promotion_event_id": "promotion-event-1"}]
+            return []
+        if table == "research_loop_run_queue_events":
+            assert filter_map == {
+                "ticket_id": "ticket-recovered",
+                "reason": "regenerate_after_rebase_unavailable",
+            }
+            return [
+                {
+                    "run_id": "replacement-run",
+                    "event_doc": {"regenerated_from_candidate_id": recovered_candidate},
+                }
+            ]
+        raise AssertionError(f"unexpected table: {table}")
+
+    monkeypatch.setattr(sw, "select_many", fake_select_many)
+    caplog.set_level("WARNING", logger=sw.logger.name)
+
+    await worker._alert_stuck_candidates()
+
+    assert "research_lab_stale_parent_candidates_overdue" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stale_parent_alert_still_warns_once_for_unrecovered_candidate(monkeypatch, caplog):
+    worker = sw.ResearchLabGatewayScoringWorker(sw.ResearchLabGatewayConfig())
+    candidate_id = "candidate:" + "3" * 64
+
+    async def fake_select_many(table, *, columns, filters, order_by=(), limit=100):
+        filter_map = dict(filters)
+        if table == "research_lab_candidate_evaluation_current":
+            if filter_map.get("current_reason") == "baseline_not_ready":
+                return []
+            return [
+                {
+                    "candidate_id": candidate_id,
+                    "ticket_id": "ticket-unrecovered",
+                    "current_status_at": "2020-01-01T00:00:00+00:00",
+                }
+            ]
+        if table in {
+            "research_lab_candidate_promotion_events",
+            "research_loop_run_queue_events",
+        }:
+            return []
+        raise AssertionError(f"unexpected table: {table}")
+
+    monkeypatch.setattr(sw, "select_many", fake_select_many)
+    caplog.set_level("WARNING", logger=sw.logger.name)
+
+    await worker._alert_stuck_candidates()
+    await worker._alert_stuck_candidates()
+
+    assert caplog.text.count("research_lab_stale_parent_candidates_overdue") == 1

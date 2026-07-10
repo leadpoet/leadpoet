@@ -328,7 +328,7 @@ COMMENT ON TABLE public.research_lab_source_add_submissions IS
 COMMENT ON TABLE public.research_lab_source_catalog IS
     'Accepted SOURCE_ADD adapters: the graduated source catalog (W5).';
 COMMENT ON TABLE public.research_lab_source_add_reward_obligations IS
-    'Append-only SOURCE_ADD reward legs (1% acceptance / +5% implementation rider × 20 epochs) riding the champion allocation rails with reward_kind labels (W6).';
+    'Append-only SOURCE_ADD reward legs (1% credible-source submission / +5% implementation rider × 20 epochs) riding the champion allocation rails with reward_kind labels (W6).';
 
 COMMIT;
 

@@ -5,7 +5,8 @@ executes them behind ``RESEARCH_LAB_SOURCE_ADD_ENABLED``: submission intake
 (anti-spam caps, catalog dedupe, KMS credential envelope), the cheapest-first
 funnel (manifest validation → static scan → LLM review → sandboxed metered
 trial), category-scoped trial yield, and the acceptance decision that feeds
-the leg-1 reward (``source_add_rewards.py``).
+the catalog. Leg 1 now triggers at credible provenance precheck; Leg 2 still
+requires accepted catalog attribution (``source_add_rewards.py``).
 
 Execution boundaries preserved from the plan:
 - adapter code runs only in the sandbox, with no credentials inside and all
@@ -536,8 +537,9 @@ def evaluate_source_add_acceptance(
     """Acceptance = category-scoped yield ≥ floor AND the human gate.
 
     Returns the advanced (or rejected) record plus the catalog entry on
-    acceptance. Leg-1 reward creation hangs off the catalog entry
-    (source_add_rewards.create_leg1_reward), not off this function.
+    acceptance. Catalog acceptance remains the switch that lets improvement
+    loops use this source; Leg 1 is created earlier at credible provenance
+    precheck.
     """
 
     if record.stage != SourceAddFunnelStage.TRIAL_COMPLETED.value:

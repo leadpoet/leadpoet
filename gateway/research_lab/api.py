@@ -77,8 +77,9 @@ from .public_activity import (
     public_loop_outcome_closes_ticket,
     safe_project_public_loop_activity,
 )
+from .chain import resolve_research_lab_evaluation_epoch
 from .promotion import private_repo_head_alignment_status
-from .source_add_provenance import PRECHECK_MANUAL, SourceAddProvenanceResult, evaluate_source_add_provenance
+from .source_add_provenance import PRECHECK_MANUAL, PRECHECK_PASSED, SourceAddProvenanceResult, evaluate_source_add_provenance
 from .store import (
     canonical_hash,
     create_candidate_evaluation_event,
@@ -101,6 +102,7 @@ from .store import (
 )
 from research_lab.improvement_engine.config import ImprovementEngineConfig
 from research_lab.source_add_execution import apply_provenance_precheck_result, intake_source_add_submission
+from research_lab.source_add_rewards import create_leg1_reward
 from research_lab.improvement_engine.fix_generator import sanitized_miner_opportunity
 from research_lab.improvement_engine.scanner import scan_for_issues
 
@@ -358,6 +360,11 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
 
     try:
         await persist_source_add_submission(record_doc)
+        await _maybe_create_source_add_leg1_reward_for_precheck(
+            record=record,
+            precheck_status=precheck.precheck_status,
+            config=config,
+        )
     except Exception as exc:
         _raise_storage_error(exc)
 
@@ -369,6 +376,98 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
         precheck_status=record.precheck_status or None,
         precheck_reasons=list((record.precheck_doc or {}).get("reasons") or []),
     )
+
+
+async def _maybe_create_source_add_leg1_reward_for_precheck(
+    *,
+    record: Any,
+    precheck_status: str,
+    config: ResearchLabGatewayConfig,
+) -> dict[str, Any]:
+    """Create the 1% SOURCE_ADD leg when provenance precheck passes.
+
+    This intentionally does not create a source catalog entry. Catalog approval
+    remains the switch that makes a source usable by improvement loops.
+    """
+
+    if str(precheck_status or "") != PRECHECK_PASSED:
+        return {"source_add_leg1_reward_status": "skipped_precheck_not_passed"}
+    if not getattr(config, "source_add_rewards_enabled", False):
+        return {"source_add_leg1_reward_status": "disabled"}
+
+    adapter_id = str(getattr(record, "adapter_id", "") or "")
+    miner_hotkey = str(getattr(record, "miner_hotkey", "") or "")
+    if not adapter_id or not miner_hotkey:
+        raise RuntimeError("SOURCE_ADD Leg 1 reward requires adapter_id and miner_hotkey")
+
+    existing_rewards = await select_many(
+        "research_lab_source_add_reward_current",
+        columns="reward_ref,adapter_id,leg,current_reward_status",
+        filters=(("adapter_id", adapter_id),),
+        limit=20,
+    )
+    leg1 = create_leg1_reward(
+        adapter_id=adapter_id,
+        miner_ref=miner_hotkey,
+        start_epoch=await _source_add_leg1_start_epoch(config),
+        existing_rewards=existing_rewards,
+        alpha_percent=float(getattr(config, "source_add_leg1_alpha_percent", 1.0) or 1.0),
+        reward_epochs=int(getattr(config, "lab_reward_epochs", 20) or 20),
+    )
+    if leg1 is None:
+        return {"source_add_leg1_reward_status": "already_created"}
+
+    try:
+        await insert_row(
+            "research_lab_source_add_reward_obligations",
+            {
+                "reward_ref": leg1.reward_ref,
+                "adapter_id": leg1.adapter_id,
+                "catalog_id": None,
+                "miner_hotkey": leg1.miner_ref,
+                "leg": leg1.leg,
+                "reward_kind": leg1.reward_kind,
+                "alpha_percent": leg1.alpha_percent,
+                "reward_epochs": leg1.reward_epochs,
+                "start_epoch": leg1.start_epoch,
+                "trigger_evidence_doc": {
+                    "precheck_status": PRECHECK_PASSED,
+                    "submission_id": str(getattr(record, "submission_id", "") or ""),
+                    "reward_trigger": "provenance_precheck_passed",
+                },
+                "public_label": leg1.public_label,
+            },
+        )
+        await insert_row(
+            "research_lab_source_add_reward_events",
+            {
+                "reward_ref": leg1.reward_ref,
+                "seq": 0,
+                "reward_status": leg1.state,
+                "reason": "leg1_provenance_precheck_passed",
+            },
+        )
+    except Exception as exc:
+        if _is_duplicate_insert_error(exc):
+            return {"source_add_leg1_reward_status": "already_created"}
+        raise
+    return {
+        "source_add_leg1_reward_status": "created",
+        "reward_ref": leg1.reward_ref,
+        "start_epoch": leg1.start_epoch,
+    }
+
+
+async def _source_add_leg1_start_epoch(config: ResearchLabGatewayConfig) -> int:
+    current_epoch, _block, _source = await resolve_research_lab_evaluation_epoch(
+        getattr(config, "evaluation_epoch", 0)
+    )
+    return max(0, int(current_epoch)) + 1
+
+
+def _is_duplicate_insert_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "duplicate" in text or "unique" in text or "23505" in text
 
 
 _TERMINAL_CANDIDATE_STATUSES = {"scored", "rejected", "failed"}

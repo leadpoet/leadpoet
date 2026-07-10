@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Run one SOURCE_ADD submission through the full funnel (W5 → W6 leg 1).
+"""Run one SOURCE_ADD submission through the full funnel (W5).
 
 Operator driver for sourceexperiments.md §5.3 step 4 (the lab-authored test
 adapter) and for early manual funnel runs before a queue consumer exists:
 
     manifest validation → static scan → LLM review → sandboxed docker trial
     → acceptance evaluation → (with --persist) submission rows + catalog
-    entry + leg-1 reward on the allocation rails.
+    entry.
+
+Leg 1 is created by gateway intake when provenance precheck passes, not by
+this operator trial/acceptance helper.
 
 Local mode needs no database:
 
@@ -67,8 +70,8 @@ def main() -> int:
     parser.add_argument("--acceptance-floor", type=float,
                         default=float(os.getenv("RESEARCH_LAB_SOURCE_ADD_ACCEPTANCE_FLOOR_YIELD") or 0.10))
     parser.add_argument("--registry-provider-id", default="", help="evidence-proxy registry id once the source is provisioned")
-    parser.add_argument("--start-epoch", type=int, default=0, help="leg-1 start epoch (required with --persist on acceptance)")
-    parser.add_argument("--persist", action="store_true", help="write submission/catalog/leg-1 rows to Supabase")
+    parser.add_argument("--start-epoch", type=int, default=0, help="deprecated; Leg 1 now starts from gateway intake")
+    parser.add_argument("--persist", action="store_true", help="write submission/catalog rows to Supabase")
     args = parser.parse_args()
 
     from gateway.research_lab.key_vault import decrypt_source_add_credential, encrypt_source_add_credential
@@ -84,8 +87,6 @@ def main() -> int:
         run_sandboxed_trial,
         run_static_scan_stage,
     )
-    from research_lab.source_add_rewards import create_leg1_reward
-
     manifest_doc = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
     bundle_dir = Path(args.bundle)
     trial_icp_refs = tuple(ref.strip() for ref in args.icp_refs.split(",") if ref.strip())
@@ -193,15 +194,6 @@ def main() -> int:
         "catalog_entry": catalog_entry.to_dict() if catalog_entry else None,
     }
 
-    leg1 = None
-    if catalog_entry is not None:
-        leg1 = create_leg1_reward(
-            adapter_id=catalog_entry.adapter_id,
-            miner_ref=record.miner_hotkey,
-            start_epoch=max(0, int(args.start_epoch)),
-        )
-        outcome["leg1_reward"] = leg1.to_dict() if leg1 else None
-
     if args.persist:
         from gateway.research_lab.store import insert_row, persist_source_add_submission
 
@@ -212,27 +204,6 @@ def main() -> int:
                     "research_lab_source_catalog",
                     {**catalog_entry.to_dict(), "catalog_doc": {"submission_id": record.submission_id}},
                 )
-            if leg1 is not None:
-                await insert_row(
-                    "research_lab_source_add_reward_obligations",
-                    {
-                        "reward_ref": leg1.reward_ref,
-                        "adapter_id": leg1.adapter_id,
-                        "catalog_id": catalog_entry.catalog_id if catalog_entry else None,
-                        "miner_hotkey": leg1.miner_ref,
-                        "leg": leg1.leg,
-                        "reward_kind": leg1.reward_kind,
-                        "alpha_percent": leg1.alpha_percent,
-                        "reward_epochs": leg1.reward_epochs,
-                        "start_epoch": leg1.start_epoch,
-                        "public_label": leg1.public_label,
-                    },
-                )
-                await insert_row(
-                    "research_lab_source_add_reward_events",
-                    {"reward_ref": leg1.reward_ref, "seq": 0, "reward_status": leg1.state, "reason": "leg1_acceptance"},
-                )
-
         asyncio.run(_persist())
         outcome["persisted"] = True
 

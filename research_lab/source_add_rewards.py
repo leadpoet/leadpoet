@@ -3,9 +3,9 @@
 Supersedes the P1.5 USD trial-yield bounty bands. Both legs are fixed-term
 emission streams on the existing champion-allocation rails:
 
-- **Leg 1 — acceptance**: 1% of miner emissions × ``RESEARCH_LAB_REWARD_EPOCHS``
-  (20), created when a source clears the category-scoped yield floor AND the
-  human gate. Flat, one per adapter, ever.
+- **Leg 1 — credible submission**: 1% of miner emissions ×
+  ``RESEARCH_LAB_REWARD_EPOCHS`` (20), created when a miner-submitted source
+  reaches ``provenance_precheck_passed``. Flat, one per adapter, ever.
 - **Leg 2 — implementation rider**: +5% × 20 epochs to the ADAPTER OWNER,
   created alongside the implementing merge's champion grant, triggered
   mechanically (all four): (1) merged diff routes to the adapter, (2) merge
@@ -164,11 +164,11 @@ def create_leg1_reward(
     reward_epochs: int = DEFAULT_REWARD_EPOCHS,
     state: str = SourceAddRewardState.ACTIVE.value,
 ) -> SourceAddRewardRecord | None:
-    """Create the acceptance leg. One per adapter, ever — idempotent None on repeat.
+    """Create the credible-submission leg. One per adapter, ever.
 
     Queue policy is normal FIFO on the allocation rails: pass
     ``state="queued"`` when the lab cap cannot pay right now, exactly like
-    improvement grants.
+    improvement grants. Returns None when this adapter already has Leg 1.
     """
 
     if _has_leg(existing_rewards, adapter_id, 1):

@@ -536,6 +536,7 @@ class ResearchLabGatewayConfig:
     source_add_ablation_required: bool = True
     source_add_acceptance_floor_yield: float = 0.10
     source_add_max_concurrent_per_hotkey: int = 3
+    source_add_max_per_day_per_hotkey: int = 5
     source_add_max_per_30d_per_hotkey: int = 10
     source_add_leg1_max_per_utc_day: int = 10
     source_add_shadow_window_days: float = 7.0
@@ -1091,6 +1092,9 @@ class ResearchLabGatewayConfig:
             source_add_max_concurrent_per_hotkey=max(
                 1, _int("RESEARCH_LAB_SOURCE_ADD_MAX_CONCURRENT_PER_HOTKEY", 3)
             ),
+            source_add_max_per_day_per_hotkey=max(
+                1, _int("RESEARCH_LAB_SOURCE_ADD_MAX_PER_DAY_PER_HOTKEY", 5)
+            ),
             source_add_max_per_30d_per_hotkey=max(
                 1, _int("RESEARCH_LAB_SOURCE_ADD_MAX_PER_30D_PER_HOTKEY", 10)
             ),
@@ -1388,6 +1392,7 @@ class ResearchLabGatewayConfig:
                 "enabled": self.source_add_enabled,
                 "rewards_enabled": self.source_add_rewards_enabled,
                 "max_concurrent_per_hotkey": self.source_add_max_concurrent_per_hotkey,
+                "max_per_day_per_hotkey": self.source_add_max_per_day_per_hotkey,
                 "max_per_30d_per_hotkey": self.source_add_max_per_30d_per_hotkey,
                 "leg1_max_per_utc_day": self.source_add_leg1_max_per_utc_day,
             },

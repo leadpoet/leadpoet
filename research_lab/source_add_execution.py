@@ -43,6 +43,7 @@ from .source_add_identity import source_identity_hash
 # §8 launch defaults — env-tunable (T), inlined here as the code defaults.
 DEFAULT_ACCEPTANCE_FLOOR_YIELD = 0.10
 DEFAULT_MAX_CONCURRENT_SUBMISSIONS_PER_HOTKEY = 3
+DEFAULT_MAX_SUBMISSIONS_PER_DAY_PER_HOTKEY = 5
 DEFAULT_MAX_SUBMISSIONS_PER_30D_PER_HOTKEY = 10
 
 
@@ -63,6 +64,7 @@ class SourceAddRejectionReason(str, Enum):
     MANIFEST_INVALID = "manifest_invalid"
     DUPLICATE_SOURCE = "duplicate_source"
     HOTKEY_CONCURRENT_CAP = "hotkey_concurrent_cap"
+    HOTKEY_DAY_CAP = "hotkey_day_cap"
     HOTKEY_30D_CAP = "hotkey_30d_cap"
     CREDENTIAL_INVALID = "credential_invalid"
     STATIC_SCAN_FAILED = "static_scan_failed"
@@ -183,8 +185,10 @@ def intake_source_add_submission(
     existing_source_identity_hashes: Sequence[str] = (),
     source_identity_ref: str = "",
     open_submission_count_for_hotkey: int = 0,
+    submissions_last_day_for_hotkey: int = 0,
     submissions_last_30d_for_hotkey: int = 0,
     max_concurrent_per_hotkey: int = DEFAULT_MAX_CONCURRENT_SUBMISSIONS_PER_HOTKEY,
+    max_per_day_per_hotkey: int = DEFAULT_MAX_SUBMISSIONS_PER_DAY_PER_HOTKEY,
     max_per_30d_per_hotkey: int = DEFAULT_MAX_SUBMISSIONS_PER_30D_PER_HOTKEY,
     kms_encrypt: Callable[[str, str, str], Mapping[str, str]] | None = None,
 ) -> tuple[SourceAddSubmissionRecord | None, list[str]]:
@@ -217,6 +221,8 @@ def intake_source_add_submission(
         errors.append(SourceAddRejectionReason.DUPLICATE_SOURCE.value)
     if open_submission_count_for_hotkey >= max(1, int(max_concurrent_per_hotkey)):
         errors.append(SourceAddRejectionReason.HOTKEY_CONCURRENT_CAP.value)
+    if submissions_last_day_for_hotkey >= max(1, int(max_per_day_per_hotkey)):
+        errors.append(SourceAddRejectionReason.HOTKEY_DAY_CAP.value)
     if submissions_last_30d_for_hotkey >= max(1, int(max_per_30d_per_hotkey)):
         errors.append(SourceAddRejectionReason.HOTKEY_30D_CAP.value)
     if errors:

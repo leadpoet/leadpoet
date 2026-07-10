@@ -105,9 +105,11 @@ def test_source_add_status_defaults_enabled_and_env_gated(clean_env):
     status = config.public_status()
     assert config.source_add_enabled is True
     assert config.source_add_rewards_enabled is True
+    assert config.source_add_max_per_day_per_hotkey == 5
     assert status["source_add_enabled"] is True
     assert status["source_add"]["enabled"] is True
     assert status["source_add"]["rewards_enabled"] is True
+    assert status["source_add"]["max_per_day_per_hotkey"] == 5
 
     clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_ENABLED", "false")
     clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_REWARDS_ENABLED", "false")

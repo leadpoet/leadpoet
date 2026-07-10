@@ -261,14 +261,15 @@ async def create_research_lab_probe(payload: ResearchLabProbeRequest):
     }
 
 
-async def _source_add_intake_context(miner_hotkey: str) -> tuple[int, int, list[str], list[str]]:
-    """(open submissions, submissions last 30d, existing domains, source identity hashes).
+async def _source_add_intake_context(miner_hotkey: str) -> tuple[int, int, int, list[str], list[str]]:
+    """(open submissions, submissions last UTC day, submissions last 30d, existing domains, source identity hashes).
 
     Best-effort reads: before the scripts/72 migration the tables are absent
     and everything counts as zero/empty (the endpoint is flag-gated anyway).
     """
 
     open_count = 0
+    last_day_count = 0
     last_30d_count = 0
     try:
         rows = await select_all(
@@ -278,6 +279,7 @@ async def _source_add_intake_context(miner_hotkey: str) -> tuple[int, int, list[
     except Exception:
         rows = []
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    day_cutoff = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     for row in rows:
         stage = str(row.get("stage") or "")
         if stage not in {"accepted", "rejected"}:
@@ -287,6 +289,8 @@ async def _source_add_intake_context(miner_hotkey: str) -> tuple[int, int, list[
             created_at = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
         except ValueError:
             continue
+        if created_at >= day_cutoff:
+            last_day_count += 1
         if created_at >= cutoff:
             last_30d_count += 1
     domains: list[str] = []
@@ -325,7 +329,7 @@ async def _source_add_intake_context(miner_hotkey: str) -> tuple[int, int, list[
         source_hash = str(row.get("source_identity_hash") or "").strip()
         if source_hash:
             identity_hashes.append(source_hash)
-    return open_count, last_30d_count, domains, sorted(set(identity_hashes))
+    return open_count, last_day_count, last_30d_count, domains, sorted(set(identity_hashes))
 
 
 @router.post("/source-adapters", response_model=ResearchLabSourceAdapterSubmissionResponse)
@@ -346,7 +350,7 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
     if payload.adapter_credential and not kms_key_id:
         raise HTTPException(status_code=503, detail="SOURCE_ADD credential KMS key is not configured")
 
-    open_count, last_30d_count, catalog_domains, source_identity_hashes = await _source_add_intake_context(payload.miner_hotkey)
+    open_count, last_day_count, last_30d_count, catalog_domains, source_identity_hashes = await _source_add_intake_context(payload.miner_hotkey)
     source_metadata = dict(payload.source_metadata or {})
     declared_domains = payload.manifest.get("declared_base_domains") if isinstance(payload.manifest, Mapping) else []
     source_identity_ref = source_identity_hash_from_metadata(
@@ -374,8 +378,10 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
             existing_source_identity_hashes=source_identity_hashes,
             source_identity_ref=source_identity_ref,
             open_submission_count_for_hotkey=open_count,
+            submissions_last_day_for_hotkey=last_day_count,
             submissions_last_30d_for_hotkey=last_30d_count,
             max_concurrent_per_hotkey=config.source_add_max_concurrent_per_hotkey,
+            max_per_day_per_hotkey=config.source_add_max_per_day_per_hotkey,
             max_per_30d_per_hotkey=config.source_add_max_per_30d_per_hotkey,
             kms_encrypt=_kms_encrypt,
         )

@@ -58,6 +58,7 @@ def _intake(**overrides: Any):
         miner_hotkey="hotkey-a",
         existing_catalog_domains=(),
         open_submission_count_for_hotkey=0,
+        submissions_last_day_for_hotkey=0,
         submissions_last_30d_for_hotkey=0,
         kms_encrypt=_fake_kms,
     )
@@ -87,6 +88,11 @@ class TestIntake:
         record, errors = _intake(open_submission_count_for_hotkey=3)
         assert record is None
         assert SourceAddRejectionReason.HOTKEY_CONCURRENT_CAP.value in errors
+
+    def test_hotkey_day_cap(self):
+        record, errors = _intake(submissions_last_day_for_hotkey=5)
+        assert record is None
+        assert SourceAddRejectionReason.HOTKEY_DAY_CAP.value in errors
 
     def test_hotkey_30d_cap(self):
         record, errors = _intake(submissions_last_30d_for_hotkey=10)

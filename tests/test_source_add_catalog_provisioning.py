@@ -10,6 +10,7 @@ from gateway.research_lab.source_add_catalog import (
     probe_endpoints_from_provisioned_rows,
 )
 from gateway.research_lab.source_add_llm_judge import _parse_verdict
+from gateway.research_lab.source_add_provenance import PRECHECK_MANUAL, PRECHECK_PASSED, SourceAddProvenanceResult
 from research_lab.source_add_execution import SourceAddRejectionReason, intake_source_add_submission
 from research_lab.source_add_identity import source_identity_hash
 
@@ -176,3 +177,129 @@ def test_llm_judge_verdict_parser_accepts_helped_json():
     )
     assert verdict.passed is True
     assert verdict.trigger_evidence()["llm_judge_passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_owner_recheck_advances_manual_submission_and_creates_leg1(monkeypatch):
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                source_add_enabled=True,
+                source_add_rewards_enabled=True,
+            )
+        ),
+    )
+    submission_id = "source_add_submission:" + "b" * 16
+    submission_doc = {
+        "submission_id": submission_id,
+        "adapter_id": "adapter:test-source",
+        "miner_hotkey": "hk-owner",
+        "manifest": _manifest_doc(),
+        "stage": PRECHECK_MANUAL,
+        "stage_history": ["submitted", "manifest_validated", PRECHECK_MANUAL],
+        "source_metadata": {
+            "api_base_url": "https://api.test-source.example",
+            "documentation_url": "https://docs.test-source.example",
+            "auth_type": "none",
+            "endpoint_examples": [{"method": "GET", "path": "/search"}],
+            "rate_limit_notes": "Use conservative request pacing.",
+        },
+        "precheck_status": PRECHECK_MANUAL,
+        "precheck_doc": {"reasons": ["low_docs_completeness"]},
+        "source_identity_hash": "sha256:" + "1" * 64,
+    }
+
+    async def fake_select_one(table, **_kwargs):
+        assert table == "research_lab_source_add_submission_current"
+        return {
+            "submission_id": submission_id,
+            "adapter_id": "adapter:test-source",
+            "miner_hotkey": "hk-owner",
+            "stage": PRECHECK_MANUAL,
+            "submission_doc": submission_doc,
+            "precheck_status": PRECHECK_MANUAL,
+            "precheck_doc": {"reasons": ["low_docs_completeness"]},
+            "source_identity_hash": "sha256:" + "1" * 64,
+        }
+
+    persisted = []
+
+    async def fake_persist(record_doc):
+        persisted.append(dict(record_doc))
+
+    async def fake_reward(**kwargs):
+        assert kwargs["precheck_status"] == PRECHECK_PASSED
+        return {
+            "source_add_leg1_reward_status": "created",
+            "reward_ref": "source_add_reward:" + "2" * 16,
+            "start_epoch": 701,
+        }
+
+    monkeypatch.setattr(api, "select_one", fake_select_one)
+    monkeypatch.setattr(
+        api,
+        "evaluate_source_add_provenance",
+        lambda **_kwargs: SourceAddProvenanceResult(
+            PRECHECK_PASSED,
+            ("provenance_reference_backed",),
+            {"docs_completeness": {"score": 5}},
+        ),
+    )
+    monkeypatch.setattr(api, "persist_source_add_submission", fake_persist)
+    monkeypatch.setattr(api, "_maybe_create_source_add_leg1_reward_for_precheck", fake_reward)
+
+    response = await api.recheck_research_lab_source_adapter_provenance(
+        submission_id,
+        authorization="Bearer service-role-test",
+    )
+
+    assert response.precheck_status == PRECHECK_PASSED
+    assert response.stage == PRECHECK_PASSED
+    assert response.leg1_reward_status == "created"
+    assert len(persisted) == 1
+    assert persisted[0]["stage_history"][-1] == PRECHECK_PASSED
+    assert persisted[0]["source_metadata"] == submission_doc["source_metadata"]
+
+
+@pytest.mark.asyncio
+async def test_owner_recheck_refuses_legacy_submission_without_structured_metadata(monkeypatch):
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                source_add_enabled=True,
+            )
+        ),
+    )
+
+    async def legacy_row(*_args, **_kwargs):
+        return {
+            "submission_id": "source_add_submission:" + "c" * 16,
+            "adapter_id": "adapter:legacy-source",
+            "miner_hotkey": "hk-owner",
+            "stage": PRECHECK_MANUAL,
+            "submission_doc": {
+                "manifest": _manifest_doc(adapter_id="adapter:legacy-source"),
+                "source_metadata": {},
+            },
+        }
+
+    monkeypatch.setattr(api, "select_one", legacy_row)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        await api.recheck_research_lab_source_adapter_provenance(
+            "source_add_submission:" + "c" * 16,
+            authorization="Bearer service-role-test",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "structured SOURCE_ADD fields" in str(exc_info.value.detail)

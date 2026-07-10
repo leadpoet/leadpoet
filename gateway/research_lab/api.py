@@ -66,6 +66,7 @@ from .models import (
     ResearchLabScoreBundleResponse,
     ResearchLabSourceAdapterSubmissionRequest,
     ResearchLabSourceAdapterSubmissionResponse,
+    ResearchLabSourceAdapterRecheckResponse,
     ResearchLabSourceAdapterProvisionRequest,
     ResearchLabSourceAdapterProvisionResponse,
     ResearchLabTicketCreateRequest,
@@ -115,7 +116,12 @@ from .store import (
 from gateway.research_lab.provider_evidence_proxy import ProviderRegistryEntry, validate_provider_registry_entries
 from research_lab.probe_catalog import ProviderProbeEndpoint, validate_probe_catalog
 from research_lab.improvement_engine.config import ImprovementEngineConfig
-from research_lab.source_add_execution import apply_provenance_precheck_result, intake_source_add_submission
+from research_lab.source_add import SourceAddAdapterManifest
+from research_lab.source_add_execution import (
+    SourceAddSubmissionRecord,
+    apply_provenance_precheck_result,
+    intake_source_add_submission,
+)
 from research_lab.source_add_identity import source_identity_hash_from_metadata
 from research_lab.source_add_rewards import create_leg1_reward
 from research_lab.improvement_engine.fix_generator import sanitized_miner_opportunity
@@ -552,6 +558,140 @@ def _require_source_add_admin(authorization: str) -> None:
         presented = presented.split(" ", 1)[1].strip()
     if not presented or not secrets.compare_digest(presented, expected):
         raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def _source_add_record_from_current_row(row: Mapping[str, Any]) -> tuple[SourceAddSubmissionRecord, dict[str, Any]]:
+    doc = row.get("submission_doc") if isinstance(row.get("submission_doc"), Mapping) else {}
+    manifest_doc = doc.get("manifest") if isinstance(doc.get("manifest"), Mapping) else {}
+    source_metadata = doc.get("source_metadata") if isinstance(doc.get("source_metadata"), Mapping) else {}
+    if not manifest_doc:
+        raise HTTPException(status_code=400, detail="submission manifest is incomplete")
+    required_text = ("api_base_url", "documentation_url", "auth_type", "rate_limit_notes")
+    if any(not str(source_metadata.get(field) or "").strip() for field in required_text) or not isinstance(
+        source_metadata.get("endpoint_examples"), list
+    ) or not source_metadata.get("endpoint_examples"):
+        raise HTTPException(
+            status_code=400,
+            detail="submission metadata is incomplete; the miner must submit the structured SOURCE_ADD fields",
+        )
+    try:
+        manifest = SourceAddAdapterManifest.from_mapping(manifest_doc)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="submission manifest is invalid") from exc
+    stage = str(row.get("stage") or doc.get("stage") or "")
+    history = tuple(str(item) for item in (doc.get("stage_history") or []) if str(item or ""))
+    if not history:
+        history = (stage,) if stage else ()
+    elif stage and history[-1] != stage:
+        history = history + (stage,)
+    measured_value = doc.get("measured_trial_yield")
+    measured_trial_yield = float(measured_value) if isinstance(measured_value, (int, float)) else -1.0
+    record = SourceAddSubmissionRecord(
+        submission_id=str(row.get("submission_id") or doc.get("submission_id") or ""),
+        adapter_id=str(row.get("adapter_id") or doc.get("adapter_id") or manifest.adapter_id),
+        miner_hotkey=str(row.get("miner_hotkey") or doc.get("miner_hotkey") or ""),
+        manifest=manifest,
+        stage=stage,
+        stage_history=history,
+        credential_envelope=dict(doc.get("credential_envelope") or {}),
+        source_brief=str(doc.get("source_brief") or ""),
+        submitted_at=str(doc.get("submitted_at") or ""),
+        rejection_reasons=tuple(str(item) for item in (doc.get("rejection_reasons") or [])),
+        rejection_stage=str(doc.get("rejection_stage") or ""),
+        trial_diagnostics=dict(doc.get("trial_diagnostics") or {}),
+        measured_trial_yield=measured_trial_yield,
+        acceptance_human_gate_passed=bool(doc.get("acceptance_human_gate_passed")),
+        precheck_status=str(row.get("precheck_status") or doc.get("precheck_status") or ""),
+        precheck_doc=dict(row.get("precheck_doc") or doc.get("precheck_doc") or {}),
+        source_identity_hash=str(row.get("source_identity_hash") or doc.get("source_identity_hash") or ""),
+    )
+    if not record.submission_id or not record.adapter_id or not record.miner_hotkey:
+        raise HTTPException(status_code=400, detail="submission ownership fields are incomplete")
+    return record, dict(source_metadata)
+
+
+@router.post(
+    "/admin/source-adapters/{submission_id}/recheck-provenance",
+    response_model=ResearchLabSourceAdapterRecheckResponse,
+)
+async def recheck_research_lab_source_adapter_provenance(
+    submission_id: str,
+    authorization: str = Header(default=""),
+):
+    """Owner-only rerun for a complete submission left in manual review."""
+
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
+    _require_enabled(config.source_add_enabled, "Research Lab SOURCE_ADD submissions are disabled")
+    _require_source_add_admin(authorization)
+
+    row = await select_one(
+        "research_lab_source_add_submission_current",
+        columns=(
+            "submission_id,adapter_id,miner_hotkey,stage,submission_doc,precheck_status,"
+            "precheck_doc,source_identity_hash"
+        ),
+        filters=(("submission_id", submission_id),),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="submission not found")
+    stage = str(row.get("stage") or "")
+    if stage not in {PRECHECK_MANUAL, PRECHECK_PASSED}:
+        raise HTTPException(status_code=400, detail="only manual-review or passed submissions can be rechecked")
+
+    record, source_metadata = _source_add_record_from_current_row(row)
+    if stage == PRECHECK_PASSED:
+        precheck_status = PRECHECK_PASSED
+        reasons = list((record.precheck_doc or {}).get("reasons") or [])
+    else:
+        try:
+            precheck = await asyncio.to_thread(
+                evaluate_source_add_provenance,
+                source_name=record.manifest.source_name,
+                source_kind=record.manifest.source_kind,
+                declared_base_domains=record.manifest.declared_base_domains,
+                source_metadata=source_metadata,
+            )
+        except Exception as exc:
+            logger.warning("SOURCE_ADD_PROVENANCE_RECHECK_ERROR type=%s", type(exc).__name__)
+            precheck = SourceAddProvenanceResult(
+                PRECHECK_MANUAL,
+                ("precheck_internal_error",),
+                {"error_type": type(exc).__name__},
+            )
+        record = apply_provenance_precheck_result(
+            record,
+            precheck_status=precheck.precheck_status,
+            precheck_doc=precheck.to_record_doc(),
+        )
+        record_doc = record.to_dict()
+        record_doc["source_metadata"] = source_metadata
+        try:
+            await persist_source_add_submission(record_doc)
+        except Exception as exc:
+            _raise_storage_error(exc)
+        precheck_status = precheck.precheck_status
+        reasons = list(precheck.reasons)
+
+    try:
+        reward = await _maybe_create_source_add_leg1_reward_for_precheck(
+            record=record,
+            precheck_status=precheck_status,
+            config=config,
+        )
+    except Exception as exc:
+        _raise_storage_error(exc)
+    return ResearchLabSourceAdapterRecheckResponse(
+        submission_id=record.submission_id,
+        adapter_id=record.adapter_id,
+        stage=record.stage,
+        precheck_status=precheck_status,
+        precheck_reasons=reasons,
+        leg1_reward_status=str(reward.get("source_add_leg1_reward_status") or "unknown"),
+        reward_ref=str(reward.get("reward_ref") or "") or None,
+        start_epoch=int(reward["start_epoch"]) if reward.get("start_epoch") is not None else None,
+    )
 
 
 @router.post(

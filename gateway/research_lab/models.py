@@ -133,6 +133,17 @@ class ResearchLabSourceAdapterSubmissionResponse(BaseModel):
     precheck_reasons: list[str] = Field(default_factory=list)
 
 
+class ResearchLabSourceAdapterRecheckResponse(BaseModel):
+    submission_id: str
+    adapter_id: str
+    stage: str
+    precheck_status: str
+    precheck_reasons: list[str] = Field(default_factory=list)
+    leg1_reward_status: str
+    reward_ref: Optional[str] = None
+    start_epoch: Optional[int] = None
+
+
 class ResearchLabSourceAdapterProvisionRequest(BaseModel):
     registry_provider_id: str = Field(min_length=2, max_length=80)
     provision_status: str = Field(default="provisioned_autoresearch_eligible", max_length=80)

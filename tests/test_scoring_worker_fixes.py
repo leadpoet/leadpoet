@@ -9,6 +9,7 @@ scoping), and the same-day baseline replacement guard.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -21,37 +22,88 @@ from gateway.research_lab.promotion import (
 )
 
 
-def test_serving_model_version_event_doc_strips_dispatch_forbidden_fields():
-    doc = sw._serving_model_version_event_doc(
-        {
-            "private_model_version_id": "private_model_version:abc",
-            "version_hash": "sha256:" + "1" * 64,
-            "model_artifact_hash": "sha256:" + "2" * 64,
-            "private_model_manifest_hash": "sha256:" + "3" * 64,
-            "candidate_id": "candidate:" + "4" * 64,
-            "score_bundle_id": "score_bundle:" + "5" * 64,
-            "score_bundle_hash": "sha256:" + "6" * 64,
-            "evaluation_epoch": "23852",
-            "image_digest": "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:" + "7" * 64,
-            "private_model_manifest_doc": {"raw": "do-not-store"},
-            "candidate_patch_manifest": {"raw": "do-not-store"},
-            "proxy_url": "http://user:pass@example.test:8080",
-        }
-    )
+EVENT_DOC_BANNED_RE = re.compile(
+    r"(sk-or-|openrouter_api_key|raw_openrouter_key|raw_secret|service_role|"
+    r"private_repo|judge_prompt|hidden_icp|icp_plaintext|\.dkr\.ecr\.|"
+    r"image_digest|private_model_manifest_doc|candidate_patch_manifest|"
+    r"proxy[_-]?url|://[^/]+:[^/@]+@)",
+    re.IGNORECASE,
+)
 
-    dumped = json.dumps(doc, sort_keys=True)
-    assert doc["version_hash"] == "sha256:" + "1" * 64
-    assert doc["model_artifact_hash"] == "sha256:" + "2" * 64
-    assert doc["serving_model_manifest_hash"] == "sha256:" + "3" * 64
-    assert doc["serving_model_version_id"] == "private_model_version:abc"
-    assert doc["evaluation_epoch"] == 23852
-    assert "image_digest" not in dumped
-    assert ".dkr.ecr." not in dumped
-    assert "private_model_version_id" not in dumped
-    assert "private_model_manifest_hash" not in dumped
-    assert "private_model_manifest_doc" not in dumped
-    assert "candidate_patch_manifest" not in dumped
-    assert "proxy_url" not in dumped
+
+def test_scored_event_serving_model_version_matches_db_leak_guard_contract():
+    score_bundle = {
+        "score_bundle_hash": "sha256:" + "6" * 64,
+        "serving_model_version": {
+            "schema_version": "research_lab_serving_model_version.v1",
+            "result_role": "candidate_scoring",
+            "run_id": "run-versioned",
+            "ticket_id": "ticket-private",
+            "candidate_id": "candidate:" + "4" * 64,
+            "private_model_version_id": "private_model_version:abc",
+            "evaluation_epoch": 23852,
+            "benchmark_date": "2026-07-09",
+            "benchmark_attempt": 1,
+            "run_scope": "candidate_scoring",
+            "icp_set_hash": "sha256:" + "5" * 64,
+            "scoring_code_version": "qualification-company-scorer:v1",
+            "evaluator_version": "leadpoet-gateway-private-scoring:v1",
+            "parent_model": {
+                "model_artifact_hash": "sha256:" + "1" * 64,
+                "manifest_hash": "sha256:" + "2" * 64,
+                "git_commit_sha": "abcdef123456",
+                "manifest_uri": "s3://private-bucket/manifest.json",
+                "image_digest": (
+                    "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:"
+                    + "7" * 64
+                ),
+            },
+            "candidate_model": {
+                "manifest_uri": "s3://private-bucket/candidate.json",
+                "image_digest": (
+                    "123456789012.dkr.ecr.us-east-1.amazonaws.com/candidate@sha256:"
+                    + "8" * 64
+                ),
+            },
+            "version_stamp_hash": "sha256:" + "3" * 64,
+        },
+    }
+    event_doc = {
+        "score_bundle_hash": score_bundle["score_bundle_hash"],
+        "serving_model_version": sw._event_serving_model_version(score_bundle),
+    }
+
+    dumped = json.dumps(event_doc, sort_keys=True)
+    assert EVENT_DOC_BANNED_RE.search(dumped) is None
+    assert set(event_doc["serving_model_version"]) == {
+        "schema_version",
+        "result_role",
+        "run_id",
+        "evaluation_epoch",
+        "benchmark_date",
+        "benchmark_attempt",
+        "run_scope",
+        "icp_set_hash",
+        "scoring_code_version",
+        "evaluator_version",
+        "model_artifact_hash",
+        "manifest_hash",
+        "git_commit_sha",
+        "version_stamp_hash",
+        "public_stamp_hash",
+    }
+    assert event_doc["serving_model_version"]["model_artifact_hash"] == "sha256:" + "1" * 64
+    assert event_doc["serving_model_version"]["manifest_hash"] == "sha256:" + "2" * 64
+    assert event_doc["serving_model_version"]["git_commit_sha"] == "abcdef123456"
+    assert event_doc["serving_model_version"]["version_stamp_hash"] == "sha256:" + "3" * 64
+    assert event_doc["serving_model_version"]["public_stamp_hash"].startswith("sha256:")
+
+
+def test_event_serving_model_version_handles_empty_score_bundle():
+    doc = sw._event_serving_model_version(None)
+
+    assert doc["public_stamp_hash"].startswith("sha256:")
+    assert EVENT_DOC_BANNED_RE.search(json.dumps(doc, sort_keys=True)) is None
 
 
 def _provider_cost_trace_entry(seq: int = 1) -> dict:

@@ -158,6 +158,77 @@ _POSTGREST_TIMESTAMP_RE = re.compile(
 )
 
 
+@functools.lru_cache(maxsize=1)
+def _scoring_worker_source_hash() -> str:
+    """Hash the executing worker source for controlled publication retries."""
+
+    try:
+        source = Path(__file__).read_bytes()
+    except OSError as exc:
+        logger.warning(
+            "research_lab_scoring_worker_source_hash_fallback path=%s error=%s",
+            str(__file__),
+            _short_error(exc),
+        )
+        return sha256_json({"module": __name__, "source_available": False})
+    return "sha256:" + hashlib.sha256(source).hexdigest()
+
+
+def _baseline_publication_retry_token_hash() -> str:
+    token = str(os.getenv("RESEARCH_LAB_BASELINE_PUBLICATION_RETRY_TOKEN", "") or "").strip()
+    return sha256_json({"retry_token": token}) if token else ""
+
+
+def _latest_terminal_baseline_publication_failure(
+    rows: list[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    """Return a terminal publication failure only when it is the latest event."""
+
+    if not rows:
+        return None
+    latest = rows[0]
+    doc = latest.get("event_doc") if isinstance(latest.get("event_doc"), Mapping) else {}
+    if str(latest.get("dispatch_status") or "") != "failed":
+        return None
+    if str(doc.get("failure_phase") or "") != "publication":
+        return None
+    if not bool(doc.get("terminal_no_automatic_retry")):
+        return None
+    return latest
+
+
+def _baseline_publication_retry_authorization(failure_row: Mapping[str, Any]) -> str:
+    """Authorize one retry only after a worker change or a new operator token."""
+
+    doc = failure_row.get("event_doc") if isinstance(failure_row.get("event_doc"), Mapping) else {}
+    failed_source_hash = str(doc.get("scoring_worker_source_hash") or "")
+    current_source_hash = _scoring_worker_source_hash()
+    if failed_source_hash and failed_source_hash != current_source_hash:
+        return "scoring_worker_source_changed"
+    failed_token_hash = str(doc.get("publication_retry_token_hash") or "")
+    current_token_hash = _baseline_publication_retry_token_hash()
+    if current_token_hash and current_token_hash != failed_token_hash:
+        return "operator_retry_token_changed"
+    return ""
+
+
+def _baseline_publication_retry_decision(
+    rows: list[Mapping[str, Any]],
+    *,
+    scope_key: str,
+    in_process_failures: set[str],
+) -> tuple[bool, str]:
+    """Return (blocked, authorization_reason) for the next baseline attempt."""
+
+    if scope_key in in_process_failures:
+        return True, ""
+    failure = _latest_terminal_baseline_publication_failure(rows)
+    if failure is None:
+        return False, ""
+    authorization = _baseline_publication_retry_authorization(failure)
+    return (not bool(authorization)), authorization
+
+
 def _artifact_serving_version_doc(artifact: PrivateModelArtifactManifest) -> dict[str, Any]:
     return {
         "model_artifact_hash": artifact.model_artifact_hash,
@@ -2640,6 +2711,9 @@ class ResearchLabGatewayScoringWorker:
         self._worker_started_at = datetime.now(timezone.utc)
         self._last_private_source_push_reconcile_at = 0.0
         self._stale_parent_overdue_warning_keys: set[str] = set()
+        self._active_baseline_context: dict[str, Any] | None = None
+        self._baseline_publication_failure_logged_key: str | None = None
+        self._baseline_publication_failures_in_process: set[str] = set()
 
     async def run_forever(self) -> None:
         # trajectoryimprovements.md P5: one structured capture health block at
@@ -2742,7 +2816,7 @@ class ResearchLabGatewayScoringWorker:
 
         baseline_result = None
         if self.config.private_baseline_rebenchmark_enabled and self._is_private_baseline_owner():
-            baseline_result = await self._maybe_run_private_baseline()
+            baseline_result = await self._run_private_baseline_contained()
         elif self.config.private_baseline_rebenchmark_enabled and not self._baseline_skip_logged:
             logger.info(
                 format_worker_block(
@@ -6334,6 +6408,85 @@ class ResearchLabGatewayScoringWorker:
                 progress=progress,
             )
 
+    async def _run_private_baseline_contained(self) -> dict[str, Any] | None:
+        """Contain failures that occur after the baseline computation guard."""
+
+        try:
+            return await self._maybe_run_private_baseline()
+        except Exception as exc:  # noqa: BLE001 - final publication must be terminal
+            if self._active_baseline_context is None:
+                raise
+            return await self._contain_private_baseline_publication_failure(exc)
+        finally:
+            self._active_baseline_context = None
+
+    async def _contain_private_baseline_publication_failure(self, exc: BaseException) -> dict[str, Any]:
+        context = dict(self._active_baseline_context or {})
+        today = str(context.get("benchmark_date") or "")
+        window_hash = str(context.get("rolling_window_hash") or "")
+        manifest_hash = str(context.get("private_model_manifest_hash") or "")
+        benchmark_attempt = int(context.get("benchmark_attempt") or 0)
+        scope_key = f"{today}:{window_hash}:{manifest_hash}"
+        self._baseline_publication_failures_in_process.add(scope_key)
+        event_doc = {
+            "benchmark_date": today,
+            "benchmark_attempt": benchmark_attempt,
+            "selected_icp_count": int(context.get("selected_icp_count") or 0),
+            "private_model_manifest_hash": manifest_hash,
+            "failure_phase": "publication",
+            "failure_stage": str(context.get("publication_stage") or "unknown"),
+            "terminal_no_automatic_retry": True,
+            "scoring_worker_source_hash": _scoring_worker_source_hash(),
+            "publication_retry_token_hash": _baseline_publication_retry_token_hash(),
+            "error_diagnostics": _event_error_diagnostics(exc),
+            "baseline_health": (
+                dict(context["baseline_health"])
+                if isinstance(context.get("baseline_health"), Mapping)
+                else None
+            ),
+            "elapsed_seconds": round(time.time() - float(context.get("started_at") or time.time()), 3),
+        }
+        try:
+            await create_scoring_dispatch_event(
+                dispatch_type="private_baseline_rebenchmark",
+                dispatch_status="failed",
+                worker_ref=self.worker_ref,
+                proxy_ref_hash=self.proxy_ref_hash,
+                rolling_window_hash=window_hash or None,
+                benchmark_bundle_id=str(context.get("benchmark_bundle_id") or "") or None,
+                event_doc=event_doc,
+            )
+        except Exception as dispatch_exc:  # noqa: BLE001 - preserve the in-process terminal latch
+            logger.exception(
+                "research_lab_baseline_publication_failed_dispatch_write_failed "
+                "benchmark_date=%s attempt=%s error=%s",
+                today,
+                benchmark_attempt,
+                _short_error(dispatch_exc),
+            )
+        logger.exception(
+            format_worker_block(
+                "RESEARCH LAB PRIVATE BASELINE PUBLICATION FAILED TERMINALLY",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Benchmark date", today),
+                    ("Rolling window", compact_ref(window_hash)),
+                    ("Attempt", benchmark_attempt),
+                    ("Publication stage", event_doc["failure_stage"]),
+                    ("Action", "automatic reruns blocked until worker source or retry token changes"),
+                    ("Error", _short_error(exc)),
+                ),
+            )
+        )
+        return {
+            "status": "baseline_publication_failed_terminal",
+            "benchmark_date": today,
+            "rolling_window_hash": window_hash,
+            "benchmark_attempt": benchmark_attempt,
+            "failure_stage": event_doc["failure_stage"],
+            "error": _short_error(exc),
+        }
+
     async def _maybe_run_private_baseline(self) -> dict[str, Any] | None:
         now = datetime.now(timezone.utc)
         today = now.date().isoformat()
@@ -6517,9 +6670,65 @@ class ResearchLabGatewayScoringWorker:
                 "rolling_window_hash": str(same_day_reference.get("rolling_window_hash") or ""),
                 "private_model_manifest_hash": artifact.manifest_hash,
             }
+        try:
+            dispatch_history = await self._baseline_dispatch_history(
+                today=today,
+                window_hash=window.window_hash,
+                manifest_hash=artifact.manifest_hash,
+            )
+        except Exception as exc:  # noqa: BLE001 - fail closed before provider spend
+            logger.warning(
+                "research_lab_baseline_dispatch_history_unavailable "
+                "benchmark_date=%s window=%s error=%s",
+                today,
+                compact_ref(window.window_hash),
+                _short_error(exc),
+            )
+            return {
+                "status": "baseline_dispatch_history_unavailable",
+                "benchmark_date": today,
+                "rolling_window_hash": window.window_hash,
+                "error": _short_error(exc),
+            }
+        publication_scope_key = f"{today}:{window.window_hash}:{artifact.manifest_hash}"
+        publication_retry_blocked, retry_authorization = _baseline_publication_retry_decision(
+            dispatch_history,
+            scope_key=publication_scope_key,
+            in_process_failures=self._baseline_publication_failures_in_process,
+        )
+        if publication_retry_blocked:
+            if self._baseline_publication_failure_logged_key != publication_scope_key:
+                logger.error(
+                    format_worker_block(
+                        "RESEARCH LAB PRIVATE BASELINE PUBLICATION RETRY BLOCKED",
+                        (
+                            ("Worker", self.worker_ref),
+                            ("Benchmark date", today),
+                            ("Rolling window", compact_ref(window.window_hash)),
+                            ("Private model", compact_ref(artifact.model_artifact_hash)),
+                            ("Action", "waiting for changed worker source or a new publication retry token"),
+                        ),
+                    )
+                )
+                self._baseline_publication_failure_logged_key = publication_scope_key
+            return {
+                "status": "baseline_publication_failed_terminal",
+                "benchmark_date": today,
+                "rolling_window_hash": window.window_hash,
+                "private_model_manifest_hash": artifact.manifest_hash,
+                "automatic_retry_blocked": True,
+            }
+        if retry_authorization:
+            logger.warning(
+                "research_lab_baseline_publication_retry_authorized "
+                "benchmark_date=%s window=%s reason=%s",
+                today,
+                compact_ref(window.window_hash),
+                retry_authorization,
+            )
         if _env_flag("RESEARCH_LAB_BASELINE_ANY_WORKER") and await self._baseline_leased_by_other_worker(today):
             return {"status": "baseline_leased_elsewhere", "benchmark_date": today}
-        benchmark_attempt = _next_benchmark_attempt(existing)
+        benchmark_attempt = _next_benchmark_attempt([*existing, *dispatch_history])
         await create_rolling_icp_window(window)
         logger.info(
             format_worker_block(
@@ -6642,6 +6851,15 @@ class ResearchLabGatewayScoringWorker:
                     rows=baseline_progress_rows,
                 )
 
+        self._active_baseline_context = {
+            "benchmark_date": today,
+            "benchmark_attempt": benchmark_attempt,
+            "rolling_window_hash": window.window_hash,
+            "private_model_manifest_hash": artifact.manifest_hash,
+            "selected_icp_count": len(window.item_refs),
+            "started_at": start,
+            "publication_stage": "computation",
+        }
         try:
             lease_event = await create_scoring_dispatch_event(
                 dispatch_type="private_baseline_rebenchmark",
@@ -6653,6 +6871,9 @@ class ResearchLabGatewayScoringWorker:
                     "benchmark_date": today,
                     "benchmark_attempt": benchmark_attempt,
                     "selected_icp_count": len(window.item_refs),
+                    "private_model_manifest_hash": artifact.manifest_hash,
+                    "scoring_worker_source_hash": _scoring_worker_source_hash(),
+                    "publication_retry_token_hash": _baseline_publication_retry_token_hash(),
                 },
             )
             # Post-write lease confirm (claim-guard pattern, like
@@ -6905,6 +7126,8 @@ class ResearchLabGatewayScoringWorker:
             )
             if day_jump_points is not None:
                 baseline_health["day_jump_points"] = round(day_jump_points, 4)
+            if self._active_baseline_context is not None:
+                self._active_baseline_context["baseline_health"] = dict(baseline_health)
             max_day_jump = _baseline_max_day_jump_points()
             if (
                 max_day_jump is not None
@@ -6929,6 +7152,11 @@ class ResearchLabGatewayScoringWorker:
                     "benchmark_date": today,
                     "benchmark_attempt": benchmark_attempt,
                     "selected_icp_count": len(window.item_refs),
+                    "private_model_manifest_hash": artifact.manifest_hash,
+                    "failure_phase": "computation",
+                    "terminal_no_automatic_retry": False,
+                    "scoring_worker_source_hash": _scoring_worker_source_hash(),
+                    "publication_retry_token_hash": _baseline_publication_retry_token_hash(),
                     "error_diagnostics": _event_error_diagnostics(exc),
                     "baseline_health": (
                         dict(exc.baseline_health)
@@ -6957,6 +7185,8 @@ class ResearchLabGatewayScoringWorker:
                 "rolling_window_hash": window.window_hash,
                 "error": str(exc)[:300],
             }
+        if self._active_baseline_context is not None:
+            self._active_baseline_context["publication_stage"] = "pre_record_conflict_check"
         pre_record_conflict = await self._same_day_reference_recorded_while_running(
             today=today,
             window_hash=window.window_hash,
@@ -6980,6 +7210,8 @@ class ResearchLabGatewayScoringWorker:
                 "rolling_window_hash": window.window_hash,
                 "private_model_manifest_hash": artifact.manifest_hash,
             }
+        if self._active_baseline_context is not None:
+            self._active_baseline_context["publication_stage"] = "score_summary_build"
         visibility_split = build_benchmark_visibility_split(
             rolling_window_hash=window.window_hash,
             benchmark_items=window.benchmark_items,
@@ -7024,12 +7256,16 @@ class ResearchLabGatewayScoringWorker:
             "elapsed_seconds": round(time.time() - start, 3),
         }
         bundle_hash = canonical_hash(score_summary_doc)
+        if self._active_baseline_context is not None:
+            self._active_baseline_context["publication_stage"] = "kms_signature"
         signature_ref = await asyncio.to_thread(
             sign_digest_with_kms,
             key_id=self.config.score_bundle_kms_key_id,
             digest_hash=bundle_hash,
             signature_uri_prefix=self.config.score_bundle_signature_uri_prefix,
         )
+        if self._active_baseline_context is not None:
+            self._active_baseline_context["publication_stage"] = "private_bundle_insert"
         bundle, _event = await create_private_model_benchmark_bundle(
             benchmark_date=today,
             private_model_artifact_hash=artifact.model_artifact_hash,
@@ -7044,6 +7280,9 @@ class ResearchLabGatewayScoringWorker:
             signature_ref=signature_ref,
             score_summary_doc=score_summary_doc,
         )
+        if self._active_baseline_context is not None:
+            self._active_baseline_context["benchmark_bundle_id"] = str(bundle["benchmark_bundle_id"])
+            self._active_baseline_context["publication_stage"] = "completed_dispatch_insert"
         await create_scoring_dispatch_event(
             dispatch_type="private_baseline_rebenchmark",
             dispatch_status="completed",
@@ -7053,12 +7292,18 @@ class ResearchLabGatewayScoringWorker:
             benchmark_bundle_id=str(bundle["benchmark_bundle_id"]),
             event_doc={
                 "benchmark_date": today,
+                "benchmark_attempt": benchmark_attempt,
                 "elapsed_seconds": round(time.time() - start, 3),
                 "selected_icp_count": len(window.item_refs),
                 "public_icp_count": int(visibility_split.get("public_count") or 0),
                 "private_holdout_icp_count": int(visibility_split.get("private_count") or 0),
+                "private_model_manifest_hash": artifact.manifest_hash,
+                "scoring_worker_source_hash": _scoring_worker_source_hash(),
+                "publication_retry_token_hash": _baseline_publication_retry_token_hash(),
             },
         )
+        if self._active_baseline_context is not None:
+            self._active_baseline_context["publication_stage"] = "public_report_build"
         public_report_doc = build_public_benchmark_report(
             benchmark_date=today,
             rolling_window_hash=window.window_hash,
@@ -7078,6 +7323,8 @@ class ResearchLabGatewayScoringWorker:
         public_report_doc["report_public_hash"] = sha256_json(
             {key: value for key, value in public_report_doc.items() if key != "report_public_hash"}
         )
+        if self._active_baseline_context is not None:
+            self._active_baseline_context["publication_stage"] = "public_report_insert"
         public_report, _report_event = await create_public_benchmark_report(
             benchmark_date=today,
             benchmark_bundle_id=str(bundle["benchmark_bundle_id"]),
@@ -7089,7 +7336,11 @@ class ResearchLabGatewayScoringWorker:
             benchmark_quality="passed",
             report_doc=public_report_doc,
         )
+        if self._active_baseline_context is not None:
+            self._active_baseline_context["publication_stage"] = "audit_bundle_write"
         await self._write_audit_bundle(evaluation_epoch)
+        self._baseline_publication_failures_in_process.discard(publication_scope_key)
+        self._baseline_publication_failure_logged_key = None
         logger.info(
             format_worker_block(
                 "RESEARCH LAB PRIVATE BASELINE COMPLETED",
@@ -7886,6 +8137,37 @@ class ResearchLabGatewayScoringWorker:
                 return dict(row)
         return None
 
+    async def _baseline_dispatch_history(
+        self,
+        *,
+        today: str,
+        window_hash: str,
+        manifest_hash: str,
+    ) -> list[dict[str, Any]]:
+        rows = await select_many(
+            "research_lab_scoring_dispatch_events",
+            columns=(
+                "dispatch_event_id,dispatch_status,worker_ref,rolling_window_hash,"
+                "event_doc,created_at"
+            ),
+            filters=(
+                ("dispatch_type", "private_baseline_rebenchmark"),
+                ("rolling_window_hash", window_hash),
+            ),
+            order_by=(("created_at", True),),
+            limit=250,
+        )
+        matching: list[dict[str, Any]] = []
+        for row in rows:
+            doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
+            if str(doc.get("benchmark_date") or "") != today:
+                continue
+            row_manifest_hash = str(doc.get("private_model_manifest_hash") or "")
+            if row_manifest_hash and row_manifest_hash != manifest_hash:
+                continue
+            matching.append(dict(row))
+        return matching
+
     async def _same_day_reference_recorded_while_running(
         self,
         *,
@@ -8600,8 +8882,12 @@ def _average(values: list[float]) -> float:
 def _next_benchmark_attempt(rows: list[Mapping[str, Any]]) -> int:
     attempts: list[int] = []
     for row in rows:
+        value: Any = row.get("benchmark_attempt")
+        if value is None:
+            event_doc = row.get("event_doc") if isinstance(row.get("event_doc"), Mapping) else {}
+            value = event_doc.get("benchmark_attempt")
         try:
-            attempts.append(int(row.get("benchmark_attempt") or 0))
+            attempts.append(int(value or 0))
         except (TypeError, ValueError):
             attempts.append(0)
     return (max(attempts) + 1) if attempts else 0

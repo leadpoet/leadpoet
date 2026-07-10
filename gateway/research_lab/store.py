@@ -114,6 +114,7 @@ async def persist_source_add_submission(record_doc: dict[str, Any]) -> None:
             "submission_doc": record_doc if seq == last_seq else {},
             "precheck_status": str(record_doc.get("precheck_status") or "") if seq == last_seq else "",
             "precheck_doc": dict(precheck_doc) if seq == last_seq else {},
+            "source_identity_hash": str(record_doc.get("source_identity_hash") or "") if seq == last_seq else "",
         }
         try:
             await insert_row("research_lab_source_add_submissions", row)

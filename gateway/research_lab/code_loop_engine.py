@@ -1018,6 +1018,21 @@ class CodeEditLoopEngine:
         if probes_enabled:
             try:
                 probe_catalog = load_probe_catalog()
+                try:
+                    from gateway.research_lab.source_add_catalog import (
+                        load_provisioned_source_rows_sync,
+                        probe_endpoints_from_provisioned_rows,
+                    )
+
+                    provisioned_probes = await asyncio.to_thread(
+                        lambda: probe_endpoints_from_provisioned_rows(load_provisioned_source_rows_sync())
+                    )
+                    existing_probe_ids = {entry.endpoint_id for entry in probe_catalog}
+                    probe_catalog.extend(
+                        entry for entry in provisioned_probes if entry.endpoint_id not in existing_probe_ids
+                    )
+                except Exception as exc:
+                    logger.warning("research_lab_source_add_probe_catalog_extend_failed error=%s", str(exc)[:200])
             except Exception as exc:
                 logger.warning("research_lab_probe_catalog_load_failed error=%s", str(exc)[:200])
                 probes_enabled = False

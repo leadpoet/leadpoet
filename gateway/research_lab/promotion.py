@@ -31,6 +31,7 @@ from gateway.research_lab.store import (
     create_private_repo_commit_event,
     create_public_benchmark_report,
     create_scoring_dispatch_event,
+    insert_row,
     select_many,
     select_one,
 )
@@ -2773,59 +2774,82 @@ class ResearchLabPromotionController:
                 "source_add_reward_status": "skipped_champion_reward_not_active",
                 "champion_reward_status": status,
             }
-        attribution_docs = _source_add_attribution_docs(score_bundle)
-        if not attribution_docs:
-            return {"source_add_reward_status": "skipped_no_attribution"}
         candidate_id = str(candidate["candidate_id"])
         score_bundle_id = str(score_bundle_row.get("score_bundle_id") or "")
-        routed_registry_ids = sorted(
-            {
-                item
-                for doc in attribution_docs
-                for item in _source_add_string_seq(
-                    doc,
-                    "routed_registry_ids",
-                    "merged_diff_routed_registry_ids",
-                    "registry_provider_ids",
-                    "provider_registry_ids",
-                    "registry_provider_id",
-                    "provider_registry_id",
-                )
-            }
-        )
-        adapter_ids = sorted(
-            {
-                item
-                for doc in attribution_docs
-                for item in _source_add_string_seq(doc, "adapter_id", "adapter_ids")
-            }
-        )
-        if not routed_registry_ids and not adapter_ids:
-            return {"source_add_reward_status": "blocked", "blockers": ["missing_adapter_or_registry_id"]}
-        filters: tuple[tuple[Any, ...], ...]
-        if routed_registry_ids:
-            filters = (("registry_provider_id", "in", routed_registry_ids),)
-        else:
-            filters = (("adapter_id", "in", adapter_ids),)
         try:
-            catalog_rows = await select_many(
-                "research_lab_source_catalog",
+            provisioned_rows = await select_many(
+                "research_lab_source_add_provisioning_current",
                 columns=(
-                    "catalog_id,adapter_id,miner_ref,registry_provider_id,accepted_at,catalog_doc"
+                    "provision_ref,catalog_id,submission_id,adapter_id,miner_hotkey,source_identity_hash,"
+                    "registry_provider_id,provision_status,provision_doc,credential_envelope,source_name,"
+                    "declared_base_domains,catalog_doc,accepted_at"
                 ),
-                filters=filters,
-                limit=100,
+                filters=(("provision_status", "provisioned_autoresearch_eligible"),),
+                limit=200,
             )
-            if adapter_ids:
-                wanted = set(adapter_ids)
-                catalog_rows = [row for row in catalog_rows if str(row.get("adapter_id") or "") in wanted]
-            if not catalog_rows:
-                return {"source_add_reward_status": "blocked", "blockers": ["accepted_source_not_found"]}
+            if not provisioned_rows:
+                return {"source_add_reward_status": "blocked", "blockers": ["no_provisioned_source_add_sources"]}
+            from gateway.research_lab.source_add_llm_judge import (
+                judge_source_add_implementation,
+                openrouter_key_for_source_add_judge,
+            )
+
+            api_key = openrouter_key_for_source_add_judge()
+            if not api_key:
+                return {"source_add_reward_status": "blocked", "blockers": ["source_add_llm_judge_key_missing"]}
+            verdict = await judge_source_add_implementation(
+                api_key=api_key,
+                candidate=candidate,
+                score_bundle=score_bundle,
+                provisioned_sources=provisioned_rows,
+            )
+            rows_by_adapter = {str(row.get("adapter_id") or ""): row for row in provisioned_rows}
+            rows_by_registry = {str(row.get("registry_provider_id") or ""): row for row in provisioned_rows}
+            matched_row = rows_by_adapter.get(verdict.adapter_id) or rows_by_registry.get(verdict.registry_provider_id)
+            if not verdict.passed or not matched_row:
+                blockers = ["llm_judge_not_helped" if not verdict.passed else "llm_judge_source_not_matched"]
+                reason = "source_add_leg2_reward_blocked"
+                adapter_for_event = verdict.adapter_id or ""
+                if not await _promotion_reason_recorded(
+                    candidate_id=candidate_id,
+                    score_bundle_id=score_bundle_id,
+                    reason=reason,
+                    adapter_id=adapter_for_event,
+                ):
+                    await create_candidate_promotion_event(
+                        candidate_id=candidate_id,
+                        source_score_bundle_id=score_bundle_id,
+                        event_type="promotion_checked",
+                        promotion_status="checked",
+                        improvement_points=improvement_points,
+                        threshold_points=threshold,
+                        worker_ref=self.worker_ref,
+                        event_doc=_db_safe_doc(
+                            {
+                                "reason": reason,
+                                "blockers": blockers,
+                                "llm_verdict": verdict.verdict,
+                                "llm_confidence": verdict.confidence,
+                                "source_used": verdict.source_used,
+                                "adapter_id": verdict.adapter_id,
+                                "registry_provider_id": verdict.registry_provider_id,
+                                "evidence_summary": verdict.evidence_summary,
+                                "reason_codes": list(verdict.reason_codes),
+                            }
+                        ),
+                    )
+                return {
+                    "source_add_reward_status": "blocked",
+                    "created": 0,
+                    "blocked": 1,
+                    "results": [{"status": "blocked", "blockers": blockers, "adapter_id": adapter_for_event}],
+                }
+            adapter_id = str(matched_row.get("adapter_id") or "")
             reward_rows = await select_many(
                 "research_lab_source_add_reward_current",
                 columns="reward_ref,adapter_id,leg,current_reward_status",
-                filters=(("adapter_id", "in", [str(row.get("adapter_id") or "") for row in catalog_rows]),),
-                limit=200,
+                filters=(("adapter_id", adapter_id),),
+                limit=20,
             )
             evaluation_epoch = int(score_bundle.get("evaluation_epoch") or getattr(self.config, "evaluation_epoch", 0) or 0)
             try:
@@ -2841,86 +2865,119 @@ class ResearchLabPromotionController:
                 )
                 current_epoch = evaluation_epoch
             start_epoch = max(int(current_epoch), int(evaluation_epoch)) + 1
-            results: list[dict[str, Any]] = []
-            docs_by_adapter = {
-                adapter_id: doc
-                for doc in attribution_docs
-                for adapter_id in _source_add_string_seq(doc, "adapter_id", "adapter_ids")
-            }
-            docs_by_registry = {
-                registry_id: doc
-                for doc in attribution_docs
-                for registry_id in _source_add_string_seq(
-                    doc,
-                    "routed_registry_ids",
-                    "merged_diff_routed_registry_ids",
-                    "registry_provider_ids",
-                    "provider_registry_ids",
-                    "registry_provider_id",
-                    "provider_registry_id",
-                )
-            }
-            for row in catalog_rows:
-                adapter_id = str(row.get("adapter_id") or "")
-                registry_id = str(row.get("registry_provider_id") or "")
-                if not adapter_id:
-                    continue
-                doc = docs_by_adapter.get(adapter_id) or docs_by_registry.get(registry_id)
-                if not isinstance(doc, Mapping):
-                    continue
-                catalog_registry_ids = [registry_id] if registry_id else []
-                catalog_doc = row.get("catalog_doc") if isinstance(row.get("catalog_doc"), Mapping) else {}
-                catalog_registry_ids.extend(
-                    item
-                    for item in _source_add_string_seq(
-                        catalog_doc,
-                        "registry_provider_ids",
-                        "provider_registry_ids",
-                        "routed_registry_ids",
-                        "registry_provider_id",
-                        "provider_registry_id",
+            from research_lab.source_add_rewards import create_leg2_reward
+
+            leg2 = create_leg2_reward(
+                adapter_id=adapter_id,
+                adapter_owner_miner_ref=str(matched_row.get("miner_hotkey") or ""),
+                start_epoch=start_epoch,
+                trigger_evidence={
+                    **verdict.trigger_evidence(),
+                    "reward_trigger": "source_add_leg2_llm_judge",
+                    "candidate_id": candidate_id,
+                    "score_bundle_id": score_bundle_id,
+                    "catalog_id": str(matched_row.get("catalog_id") or ""),
+                    "provision_ref": str(matched_row.get("provision_ref") or ""),
+                },
+                existing_rewards=reward_rows,
+                alpha_percent=float(getattr(self.config, "source_add_leg2_alpha_percent", 5.0) or 5.0),
+                reward_epochs=int(getattr(self.config, "lab_reward_epochs", 20) or 20),
+            )
+            blockers: list[str] = []
+            if leg2 is None:
+                blockers = ["leg2_already_created"]
+                reward_doc = None
+            else:
+                reward_doc = leg2.to_dict()
+                try:
+                    await insert_row(
+                        "research_lab_source_add_reward_obligations",
+                        {
+                            "reward_ref": leg2.reward_ref,
+                            "adapter_id": leg2.adapter_id,
+                            "catalog_id": str(matched_row.get("catalog_id") or "") or None,
+                            "miner_hotkey": leg2.miner_ref,
+                            "leg": leg2.leg,
+                            "reward_kind": leg2.reward_kind,
+                            "alpha_percent": leg2.alpha_percent,
+                            "reward_epochs": leg2.reward_epochs,
+                            "start_epoch": leg2.start_epoch,
+                            "trigger_evidence_doc": leg2.trigger_evidence or {},
+                            "public_label": leg2.public_label,
+                        },
                     )
-                    if item not in catalog_registry_ids
-                )
-                ablation = _source_add_ablation_from_doc(
-                    doc=doc,
-                    adapter_id=adapter_id,
-                    registry_provider_id=registry_id,
+                    await insert_row(
+                        "research_lab_source_add_reward_events",
+                        {
+                            "reward_ref": leg2.reward_ref,
+                            "seq": 0,
+                            "reward_status": leg2.state,
+                            "reason": "leg2_llm_judge_helped",
+                        },
+                    )
+                except Exception as exc:
+                    if "duplicate" in str(exc).lower() or "unique" in str(exc).lower() or "23505" in str(exc):
+                        blockers = ["leg2_already_created"]
+                        reward_doc = None
+                    else:
+                        raise
+            reason = "source_add_leg2_reward_created" if reward_doc else "source_add_leg2_reward_blocked"
+            if not await _promotion_reason_recorded(
+                candidate_id=candidate_id,
+                score_bundle_id=score_bundle_id,
+                reason=reason,
+                adapter_id=adapter_id,
+            ):
+                await create_candidate_promotion_event(
                     candidate_id=candidate_id,
-                    threshold_points=float(getattr(self.config, "source_add_ablation_threshold_points", 0.5) or 0.5),
-                )
-                reward_doc, blockers = await arm_leg2_for_merge(
-                    adapter_id=adapter_id,
-                    adapter_owner_miner_ref=str(row.get("miner_ref") or ""),
-                    catalog_id=str(row.get("catalog_id") or ""),
-                    catalog_registry_ids=tuple(catalog_registry_ids),
-                    merged=True,
-                    merged_diff_routed_registry_ids=tuple(routed_registry_ids),
-                    merge_cleared_score_bar=True,
-                    shadow_monitor_live=_source_add_bool(doc.get("shadow_monitor_live"), False),
-                    shadow_window_days_elapsed=float(_source_add_float(doc.get("shadow_window_days_elapsed"), 0.0) or 0.0),
-                    shadow_window_survived=_source_add_bool(doc.get("shadow_window_survived"), False),
-                    ablation=ablation,
-                    start_epoch=start_epoch,
-                    accepted_at=str(row.get("accepted_at") or ""),
-                    market_open_at=str(
-                        doc.get("market_open_at")
-                        or catalog_doc.get("market_open_at")
-                        or ""
+                    source_score_bundle_id=score_bundle_id,
+                    event_type="promotion_checked",
+                    promotion_status="checked",
+                    improvement_points=improvement_points,
+                    threshold_points=threshold,
+                    worker_ref=self.worker_ref,
+                    event_doc=_db_safe_doc(
+                        {
+                            "reason": reason,
+                            "adapter_id": adapter_id,
+                            "catalog_id": str(matched_row.get("catalog_id") or ""),
+                            "registry_provider_id": str(matched_row.get("registry_provider_id") or ""),
+                            "reward_ref": str((reward_doc or {}).get("reward_ref") or ""),
+                            "blockers": blockers,
+                            "llm_verdict": verdict.verdict,
+                            "llm_confidence": verdict.confidence,
+                            "source_used": verdict.source_used,
+                            "evidence_summary": verdict.evidence_summary,
+                            "reason_codes": list(verdict.reason_codes),
+                        }
                     ),
-                    existing_rewards=reward_rows,
-                    shadow_window_days_required=float(getattr(self.config, "source_add_shadow_window_days", 7.0) or 7.0),
-                    expiry_months=int(getattr(self.config, "source_add_leg2_expiry_months", 6) or 6),
-                    alpha_percent=float(getattr(self.config, "source_add_leg2_alpha_percent", 5.0) or 5.0),
-                    reward_epochs=int(getattr(self.config, "lab_reward_epochs", 20) or 20),
-                    persist=True,
                 )
-                reason = "source_add_leg2_reward_created" if reward_doc else "source_add_leg2_reward_blocked"
+            result = {
+                "adapter_id": adapter_id,
+                "status": "created" if reward_doc else "blocked",
+                "reward_ref": str((reward_doc or {}).get("reward_ref") or ""),
+                "blockers": blockers,
+            }
+            return {
+                "source_add_reward_status": "created" if reward_doc else "blocked",
+                "created": 1 if reward_doc else 0,
+                "blocked": 0 if reward_doc else 1,
+                "results": [result],
+            }
+        except Exception as exc:  # noqa: BLE001 - source reward failure must not block promotion
+            error_hash = canonical_hash({"error": str(exc), "candidate_id": candidate_id})[:24]
+            logger.warning(
+                "research_lab_source_add_leg2_reward_failed candidate=%s score_bundle=%s error=%s",
+                _short_ref(candidate_id),
+                _short_ref(score_bundle_id),
+                _safe_text(str(exc))[:240],
+            )
+            try:
                 if not await _promotion_reason_recorded(
                     candidate_id=candidate_id,
                     score_bundle_id=score_bundle_id,
-                    reason=reason,
-                    adapter_id=adapter_id,
+                    reason="source_add_leg2_reward_failed",
+                    adapter_id="",
                 ):
                     await create_candidate_promotion_event(
                         candidate_id=candidate_id,
@@ -2932,47 +2989,18 @@ class ResearchLabPromotionController:
                         worker_ref=self.worker_ref,
                         event_doc=_db_safe_doc(
                             {
-                                "reason": reason,
-                                "adapter_id": adapter_id,
-                                "catalog_id": str(row.get("catalog_id") or ""),
-                                "routed_registry_ids": sorted(set(routed_registry_ids) & set(catalog_registry_ids)),
-                                "reward_ref": str((reward_doc or {}).get("reward_ref") or ""),
-                                "blockers": blockers,
-                                "ablation_delta_points": (
-                                    reward_doc.get("trigger_evidence", {}).get("ablation_delta_points")
-                                    if isinstance(reward_doc, Mapping)
-                                    else None
-                                ),
+                                "reason": "source_add_leg2_reward_failed",
+                                "error_class": type(exc).__name__,
+                                "error_hash": error_hash,
                             }
                         ),
                     )
-                results.append(
-                    {
-                        "adapter_id": adapter_id,
-                        "status": "created" if reward_doc else "blocked",
-                        "reward_ref": str((reward_doc or {}).get("reward_ref") or ""),
-                        "blockers": blockers,
-                    }
-                )
-            created = sum(1 for item in results if item.get("status") == "created")
-            blocked = sum(1 for item in results if item.get("status") == "blocked")
-            return {
-                "source_add_reward_status": "created" if created else "blocked",
-                "created": created,
-                "blocked": blocked,
-                "results": results,
-            }
-        except Exception as exc:  # noqa: BLE001 - source reward failure must not block promotion
-            logger.warning(
-                "research_lab_source_add_leg2_reward_failed candidate=%s score_bundle=%s error=%s",
-                _short_ref(candidate_id),
-                _short_ref(score_bundle_id),
-                _safe_text(str(exc))[:240],
-            )
+            except Exception:
+                pass
             return {
                 "source_add_reward_status": "failed",
                 "error_class": type(exc).__name__,
-                "error_hash": canonical_hash({"error": str(exc), "candidate_id": candidate_id})[:24],
+                "error_hash": error_hash,
             }
 
     async def _maybe_finalize_missing_private_source_push(

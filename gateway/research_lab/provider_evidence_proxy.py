@@ -431,7 +431,23 @@ def load_provider_registry(path: str = "") -> list[ProviderRegistryEntry]:
 
     resolved = str(path or os.getenv(REGISTRY_PATH_ENV) or "").strip()
     if not resolved:
-        return seed_provider_registry()
+        entries = seed_provider_registry()
+        try:
+            from gateway.research_lab.source_add_catalog import (
+                load_provisioned_source_rows_sync,
+                provider_registry_entries_from_provisioned_rows,
+            )
+
+            provisioned = provider_registry_entries_from_provisioned_rows(load_provisioned_source_rows_sync())
+            existing = {entry.id for entry in entries}
+            entries.extend(entry for entry in provisioned if entry.id not in existing)
+        except Exception as exc:  # noqa: BLE001 - static registry must remain available
+            logger.warning("source_add_provider_registry_extension_failed error=%s", str(exc)[:200])
+        errors = validate_provider_registry_entries(entries)
+        if errors:
+            logger.warning("source_add_provider_registry_extension_invalid errors=%s", "; ".join(errors[:5]))
+            return seed_provider_registry()
+        return entries
     with open(resolved, "r", encoding="utf-8") as handle:
         doc = json.load(handle)
     raw_entries = doc.get("providers") if isinstance(doc, Mapping) else doc
@@ -475,6 +491,14 @@ def resolve_provider_credential(
         value = (os.getenv(env_name) or "").strip()
         if value:
             return value, env_name
+    try:
+        from gateway.research_lab.source_add_catalog import decrypt_source_add_registry_credential
+
+        credential, source_ref = decrypt_source_add_registry_credential(entry)
+        if credential:
+            return credential, source_ref
+    except Exception as exc:  # noqa: BLE001 - caller handles missing credential
+        logger.warning("source_add_registry_credential_decrypt_failed provider=%s error=%s", entry.id, str(exc)[:200])
     return "", ""
 
 

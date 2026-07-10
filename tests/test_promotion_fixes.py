@@ -29,6 +29,7 @@ from typing import Any, Mapping
 import pytest
 
 import gateway.research_lab.promotion as promotion
+from gateway.research_lab import source_add_llm_judge
 import gateway.research_lab.store as store_module
 from gateway.research_lab.promotion import (
     ActiveManifestHashMismatchError,
@@ -44,6 +45,7 @@ from gateway.research_lab.promotion import (
     sync_active_model_to_repo_head,
 )
 from research_lab.canonical import sha256_json
+from gateway.research_lab.source_add_llm_judge import SourceAddJudgeVerdict
 
 
 @dataclass
@@ -192,6 +194,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
     monkeypatch.setattr(promotion, "create_private_model_benchmark_bundle", fake.create_private_model_benchmark_bundle)
     monkeypatch.setattr(promotion, "create_public_benchmark_report", fake.create_public_benchmark_report)
     monkeypatch.setattr(store_module, "insert_row", fake.insert_row)
+    monkeypatch.setattr(promotion, "insert_row", fake.insert_row)
     monkeypatch.setattr(promotion, "sign_digest_with_kms", lambda **kwargs: "kms-signature:test")
     monkeypatch.delenv(promotion.ALLOW_BOOTSTRAP_REGISTER_ENV, raising=False)
     monkeypatch.delenv(promotion.AUTO_COMMIT_HEAD_MISMATCH_RECOVER_ENV, raising=False)
@@ -1274,13 +1277,15 @@ def _source_add_attribution_bundle() -> dict[str, Any]:
     }
 
 
-async def test_source_add_leg2_created_when_promoted_champion_has_attribution(store, monkeypatch):
-    store.select_many_results["research_lab_source_catalog"] = [
+async def test_source_add_leg2_created_when_llm_judge_says_helped(store, monkeypatch):
+    store.select_many_results["research_lab_source_add_provisioning_current"] = [
         {
+            "provision_ref": "source_add_provision:" + "2" * 16,
             "catalog_id": "source_catalog:" + "1" * 16,
             "adapter_id": "adapter:test-api-source",
-            "miner_ref": "hk-source-owner",
+            "miner_hotkey": "hk-source-owner",
             "registry_provider_id": "test_api_source",
+            "provision_status": "provisioned_autoresearch_eligible",
             "accepted_at": "2026-07-06T00:00:00Z",
             "catalog_doc": {"market_open_at": "2026-07-20T00:00:00Z"},
         }
@@ -1291,7 +1296,21 @@ async def test_source_add_leg2_created_when_promoted_champion_has_attribution(st
     async def _live_epoch(configured: Any = None) -> tuple[int, int | None, str]:
         return 250, None, "test"
 
+    async def _judge(**_kwargs: Any) -> SourceAddJudgeVerdict:
+        return SourceAddJudgeVerdict(
+            verdict="helped",
+            confidence=0.91,
+            source_used=True,
+            adapter_id="adapter:test-api-source",
+            registry_provider_id="test_api_source",
+            evidence_summary="The winning change used the new API for sourcing evidence.",
+            reason_codes=("matched_api_usage",),
+            model_id="openai/gpt-5.6-sol",
+        )
+
     monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _live_epoch)
+    monkeypatch.setattr(source_add_llm_judge, "openrouter_key_for_source_add_judge", lambda: "test-openrouter-key")
+    monkeypatch.setattr(source_add_llm_judge, "judge_source_add_implementation", _judge)
     controller = ResearchLabPromotionController(_source_add_reward_config(), worker_ref="test-worker")
     result = await controller._maybe_create_source_add_implementation_rewards(
         candidate={
@@ -1319,13 +1338,37 @@ async def test_source_add_leg2_created_when_promoted_champion_has_attribution(st
     assert obligation["reward_kind"] == "source_implementation"
     assert obligation["alpha_percent"] == pytest.approx(5.0)
     assert obligation["start_epoch"] == 251
-    assert obligation["trigger_evidence_doc"]["ablation_passed"] is True
-    assert obligation["trigger_evidence_doc"]["ablation_delta_points"] == pytest.approx(0.7)
+    assert obligation["trigger_evidence_doc"]["llm_judge_passed"] is True
+    assert obligation["trigger_evidence_doc"]["llm_verdict"] == "helped"
     events = [event for event in store.promotion_event_writes if event["event_type"] == "promotion_checked"]
     assert any((event["event_doc"] or {}).get("reason") == "source_add_leg2_reward_created" for event in events)
 
 
-async def test_source_add_leg2_does_not_self_award_without_gateway_attribution_doc(store):
+async def test_source_add_leg2_blocks_when_llm_judge_says_not_helped(store, monkeypatch):
+    store.select_many_results["research_lab_source_add_provisioning_current"] = [
+        {
+            "provision_ref": "source_add_provision:" + "2" * 16,
+            "catalog_id": "source_catalog:" + "1" * 16,
+            "adapter_id": "adapter:test-api-source",
+            "miner_hotkey": "hk-source-owner",
+            "registry_provider_id": "test_api_source",
+            "provision_status": "provisioned_autoresearch_eligible",
+        }
+    ]
+    store.select_many_results["research_lab_candidate_promotion_events"] = []
+
+    async def _judge(**_kwargs: Any) -> SourceAddJudgeVerdict:
+        return SourceAddJudgeVerdict(
+            verdict="not_helped",
+            confidence=0.82,
+            source_used=False,
+            evidence_summary="No evidence the new API affected the winning change.",
+            reason_codes=("no_source_use",),
+            model_id="openai/gpt-5.6-sol",
+        )
+
+    monkeypatch.setattr(source_add_llm_judge, "openrouter_key_for_source_add_judge", lambda: "test-openrouter-key")
+    monkeypatch.setattr(source_add_llm_judge, "judge_source_add_implementation", _judge)
     controller = ResearchLabPromotionController(_source_add_reward_config(), worker_ref="test-worker")
     result = await controller._maybe_create_source_add_implementation_rewards(
         candidate={
@@ -1341,7 +1384,8 @@ async def test_source_add_leg2_does_not_self_award_without_gateway_attribution_d
         threshold=1.0,
         champion_reward_status={"champion_reward_status": "created", "champion_reward_id": "cr-1"},
     )
-    assert result["source_add_reward_status"] == "skipped_no_attribution"
+    assert result["source_add_reward_status"] == "blocked"
+    assert result["results"][0]["blockers"] == ["llm_judge_not_helped"]
     assert store.generic_insert_writes == []
 
 

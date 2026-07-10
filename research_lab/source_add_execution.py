@@ -38,6 +38,7 @@ from .source_add import (
     validate_source_add_adapter_manifest,
     validate_source_add_trial_output,
 )
+from .source_add_identity import source_identity_hash
 
 # §8 launch defaults — env-tunable (T), inlined here as the code defaults.
 DEFAULT_ACCEPTANCE_FLOOR_YIELD = 0.10
@@ -109,6 +110,7 @@ class SourceAddSubmissionRecord:
     acceptance_human_gate_passed: bool = False
     precheck_status: str = ""
     precheck_doc: dict[str, Any] = field(default_factory=dict)
+    source_identity_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -129,6 +131,7 @@ class SourceAddCatalogEntry:
     registry_provider_id: str
     measured_trial_yield: float
     accepted_at: str
+    source_identity_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -177,6 +180,8 @@ def intake_source_add_submission(
     source_brief: str = "",
     submitted_at: str = "",
     existing_catalog_domains: Sequence[str] = (),
+    existing_source_identity_hashes: Sequence[str] = (),
+    source_identity_ref: str = "",
     open_submission_count_for_hotkey: int = 0,
     submissions_last_30d_for_hotkey: int = 0,
     max_concurrent_per_hotkey: int = DEFAULT_MAX_CONCURRENT_SUBMISSIONS_PER_HOTKEY,
@@ -200,8 +205,15 @@ def intake_source_add_submission(
     if manifest_errors:
         return None, [f"{SourceAddRejectionReason.MANIFEST_INVALID.value}: {error}" for error in manifest_errors]
 
+    identity_ref = str(source_identity_ref or "").strip() or source_identity_hash(
+        declared_base_domains=manifest.declared_base_domains
+    )
+
     # Anti-spam before anything costs money.
-    if _domains_overlap(manifest.declared_base_domains, existing_catalog_domains):
+    existing_identity_refs = {str(item or "").strip() for item in existing_source_identity_hashes if str(item or "").strip()}
+    if (identity_ref and identity_ref in existing_identity_refs) or _domains_overlap(
+        manifest.declared_base_domains, existing_catalog_domains
+    ):
         errors.append(SourceAddRejectionReason.DUPLICATE_SOURCE.value)
     if open_submission_count_for_hotkey >= max(1, int(max_concurrent_per_hotkey)):
         errors.append(SourceAddRejectionReason.HOTKEY_CONCURRENT_CAP.value)
@@ -253,6 +265,7 @@ def intake_source_add_submission(
         credential_envelope=credential_envelope,
         source_brief=str(source_brief)[:2000],
         submitted_at=str(submitted_at),
+        source_identity_hash=identity_ref,
     )
     return record, []
 
@@ -575,6 +588,7 @@ def evaluate_source_add_acceptance(
         registry_provider_id=str(registry_provider_id or ""),
         measured_trial_yield=float(record.measured_trial_yield),
         accepted_at=str(accepted_at),
+        source_identity_hash=record.source_identity_hash,
     )
     return accepted, entry
 

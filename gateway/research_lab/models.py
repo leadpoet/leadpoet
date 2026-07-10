@@ -133,6 +133,50 @@ class ResearchLabSourceAdapterSubmissionResponse(BaseModel):
     precheck_reasons: list[str] = Field(default_factory=list)
 
 
+class ResearchLabSourceAdapterProvisionRequest(BaseModel):
+    registry_provider_id: str = Field(min_length=2, max_length=80)
+    provision_status: str = Field(default="provisioned_autoresearch_eligible", max_length=80)
+    base_url: Optional[str] = Field(default=None, max_length=500)
+    auth_kind: str = Field(default="none", max_length=20)
+    auth_name: Optional[str] = Field(default=None, max_length=120)
+    credential_env_refs: list[str] = Field(default_factory=list, max_length=8)
+    api_credential: Optional[str] = Field(default=None, min_length=8, max_length=512)
+    cost_model: dict[str, Any] = Field(default_factory=dict)
+    probe_endpoints: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+    operator_notes: Optional[str] = Field(default=None, max_length=1000)
+
+    @field_validator("registry_provider_id")
+    @classmethod
+    def valid_registry_provider_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized.replace("_", "").replace("-", "").isalnum():
+            raise ValueError("registry_provider_id must be a slug")
+        return normalized
+
+    @field_validator("operator_notes")
+    @classmethod
+    def notes_have_no_secret_material(cls, value: Optional[str]) -> Optional[str]:
+        if value:
+            reject_secret_material(value)
+        return value
+
+    @field_validator("cost_model", "probe_endpoints")
+    @classmethod
+    def provision_docs_have_no_secret_material(cls, value: Any) -> Any:
+        reject_secret_material(value)
+        return value
+
+
+class ResearchLabSourceAdapterProvisionResponse(BaseModel):
+    submission_id: str
+    adapter_id: str
+    catalog_id: str
+    registry_provider_id: str
+    provision_status: str
+    provision_ref: str
+    credential_ref: Optional[str] = None
+
+
 class ResearchLabOpenRouterKeyRegisterRequest(SignedResearchLabRequest):
     openrouter_api_key: str = Field(min_length=1, max_length=512)
     openrouter_management_key: str = Field(min_length=1, max_length=512)

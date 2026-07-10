@@ -7,13 +7,9 @@ emission streams on the existing champion-allocation rails:
   ``RESEARCH_LAB_REWARD_EPOCHS`` (20), created when a miner-submitted source
   reaches ``provenance_precheck_passed``. Flat, one per adapter, ever.
 - **Leg 2 — implementation rider**: +5% × 20 epochs to the ADAPTER OWNER,
-  created alongside the implementing merge's champion grant, triggered
-  mechanically (all four): (1) merged diff routes to the adapter, (2) merge
-  cleared the normal score-only bar, (3) the patch survived the shadow-monitor
-  window, (4) adapter-ablation attribution ≥ threshold. Never before the
-  shadow window elapses; expires N months after max(acceptance, market open);
-  paid to the owner even when the house arm wires it. On-chain paid is paid —
-  an auto-revert stops the stream going forward only.
+  created alongside the implementing merge's champion grant only when the
+  LLM final judge decides the already-winning change was helped by a known
+  SOURCE_ADD API. Paid to the owner even when the house arm wires it.
 
 Reward records enter the ``champion_allocations`` / ``queued_champion_allocations``
 sections with a ``reward_kind`` field, so the validator pays them with zero
@@ -143,10 +139,10 @@ def validate_source_add_reward_record(record: SourceAddRewardRecord | Mapping[st
         if record.reward_kind != REWARD_KIND_SOURCE_IMPLEMENTATION:
             errors.append("leg 2 must carry reward_kind source_implementation")
         evidence = record.trigger_evidence or {}
-        if not evidence.get("shadow_window_passed"):
-            errors.append("leg 2 requires shadow_window_passed trigger evidence")
-        if not evidence.get("ablation_passed"):
-            errors.append("leg 2 requires ablation_passed trigger evidence")
+        llm_passed = bool(evidence.get("llm_judge_passed"))
+        legacy_passed = bool(evidence.get("shadow_window_passed")) and bool(evidence.get("ablation_passed"))
+        if not (llm_passed or legacy_passed):
+            errors.append("leg 2 requires llm_judge_passed or legacy shadow_window_passed/ablation_passed trigger evidence")
     return errors
 
 

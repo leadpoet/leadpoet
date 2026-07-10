@@ -66,6 +66,8 @@ from .models import (
     ResearchLabScoreBundleResponse,
     ResearchLabSourceAdapterSubmissionRequest,
     ResearchLabSourceAdapterSubmissionResponse,
+    ResearchLabSourceAdapterProvisionRequest,
+    ResearchLabSourceAdapterProvisionResponse,
     ResearchLabTicketCreateRequest,
     ResearchLabTicketResponse,
     reject_secret_material,
@@ -80,6 +82,15 @@ from .public_activity import (
 from .chain import resolve_research_lab_evaluation_epoch
 from .promotion import private_repo_head_alignment_status
 from .source_add_provenance import PRECHECK_MANUAL, PRECHECK_PASSED, SourceAddProvenanceResult, evaluate_source_add_provenance
+from .source_add_catalog import (
+    ALREADY_SUBMITTED_DETAIL,
+    PROVISION_STATUS_DISABLED,
+    PROVISION_STATUS_ELIGIBLE,
+    PROVISION_STATUSES,
+    provisioning_ref,
+    reject_source_add_secret_text,
+    sanitize_source_add_doc,
+)
 from .store import (
     canonical_hash,
     create_candidate_evaluation_event,
@@ -93,6 +104,7 @@ from .store import (
     create_ticket,
     create_ticket_event,
     insert_row,
+    next_event_seq,
     payment_ref_exists,
     persist_source_add_submission,
     select_all,
@@ -100,8 +112,11 @@ from .store import (
     select_one,
     update_row,
 )
+from gateway.research_lab.provider_evidence_proxy import ProviderRegistryEntry, validate_provider_registry_entries
+from research_lab.probe_catalog import ProviderProbeEndpoint, validate_probe_catalog
 from research_lab.improvement_engine.config import ImprovementEngineConfig
 from research_lab.source_add_execution import apply_provenance_precheck_result, intake_source_add_submission
+from research_lab.source_add_identity import source_identity_hash_from_metadata
 from research_lab.source_add_rewards import create_leg1_reward
 from research_lab.improvement_engine.fix_generator import sanitized_miner_opportunity
 from research_lab.improvement_engine.scanner import scan_for_issues
@@ -246,8 +261,8 @@ async def create_research_lab_probe(payload: ResearchLabProbeRequest):
     }
 
 
-async def _source_add_intake_context(miner_hotkey: str) -> tuple[int, int, list[str]]:
-    """(open submissions, submissions last 30d, existing catalog domains).
+async def _source_add_intake_context(miner_hotkey: str) -> tuple[int, int, list[str], list[str]]:
+    """(open submissions, submissions last 30d, existing domains, source identity hashes).
 
     Best-effort reads: before the scripts/72 migration the tables are absent
     and everything counts as zero/empty (the endpoint is flag-gated anyway).
@@ -275,15 +290,42 @@ async def _source_add_intake_context(miner_hotkey: str) -> tuple[int, int, list[
         if created_at >= cutoff:
             last_30d_count += 1
     domains: list[str] = []
+    identity_hashes: list[str] = []
+    for row in rows:
+        source_hash = str(row.get("source_identity_hash") or "").strip()
+        if not source_hash:
+            doc = row.get("submission_doc") if isinstance(row.get("submission_doc"), Mapping) else {}
+            source_hash = str(doc.get("source_identity_hash") or "").strip()
+        if source_hash:
+            identity_hashes.append(source_hash)
     try:
-        catalog_rows = await select_all("research_lab_source_catalog", columns="declared_base_domains")
+        catalog_rows = await select_all(
+            "research_lab_source_catalog",
+            columns="declared_base_domains,source_identity_hash",
+            filters=(),
+        )
     except Exception:
         catalog_rows = []
     for row in catalog_rows:
         declared = row.get("declared_base_domains")
         if isinstance(declared, list):
             domains.extend(str(item) for item in declared)
-    return open_count, last_30d_count, domains
+        source_hash = str(row.get("source_identity_hash") or "").strip()
+        if source_hash:
+            identity_hashes.append(source_hash)
+    try:
+        provisioned_rows = await select_all(
+            "research_lab_source_add_provisioning_current",
+            columns="source_identity_hash",
+            filters=(),
+        )
+    except Exception:
+        provisioned_rows = []
+    for row in provisioned_rows:
+        source_hash = str(row.get("source_identity_hash") or "").strip()
+        if source_hash:
+            identity_hashes.append(source_hash)
+    return open_count, last_30d_count, domains, sorted(set(identity_hashes))
 
 
 @router.post("/source-adapters", response_model=ResearchLabSourceAdapterSubmissionResponse)
@@ -304,7 +346,13 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
     if payload.adapter_credential and not kms_key_id:
         raise HTTPException(status_code=503, detail="SOURCE_ADD credential KMS key is not configured")
 
-    open_count, last_30d_count, catalog_domains = await _source_add_intake_context(payload.miner_hotkey)
+    open_count, last_30d_count, catalog_domains, source_identity_hashes = await _source_add_intake_context(payload.miner_hotkey)
+    source_metadata = dict(payload.source_metadata or {})
+    declared_domains = payload.manifest.get("declared_base_domains") if isinstance(payload.manifest, Mapping) else []
+    source_identity_ref = source_identity_hash_from_metadata(
+        source_metadata,
+        declared_base_domains=[str(item) for item in declared_domains] if isinstance(declared_domains, Sequence) else (),
+    )
 
     def _kms_encrypt(raw_credential: str, miner_hotkey: str, adapter_ref: str) -> dict[str, str]:
         return encrypt_source_add_credential(
@@ -323,6 +371,8 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
             source_brief=payload.source_brief or "",
             submitted_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             existing_catalog_domains=catalog_domains,
+            existing_source_identity_hashes=source_identity_hashes,
+            source_identity_ref=source_identity_ref,
             open_submission_count_for_hotkey=open_count,
             submissions_last_30d_for_hotkey=last_30d_count,
             max_concurrent_per_hotkey=config.source_add_max_concurrent_per_hotkey,
@@ -332,9 +382,10 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
     except OpenRouterKeyVaultError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if errors or record is None:
+        if any(str(error) == "duplicate_source" or str(error).endswith(".DUPLICATE_SOURCE") for error in (errors or [])):
+            raise HTTPException(status_code=409, detail=ALREADY_SUBMITTED_DETAIL)
         raise HTTPException(status_code=400, detail="; ".join(errors or ["submission rejected"]))
 
-    source_metadata = dict(payload.source_metadata or {})
     try:
         precheck = await asyncio.to_thread(
             evaluate_source_add_provenance,
@@ -468,6 +519,202 @@ async def _source_add_leg1_start_epoch(config: ResearchLabGatewayConfig) -> int:
 def _is_duplicate_insert_error(exc: Exception) -> bool:
     text = str(exc).lower()
     return "duplicate" in text or "unique" in text or "23505" in text
+
+
+def _require_source_add_admin(authorization: str) -> None:
+    expected = str(os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="SOURCE_ADD admin auth is not configured")
+    presented = str(authorization or "").strip()
+    if presented.lower().startswith("bearer "):
+        presented = presented.split(" ", 1)[1].strip()
+    if not presented or not secrets.compare_digest(presented, expected):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+@router.post(
+    "/admin/source-adapters/{submission_id}/provision",
+    response_model=ResearchLabSourceAdapterProvisionResponse,
+)
+async def provision_research_lab_source_adapter(
+    submission_id: str,
+    payload: ResearchLabSourceAdapterProvisionRequest,
+    authorization: str = Header(default=""),
+):
+    """Owner-only SOURCE_ADD approval/provisioning path."""
+
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
+    _require_enabled(config.source_add_enabled, "Research Lab SOURCE_ADD submissions are disabled")
+    _require_source_add_admin(authorization)
+
+    status = str(payload.provision_status or "").strip()
+    if status not in PROVISION_STATUSES:
+        raise HTTPException(status_code=400, detail="invalid provision_status")
+    auth_kind = str(payload.auth_kind or "none").strip().lower()
+    if auth_kind not in {"header", "query", "bearer", "none"}:
+        raise HTTPException(status_code=400, detail="invalid auth_kind")
+    auth_name = str(payload.auth_name or "").strip()
+    if auth_kind in {"header", "query"} and not auth_name:
+        raise HTTPException(status_code=400, detail="auth_name is required for header/query auth")
+
+    row = await select_one(
+        "research_lab_source_add_submission_current",
+        columns="submission_id,adapter_id,miner_hotkey,stage,submission_doc,source_identity_hash",
+        filters=(("submission_id", submission_id),),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if str(row.get("stage") or "") in {"rejected", "rejected_precheck"}:
+        raise HTTPException(status_code=400, detail="submission is rejected")
+    doc = row.get("submission_doc") if isinstance(row.get("submission_doc"), Mapping) else {}
+    manifest = doc.get("manifest") if isinstance(doc.get("manifest"), Mapping) else {}
+    source_metadata = doc.get("source_metadata") if isinstance(doc.get("source_metadata"), Mapping) else {}
+    adapter_id = str(row.get("adapter_id") or doc.get("adapter_id") or manifest.get("adapter_id") or "")
+    miner_hotkey = str(row.get("miner_hotkey") or doc.get("miner_hotkey") or manifest.get("miner_ref") or "")
+    if not adapter_id or not miner_hotkey or not manifest:
+        raise HTTPException(status_code=400, detail="submission manifest is incomplete")
+
+    base_url = str(payload.base_url or source_metadata.get("api_base_url") or "").strip()
+    if not base_url.startswith("https://") and not base_url.startswith(("http://127.0.0.1", "http://localhost")):
+        raise HTTPException(status_code=400, detail="base_url must be https")
+
+    probe_objects = [ProviderProbeEndpoint.from_mapping(item) for item in payload.probe_endpoints]
+    probe_errors = validate_probe_catalog(probe_objects)
+    if probe_errors:
+        raise HTTPException(status_code=400, detail="invalid probe_endpoints: " + "; ".join(probe_errors[:5]))
+    probe_endpoints = [item.to_dict() for item in probe_objects]
+
+    credential_envelope: dict[str, str] = {}
+    credential_refs = [str(item).strip() for item in payload.credential_env_refs if str(item or "").strip()]
+    if payload.api_credential:
+        kms_key_id = config.source_add_credential_kms_key_id or config.openrouter_key_kms_key_id
+        if not kms_key_id:
+            raise HTTPException(status_code=503, detail="SOURCE_ADD credential KMS key is not configured")
+        adapter_ref = f"source_add:{adapter_id}"
+        try:
+            envelope = encrypt_source_add_credential(
+                raw_credential=payload.api_credential,
+                kms_key_id=kms_key_id,
+                miner_hotkey=miner_hotkey,
+                adapter_ref=adapter_ref,
+            )
+        except OpenRouterKeyVaultError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        credential_envelope = {
+            "ciphertext_b64": str(envelope["ciphertext_b64"]),
+            "kms_key_id": str(envelope.get("kms_key_id") or ""),
+            "encryption_context_hash": str(envelope.get("encryption_context_hash") or ""),
+            "credential_ref": f"encrypted_ref:source_add:{canonical_hash({'adapter_id': adapter_id, 'miner': miner_hotkey})[-32:]}",
+        }
+        credential_refs = [credential_envelope["credential_ref"]]
+    if auth_kind != "none" and not credential_refs:
+        raise HTTPException(status_code=400, detail="authenticated source requires credential_env_refs or api_credential")
+
+    source_identity_ref = str(row.get("source_identity_hash") or doc.get("source_identity_hash") or "").strip()
+    if not source_identity_ref:
+        source_identity_ref = source_identity_hash_from_metadata(
+            source_metadata,
+            declared_base_domains=[str(item) for item in manifest.get("declared_base_domains", [])],
+        )
+
+    registry_entry = ProviderRegistryEntry(
+        id=payload.registry_provider_id,
+        base_url=base_url,
+        auth_kind=auth_kind,
+        auth_name=auth_name or ("Authorization" if auth_kind == "bearer" else ""),
+        credential_ref=tuple(credential_refs),
+        cost_model=dict(payload.cost_model or {}),
+        active=status == PROVISION_STATUS_ELIGIBLE,
+    )
+    registry_errors = validate_provider_registry_entries([registry_entry])
+    if registry_errors:
+        raise HTTPException(status_code=400, detail="invalid provider registry entry: " + "; ".join(registry_errors[:5]))
+    if payload.operator_notes:
+        try:
+            reject_source_add_secret_text(payload.operator_notes, field_name="operator_notes")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    catalog_id = "source_catalog:" + canonical_hash({"adapter_id": adapter_id}).split(":", 1)[1][:16]
+    catalog_row = await select_one(
+        "research_lab_source_catalog",
+        columns="catalog_id,adapter_id",
+        filters=(("adapter_id", adapter_id),),
+    )
+    if catalog_row:
+        catalog_id = str(catalog_row.get("catalog_id") or catalog_id)
+    else:
+        catalog_doc = sanitize_source_add_doc(
+            {
+                "source_metadata": source_metadata,
+                "operator_notes": payload.operator_notes or "",
+                "registry_provider_id": payload.registry_provider_id,
+                "provision_status": status,
+            }
+        )
+        try:
+            await insert_row(
+                "research_lab_source_catalog",
+                {
+                    "catalog_id": catalog_id,
+                    "adapter_id": adapter_id,
+                    "miner_ref": miner_hotkey,
+                    "source_name": str(manifest.get("source_name") or "")[:200],
+                    "source_kind": str(manifest.get("source_kind") or "web"),
+                    "declared_base_domains": list(manifest.get("declared_base_domains") or []),
+                    "registry_provider_id": payload.registry_provider_id,
+                    "measured_trial_yield": max(0.0, float(doc.get("measured_trial_yield") or 0.0)),
+                    "accepted_at": datetime.now(timezone.utc).isoformat(),
+                    "catalog_doc": catalog_doc,
+                    "source_identity_hash": source_identity_ref,
+                },
+            )
+        except Exception as exc:
+            if not _is_duplicate_insert_error(exc):
+                _raise_storage_error(exc)
+
+    seq = await next_event_seq("research_lab_source_add_provisioning_events", "adapter_id", adapter_id)
+    provision_doc = sanitize_source_add_doc(
+        {
+            "provider_registry_entry": registry_entry.to_dict(),
+            "probe_endpoints": probe_endpoints,
+            "operator_notes": payload.operator_notes or "",
+            "source_metadata": source_metadata,
+        }
+    )
+    ref = provisioning_ref(adapter_id, seq)
+    try:
+        await insert_row(
+            "research_lab_source_add_provisioning_events",
+            {
+                "provision_ref": ref,
+                "catalog_id": catalog_id,
+                "submission_id": submission_id,
+                "adapter_id": adapter_id,
+                "miner_hotkey": miner_hotkey,
+                "source_identity_hash": source_identity_ref,
+                "registry_provider_id": payload.registry_provider_id,
+                "provision_status": status,
+                "seq": seq,
+                "provision_doc": provision_doc,
+                "credential_envelope": credential_envelope,
+            },
+        )
+    except Exception as exc:
+        if not _is_duplicate_insert_error(exc):
+            _raise_storage_error(exc)
+
+    return ResearchLabSourceAdapterProvisionResponse(
+        submission_id=submission_id,
+        adapter_id=adapter_id,
+        catalog_id=catalog_id,
+        registry_provider_id=payload.registry_provider_id,
+        provision_status=status,
+        provision_ref=ref,
+        credential_ref=credential_envelope.get("credential_ref") or (credential_refs[0] if credential_refs else None),
+    )
 
 
 _TERMINAL_CANDIDATE_STATUSES = {"scored", "rejected", "failed"}

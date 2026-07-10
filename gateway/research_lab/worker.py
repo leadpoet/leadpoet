@@ -46,8 +46,14 @@ from gateway.research_lab.loop_engine import (
 )
 from gateway.research_lab.maintenance import (
     autoresearch_queue_capacity_doc,
+    get_autoresearch_maintenance_state,
     is_autoresearch_maintenance_paused,
     reconcile_terminal_ticket_statuses,
+    set_autoresearch_maintenance_paused,
+)
+from gateway.research_lab.provider_preflight import (
+    PREFLIGHT_REASON_PREFIX,
+    preflight_gate,
 )
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabReceiptCreateRequest
 from gateway.research_lab.promotion import (
@@ -1241,7 +1247,13 @@ class ResearchLabHostedWorker:
             await self._reconcile_stale_loop_projections()
             await self._maybe_reconcile_terminal_tickets()
             await self._maybe_refresh_allocator_priors()
-        if await is_autoresearch_maintenance_paused():
+        autoresearch_state = await get_autoresearch_maintenance_state()
+        if bool(autoresearch_state.get("paused")) and not str(
+            autoresearch_state.get("reason") or ""
+        ).startswith(PREFLIGHT_REASON_PREFIX):
+            # Operator/manual pauses stop the pass outright. A pause carrying
+            # the preflight marker falls through to the preflight gate below,
+            # which auto-resumes once providers recover.
             return HostedWorkerOutcome(
                 processed=False,
                 dry_run=self.config.hosted_worker_dry_run,
@@ -1268,6 +1280,25 @@ class ResearchLabHostedWorker:
             return HostedWorkerOutcome(processed=False, dry_run=self.config.hosted_worker_dry_run)
         run_id = str(queued["run_id"])
         ticket_id = str(queued["ticket_id"])
+        if not self.config.hosted_worker_dry_run:
+            # Provider preflight: leave the run queued (no started/running
+            # events, miner keeps their budget) while ScrapingDog/Exa are out
+            # of credits or persistently unreachable — the loop's sourcing
+            # would fail wholesale and burn the paid budget on zeros.
+            preflight = await preflight_gate(
+                scope="autoresearch",
+                actor_ref=self.worker_ref,
+                is_paused=get_autoresearch_maintenance_state,
+                set_paused=set_autoresearch_maintenance_paused,
+            )
+            if not preflight.get("proceed"):
+                return HostedWorkerOutcome(
+                    processed=False,
+                    dry_run=False,
+                    run_id=run_id,
+                    ticket_id=ticket_id,
+                    status="provider_preflight_deferred",
+                )
         if self.config.hosted_worker_dry_run:
             return HostedWorkerOutcome(
                 processed=False,

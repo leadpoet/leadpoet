@@ -61,7 +61,14 @@ from gateway.research_lab.logging_utils import (
     runtime_error_diagnostics as _runtime_error_diagnostics,
     safe_event_error_text as _safe_event_error_text,
 )
-from gateway.research_lab.maintenance import is_scoring_maintenance_paused
+from gateway.research_lab.maintenance import (
+    get_scoring_maintenance_state,
+    set_scoring_maintenance_paused,
+)
+from gateway.research_lab.provider_preflight import (
+    PREFLIGHT_REASON_PREFIX,
+    preflight_gate,
+)
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabScoreBundleCreateRequest
 from gateway.research_lab.promotion import (
     CONFIRMATION_ATTEMPT_FAILED_REASON,
@@ -2959,7 +2966,13 @@ class ResearchLabGatewayScoringWorker:
             return {"processed": False, "status": "writes_or_eval_disabled"}
         if self.config.scoring_worker_require_proxy and not self.proxy_url:
             return {"processed": False, "status": "scoring_worker_proxy_required"}
-        if await is_scoring_maintenance_paused():
+        maintenance_state = await get_scoring_maintenance_state()
+        if bool(maintenance_state.get("paused")) and not str(
+            maintenance_state.get("reason") or ""
+        ).startswith(PREFLIGHT_REASON_PREFIX):
+            # Operator/manual pauses stop the pass outright. A pause carrying
+            # the preflight marker instead falls through to the preflight gate
+            # below, which auto-resumes once providers recover.
             return {"processed": False, "status": "maintenance_paused"}
 
         missing_private_env = self._missing_private_scoring_env()
@@ -2996,6 +3009,21 @@ class ResearchLabGatewayScoringWorker:
 
         await self._recover_stale_candidate_claims()
         await self._alert_stuck_candidates()
+
+        # Provider preflight: never start a baseline or claim candidates when
+        # ScrapingDog/Exa are out of credits or persistently unreachable —
+        # every measurement would be a provider-outage zero.
+        preflight = await preflight_gate(
+            scope="scoring",
+            actor_ref=self.worker_ref,
+            is_paused=get_scoring_maintenance_state,
+            set_paused=set_scoring_maintenance_paused,
+        )
+        if not preflight.get("proceed"):
+            return {
+                "status": "provider_preflight_unhealthy",
+                "preflight": preflight.get("verdicts"),
+            }
 
         baseline_result = None
         if self.config.private_baseline_rebenchmark_enabled and self._is_private_baseline_owner():

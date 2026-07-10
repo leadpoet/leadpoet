@@ -19,6 +19,10 @@ COMMUNICATION:
 - No network access from inside the enclave
 """
 
+# The enclave runs Python 3.7: annotations must stay lazy or modern builtin
+# generics (tuple[...], dict[...]) raise TypeError at def time.
+from __future__ import annotations
+
 print("=" * 80, flush=True)
 print("🔐 VALIDATOR TEE SERVICE STARTING", flush=True)
 print("=" * 80, flush=True)

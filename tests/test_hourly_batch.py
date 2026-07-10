@@ -26,7 +26,12 @@ async def _publish_research_lab_epoch_audit_stub(*args, **kwargs):
     return {"ok": True, "status": "stubbed"}
 
 
+async def _latest_arweave_anchor_stub(*args, **kwargs):
+    return None
+
+
 arweave_audit_stub.publish_research_lab_epoch_audit = _publish_research_lab_epoch_audit_stub
+arweave_audit_stub.latest_arweave_anchor = _latest_arweave_anchor_stub
 sys.modules.setdefault("gateway.research_lab.arweave_audit", arweave_audit_stub)
 
 from gateway.tasks.hourly_batch import build_arweave_checkpoint_log_event

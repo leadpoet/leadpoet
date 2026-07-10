@@ -1,9 +1,69 @@
-from research_lab.source_add import validate_source_add_adapter_manifest
+import re
+from pathlib import Path
+
+import pytest
+
+from research_lab.source_add import SourceAddSourceKind, validate_source_add_adapter_manifest
 from research_lab.source_add_miner import (
+    SOURCE_ADD_SOURCE_KIND_DESCRIPTIONS,
+    SOURCE_ADD_SOURCE_KINDS,
     build_source_add_submission_docs,
     build_source_add_metadata,
     parse_source_add_domains,
 )
+
+
+EXPECTED_SOURCE_KINDS = (
+    "web",
+    "filing",
+    "news",
+    "registry",
+    "procurement",
+    "social",
+    "hiring",
+    "tech_stack",
+    "funding",
+    "firmographic",
+    "people",
+    "intent",
+    "reviews",
+    "events",
+)
+
+
+def test_source_add_kind_taxonomy_has_one_authority_and_descriptions():
+    assert SOURCE_ADD_SOURCE_KINDS == EXPECTED_SOURCE_KINDS
+    assert SOURCE_ADD_SOURCE_KINDS == tuple(kind.value for kind in SourceAddSourceKind)
+    assert set(SOURCE_ADD_SOURCE_KIND_DESCRIPTIONS) == set(SOURCE_ADD_SOURCE_KINDS)
+
+
+def test_source_add_catalog_constraint_migration_matches_code_taxonomy():
+    migration = (
+        Path(__file__).resolve().parents[1] / "scripts" / "84-expand-source-add-source-kinds.sql"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"source_kind IN \((.*?)\)\s*\) NOT VALID", migration, re.DOTALL)
+
+    assert match is not None
+    assert tuple(re.findall(r"'([^']+)'", match.group(1))) == SOURCE_ADD_SOURCE_KINDS
+
+
+@pytest.mark.parametrize(
+    "source_kind",
+    ("hiring", "tech_stack", "funding", "firmographic", "people", "intent", "reviews", "events"),
+)
+def test_build_source_add_docs_accepts_expanded_gtm_source_kinds(source_kind):
+    manifest, _brief, _key, _metadata = build_source_add_submission_docs(
+        miner_hotkey="5MinerHotkey",
+        source_name=f"Example {source_kind} API",
+        source_kind=source_kind,
+        declared_base_domains=("example.com",),
+        endpoint_summary="GET /v1/search",
+        claimed_output_type="evidence",
+        credential_supplied=False,
+    )
+
+    assert manifest["source_kind"] == source_kind
+    assert validate_source_add_adapter_manifest(manifest) == []
 
 
 def test_parse_source_add_domains_normalizes_and_dedupes():

@@ -73,6 +73,14 @@ class SourceAddSourceKind(str, Enum):
     REGISTRY = "registry"
     PROCUREMENT = "procurement"
     SOCIAL = "social"
+    HIRING = "hiring"
+    TECH_STACK = "tech_stack"
+    FUNDING = "funding"
+    FIRMOGRAPHIC = "firmographic"
+    PEOPLE = "people"
+    INTENT = "intent"
+    REVIEWS = "reviews"
+    EVENTS = "events"
 
 
 class SourceAddReviewStatus(str, Enum):

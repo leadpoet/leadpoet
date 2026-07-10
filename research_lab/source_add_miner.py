@@ -13,15 +13,27 @@ import re
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
 
+from research_lab.source_add import SourceAddSourceKind
 
-SOURCE_ADD_SOURCE_KINDS: tuple[str, ...] = (
-    "web",
-    "filing",
-    "news",
-    "registry",
-    "procurement",
-    "social",
-)
+
+SOURCE_ADD_SOURCE_KINDS: tuple[str, ...] = tuple(kind.value for kind in SourceAddSourceKind)
+
+SOURCE_ADD_SOURCE_KIND_DESCRIPTIONS: dict[str, str] = {
+    "web": "general web, search, or crawl data",
+    "filing": "regulatory, legal, or company filings",
+    "news": "news articles and media coverage",
+    "registry": "official business or public registries",
+    "procurement": "contracts, tenders, and RFPs",
+    "social": "social networks and public community activity",
+    "hiring": "job postings, ATS data, and workforce changes",
+    "tech_stack": "technologies a company uses, adds, or removes",
+    "funding": "funding rounds, investors, acquisitions, and exits",
+    "firmographic": "company attributes such as size, revenue, and location",
+    "people": "professional profiles, roles, and career history",
+    "intent": "research, demand, and buyer-intent signals",
+    "reviews": "product, vendor, employer, and customer reviews",
+    "events": "conferences, webinars, speakers, and attendance",
+}
 
 SOURCE_ADD_DEFAULT_OUTPUT_FIELDS: tuple[str, ...] = (
     "evidence_refs",

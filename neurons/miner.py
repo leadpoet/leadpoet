@@ -47,6 +47,7 @@ from urllib.parse import urlparse
 from gateway.research_lab.config import DEFAULT_LOOP_START_FEE_USD as RESEARCH_LAB_DEFAULT_LOOP_START_FEE_USD
 from research_lab.source_add_miner import (
     SOURCE_ADD_AUTH_TYPES,
+    SOURCE_ADD_SOURCE_KIND_DESCRIPTIONS,
     SOURCE_ADD_SOURCE_KINDS,
     build_source_add_submission_docs,
 )
@@ -3145,7 +3146,7 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
     source_name = _research_lab_prompt_required_text("   Source/API name: ", max_length=160)
     print("   Source kind:")
     for index, kind in enumerate(SOURCE_ADD_SOURCE_KINDS, start=1):
-        print(f"     {index}. {kind}")
+        print(f"     {index}. {kind} — {SOURCE_ADD_SOURCE_KIND_DESCRIPTIONS[kind]}")
     kind_input = input("   Choose source kind [web]: ").strip().lower()
     if not kind_input:
         source_kind = "web"

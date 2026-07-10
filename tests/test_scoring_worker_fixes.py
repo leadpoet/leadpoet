@@ -42,10 +42,13 @@ def test_serving_model_version_event_doc_strips_dispatch_forbidden_fields():
     dumped = json.dumps(doc, sort_keys=True)
     assert doc["version_hash"] == "sha256:" + "1" * 64
     assert doc["model_artifact_hash"] == "sha256:" + "2" * 64
-    assert doc["private_model_manifest_hash"] == "sha256:" + "3" * 64
+    assert doc["serving_model_manifest_hash"] == "sha256:" + "3" * 64
+    assert doc["serving_model_version_id"] == "private_model_version:abc"
     assert doc["evaluation_epoch"] == 23852
     assert "image_digest" not in dumped
     assert ".dkr.ecr." not in dumped
+    assert "private_model_version_id" not in dumped
+    assert "private_model_manifest_hash" not in dumped
     assert "private_model_manifest_doc" not in dumped
     assert "candidate_patch_manifest" not in dumped
     assert "proxy_url" not in dumped

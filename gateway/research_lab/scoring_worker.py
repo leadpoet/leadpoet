@@ -8629,7 +8629,11 @@ def _serving_model_version_event_doc(value: Any) -> dict[str, Any]:
         return {}
     doc: dict[str, Any] = {
         "schema_version": "1.0",
-        "private_model_version_id": str(value.get("private_model_version_id") or ""),
+        "serving_model_version_id": str(
+            value.get("serving_model_version_id")
+            or value.get("private_model_version_id")
+            or ""
+        ),
         "version_hash": str(
             value.get("version_hash")
             or value.get("serving_model_version_hash")
@@ -8641,7 +8645,7 @@ def _serving_model_version_event_doc(value: Any) -> dict[str, Any]:
             or value.get("artifact_hash")
             or ""
         ),
-        "private_model_manifest_hash": str(
+        "serving_model_manifest_hash": str(
             value.get("private_model_manifest_hash")
             or value.get("serving_model_manifest_hash")
             or value.get("manifest_hash")

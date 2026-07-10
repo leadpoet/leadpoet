@@ -379,10 +379,33 @@ def _score_bundle_gate_from_row(bundle_row: Mapping[str, Any] | None) -> Mapping
 
 
 def _score_bundle_serving_version_doc_from_row(bundle_row: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(bundle_row, Mapping):
+        return {}
     doc = _score_bundle_doc_from_row(bundle_row)
     serving = doc.get("serving_model_version")
     if not isinstance(serving, Mapping):
         serving = {}
+    candidate_model = serving.get("candidate_model")
+    if not isinstance(candidate_model, Mapping):
+        candidate_model = {}
+    parent_model = serving.get("parent_model")
+    if not isinstance(parent_model, Mapping):
+        parent_model = {}
+    model_artifact_hash = (
+        serving.get("model_artifact_hash")
+        or candidate_model.get("model_artifact_hash")
+        or parent_model.get("model_artifact_hash")
+        or doc.get("candidate_artifact_hash")
+        or (bundle_row or {}).get("candidate_artifact_hash")
+    )
+    model_manifest_hash = (
+        serving.get("private_model_manifest_hash")
+        or serving.get("model_manifest_hash")
+        or candidate_model.get("manifest_hash")
+        or parent_model.get("manifest_hash")
+        or doc.get("private_model_manifest_hash")
+        or doc.get("model_manifest_hash")
+    )
     return {
         key: value
         for key, value in sanitize_capture_payload(
@@ -393,17 +416,13 @@ def _score_bundle_serving_version_doc_from_row(bundle_row: Mapping[str, Any] | N
                     serving.get("private_model_version_id")
                     or doc.get("private_model_version_id")
                 ),
-                "version_hash": serving.get("version_hash") or doc.get("serving_model_version_hash"),
-                "model_artifact_hash": (
-                    serving.get("model_artifact_hash")
-                    or doc.get("candidate_artifact_hash")
-                    or (bundle_row or {}).get("candidate_artifact_hash")
+                "version_hash": (
+                    serving.get("version_hash")
+                    or serving.get("version_stamp_hash")
+                    or doc.get("serving_model_version_hash")
                 ),
-                "private_model_manifest_hash": (
-                    serving.get("private_model_manifest_hash")
-                    or doc.get("private_model_manifest_hash")
-                    or doc.get("model_manifest_hash")
-                ),
+                "model_artifact_hash": model_artifact_hash,
+                "private_model_manifest_hash": model_manifest_hash,
                 "candidate_id": _score_bundle_candidate_id_from_row(bundle_row or {}),
                 "score_bundle_id": (bundle_row or {}).get("score_bundle_id"),
                 "score_bundle_hash": (bundle_row or {}).get("score_bundle_hash") or doc.get("score_bundle_hash"),
@@ -414,12 +433,107 @@ def _score_bundle_serving_version_doc_from_row(bundle_row: Mapping[str, Any] | N
     }
 
 
+def _candidate_serving_version_doc_from_state(state: Any) -> dict[str, Any]:
+    """Best-effort serving stamp for built candidates without score bundles yet."""
+
+    candidate_row = getattr(state, "candidate_row", None)
+    if not isinstance(candidate_row, Mapping):
+        candidate_row = {}
+    build_doc = getattr(state, "candidate_build_doc", None)
+    if not isinstance(build_doc, Mapping):
+        build_doc = {}
+    candidate_model = candidate_row.get("candidate_model_manifest_doc")
+    if not isinstance(candidate_model, Mapping):
+        candidate_model = {}
+    parent_model = candidate_row.get("private_model_manifest_doc")
+    if not isinstance(parent_model, Mapping):
+        parent_model = {}
+
+    candidate_id = str(
+        getattr(state, "candidate_id", "") or candidate_row.get("candidate_id") or ""
+    )
+    model_artifact_hash = str(
+        getattr(state, "candidate_artifact_hash", "")
+        or candidate_row.get("candidate_artifact_hash")
+        or candidate_model.get("model_artifact_hash")
+        or ""
+    )
+    model_manifest_hash = str(
+        candidate_row.get("candidate_model_manifest_hash")
+        or candidate_model.get("manifest_hash")
+        or build_doc.get("candidate_model_manifest_hash")
+        or ""
+    )
+    parent_artifact_hash = str(
+        candidate_row.get("parent_artifact_hash")
+        or parent_model.get("model_artifact_hash")
+        or ""
+    )
+    parent_manifest_hash = str(
+        candidate_row.get("private_model_manifest_hash")
+        or parent_model.get("manifest_hash")
+        or ""
+    )
+    candidate_source_diff_hash = str(
+        getattr(state, "candidate_source_diff_hash", "")
+        or candidate_row.get("candidate_source_diff_hash")
+        or build_doc.get("candidate_source_diff_hash")
+        or ""
+    )
+
+    if not any((candidate_id, model_artifact_hash, model_manifest_hash)):
+        return {}
+
+    base_doc = {
+        "schema_version": "1.0",
+        "source": "candidate_artifact",
+        "candidate_id": candidate_id,
+        "model_artifact_hash": model_artifact_hash,
+        "private_model_manifest_hash": model_manifest_hash,
+        "parent_artifact_hash": parent_artifact_hash,
+        "parent_model_manifest_hash": parent_manifest_hash,
+        "candidate_source_diff_hash": candidate_source_diff_hash,
+    }
+    base_doc = {key: value for key, value in base_doc.items() if value not in (None, "", [], {})}
+    base_doc["version_hash"] = sha256_json(
+        {
+            "schema_version": "research_lab_candidate_serving_model_version.v1",
+            "candidate_id": candidate_id,
+            "model_artifact_hash": model_artifact_hash,
+            "model_manifest_hash": model_manifest_hash,
+            "parent_artifact_hash": parent_artifact_hash,
+            "parent_model_manifest_hash": parent_manifest_hash,
+            "candidate_source_diff_hash": candidate_source_diff_hash,
+        }
+    )
+    return {
+        key: value
+        for key, value in sanitize_capture_payload(base_doc).items()
+        if value not in (None, "", [], {})
+    }
+
+
 def _ledger_serving_version_fields(
     *,
     state: Any,
     bundle_row: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     version_doc = _score_bundle_serving_version_doc_from_row(bundle_row)
+    if not version_doc or not (
+        version_doc.get("version_hash")
+        and version_doc.get("model_artifact_hash")
+        and version_doc.get("private_model_manifest_hash")
+    ):
+        candidate_doc = _candidate_serving_version_doc_from_state(state)
+        if candidate_doc:
+            version_doc = {
+                **candidate_doc,
+                **{
+                    key: value
+                    for key, value in version_doc.items()
+                    if value not in (None, "", [], {})
+                },
+            }
     private_model_version_id = (
         str(getattr(state, "private_model_version_id", "") or "")
         or str(version_doc.get("private_model_version_id") or "")
@@ -2224,6 +2338,8 @@ class _NodeState:
     candidate_artifact_hash: str | None = None
     candidate_source_diff_hash: str | None = None
     candidate_id: str | None = None
+    candidate_row: Mapping[str, Any] | None = None
+    candidate_build_doc: Mapping[str, Any] | None = None
     evaluated: bool = False
     gate_doc: Mapping[str, Any] | None = None
     score_bundle_id: str | None = None
@@ -2504,6 +2620,8 @@ def build_trajectory_projection(
             candidate_row = candidates_by_hash.get(state.candidate_artifact_hash or "")
             if candidate_row:
                 state.candidate_id = str(candidate_row.get("candidate_id"))
+                state.candidate_row = candidate_row
+            state.candidate_build_doc = doc
             _emit_node_evaluated(
                 _emit,
                 state,

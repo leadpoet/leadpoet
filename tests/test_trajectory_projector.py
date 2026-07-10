@@ -46,6 +46,9 @@ CANDIDATE_1 = "55555555-5555-4555-8555-555555555551"
 CANDIDATE_3 = "55555555-5555-4555-8555-555555555553"
 VERSION_ID = "66666666-6666-4666-8666-666666666666"
 SCORE_BUNDLE_ID = "score_bundle:abc123"
+CANDIDATE_1_MANIFEST_HASH = "sha256:" + "8" * 64
+CANDIDATE_3_MANIFEST_HASH = "sha256:" + "9" * 64
+PARENT_MANIFEST_HASH = "sha256:" + "a" * 64
 
 
 def test_projector_and_trace_join_keys_default_on(monkeypatch):
@@ -375,6 +378,12 @@ def happy_path_tables() -> dict[str, list[dict[str, Any]]]:
             "island": "lead_generation",
             "parent_artifact_hash": "sha256:parent-image",
             "candidate_artifact_hash": artifact_1,
+            "private_model_manifest_hash": PARENT_MANIFEST_HASH,
+            "candidate_model_manifest_hash": CANDIDATE_1_MANIFEST_HASH,
+            "candidate_model_manifest_doc": {
+                "model_artifact_hash": artifact_1,
+                "manifest_hash": CANDIDATE_1_MANIFEST_HASH,
+            },
             "candidate_source_diff_hash": "sha256:source-diff-1",
         },
         {
@@ -384,6 +393,12 @@ def happy_path_tables() -> dict[str, list[dict[str, Any]]]:
             "island": "lead_generation",
             "parent_artifact_hash": "sha256:parent-image",
             "candidate_artifact_hash": artifact_3,
+            "private_model_manifest_hash": PARENT_MANIFEST_HASH,
+            "candidate_model_manifest_hash": CANDIDATE_3_MANIFEST_HASH,
+            "candidate_model_manifest_doc": {
+                "model_artifact_hash": artifact_3,
+                "manifest_hash": CANDIDATE_3_MANIFEST_HASH,
+            },
             "candidate_source_diff_hash": "sha256:source-diff-3",
         },
     ]
@@ -610,6 +625,18 @@ async def test_happy_path_projects_schema_valid_rows(tables, enabled):
     assert keep_row["candidate_id"] == CANDIDATE_1
     assert keep_row["score_bundle_id"] == SCORE_BUNDLE_ID
     assert keep_row["serving_model_version_doc"]["source"] == "score_bundle"
+    timeout_row = next(row for row in ledger if row["node_id"] == "node-3")
+    assert timeout_row["serving_model_version_hash"].startswith("sha256:")
+    assert timeout_row["serving_model_manifest_hash"] == CANDIDATE_3_MANIFEST_HASH
+    assert timeout_row["serving_model_artifact_hash"] == "sha256:candidate-artifact-3"
+    assert timeout_row["candidate_id"] == CANDIDATE_3
+    assert timeout_row["score_bundle_id"] == ""
+    assert timeout_row["private_model_version_id"] == ""
+    assert timeout_row["serving_model_version_doc"]["source"] == "candidate_artifact"
+    assert (
+        timeout_row["serving_model_version_doc"]["candidate_source_diff_hash"]
+        == "sha256:source-diff-3"
+    )
     assert "evidence_quality" in keep_row["description"]
     for row in ledger:
         schema_row = {k: v for k, v in row.items() if k != "source_event_seq"}

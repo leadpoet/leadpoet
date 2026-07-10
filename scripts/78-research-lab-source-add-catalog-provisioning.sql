@@ -14,6 +14,13 @@ CREATE INDEX IF NOT EXISTS idx_research_lab_source_catalog_identity
     ON public.research_lab_source_catalog (source_identity_hash)
     WHERE source_identity_hash <> '';
 
+CREATE OR REPLACE VIEW public.research_lab_source_add_submission_current
+WITH (security_invoker = true) AS
+SELECT DISTINCT ON (submission_id)
+    *
+FROM public.research_lab_source_add_submissions
+ORDER BY submission_id, seq DESC, created_at DESC;
+
 CREATE TABLE IF NOT EXISTS public.research_lab_source_add_provisioning_events (
     provision_event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     provision_ref TEXT NOT NULL CHECK (provision_ref ~ '^source_add_provision:[0-9a-f]{16}$'),

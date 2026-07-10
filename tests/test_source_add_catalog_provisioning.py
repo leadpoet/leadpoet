@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -50,6 +51,90 @@ def test_intake_rejects_duplicate_source_identity_hash():
     )
     assert record is None
     assert SourceAddRejectionReason.DUPLICATE_SOURCE in errors
+
+
+@pytest.mark.asyncio
+async def test_intake_context_releases_rejected_dedupe_and_keeps_active_global_dedupe(monkeypatch):
+    now = datetime.now(timezone.utc)
+    rejected_hash = "sha256:" + "1" * 64
+    rejected_precheck_hash = "sha256:" + "2" * 64
+    active_other_miner_hash = "sha256:" + "3" * 64
+    active_own_hash = "sha256:" + "4" * 64
+    catalog_hash = "sha256:" + "5" * 64
+    provisioned_hash = "sha256:" + "6" * 64
+    miner_rows = [
+        {
+            "stage": "rejected",
+            "created_at": now.isoformat(),
+            "submission_doc": {"submitted_at": (now - timedelta(days=2)).isoformat()},
+            "source_identity_hash": rejected_hash,
+        },
+        {
+            "stage": "needs_manual_review",
+            "created_at": now.isoformat(),
+            "submission_doc": {"submitted_at": now.isoformat()},
+            "source_identity_hash": active_own_hash,
+        },
+    ]
+    global_rows = [
+        {"stage": "rejected", "source_identity_hash": rejected_hash, "submission_doc": {}},
+        {
+            "stage": "rejected_precheck",
+            "source_identity_hash": rejected_precheck_hash,
+            "submission_doc": {},
+        },
+        {
+            "stage": "needs_manual_review",
+            "source_identity_hash": active_other_miner_hash,
+            "submission_doc": {"manifest": {"declared_base_domains": ["pending.example"]}},
+        },
+        {
+            "stage": "provenance_precheck_passed",
+            "source_identity_hash": active_own_hash,
+            "submission_doc": {},
+        },
+    ]
+
+    async def fake_select_all(table, *, filters=(), **_kwargs):
+        if table == "research_lab_source_add_submission_current":
+            return miner_rows if filters else global_rows
+        if table == "research_lab_source_catalog":
+            return [{"declared_base_domains": ["approved.example"], "source_identity_hash": catalog_hash}]
+        if table == "research_lab_source_add_provisioning_current":
+            return [{"source_identity_hash": provisioned_hash}]
+        raise AssertionError(f"unexpected table: {table}")
+
+    monkeypatch.setattr(api, "select_all", fake_select_all)
+
+    open_count, day_count, month_count, domains, identity_hashes = await api._source_add_intake_context(
+        "hk-owner"
+    )
+
+    assert open_count == 1
+    assert day_count == 1
+    assert month_count == 2
+    assert domains == ["pending.example", "approved.example"]
+    assert rejected_hash not in identity_hashes
+    assert rejected_precheck_hash not in identity_hashes
+    assert identity_hashes == sorted(
+        {active_other_miner_hash, active_own_hash, catalog_hash, provisioned_hash}
+    )
+
+
+@pytest.mark.asyncio
+async def test_intake_context_fails_closed_when_global_duplicate_read_fails(monkeypatch):
+    async def fake_select_all(table, *, filters=(), **_kwargs):
+        if table == "research_lab_source_add_submission_current" and filters:
+            return []
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(api, "select_all", fake_select_all)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        await api._source_add_intake_context("hk-owner")
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "SOURCE_ADD intake temporarily unavailable"
 
 
 @pytest.mark.asyncio

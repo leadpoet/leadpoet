@@ -270,41 +270,62 @@ async def create_research_lab_probe(payload: ResearchLabProbeRequest):
 async def _source_add_intake_context(miner_hotkey: str) -> tuple[int, int, int, list[str], list[str]]:
     """(open submissions, submissions last UTC day, submissions last 30d, existing domains, source identity hashes).
 
-    Best-effort reads: before the scripts/72 migration the tables are absent
-    and everything counts as zero/empty (the endpoint is flag-gated anyway).
+    These reads fail closed. A temporary database/schema failure must not admit
+    a duplicate or bypass the miner submission caps.
     """
 
     open_count = 0
     last_day_count = 0
     last_30d_count = 0
     try:
-        rows = await select_all(
+        miner_rows = await select_all(
             "research_lab_source_add_submission_current",
             filters=(("miner_hotkey", miner_hotkey),),
         )
-    except Exception:
-        rows = []
+    except Exception as exc:
+        logger.warning("SOURCE_ADD_INTAKE_CONTEXT_MINER_READ_FAILED type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="SOURCE_ADD intake temporarily unavailable") from exc
+    try:
+        submission_rows = await select_all(
+            "research_lab_source_add_submission_current",
+            columns="stage,source_identity_hash,submission_doc",
+            filters=(),
+        )
+    except Exception as exc:
+        logger.warning("SOURCE_ADD_INTAKE_CONTEXT_GLOBAL_READ_FAILED type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="SOURCE_ADD intake temporarily unavailable") from exc
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
     day_cutoff = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    for row in rows:
+    for row in miner_rows:
         stage = str(row.get("stage") or "")
-        if stage not in {"accepted", "rejected"}:
+        if stage not in {"accepted", "rejected", "rejected_precheck"}:
             open_count += 1
-        created_raw = str(row.get("created_at") or "")
+        doc = row.get("submission_doc") if isinstance(row.get("submission_doc"), Mapping) else {}
+        submitted_raw = str(doc.get("submitted_at") or row.get("created_at") or "")
         try:
-            created_at = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+            submitted_at = datetime.fromisoformat(submitted_raw.replace("Z", "+00:00"))
         except ValueError:
             continue
-        if created_at >= day_cutoff:
+        if submitted_at.tzinfo is None:
+            submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+        if submitted_at >= day_cutoff:
             last_day_count += 1
-        if created_at >= cutoff:
+        if submitted_at >= cutoff:
             last_30d_count += 1
     domains: list[str] = []
     identity_hashes: list[str] = []
-    for row in rows:
+    for row in submission_rows:
+        # Rejected submissions release their duplicate reservation so the API
+        # can be corrected and resubmitted through the structured flow.
+        if str(row.get("stage") or "") in {"rejected", "rejected_precheck"}:
+            continue
+        doc = row.get("submission_doc") if isinstance(row.get("submission_doc"), Mapping) else {}
+        manifest = doc.get("manifest") if isinstance(doc.get("manifest"), Mapping) else {}
+        declared = manifest.get("declared_base_domains")
+        if isinstance(declared, list):
+            domains.extend(str(item) for item in declared)
         source_hash = str(row.get("source_identity_hash") or "").strip()
         if not source_hash:
-            doc = row.get("submission_doc") if isinstance(row.get("submission_doc"), Mapping) else {}
             source_hash = str(doc.get("source_identity_hash") or "").strip()
         if source_hash:
             identity_hashes.append(source_hash)
@@ -314,8 +335,9 @@ async def _source_add_intake_context(miner_hotkey: str) -> tuple[int, int, int, 
             columns="declared_base_domains,source_identity_hash",
             filters=(),
         )
-    except Exception:
-        catalog_rows = []
+    except Exception as exc:
+        logger.warning("SOURCE_ADD_INTAKE_CONTEXT_CATALOG_READ_FAILED type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="SOURCE_ADD intake temporarily unavailable") from exc
     for row in catalog_rows:
         declared = row.get("declared_base_domains")
         if isinstance(declared, list):
@@ -329,8 +351,9 @@ async def _source_add_intake_context(miner_hotkey: str) -> tuple[int, int, int, 
             columns="source_identity_hash",
             filters=(),
         )
-    except Exception:
-        provisioned_rows = []
+    except Exception as exc:
+        logger.warning("SOURCE_ADD_INTAKE_CONTEXT_PROVISIONING_READ_FAILED type=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="SOURCE_ADD intake temporarily unavailable") from exc
     for row in provisioned_rows:
         source_hash = str(row.get("source_identity_hash") or "").strip()
         if source_hash:

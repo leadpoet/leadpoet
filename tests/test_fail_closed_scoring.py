@@ -241,3 +241,217 @@ def test_config_defaults_fail_closed(monkeypatch):
     assert config.baseline_health_gate_enforced is True
     assert config.scoring_health_max_reference_zero_company_rate == 1.0
     assert config.scoring_health_max_candidate_zero_company_rate == 1.0
+
+
+# ---------------------------------------------------------------------------
+# provider-recovery rescore (quarantine requeue)
+# ---------------------------------------------------------------------------
+
+
+def _recovery_worker(monkeypatch, **overrides):
+    worker = _worker(**overrides)
+    monkeypatch.setenv("RESEARCH_LAB_QUARANTINE_RECOVERY_INTERVAL_SECONDS", "0")
+    return worker
+
+
+def test_recovery_requeues_quarantined_scored_candidate(monkeypatch):
+    worker = _recovery_worker(monkeypatch)
+    writes = []
+
+    async def fake_select_many(table, **kwargs):
+        filters = dict(kwargs.get("filters") or ())
+        if table == "research_lab_candidate_promotion_events":
+            if filters.get("event_type") == "scoring_health_quarantined":
+                return [{"candidate_id": "cand-q", "created_at": "2026-07-10T10:00:00"}]
+            # latest promotion for the candidate is still the quarantine
+            return [{"event_type": "scoring_health_quarantined", "created_at": "2026-07-10T10:00:00"}]
+        if table == "research_lab_candidate_evaluation_events":
+            return []  # no prior recovery attempts
+        raise AssertionError(f"unexpected table {table}")
+
+    async def fake_select_one(table, **kwargs):
+        assert table == "research_lab_candidate_evaluation_current"
+        return {
+            "candidate_id": "cand-q",
+            "current_candidate_status": "scored",
+            "run_id": "run-1",
+            "ticket_id": "tick-1",
+        }
+
+    async def fake_create_event(**kwargs):
+        writes.append(kwargs)
+        return {"event_id": "e1"}
+
+    with mock.patch.object(sw, "select_many", fake_select_many), \
+            mock.patch.object(sw, "select_one", fake_select_one), \
+            mock.patch.object(sw, "create_candidate_evaluation_event", fake_create_event):
+        requeued = asyncio.run(worker._requeue_quarantined_candidates())
+    assert requeued == 1
+    assert writes[0]["event_type"] == "queued"
+    assert writes[0]["candidate_status"] == "queued"
+    assert writes[0]["reason"] == "provider_recovery_rescore"
+    assert writes[0]["candidate_id"] == "cand-q"
+
+
+def test_recovery_skips_candidate_already_requeued(monkeypatch):
+    worker = _recovery_worker(monkeypatch)
+    writes = []
+
+    async def fake_select_many(table, **kwargs):
+        filters = dict(kwargs.get("filters") or ())
+        if filters.get("event_type") == "scoring_health_quarantined":
+            return [{"candidate_id": "cand-q", "created_at": "t"}]
+        return []
+
+    async def fake_select_one(table, **kwargs):
+        return {"candidate_id": "cand-q", "current_candidate_status": "queued"}
+
+    async def fake_create_event(**kwargs):
+        writes.append(kwargs)
+
+    with mock.patch.object(sw, "select_many", fake_select_many), \
+            mock.patch.object(sw, "select_one", fake_select_one), \
+            mock.patch.object(sw, "create_candidate_evaluation_event", fake_create_event):
+        requeued = asyncio.run(worker._requeue_quarantined_candidates())
+    assert requeued == 0
+    assert writes == []
+
+
+def test_recovery_skips_when_quarantine_superseded(monkeypatch):
+    worker = _recovery_worker(monkeypatch)
+    writes = []
+
+    async def fake_select_many(table, **kwargs):
+        filters = dict(kwargs.get("filters") or ())
+        if filters.get("event_type") == "scoring_health_quarantined":
+            return [{"candidate_id": "cand-q", "created_at": "t"}]
+        if table == "research_lab_candidate_promotion_events":
+            return [{"event_type": "merged", "created_at": "t2"}]  # superseded
+        return []
+
+    async def fake_select_one(table, **kwargs):
+        return {"candidate_id": "cand-q", "current_candidate_status": "scored"}
+
+    async def fake_create_event(**kwargs):
+        writes.append(kwargs)
+
+    with mock.patch.object(sw, "select_many", fake_select_many), \
+            mock.patch.object(sw, "select_one", fake_select_one), \
+            mock.patch.object(sw, "create_candidate_evaluation_event", fake_create_event):
+        requeued = asyncio.run(worker._requeue_quarantined_candidates())
+    assert requeued == 0
+    assert writes == []
+
+
+def test_recovery_respects_attempt_cap(monkeypatch):
+    worker = _recovery_worker(monkeypatch)
+    monkeypatch.setenv("RESEARCH_LAB_QUARANTINE_RECOVERY_MAX_ATTEMPTS", "2")
+    writes = []
+
+    async def fake_select_many(table, **kwargs):
+        filters = dict(kwargs.get("filters") or ())
+        if filters.get("event_type") == "scoring_health_quarantined":
+            return [{"candidate_id": "cand-q", "created_at": "t"}]
+        if table == "research_lab_candidate_promotion_events":
+            return [{"event_type": "scoring_health_quarantined", "created_at": "t"}]
+        if table == "research_lab_candidate_evaluation_events":
+            return [{"event_id": "r1"}, {"event_id": "r2"}]  # cap reached
+        return []
+
+    async def fake_select_one(table, **kwargs):
+        return {"candidate_id": "cand-q", "current_candidate_status": "scored"}
+
+    async def fake_create_event(**kwargs):
+        writes.append(kwargs)
+
+    with mock.patch.object(sw, "select_many", fake_select_many), \
+            mock.patch.object(sw, "select_one", fake_select_one), \
+            mock.patch.object(sw, "create_candidate_evaluation_event", fake_create_event):
+        requeued = asyncio.run(worker._requeue_quarantined_candidates())
+    assert requeued == 0
+    assert writes == []
+
+
+def test_recovery_disabled_with_gate(monkeypatch):
+    worker = _recovery_worker(monkeypatch, scoring_health_gate_enabled=False)
+
+    async def boom(*a, **k):
+        raise AssertionError("must not query when gate disabled")
+
+    with mock.patch.object(sw, "select_many", boom):
+        assert asyncio.run(worker._requeue_quarantined_candidates()) == 0
+
+
+def test_recovery_interval_throttles(monkeypatch):
+    worker = _worker()
+    monkeypatch.setenv("RESEARCH_LAB_QUARANTINE_RECOVERY_INTERVAL_SECONDS", "3600")
+    calls = {"n": 0}
+
+    async def fake_select_many(table, **kwargs):
+        calls["n"] += 1
+        return []
+
+    with mock.patch.object(sw, "select_many", fake_select_many):
+        asyncio.run(worker._requeue_quarantined_candidates())
+        asyncio.run(worker._requeue_quarantined_candidates())
+    assert calls["n"] == 1  # second call throttled by the interval
+
+
+def test_reusable_bundle_skips_quarantine_worthy_bundle():
+    worker = _worker()
+    degraded_doc = {
+        "execution_trace_ref": "trace:cand-1",
+        "score_bundle_hash": "sha256:h",
+        "signature_ref": "s3://sig",
+        "scoring_health": {"provider_error_rate": 0.9},
+    }
+
+    async def fake_select_many(table, **kwargs):
+        return [
+            {
+                "score_bundle_id": "sb-degraded",
+                "score_bundle_doc": degraded_doc,
+                "signature_ref": "s3://sig",
+            }
+        ]
+
+    with mock.patch.object(sw, "select_many", fake_select_many):
+        row = asyncio.run(
+            worker._find_reusable_scored_bundle(
+                candidate_id="cand-1",
+                run_id="run-1",
+                candidate_artifact_hash="sha256:a",
+                evaluation_epoch=1,
+            )
+        )
+    assert row is None  # degraded bundle must not be reused
+
+
+def test_reusable_bundle_returns_healthy_bundle():
+    worker = _worker()
+    healthy_doc = {
+        "execution_trace_ref": "trace:cand-1",
+        "score_bundle_hash": "sha256:h",
+        "signature_ref": "s3://sig",
+        "scoring_health": {"provider_error_rate": 0.0},
+    }
+
+    async def fake_select_many(table, **kwargs):
+        return [
+            {
+                "score_bundle_id": "sb-healthy",
+                "score_bundle_doc": healthy_doc,
+                "signature_ref": "s3://sig",
+            }
+        ]
+
+    with mock.patch.object(sw, "select_many", fake_select_many):
+        row = asyncio.run(
+            worker._find_reusable_scored_bundle(
+                candidate_id="cand-1",
+                run_id="run-1",
+                candidate_artifact_hash="sha256:a",
+                evaluation_epoch=1,
+            )
+        )
+    assert row is not None and row["score_bundle_id"] == "sb-healthy"

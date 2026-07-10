@@ -3024,6 +3024,9 @@ class ResearchLabGatewayScoringWorker:
                 "status": "provider_preflight_unhealthy",
                 "preflight": preflight.get("verdicts"),
             }
+        # Providers are healthy at this moment: requeue any candidates whose
+        # scores were quarantined during an outage for a clean rescore.
+        await self._requeue_quarantined_candidates()
 
         baseline_result = None
         if self.config.private_baseline_rebenchmark_enabled and self._is_private_baseline_owner():
@@ -5638,6 +5641,16 @@ class ResearchLabGatewayScoringWorker:
                 continue
             if not str(doc.get("score_bundle_hash") or ""):
                 continue
+            if self._scoring_health_gate_result(doc).get("decision") == "quarantine":
+                # A degraded measurement is not reusable evidence: a
+                # provider-recovery requeue must re-evaluate fresh instead of
+                # re-quarantining the same bundle forever.
+                logger.warning(
+                    "research_lab_reusable_bundle_skipped_quarantined candidate_id=%s score_bundle_id=%s",
+                    compact_ref(candidate_id),
+                    compact_ref(str(row.get("score_bundle_id") or "")),
+                )
+                continue
             return dict(row)
         return None
 
@@ -5980,6 +5993,120 @@ class ResearchLabGatewayScoringWorker:
             json.dumps(scoring_health_gate.get("violations") or [])[:400],
         )
         return {"status": "scoring_health_quarantined"}
+
+    async def _requeue_quarantined_candidates(self) -> int:
+        """Provider-recovery rescore: requeue quarantined candidates.
+
+        Runs only after the provider preflight reported healthy. A candidate
+        whose latest promotion event is ``scoring_health_quarantined`` and
+        whose evaluation is terminally ``scored`` gets a fresh ``queued``
+        evaluation event (reason ``provider_recovery_rescore``), bounded by a
+        per-candidate attempt cap so a flapping provider cannot spin rescores.
+        Returns the number of candidates requeued.
+        """
+        if not self.config.scoring_health_gate_enabled:
+            return 0
+        interval = float(_env_int("RESEARCH_LAB_QUARANTINE_RECOVERY_INTERVAL_SECONDS", 300))
+        now = time.monotonic()
+        last = getattr(self, "_last_quarantine_recovery_at", 0.0)
+        if now - last < interval:
+            return 0
+        self._last_quarantine_recovery_at = now
+        max_attempts = _env_int("RESEARCH_LAB_QUARANTINE_RECOVERY_MAX_ATTEMPTS", 2)
+        per_pass_cap = _env_int("RESEARCH_LAB_QUARANTINE_RECOVERY_PER_PASS", 10)
+        try:
+            quarantine_events = await select_many(
+                "research_lab_candidate_promotion_events",
+                columns="candidate_id,created_at",
+                filters=(("event_type", "scoring_health_quarantined"),),
+                order_by=(("created_at", True),),
+                limit=100,
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_quarantine_recovery_scan_failed error=%s", str(exc)[:200]
+            )
+            return 0
+        requeued = 0
+        seen: set[str] = set()
+        for event_row in quarantine_events:
+            if requeued >= max(1, per_pass_cap):
+                break
+            candidate_id = str(event_row.get("candidate_id") or "")
+            if not candidate_id or candidate_id in seen:
+                continue
+            seen.add(candidate_id)
+            try:
+                current = await select_one(
+                    "research_lab_candidate_evaluation_current",
+                    filters=(("candidate_id", candidate_id),),
+                )
+                if not isinstance(current, Mapping):
+                    continue
+                if str(current.get("current_candidate_status") or "") != "scored":
+                    # queued/evaluating means a rescore is already in flight;
+                    # failed/rejected/tombstoned are terminal for other reasons.
+                    continue
+                latest_promotions = await select_many(
+                    "research_lab_candidate_promotion_events",
+                    columns="event_type,created_at",
+                    filters=(("candidate_id", candidate_id),),
+                    order_by=(("created_at", True),),
+                    limit=1,
+                )
+                latest_promotion = latest_promotions[0] if latest_promotions else None
+                if (
+                    not isinstance(latest_promotion, Mapping)
+                    or str(latest_promotion.get("event_type") or "") != "scoring_health_quarantined"
+                ):
+                    # A later promotion decision superseded the quarantine.
+                    continue
+                prior_recoveries = await select_many(
+                    "research_lab_candidate_evaluation_events",
+                    columns="event_id",
+                    filters=(
+                        ("candidate_id", candidate_id),
+                        ("event_type", "queued"),
+                        ("reason", "provider_recovery_rescore"),
+                    ),
+                    limit=max_attempts + 1,
+                )
+                if len(prior_recoveries) >= max(1, max_attempts):
+                    logger.warning(
+                        "research_lab_quarantine_recovery_attempts_exhausted candidate_id=%s attempts=%d",
+                        compact_ref(candidate_id),
+                        len(prior_recoveries),
+                    )
+                    continue
+                await create_candidate_evaluation_event(
+                    candidate_id=candidate_id,
+                    run_id=str(current.get("run_id") or ""),
+                    ticket_id=str(current.get("ticket_id") or ""),
+                    event_type="queued",
+                    candidate_status="queued",
+                    evaluator_ref=self.worker_ref,
+                    reason="provider_recovery_rescore",
+                    event_doc={
+                        "recovering_worker_ref": self.worker_ref,
+                        "quarantined_at": str(event_row.get("created_at") or ""),
+                        "previous_candidate_status": current.get("current_candidate_status"),
+                        "recovery_attempt": len(prior_recoveries) + 1,
+                        "max_recovery_attempts": max_attempts,
+                    },
+                )
+                requeued += 1
+                logger.warning(
+                    "research_lab_quarantined_candidate_requeued candidate_id=%s attempt=%d",
+                    compact_ref(candidate_id),
+                    len(prior_recoveries) + 1,
+                )
+            except Exception as exc:  # noqa: BLE001 - per-candidate containment
+                logger.warning(
+                    "research_lab_quarantine_recovery_requeue_failed candidate_id=%s error=%s",
+                    compact_ref(candidate_id),
+                    str(exc)[:200],
+                )
+        return requeued
 
     def _scoring_health_gate_result(self, score_bundle: Mapping[str, Any]) -> dict[str, Any]:
         health = score_bundle.get("scoring_health") if isinstance(score_bundle.get("scoring_health"), Mapping) else {}

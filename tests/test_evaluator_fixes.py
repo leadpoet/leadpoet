@@ -421,6 +421,101 @@ async def test_sourced_zero_no_error_flag():
     assert health["health_status"] == "degraded"
 
 
+# ---------------------------------------------------------------------------
+# Loop-ending provider-error gate: only credit/auth/quota rejections and
+# provider-infra failures escalate an empty run to a runtime error. Request-
+# shaped rejections of model-generated URLs (SD 400/404/410/503) score as-is.
+# ---------------------------------------------------------------------------
+
+_MARKER = private_runtime.PROVIDER_ERROR_MARKER
+
+
+def _stderr(*error_lines: str) -> str:
+    return "\n".join(f"{_MARKER} {line}" for line in error_lines)
+
+
+SD_404_LINE = "HTTPError: HTTP Error 404: Not Found; status=404; url=https://api.scrapingdog.com/scrape"
+SD_400_LINE = (
+    'HTTPError: HTTP Error 400: Bad Request; status=400; body={"success": false, '
+    '"message": "Something went wrong or profile not found"}; url=https://api.scrapingdog.com/linkedin'
+)
+SD_503_LINE = "HTTPError: HTTP Error 503: Service Unavailable; status=503; url=https://api.scrapingdog.com/scrape"
+SD_410_LINE = "HTTPError: HTTP Error 410: Gone; status=410; url=https://api.scrapingdog.com/linkedin"
+EXA_402_LINE = "HTTPError: HTTP Error 402: Payment Required; status=402; url=https://api.exa.ai/search"
+PROXY_500_LINE = "HTTPError: HTTP Error 500: Internal Server Error; status=500; reason=Internal Server Error"
+TIMEOUT_LINE = "TimeoutError: timed out; url=http://172.17.0.1:8791/exa/search"
+RATE_429_LINE = "HTTPError: too many requests; status=429; url=https://api.example.test/search"
+QUOTA_400_LINE = "HTTPError: HTTP Error 400: Bad Request; status=400; body=request quota exceeded"
+
+
+@pytest.mark.parametrize(
+    "line,loop_ending",
+    [
+        (SD_404_LINE, False),
+        (SD_400_LINE, False),
+        (SD_503_LINE, False),
+        (SD_410_LINE, False),
+        (EXA_402_LINE, True),
+        (PROXY_500_LINE, True),
+        (TIMEOUT_LINE, True),
+        (RATE_429_LINE, True),
+        # Credit/quota markers win even under a request-shaped status.
+        (QUOTA_400_LINE, True),
+    ],
+)
+def test_provider_error_line_loop_ending_classification(line, loop_ending):
+    assert private_runtime._provider_error_line_is_loop_ending(line) is loop_ending
+
+
+def test_empty_run_with_only_request_errors_does_not_raise():
+    # SD rejecting model-generated URLs is model-output behavior: the empty
+    # run stands as a legitimate zero-company result.
+    private_runtime._raise_on_empty_provider_error(
+        [], _stderr(SD_404_LINE, SD_400_LINE, SD_503_LINE), context_label="docker private model"
+    )
+
+
+def test_empty_run_with_credit_exhaustion_raises():
+    with pytest.raises(PrivateModelRuntimeError) as excinfo:
+        private_runtime._raise_on_empty_provider_error(
+            [], _stderr(EXA_402_LINE), context_label="docker private model"
+        )
+    assert "402" in str(excinfo.value)
+
+
+def test_empty_run_mixed_errors_raises_with_loop_ending_line():
+    # The raise text must carry the loop-ending line so downstream
+    # diagnostics parse the outage status, not a trailing per-URL 404.
+    with pytest.raises(PrivateModelRuntimeError) as excinfo:
+        private_runtime._raise_on_empty_provider_error(
+            [], _stderr(SD_404_LINE, EXA_402_LINE, SD_404_LINE), context_label="private model"
+        )
+    text = str(excinfo.value)
+    assert "402" in text
+    assert "404" not in text
+
+
+def test_empty_run_with_transport_failure_raises():
+    with pytest.raises(PrivateModelRuntimeError):
+        private_runtime._raise_on_empty_provider_error(
+            [], _stderr(TIMEOUT_LINE), context_label="docker private model"
+        )
+    with pytest.raises(PrivateModelRuntimeError):
+        private_runtime._raise_on_empty_provider_error(
+            [], _stderr(PROXY_500_LINE), context_label="docker private model"
+        )
+
+
+def test_non_empty_run_never_raises_on_provider_errors():
+    private_runtime._raise_on_empty_provider_error(
+        [{"company_name": "Acme"}], _stderr(EXA_402_LINE), context_label="docker private model"
+    )
+
+
+def test_empty_run_without_provider_errors_does_not_raise():
+    private_runtime._raise_on_empty_provider_error([], "", context_label="docker private model")
+
+
 def test_provider_error_detection_bootstrap_covers_httpx_requests_aiohttp(tmp_path):
     probe = r"""
 import asyncio

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import base64
 import contextvars
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -23,6 +24,8 @@ from research_lab.employee_buckets import (
     normalize_employee_count_bucket as _normalize_linkedin_employee_count_bucket,
     normalize_employee_count_buckets,
 )
+
+logger = logging.getLogger(__name__)
 
 SECRET_MARKERS = (
     "sk-or-",
@@ -743,15 +746,79 @@ def _redacted_context(context: Mapping[str, Any]) -> dict[str, Any]:
     return dict(context)
 
 
+# Provider failures that end the whole sourcing run: credit/auth/quota
+# rejections and provider-infra failures. Request-shaped rejections of
+# model-generated inputs (Scrapingdog 400 "Something went wrong", 404 on an
+# invalid URL, 410 Gone, 503 on a bad scrape target) are model-output
+# behavior — the provider answered, the input was wrong — so an empty run
+# that only carries those stands as a legitimate zero-company result.
+_LOOP_ENDING_PROVIDER_STATUSES = frozenset({401, 402, 403, 429, 500, 502, 504})
+_PROVIDER_CREDIT_MARKERS = (
+    "out of credits",
+    "insufficient credits",
+    "payment required",
+    "quota",
+)
+_PROVIDER_OUTAGE_TEXT_MARKERS = (
+    "too many requests",
+    "rate limit",
+    "timed out",
+    "timeout",
+    "connection reset",
+    "connection refused",
+    "temporarily unavailable",
+    "remotedisconnected",
+    "incompleteread",
+)
+_PROVIDER_ERROR_STATUS_CODES = (400, 401, 402, 403, 404, 408, 409, 410, 429, 500, 502, 503, 504)
+
+
+def _provider_error_line_is_loop_ending(line: str) -> bool:
+    """True only for provider errors that mean the provider itself failed.
+
+    Credit/quota markers win regardless of status (providers report exhausted
+    credits under several 4xx codes). A recognized request-shaped status
+    (400/404/408/409/410/503) is the provider correctly rejecting a
+    model-generated input, not an outage. Text markers (timeouts, connection
+    resets) only decide lines with no parseable status — e.g. transport
+    failures reaching the evidence proxy.
+    """
+    lowered = line.lower()
+    if any(marker in lowered for marker in _PROVIDER_CREDIT_MARKERS):
+        return True
+    status = 0
+    for code in _PROVIDER_ERROR_STATUS_CODES:
+        if f"http error {code}" in lowered or f"status={code}" in lowered or f'"status":{code}' in lowered:
+            status = code
+            break
+    if status:
+        return status in _LOOP_ENDING_PROVIDER_STATUSES
+    return any(marker in lowered for marker in _PROVIDER_OUTAGE_TEXT_MARKERS)
+
+
 def _raise_on_empty_provider_error(decoded: Any, stderr: str, *, context_label: str) -> None:
     if decoded != []:
         return
     provider_error = _provider_error_text(stderr)
     if not provider_error:
         return
+    loop_ending_lines = [
+        line for line in provider_error.splitlines() if _provider_error_line_is_loop_ending(line)
+    ]
+    if not loop_ending_lines:
+        # Only request-shaped provider rejections (invalid model-generated
+        # URLs and the like): the empty result is scored as-is instead of
+        # marking the run unhealthy.
+        logger.warning(
+            "research_lab_private_runtime_empty_run_request_errors_only context=%s "
+            "provider_error_lines=%d",
+            context_label,
+            len(provider_error.splitlines()),
+        )
+        return
     raise PrivateModelRuntimeError(
         f"{context_label} provider-backed sourcing failed before returning companies: "
-        f"{provider_error}"
+        + "\n".join(loop_ending_lines)[-1200:]
     )
 
 

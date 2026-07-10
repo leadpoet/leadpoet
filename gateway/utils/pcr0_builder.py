@@ -165,7 +165,7 @@ PCR0_COPY_PATHS: List[str] = [
 # =============================================================================
 
 # Cache structure (keyed by source content plus base-image identity, not commit hash):
-# {cache_key: {"pcr0": "...", "content_hash": "...", "base_image_stamp": "...", "commit_hash": "...", "built_at": timestamp}}
+# {cache_key: {"pcr0": "...", "content_hash": "...", "base_image_stamp": "...", "commit_hash": "...", "commit_timestamp": "...", "built_at": timestamp}}
 # This means: same code content + same base image = same cache key, regardless of commits
 _pcr0_cache: Dict[str, Dict] = {}
 _cache_lock = asyncio.Lock()
@@ -196,6 +196,7 @@ def get_cache_status() -> Dict:
                 "content_hash": v.get("content_hash", "?"),
                 "base_image_stamp": v.get("base_image_stamp", "?"),
                 "commit_hash": v.get("commit_hash", "?")[:8],
+                "commit_timestamp": v.get("commit_timestamp"),
                 "pcr0": v["pcr0"][:32] + "...",
                 "built_at": v.get("built_at"),
             }
@@ -212,10 +213,41 @@ def get_cache_status() -> Dict:
 # Git Operations
 # =============================================================================
 
+def _cache_commit_timestamp(entry: Dict) -> int:
+    try:
+        return int(entry.get("commit_timestamp") or -1)
+    except (TypeError, ValueError):
+        return -1
+
+
+def _prune_pcr0_cache() -> None:
+    """Prune cache by commit recency, with build time only as a fallback tie-breaker."""
+    global _pcr0_cache
+
+    if len(_pcr0_cache) <= PCR0_CACHE_SIZE:
+        return
+
+    sorted_entries = sorted(
+        _pcr0_cache.items(),
+        key=lambda item: (
+            _cache_commit_timestamp(item[1]),
+            item[1].get("built_at") or "",
+        ),
+        reverse=True,
+    )
+    removed_entries = sorted_entries[PCR0_CACHE_SIZE:]
+    _pcr0_cache = dict(sorted_entries[:PCR0_CACHE_SIZE])
+    removed = ", ".join(
+        f"{entry.get('commit_hash', 'unknown')[:8]}:{entry.get('pcr0', '')[:16]}"
+        for _key, entry in removed_entries
+    )
+    logger.info(f"[PCR0] Pruned cache to {PCR0_CACHE_SIZE} entries by commit recency; removed {removed}")
+
+
 async def get_latest_commits(repo_dir: str, count: int = 3) -> List[Dict]:
     """Get the latest N commits from the repo."""
     proc = await asyncio.create_subprocess_exec(
-        "git", "log", f"-{count}", "--format=%H|%s|%ai",
+        "git", "log", f"-{count}", "--format=%H|%ct|%s|%ai",
         cwd=repo_dir,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -229,11 +261,12 @@ async def get_latest_commits(repo_dir: str, count: int = 3) -> List[Dict]:
     commits = []
     for line in stdout.decode().strip().split("\n"):
         if "|" in line:
-            parts = line.split("|", 2)
+            parts = line.split("|", 3)
             commits.append({
                 "hash": parts[0],
-                "message": parts[1] if len(parts) > 1 else "",
-                "date": parts[2] if len(parts) > 2 else "",
+                "timestamp": parts[1] if len(parts) > 1 else "",
+                "message": parts[2] if len(parts) > 2 else "",
+                "date": parts[3] if len(parts) > 3 else "",
             })
     
     return commits
@@ -1024,6 +1057,7 @@ async def check_and_build_pcr0():
         # Get commit hash for reference (optional, just for logging)
         commits = await get_latest_commits(repo_dir, 1)
         commit_hash = commits[0]["hash"] if commits else "unknown"
+        commit_timestamp = commits[0].get("timestamp", "") if commits else ""
         
         # Build PCR0 for current content
         async with _cache_lock:
@@ -1042,21 +1076,13 @@ async def check_and_build_pcr0():
                     "cache_key": cache_key,
                     "base_image_stamp": format_base_image_stamp(repo_dir),
                     "commit_hash": commit_hash,
+                    "commit_timestamp": commit_timestamp,
                     "built_at": datetime.utcnow().isoformat(),
                 }
                 print(f"[PCR0] ✅ Cached PCR0 for key {cache_key}: {pcr0[:64]}...")
                 logger.info(f"[PCR0] ✅ Cached PCR0 for key {cache_key}: {pcr0[:32]}...")
                 
-                # Prune old entries (keep only last N)
-                if len(_pcr0_cache) > PCR0_CACHE_SIZE:
-                    # Sort by built_at and keep newest
-                    sorted_entries = sorted(
-                        _pcr0_cache.items(),
-                        key=lambda x: x[1]["built_at"],
-                        reverse=True
-                    )
-                    _pcr0_cache = dict(sorted_entries[:PCR0_CACHE_SIZE])
-                    logger.info(f"[PCR0] Pruned cache to {PCR0_CACHE_SIZE} entries")
+                _prune_pcr0_cache()
             else:
                 logger.error(f"[PCR0] ❌ Failed to build PCR0 for content {content_hash}")
         
@@ -1116,7 +1142,7 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
         
         proc = await asyncio.create_subprocess_exec(
             "git", "log", f"-{num_commits * 2}",  # Get more to filter
-            "--format=%H|%s|%ai",
+            "--format=%H|%ct|%s|%ai",
             *path_args,
             cwd=repo_dir,
             stdout=asyncio.subprocess.PIPE,
@@ -1132,11 +1158,12 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
             commits = []
             for line in stdout.decode().strip().split("\n"):
                 if "|" in line:
-                    parts = line.split("|", 2)
+                    parts = line.split("|", 3)
                     commits.append({
                         "hash": parts[0],
-                        "message": parts[1] if len(parts) > 1 else "",
-                        "date": parts[2] if len(parts) > 2 else "",
+                        "timestamp": parts[1] if len(parts) > 1 else "",
+                        "message": parts[2] if len(parts) > 2 else "",
+                        "date": parts[3] if len(parts) > 3 else "",
                     })
             commits = commits[:num_commits]  # Limit to requested count
         
@@ -1209,6 +1236,7 @@ async def build_pcr0_for_recent_commits(num_commits: int = None):
                         "cache_key": cache_key,
                         "base_image_stamp": format_base_image_stamp(repo_dir),
                         "commit_hash": commit_hash,
+                        "commit_timestamp": commit.get("timestamp", ""),
                         "built_at": datetime.utcnow().isoformat(),
                     }
                 built_count += 1
@@ -1365,7 +1393,7 @@ def verify_pcr0(pcr0: str) -> Dict:
     The cache stores PCR0 values keyed by monitored source content and base-image identity.
     This means:
     - Same code + same base image = same PCR0 (regardless of how many commits)
-    - Only 3 different build identities are cached
+    - Recent build identities are cached for rolling validator compatibility
     - Validators on older code versions are still accepted
     
     Returns:

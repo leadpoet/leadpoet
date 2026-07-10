@@ -43,6 +43,13 @@ print("🐛 DEBUG: Cryptography imports OK", flush=True)
 # CBOR for attestation documents
 import cbor2
 
+# The enclave interpreter only has this script's directory on sys.path; the
+# repo-level packages copied to /app (leadpoet_canonical, research_lab, ...)
+# must be importable before the imports below or the enclave dies at boot.
+_APP_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _APP_ROOT not in sys.path:
+    sys.path.insert(0, _APP_ROOT)
+
 from leadpoet_canonical.attested_receipts import (
     WEIGHT_PURPOSE,
     WEIGHT_ROLE,

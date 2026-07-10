@@ -59,10 +59,14 @@ def get_enclave_cid() -> Optional[int]:
         except ValueError:
             print(f"[vsock] Invalid ENCLAVE_CID: {env_cid}")
     
-    # Fall back to nitro-cli (for host)
+    # Fall back to nitro-cli (for host). Resolve an absolute path first:
+    # coordinator/worker processes can run with a PATH that lacks /usr/bin.
     try:
+        import shutil as _shutil
+
+        nitro_cli = _shutil.which("nitro-cli") or "/usr/bin/nitro-cli"
         result = subprocess.run(
-            ["nitro-cli", "describe-enclaves"],
+            [nitro_cli, "describe-enclaves"],
             capture_output=True,
             text=True
         )

@@ -1,101 +1,115 @@
 {
-  "_comment": "PCR0 allowlist for LeadPoet TEE verification. Updated by CI/CD on each enclave build.",
-  "_updated": "2026-07-07T17:05:00Z",
-  "_repo": "https://github.com/leadpoet/leadpoet",
-  "gateway_pcr0": [
-    {
-      "pcr0": "9376a62482c8d275813265bfa829ec4c0bf57c0087b8a07ada674097194ea0f929e11da8754b9f3b00686cdc3e77534c",
-      "version": "2026-07-07",
-      "deployed": "2026-07-07",
-      "commit_hash": "43dad2100f8b682a44a4912155a803e9499cb367",
-      "notes": "gateway enclave: observed production build after 2026-07-07 morning restart (Docker-root reset build session)"
-    },
-    {
-      "pcr0": "af54faabc191e01231561e49109d73a5e818ca03fd3a550b849742a57e8436c1862e50ba8fb00e77c8aa78fb83fda139",
-      "version": "2026-07-05",
-      "deployed": "2026-07-05",
-      "commit_hash": "dfe17449d1a4eed3f17f0634cae91d2851e36fe4",
-      "notes": "gateway enclave: current production build after daily baseline window deploy"
-    },
-    {
-      "pcr0": "02797d0a3b02fdda186db756b7cae6ef283592bae6ea879c0c19e4ab0a787766bbbd2008eb49eb9de58f7346d6c834d5",
-      "version": "v1.0.0",
-      "deployed": "2026-01-05",
-      "notes": "Initial gateway enclave"
-    }
-  ],
-  "validator_pcr0": [
-    {
-      "pcr0": "e4d0da1828c4dfbc13191dae1955b19a4e1db0507f1fe742843ee3b45a372da548b0d3eafe930c8e03603606f67db112",
-      "version": "2026-07-07",
-      "deployed": "2026-07-07",
-      "commit_hash": "ff39b5b279d2e36f23ebc8222836cde0ca3833d6",
-      "notes": "validator enclave: observed production build on commit ff39b5b2 after 2026-07-07 restart (validator box repo HEAD at build)"
-    },
-    {
-      "pcr0": "67da49d008d22c120eaafcbc17580364c340aa1f02f83547f19d1ff64b086ede9be2a44762d3ff30aad06ddcd0855788",
-      "version": "2026-07-06",
-      "deployed": "2026-07-06",
-      "commit_hash": "90a7d9e679c4f5be785588b0cab45ffa60b23d94",
-      "notes": "validator enclave: observed production build on commit 90a7d9e6 after stale private-source rebase restart (.eif built 2026-07-06T20:41Z)"
-    },
-    {
-      "pcr0": "86c579cc13003b16692f35a80391c7ea3a975ea52860b02aeed73da6f1dff21fbf1e686756f2c73c262be7ff5571b098",
-      "version": "2026-07-06",
-      "deployed": "2026-07-06",
-      "commit_hash": "a276b7647b8788fbfddec0904bbae1ac03806ac8",
-      "notes": "validator enclave: observed production build on commit a276b764 after champion replay deploy"
-    },
-    {
-      "pcr0": "2b3bc241d77322112753c8e8b1e2d42090a88924e3b0a1e269c4f32cba1762f5e944e2f4a0b127c07067ffee0ec9dd8c",
-      "version": "2026-07-05",
-      "deployed": "2026-07-05",
-      "commit_hash": "dfe17449d1a4eed3f17f0634cae91d2851e36fe4",
-      "notes": "validator enclave: current production build after daily baseline window deploy"
-    },
-    {
-      "pcr0": "01877a6d4fd0f4b6f335e7816af36072c63e141ed40e9b100703f467a1feca740cdbca2fd29196e0808d80d50fee5104",
-      "version": "2026-07-05",
-      "deployed": "2026-07-05",
-      "notes": "validator enclave: current production build on commit 9e2f228"
-    },
-    {
-      "pcr0": "46b34413f6a5fbc08058f401b23ea8ae7faf787d056e79d981d4a4c438b3e96e80bef77a3aa9bac9391f29efd9ebd934",
-      "version": "2026-06-23",
-      "deployed": "2026-06-23",
-      "notes": "validator enclave: fulfillment /scoring fix + emissions split (commit d267acb)"
-    },
-    {
-      "pcr0": "1697ef7e8c095ff5fc3d7e0e79bb7d00d29d0bdfa487d2c7353812ebafb35667ebd428c42db59ad1efe1c2999d1e5d85",
-      "version": "v1.0.0",
-      "deployed": "2026-01-06",
-      "notes": "Initial validator enclave"
-    },
-    {
-      "pcr0": "503efd9c21ea01bd2051aa45c87240957ad00f4cbd9f3fe646be6d5f24e75223ed59558a90e6c4ef5f042332915af07b",
-      "version": "v1.0.1-temp",
-      "deployed": "2026-01-21",
-      "notes": "TEMPORARY - validator on commit 4014536, remove after enclave rebuild"
-    },
-    {
-      "pcr0": "9f7a630b6d05300e4be7d4afb25e923fced28bad741f9fc7b44cc0d2db1e13a041ff8a60a8db85f916226cae752703ae",
-      "version": "v1.1.0",
-      "deployed": "2026-02-06",
-      "notes": "IMMEDIATE REVEAL MODE - validator with weight calculation and reveal removal changes"
-    },
-    {
-      "pcr0": "01877a6d4fd0f4b6f335e7816af36072c63e141ed40e9b100703f467a1feca740cdbca2fd29196e0808d80d50fee5104",
-      "version": "2026-07-05",
-      "deployed": "2026-07-05",
-      "commit_hash": "9e2f22846d8a0fb4a3ff1c73f821fed8f127b40e",
-      "notes": "validator enclave: current production build on commit 9e2f228"
-    },
-    {
-      "pcr0": "8f36ef9f31361b44cd8f2f986a258a7930827026cf58019d831985a968e1a9bd4f7e1c5b6b01646b763d26a2b2a2ec05",
-      "version": "2026-07-06",
-      "deployed": "2026-07-06",
-      "commit_hash": "6d75fd91c473235bec6ae48ef8f43c8ffbc9e6fb",
-      "notes": "validator enclave: observed production build on commit 6d75fd91 after Langfuse/PCR0 restart"
-    }
-  ]
+    "_comment": "PCR0 allowlist for LeadPoet TEE verification. Updated by CI/CD on each enclave build.",
+    "_updated": "2026-07-10T20:40:00Z",
+    "_repo": "https://github.com/leadpoet/leadpoet",
+    "gateway_pcr0": [
+        {
+            "pcr0": "3e05712d8bfc862440c2a8f48907d417cb810f4da6e68573353220f8b401f43bcd56b9a695fcecd4c2a2cdcd930a560a",
+            "version": "2026-07-10",
+            "deployed": "2026-07-10",
+            "commit_hash": "4472cf0826487203d337f35a6674eddd94ca5a77",
+            "notes": "gateway enclave: 2026-07-10 deploy (attested EIF staging from exact commit, absolute-interpreter entrypoint)"
+        },
+        {
+            "pcr0": "9376a62482c8d275813265bfa829ec4c0bf57c0087b8a07ada674097194ea0f929e11da8754b9f3b00686cdc3e77534c",
+            "version": "2026-07-07",
+            "deployed": "2026-07-07",
+            "commit_hash": "43dad2100f8b682a44a4912155a803e9499cb367",
+            "notes": "gateway enclave: observed production build after 2026-07-07 morning restart (Docker-root reset build session)"
+        },
+        {
+            "pcr0": "af54faabc191e01231561e49109d73a5e818ca03fd3a550b849742a57e8436c1862e50ba8fb00e77c8aa78fb83fda139",
+            "version": "2026-07-05",
+            "deployed": "2026-07-05",
+            "commit_hash": "dfe17449d1a4eed3f17f0634cae91d2851e36fe4",
+            "notes": "gateway enclave: current production build after daily baseline window deploy"
+        },
+        {
+            "pcr0": "02797d0a3b02fdda186db756b7cae6ef283592bae6ea879c0c19e4ab0a787766bbbd2008eb49eb9de58f7346d6c834d5",
+            "version": "v1.0.0",
+            "deployed": "2026-01-05",
+            "notes": "Initial gateway enclave"
+        }
+    ],
+    "validator_pcr0": [
+        {
+            "pcr0": "5cb9746a49009231d9863e789eed83130077e33041faf894f7781e9a07c7258cf4da77d865dcb4fe6959379ff5ff3c62",
+            "version": "2026-07-10",
+            "deployed": "2026-07-10",
+            "commit_hash": "09ed2d14874bf2e1603253a2ca188216f7151301",
+            "notes": "validator enclave: 2026-07-10 deploy (attested weight lineage, sys.path bootstrap + py3.7 lazy annotations); verified against gateway dynamic rebuild cache"
+        },
+        {
+            "pcr0": "e4d0da1828c4dfbc13191dae1955b19a4e1db0507f1fe742843ee3b45a372da548b0d3eafe930c8e03603606f67db112",
+            "version": "2026-07-07",
+            "deployed": "2026-07-07",
+            "commit_hash": "ff39b5b279d2e36f23ebc8222836cde0ca3833d6",
+            "notes": "validator enclave: observed production build on commit ff39b5b2 after 2026-07-07 restart (validator box repo HEAD at build)"
+        },
+        {
+            "pcr0": "67da49d008d22c120eaafcbc17580364c340aa1f02f83547f19d1ff64b086ede9be2a44762d3ff30aad06ddcd0855788",
+            "version": "2026-07-06",
+            "deployed": "2026-07-06",
+            "commit_hash": "90a7d9e679c4f5be785588b0cab45ffa60b23d94",
+            "notes": "validator enclave: observed production build on commit 90a7d9e6 after stale private-source rebase restart (.eif built 2026-07-06T20:41Z)"
+        },
+        {
+            "pcr0": "86c579cc13003b16692f35a80391c7ea3a975ea52860b02aeed73da6f1dff21fbf1e686756f2c73c262be7ff5571b098",
+            "version": "2026-07-06",
+            "deployed": "2026-07-06",
+            "commit_hash": "a276b7647b8788fbfddec0904bbae1ac03806ac8",
+            "notes": "validator enclave: observed production build on commit a276b764 after champion replay deploy"
+        },
+        {
+            "pcr0": "2b3bc241d77322112753c8e8b1e2d42090a88924e3b0a1e269c4f32cba1762f5e944e2f4a0b127c07067ffee0ec9dd8c",
+            "version": "2026-07-05",
+            "deployed": "2026-07-05",
+            "commit_hash": "dfe17449d1a4eed3f17f0634cae91d2851e36fe4",
+            "notes": "validator enclave: current production build after daily baseline window deploy"
+        },
+        {
+            "pcr0": "01877a6d4fd0f4b6f335e7816af36072c63e141ed40e9b100703f467a1feca740cdbca2fd29196e0808d80d50fee5104",
+            "version": "2026-07-05",
+            "deployed": "2026-07-05",
+            "notes": "validator enclave: current production build on commit 9e2f228"
+        },
+        {
+            "pcr0": "46b34413f6a5fbc08058f401b23ea8ae7faf787d056e79d981d4a4c438b3e96e80bef77a3aa9bac9391f29efd9ebd934",
+            "version": "2026-06-23",
+            "deployed": "2026-06-23",
+            "notes": "validator enclave: fulfillment /scoring fix + emissions split (commit d267acb)"
+        },
+        {
+            "pcr0": "1697ef7e8c095ff5fc3d7e0e79bb7d00d29d0bdfa487d2c7353812ebafb35667ebd428c42db59ad1efe1c2999d1e5d85",
+            "version": "v1.0.0",
+            "deployed": "2026-01-06",
+            "notes": "Initial validator enclave"
+        },
+        {
+            "pcr0": "503efd9c21ea01bd2051aa45c87240957ad00f4cbd9f3fe646be6d5f24e75223ed59558a90e6c4ef5f042332915af07b",
+            "version": "v1.0.1-temp",
+            "deployed": "2026-01-21",
+            "notes": "TEMPORARY - validator on commit 4014536, remove after enclave rebuild"
+        },
+        {
+            "pcr0": "9f7a630b6d05300e4be7d4afb25e923fced28bad741f9fc7b44cc0d2db1e13a041ff8a60a8db85f916226cae752703ae",
+            "version": "v1.1.0",
+            "deployed": "2026-02-06",
+            "notes": "IMMEDIATE REVEAL MODE - validator with weight calculation and reveal removal changes"
+        },
+        {
+            "pcr0": "01877a6d4fd0f4b6f335e7816af36072c63e141ed40e9b100703f467a1feca740cdbca2fd29196e0808d80d50fee5104",
+            "version": "2026-07-05",
+            "deployed": "2026-07-05",
+            "commit_hash": "9e2f22846d8a0fb4a3ff1c73f821fed8f127b40e",
+            "notes": "validator enclave: current production build on commit 9e2f228"
+        },
+        {
+            "pcr0": "8f36ef9f31361b44cd8f2f986a258a7930827026cf58019d831985a968e1a9bd4f7e1c5b6b01646b763d26a2b2a2ec05",
+            "version": "2026-07-06",
+            "deployed": "2026-07-06",
+            "commit_hash": "6d75fd91c473235bec6ae48ef8f43c8ffbc9e6fb",
+            "notes": "validator enclave: observed production build on commit 6d75fd91 after Langfuse/PCR0 restart"
+        }
+    ]
 }

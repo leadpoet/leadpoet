@@ -121,10 +121,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     build.add_argument("--manifest", required=True, type=Path)
     build.add_argument("--output", required=True, type=Path)
     build.add_argument("--commit", default="")
+    resolve = subparsers.add_parser("resolve")
+    resolve.add_argument("--gateway-root", required=True, type=Path)
+    resolve.add_argument("--source-root", required=True, type=Path)
+    resolve.add_argument("--commit", default="")
     verify = subparsers.add_parser("verify")
     verify.add_argument("--gateway-root", required=True, type=Path)
     args = parser.parse_args(argv)
 
+    if args.command == "resolve":
+        print(
+            resolve_commit(
+                gateway_root=args.gateway_root,
+                source_root=args.source_root,
+                explicit_commit=args.commit,
+            )
+        )
+        return 0
     if args.command == "verify":
         identity = load_identity(gateway_root=args.gateway_root)
     else:

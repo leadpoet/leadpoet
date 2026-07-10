@@ -146,6 +146,7 @@ def _build_once(*, source_root: Path, commit: str, work_root: Path, index: int) 
             "GATEWAY_ROOT": str(gateway_root),
             "RESEARCH_LAB_RUNTIME_SOURCE_ROOT": str(source_root),
             "ATTESTED_RUNTIME_COMMIT_SHA": commit,
+            "ATTESTED_RUNTIME_SOURCE_IS_CLEAN_GIT_ARCHIVE": "1",
         }
     )
     _run(["bash", str(gateway_root / "tee" / "stage_attested_runtime.sh")], env=env, timeout=900)

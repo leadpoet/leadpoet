@@ -68,6 +68,11 @@ def test_repeated_builds_require_three_runs(tmp_path):
         )
 
 
+def test_independent_builder_marks_extracted_git_archive_clean():
+    source = Path(gateway_pcr0_builder.__file__).read_text(encoding="utf-8")
+    assert '"ATTESTED_RUNTIME_SOURCE_IS_CLEAN_GIT_ARCHIVE": "1"' in source
+
+
 def test_cache_keeps_latest_twenty_verified_commits(tmp_path):
     cache = tmp_path / "cache.json"
     for index in range(25):

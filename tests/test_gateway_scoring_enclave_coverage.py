@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 
 import pytest
 
@@ -98,6 +100,11 @@ def test_gateway_eif_build_enforces_scoring_manifest():
     assert 'COPY _enclave_source/ /app/gateway/' in dockerfile
     assert 'normalize_attested_runtime.py\" --root \"$BUILD_CONTEXT_TMP\"' in stage_script
     assert "--exclude='.source_commit'" in stage_script
+    assert "ATTESTED_RUNTIME_SOURCE_IS_CLEAN_GIT_ARCHIVE" in stage_script
+    assert 'git -C "$CLEAN_SOURCE_ROOT" fetch -q --depth=1 origin "$ATTESTED_COMMIT_SHA"' in stage_script
+    assert 'if [ "$RESOLVED_SOURCE_COMMIT" != "$ATTESTED_COMMIT_SHA" ]' in stage_script
+    assert '"$SOURCE_GATEWAY_ROOT/" "$BUILD_CONTEXT_TMP/"' in stage_script
+    assert '"$GATEWAY_ROOT/" "$BUILD_CONTEXT_TMP/"' not in stage_script
     assert 'pip download' in stage_script
     assert '--require-hashes' in stage_script
     assert '--no-index --find-links=/tmp/wheelhouse' in dockerfile
@@ -108,6 +115,27 @@ def test_gateway_eif_build_enforces_scoring_manifest():
     assert 'GATEWAY_ENCLAVE_CPU_COUNT 2' in start_script
     assert 'GATEWAY_ENCLAVE_MEMORY_MB 8192' in start_script
     assert '/home/ec2-user/.config/leadpoet/gateway.env' in start_script
+
+
+def test_gateway_build_identity_resolve_command_returns_exact_commit(tmp_path: Path):
+    commit = "a" * 40
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "gateway" / "tee" / "build_identity.py"),
+            "resolve",
+            "--gateway-root",
+            str(tmp_path / "gateway"),
+            "--source-root",
+            str(tmp_path),
+            "--commit",
+            commit,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == commit
 
 
 def test_gateway_build_identity_binds_commit_and_scoring_manifest(tmp_path: Path):

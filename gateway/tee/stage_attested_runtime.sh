@@ -7,15 +7,15 @@
 set -euo pipefail
 
 GATEWAY_ROOT="${GATEWAY_ROOT:-$HOME/gateway}"
-SOURCE_ROOT="${RESEARCH_LAB_RUNTIME_SOURCE_ROOT:-$HOME}"
+DEPLOY_SOURCE_ROOT="${RESEARCH_LAB_RUNTIME_SOURCE_ROOT:-$HOME}"
+CLEAN_SOURCE_ROOT="${ATTESTED_RUNTIME_GIT_SOURCE_ROOT:-/tmp/leadpoet_gateway_enclave_source}"
+SOURCE_REPO_URL="${ATTESTED_RUNTIME_GIT_REPO_URL:-https://github.com/leadpoet/leadpoet.git}"
 DEST_ROOT="$GATEWAY_ROOT/_attested_runtime"
 TMP_ROOT="$GATEWAY_ROOT/.attested_runtime.tmp"
 BUILD_CONTEXT_ROOT="$GATEWAY_ROOT/_enclave_source"
 BUILD_CONTEXT_TMP="$GATEWAY_ROOT/.enclave_source.tmp"
 WHEELHOUSE_ROOT="$GATEWAY_ROOT/_enclave_wheelhouse"
 WHEELHOUSE_TMP="$GATEWAY_ROOT/.enclave_wheelhouse.tmp"
-SCORING_REQUIREMENTS_INPUT="$GATEWAY_ROOT/tee/requirements-scoring-py39.in"
-SCORING_REQUIREMENTS_LOCK="$GATEWAY_ROOT/tee/requirements-scoring-py39.lock"
 PACKAGES=(
   "research_lab"
   "leadpoet_verifier"
@@ -25,15 +25,59 @@ PACKAGES=(
   "validator_models"
 )
 
-echo "Staging attested Research Lab runtime packages"
-echo "  Gateway root: $GATEWAY_ROOT"
-echo "  Source root:  $SOURCE_ROOT"
-echo "  Dest root:    $DEST_ROOT"
-
 if ! command -v rsync >/dev/null 2>&1; then
   echo "ERROR: rsync is required to stage attested runtime packages" >&2
   exit 1
 fi
+if ! command -v git >/dev/null 2>&1; then
+  echo "ERROR: git is required to stage a clean attested runtime commit" >&2
+  exit 1
+fi
+
+ATTESTED_COMMIT_SHA="$(
+  python3 "$GATEWAY_ROOT/tee/build_identity.py" resolve \
+    --gateway-root "$GATEWAY_ROOT" \
+    --source-root "$DEPLOY_SOURCE_ROOT"
+)"
+
+if [ "${ATTESTED_RUNTIME_SOURCE_IS_CLEAN_GIT_ARCHIVE:-0}" = "1" ]; then
+  SOURCE_ROOT="$DEPLOY_SOURCE_ROOT"
+else
+  DEPLOY_SOURCE_COMMIT="$(git -C "$DEPLOY_SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
+  DEPLOY_SOURCE_DIRTY="$(git -C "$DEPLOY_SOURCE_ROOT" status --porcelain 2>/dev/null || true)"
+  if [ "$DEPLOY_SOURCE_COMMIT" = "$ATTESTED_COMMIT_SHA" ] \
+      && [ -z "$DEPLOY_SOURCE_DIRTY" ] \
+      && [ -d "$DEPLOY_SOURCE_ROOT/gateway" ]; then
+    SOURCE_ROOT="$DEPLOY_SOURCE_ROOT"
+  else
+    rm -rf "$CLEAN_SOURCE_ROOT"
+    git init -q "$CLEAN_SOURCE_ROOT"
+    git -C "$CLEAN_SOURCE_ROOT" remote add origin "$SOURCE_REPO_URL"
+    git -C "$CLEAN_SOURCE_ROOT" fetch -q --depth=1 origin "$ATTESTED_COMMIT_SHA"
+    git -C "$CLEAN_SOURCE_ROOT" checkout -q --detach FETCH_HEAD
+    RESOLVED_SOURCE_COMMIT="$(git -C "$CLEAN_SOURCE_ROOT" rev-parse HEAD)"
+    if [ "$RESOLVED_SOURCE_COMMIT" != "$ATTESTED_COMMIT_SHA" ]; then
+      echo "ERROR: clean attested source commit mismatch" >&2
+      exit 1
+    fi
+    SOURCE_ROOT="$CLEAN_SOURCE_ROOT"
+  fi
+fi
+
+SOURCE_GATEWAY_ROOT="$SOURCE_ROOT/gateway"
+SCORING_REQUIREMENTS_INPUT="$SOURCE_GATEWAY_ROOT/tee/requirements-scoring-py39.in"
+SCORING_REQUIREMENTS_LOCK="$SOURCE_GATEWAY_ROOT/tee/requirements-scoring-py39.lock"
+
+if [ ! -d "$SOURCE_GATEWAY_ROOT" ]; then
+  echo "ERROR: clean gateway source missing: $SOURCE_GATEWAY_ROOT" >&2
+  exit 1
+fi
+
+echo "Staging attested Research Lab runtime packages"
+echo "  Gateway root:  $GATEWAY_ROOT"
+echo "  Source root:   $SOURCE_ROOT"
+echo "  Source commit: $ATTESTED_COMMIT_SHA"
+echo "  Dest root:     $DEST_ROOT"
 
 rm -rf "$TMP_ROOT"
 mkdir -p "$TMP_ROOT"
@@ -64,18 +108,19 @@ for package in "${PACKAGES[@]}"; do
     "$source_dir/" "$dest_dir/"
 done
 
-python3 "$GATEWAY_ROOT/tee/scoring_import_closure.py" build \
-  --gateway-root "$GATEWAY_ROOT" \
+python3 "$SOURCE_GATEWAY_ROOT/tee/scoring_import_closure.py" build \
+  --gateway-root "$SOURCE_GATEWAY_ROOT" \
   --source-root "$SOURCE_ROOT" \
   --output "$TMP_ROOT/scoring_import_closure.json"
 
-python3 "$GATEWAY_ROOT/tee/build_identity.py" build \
-  --gateway-root "$GATEWAY_ROOT" \
+python3 "$SOURCE_GATEWAY_ROOT/tee/build_identity.py" build \
+  --gateway-root "$SOURCE_GATEWAY_ROOT" \
   --source-root "$SOURCE_ROOT" \
   --manifest "$TMP_ROOT/scoring_import_closure.json" \
-  --output "$TMP_ROOT/gateway_enclave_build_identity.json"
+  --output "$TMP_ROOT/gateway_enclave_build_identity.json" \
+  --commit "$ATTESTED_COMMIT_SHA"
 
-python3 "$GATEWAY_ROOT/tee/normalize_attested_runtime.py" --root "$TMP_ROOT"
+python3 "$SOURCE_GATEWAY_ROOT/tee/normalize_attested_runtime.py" --root "$TMP_ROOT"
 
 find "$TMP_ROOT" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
 find "$TMP_ROOT" -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '*.pyd' \) -delete 2>/dev/null || true
@@ -95,11 +140,11 @@ python3 -m pip download \
   --python-version 39 \
   --abi cp39 \
   -r "$SCORING_REQUIREMENTS_LOCK"
-python3 "$GATEWAY_ROOT/tee/scoring_wheelhouse.py" verify-wheelhouse \
+python3 "$SOURCE_GATEWAY_ROOT/tee/scoring_wheelhouse.py" verify-wheelhouse \
   --input "$SCORING_REQUIREMENTS_INPUT" \
   --lock "$SCORING_REQUIREMENTS_LOCK" \
   --wheelhouse "$WHEELHOUSE_TMP"
-python3 "$GATEWAY_ROOT/tee/normalize_attested_runtime.py" --root "$WHEELHOUSE_TMP"
+python3 "$SOURCE_GATEWAY_ROOT/tee/normalize_attested_runtime.py" --root "$WHEELHOUSE_TMP"
 rm -rf "$WHEELHOUSE_ROOT"
 mv "$WHEELHOUSE_TMP" "$WHEELHOUSE_ROOT"
 
@@ -136,12 +181,12 @@ rsync -a --delete \
   --exclude='hotpatch-backups/' \
   --exclude='BUILD_INFO.json' \
   --exclude='.source_commit' \
-  "$GATEWAY_ROOT/" "$BUILD_CONTEXT_TMP/"
+  "$SOURCE_GATEWAY_ROOT/" "$BUILD_CONTEXT_TMP/"
 mkdir -p "$BUILD_CONTEXT_TMP/_attested_runtime"
 rsync -a --delete "$DEST_ROOT/" "$BUILD_CONTEXT_TMP/_attested_runtime/"
 mkdir -p "$BUILD_CONTEXT_TMP/tee/wheelhouse"
 rsync -a --delete "$WHEELHOUSE_ROOT/" "$BUILD_CONTEXT_TMP/tee/wheelhouse/"
-python3 "$GATEWAY_ROOT/tee/normalize_attested_runtime.py" --root "$BUILD_CONTEXT_TMP"
+python3 "$SOURCE_GATEWAY_ROOT/tee/normalize_attested_runtime.py" --root "$BUILD_CONTEXT_TMP"
 rm -rf "$BUILD_CONTEXT_ROOT"
 mv "$BUILD_CONTEXT_TMP" "$BUILD_CONTEXT_ROOT"
 

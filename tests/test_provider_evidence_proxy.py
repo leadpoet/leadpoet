@@ -380,6 +380,31 @@ class TestDayCacheRecordability:
         assert not proxy_module._response_is_recordable("exa", "https://api.exa.ai/agent/runs/1", 200, running)
         assert proxy_module._response_is_recordable("exa", "https://api.exa.ai/agent/runs/1", 200, done)
 
+    def test_exa_no_more_credits_body_not_recordable_even_if_200(self) -> None:
+        body = json.dumps(
+            {
+                "error": "You have exceeded your credits limit. Please top up to keep using Exa.",
+                "tag": "NO_MORE_CREDITS",
+            }
+        ).encode()
+
+        assert not proxy_module._response_is_recordable(
+            "exa",
+            "https://api.exa.ai/search",
+            200,
+            body,
+        )
+
+    def test_exa_successful_search_body_recordable(self) -> None:
+        body = json.dumps({"results": [{"url": "https://example.com"}], "costDollars": {"total": 0.007}}).encode()
+
+        assert proxy_module._response_is_recordable(
+            "exa",
+            "https://api.exa.ai/search",
+            200,
+            body,
+        )
+
     def test_errors_never_recordable(self) -> None:
         assert not proxy_module._response_is_recordable("deepline", "https://code.deepline.com/api/v2/runs/x", 500, b"{}")
         assert not proxy_module._response_is_recordable("sd", "https://api.scrapingdog.com/profile", 404, b"{}")

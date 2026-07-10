@@ -590,6 +590,7 @@ def _utc_day() -> str:
 
 
 _EXA_AGENT_NONTERMINAL_STATUSES = {"queued", "running", "in_progress", "pending"}
+_EXA_TRANSIENT_ERROR_TAGS = {"NO_MORE_CREDITS"}
 
 # Deepline play runs are polled at GET /api/v2/runs/<id> until terminal. A
 # nonterminal snapshot recorded into the day cache freezes every later poll of
@@ -616,6 +617,8 @@ def _response_is_recordable(provider: str, upstream_url: str, status: int, body:
     except Exception:
         path = ""
     if provider == "exa":
+        if _exa_response_is_transient_error(body):
+            return False
         if not path.startswith("/agent/runs/"):
             return True
         agent_status = exa_agent_run_status(body)
@@ -626,6 +629,22 @@ def _response_is_recordable(provider: str, upstream_url: str, status: int, body:
         run_status = _deepline_status_from_response(body)
         return run_status not in _DEEPLINE_RUN_NONTERMINAL_STATUSES
     return True
+
+
+def _exa_response_is_transient_error(body: bytes) -> bool:
+    try:
+        doc = json.loads(body.decode("utf-8"))
+    except Exception:
+        return False
+    if not isinstance(doc, Mapping):
+        return False
+    tag = str(doc.get("tag") or "").strip().upper()
+    if tag in _EXA_TRANSIENT_ERROR_TAGS:
+        return True
+    error = doc.get("error")
+    if isinstance(error, str) and error.strip():
+        return True
+    return False
 
 
 def _record_is_replayable(record: Mapping[str, Any]) -> bool:

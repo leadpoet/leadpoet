@@ -66,6 +66,7 @@ from gateway.research_lab.promotion import (
     load_active_private_model,
     load_confirmation_state,
     private_source_push_retry_seconds,
+    private_repo_head_alignment_status,
     promotion_confirmation_rerun_enabled,
     promotion_improvement_metric,
     reconcile_failed_private_source_pushes,
@@ -2167,6 +2168,22 @@ class CandidateBaselineWindowChanged(CandidateBaselineNotReady):
 
 class ClaimLostDuringScoring(RuntimeError):
     """Raised at an ICP boundary when this worker's claim was lost mid-scoring."""
+
+
+class PrivateBaselineRepoHeadChanged(RuntimeError):
+    """Raised at an ICP boundary when repo main advances during a baseline run."""
+
+    def __init__(self, *, expected_git_sha: str, repo_main_sha: str, item_index: int, total_icps: int):
+        self.expected_git_sha = expected_git_sha
+        self.repo_main_sha = repo_main_sha
+        self.item_index = item_index
+        self.total_icps = total_icps
+        super().__init__(
+            "private baseline repo head changed during run: "
+            f"expected={compact_ref(expected_git_sha)} "
+            f"repo_main={compact_ref(repo_main_sha)} "
+            f"before_icp={item_index}/{total_icps}"
+        )
 
 
 # Known-terminal error classes: validation / malformed-candidate style failures
@@ -6400,6 +6417,7 @@ class ResearchLabGatewayScoringWorker:
             }
         active = await load_active_private_model(self.config, register_bootstrap=True)
         artifact = active.artifact
+        baseline_repo_main_sha = str(repo_head_sync.get("repo_main_sha") or "")
         existing = await select_many(
             "research_lab_private_model_benchmark_current",
             columns="*",
@@ -6540,6 +6558,12 @@ class ResearchLabGatewayScoringWorker:
             else None
         )
         if baseline_progress_location is not None:
+            await self._ensure_private_baseline_repo_head_unchanged(
+                expected_git_sha=baseline_repo_main_sha,
+                benchmark_date=today,
+                item_index=1,
+                total_icps=max(1, len(window.benchmark_items)),
+            )
             progress_bucket, progress_key = baseline_progress_location
             baseline_progress_rows = await asyncio.to_thread(
                 _load_baseline_scoring_progress,
@@ -6654,6 +6678,8 @@ class ResearchLabGatewayScoringWorker:
                     trace_context=baseline_trace_context,
                     resume_results=baseline_progress_rows,
                     icp_checkpoint=_checkpoint_completed_baseline_icp,
+                    expected_repo_main_git_sha=baseline_repo_main_sha,
+                    benchmark_date=today,
                 )
                 retried_total = int(retry_stats.get("retried") or 0)
                 recovered_total = int(retry_stats.get("recovered") or 0)
@@ -6686,6 +6712,12 @@ class ResearchLabGatewayScoringWorker:
                         nonempty_output_count += 1
                     per_icp_summaries.append(dict(resumed_summary))
                     continue
+                await self._ensure_private_baseline_repo_head_unchanged(
+                    expected_git_sha=baseline_repo_main_sha,
+                    benchmark_date=today,
+                    item_index=item_index,
+                    total_icps=total_icps,
+                )
                 logger.info(
                     format_worker_block(
                         "RESEARCH LAB PRIVATE BASELINE ICP STARTED",
@@ -7089,6 +7121,70 @@ class ResearchLabGatewayScoringWorker:
             "incontainer_drop_state": {"logged": False, "dropped_entries": 0},
         }
 
+    async def _ensure_private_baseline_repo_head_unchanged(
+        self,
+        *,
+        expected_git_sha: str,
+        benchmark_date: str,
+        item_index: int,
+        total_icps: int,
+    ) -> None:
+        expected = str(expected_git_sha or "").strip()
+        if not expected:
+            return
+        try:
+            status = await private_repo_head_alignment_status(self.config)
+        except Exception as exc:  # noqa: BLE001 - do not kill a healthy run on transient git status failure
+            logger.warning(
+                "research_lab_private_baseline_repo_head_check_unavailable worker_ref=%s "
+                "benchmark_date=%s icp=%s/%s error=%s",
+                self.worker_ref,
+                benchmark_date,
+                item_index,
+                total_icps,
+                _short_error(exc),
+            )
+            return
+        repo_main_sha = str(status.get("repo_main_sha") or "").strip()
+        if not repo_main_sha or repo_main_sha.lower() == expected.lower():
+            return
+        try:
+            await sync_active_model_to_repo_head(
+                self.config,
+                actor_ref=self.worker_ref,
+                dry_run=False,
+                wait_for_repo_head=False,
+            )
+        except Exception:  # noqa: BLE001 - raising the repo-change exception is the control path
+            logger.warning(
+                "research_lab_private_baseline_repo_head_sync_after_change_failed worker_ref=%s "
+                "benchmark_date=%s old_repo_main=%s new_repo_main=%s",
+                self.worker_ref,
+                benchmark_date,
+                compact_ref(expected),
+                compact_ref(repo_main_sha),
+                exc_info=True,
+            )
+        logger.warning(
+            format_worker_block(
+                "RESEARCH LAB PRIVATE BASELINE RESTART REQUIRED: REPO HEAD CHANGED",
+                (
+                    ("Worker", self.worker_ref),
+                    ("Benchmark date", benchmark_date),
+                    ("ICP boundary", f"{item_index}/{total_icps}"),
+                    ("Started repo main", compact_ref(expected)),
+                    ("Current repo main", compact_ref(repo_main_sha)),
+                    ("Action", "failing this attempt so the next pass benchmarks the new artifact"),
+                ),
+            )
+        )
+        raise PrivateBaselineRepoHeadChanged(
+            expected_git_sha=expected,
+            repo_main_sha=repo_main_sha,
+            item_index=item_index,
+            total_icps=total_icps,
+        )
+
     async def _record_baseline_icp_traces(
         self,
         *,
@@ -7239,6 +7335,8 @@ class ResearchLabGatewayScoringWorker:
         scorer_semaphore: asyncio.Semaphore | None = None,
         mode_label: str = "private_baseline",
         trace_context: Mapping[str, Any] | None = None,
+        expected_repo_main_git_sha: str = "",
+        benchmark_date: str = "",
     ) -> dict[str, Any]:
         """Run one benchmark ICP (docker sourcing + scoring) and build its summary.
 
@@ -7262,6 +7360,12 @@ class ResearchLabGatewayScoringWorker:
         loop = asyncio.get_running_loop()
         item_start = time.time()
         label = str(item.get("icp_ref") or item.get("icp_hash") or "unknown_icp")
+        await self._ensure_private_baseline_repo_head_unchanged(
+            expected_git_sha=expected_repo_main_git_sha,
+            benchmark_date=benchmark_date,
+            item_index=item_index,
+            total_icps=total_icps,
+        )
         logger.info(
             format_worker_block(
                 "RESEARCH LAB PRIVATE BASELINE ICP STARTED",
@@ -7489,6 +7593,8 @@ class ResearchLabGatewayScoringWorker:
         trace_context: Mapping[str, Any] | None = None,
         resume_results: list[dict[str, Any]] | None = None,
         icp_checkpoint: Callable[[dict[str, Any]], Any] | None = None,
+        expected_repo_main_git_sha: str = "",
+        benchmark_date: str = "",
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Run all benchmark ICPs concurrently, then retry transient failures.
 
@@ -7508,6 +7614,8 @@ class ResearchLabGatewayScoringWorker:
                 trace_context=trace_context,
                 resume_results=resume_results,
                 icp_checkpoint=icp_checkpoint,
+                expected_repo_main_git_sha=expected_repo_main_git_sha,
+                benchmark_date=benchmark_date,
             )
 
     async def _run_baseline_batch_inner(
@@ -7522,6 +7630,8 @@ class ResearchLabGatewayScoringWorker:
         trace_context: Mapping[str, Any] | None = None,
         resume_results: list[dict[str, Any]] | None = None,
         icp_checkpoint: Callable[[dict[str, Any]], Any] | None = None,
+        expected_repo_main_git_sha: str = "",
+        benchmark_date: str = "",
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Run all benchmark ICPs concurrently, then retry transient failures.
 
@@ -7593,6 +7703,8 @@ class ResearchLabGatewayScoringWorker:
                         scorer_semaphore=scorer_semaphore,
                         mode_label=mode_label,
                         trace_context=trace_context,
+                        expected_repo_main_git_sha=expected_repo_main_git_sha,
+                        benchmark_date=benchmark_date,
                     )
                     if icp_checkpoint is not None and _baseline_summary_checkpointable(entry):
                         await icp_checkpoint(entry)
@@ -7663,6 +7775,8 @@ class ResearchLabGatewayScoringWorker:
                             scorer_semaphore=scorer_semaphore,
                             mode_label=mode_label,
                             trace_context=trace_context,
+                            expected_repo_main_git_sha=expected_repo_main_git_sha,
+                            benchmark_date=benchmark_date,
                         )
                         if icp_checkpoint is not None and _baseline_summary_checkpointable(entry):
                             await icp_checkpoint(entry)

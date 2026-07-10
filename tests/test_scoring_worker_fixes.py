@@ -848,6 +848,8 @@ async def test_private_baseline_parallel_resumes_completed_icps(monkeypatch):
 
     async def fake_run_baseline_icp(self, *, item, item_index, **kwargs):  # noqa: ANN001
         called.append(item["icp_ref"])
+        assert kwargs["expected_repo_main_git_sha"] == "abc123"
+        assert kwargs["benchmark_date"] == "2026-07-10"
         return {
             "icp_ref": item["icp_ref"],
             "icp_hash": item["icp_hash"],
@@ -888,6 +890,8 @@ async def test_private_baseline_parallel_resumes_completed_icps(monkeypatch):
             }
         ],
         icp_checkpoint=checkpoint,
+        expected_repo_main_git_sha="abc123",
+        benchmark_date="2026-07-10",
     )
 
     assert called == ["icp-b"]
@@ -895,6 +899,70 @@ async def test_private_baseline_parallel_resumes_completed_icps(monkeypatch):
     assert [row["icp_ref"] for row in rows] == ["icp-a", "icp-b"]
     assert [row["score"] for row in rows] == [7.0, 2.0]
     assert stats == {"retried": 0, "recovered": 0, "unresolved": 0}
+
+
+@pytest.mark.asyncio
+async def test_private_baseline_repo_head_change_raises_and_syncs(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace()
+    sync_calls = []
+
+    async def fake_alignment_status(config):  # noqa: ANN001
+        assert config is worker.config
+        return {"repo_main_sha": "new-sha"}
+
+    async def fake_sync(config, **kwargs):  # noqa: ANN001
+        sync_calls.append(kwargs)
+        return {"ok": True, "status": "synced_active_model_to_repo_head"}
+
+    monkeypatch.setattr(sw, "private_repo_head_alignment_status", fake_alignment_status)
+    monkeypatch.setattr(sw, "sync_active_model_to_repo_head", fake_sync)
+
+    with pytest.raises(sw.PrivateBaselineRepoHeadChanged) as exc_info:
+        await worker._ensure_private_baseline_repo_head_unchanged(
+            expected_git_sha="old-sha",
+            benchmark_date="2026-07-10",
+            item_index=2,
+            total_icps=20,
+        )
+
+    assert exc_info.value.expected_git_sha == "old-sha"
+    assert exc_info.value.repo_main_sha == "new-sha"
+    assert sync_calls == [
+        {
+            "actor_ref": "baseline-worker",
+            "dry_run": False,
+            "wait_for_repo_head": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_private_baseline_repo_head_check_allows_same_sha(monkeypatch):
+    worker = object.__new__(sw.ResearchLabGatewayScoringWorker)
+    worker.worker_ref = "baseline-worker"
+    worker.config = SimpleNamespace()
+    sync_called = False
+
+    async def fake_alignment_status(config):  # noqa: ANN001
+        return {"repo_main_sha": "same-sha"}
+
+    async def fake_sync(config, **kwargs):  # noqa: ANN001
+        nonlocal sync_called
+        sync_called = True
+
+    monkeypatch.setattr(sw, "private_repo_head_alignment_status", fake_alignment_status)
+    monkeypatch.setattr(sw, "sync_active_model_to_repo_head", fake_sync)
+
+    await worker._ensure_private_baseline_repo_head_unchanged(
+        expected_git_sha="same-sha",
+        benchmark_date="2026-07-10",
+        item_index=3,
+        total_icps=20,
+    )
+
+    assert sync_called is False
 
 
 def test_private_baseline_retry_runner_gets_fresh_cost_scope(monkeypatch):

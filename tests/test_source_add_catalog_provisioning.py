@@ -402,6 +402,15 @@ def test_llm_judge_verdict_parser_accepts_helped_json():
     assert verdict.trigger_evidence()["llm_judge_passed"] is True
 
 
+def test_llm_judge_verdict_parser_rejects_string_source_used():
+    with pytest.raises(ValueError, match="non-boolean source_used"):
+        _parse_verdict(
+            '{"verdict":"helped","confidence":0.9,"source_used":"false"}',
+            model_id="openai/gpt-5.6-sol",
+            provider_usage={},
+        )
+
+
 @pytest.mark.asyncio
 async def test_owner_recheck_advances_manual_submission_and_creates_leg1(monkeypatch):
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")

@@ -48,6 +48,7 @@ from research_lab.code_editing import (
     build_code_edit_repair_messages,
     build_code_edit_source_inspection_messages,
     build_loop_direction_planner_messages,
+    build_loop_direction_reference_repair_messages,
     build_plan_alignment_judge_messages,
     code_edit_no_viable_patch_reason,
     code_edit_plan_alignment_errors,
@@ -58,8 +59,17 @@ from research_lab.code_editing import (
     parse_code_edit_response,
     parse_code_edit_source_inspection_response,
 )
+from gateway.research_lab.source_symbol_index import (
+    resolve_source_references,
+    unresolved_references_from_context,
+)
 from gateway.research_lab.provider_evidence_proxy import (
     load_provider_registry as load_provider_registry_entries,
+    load_provider_registry_with_capabilities,
+)
+from gateway.research_lab.provider_capabilities import (
+    summary_mentions_private_capability,
+    validate_candidate_provider_diff,
 )
 from gateway.research_lab.provider_probe import (
     ProbeBudgetState,
@@ -67,7 +77,7 @@ from gateway.research_lab.provider_probe import (
 )
 from research_lab.engine_v1 import ReflectionRecord
 from research_lab.eval import PrivateModelArtifactManifest
-from research_lab.probe_catalog import load_probe_catalog
+from research_lab.probe_catalog import ProviderProbeEndpoint, load_probe_catalog, validate_probe_catalog
 from research_lab.observability.langfuse_client import (
     observation as langfuse_observation,
     run_trace_id as langfuse_run_trace_id,
@@ -183,6 +193,12 @@ def _ranked_path_fallback_max_paths(config: Any) -> int:
         except (TypeError, ValueError):
             attr = 3
     return max(1, int(attr))
+
+
+def _planner_reference_repair_enabled(config: Any) -> bool:
+    return bool(getattr(config, "planner_reference_repair_enabled", True)) and int(
+        getattr(config, "planner_reference_repair_max_attempts", 1) or 0
+    ) > 0
 
 
 def _ranked_path_id(path: Mapping[str, Any] | None) -> str:
@@ -949,6 +965,10 @@ class CodeEditLoopEngine:
                     "parent_image_digest_hash": source_context.parent_image_digest_hash,
                     "extracted_top_level_paths": list(source_context.top_level_paths),
                     "editable_file_count": len(source_context.editable_files),
+                    "symbol_index_hash": str(source_context.planner_source_index.get("index_hash") or ""),
+                    "symbol_count": int(source_context.planner_source_index.get("symbol_count") or 0),
+                    "import_count": int(source_context.planner_source_index.get("import_count") or 0),
+                    "symbol_index_truncated": bool(source_context.planner_source_index.get("truncated")),
                 },
             )
         )
@@ -1001,6 +1021,22 @@ class CodeEditLoopEngine:
         elapsed = lambda: elapsed_offset + (time.monotonic() - start)
         budget_limit_microusd = _budget_limit_microusd(budget_context)
         built_candidate_total = max(0, int(resume.get("built_candidate_count") or 0))
+        provider_capabilities = None
+        provider_capability_summary: dict[str, Any] | None = None
+        effective_provider_entries: list[Any] = []
+        if bool(getattr(self.builder.config, "provider_capability_catalog_enabled", True)):
+            try:
+                effective_provider_entries, provider_capabilities = await asyncio.to_thread(
+                    load_provider_registry_with_capabilities
+                )
+                if provider_capabilities.private_snapshot_loaded:
+                    provider_capability_summary = provider_capabilities.prompt_summary()
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_provider_capability_loop_load_failed run_id=%s error=%s",
+                    str(run_id or ""),
+                    str(exc)[:200],
+                )
         # W4: per-run provider-probe state. Caps persist across iterations and
         # resume (probe accounting restored from the resume checkpoint).
         probes_enabled = _loop_provider_probes_enabled(self.builder.config)
@@ -1017,22 +1053,32 @@ class CodeEditLoopEngine:
         probe_budget = None
         if probes_enabled:
             try:
-                probe_catalog = load_probe_catalog()
-                try:
-                    from gateway.research_lab.source_add_catalog import (
-                        load_provisioned_source_rows_sync,
-                        probe_endpoints_from_provisioned_rows,
-                    )
+                if provider_capabilities is not None and provider_capabilities.private_snapshot_loaded:
+                    probe_catalog = [
+                        ProviderProbeEndpoint.from_mapping(item)
+                        for entry in effective_provider_entries
+                        for item in entry.probe_endpoints
+                    ]
+                    probe_errors = validate_probe_catalog(probe_catalog) if probe_catalog else []
+                    if probe_errors:
+                        raise ValueError("invalid private probe catalog: " + "; ".join(probe_errors[:5]))
+                else:
+                    probe_catalog = load_probe_catalog()
+                    try:
+                        from gateway.research_lab.source_add_catalog import (
+                            load_provisioned_source_rows_sync,
+                            probe_endpoints_from_provisioned_rows,
+                        )
 
-                    provisioned_probes = await asyncio.to_thread(
-                        lambda: probe_endpoints_from_provisioned_rows(load_provisioned_source_rows_sync())
-                    )
-                    existing_probe_ids = {entry.endpoint_id for entry in probe_catalog}
-                    probe_catalog.extend(
-                        entry for entry in provisioned_probes if entry.endpoint_id not in existing_probe_ids
-                    )
-                except Exception as exc:
-                    logger.warning("research_lab_source_add_probe_catalog_extend_failed error=%s", str(exc)[:200])
+                        provisioned_probes = await asyncio.to_thread(
+                            lambda: probe_endpoints_from_provisioned_rows(load_provisioned_source_rows_sync())
+                        )
+                        existing_probe_ids = {entry.endpoint_id for entry in probe_catalog}
+                        probe_catalog.extend(
+                            entry for entry in provisioned_probes if entry.endpoint_id not in existing_probe_ids
+                        )
+                    except Exception as exc:
+                        logger.warning("research_lab_source_add_probe_catalog_extend_failed error=%s", str(exc)[:200])
             except Exception as exc:
                 logger.warning("research_lab_probe_catalog_load_failed error=%s", str(exc)[:200])
                 probes_enabled = False
@@ -1048,8 +1094,9 @@ class CodeEditLoopEngine:
         probe_registry_base_urls: dict[str, str] = {}
         if probes_enabled:
             try:
+                registry_entries = effective_provider_entries or load_provider_registry_entries()
                 probe_registry_base_urls = {
-                    entry.id: entry.base_url for entry in load_provider_registry_entries()
+                    entry.id: entry.base_url for entry in registry_entries
                 }
             except Exception as exc:
                 logger.warning("research_lab_probe_registry_load_failed error=%s", str(exc)[:200])
@@ -1245,6 +1292,20 @@ class CodeEditLoopEngine:
                     "editable_file_count": len(source_context.editable_files),
                     "editable_file_sample": list(source_context.editable_files[:25]),
                     "file_preview_count": len(source_context.file_previews),
+                    "symbol_index_hash": str(source_context.planner_source_index.get("index_hash") or ""),
+                    "symbol_count": int(source_context.planner_source_index.get("symbol_count") or 0),
+                    "import_count": int(source_context.planner_source_index.get("import_count") or 0),
+                    "provider_capability_hash": (
+                        provider_capabilities.capability_hash
+                        if provider_capabilities is not None
+                        and provider_capabilities.private_snapshot_loaded
+                        else ""
+                    ),
+                    "provider_capability_count": (
+                        int(provider_capability_summary.get("provider_count") or 0)
+                        if provider_capability_summary is not None
+                        else 0
+                    ),
                 },
             )
         )
@@ -1365,6 +1426,8 @@ class CodeEditLoopEngine:
         if selected_path_id:
             ranked_path_attempted_ids.add(selected_path_id)
         ranked_path_fallback_count = 0
+        reference_repair_attempted = bool(resume.get("planner_reference_repair_attempted"))
+        reference_repair_status = str(resume.get("planner_reference_repair_status") or "")
 
         async def _activate_ranked_path_fallback(*, trigger: str, reason: str) -> bool:
             nonlocal loop_direction_plan_doc
@@ -1473,6 +1536,250 @@ class CodeEditLoopEngine:
             )
             return True
 
+        async def _attempt_planner_reference_repair(
+            *,
+            trigger: str,
+            reason: str,
+            plan_doc: Mapping[str, Any],
+            explicit_references: Sequence[Any] = (),
+        ) -> dict[str, Any] | None:
+            nonlocal loop_direction_plan_doc
+            nonlocal ranked_path_base_doc
+            nonlocal ranked_path_attempted_ids
+            nonlocal planner_terminal_without_candidate
+            nonlocal binding_plan_terminal_without_candidate
+            nonlocal stop_reason
+            nonlocal reference_repair_attempted
+            nonlocal reference_repair_status
+            nonlocal openrouter_calls
+            nonlocal estimated_cost
+            nonlocal actual_cost_microusd
+            nonlocal last_checkpoint
+
+            if reference_repair_attempted or not _planner_reference_repair_enabled(self.builder.config):
+                return None
+            raw_must_inspect = plan_doc.get("must_inspect")
+            must_inspect = (
+                raw_must_inspect
+                if isinstance(raw_must_inspect, Sequence)
+                and not isinstance(raw_must_inspect, (str, bytes, bytearray))
+                else ()
+            )
+            references = unresolved_references_from_context(explicit=explicit_references)
+            if not references:
+                references = unresolved_references_from_context(
+                    must_inspect=must_inspect,
+                    reason=reason,
+                )
+            if not references:
+                reference_repair_status = "no_safe_references"
+                return None
+            if elapsed() >= settings.max_seconds:
+                reference_repair_status = "skipped_time_budget"
+                return None
+            if _would_exceed_budget(
+                actual_cost_microusd,
+                _estimated_call_microusd(settings.estimated_iteration_cost_usd),
+                budget_limit_microusd,
+            ):
+                reference_repair_status = "skipped_compute_budget"
+                return None
+
+            reference_repair_attempted = True
+            reference_repair_status = "attempted"
+            # Persist the one-shot state before the paid call. If the process
+            # exits during that call, resume must not purchase another repair.
+            last_checkpoint = await self._emit_checkpoint(
+                run_id=run_id,
+                settings=settings,
+                artifact=artifact,
+                model_id=model_id,
+                budget_context=budget_context,
+                iterations_completed=iteration,
+                elapsed_seconds=elapsed(),
+                selected=selected,
+                provider_usage=provider_usage,
+                openrouter_calls=openrouter_calls,
+                estimated_cost=estimated_cost,
+                actual_cost_microusd=actual_cost_microusd,
+                stage="before_planner_reference_repair",
+                loop_direction_plan=loop_direction_plan_doc,
+                built_candidate_count=built_candidate_total,
+                probe_budget=probe_budget,
+                planner_reference_repair_attempted=True,
+                planner_reference_repair_status=reference_repair_status,
+            )
+            resolution = await asyncio.to_thread(
+                resolve_source_references,
+                index_doc=source_context.planner_index(),
+                source_root=source_context.source_root,
+                references=references,
+            )
+            prior_plan_hash = str(plan_doc.get("plan_hash") or sha256_json(dict(plan_doc)))
+            await self.event_sink(
+                AutoResearchLoopEvent(
+                    event_type="candidate_generation_fallback_requested",
+                    loop_status="running",
+                    elapsed_seconds=elapsed(),
+                    cost_ledger=_running_cost_ledger(
+                        openrouter_calls,
+                        estimated_cost,
+                        actual_cost_microusd,
+                        "planner_reference_repair_requested",
+                    ),
+                    event_doc={
+                        "schema_version": "1.0",
+                        "stage": "planner_reference_repair",
+                        "trigger": str(trigger or "")[:120],
+                        "prior_plan_hash": prior_plan_hash,
+                        "symbol_index_hash": str(resolution.get("symbol_index_hash") or ""),
+                        "reference_count": int(resolution.get("reference_count") or 0),
+                        "resolved_reference_count": int(resolution.get("resolved_reference_count") or 0),
+                        "resolution_hash": str(resolution.get("resolution_hash") or ""),
+                    },
+                )
+            )
+            remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
+            repair_result, repair_error = await self._call_stage_contained(
+                build_loop_direction_reference_repair_messages(
+                    ticket={
+                        "brief_public_summary": _ticket_doc_value(ticket, "brief_public_summary"),
+                        "focus_signature_hash": _focus_signature_hash(ticket),
+                    },
+                    original_plan=plan_doc,
+                    reference_resolution=resolution,
+                ),
+                min(settings.draft_timeout_seconds, remaining_call_seconds),
+                self.builder.config.loop_planner_max_tokens,
+                "loop_planner_reference_repair",
+            )
+            if repair_result is None:
+                failure_usage = (
+                    repair_error.failure_usage_entries()
+                    if isinstance(repair_error, ContainedStageFailure)
+                    else []
+                )
+                if isinstance(repair_error, ContainedStageFailure):
+                    actual_cost_microusd += repair_error.cost_microusd
+                    provider_usage.extend(failure_usage)
+                reference_repair_status = "call_failed"
+                await self.event_sink(
+                    AutoResearchLoopEvent(
+                        event_type="code_edit_validation_failed",
+                        loop_status="running",
+                        elapsed_seconds=elapsed(),
+                        provider_usage=failure_usage,
+                        cost_ledger=_running_cost_ledger(
+                            openrouter_calls,
+                            estimated_cost,
+                            actual_cost_microusd,
+                            "planner_reference_repair_call_failed",
+                        ),
+                        event_doc={
+                            "stage": "planner_reference_repair",
+                            "status": reference_repair_status,
+                            "prior_plan_hash": prior_plan_hash,
+                            "resolution_hash": str(resolution.get("resolution_hash") or ""),
+                            "failure_hash": sha256_json(
+                                {"failure": str(repair_error or "planner_reference_repair_call_failed")}
+                            ),
+                        },
+                    )
+                )
+                return None
+
+            openrouter_calls += 1
+            estimated_cost += settings.estimated_iteration_cost_usd
+            actual_cost_microusd += max(0, int(repair_result.cost_microusd))
+            if repair_result.provider_usage:
+                provider_usage.append(
+                    {**repair_result.provider_usage, "call_stage": "loop_planner_reference_repair"}
+                )
+            try:
+                repaired_plan = parse_loop_direction_plan_response(repair_result.content)
+                repaired_doc = repaired_plan.to_dict()
+            except Exception:
+                reference_repair_status = "parse_failed"
+                await self.event_sink(
+                    AutoResearchLoopEvent(
+                        event_type="code_edit_validation_failed",
+                        loop_status="running",
+                        elapsed_seconds=elapsed(),
+                        provider_usage=([provider_usage[-1]] if provider_usage else []),
+                        cost_ledger=_running_cost_ledger(
+                            openrouter_calls,
+                            estimated_cost,
+                            actual_cost_microusd,
+                            "planner_reference_repair_parse_failed",
+                        ),
+                        event_doc={
+                            "stage": "planner_reference_repair",
+                            "status": reference_repair_status,
+                            "prior_plan_hash": prior_plan_hash,
+                            "resolution_hash": str(resolution.get("resolution_hash") or ""),
+                            "raw_response_hash": sha256_json({"raw_response": repair_result.content}),
+                        },
+                    )
+                )
+                return None
+
+            loop_direction_plan_doc = repaired_doc
+            ranked_path_base_doc = dict(repaired_doc)
+            ranked_path_attempted_ids = set()
+            repaired_path_id = _loop_plan_selected_path_id(repaired_doc)
+            if repaired_path_id:
+                ranked_path_attempted_ids.add(repaired_path_id)
+            planner_terminal_without_candidate = bool(repaired_plan.no_new_safe_path)
+            binding_plan_terminal_without_candidate = False
+            stop_reason = "loop_direction_no_new_safe_path" if repaired_plan.no_new_safe_path else "max_iterations"
+            reference_repair_status = "still_unresolved" if repaired_plan.no_new_safe_path else "repaired"
+            last_checkpoint = await self._emit_checkpoint(
+                run_id=run_id,
+                settings=settings,
+                artifact=artifact,
+                model_id=model_id,
+                budget_context=budget_context,
+                iterations_completed=iteration,
+                elapsed_seconds=elapsed(),
+                selected=selected,
+                provider_usage=provider_usage,
+                openrouter_calls=openrouter_calls,
+                estimated_cost=estimated_cost,
+                actual_cost_microusd=actual_cost_microusd,
+                stage="after_planner_reference_repair",
+                loop_direction_plan=repaired_doc,
+                built_candidate_count=built_candidate_total,
+                probe_budget=probe_budget,
+                planner_reference_repair_attempted=True,
+                planner_reference_repair_status=reference_repair_status,
+            )
+            await self.event_sink(
+                AutoResearchLoopEvent(
+                    event_type="loop_direction_planned",
+                    loop_status="running",
+                    elapsed_seconds=elapsed(),
+                    provider_usage=([provider_usage[-1]] if provider_usage else []),
+                    cost_ledger=_running_cost_ledger(
+                        openrouter_calls,
+                        estimated_cost,
+                        actual_cost_microusd,
+                        "planner_reference_repair_completed",
+                    ),
+                    event_doc={
+                        "schema_version": "1.0",
+                        "stage": "planner_reference_repair",
+                        "status": reference_repair_status,
+                        "prior_plan_hash": prior_plan_hash,
+                        "repaired_plan_hash": str(repaired_doc.get("plan_hash") or ""),
+                        "symbol_index_hash": str(resolution.get("symbol_index_hash") or ""),
+                        "reference_count": int(resolution.get("reference_count") or 0),
+                        "resolved_reference_count": int(resolution.get("resolved_reference_count") or 0),
+                        "resolution_hash": str(resolution.get("resolution_hash") or ""),
+                    },
+                )
+            )
+            return repaired_doc
+
         if (
             self.builder.config.loop_planner_enabled
             and loop_direction_plan_doc is None
@@ -1516,7 +1823,7 @@ class CodeEditLoopEngine:
                             artifact_manifest=artifact.to_dict(),
                             component_registry=dict(component_registry),
                             benchmark_public_summary=benchmark_public_summary,
-                            runtime_source_index=source_context.inspection_index(),
+                            runtime_source_index=source_context.planner_index(),
                             budget_context={
                                 **dict(budget_context),
                                 "candidate_kind": "image_build",
@@ -1534,6 +1841,7 @@ class CodeEditLoopEngine:
                             },
                             prior_attempts=prior_attempts,
                             provider_outcome_digest=self.provider_outcome_digest,
+                            provider_capability_summary=provider_capability_summary,
                         ),
                         min(settings.draft_timeout_seconds, remaining_call_seconds),
                         self.builder.config.loop_planner_max_tokens,
@@ -1644,6 +1952,18 @@ class CodeEditLoopEngine:
                         )
                     )
                     if loop_plan.no_new_safe_path:
+                        if loop_plan.unresolved_references or _binding_plan_unimplementable_reason(loop_plan.reason):
+                            repaired_doc = await _attempt_planner_reference_repair(
+                                trigger="loop_direction_no_new_safe_path",
+                                reason=loop_plan.reason or "planner returned no_new_safe_path",
+                                plan_doc=loop_direction_plan_doc,
+                                explicit_references=loop_plan.unresolved_references,
+                            )
+                            if repaired_doc is not None:
+                                loop_plan = loop_direction_plan_from_mapping(repaired_doc)
+                                loop_direction_plan_doc = repaired_doc
+                                if not loop_plan.no_new_safe_path:
+                                    break
                         stop_reason = "loop_direction_no_new_safe_path"
                         planner_terminal_without_candidate = True
                         await self.event_sink(
@@ -1717,6 +2037,8 @@ class CodeEditLoopEngine:
                     loop_direction_plan=loop_direction_plan_doc,
                     built_candidate_count=built_candidate_total,
                     probe_budget=probe_budget,
+                    planner_reference_repair_attempted=reference_repair_attempted,
+                    planner_reference_repair_status=reference_repair_status,
                 )
                 _cleanup_source_tmp()
                 return self._result(
@@ -1743,9 +2065,10 @@ class CodeEditLoopEngine:
             }
             read_paths: set[str] = set()
             read_ranges: dict[str, tuple[tuple[int, int], ...]] = {}
-            source_access_v2 = bool(getattr(self.builder.config, "code_edit_source_access_v2", False))
+            source_access_v2 = bool(getattr(self.builder.config, "code_edit_source_access_v2", True))
             source_bytes_returned = 0
             budget_exhausted_after_source_inspection = False
+            retry_iteration_after_reference_repair = False
             for inspection_round in range(1, max(1, int(self.builder.config.code_edit_source_inspection_rounds)) + 1):
                 if elapsed() >= settings.max_seconds:
                     stop_reason = "max_seconds"
@@ -1802,6 +2125,7 @@ class CodeEditLoopEngine:
                             max_requests=4,
                             source_access_v2=source_access_v2,
                             provider_outcome_digest=self.provider_outcome_digest,
+                            provider_capability_summary=provider_capability_summary,
                             provider_probe_catalog=(
                                 {
                                     "endpoints": [endpoint.prompt_summary() for endpoint in probe_catalog],
@@ -2320,6 +2644,7 @@ class CodeEditLoopEngine:
                         ),
                         max_candidates=draft_parse_limit,
                         provider_outcome_digest=self.provider_outcome_digest,
+                        provider_capability_summary=provider_capability_summary,
                     ),
                     min(settings.draft_timeout_seconds, remaining_call_seconds),
                     3000,
@@ -2416,17 +2741,29 @@ class CodeEditLoopEngine:
                             if terminal_binding_plan:
                                 stop_reason = "binding_plan_unimplementable"
                                 binding_plan_terminal_without_candidate = True
-                            fallback_drafts = await _attempt_candidate_generation_fallback(
-                                trigger="no_viable_patch",
-                                reason=no_viable_reason,
-                            )
-                            if fallback_drafts:
-                                binding_plan_terminal_without_candidate = False
-                            elif terminal_binding_plan:
-                                await _activate_ranked_path_fallback(
+                            repaired_doc = None
+                            if terminal_binding_plan:
+                                repaired_doc = await _attempt_planner_reference_repair(
                                     trigger="binding_plan_unimplementable",
                                     reason=no_viable_reason,
+                                    plan_doc=loop_direction_plan_doc or {},
                                 )
+                            if repaired_doc is not None and not bool(repaired_doc.get("no_new_safe_path")):
+                                retry_iteration_after_reference_repair = True
+                                binding_plan_terminal_without_candidate = False
+                                stop_reason = "max_iterations"
+                            else:
+                                fallback_drafts = await _attempt_candidate_generation_fallback(
+                                    trigger="no_viable_patch",
+                                    reason=no_viable_reason,
+                                )
+                                if fallback_drafts:
+                                    binding_plan_terminal_without_candidate = False
+                                elif terminal_binding_plan:
+                                    await _activate_ranked_path_fallback(
+                                        trigger="binding_plan_unimplementable",
+                                        reason=no_viable_reason,
+                                    )
                         else:
                             await self.event_sink(
                                 AutoResearchLoopEvent(
@@ -2451,7 +2788,29 @@ class CodeEditLoopEngine:
                                 reason=safe_event_error_text(exc),
                             )
                         drafts = fallback_drafts if fallback_drafts else []
+            if retry_iteration_after_reference_repair:
+                iteration = max(0, iteration - 1)
+                drafts = []
             for draft_index, draft in enumerate(drafts):
+                if (
+                    provider_capabilities is not None
+                    and provider_capabilities.private_snapshot_loaded
+                    and (
+                        str(draft.lane or "")
+                        in {"source_routing", "provider_fallback", "openrouter_model_selection"}
+                        or summary_mentions_private_capability(
+                            draft.redacted_summary,
+                            provider_capabilities,
+                        )
+                    )
+                ):
+                    draft = replace(
+                        draft,
+                        redacted_summary=(
+                            "Adjusted an approved provider path inside the existing runtime "
+                            "while preserving credential, cost, and output safeguards."
+                        ),
+                    )
                 if len(selected) >= settings.max_candidates and _stop_at_candidate_cap_enabled():
                     # Bug 20: never start a docker build for a candidate that would be
                     # truncated away by the max_candidates cap.
@@ -2506,6 +2865,13 @@ class CodeEditLoopEngine:
                     read_paths=tuple(sorted(read_paths)),
                     require_read=True,
                 )
+                if provider_capabilities is not None and provider_capabilities.private_snapshot_loaded:
+                    source_errors.extend(
+                        validate_candidate_provider_diff(
+                            draft.unified_diff,
+                            provider_capabilities,
+                        )
+                    )
                 if source_errors:
                     await self.event_sink(
                         AutoResearchLoopEvent(
@@ -2978,6 +3344,8 @@ class CodeEditLoopEngine:
                     loop_direction_plan=loop_direction_plan_doc,
                     built_candidate_count=built_candidate_total,
                     probe_budget=probe_budget,
+                    planner_reference_repair_attempted=reference_repair_attempted,
+                    planner_reference_repair_status=reference_repair_status,
                 )
             except Exception:
                 # Bug 17: a transient checkpoint-write failure must not fail a run that may
@@ -3044,6 +3412,8 @@ class CodeEditLoopEngine:
                     loop_direction_plan=loop_direction_plan_doc,
                     built_candidate_count=built_candidate_total,
                     probe_budget=probe_budget,
+                    planner_reference_repair_attempted=reference_repair_attempted,
+                    planner_reference_repair_status=reference_repair_status,
                 )
                 _cleanup_source_tmp()
                 return self._result(
@@ -3196,6 +3566,8 @@ class CodeEditLoopEngine:
         loop_direction_plan: Mapping[str, Any] | None = None,
         built_candidate_count: int = 0,
         probe_budget: ProbeBudgetState | None = None,
+        planner_reference_repair_attempted: bool = False,
+        planner_reference_repair_status: str = "",
     ) -> dict[str, Any]:
         payload = {
             "schema_version": "1.0",
@@ -3258,6 +3630,16 @@ class CodeEditLoopEngine:
                     "probe_cost_microusd": int(probe_budget.cost_used_microusd),
                 }
                 if probe_budget is not None
+                else {}
+            ),
+            **(
+                {
+                    "planner_reference_repair_attempted": True,
+                    "planner_reference_repair_status": str(
+                        planner_reference_repair_status or "attempted"
+                    )[:80],
+                }
+                if planner_reference_repair_attempted
                 else {}
             ),
         }

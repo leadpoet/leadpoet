@@ -1,4 +1,4 @@
-"""Go-live glue: docker trial runner, ablation harness, probe-guard wiring."""
+"""Go-live glue: docker trial runner and probe-guard wiring."""
 
 from __future__ import annotations
 
@@ -15,12 +15,6 @@ from gateway.research_lab.provider_evidence_proxy import (
     serve_evidence_proxy,
 )
 from gateway.research_lab.provider_probe import probe_guard_terms_from_icp_items
-from gateway.research_lab.source_add_ablation import (
-    AdapterAblationResult,
-    arm_leg2_for_merge,
-    disabled_registry,
-    run_adapter_ablation,
-)
 from gateway.research_lab.source_add_trial_runner import (
     build_source_add_sandbox_runner,
     build_trial_registry_entry,
@@ -275,116 +269,6 @@ class TestFullTrialThroughRunner:
         assert trial.failure_reason == ""
         assert trial.measured_trial_yield == 1.0
         assert calls == ["icp:1", "icp:2"]
-
-
-class TestAblationHarness:
-    ENTRIES = [
-        ProviderRegistryEntry(id="exa", base_url="https://api.exa.ai", auth_kind="none"),
-        ProviderRegistryEntry(id="gluefeed", base_url="https://gluefeed.example", auth_kind="none"),
-    ]
-
-    def test_disabled_registry_removes_only_the_adapter(self):
-        remaining = disabled_registry(self.ENTRIES, "gluefeed")
-        assert [entry.id for entry in remaining] == ["exa"]
-
-    def test_disabled_registry_rejects_unknown_provider(self):
-        with pytest.raises(ValueError, match="not in the eval registry"):
-            disabled_registry(self.ENTRIES, "nope")
-
-    @pytest.mark.asyncio
-    async def test_ablation_passes_when_delta_reaches_threshold(self):
-        async def _evaluator(candidate_ref, entries, holdout_ref):
-            return 6.2 if any(entry.id == "gluefeed" for entry in entries) else 5.4
-
-        result = await run_adapter_ablation(
-            adapter_id="adapter:glue-test-1",
-            registry_provider_id="gluefeed",
-            candidate_ref="candidate:1",
-            registry_entries=self.ENTRIES,
-            evaluator=_evaluator,
-            holdout_ref="holdout:lab:1",
-        )
-        assert result.passed
-        assert result.delta_points == pytest.approx(0.8)
-
-    @pytest.mark.asyncio
-    async def test_dead_code_routing_fails_attribution(self):
-        # Adapter present or absent, score identical → routing is dead code.
-        async def _evaluator(candidate_ref, entries, holdout_ref):
-            return 6.0
-
-        result = await run_adapter_ablation(
-            adapter_id="adapter:glue-test-1",
-            registry_provider_id="gluefeed",
-            candidate_ref="candidate:1",
-            registry_entries=self.ENTRIES,
-            evaluator=_evaluator,
-        )
-        assert not result.passed
-        assert result.delta_points == 0.0
-
-
-class TestArmLeg2:
-    def _ablation(self, on: float, off: float) -> AdapterAblationResult:
-        return AdapterAblationResult(
-            adapter_id="adapter:glue-test-1",
-            registry_provider_id="gluefeed",
-            candidate_ref="candidate:1",
-            holdout_ref="holdout:lab:1",
-            adapter_on_score=on,
-            adapter_off_score=off,
-            delta_points=on - off,
-            threshold_points=0.5,
-            passed=(on - off) >= 0.5,
-            evaluated_at="2026-08-01T00:00:00Z",
-        )
-
-    @pytest.mark.asyncio
-    async def test_arms_and_returns_reward_doc(self):
-        reward, blockers = await arm_leg2_for_merge(
-            adapter_id="adapter:glue-test-1",
-            adapter_owner_miner_ref="hk-owner",
-            catalog_id="source_catalog:" + "0" * 16,
-            catalog_registry_ids=("gluefeed",),
-            merged=True,
-            merged_diff_routed_registry_ids=("gluefeed",),
-            merge_cleared_score_bar=True,
-            shadow_monitor_live=True,
-            shadow_window_days_elapsed=7.2,
-            shadow_window_survived=True,
-            ablation=self._ablation(6.2, 5.4),
-            start_epoch=900,
-            accepted_at="2026-07-06T00:00:00Z",
-            market_open_at="2026-07-20T00:00:00Z",
-            persist=False,
-        )
-        assert blockers == []
-        assert reward is not None
-        assert reward["alpha_percent"] == 5.0
-        assert reward["miner_ref"] == "hk-owner"
-        assert reward["trigger_evidence"]["ablation_result"]["delta_points"] == pytest.approx(0.8)
-
-    @pytest.mark.asyncio
-    async def test_missing_ablation_blocks(self):
-        reward, blockers = await arm_leg2_for_merge(
-            adapter_id="adapter:glue-test-1",
-            adapter_owner_miner_ref="hk-owner",
-            catalog_id="",
-            catalog_registry_ids=("gluefeed",),
-            merged=True,
-            merged_diff_routed_registry_ids=("gluefeed",),
-            merge_cleared_score_bar=True,
-            shadow_monitor_live=True,
-            shadow_window_days_elapsed=7.2,
-            shadow_window_survived=True,
-            ablation=None,
-            start_epoch=900,
-            accepted_at="2026-07-06T00:00:00Z",
-            market_open_at="2026-07-20T00:00:00Z",
-            persist=False,
-        )
-        assert reward is None
-        assert "ablation_not_run" in blockers
 
 
 class TestProbeGuardTermExtraction:

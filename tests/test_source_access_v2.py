@@ -425,3 +425,13 @@ class TestPromptFlipTogether:
         monkeypatch.setenv("RESEARCH_LAB_SOURCE_ACCESS_V2", "true")
         user = self._messages(source_access_v2=None)[1]["content"]
         assert "start_line" in user
+
+    def test_none_defaults_to_v2_when_env_is_unset(self, monkeypatch):
+        monkeypatch.delenv("RESEARCH_LAB_SOURCE_ACCESS_V2", raising=False)
+        user = self._messages(source_access_v2=None)[1]["content"]
+        assert "start_line" in user
+
+    def test_none_honors_explicit_false_env(self, monkeypatch):
+        monkeypatch.setenv("RESEARCH_LAB_SOURCE_ACCESS_V2", "false")
+        user = self._messages(source_access_v2=None)[1]["content"]
+        assert "start_line" not in user

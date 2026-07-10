@@ -428,6 +428,9 @@ class ResearchLabGatewayConfig:
     loop_planner_allow_non_zdr: bool = False
     ranked_path_fallback_enabled: bool = True
     ranked_path_fallback_max_paths: int = 3
+    planner_symbol_index_enabled: bool = True
+    planner_reference_repair_enabled: bool = True
+    planner_reference_repair_max_attempts: int = 1
     loop_executor_model: str = ""
     loop_executor_reasoning_effort: str = ""
     loop_alignment_judge_model: str = ""
@@ -500,7 +503,7 @@ class ResearchLabGatewayConfig:
     code_edit_allowed_suffixes_json: str = ""
     # Source-access v2 (W1): ranged reads honored by BOTH the inspection prompt
     # and the gateway resolver. One decision so the halves cannot diverge.
-    code_edit_source_access_v2: bool = False
+    code_edit_source_access_v2: bool = True
     code_edit_source_inspection_max_ranges_per_path: int = 3
     code_edit_source_inspection_rounds: int = 3
     # 12 cumulative file reads: 8 caps patch quality on ~300-file trees
@@ -515,6 +518,13 @@ class ResearchLabGatewayConfig:
     loop_provider_probes_enabled: bool = True
     loop_probe_max_probes: int = 4
     loop_probe_max_cost_microusd: int = 250_000
+    # Private Supabase capability snapshots expand trusted provider endpoints.
+    # Observe mode preserves existing traffic until the private seed is loaded
+    # and operators explicitly switch enforcement on.
+    provider_capability_catalog_enabled: bool = True
+    provider_capability_enforcement: str = "observe"
+    provider_capability_refresh_seconds: int = 60
+    openrouter_model_catalog_ttl_seconds: int = 900
     corpus_export_enabled: bool = False
     corpus_export_interval_seconds: int = 3600
     corpus_export_s3_prefix: str = ""
@@ -530,17 +540,11 @@ class ResearchLabGatewayConfig:
     source_add_trial_timeout_seconds: int = 300
     source_add_leg1_alpha_percent: float = 1.0
     source_add_leg2_alpha_percent: float = 5.0
-    source_add_leg2_expiry_months: int = 6
-    # No off-switch in the prod profile: leg 2 is never created without the
-    # ablation attribution pass.
-    source_add_ablation_required: bool = True
     source_add_acceptance_floor_yield: float = 0.10
     source_add_max_concurrent_per_hotkey: int = 3
     source_add_max_per_day_per_hotkey: int = 5
     source_add_max_per_30d_per_hotkey: int = 10
     source_add_leg1_max_per_utc_day: int = 10
-    source_add_shadow_window_days: float = 7.0
-    source_add_ablation_threshold_points: float = 0.5
     stale_parent_rebase_enabled: bool = True
     stale_parent_rebase_repair_enabled: bool = True
     stale_parent_rebase_repair_model: str = STALE_PARENT_REBASE_REPAIR_MODEL_ID
@@ -870,6 +874,18 @@ class ResearchLabGatewayConfig:
                 1,
                 _int("RESEARCH_LAB_RANKED_PATH_FALLBACK_MAX_PATHS", 3),
             ),
+            planner_symbol_index_enabled=_truthy(
+                "RESEARCH_LAB_PLANNER_SYMBOL_INDEX_ENABLED",
+                "true",
+            ),
+            planner_reference_repair_enabled=_truthy(
+                "RESEARCH_LAB_PLANNER_REFERENCE_REPAIR_ENABLED",
+                "true",
+            ),
+            planner_reference_repair_max_attempts=min(
+                1,
+                max(0, _int("RESEARCH_LAB_PLANNER_REFERENCE_REPAIR_MAX_ATTEMPTS", 1)),
+            ),
             loop_executor_model=os.getenv("RESEARCH_LAB_LOOP_EXECUTOR_MODEL", ""),
             loop_executor_reasoning_effort=os.getenv("RESEARCH_LAB_LOOP_EXECUTOR_REASONING_EFFORT", ""),
             loop_alignment_judge_model=os.getenv("RESEARCH_LAB_LOOP_ALIGNMENT_JUDGE_MODEL", ""),
@@ -1029,7 +1045,7 @@ class ResearchLabGatewayConfig:
             code_edit_allowed_paths_json=os.getenv("RESEARCH_LAB_CODE_EDIT_ALLOWED_PATHS_JSON", ""),
             code_edit_allowed_exact_paths_json=os.getenv("RESEARCH_LAB_CODE_EDIT_ALLOWED_EXACT_PATHS_JSON", ""),
             code_edit_allowed_suffixes_json=os.getenv("RESEARCH_LAB_CODE_EDIT_ALLOWED_SUFFIXES_JSON", ""),
-            code_edit_source_access_v2=_truthy("RESEARCH_LAB_SOURCE_ACCESS_V2", "false"),
+            code_edit_source_access_v2=_truthy("RESEARCH_LAB_SOURCE_ACCESS_V2", "true"),
             code_edit_source_inspection_max_ranges_per_path=max(
                 1,
                 _int("RESEARCH_LAB_CODE_EDIT_SOURCE_INSPECTION_MAX_RANGES_PER_PATH", 3),
@@ -1064,6 +1080,21 @@ class ResearchLabGatewayConfig:
                 0,
                 _int("RESEARCH_LAB_LOOP_PROBE_MAX_COST_MICROUSD", 250_000),
             ),
+            provider_capability_catalog_enabled=_truthy(
+                "RESEARCH_LAB_PROVIDER_CAPABILITY_CATALOG_ENABLED", "true"
+            ),
+            provider_capability_enforcement=(
+                os.getenv("RESEARCH_LAB_PROVIDER_CAPABILITY_ENFORCEMENT", "observe")
+                or "observe"
+            ).strip().lower(),
+            provider_capability_refresh_seconds=max(
+                10,
+                _int("RESEARCH_LAB_PROVIDER_CAPABILITY_REFRESH_SECONDS", 60),
+            ),
+            openrouter_model_catalog_ttl_seconds=max(
+                60,
+                _int("RESEARCH_LAB_OPENROUTER_MODEL_CATALOG_TTL_SECONDS", 900),
+            ),
             corpus_export_enabled=_truthy("RESEARCH_LAB_CORPUS_EXPORT_ENABLED", "false"),
             corpus_export_interval_seconds=max(
                 300,
@@ -1084,8 +1115,6 @@ class ResearchLabGatewayConfig:
             source_add_leg2_alpha_percent=max(
                 0.0, _float("RESEARCH_LAB_SOURCE_ADD_LEG2_ALPHA_PERCENT", 5.0)
             ),
-            source_add_leg2_expiry_months=max(1, _int("RESEARCH_LAB_SOURCE_ADD_LEG2_EXPIRY_MONTHS", 6)),
-            source_add_ablation_required=_truthy("RESEARCH_LAB_SOURCE_ADD_ABLATION_REQUIRED", "true"),
             source_add_acceptance_floor_yield=max(
                 0.0, _float("RESEARCH_LAB_SOURCE_ADD_ACCEPTANCE_FLOOR_YIELD", 0.10)
             ),
@@ -1100,12 +1129,6 @@ class ResearchLabGatewayConfig:
             ),
             source_add_leg1_max_per_utc_day=max(
                 1, _int("RESEARCH_LAB_SOURCE_ADD_LEG1_MAX_PER_UTC_DAY", 10)
-            ),
-            source_add_shadow_window_days=max(
-                0.0, _float("RESEARCH_LAB_SOURCE_ADD_SHADOW_WINDOW_DAYS", 7.0)
-            ),
-            source_add_ablation_threshold_points=max(
-                0.0, _float("RESEARCH_LAB_SOURCE_ADD_ABLATION_THRESHOLD_POINTS", 0.5)
             ),
             stale_parent_rebase_enabled=_truthy("RESEARCH_LAB_STALE_PARENT_REBASE_ENABLED", "true"),
             stale_parent_rebase_repair_enabled=_truthy("RESEARCH_LAB_STALE_PARENT_REBASE_REPAIR_ENABLED", "true"),
@@ -1486,6 +1509,9 @@ class ResearchLabGatewayConfig:
                     "fallback_model_count": len(self.loop_planner_fallback_models),
                     "ranked_path_fallback_enabled": self.ranked_path_fallback_enabled,
                     "ranked_path_fallback_max_paths": self.ranked_path_fallback_max_paths,
+                    "symbol_index_enabled": self.planner_symbol_index_enabled,
+                    "reference_repair_enabled": self.planner_reference_repair_enabled,
+                    "reference_repair_max_attempts": self.planner_reference_repair_max_attempts,
                     "reasoning_effort": _normalize_auto_research_reasoning_effort(
                         self.loop_planner_reasoning_effort
                     ),
@@ -1561,6 +1587,7 @@ class ResearchLabGatewayConfig:
                 "private_build_cmd_configured": bool(self.private_build_cmd),
                 "private_artifact_manifest_output_configured": bool(self.private_artifact_manifest_output),
                 "code_edit_source_inspection": {
+                    "source_access_v2": self.code_edit_source_access_v2,
                     "rounds": self.code_edit_source_inspection_rounds,
                     "max_files": self.code_edit_source_inspection_max_files,
                     "file_bytes": self.code_edit_source_inspection_file_bytes,

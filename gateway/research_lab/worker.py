@@ -2197,9 +2197,11 @@ class ResearchLabHostedWorker:
                 builder=code_builder,
                 dev_evaluator=dev_evaluator,
                 probe_private_window_term_hashes=probe_guard_hashes,
-                # W2: sanitized provider-outcome digest from today's recorded
-                # truth (usage ledger + day cache); None when the flag is off.
-                provider_outcome_digest=build_run_provider_outcome_digest(),
+                # W2: load only the proxy's compact, hash-verified sidecar.
+                # Keep filesystem I/O off the hosted worker's async loop.
+                provider_outcome_digest=await asyncio.to_thread(
+                    build_run_provider_outcome_digest
+                ),
             ).run(
                 run_id=context.run_id,
                 ticket=context.ticket,

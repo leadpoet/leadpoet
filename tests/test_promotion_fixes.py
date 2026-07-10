@@ -1246,9 +1246,6 @@ def _source_add_reward_config() -> Any:
     return SimpleNamespace(
         source_add_rewards_enabled=True,
         source_add_leg2_alpha_percent=5.0,
-        source_add_leg2_expiry_months=6,
-        source_add_shadow_window_days=7.0,
-        source_add_ablation_threshold_points=0.5,
         lab_reward_epochs=20,
         evaluation_epoch=0,
     )
@@ -1258,22 +1255,6 @@ def _source_add_attribution_bundle() -> dict[str, Any]:
     return {
         "evaluation_epoch": 200,
         "aggregates": {"per_icp_results": []},
-        "source_add_implementation_attribution": {
-            "adapter_id": "adapter:test-api-source",
-            "routed_registry_ids": ["test_api_source"],
-            "shadow_monitor_live": True,
-            "shadow_window_days_elapsed": 7.25,
-            "shadow_window_survived": True,
-            "market_open_at": "2026-07-20T00:00:00Z",
-            "ablation": {
-                "holdout_ref": "source-add-holdout:test-api-source",
-                "adapter_on_score": 13.4,
-                "adapter_off_score": 12.7,
-                "threshold_points": 0.5,
-                "passed": True,
-                "evaluated_at": "2026-08-01T00:00:00Z",
-            },
-        },
     }
 
 
@@ -1387,6 +1368,205 @@ async def test_source_add_leg2_blocks_when_llm_judge_says_not_helped(store, monk
     assert result["source_add_reward_status"] == "blocked"
     assert result["results"][0]["blockers"] == ["llm_judge_not_helped"]
     assert store.generic_insert_writes == []
+
+
+@pytest.mark.parametrize("verdict", ["not_helped", "uncertain"])
+async def test_source_add_leg2_non_helped_and_uncertain_never_create_reward(
+    store,
+    monkeypatch,
+    verdict,
+):
+    store.select_many_results["research_lab_source_add_provisioning_current"] = [
+        {
+            "provision_ref": "source_add_provision:" + "2" * 16,
+            "catalog_id": "source_catalog:" + "1" * 16,
+            "adapter_id": "adapter:test-api-source",
+            "miner_hotkey": "hk-source-owner",
+            "registry_provider_id": "test_api_source",
+            "provision_status": "provisioned_autoresearch_eligible",
+        }
+    ]
+    store.select_many_results["research_lab_candidate_promotion_events"] = []
+
+    async def _judge(**_kwargs: Any) -> SourceAddJudgeVerdict:
+        return SourceAddJudgeVerdict(
+            verdict=verdict,
+            confidence=0.5,
+            source_used=(verdict == "uncertain"),
+            adapter_id="adapter:test-api-source",
+            registry_provider_id="test_api_source",
+            model_id="test/judge",
+        )
+
+    monkeypatch.setattr(
+        source_add_llm_judge,
+        "openrouter_key_for_source_add_judge",
+        lambda: "test-openrouter-key",
+    )
+    monkeypatch.setattr(source_add_llm_judge, "judge_source_add_implementation", _judge)
+    controller = ResearchLabPromotionController(_source_add_reward_config(), worker_ref="test-worker")
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={"candidate_id": "candidate:" + "1" * 64},
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle={"evaluation_epoch": 200, "aggregates": {}},
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status={"champion_reward_status": "created", "champion_reward_id": "cr-1"},
+    )
+    assert result["source_add_reward_status"] == "blocked"
+    assert result["results"][0]["blockers"] == ["llm_judge_not_helped"]
+    assert store.generic_insert_writes == []
+
+
+async def test_source_add_leg2_helped_verdict_must_match_provisioned_source(store, monkeypatch):
+    store.select_many_results["research_lab_source_add_provisioning_current"] = [
+        {
+            "provision_ref": "source_add_provision:" + "2" * 16,
+            "catalog_id": "source_catalog:" + "1" * 16,
+            "adapter_id": "adapter:test-api-source",
+            "miner_hotkey": "hk-source-owner",
+            "registry_provider_id": "test_api_source",
+            "provision_status": "provisioned_autoresearch_eligible",
+        }
+    ]
+    store.select_many_results["research_lab_candidate_promotion_events"] = []
+
+    async def _judge(**_kwargs: Any) -> SourceAddJudgeVerdict:
+        return SourceAddJudgeVerdict(
+            verdict="helped",
+            confidence=0.9,
+            source_used=True,
+            adapter_id="adapter:unknown",
+            registry_provider_id="unknown_source",
+            model_id="test/judge",
+        )
+
+    monkeypatch.setattr(
+        source_add_llm_judge,
+        "openrouter_key_for_source_add_judge",
+        lambda: "test-openrouter-key",
+    )
+    monkeypatch.setattr(source_add_llm_judge, "judge_source_add_implementation", _judge)
+    controller = ResearchLabPromotionController(_source_add_reward_config(), worker_ref="test-worker")
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={"candidate_id": "candidate:" + "1" * 64},
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle={"evaluation_epoch": 200, "aggregates": {}},
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status={"champion_reward_status": "created", "champion_reward_id": "cr-1"},
+    )
+    assert result["source_add_reward_status"] == "blocked"
+    assert result["results"][0]["blockers"] == ["llm_judge_source_not_matched"]
+    assert store.generic_insert_writes == []
+
+
+async def test_source_add_leg2_duplicate_is_idempotently_blocked(store, monkeypatch):
+    store.select_many_results["research_lab_source_add_provisioning_current"] = [
+        {
+            "provision_ref": "source_add_provision:" + "2" * 16,
+            "catalog_id": "source_catalog:" + "1" * 16,
+            "adapter_id": "adapter:test-api-source",
+            "miner_hotkey": "hk-source-owner",
+            "registry_provider_id": "test_api_source",
+            "provision_status": "provisioned_autoresearch_eligible",
+        }
+    ]
+    store.select_many_results["research_lab_source_add_reward_current"] = [
+        {
+            "reward_ref": "source_add_reward:" + "3" * 16,
+            "adapter_id": "adapter:test-api-source",
+            "leg": 2,
+            "current_reward_status": "active",
+        }
+    ]
+    store.select_many_results["research_lab_candidate_promotion_events"] = []
+
+    async def _judge(**_kwargs: Any) -> SourceAddJudgeVerdict:
+        return SourceAddJudgeVerdict(
+            verdict="helped",
+            confidence=0.9,
+            source_used=True,
+            adapter_id="adapter:test-api-source",
+            registry_provider_id="test_api_source",
+            model_id="test/judge",
+        )
+
+    async def _live_epoch(configured: Any = None) -> tuple[int, int | None, str]:
+        return 250, None, "test"
+
+    monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _live_epoch)
+    monkeypatch.setattr(
+        source_add_llm_judge,
+        "openrouter_key_for_source_add_judge",
+        lambda: "test-openrouter-key",
+    )
+    monkeypatch.setattr(source_add_llm_judge, "judge_source_add_implementation", _judge)
+    controller = ResearchLabPromotionController(_source_add_reward_config(), worker_ref="test-worker")
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={"candidate_id": "candidate:" + "1" * 64},
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle={"evaluation_epoch": 200, "aggregates": {}},
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status={"champion_reward_status": "already_created", "champion_reward_id": "cr-1"},
+    )
+    assert result["source_add_reward_status"] == "blocked"
+    assert result["results"][0]["blockers"] == ["leg2_already_created"]
+    assert store.generic_insert_writes == []
+
+
+async def test_source_add_leg2_persistence_failure_is_non_blocking(store, monkeypatch):
+    store.select_many_results["research_lab_source_add_provisioning_current"] = [
+        {
+            "provision_ref": "source_add_provision:" + "2" * 16,
+            "catalog_id": "source_catalog:" + "1" * 16,
+            "adapter_id": "adapter:test-api-source",
+            "miner_hotkey": "hk-source-owner",
+            "registry_provider_id": "test_api_source",
+            "provision_status": "provisioned_autoresearch_eligible",
+        }
+    ]
+    store.select_many_results["research_lab_source_add_reward_current"] = []
+    store.select_many_results["research_lab_candidate_promotion_events"] = []
+
+    async def _judge(**_kwargs: Any) -> SourceAddJudgeVerdict:
+        return SourceAddJudgeVerdict(
+            verdict="helped",
+            confidence=0.9,
+            source_used=True,
+            adapter_id="adapter:test-api-source",
+            registry_provider_id="test_api_source",
+            model_id="test/judge",
+        )
+
+    async def _live_epoch(configured: Any = None) -> tuple[int, int | None, str]:
+        return 250, None, "test"
+
+    async def _failed_insert(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("database temporarily unavailable")
+
+    monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _live_epoch)
+    monkeypatch.setattr(promotion, "insert_row", _failed_insert)
+    monkeypatch.setattr(
+        source_add_llm_judge,
+        "openrouter_key_for_source_add_judge",
+        lambda: "test-openrouter-key",
+    )
+    monkeypatch.setattr(source_add_llm_judge, "judge_source_add_implementation", _judge)
+    controller = ResearchLabPromotionController(_source_add_reward_config(), worker_ref="test-worker")
+    champion_status = {"champion_reward_status": "created", "champion_reward_id": "cr-1"}
+    result = await controller._maybe_create_source_add_implementation_rewards(
+        candidate={"candidate_id": "candidate:" + "1" * 64},
+        score_bundle_row={"score_bundle_id": "score_bundle:" + "7" * 64},
+        score_bundle={"evaluation_epoch": 200, "aggregates": {}},
+        improvement_points=2.0,
+        threshold=1.0,
+        champion_reward_status=champion_status,
+    )
+    assert result["source_add_reward_status"] == "failed"
+    assert result["error_class"] == "RuntimeError"
+    assert champion_status == {"champion_reward_status": "created", "champion_reward_id": "cr-1"}
 
 
 # ---------------------------------------------------------------------------

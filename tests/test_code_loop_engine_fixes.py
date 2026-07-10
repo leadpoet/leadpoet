@@ -20,6 +20,7 @@ from gateway.research_lab.code_build import (
     CodeEditPatchApplyError,
     ParentImageSourceContext,
 )
+from gateway.research_lab.source_symbol_index import build_source_symbol_index
 from gateway.research_lab.loop_engine import AutoResearchLoopSettings, OpenRouterCallResult
 from research_lab.code_editing import CodeEditDraft
 from research_lab.eval import PrivateModelArtifactManifest
@@ -80,7 +81,19 @@ def _source_context(tmp_path):
     source_root = tmp_path / "source"
     source_root.mkdir(exist_ok=True)
     (source_root / "sourcing_model").mkdir(exist_ok=True)
-    (source_root / "sourcing_model" / "discovery.py").write_text("x = 1\n", encoding="utf-8")
+    (source_root / "sourcing_model" / "discovery.py").write_text(
+        "x = 1\n\n"
+        "def discover_companies(query):\n"
+        "    \"\"\"Find companies through the current discovery route.\"\"\"\n"
+        "    return query\n",
+        encoding="utf-8",
+    )
+    planner_source_index = build_source_symbol_index(
+        source_root=source_root,
+        editable_files=("sourcing_model/discovery.py",),
+        source_tree_hash="sha256:" + "8" * 64,
+        parent_image_digest_hash="sha256:" + "9" * 64,
+    )
     return ParentImageSourceContext(
         source_root=source_root,
         source_mode="extracted",
@@ -89,6 +102,7 @@ def _source_context(tmp_path):
         top_level_paths=("sourcing_model/",),
         editable_files=("sourcing_model/discovery.py",),
         file_previews=(),
+        planner_source_index=planner_source_index,
     )
 
 
@@ -346,6 +360,9 @@ class _NoCandidateBuilder:
             code_edit_patch_repair_attempts=0,
             ranked_path_fallback_enabled=True,
             ranked_path_fallback_max_paths=3,
+            planner_reference_repair_enabled=False,
+            planner_reference_repair_max_attempts=1,
+            provider_capability_catalog_enabled=False,
         )
 
     def prepare_parent_source_context(self, *, parent_artifact, workspace_dir):
@@ -464,6 +481,337 @@ async def test_loop_direction_no_new_safe_path_preserves_stop_reason(tmp_path):
     terminal = events[-1]
     assert terminal.event_type == "loop_failed"
     assert terminal.event_doc["run_summary"]["stop_reason"] == "loop_direction_no_new_safe_path"
+
+
+async def test_planner_reference_repair_resolves_symbol_and_builds_once(tmp_path):
+    events = []
+    calls = []
+    builder = _PlannerBuildsCandidateBuilder(_source_context(tmp_path))
+    builder.config.planner_reference_repair_enabled = True
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        calls.append(stage)
+        if stage == "loop_planner":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    _loop_direction_plan_payload(
+                        no_new_safe_path=True,
+                        reason="discover_companiez is not present in editable source",
+                        unresolved_references=["discover_companiez"],
+                    )
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "planner", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        if stage == "loop_planner_reference_repair":
+            prompt = json.loads(messages[1]["content"].split("Context JSON:\n", 1)[1])
+            resolution = prompt["reference_resolution"]
+            assert resolution["reference_count"] == 1
+            assert resolution["resolved_reference_count"] == 1
+            assert resolution["results"][0]["matches"][0]["symbol"] == "discover_companies"
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    _loop_direction_plan_payload(
+                        no_new_safe_path=False,
+                        reason="",
+                        unresolved_references=[],
+                        required_mechanism="extend discover_companies without weakening filters",
+                    )
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "repair", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        if stage == "source_inspection":
+            return OpenRouterCallResult(
+                content='{"requests":[{"operation":"read_file","path":"sourcing_model/discovery.py"}]}',
+                provider_usage={"provider": "openrouter", "response_id": "inspect", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        if stage == "code_edit_draft":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "candidates": [
+                            _draft(
+                                lane="source_routing",
+                                plan_path_id="alternate_discovery_surface",
+                            ).to_dict()
+                        ]
+                    }
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "draft", "cost_microusd": 2000},
+                cost_microusd=2000,
+            )
+        raise AssertionError(f"unexpected stage: {stage}")
+
+    async def event_sink(event):
+        events.append(event)
+
+    result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=3,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=builder,
+    ).run(
+        run_id="run-reference-repair",
+        ticket={
+            "ticket_id": "ticket-reference-repair",
+            "miner_hotkey": "hotkey",
+            "island": "generalist",
+            "brief_sanitized_ref": "brief",
+            "ticket_doc": {"brief_public_summary": "repair one misspelled source reference"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+        requested_loop_count=1,
+    )
+
+    assert result.status == "completed", (
+        result.stop_reason,
+        calls,
+        [
+            (
+                event.event_type,
+                event.event_doc.get("stage"),
+                event.event_doc.get("error"),
+                event.event_doc.get("reason"),
+            )
+            for event in events
+        ],
+    )
+    assert calls.count("loop_planner_reference_repair") == 1
+    assert len(result.selected_candidates) == 1
+    repair_checkpoints = [
+        event.event_doc["checkpoint"]
+        for event in events
+        if event.event_type == "checkpoint_saved"
+        and event.event_doc.get("checkpoint", {}).get("planner_reference_repair_attempted")
+    ]
+    assert [item["stage"] for item in repair_checkpoints[:2]] == [
+        "before_planner_reference_repair",
+        "after_planner_reference_repair",
+    ]
+    assert repair_checkpoints[0]["planner_reference_repair_status"] == "attempted"
+    assert repair_checkpoints[1]["planner_reference_repair_status"] == "repaired"
+    repair_events = [
+        event
+        for event in events
+        if event.event_doc.get("stage") == "planner_reference_repair"
+    ]
+    serialized = json.dumps([event.event_doc for event in repair_events], sort_keys=True)
+    assert "reference_resolution" not in serialized
+    assert "Find companies through the current discovery route" not in serialized
+
+    resumed_calls = []
+    resumed_events = []
+    resumed_builder = _PlannerNoCandidateBuilder(_source_context(tmp_path))
+    resumed_builder.config.planner_reference_repair_enabled = True
+
+    async def resumed_call_model(messages, timeout_seconds, max_tokens, stage):
+        resumed_calls.append(stage)
+        assert stage != "loop_planner_reference_repair"
+        if stage == "source_inspection":
+            return OpenRouterCallResult(
+                content='{"requests":[{"operation":"read_file","path":"sourcing_model/discovery.py"}]}',
+                provider_usage={"provider": "openrouter", "response_id": "inspect-resume", "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        if stage in {"code_edit_draft", "code_edit_fallback"}:
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "no_viable_patch": True,
+                        "reason": "no call_sonar implementation is present in editable source",
+                    }
+                ),
+                provider_usage={"provider": "openrouter", "response_id": stage, "cost_microusd": 1000},
+                cost_microusd=1000,
+            )
+        raise AssertionError(f"unexpected resumed stage: {stage}")
+
+    async def resumed_event_sink(event):
+        resumed_events.append(event)
+
+    resumed_result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=1,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=resumed_call_model,
+        event_sink=resumed_event_sink,
+        builder=resumed_builder,
+    ).run(
+        run_id="run-reference-repair-resume",
+        ticket={
+            "ticket_id": "ticket-reference-repair-resume",
+            "miner_hotkey": "hotkey",
+            "island": "generalist",
+            "brief_sanitized_ref": "brief",
+            "ticket_doc": {"brief_public_summary": "resume after interrupted repair"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+        requested_loop_count=1,
+        resume_state=repair_checkpoints[0],
+    )
+
+    assert resumed_result.status == "failed"
+    assert "loop_planner_reference_repair" not in resumed_calls
+    resumed_checkpoints = [
+        event.event_doc["checkpoint"]
+        for event in resumed_events
+        if event.event_type == "checkpoint_saved"
+    ]
+    assert resumed_checkpoints[-1]["planner_reference_repair_attempted"] is True
+
+
+async def test_draft_unknown_reference_gets_one_repair_before_existing_fallbacks(tmp_path):
+    events = []
+    calls = []
+    builder = _PlannerBuildsCandidateBuilder(_source_context(tmp_path))
+    builder.config.planner_reference_repair_enabled = True
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        calls.append(stage)
+        if stage == "loop_planner":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    _loop_direction_plan_payload(
+                        required_mechanism="extend discover_companiez without weakening filters",
+                        selected_path_id="misspelled_discovery_symbol",
+                        ranked_paths=[
+                            {
+                                "path_id": "misspelled_discovery_symbol",
+                                "lane": "source_routing",
+                                "mechanism": "extend discover_companiez",
+                            },
+                            {
+                                "path_id": "ranked_fallback_path",
+                                "lane": "source_routing",
+                                "mechanism": "use a separate safe routing path",
+                            },
+                        ],
+                    )
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "planner"},
+                cost_microusd=1000,
+            )
+        if stage == "source_inspection":
+            return OpenRouterCallResult(
+                content='{"requests":[{"operation":"read_file","path":"sourcing_model/discovery.py"}]}',
+                provider_usage={"provider": "openrouter", "response_id": "inspect"},
+                cost_microusd=1000,
+            )
+        if stage == "code_edit_draft" and calls.count("code_edit_draft") == 1:
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "no_viable_patch": True,
+                        "reason": "discover_companiez is not present in editable source",
+                    }
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "draft-miss"},
+                cost_microusd=1000,
+            )
+        if stage == "loop_planner_reference_repair":
+            context = json.loads(messages[1]["content"].split("Context JSON:\n", 1)[1])
+            resolution = next(
+                item
+                for item in context["reference_resolution"]["results"]
+                if item["reference"] == "discover_companiez"
+            )
+            matches = resolution["matches"]
+            assert matches[0]["symbol"] == "discover_companies"
+            return OpenRouterCallResult(
+                content=json.dumps(_loop_direction_plan_payload()),
+                provider_usage={"provider": "openrouter", "response_id": "repair"},
+                cost_microusd=1000,
+            )
+        if stage == "code_edit_draft":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "candidates": [
+                            _draft(
+                                lane="source_routing",
+                                plan_path_id="alternate_discovery_surface",
+                            ).to_dict()
+                        ]
+                    }
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "draft-fixed"},
+                cost_microusd=1000,
+            )
+        raise AssertionError(f"unexpected stage: {stage}")
+
+    async def event_sink(event):
+        events.append(event)
+
+    result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=2,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=builder,
+    ).run(
+        run_id="run-draft-reference-repair",
+        ticket={
+            "ticket_id": "ticket-draft-reference-repair",
+            "miner_hotkey": "hotkey",
+            "island": "generalist",
+            "brief_sanitized_ref": "brief",
+            "ticket_doc": {"brief_public_summary": "repair a draft source reference"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+        requested_loop_count=1,
+    )
+
+    assert result.status == "completed"
+    assert len(result.selected_candidates) == 1
+    assert calls.count("loop_planner_reference_repair") == 1
+    assert calls.count("code_edit_draft") == 2
+    assert "code_edit_fallback" not in calls
+    assert not [
+        event
+        for event in events
+        if event.event_doc.get("ranked_path_fallback_attempted") is True
+    ]
 
 
 async def test_unimplementable_binding_plan_stops_after_one_draft(tmp_path):

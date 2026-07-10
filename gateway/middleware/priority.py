@@ -64,6 +64,7 @@ OTHER_CLASS = RouteClass(
 VALIDATOR_EXACT = {
     "/validate",
     "/weights/submit",
+    "/weights/submit/v2",
     "/fulfillment/scoring",
     "/fulfillment/score",
     "/fulfillment/rewards/active",

@@ -181,6 +181,7 @@ class LoopDirectionPlan:
     novelty_contrast: str = ""
     no_new_safe_path: bool = False
     reason: str = ""
+    unresolved_references: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -194,6 +195,7 @@ class LoopDirectionPlan:
             "novelty_requirements",
             "anti_overfit_checks",
             "ranked_paths",
+            "unresolved_references",
         ):
             payload[key] = list(payload[key])
         payload["plan_hash"] = sha256_json({key: value for key, value in payload.items() if key != "plan_hash"})
@@ -225,6 +227,7 @@ def build_loop_direction_planner_messages(
     budget_context: Mapping[str, Any] | None,
     prior_attempts: Sequence[Mapping[str, Any]] | None = None,
     provider_outcome_digest: Mapping[str, Any] | None = None,
+    provider_capability_summary: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     allowed_lanes = list(LOOP_DIRECTION_ALLOWED_LANES)
     context = {
@@ -242,6 +245,8 @@ def build_loop_direction_planner_messages(
         # rates) sits beside the benchmark summary so plans can target real
         # provider failure modes instead of guessing them.
         context["provider_outcome_digest"] = _redacted_mapping(provider_outcome_digest)
+    if provider_capability_summary:
+        context["approved_provider_capabilities"] = _redacted_mapping(provider_capability_summary)
     system = (
         "You are Leadpoet Research Lab's loop-direction planner. Convert a miner's "
         "public research focus into a binding, auditable code-edit plan for a later "
@@ -266,7 +271,9 @@ def build_loop_direction_planner_messages(
         "- Do not remove ICP constraints unless replacing them with a more faithful constraint or adding a compensating downstream validation/filter.\n"
         "- Provider fallback paths must classify, retry, timeout, log, or route provider/runtime failures; pure query wording changes are not provider fallback.\n"
         "- Do not select paths that weaken ICP fit, remove constraints as the primary mechanism, or merely clean up code.\n"
-        "- If the ticket names a concrete file/path/provider/function that is not present in runtime_source_index editable_files or inventory, return no_new_safe_path=true instead of translating it to a different source path.\n"
+        "- If the ticket names a concrete file/path/function that is not present in runtime_source_index, do not invent it or silently translate it. Return no_new_safe_path=true and list only the exact missing path/identifier in unresolved_references so the gateway can perform one bounded clarification pass.\n"
+        "- A provider endpoint or text model absent from source inventory is viable only when approved_provider_capabilities explicitly permits its provider family/policy and runtime_source_index shows an existing editable provider module.\n"
+        "- Capability expansion may edit that existing provider module only; never introduce a new host, credential/env reference, dependency, or network client.\n"
         "- Do not request, reveal, or store secrets, hidden ICP plaintext, judge prompts, provider keys, private repo URLs, or raw private data.\n"
         "- If no safe new path exists, return no_new_safe_path=true with a clear reason.\n\n"
         "Required output shape:\n"
@@ -279,9 +286,46 @@ def build_loop_direction_planner_messages(
         "\"success_criteria\":[\"...\"],\"novelty_requirements\":[\"...\"],"
         "\"anti_overfit_checks\":[\"Preserves multiple qualified company outputs.\"],"
         "\"novelty_contrast\":\"How this differs from prior attempts by mechanism, target function/file, and expected behavior.\","
+        "\"unresolved_references\":[],"
         "\"ranked_paths\":[{\"path_id\":\"query_decomposition_recall\",\"lane\":\"query_construction\","
         "\"mechanism\":\"Add one bounded decomposed-search pass while preserving downstream gates.\"}],"
         "\"selected_path_id\":\"query_decomposition_recall\"}\n\n"
+        "Context JSON:\n"
+        + json.dumps(context, sort_keys=True, separators=(",", ":"))
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def build_loop_direction_reference_repair_messages(
+    *,
+    ticket: Mapping[str, Any],
+    original_plan: Mapping[str, Any],
+    reference_resolution: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    """Ask the planner once to repair a plan bound to missing source names."""
+
+    context: dict[str, Any] = {
+        "ticket": _redacted_mapping(ticket),
+        "original_plan": _redacted_mapping(original_plan),
+        "reference_resolution": _redacted_source_context(reference_resolution),
+        "allowed_lanes": list(LOOP_DIRECTION_ALLOWED_LANES),
+    }
+    system = (
+        "You are Leadpoet Research Lab's loop-direction planner repairing one plan "
+        "whose file or function references did not bind to the exact extracted model source. "
+        "You do not write code. Preserve the miner's objective and return one complete replacement plan."
+    )
+    user = (
+        "Return strict JSON only, no markdown.\n\n"
+        "Use only paths and symbols present in reference_resolution matches or the original plan's valid paths. "
+        "Do not invent an API, path, function, credential, dependency, host, or network client. "
+        "A similar symbol is evidence to inspect, not permission to change the miner's requested mechanism. "
+        "If the objective still cannot be implemented safely, return no_new_safe_path=true with exact "
+        "identifier/path values in unresolved_references. Otherwise return no_new_safe_path=false and a "
+        "complete plan with required_lane, required_mechanism, selected_path_id, ranked_paths, target_behavior, "
+        "must_inspect, allowed_lanes, disallowed_lanes, must_not_try, success_criteria, novelty_requirements, "
+        "anti_overfit_checks, generalization_claim, and novelty_contrast. unresolved_references must then be empty.\n\n"
+        "Never expose secrets, private ICP text, raw provider bodies, hidden prompts, or private repository URLs.\n\n"
         "Context JSON:\n"
         + json.dumps(context, sort_keys=True, separators=(",", ":"))
     )
@@ -302,6 +346,7 @@ def build_code_edit_source_inspection_messages(
     source_access_v2: bool | None = None,
     provider_probe_catalog: Mapping[str, Any] | None = None,
     provider_outcome_digest: Mapping[str, Any] | None = None,
+    provider_capability_summary: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Ask the model which extracted source files it needs before drafting.
 
@@ -332,6 +377,8 @@ def build_code_edit_source_inspection_messages(
         context["provider_probe_catalog"] = _redacted_mapping(provider_probe_catalog or {})
     if provider_outcome_digest:
         context["provider_outcome_digest"] = _redacted_mapping(provider_outcome_digest)
+    if provider_capability_summary:
+        context["approved_provider_capabilities"] = _redacted_mapping(provider_capability_summary)
     system = (
         "You are Leadpoet Research Lab's source-inspection planner for code-edit "
         "autoresearch. You are inspecting the private sourcing model runtime extracted "
@@ -408,6 +455,7 @@ def build_code_edit_auto_research_messages(
     loop_direction_plan: Mapping[str, Any] | None = None,
     max_candidates: int,
     provider_outcome_digest: Mapping[str, Any] | None = None,
+    provider_capability_summary: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build the code-edit candidate prompt.
 
@@ -460,6 +508,8 @@ def build_code_edit_auto_research_messages(
     }
     if provider_outcome_digest:
         context["provider_outcome_digest"] = _redacted_mapping(provider_outcome_digest)
+    if provider_capability_summary:
+        context["approved_provider_capabilities"] = _redacted_mapping(provider_capability_summary)
     system = (
         "You are Leadpoet Research Lab's code-editing auto-research engine. "
         "Your task is to improve the private sourcing model so it finds more "
@@ -493,6 +543,9 @@ def build_code_edit_auto_research_messages(
         "- new top-level folders or files outside the allowed runtime roots\n"
         "- new files, even under an allowed root, unless the path already appears in editable_files\n"
         "- new external endpoints or new network clients outside existing provider modules\n"
+        "- provider hosts, routes, or text models not permitted by Context JSON approved_provider_capabilities\n"
+        "- new credential/env references even for an approved provider\n"
+        "- copying private provider aliases, endpoint names, hosts, or model IDs into redacted_summary or other public-facing prose; describe the mechanism generically\n"
         "- subprocess/shell execution additions\n"
         "- hidden ICP access, raw judge prompts, raw model responses, secrets, or key handling changes\n\n"
         "Diff requirements:\n"
@@ -756,6 +809,9 @@ def loop_direction_plan_from_mapping(value: Mapping[str, Any]) -> LoopDirectionP
         _compact_mapping(item, max_string=500)
         for item in _coerce_mapping_list(_get_first_present(value, ("ranked_paths", "rankedPaths", "paths")))
     )
+    unresolved_references = _coerce_reference_tuple(
+        _get_first_present(value, ("unresolved_references", "unresolvedReferences", "missing_references"))
+    )
     if not no_new_safe_path:
         if not required_lane:
             raise ValueError("loop direction plan requires required_lane")
@@ -766,6 +822,8 @@ def loop_direction_plan_from_mapping(value: Mapping[str, Any]) -> LoopDirectionP
                 selected_path_id = _string_value(_get_first_present(ranked_paths[0], ("path_id", "pathId", "id"))).strip()[:120]
             if not selected_path_id:
                 raise ValueError("loop direction plan requires selected_path_id")
+        if unresolved_references:
+            raise ValueError("viable loop direction plan cannot retain unresolved references")
     allowed_lanes = _coerce_string_tuple(_get_first_present(value, ("allowed_lanes", "allowedLanes")), max_items=10)
     if required_lane and required_lane not in allowed_lanes:
         allowed_lanes = (required_lane, *tuple(item for item in allowed_lanes if item != required_lane))
@@ -803,6 +861,7 @@ def loop_direction_plan_from_mapping(value: Mapping[str, Any]) -> LoopDirectionP
         selected_path_id=selected_path_id,
         no_new_safe_path=no_new_safe_path,
         reason=_string_value(_get_first_present(value, ("reason", "rationale", "why")))[:1000],
+        unresolved_references=unresolved_references,
     )
 
 
@@ -1654,6 +1713,26 @@ def _coerce_string_tuple(value: Any, *, max_items: int) -> tuple[str, ...]:
     return tuple(items)
 
 
+def _coerce_reference_tuple(value: Any) -> tuple[str, ...]:
+    raw_items = list(value) if isinstance(value, (list, tuple, set)) else ([] if value is None else [value])
+    references: list[str] = []
+    for item in raw_items[:8]:
+        text = _string_value(item).strip()
+        if not text:
+            continue
+        if len(text) > 120:
+            raise ValueError("loop direction unresolved reference exceeds 120 characters")
+        if any(ord(char) < 32 or ord(char) == 127 for char in text):
+            raise ValueError("loop direction unresolved reference contains control characters")
+        if ".." in text or "://" in text or not re.fullmatch(r"[A-Za-z0-9_./:\-]+", text):
+            raise ValueError("loop direction unresolved reference must be a path or identifier")
+        if _contains_forbidden_material(text):
+            raise ValueError("loop direction unresolved reference contains forbidden material")
+        if text not in references:
+            references.append(text)
+    return tuple(references)
+
+
 def _coerce_mapping_list(value: Any) -> list[Mapping[str, Any]]:
     if value is None:
         return []
@@ -1715,7 +1794,7 @@ def _int_value(value: Any, *, default: int) -> int:
 def _source_access_v2_enabled() -> bool:
     """Local flag read; config.py is intentionally not touched here."""
 
-    raw = str(os.getenv("RESEARCH_LAB_SOURCE_ACCESS_V2", "") or "").strip().lower()
+    raw = str(os.getenv("RESEARCH_LAB_SOURCE_ACCESS_V2", "true") or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 

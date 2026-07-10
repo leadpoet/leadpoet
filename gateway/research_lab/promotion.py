@@ -23,7 +23,6 @@ from gateway.research_lab.attested_scoring import (
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.public_benchmarks import build_public_benchmark_report
-from gateway.research_lab.source_add_ablation import AdapterAblationResult, arm_leg2_for_merge
 from gateway.research_lab.store import (
     canonical_hash,
     create_candidate_evaluation_event,
@@ -1341,128 +1340,6 @@ async def latest_public_benchmark_summary() -> dict[str, Any]:
         "status": "unavailable",
         "guidance": "No sanitized daily benchmark report has been published yet.",
     }
-
-
-_SOURCE_ADD_ATTRIBUTION_KEYS = (
-    "source_add_implementation_attribution",
-    "source_add_implementation_attributions",
-    "source_add_reward_attribution",
-)
-
-
-def _source_add_attribution_docs(score_bundle: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Trusted score-bundle source-add attribution docs.
-
-    The candidate artifact itself is deliberately not scanned here: leg-2 is a
-    reward, so only gateway-produced scoring/promotion evidence may arm it.
-    """
-
-    docs: list[dict[str, Any]] = []
-
-    def _append(value: Any) -> None:
-        if isinstance(value, Mapping):
-            docs.append(dict(value))
-        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-            for item in value:
-                if isinstance(item, Mapping):
-                    docs.append(dict(item))
-
-    for key in _SOURCE_ADD_ATTRIBUTION_KEYS:
-        _append(score_bundle.get(key))
-    nested = score_bundle.get("source_add")
-    if isinstance(nested, Mapping):
-        _append(nested.get("implementation_attribution"))
-        _append(nested.get("implementation_attributions"))
-    return docs
-
-
-def _source_add_string_seq(doc: Mapping[str, Any], *keys: str) -> tuple[str, ...]:
-    values: list[str] = []
-    for key in keys:
-        value = doc.get(key)
-        if isinstance(value, str):
-            if value.strip():
-                values.append(value.strip())
-        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-            values.extend(str(item).strip() for item in value if str(item or "").strip())
-    return tuple(dict.fromkeys(values))
-
-
-def _source_add_float(value: Any, default: float | None = None) -> float | None:
-    try:
-        if value is None or value == "":
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _source_add_bool(value: Any, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in TRUTHY:
-            return True
-        if text in {"0", "false", "no", "off"}:
-            return False
-    return default
-
-
-def _source_add_first_float(doc: Mapping[str, Any], *keys: str) -> float | None:
-    for key in keys:
-        if key in doc:
-            value = _source_add_float(doc.get(key))
-            if value is not None:
-                return value
-    return None
-
-
-def _source_add_ablation_from_doc(
-    *,
-    doc: Mapping[str, Any],
-    adapter_id: str,
-    registry_provider_id: str,
-    candidate_id: str,
-    threshold_points: float,
-) -> AdapterAblationResult | None:
-    raw = doc.get("ablation_result") or doc.get("ablation")
-    if not isinstance(raw, Mapping):
-        return None
-    on_score = _source_add_first_float(
-        raw,
-        "adapter_on_score",
-        "on_score",
-        "source_enabled_score",
-        "enabled_score",
-    )
-    off_score = _source_add_first_float(
-        raw,
-        "adapter_off_score",
-        "off_score",
-        "source_disabled_score",
-        "disabled_score",
-    )
-    if on_score is None or off_score is None:
-        return None
-    delta = _source_add_float(raw.get("delta_points"), on_score - off_score)
-    threshold = _source_add_float(raw.get("threshold_points"), threshold_points) or threshold_points
-    return AdapterAblationResult(
-        adapter_id=adapter_id,
-        registry_provider_id=registry_provider_id,
-        candidate_ref=str(raw.get("candidate_ref") or candidate_id),
-        holdout_ref=str(raw.get("holdout_ref") or doc.get("holdout_ref") or ""),
-        adapter_on_score=float(on_score),
-        adapter_off_score=float(off_score),
-        delta_points=float(delta if delta is not None else on_score - off_score),
-        threshold_points=float(threshold),
-        passed=_source_add_bool(raw.get("passed"), (on_score - off_score) >= float(threshold)),
-        evaluated_at=str(
-            raw.get("evaluated_at")
-            or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-        ),
-        result_hash=str(raw.get("result_hash") or ""),
-    )
 
 
 async def _promotion_reason_recorded(
@@ -2960,8 +2837,14 @@ class ResearchLabPromotionController:
                             }
                         ),
                     )
-            except Exception:
-                pass
+            except Exception as event_exc:
+                logger.warning(
+                    "research_lab_source_add_leg2_failure_event_record_failed "
+                    "candidate=%s score_bundle=%s error=%s",
+                    _short_ref(candidate_id),
+                    _short_ref(score_bundle_id),
+                    type(event_exc).__name__,
+                )
             return {
                 "source_add_reward_status": "failed",
                 "error_class": type(exc).__name__,

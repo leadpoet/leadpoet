@@ -88,6 +88,28 @@ def test_section_6_4_recommended_defaults(clean_env):
     assert config.private_baseline_rebenchmark_enabled is True
 
 
+def test_source_intelligence_defaults_and_independent_rollbacks(clean_env):
+    config = ResearchLabGatewayConfig.from_env()
+    status = config.public_status()
+    assert config.code_edit_source_access_v2 is True
+    assert config.planner_symbol_index_enabled is True
+    assert config.planner_reference_repair_enabled is True
+    assert config.planner_reference_repair_max_attempts == 1
+    assert status["hosted_worker"]["code_edit_source_inspection"]["source_access_v2"] is True
+    assert status["hosted_worker"]["loop_planner"]["symbol_index_enabled"] is True
+    assert status["hosted_worker"]["loop_planner"]["reference_repair_enabled"] is True
+
+    clean_env.setenv("RESEARCH_LAB_SOURCE_ACCESS_V2", "false")
+    clean_env.setenv("RESEARCH_LAB_PLANNER_SYMBOL_INDEX_ENABLED", "false")
+    clean_env.setenv("RESEARCH_LAB_PLANNER_REFERENCE_REPAIR_ENABLED", "false")
+    clean_env.setenv("RESEARCH_LAB_PLANNER_REFERENCE_REPAIR_MAX_ATTEMPTS", "9")
+    config = ResearchLabGatewayConfig.from_env()
+    assert config.code_edit_source_access_v2 is False
+    assert config.planner_symbol_index_enabled is False
+    assert config.planner_reference_repair_enabled is False
+    assert config.planner_reference_repair_max_attempts == 1
+
+
 def test_daily_scoring_schedule_env_overrides(clean_env):
     clean_env.setenv("RESEARCH_LAB_BASELINE_START_UTC_OFFSET_SECONDS", "600")
     clean_env.setenv("RESEARCH_LAB_CANDIDATE_SCORING_QUIET_START_UTC_SECONDS", "82800")
@@ -106,6 +128,10 @@ def test_source_add_status_defaults_enabled_and_env_gated(clean_env):
     assert config.source_add_enabled is True
     assert config.source_add_rewards_enabled is True
     assert config.source_add_max_per_day_per_hotkey == 5
+    assert not hasattr(config, "source_add_leg2_expiry_months")
+    assert not hasattr(config, "source_add_ablation_required")
+    assert not hasattr(config, "source_add_shadow_window_days")
+    assert not hasattr(config, "source_add_ablation_threshold_points")
     assert status["source_add_enabled"] is True
     assert status["source_add"]["enabled"] is True
     assert status["source_add"]["rewards_enabled"] is True

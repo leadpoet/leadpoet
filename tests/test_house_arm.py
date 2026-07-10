@@ -200,7 +200,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeHouseStore:
     monkeypatch.setattr(
         house_arm,
         "ResearchLabGatewayConfig",
-        SimpleNamespace(from_env=staticmethod(lambda: config)),
+        SimpleNamespace(from_env=lambda: config),
     )
     monkeypatch.setattr(house_arm, "_bittensor_network_netuid", lambda: ("test", 71))
 

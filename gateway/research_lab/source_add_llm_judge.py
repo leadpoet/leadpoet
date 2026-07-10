@@ -170,6 +170,9 @@ def _parse_verdict(content: str, *, model_id: str, provider_usage: Mapping[str, 
     verdict = str(decoded.get("verdict") or "").strip().lower()
     if verdict not in {"helped", "not_helped", "uncertain"}:
         raise ValueError("SOURCE_ADD LLM judge returned invalid verdict")
+    source_used = decoded.get("source_used")
+    if not isinstance(source_used, bool):
+        raise ValueError("SOURCE_ADD LLM judge returned non-boolean source_used")
     try:
         confidence = max(0.0, min(1.0, float(decoded.get("confidence") or 0.0)))
     except (TypeError, ValueError):
@@ -178,7 +181,7 @@ def _parse_verdict(content: str, *, model_id: str, provider_usage: Mapping[str, 
     return SourceAddJudgeVerdict(
         verdict=verdict,
         confidence=confidence,
-        source_used=bool(decoded.get("source_used")),
+        source_used=source_used,
         adapter_id=str(decoded.get("adapter_id") or "")[:200],
         registry_provider_id=str(decoded.get("registry_provider_id") or "")[:200],
         evidence_summary=str(decoded.get("evidence_summary") or "")[:1200],

@@ -22,6 +22,7 @@ from gateway.research_lab.provider_evidence_proxy import (
     serve_evidence_proxy,
     validate_provider_registry_entries,
 )
+from gateway.research_lab.provider_outcome_digest import load_provider_outcome_sidecar
 from research_lab.eval.provider_evidence_cache import canonical_request_fingerprint
 
 
@@ -207,6 +208,7 @@ def proxy_server(tmp_path):
     """A running proxy with a test registry, ledger file, and token map."""
 
     ledger_path = tmp_path / "ledger.jsonl"
+    outcome_sidecar_path = tmp_path / "provider_outcomes.json"
     token_map_path = tmp_path / "tokens.json"
     token_map_path.write_text(
         json.dumps({"tok-123": {"caller_kind": "loop_probe", "run_id": "run-9"}}), encoding="utf-8"
@@ -227,10 +229,12 @@ def proxy_server(tmp_path):
         port=0,
         registry=registry,
         usage_ledger_path=str(ledger_path),
+        outcome_sidecar_path=str(outcome_sidecar_path),
         caller_context={"caller_kind": "spawn_default", "worker": "w0"},
         caller_token_map_path=str(token_map_path),
         key_split=False,
     )
+    server.test_outcome_sidecar_path = outcome_sidecar_path
     try:
         yield server, store, server.server_address[1], ledger_path
     finally:
@@ -266,6 +270,44 @@ class TestProxyEndToEnd:
         assert rows[0]["endpoint_class"] == "/search"
         assert rows[0]["est_cost_microusd"] == 0
         assert rows[0]["caller"] == {"caller_kind": "spawn_default", "worker": "w0"}
+
+    def test_one_live_operation_plus_replay_records_spend_once(self, proxy_server, monkeypatch):
+        server, _store, port, _ledger_path = proxy_server
+        monkeypatch.setenv("RESEARCH_LAB_EXA_API_KEY", "lab-key")
+
+        class _FakeResponse:
+            status = 200
+
+            def read(self):
+                return b'{"results":[],"costDollars":{"total":0.007}}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        upstream_calls = []
+
+        def _fake_urlopen(request, timeout=0):
+            upstream_calls.append(request.full_url)
+            return _FakeResponse()
+
+        monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+        assert _request(port, "/exa/search?q=one")[0] == 200
+        assert _request(port, "/exa/search?q=one")[0] == 200
+        server.usage_ledger.close()
+
+        assert len(upstream_calls) == 1
+        sidecar = load_provider_outcome_sidecar(
+            str(server.test_outcome_sidecar_path),
+            stale_seconds=3600,
+        )
+        exa = sidecar["providers"]["exa"]
+        assert exa["call_count"] == 2
+        assert exa["live_call_count"] == 1
+        assert exa["cache_hit_count"] == 1
+        assert exa["measured_spend_microusd"] == 7000
 
     def test_worker_issued_token_overrides_spawn_context(self, proxy_server):
         _server, store, port, ledger_path = proxy_server

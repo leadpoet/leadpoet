@@ -1,4 +1,4 @@
-"""W6 SOURCE_ADD reward legs: creation, leg-2 trigger gates, rails integration."""
+"""SOURCE_ADD reward legs: LLM-only Leg 2 and allocation-rail integration."""
 
 from __future__ import annotations
 
@@ -11,8 +11,6 @@ from research_lab.source_add_rewards import (
     SourceAddRewardState,
     create_leg1_reward,
     create_leg2_reward,
-    evaluate_leg2_trigger,
-    leg2_expired,
     stop_reward_forward,
     validate_source_add_reward_record,
 )
@@ -43,101 +41,22 @@ class TestLeg1:
         assert validate_source_add_reward_record(record) == []
 
 
-def _trigger_kwargs(**overrides):
-    kwargs = dict(
-        adapter_id="adapter:a",
-        catalog_registry_ids=("intentfeed",),
-        merged=True,
-        merged_diff_routed_registry_ids=("intentfeed",),
-        merge_cleared_score_bar=True,
-        shadow_monitor_live=True,
-        shadow_window_days_elapsed=7.5,
-        shadow_window_survived=True,
-        ablation_adapter_on_score=6.2,
-        ablation_adapter_off_score=5.4,
-        now="2026-08-01T00:00:00Z",
-        accepted_at="2026-07-06T00:00:00Z",
-        market_open_at="2026-07-20T00:00:00Z",
-    )
-    kwargs.update(overrides)
-    return kwargs
-
-
-class TestLeg2Trigger:
-    def test_all_four_conditions_arm_the_trigger(self):
-        armed, blockers, evidence = evaluate_leg2_trigger(**_trigger_kwargs())
-        assert armed, blockers
-        assert evidence["shadow_window_passed"] is True
-        assert evidence["ablation_passed"] is True
-        assert evidence["ablation_delta_points"] == pytest.approx(0.8)
-
-    @pytest.mark.parametrize(
-        "override,expected_blocker",
-        [
-            ({"merged": False}, "candidate_not_merged"),
-            ({"merged_diff_routed_registry_ids": ("other",)}, "diff_does_not_route_to_adapter"),
-            ({"merge_cleared_score_bar": False}, "merge_below_score_bar"),
-            ({"shadow_monitor_live": False}, "shadow_monitor_not_live"),
-            ({"shadow_window_days_elapsed": 3.0}, "shadow_window_not_elapsed"),
-            ({"shadow_window_survived": False}, "shadow_window_not_survived"),
-            ({"ablation_adapter_on_score": None}, "ablation_not_run"),
-            (
-                {"ablation_adapter_on_score": 5.7, "ablation_adapter_off_score": 5.4},
-                "ablation_attribution_below_threshold",
-            ),
-        ],
-    )
-    def test_each_gate_blocks_alone(self, override, expected_blocker):
-        armed, blockers, _ = evaluate_leg2_trigger(**_trigger_kwargs(**override))
-        assert not armed
-        assert expected_blocker in blockers
-
-    def test_leg2_never_created_before_shadow_window_elapses(self):
-        armed, blockers, _ = evaluate_leg2_trigger(
-            **_trigger_kwargs(shadow_window_days_elapsed=6.9, shadow_window_survived=True)
-        )
-        assert not armed
-        assert "shadow_window_not_elapsed" in blockers
-
-    def test_idempotent_when_leg2_exists(self):
-        existing = [{"adapter_id": "adapter:a", "leg": 2}]
-        armed, blockers, _ = evaluate_leg2_trigger(**_trigger_kwargs(existing_rewards=existing))
-        assert not armed
-        assert "leg2_already_created" in blockers
-
-    def test_expiry_clock_anchors_at_market_open_not_acceptance(self):
-        # Accepted 2026-01-01, market opened 2026-07-20 → at 2026-08-01 the
-        # 6-month clock from market open has NOT elapsed.
-        armed, blockers, _ = evaluate_leg2_trigger(
-            **_trigger_kwargs(accepted_at="2026-01-01T00:00:00Z", market_open_at="2026-07-20T00:00:00Z")
-        )
-        assert armed, blockers
-        # Without a market open, acceptance anchors the clock → expired.
-        armed, blockers, _ = evaluate_leg2_trigger(
-            **_trigger_kwargs(accepted_at="2026-01-01T00:00:00Z", market_open_at="")
-        )
-        assert not armed
-        assert "leg2_expired" in blockers
-
-
-class TestLeg2Expiry:
-    def test_expiry_math(self):
-        assert not leg2_expired(
-            now="2026-12-01T00:00:00Z", accepted_at="2026-07-06T00:00:00Z", expiry_months=6
-        )
-        assert leg2_expired(
-            now="2027-01-07T00:00:00Z", accepted_at="2026-07-06T00:00:00Z", expiry_months=6
-        )
-
-    def test_unknown_clocks_never_expire_silently(self):
-        assert not leg2_expired(now="", accepted_at="2026-07-06T00:00:00Z")
-        assert not leg2_expired(now="2027-01-01T00:00:00Z", accepted_at="")
+def _llm_evidence(**overrides):
+    evidence = {
+        "llm_judge_passed": True,
+        "llm_verdict": "helped",
+        "source_used": True,
+        "adapter_id": "adapter:a",
+        "registry_provider_id": "intentfeed",
+        "judge_doc_hash": "sha256:" + "a" * 64,
+    }
+    evidence.update(overrides)
+    return evidence
 
 
 class TestLeg2Creation:
     def _evidence(self):
-        _, _, evidence = evaluate_leg2_trigger(**_trigger_kwargs())
-        return evidence
+        return _llm_evidence()
 
     def test_created_for_adapter_owner_with_spec_defaults(self):
         record = create_leg2_reward(
@@ -168,13 +87,22 @@ class TestLeg2Creation:
         )
         assert repeat is None
 
-    def test_creation_without_gate_evidence_raises(self):
-        with pytest.raises(ValueError, match="shadow_window_passed"):
+    @pytest.mark.parametrize(
+        "evidence",
+        [
+            {},
+            {"llm_judge_passed": False},
+            {"llm_judge_passed": 1},
+            {"shadow_window_passed": True, "ablation_passed": True},
+        ],
+    )
+    def test_creation_without_exact_llm_pass_evidence_raises(self, evidence):
+        with pytest.raises(ValueError, match="llm_judge_passed=true"):
             create_leg2_reward(
                 adapter_id="adapter:a",
                 adapter_owner_miner_ref="miner:owner",
                 start_epoch=500,
-                trigger_evidence={"ablation_passed": True},
+                trigger_evidence=evidence,
             )
 
     def test_revert_stops_stream_forward_only(self):
@@ -226,12 +154,11 @@ class TestAllocationRails:
 
     def test_source_rewards_allocate_with_zero_validator_change(self):
         leg1 = create_leg1_reward(adapter_id="adapter:a", miner_ref="miner:owner", start_epoch=100)
-        _, _, evidence = evaluate_leg2_trigger(**_trigger_kwargs())
         leg2 = create_leg2_reward(
             adapter_id="adapter:a",
             adapter_owner_miner_ref="miner:owner",
             start_epoch=100,
-            trigger_evidence=evidence,
+            trigger_evidence=_llm_evidence(),
         )
         allocation = allocate_research_lab_epoch(
             105,
@@ -248,12 +175,11 @@ class TestAllocationRails:
     def test_source_rewards_and_champion_grant_fit_the_cap_concurrently(self):
         # Cap fit: champion 15% + leg2 5% + leg1 1% = 21% inside 30%.
         leg1 = create_leg1_reward(adapter_id="adapter:a", miner_ref="miner:owner", start_epoch=100)
-        _, _, evidence = evaluate_leg2_trigger(**_trigger_kwargs())
         leg2 = create_leg2_reward(
             adapter_id="adapter:a",
             adapter_owner_miner_ref="miner:owner",
             start_epoch=100,
-            trigger_evidence=evidence,
+            trigger_evidence=_llm_evidence(),
         )
         champion = {
             "uid": 9,

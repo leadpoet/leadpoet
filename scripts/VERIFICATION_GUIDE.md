@@ -1,18 +1,19 @@
 # Gateway Verification Guide
 
-**For Miners & Validators**: How to verify the gateway is running canonical code and hasn't been tampered with.
+**For Miners & Validators**: How to verify gateway attestation, validator TEE PCR0, and checkpoint integrity without trusting the operator.
 
 ---
 
 ## **🎯 What You're Verifying**
 
-The gateway runs inside an **AWS Nitro Enclave (TEE)** that provides cryptographic proof of code integrity. You can verify:
+The gateway uses an **AWS Nitro Enclave (TEE)** for attestation and signing, and it independently verifies validator TEEs before accepting signed weights. You can verify:
 
-1. ✅ **Code Integrity**: Gateway is running the exact code from GitHub (not modified)
+1. ✅ **TEE Integrity**: Gateway and validator attestations are signed by AWS Nitro hardware
 2. ✅ **Event Inclusion**: Your events are logged and included in Arweave checkpoints
 3. ✅ **Signature Validity**: Checkpoints are signed by the verified TEE enclave
+4. ✅ **Validator Weight Integrity**: Validator PCR0 is independently rebuilt by the gateway from GitHub before weights are accepted
 
-**Why This Matters**: Even if the subnet owner is malicious, they CANNOT run modified code without detection. The TEE attestation makes this cryptographically provable.
+**Why This Matters**: Even if the subnet owner is malicious, they CANNOT silently run modified TEE code without detection. AWS Nitro attestation provides the hardware proof, and the gateway's independent PCR0 builder verifies validator weights against code reproducible from GitHub.
 
 ---
 
@@ -22,7 +23,7 @@ The gateway runs inside an **AWS Nitro Enclave (TEE)** that provides cryptograph
 # Python dependencies
 pip install cbor2 cryptography requests
 
-# For code hash verification (optional, advanced)
+# For validator PCR0 rebuild verification (optional, advanced)
 # Install Docker: https://docs.docker.com/get-docker/
 # Install AWS Nitro CLI: https://docs.aws.amazon.com/enclaves/latest/user/nitro-enclave-cli-install.html
 ```
@@ -31,7 +32,7 @@ pip install cbor2 cryptography requests
 
 ## **Step 1: Verify Attestation Document**
 
-**Purpose**: Verify the gateway is running inside a genuine AWS Nitro Enclave and extract the code integrity proof (PCR0).
+**Purpose**: Verify the gateway's attestation comes from a genuine AWS Nitro Enclave and extract the code integrity proof (PCR0).
 
 ```bash
 python scripts/verify_attestation.py http://52.91.135.79:8000
@@ -85,7 +86,7 @@ PCR0 (Code Integrity Proof): d2106245cba92cdba289501ef56a6c0e972fa100bd3ddde6715
 ================================================================================
 ```
 
-**Save the PCR0 value** - you'll use it in Step 2.
+**Save the PCR0 and code_hash values** - you'll use them when comparing attestations over time.
 
 ### **⚠️ Debug Mode Warning**
 
@@ -104,52 +105,57 @@ Debug mode is fine for development/testing, but **reject any production gateway 
 
 ---
 
-## **Step 2: Verify Code Hash (PCR0)**
+## **Step 2: Verify Code Hash / PCR0**
 
-**Purpose**: Prove the gateway is running the exact code from a specific GitHub commit.
+**Purpose**: Prove the attested code matches the expected GitHub code path.
 
-### **Option A: Compare Against Known Good PCR0** (Recommended)
+### **Option A: Gateway Code Hash Check** (Recommended for miners)
 
-If a trusted source (subnet documentation, Discord announcement) publishes the expected PCR0 for a specific commit:
+The gateway `/attest` response includes a `code_hash` bound into the Nitro attestation. You can recompute that hash from GitHub and compare:
 
 ```bash
-# Get PCR0 from Step 1
-GATEWAY_PCR0="d2106245cba92cdba289501ef56a6c0e972fa100bd3ddde671570bf732ce16f7..."
-
-# Get expected PCR0 from trusted source
-EXPECTED_PCR0="d2106245cba92cdba289501ef56a6c0e972fa100bd3ddde671570bf732ce16f7..."
-
-# Compare
-if [ "$GATEWAY_PCR0" == "$EXPECTED_PCR0" ]; then
-  echo "✅ CODE HASH MATCHES"
-else
-  echo "❌ CODE HASH MISMATCH - DO NOT TRUST THIS GATEWAY"
-fi
+python scripts/verify_code_hash.py http://52.91.135.79:8000 --commit <github_commit>
 ```
 
-### **Option B: Build Locally and Compute PCR0** (Advanced)
+**What it does**:
+1. Downloads the gateway attestation from `/attest`
+2. Extracts the attested `code_hash`
+3. Clones GitHub at the specified commit
+4. Recomputes the same gateway code hash locally
+5. Compares your local hash to the attested hash
 
-If you want to independently verify (requires Docker + Nitro CLI):
+**If they match**: Gateway attestation is bound to the expected GitHub code hash ✅
+**If they don't match**: Gateway code hash does not match the specified commit - **DO NOT TRUST** ❌
+
+### **Option B: Validator PCR0 Rebuild Check** (Advanced)
+
+For validator weight submissions, the gateway independently rebuilds the validator enclave PCR0 from GitHub and compares it to the validator's AWS Nitro attestation before accepting signed weights.
 
 ```bash
-# Get PCR0 from Step 1
-GATEWAY_PCR0="d2106245cba92cdba289501ef56a6c0e..."
+# Requires Docker + Nitro CLI on a Nitro-capable machine
+git clone https://github.com/leadpoet/leadpoet.git
+cd leadpoet
+git checkout <validator_commit>
 
-# Get GitHub commit hash (from gateway docs or /attest endpoint)
-GITHUB_COMMIT="abc123def456"
+docker rmi -f validator-base:v1 2>/dev/null || true
+docker build --no-cache -f validator_tee/Dockerfile.base -t validator-base:v1 .
+bash validator_tee/scripts/build_enclave.sh
 
-# Build locally and compare
-python scripts/verify_code_hash.py $GATEWAY_PCR0 $GITHUB_COMMIT
+# PCR0 is printed in validator_tee/enclave_build_output.txt
+grep '"PCR0"' validator_tee/enclave_build_output.txt
 ```
 
 **What it does**:
 1. Clones the GitHub repo at the specified commit
-2. Builds the enclave Docker image locally
-3. Computes PCR0 using `nitro-cli build-enclave`
-4. Compares your local PCR0 to the gateway's PCR0
+2. Builds the same validator base image and enclave image
+3. Normalizes timestamps and copied-file permissions for reproducibility
+4. Computes PCR0 using `nitro-cli build-enclave`
+5. Lets you compare your PCR0 to the validator PCR0 in an AWS Nitro attestation
 
-**If they match**: Gateway is running the exact code from GitHub ✅  
-**If they don't match**: Gateway is running modified code - **DO NOT TRUST** ❌
+**If they match**: Validator weights came from an enclave image reproducible from the same GitHub commit ✅
+**If they don't match**: Validator enclave code or build inputs differ - **DO NOT TRUST THOSE WEIGHTS** ❌
+
+**Important**: The match is between the validator's attested PCR0 and the gateway's independently rebuilt expected validator PCR0. That proves the validator enclave image matches the PCR0-relevant files from the same GitHub commit. The gateway's own `/attest` PCR0 is a separate gateway-enclave measurement.
 
 ---
 
@@ -290,17 +296,18 @@ Checkpoints are created **hourly**. To find your event:
 
 ### **PCR0 Mismatch** ❌
 ```
-❌ CODE HASH MISMATCH - Gateway is running modified code!
+❌ CODE HASH / PCR0 MISMATCH
 ```
 
-**Meaning**: The gateway is NOT running the code from the specified GitHub commit.
+**Meaning**: The attested code does not match the specified GitHub commit or the validator PCR0 does not match the independently rebuilt validator enclave.
 
 **Possible causes**:
-1. **Malicious gateway** - running modified code to favor certain miners
+1. **Modified TEE code** - gateway or validator is running code that does not match GitHub
 2. Wrong commit hash - you verified against the wrong version
-3. Build non-determinism - rare, but Docker builds can sometimes vary
+3. Validator and gateway are on different commits
+4. Build non-determinism or dirty local build inputs
 
-**Action**: **DO NOT USE THIS GATEWAY** until you investigate. Notify the community.
+**Action**: **DO NOT TRUST THE AFFECTED GATEWAY OR WEIGHT SUBMISSION** until you investigate. Notify the community.
 
 ---
 
@@ -341,10 +348,11 @@ Checkpoints are created **hourly**. To find your event:
 **Reject the gateway if**:
 
 1. ❌ PCR0 is all zeros (debug mode in production)
-2. ❌ PCR0 doesn't match published expected value
-3. ❌ Attestation certificate is invalid or expired
-4. ❌ Checkpoint signatures fail verification
-5. ❌ Events consistently missing from checkpoints
+2. ❌ Gateway code hash does not match the expected GitHub commit
+3. ❌ Validator PCR0 does not match an independent rebuild from the same commit
+4. ❌ Attestation certificate is invalid or expired
+5. ❌ Checkpoint signatures fail verification
+6. ❌ Events consistently missing from checkpoints
 
 **In these cases, the gateway is either misconfigured or malicious. Do not use it.**
 
@@ -357,7 +365,7 @@ Checkpoints are created **hourly**. To find your event:
 1. **Verify gateway before first submission**:
    ```bash
    python scripts/verify_attestation.py https://gateway.leadpoet.ai
-   # Save PCR0, compare to community-announced value
+   python scripts/verify_code_hash.py https://gateway.leadpoet.ai --commit <github_commit>
    ```
 
 2. **Verify event inclusion after submission**:
@@ -372,16 +380,20 @@ Checkpoints are created **hourly**. To find your event:
 ### **For Validators**
 
 1. **Verify gateway before accepting assignments**:
-   - Same as miners: verify attestation + PCR0
+   - Same as miners: verify attestation + code hash
 
-2. **Verify epoch events on Arweave**:
+2. **Verify validator PCR0 for weight submissions**:
+   - Validator attestation PCR0 must match a reproducible build from the same GitHub commit
+   - The gateway performs this check automatically before accepting signed weights
+
+3. **Verify epoch events on Arweave**:
    - Download `EPOCH_INITIALIZATION` from Arweave checkpoint
    - Verify all validators got the same assignment
    - Verify queue_merkle_root is correct
 
-3. **Cross-check with other validators**:
+4. **Cross-check with other validators**:
    - Compare notes: did everyone get the same leads?
-   - Compare attestation PCR0 values
+   - Compare attestation code hashes and validator PCR0 values
    - If discrepancies found, investigate immediately
 
 ---
@@ -425,9 +437,8 @@ Install AWS Nitro CLI:
 
 If you find a verification failure or have questions:
 
-1. **Check community announcements** - expected PCR0 values should be published
-2. **Ask in Discord/Telegram** - other miners may have encountered the same issue
+1. **Check community announcements** - confirm the active GitHub commit and gateway URL
+2. **Ask in Discord/Telegram** - compare results with other miners and validators
 3. **Report to developers** - if you suspect malicious activity
 
 **Remember**: The verification scripts are your defense against malicious gateways. Use them regularly! 🛡️
-

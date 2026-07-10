@@ -19,7 +19,6 @@ code change (it pays whatever the allocation doc says within the lab cap).
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
@@ -29,9 +28,6 @@ from .canonical import sha256_json
 DEFAULT_LEG1_ALPHA_PERCENT = 1.0
 DEFAULT_LEG2_ALPHA_PERCENT = 5.0
 DEFAULT_REWARD_EPOCHS = 20
-DEFAULT_LEG2_EXPIRY_MONTHS = 6
-DEFAULT_SHADOW_WINDOW_DAYS = 7
-DEFAULT_ABLATION_THRESHOLD_POINTS = 0.5
 
 REWARD_KIND_SOURCE_ACCEPTANCE = "source_acceptance"
 REWARD_KIND_SOURCE_IMPLEMENTATION = "source_implementation"
@@ -139,10 +135,8 @@ def validate_source_add_reward_record(record: SourceAddRewardRecord | Mapping[st
         if record.reward_kind != REWARD_KIND_SOURCE_IMPLEMENTATION:
             errors.append("leg 2 must carry reward_kind source_implementation")
         evidence = record.trigger_evidence or {}
-        llm_passed = bool(evidence.get("llm_judge_passed"))
-        legacy_passed = bool(evidence.get("shadow_window_passed")) and bool(evidence.get("ablation_passed"))
-        if not (llm_passed or legacy_passed):
-            errors.append("leg 2 requires llm_judge_passed or legacy shadow_window_passed/ablation_passed trigger evidence")
+        if evidence.get("llm_judge_passed") is not True:
+            errors.append("leg 2 requires llm_judge_passed=true trigger evidence")
     return errors
 
 
@@ -190,112 +184,6 @@ def _has_leg(existing_rewards: Sequence[Mapping[str, Any]], adapter_id: str, leg
         if str(row.get("adapter_id") or "") == adapter_id and int(row.get("leg") or 0) == leg:
             return True
     return False
-
-
-def _parse_iso(value: str) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
-    except ValueError:
-        return None
-
-
-def leg2_expired(
-    *,
-    now: str,
-    accepted_at: str,
-    market_open_at: str = "",
-    expiry_months: int = DEFAULT_LEG2_EXPIRY_MONTHS,
-) -> bool:
-    """Leg 2 lapses ``expiry_months`` after max(acceptance, paid-loop market open).
-
-    The market-open clock protects early contributors: pre-market acceptances
-    do not burn expiry time during the quiet period.
-    """
-
-    now_dt = _parse_iso(now)
-    anchors = [dt for dt in (_parse_iso(accepted_at), _parse_iso(market_open_at)) if dt is not None]
-    if now_dt is None or not anchors:
-        return False  # unknown clocks never expire a reward silently
-    anchor = max(anchors)
-    total_months = anchor.year * 12 + (anchor.month - 1) + max(0, int(expiry_months))
-    expiry_year, expiry_month = divmod(total_months, 12)
-    expiry_day = min(
-        anchor.day,
-        [31, 29 if expiry_year % 4 == 0 and (expiry_year % 100 != 0 or expiry_year % 400 == 0) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][expiry_month],
-    )
-    expiry = anchor.replace(year=expiry_year, month=expiry_month + 1, day=expiry_day)
-    return now_dt >= expiry
-
-
-def evaluate_leg2_trigger(
-    *,
-    adapter_id: str,
-    catalog_registry_ids: Sequence[str],
-    merged: bool,
-    merged_diff_routed_registry_ids: Sequence[str],
-    merge_cleared_score_bar: bool,
-    shadow_monitor_live: bool,
-    shadow_window_days_elapsed: float,
-    shadow_window_survived: bool,
-    ablation_adapter_on_score: float | None,
-    ablation_adapter_off_score: float | None,
-    now: str,
-    accepted_at: str,
-    market_open_at: str = "",
-    existing_rewards: Sequence[Mapping[str, Any]] = (),
-    shadow_window_days_required: float = DEFAULT_SHADOW_WINDOW_DAYS,
-    ablation_threshold_points: float = DEFAULT_ABLATION_THRESHOLD_POINTS,
-    expiry_months: int = DEFAULT_LEG2_EXPIRY_MONTHS,
-) -> tuple[bool, list[str], dict[str, Any]]:
-    """Mechanical, binary leg-2 trigger. Returns (armed, blockers, evidence).
-
-    All four §3.2 conditions must hold, the shadow monitor must be LIVE (a
-    liveness check at creation time, not just a flag), the reward must be
-    unexpired, and no leg-2 may already exist for the adapter.
-    """
-
-    blockers: list[str] = []
-    if _has_leg(existing_rewards, adapter_id, 2):
-        blockers.append("leg2_already_created")
-    if leg2_expired(now=now, accepted_at=accepted_at, market_open_at=market_open_at, expiry_months=expiry_months):
-        blockers.append("leg2_expired")
-    if not merged:
-        blockers.append("candidate_not_merged")
-    routed = {str(item) for item in merged_diff_routed_registry_ids}
-    adapter_registry_ids = {str(item) for item in catalog_registry_ids if item}
-    if not adapter_registry_ids or not (routed & adapter_registry_ids):
-        blockers.append("diff_does_not_route_to_adapter")
-    if not merge_cleared_score_bar:
-        blockers.append("merge_below_score_bar")
-    if not shadow_monitor_live:
-        blockers.append("shadow_monitor_not_live")
-    if shadow_window_days_elapsed < float(shadow_window_days_required):
-        blockers.append("shadow_window_not_elapsed")
-    elif not shadow_window_survived:
-        blockers.append("shadow_window_not_survived")
-    ablation_delta: float | None = None
-    if ablation_adapter_on_score is None or ablation_adapter_off_score is None:
-        blockers.append("ablation_not_run")
-    else:
-        ablation_delta = float(ablation_adapter_on_score) - float(ablation_adapter_off_score)
-        if ablation_delta < float(ablation_threshold_points):
-            blockers.append("ablation_attribution_below_threshold")
-    evidence = {
-        "adapter_id": adapter_id,
-        "routed_registry_ids": sorted(routed & adapter_registry_ids),
-        "merge_cleared_score_bar": bool(merge_cleared_score_bar),
-        "shadow_window_days_elapsed": float(shadow_window_days_elapsed),
-        "shadow_window_passed": shadow_window_days_elapsed >= float(shadow_window_days_required)
-        and bool(shadow_window_survived),
-        "ablation_delta_points": ablation_delta,
-        "ablation_threshold_points": float(ablation_threshold_points),
-        "ablation_passed": ablation_delta is not None and ablation_delta >= float(ablation_threshold_points),
-        "evaluated_at": str(now),
-    }
-    return (not blockers), blockers, evidence
 
 
 def create_leg2_reward(

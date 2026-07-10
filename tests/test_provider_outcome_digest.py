@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 import time
 
+from gateway.research_lab import provider_outcome_digest as digest_module
 from gateway.research_lab.provider_outcome_digest import (
+    MAX_PROVIDER_OUTCOME_ENDPOINTS,
+    MAX_PROVIDER_OUTCOME_SIDECAR_BYTES,
+    PROVIDER_OUTCOME_SIDECAR_ENV,
+    ProviderOutcomeSidecarAccumulator,
     build_provider_outcome_digest,
     build_run_provider_outcome_digest,
+    load_provider_outcome_sidecar,
     parse_provider_error_marker_line,
 )
 from research_lab.code_editing import (
@@ -94,41 +102,296 @@ class TestDigestBuild:
 
 class TestWorkerGate:
     def test_flag_off_returns_none(self, monkeypatch):
-        monkeypatch.delenv("RESEARCH_LAB_PROVIDER_OUTCOME_DIGEST", raising=False)
+        monkeypatch.setenv("RESEARCH_LAB_PROVIDER_OUTCOME_DIGEST", "false")
         assert build_run_provider_outcome_digest() is None
 
-    def test_flag_on_reads_todays_ledger_and_day_cache(self, monkeypatch, tmp_path):
-        today = time.strftime("%Y-%m-%d", time.gmtime())
-        ledger = tmp_path / "ledger.jsonl"
-        ledger.write_text(
-            "\n".join(
-                [
-                    json.dumps({"utc_day": today, "provider_id": "sd", "endpoint_class": "/scrape", "status": 200, "evidence": "recorded"}),
-                    json.dumps({"utc_day": "2020-01-01", "provider_id": "sd", "endpoint_class": "/scrape", "status": 200, "evidence": "recorded"}),
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
+    def test_flag_on_reads_only_compact_sidecar(self, monkeypatch, tmp_path):
+        sidecar_path = tmp_path / "provider_outcomes.json"
+        accumulator = ProviderOutcomeSidecarAccumulator(str(sidecar_path))
+        accumulator.record(
+            provider_id="sd",
+            endpoint_class="/scrape",
+            evidence="recorded",
+            status=200,
+            live_call=True,
+            spend_microusd=5000,
+            spend_kind="estimated",
         )
-        day_cache = tmp_path / "day.json"
-        day_cache.write_text(
-            json.dumps({"utc_day": today, "entries": {"fp": {"status": 200, "outcome": "success", "body_b64": "c2VjcmV0"}}}),
-            encoding="utf-8",
+        accumulator.record(
+            provider_id="sd",
+            endpoint_class="/scrape",
+            evidence="hit",
+            status=200,
+            live_call=False,
+            spend_microusd=0,
+            spend_kind="estimated",
         )
+        accumulator.close()
+
+        large_ledger = tmp_path / "ledger.jsonl"
+        large_cache = tmp_path / "day_cache.json"
+        large_ledger.write_text("must-not-open", encoding="utf-8")
+        large_cache.write_text("must-not-open", encoding="utf-8")
+        opened_paths = []
+        real_open = open
+
+        def tracked_open(path, *args, **kwargs):
+            opened_paths.append(os.fspath(path))
+            return real_open(path, *args, **kwargs)
+
         monkeypatch.setenv("RESEARCH_LAB_PROVIDER_OUTCOME_DIGEST", "true")
-        monkeypatch.setenv("RESEARCH_LAB_PROVIDER_USAGE_LEDGER_PATH", str(ledger))
-        monkeypatch.setenv("RESEARCH_LAB_PROVIDER_EVIDENCE_DAY_CACHE", str(day_cache))
+        monkeypatch.setenv(PROVIDER_OUTCOME_SIDECAR_ENV, str(sidecar_path))
+        monkeypatch.setenv("RESEARCH_LAB_PROVIDER_USAGE_LEDGER_PATH", str(large_ledger))
+        monkeypatch.setenv("RESEARCH_LAB_PROVIDER_EVIDENCE_DAY_CACHE", str(large_cache))
+        monkeypatch.setattr("builtins.open", tracked_open)
         digest = build_run_provider_outcome_digest()
         assert digest is not None
-        assert digest["providers"]["sd"]["call_count"] == 1  # stale day filtered
-        assert digest["day_cache_outcomes"] == {"success": 1}
-        assert "body_b64" not in json.dumps(digest)
+        assert digest["providers"]["sd"]["call_count"] == 2
+        assert digest["providers"]["sd"]["live_call_count"] == 1
+        assert digest["providers"]["sd"]["cache_hit_count"] == 1
+        assert digest["aggregate_spend"] == {
+            "measured_microusd": 0,
+            "estimated_microusd": 5000,
+        }
+        assert str(sidecar_path) in opened_paths
+        assert str(large_ledger) not in opened_paths
+        assert str(large_cache) not in opened_paths
 
     def test_flag_on_with_nothing_recorded_returns_none(self, monkeypatch):
         monkeypatch.setenv("RESEARCH_LAB_PROVIDER_OUTCOME_DIGEST", "true")
-        monkeypatch.setenv("RESEARCH_LAB_PROVIDER_USAGE_LEDGER_PATH", "/nonexistent/ledger.jsonl")
-        monkeypatch.setenv("RESEARCH_LAB_PROVIDER_EVIDENCE_DAY_CACHE", "/nonexistent/day.json")
+        monkeypatch.setenv(PROVIDER_OUTCOME_SIDECAR_ENV, "/nonexistent/provider_outcomes.json")
         assert build_run_provider_outcome_digest() is None
+
+
+class TestCompactSidecar:
+    def test_permissions_hash_and_live_plus_cache_spend_once(self, tmp_path):
+        path = tmp_path / "outcomes.json"
+        accumulator = ProviderOutcomeSidecarAccumulator(str(path), flush_interval_seconds=60)
+        accumulator.record(
+            provider_id="exa",
+            endpoint_class="/search",
+            evidence="recorded",
+            status=200,
+            live_call=True,
+            spend_microusd=7000,
+            spend_kind="measured",
+        )
+        accumulator.record(
+            provider_id="exa",
+            endpoint_class="/search",
+            evidence="hit",
+            status=200,
+            live_call=False,
+            spend_microusd=7000,
+            spend_kind="measured",
+        )
+        accumulator.close()
+
+        assert os.stat(path).st_mode & 0o777 == 0o600
+        doc = load_provider_outcome_sidecar(str(path), stale_seconds=3600)
+        assert doc is not None
+        exa = doc["providers"]["exa"]
+        assert exa["call_count"] == 2
+        assert exa["live_call_count"] == 1
+        assert exa["cache_hit_count"] == 1
+        assert exa["measured_spend_microusd"] == 7000
+        assert exa["estimated_spend_microusd"] == 0
+        serialized = json.dumps(doc, sort_keys=True)
+        assert "request_fingerprint" not in serialized
+        assert "caller" not in serialized
+
+    def test_failed_call_is_zero_spend_even_if_caller_supplies_estimate(self, tmp_path):
+        path = tmp_path / "outcomes.json"
+        accumulator = ProviderOutcomeSidecarAccumulator(str(path))
+        accumulator.record(
+            provider_id="sd",
+            endpoint_class="/unknown",
+            evidence="live_unrecorded",
+            status=500,
+            live_call=True,
+            spend_microusd=999999,
+            spend_kind="estimated",
+        )
+        accumulator.close()
+        doc = load_provider_outcome_sidecar(str(path))
+        sd = doc["providers"]["sd"]
+        assert sd["live_call_count"] == 1
+        assert sd["error_count"] == 1
+        assert sd["estimated_spend_microusd"] == 0
+
+    def test_redirect_is_non_success_and_never_records_spend(self, tmp_path):
+        path = tmp_path / "outcomes.json"
+        accumulator = ProviderOutcomeSidecarAccumulator(str(path))
+        accumulator.record(
+            provider_id="sd",
+            endpoint_class="/redirect",
+            evidence="live_unrecorded",
+            status=302,
+            live_call=True,
+            spend_microusd=5000,
+            spend_kind="estimated",
+        )
+        accumulator.close()
+        sd = load_provider_outcome_sidecar(str(path))["providers"]["sd"]
+        assert sd["error_count"] == 1
+        assert sd["estimated_spend_microusd"] == 0
+
+    def test_restart_reload_and_utc_rollover(self, monkeypatch, tmp_path):
+        current_day = ["2026-07-10"]
+        monkeypatch.setattr(digest_module, "_utc_day", lambda: current_day[0])
+        path = tmp_path / "outcomes.json"
+        first = ProviderOutcomeSidecarAccumulator(str(path))
+        first.record(
+            provider_id="exa",
+            endpoint_class="/search",
+            evidence="recorded",
+            status=200,
+            live_call=True,
+            spend_microusd=100,
+            spend_kind="measured",
+        )
+        first.close()
+
+        second = ProviderOutcomeSidecarAccumulator(str(path))
+        second.record(
+            provider_id="exa",
+            endpoint_class="/search",
+            evidence="hit",
+            status=200,
+            live_call=False,
+            spend_microusd=0,
+            spend_kind="estimated",
+        )
+        second.close()
+        day_one = load_provider_outcome_sidecar(str(path), stale_seconds=0)
+        assert day_one["sequence"] == 2
+        assert day_one["providers"]["exa"]["call_count"] == 2
+
+        current_day[0] = "2026-07-11"
+        third = ProviderOutcomeSidecarAccumulator(str(path))
+        third.record(
+            provider_id="exa",
+            endpoint_class="/search",
+            evidence="recorded",
+            status=200,
+            live_call=True,
+            spend_microusd=200,
+            spend_kind="measured",
+        )
+        third.close()
+        day_two = load_provider_outcome_sidecar(str(path), stale_seconds=0)
+        assert day_two["utc_day"] == "2026-07-11"
+        assert day_two["sequence"] == 1
+        assert day_two["providers"]["exa"]["call_count"] == 1
+
+    def test_concurrent_records_are_not_lost_and_endpoints_are_bounded(self, tmp_path):
+        path = tmp_path / "outcomes.json"
+        accumulator = ProviderOutcomeSidecarAccumulator(str(path), flush_interval_seconds=60)
+
+        def write_batch(worker: int) -> None:
+            for index in range(75):
+                accumulator.record(
+                    provider_id="exa",
+                    endpoint_class=f"/endpoint/{worker}/{index}",
+                    evidence="hit",
+                    status=200,
+                    live_call=False,
+                    spend_microusd=0,
+                    spend_kind="estimated",
+                )
+
+        threads = [threading.Thread(target=write_batch, args=(worker,)) for worker in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        accumulator.close()
+
+        doc = load_provider_outcome_sidecar(str(path))
+        exa = doc["providers"]["exa"]
+        assert exa["call_count"] == 600
+        assert exa["cache_hit_count"] == 600
+        assert len(exa["endpoints"]) <= MAX_PROVIDER_OUTCOME_ENDPOINTS
+        assert "other" in exa["endpoints"]
+        assert len(path.read_bytes()) <= MAX_PROVIDER_OUTCOME_SIDECAR_BYTES
+
+    def test_atomic_replacements_never_expose_partial_json(self, tmp_path):
+        path = tmp_path / "outcomes.json"
+        accumulator = ProviderOutcomeSidecarAccumulator(
+            str(path),
+            flush_interval_seconds=0.02,
+        )
+        accumulator.record(
+            provider_id="exa",
+            endpoint_class="/search",
+            evidence="recorded",
+            status=200,
+            live_call=True,
+            spend_microusd=1,
+            spend_kind="measured",
+        )
+        time.sleep(0.04)
+        observed_sequences = []
+
+        def writer() -> None:
+            for _ in range(80):
+                accumulator.record(
+                    provider_id="exa",
+                    endpoint_class="/search",
+                    evidence="hit",
+                    status=200,
+                    live_call=False,
+                    spend_microusd=0,
+                    spend_kind="estimated",
+                )
+                time.sleep(0.001)
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        while thread.is_alive():
+            doc = load_provider_outcome_sidecar(str(path), stale_seconds=3600, warn=False)
+            assert doc is not None
+            observed_sequences.append(doc["sequence"])
+        thread.join()
+        accumulator.close()
+        final = load_provider_outcome_sidecar(str(path), stale_seconds=3600, warn=False)
+        assert observed_sequences
+        assert final["sequence"] == 81
+        assert final["providers"]["exa"]["call_count"] == 81
+
+    def test_corrupt_hash_stale_oversized_and_unsafe_mode_are_inert(self, tmp_path):
+        path = tmp_path / "outcomes.json"
+        accumulator = ProviderOutcomeSidecarAccumulator(str(path))
+        accumulator.record(
+            provider_id="exa",
+            endpoint_class="/search",
+            evidence="recorded",
+            status=200,
+            live_call=True,
+            spend_microusd=1,
+            spend_kind="measured",
+        )
+        accumulator.close()
+        valid = json.loads(path.read_text(encoding="utf-8"))
+
+        assert load_provider_outcome_sidecar(
+            str(path),
+            now=float(valid["generated_at_epoch"]) + 3601,
+            stale_seconds=3600,
+            warn=False,
+        ) is None
+        valid["sequence"] += 1
+        path.write_text(json.dumps(valid), encoding="utf-8")
+        os.chmod(path, 0o600)
+        assert load_provider_outcome_sidecar(str(path), warn=False) is None
+
+        path.write_bytes(b"x" * (MAX_PROVIDER_OUTCOME_SIDECAR_BYTES + 1))
+        os.chmod(path, 0o600)
+        assert load_provider_outcome_sidecar(str(path), warn=False) is None
+
+        path.write_text("{}", encoding="utf-8")
+        os.chmod(path, 0o644)
+        assert load_provider_outcome_sidecar(str(path), warn=False) is None
 
 
 class TestPromptInjection:

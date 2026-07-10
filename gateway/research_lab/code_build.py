@@ -15,6 +15,10 @@ import time
 from typing import Any, Mapping, Sequence
 
 from gateway.research_lab.config import ResearchLabGatewayConfig
+from gateway.research_lab.source_symbol_index import (
+    build_source_symbol_index,
+    compact_file_inventory,
+)
 from gateway.research_lab.store import canonical_hash
 from research_lab.canonical import sha256_json
 from research_lab.code_editing import (
@@ -126,6 +130,7 @@ class ParentImageSourceContext:
     top_level_paths: tuple[str, ...]
     editable_files: tuple[str, ...]
     file_previews: tuple[dict[str, Any], ...]
+    planner_source_index: dict[str, Any] = field(default_factory=dict)
 
     def prompt_context(self) -> dict[str, Any]:
         return {
@@ -144,21 +149,9 @@ class ParentImageSourceContext:
         }
 
     def inspection_index(self) -> dict[str, Any]:
-        files: list[dict[str, Any]] = []
-        for rel in self.editable_files:
-            path = self.source_root / rel
-            try:
-                stat = path.stat()
-                raw = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            files.append(
-                {
-                    "path": rel,
-                    "size_bytes": int(stat.st_size),
-                    "line_count": raw.count("\n") + (1 if raw else 0),
-                }
-            )
+        files = compact_file_inventory(self.planner_source_index)
+        if not files:
+            files = _source_file_inventory(self.source_root, self.editable_files)
         return {
             "source_mode": self.source_mode,
             "parent_image_digest_hash": self.parent_image_digest_hash,
@@ -172,6 +165,16 @@ class ParentImageSourceContext:
                 "Do not request dependency, env, credential, Docker, CI, or generated files.",
                 "A final patch may edit only files returned by read_file in this iteration.",
             ],
+        }
+
+    def planner_index(self) -> dict[str, Any]:
+        """The one-time AST projection for the loop-direction planner."""
+
+        if self.planner_source_index:
+            return json.loads(json.dumps(self.planner_source_index, default=str))
+        return {
+            **self.inspection_index(),
+            "symbol_index_status": "unavailable",
         }
 
 
@@ -214,14 +217,31 @@ class CodeEditCandidateBuilder:
         )
         if not editable_files:
             raise CodeEditBuildError("parent image /app has no editable runtime files in the code-edit allowlist")
+        parent_image_digest_hash = canonical_hash({"image_digest": image_digest})
+        planner_source_index: dict[str, Any] = {}
+        if bool(getattr(self.config, "planner_symbol_index_enabled", True)):
+            try:
+                planner_source_index = build_source_symbol_index(
+                    source_root=source_root,
+                    editable_files=editable_files,
+                    source_tree_hash=source_tree_hash,
+                    parent_image_digest_hash=parent_image_digest_hash,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_source_symbol_index_build_failed source_tree_hash=%s error=%s",
+                    source_tree_hash,
+                    type(exc).__name__,
+                )
         return ParentImageSourceContext(
             source_root=source_root,
             source_mode="parent_image_extract",
-            parent_image_digest_hash=canonical_hash({"image_digest": image_digest}),
+            parent_image_digest_hash=parent_image_digest_hash,
             source_tree_hash=source_tree_hash,
             top_level_paths=tuple(top_level_paths),
             editable_files=tuple(editable_files),
             file_previews=tuple(_source_file_previews(source_root, editable_files)),
+            planner_source_index=planner_source_index,
         )
 
     def validate_draft_against_source_context(
@@ -1187,6 +1207,25 @@ def _read_source_file_for_model(
         "content": redacted,
         "content_hash": sha256_json({"path": rel, "content": redacted}),
     }
+
+
+def _source_file_inventory(source_dir: Path, editable_files: Sequence[str]) -> list[dict[str, Any]]:
+    files: list[dict[str, Any]] = []
+    for rel in editable_files:
+        path = source_dir / rel
+        try:
+            stat = path.stat()
+            raw = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        files.append(
+            {
+                "path": rel,
+                "size_bytes": int(stat.st_size),
+                "line_count": raw.count("\n") + (1 if raw else 0),
+            }
+        )
+    return files
 
 
 def _source_file_previews(source_dir: Path, editable_files: Sequence[str]) -> list[dict[str, Any]]:

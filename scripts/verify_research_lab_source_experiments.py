@@ -223,27 +223,18 @@ def verify_w6_rewards() -> str:
     from research_lab.source_add_rewards import (
         create_leg1_reward,
         create_leg2_reward,
-        evaluate_leg2_trigger,
         validate_source_add_reward_record,
     )
 
     leg1 = create_leg1_reward(adapter_id="adapter:verify-1", miner_ref="hk-verify", start_epoch=10)
     _assert(leg1.alpha_percent == 1.0 and validate_source_add_reward_record(leg1) == [], "W6 leg-1")
-    armed, blockers, evidence = evaluate_leg2_trigger(
-        adapter_id="adapter:verify-1",
-        catalog_registry_ids=("verifysource",),
-        merged=True,
-        merged_diff_routed_registry_ids=("verifysource",),
-        merge_cleared_score_bar=True,
-        shadow_monitor_live=True,
-        shadow_window_days_elapsed=7.1,
-        shadow_window_survived=True,
-        ablation_adapter_on_score=6.0,
-        ablation_adapter_off_score=5.3,
-        now="2026-08-01T00:00:00Z",
-        accepted_at="2026-07-06T00:00:00Z",
-    )
-    _assert(armed, f"W6 leg-2 trigger arms: {blockers}")
+    evidence = {
+        "llm_judge_passed": True,
+        "llm_verdict": "helped",
+        "source_used": True,
+        "adapter_id": "adapter:verify-1",
+        "registry_provider_id": "verifysource",
+    }
     leg2 = create_leg2_reward(
         adapter_id="adapter:verify-1",
         adapter_owner_miner_ref="hk-verify",
@@ -251,6 +242,16 @@ def verify_w6_rewards() -> str:
         trigger_evidence=evidence,
     )
     _assert(leg2.alpha_percent == 5.0 and leg2.reward_kind == "source_implementation", "W6 leg-2")
+    legacy_errors = validate_source_add_reward_record(
+        {
+            **leg2.to_dict(),
+            "trigger_evidence": {
+                "shadow_window_passed": True,
+                "ablation_passed": True,
+            },
+        }
+    )
+    _assert(bool(legacy_errors), "W6 legacy ablation evidence cannot authorize leg 2")
     row = leg2.champion_reward_row()
     _assert(row["reward_kind"] == "source_implementation" and row["desired_alpha_percent"] == 5.0, "W6 rails row")
     return "W6 two-leg rewards"
@@ -270,7 +271,17 @@ def verify_sql_bundle() -> str:
         "'probe_blocked'",
     ):
         _assert(expected in sql, f"SQL bundle carries {expected}")
-    return "SQL bundle 72"
+    llm_only = (
+        REPO_ROOT / "scripts" / "82-research-lab-source-add-llm-only-leg2.sql"
+    ).read_text(encoding="utf-8")
+    _assert("legacy_leg2_count" in llm_only, "SQL 82 prechecks historical Leg 2 rows")
+    _assert(
+        "trigger_evidence_doc @> '{\"llm_judge_passed\": true}'::JSONB" in llm_only,
+        "SQL 82 requires LLM attribution",
+    )
+    _assert("UPDATE public.research_lab_source_add_reward" not in llm_only, "SQL 82 is append-only")
+    _assert("DELETE FROM public.research_lab_source_add_reward" not in llm_only, "SQL 82 never deletes rewards")
+    return "SQL bundles 72 + 82"
 
 
 def main() -> int:

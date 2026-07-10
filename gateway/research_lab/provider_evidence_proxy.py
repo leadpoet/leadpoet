@@ -79,6 +79,10 @@ from gateway.research_lab.provider_capabilities import (
     normalize_candidate_route,
     provider_request_allowed,
 )
+from gateway.research_lab.provider_outcome_digest import (
+    PROVIDER_OUTCOME_SIDECAR_ENV,
+    ProviderOutcomeSidecarAccumulator,
+)
 
 PROXY_URL_ENV = "RESEARCH_LAB_EVIDENCE_PROXY_URL"
 REGISTRY_PATH_ENV = "RESEARCH_LAB_PROVIDER_REGISTRY_PATH"
@@ -100,6 +104,12 @@ OPENROUTER_MANAGEMENT_CREDENTIAL_REFS = (
 logger = logging.getLogger(__name__)
 
 _VALID_AUTH_KINDS = ("header", "query", "bearer", "none")
+_MEASURED_PROVIDER_COST_SOURCES = {
+    "exa_cost_dollars",
+    "openrouter_response_usage",
+    "openrouter_generation_reconciliation",
+    "deepline_response_cost",
+}
 
 # Legacy fallback env chains, used ONLY while the key split is off. With
 # RESEARCH_LAB_PROVIDER_KEY_SPLIT on, lab traffic authenticates exclusively
@@ -575,11 +585,14 @@ class ProviderUsageLedger:
     accumulate in memory so per-day quotas are enforceable either way.
     """
 
-    def __init__(self, path: str = "") -> None:
+    def __init__(self, path: str = "", *, outcome_sidecar_path: str = "") -> None:
         self._path = str(path or "")
         self._lock = threading.Lock()
         self._live_day = _utc_day()
         self._live_calls: dict[str, int] = {}
+        self._outcomes = ProviderOutcomeSidecarAccumulator(
+            outcome_sidecar_path or os.getenv(PROVIDER_OUTCOME_SIDECAR_ENV) or ""
+        )
 
     def _roll_day_locked(self) -> None:
         today = _utc_day()
@@ -602,30 +615,53 @@ class ProviderUsageLedger:
         status: int,
         est_cost_microusd: int,
         caller: Mapping[str, Any] | None,
+        outcome_evidence: str = "",
+        live_call: bool | None = None,
+        sidecar_spend_microusd: int | None = None,
+        sidecar_spend_kind: str = "estimated",
     ) -> None:
         with self._lock:
             self._roll_day_locked()
             if evidence == "recorded":
                 self._live_calls[provider_id] = self._live_calls.get(provider_id, 0) + 1
-            if not self._path:
-                return
-            row = {
-                "schema_version": "1.0",
-                "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "utc_day": self._live_day,
-                "provider_id": provider_id,
-                "endpoint_class": endpoint_class,
-                "request_fingerprint": fingerprint,
-                "evidence": evidence,
-                "status": int(status),
-                "est_cost_microusd": int(est_cost_microusd),
-                "caller": dict(caller or {}),
-            }
-            try:
-                with open(self._path, "a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
-            except Exception:
-                pass
+            self._outcomes.record(
+                provider_id=provider_id,
+                endpoint_class=endpoint_class,
+                evidence=outcome_evidence or evidence,
+                status=int(status),
+                live_call=(evidence == "recorded" if live_call is None else bool(live_call)),
+                spend_microusd=(
+                    int(est_cost_microusd)
+                    if sidecar_spend_microusd is None
+                    else int(sidecar_spend_microusd)
+                ),
+                spend_kind=sidecar_spend_kind,
+            )
+            if self._path:
+                row = {
+                    "schema_version": "1.0",
+                    "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "utc_day": self._live_day,
+                    "provider_id": provider_id,
+                    "endpoint_class": endpoint_class,
+                    "request_fingerprint": fingerprint,
+                    "evidence": evidence,
+                    "status": int(status),
+                    "est_cost_microusd": int(est_cost_microusd),
+                    "caller": dict(caller or {}),
+                }
+                try:
+                    with open(self._path, "a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+                except Exception as exc:
+                    logger.warning(
+                        "research_lab_provider_usage_ledger_append_failed path_hash=%s error=%s",
+                        sha256_json({"path": self._path}),
+                        type(exc).__name__,
+                    )
+
+    def close(self) -> None:
+        self._outcomes.close()
 
 
 def _endpoint_class(rest: str) -> str:
@@ -998,10 +1034,16 @@ class ProviderRegistryState:
 
 class _CapabilityAwareHTTPServer(ThreadingHTTPServer):
     registry_state: ProviderRegistryState
+    usage_ledger: ProviderUsageLedger
 
     def server_close(self) -> None:
         self.registry_state.stop()
-        super().server_close()
+        try:
+            super().server_close()
+        finally:
+            # ThreadingHTTPServer waits for active handlers in server_close;
+            # flush only after no request can append another outcome.
+            self.usage_ledger.close()
 
 
 _HOP_HEADERS = {"connection", "keep-alive", "transfer-encoding", "host", "content-length", "authorization", "x-api-key"}
@@ -1076,6 +1118,10 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         status: int,
         live_cost: bool,
         est_cost_microusd: int | None = None,
+        outcome_evidence: str = "",
+        live_call: bool | None = None,
+        sidecar_spend_microusd: int | None = None,
+        sidecar_spend_kind: str = "estimated",
     ) -> None:
         if est_cost_microusd is None:
             est_cost_microusd = entry.est_cost_microusd() if live_cost else 0
@@ -1087,6 +1133,10 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             status=status,
             est_cost_microusd=est_cost_microusd,
             caller=self._caller(),
+            outcome_evidence=outcome_evidence,
+            live_call=live_call,
+            sidecar_spend_microusd=sidecar_spend_microusd,
+            sidecar_spend_kind=sidecar_spend_kind,
         )
 
     def _handle(self) -> None:
@@ -1323,7 +1373,16 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                     cost_source="transport_failure_zero_cost",
                 ),
             )
-            self._ledger_row(entry, rest, fingerprint, evidence="error", status=502, live_cost=False)
+            self._ledger_row(
+                entry,
+                rest,
+                fingerprint,
+                evidence="error",
+                status=502,
+                live_cost=False,
+                live_call=True,
+                sidecar_spend_microusd=0,
+            )
             self._respond(502, b'{"error":"upstream unreachable"}', evidence="error", headers=event.to_headers())
             return
         # Nonterminal Exa agent polls are real spend but not replayable
@@ -1376,6 +1435,13 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 measured_microusd = max(0, int(Decimal(estimate.cost_usd) * 1_000_000))
             except Exception:
                 measured_microusd = None
+        sidecar_spend_microusd = 0
+        if estimate.billable and 200 <= status < 300:
+            sidecar_spend_microusd = (
+                measured_microusd
+                if measured_microusd is not None
+                else max(0, entry.est_cost_microusd())
+            )
         self._ledger_row(
             entry,
             rest,
@@ -1384,6 +1450,14 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             status=status,
             live_cost=True,
             est_cost_microusd=measured_microusd,
+            outcome_evidence=evidence_label,
+            live_call=True,
+            sidecar_spend_microusd=sidecar_spend_microusd,
+            sidecar_spend_kind=(
+                "measured"
+                if estimate.cost_source in _MEASURED_PROVIDER_COST_SOURCES
+                else "estimated"
+            ),
         )
         self._respond(status, body, evidence=evidence_label, headers=event.to_headers())
 
@@ -1409,6 +1483,7 @@ def serve_evidence_proxy(
     registry_refresh_seconds: int | None = None,
     enforcement_mode: str | None = None,
     model_catalog: LiveTextModelCatalog | None = None,
+    outcome_sidecar_path: str = "",
 ) -> tuple[ThreadingHTTPServer, EvidenceStore, threading.Thread]:
     """Start the proxy; returns (server, store, thread). Caller owns shutdown.
 
@@ -1444,7 +1519,12 @@ def serve_evidence_proxy(
         loader=registry_loader,
     )
     store = EvidenceStore(baseline_dir=baseline_dir, day_cache_path=day_cache_path)
-    ledger = ProviderUsageLedger(usage_ledger_path or os.getenv(USAGE_LEDGER_PATH_ENV) or "")
+    ledger = ProviderUsageLedger(
+        usage_ledger_path or os.getenv(USAGE_LEDGER_PATH_ENV) or "",
+        outcome_sidecar_path=(
+            outcome_sidecar_path or os.getenv(PROVIDER_OUTCOME_SIDECAR_ENV) or ""
+        ),
+    )
     handler = type(
         "BoundProxyHandler",
         (_ProxyHandler,),
@@ -1463,6 +1543,7 @@ def serve_evidence_proxy(
     )
     server = _CapabilityAwareHTTPServer((host, port), handler)
     server.registry_state = registry_state
+    server.usage_ledger = ledger
     registry_state.start()
     thread = threading.Thread(target=server.serve_forever, name="evidence-proxy", daemon=True)
     thread.start()
@@ -1479,6 +1560,10 @@ def main() -> int:
     parser.add_argument("--day-cache", default=os.getenv("RESEARCH_LAB_PROVIDER_EVIDENCE_DAY_CACHE") or "")
     parser.add_argument("--registry", default=os.getenv(REGISTRY_PATH_ENV) or "")
     parser.add_argument("--usage-ledger", default=os.getenv(USAGE_LEDGER_PATH_ENV) or "")
+    parser.add_argument(
+        "--outcome-sidecar",
+        default=os.getenv(PROVIDER_OUTCOME_SIDECAR_ENV) or "",
+    )
     parser.add_argument(
         "--caller-token-map",
         default=os.getenv("RESEARCH_LAB_PROXY_CALLER_TOKEN_MAP") or "",
@@ -1501,6 +1586,7 @@ def main() -> int:
         registry_path=args.registry,
         dynamic_registry=True,
         usage_ledger_path=args.usage_ledger,
+        outcome_sidecar_path=args.outcome_sidecar,
         caller_context=caller_context,
         caller_token_map_path=args.caller_token_map,
     )

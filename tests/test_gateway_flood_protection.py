@@ -11,6 +11,7 @@ from gateway.utils.hotkey_bucket import HotkeyBuckets, enforce, observe
 
 def test_priority_route_classification_is_explicit():
     assert classify_path("/weights/submit") == "validator"
+    assert classify_path("/weights/submit/v2") == "validator"
     assert classify_path("/fulfillment/scoring") == "validator"
     assert classify_path("/fulfillment/rewards/active") == "validator"
     assert classify_path("/fulfillment/requests/active") == "miner"

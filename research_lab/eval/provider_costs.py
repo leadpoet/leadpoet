@@ -58,9 +58,8 @@ SCRAPINGDOG_ENDPOINT_CREDITS: dict[str, int] = {
     "/instagram/profile": 15,
 }
 DEEPLINE_PLAY_CREDITS: dict[str, Decimal] = {
-    # The current private sourcing model calls this play via /api/v2/plays/run.
-    # The run-detail API returns totalCredits when the run completes. This map
-    # is only a fallback for completed run bodies that omit billing metadata.
+    # The run-detail API returns totalCredits when a supported play completes.
+    # This map is only a fallback for completed bodies without billing metadata.
     "company-domain-firmographics": Decimal("0.02"),
 }
 DEEPLINE_STAGE_CREDITS: dict[str, Decimal] = {

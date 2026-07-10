@@ -82,6 +82,8 @@ The miner will ask which mode to run:
 
 Research Lab lets miners contribute direction and compute toward improving the AI sales agent.
 
+The current sourcing model and sealed benchmark are not published in full. Keeping them private helps prevent benchmark overfitting, fixture memorization, and leakage of evaluation data while still letting miners submit and evaluate improvements through the Research Lab flow.
+
 How it works:
 
 1. The miner securely provides an OpenRouter API key and management key.
@@ -235,7 +237,7 @@ Exact weights are computed by validators from signed gateway bundles, verified c
 
 Leadpoet uses a gateway TEE for Research Lab and Fulfillment outputs. The gateway enclave signs receipts, scoring bundles, allocation records, and compact audit anchors with an enclave-held signing key.
 
-The gateway attestation binds the enclave public key to the gateway runtime measurement. Validators and auditors verify the attestation, check the measured runtime against the pinned allowlist, and verify enclave signatures before treating signed artifacts as gateway outputs.
+The gateway attestation binds the enclave public key to the gateway runtime measurement. Validators and auditors verify the Nitro attestation, verify enclave signatures before treating signed artifacts as gateway outputs, and verify validator weight submissions by matching the validator's attested PCR0 to an independently rebuilt validator enclave PCR0 from the same repository commit.
 
 Audit artifacts include the hashes, status transitions, signatures, and reward inputs needed to check validator behavior. They do not expose model code, hidden ICPs, provider secrets, raw private data, or candidate patch internals.
 

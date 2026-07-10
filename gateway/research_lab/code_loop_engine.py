@@ -219,12 +219,34 @@ def _ranked_path_fallback_plan(
     attempted_path_ids: set[str],
     max_paths: int,
     fallback_index: int,
+    refused_lanes: frozenset[str] | set[str] = frozenset(),
 ) -> dict[str, Any] | None:
     if not isinstance(base_plan_doc, Mapping):
         return None
     ranked_paths = base_plan_doc.get("ranked_paths")
     if not isinstance(ranked_paths, (list, tuple)):
         return None
+    # Diversity preference: when a lane was refused against the inspected
+    # source, prefer the next un-attempted path in a DIFFERENT lane; fall back
+    # to same-lane paths only when no alternative lane remains.
+    if refused_lanes:
+        preferred = _ranked_path_fallback_plan(
+            {
+                **dict(base_plan_doc),
+                "ranked_paths": [
+                    raw_path
+                    for raw_path in ranked_paths
+                    if isinstance(raw_path, Mapping)
+                    and str(raw_path.get("lane") or raw_path.get("required_lane") or "")
+                    not in refused_lanes
+                ],
+            },
+            attempted_path_ids=attempted_path_ids,
+            max_paths=max_paths,
+            fallback_index=fallback_index,
+        )
+        if preferred is not None:
+            return preferred
     checked = 0
     for raw_path in ranked_paths:
         if not isinstance(raw_path, Mapping):
@@ -269,6 +291,15 @@ def _stop_at_candidate_cap_enabled() -> bool:
     """Bug 20 kill switch: stop iterating/building once max_candidates is reached (no build-and-discard)."""
 
     return _engine_env_flag("RESEARCH_LAB_LOOP_STOP_AT_CANDIDATE_CAP", "true")
+
+
+def _refusal_lane_advance_enabled() -> bool:
+    """After a source-grounded refusal (drafter declined the lane against the
+    inspected source, and the bounded fallback declined again), advance to the
+    next ranked path — or terminate cheaply — instead of re-asking the same
+    lane every iteration until the compute budget dies."""
+
+    return _engine_env_flag("RESEARCH_LAB_LOOP_REFUSAL_LANE_ADVANCE", "true")
 
 
 def _judge_parse_soft_skip_enabled() -> bool:
@@ -1426,6 +1457,9 @@ class CodeEditLoopEngine:
         if selected_path_id:
             ranked_path_attempted_ids.add(selected_path_id)
         ranked_path_fallback_count = 0
+        # Lanes the drafter refused against the inspected source this run —
+        # the fallback prefers a different lane over re-asking a refused one.
+        refused_lane_keys: set[str] = set()
         reference_repair_attempted = bool(resume.get("planner_reference_repair_attempted"))
         reference_repair_status = str(resume.get("planner_reference_repair_status") or "")
 
@@ -1450,6 +1484,7 @@ class CodeEditLoopEngine:
                 attempted_path_ids=ranked_path_attempted_ids,
                 max_paths=max_ranked_paths,
                 fallback_index=next_index,
+                refused_lanes=refused_lane_keys,
             )
             if not next_plan:
                 if ranked_path_fallback_count > 0:
@@ -2764,6 +2799,30 @@ class CodeEditLoopEngine:
                                         trigger="binding_plan_unimplementable",
                                         reason=no_viable_reason,
                                     )
+                                elif (
+                                    isinstance(loop_direction_plan_doc, Mapping)
+                                    and _refusal_lane_advance_enabled()
+                                ):
+                                    # Source-grounded refusal on a non-terminal
+                                    # lane: the drafter (and its bounded
+                                    # fallback) declined this lane against the
+                                    # inspected source. Re-asking the identical
+                                    # lane next iteration is pure spend —
+                                    # advance to the next ranked path
+                                    # (different lane preferred) or terminate
+                                    # cheaply with budget left.
+                                    refused_lane = str(
+                                        loop_direction_plan_doc.get("required_lane") or ""
+                                    )
+                                    if refused_lane:
+                                        refused_lane_keys.add(refused_lane)
+                                    advanced = await _activate_ranked_path_fallback(
+                                        trigger="source_grounded_refusal",
+                                        reason=no_viable_reason,
+                                    )
+                                    if not advanced:
+                                        stop_reason = "loop_direction_no_new_safe_path"
+                                        planner_terminal_without_candidate = True
                         else:
                             await self.event_sink(
                                 AutoResearchLoopEvent(
@@ -4827,9 +4886,12 @@ def _redacted_draft_doc(draft: CodeEditDraft) -> dict[str, Any]:
 
 
 def _focus_signature_hash(ticket: Mapping[str, Any]) -> str:
+    # Delegates to the shared intake helper so ticket-intake refusal dedup
+    # and the refusal events stamped here can never drift apart.
+    from gateway.research_lab.ticket_intake_validation import focus_signature_hash_for_brief
+
     focus = _ticket_doc_value(ticket, "brief_public_summary")
-    normalized = re.sub(r"\s+", " ", str(focus or "").strip().lower())[:2000]
-    return sha256_json({"focus": normalized})
+    return focus_signature_hash_for_brief(str(focus or ""))
 
 
 def _prior_attempts_from_budget_context(budget_context: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:

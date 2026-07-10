@@ -43,6 +43,7 @@ from .key_vault import (
     verify_openrouter_workspace_privacy,
 )
 from .maintenance import get_autoresearch_maintenance_state
+from .ticket_intake_validation import validate_ticket_direction
 from .miner_diagnostics import (
     build_candidate_diagnostics,
     visibility_map_from_benchmark_split,
@@ -205,6 +206,17 @@ async def create_research_lab_ticket(payload: ResearchLabTicketCreateRequest, re
     await _enforce_autoresearch_loop_capacity(config, payload.miner_hotkey)
     island = _validate_allowed_research_island(config, payload.island)
     _require_default_research_model_tier(config, payload.research_model_tier)
+    # Free intake validation: reject directions bound to uneditable paths or
+    # already refused repeatedly against the active source BEFORE the miner
+    # pays a loop-start fee or a planner call is spent.
+    intake_rejection = await validate_ticket_direction(
+        brief_public_summary=str(payload.brief_public_summary or ""),
+        allowed_prefixes=config.code_edit_allowed_path_prefixes(),
+        allowed_exact=config.code_edit_allowed_exact_paths(),
+        allowed_suffixes=config.code_edit_allowed_suffixes(),
+    )
+    if intake_rejection is not None:
+        raise HTTPException(status_code=422, detail=intake_rejection)
     budget_doc = _effective_budget_doc(
         config,
         ticket={"ticket_doc": {}},

@@ -293,6 +293,19 @@ def _stop_at_candidate_cap_enabled() -> bool:
     return _engine_env_flag("RESEARCH_LAB_LOOP_STOP_AT_CANDIDATE_CAP", "true")
 
 
+def _fallback_max_target_files(config: Any) -> int:
+    attr = getattr(config, "code_edit_fallback_max_target_files", None)
+    if attr is not None:
+        try:
+            return max(1, int(attr))
+        except (TypeError, ValueError):
+            pass
+    try:
+        return max(1, int(os.getenv("RESEARCH_LAB_CODE_EDIT_FALLBACK_MAX_TARGET_FILES", "3")))
+    except ValueError:
+        return 3
+
+
 def _refusal_lane_advance_enabled() -> bool:
     """After a source-grounded refusal (drafter declined the lane against the
     inspected source, and the bounded fallback declined again), advance to the
@@ -2494,7 +2507,7 @@ class CodeEditLoopEngine:
                                 "reason": safe_event_error_text(reason),
                                 "mode": "smaller_same_lane_inspected_files",
                                 "max_candidates": 1,
-                                "max_target_files": 1,
+                                "max_target_files": _fallback_max_target_files(self.builder.config),
                                 "read_file_count": len(read_paths),
                                 "read_files_sample": list(sorted(read_paths))[:8],
                             },
@@ -2535,6 +2548,7 @@ class CodeEditLoopEngine:
                             ),
                             fallback_reason=reason,
                             max_candidates=1,
+                            max_target_files=_fallback_max_target_files(self.builder.config),
                         ),
                         min(settings.draft_timeout_seconds, remaining_fallback_seconds),
                         3000,
@@ -2583,7 +2597,11 @@ class CodeEditLoopEngine:
                             }
                         )
                     try:
-                        fallback_drafts = parse_code_edit_response(fallback_result.content, max_candidates=1)
+                        fallback_drafts = parse_code_edit_response(
+                            fallback_result.content,
+                            max_candidates=1,
+                            max_target_files=_fallback_max_target_files(self.builder.config),
+                        )
                     except Exception as exc:
                         no_viable_reason = code_edit_no_viable_patch_reason(fallback_result.content)
                         await self.event_sink(

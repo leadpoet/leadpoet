@@ -601,14 +601,19 @@ def build_code_edit_fallback_messages(
     loop_direction_plan: Mapping[str, Any] | None = None,
     fallback_reason: str,
     max_candidates: int = 1,
+    max_target_files: int = 1,
 ) -> list[dict[str, str]]:
     """Build one bounded fallback pass after the first candidate draft fails.
 
     The output shape intentionally matches ``build_code_edit_auto_research_messages``
     so the same parser, source-context gates, patch repair, build, scoring,
-    reimbursement, and ledger paths remain in force.
+    reimbursement, and ledger paths remain in force. ``max_target_files`` > 1
+    allows a bounded multi-file patch when the required contract change
+    crosses modules — a strict one-file rule forced refusals on fixes that
+    legitimately span discovery/adapter/client boundaries.
     """
 
+    bounded_target_files = max(1, int(max_target_files))
     fallback_context = {
         **dict(budget_context or {}),
         "candidate_generation_fallback": {
@@ -616,7 +621,7 @@ def build_code_edit_fallback_messages(
             "mode": "smaller_same_lane_inspected_files",
             "fallback_reason": str(fallback_reason or "")[:500],
             "max_candidates": 1,
-            "max_target_files": 1,
+            "max_target_files": bounded_target_files,
             "preserve_loop_direction_plan": bool(loop_direction_plan),
         },
     }
@@ -638,11 +643,23 @@ def build_code_edit_fallback_messages(
             user
             + "\n\nBounded fallback pass:\n"
             "- This is the only automatic fallback candidate-generation pass for this iteration.\n"
-            "- Produce at most one candidate and target exactly one file from source_inspection_context.read_files.\n"
-            "- Keep the same lane and same LoopDirectionPlan binding when a plan is present.\n"
-            "- Do not add new files or broaden the target file set.\n"
+            + (
+                "- Produce at most one candidate and target exactly one file from source_inspection_context.read_files.\n"
+                if bounded_target_files <= 1
+                else (
+                    f"- Produce at most one candidate targeting at most {bounded_target_files} files "
+                    "from source_inspection_context.read_files. Prefer one file; span multiple files "
+                    "ONLY when the required contract change crosses module boundaries.\n"
+                )
+            )
+            + "- Keep the same lane and same LoopDirectionPlan binding when a plan is present.\n"
+            "- Do not add new files or broaden the target file set beyond the inspected files.\n"
             "- Prefer the smallest behavior-preserving patch that directly addresses the failure mode.\n"
-            "- If no one-file inspected-source patch is safe, return {\"no_viable_patch\":true,\"reason\":\"...\"}.\n"
+            + (
+                "- If no one-file inspected-source patch is safe, return {\"no_viable_patch\":true,\"reason\":\"...\"}.\n"
+                if bounded_target_files <= 1
+                else "- If no bounded inspected-source patch is safe, return {\"no_viable_patch\":true,\"reason\":\"...\"}.\n"
+            )
         ),
     }
     return messages
@@ -1123,7 +1140,9 @@ def parse_code_edit_source_inspection_response(
     return parsed
 
 
-def parse_code_edit_response(raw_text: str, *, max_candidates: int = 1) -> list[CodeEditDraft]:
+def parse_code_edit_response(
+    raw_text: str, *, max_candidates: int = 1, max_target_files: int = 0
+) -> list[CodeEditDraft]:
     """Parse first-pass code-edit output from different LLM families.
 
     The builder still treats parsed drafts as untrusted: every returned draft
@@ -1142,7 +1161,9 @@ def parse_code_edit_response(raw_text: str, *, max_candidates: int = 1) -> list[
 
     if isinstance(decoded, str):
         try:
-            return parse_code_edit_response(decoded, max_candidates=max_candidates)
+            return parse_code_edit_response(
+                decoded, max_candidates=max_candidates, max_target_files=max_target_files
+            )
         except ValueError:
             draft = _draft_from_diff_only_response(decoded)
             if draft is not None:
@@ -1165,7 +1186,7 @@ def parse_code_edit_response(raw_text: str, *, max_candidates: int = 1) -> list[
             break
         try:
             draft = _draft_from_code_edit_candidate(item)
-            validate_code_edit_draft(draft)
+            validate_code_edit_draft(draft, max_target_files=max_target_files)
         except Exception as exc:
             parse_errors.append(str(exc)[:200])
             continue
@@ -1866,6 +1887,7 @@ def validate_code_edit_draft(
     allowed_prefixes: Sequence[str] = DEFAULT_ALLOWED_PATH_PREFIXES,
     allowed_exact_paths: Sequence[str] = DEFAULT_ALLOWED_EXACT_PATHS,
     allowed_suffixes: Sequence[str] = DEFAULT_ALLOWED_SUFFIXES,
+    max_target_files: int = 0,
 ) -> list[str]:
     errors: list[str] = []
     payload = draft.to_dict()
@@ -1881,6 +1903,10 @@ def validate_code_edit_draft(
     all_paths = sorted(diff_paths | target_paths)
     if not all_paths:
         errors.append("code_edit_has_no_target_paths")
+    if max_target_files and len(all_paths) > int(max_target_files):
+        errors.append(
+            f"code_edit_too_many_target_files:{len(all_paths)}>{int(max_target_files)}"
+        )
     for path in all_paths:
         errors.extend(_validate_repo_path(
             path,

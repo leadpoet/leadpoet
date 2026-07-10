@@ -521,6 +521,10 @@ class ResearchLabGatewayConfig:
     # 12 cumulative file reads: 8 caps patch quality on ~300-file trees
     # (fableanalysis §6.4 recommends 12-16).
     code_edit_source_inspection_max_files: int = 12
+    # Bounded multi-file fallback patches: the one-file rule forced refusals
+    # on fixes whose contract legitimately crosses modules. 1 restores the
+    # strict single-file fallback.
+    code_edit_fallback_max_target_files: int = 3
     code_edit_source_inspection_file_bytes: int = 24_000
     code_edit_source_inspection_total_bytes: int = 120_000
     code_edit_source_inspection_search_matches: int = 30
@@ -1075,6 +1079,10 @@ class ResearchLabGatewayConfig:
                 1,
                 _int("RESEARCH_LAB_CODE_EDIT_SOURCE_INSPECTION_MAX_FILES", 12),
             ),
+            code_edit_fallback_max_target_files=max(
+                1,
+                _int("RESEARCH_LAB_CODE_EDIT_FALLBACK_MAX_TARGET_FILES", 3),
+            ),
             code_edit_source_inspection_file_bytes=max(
                 1024,
                 _int("RESEARCH_LAB_CODE_EDIT_SOURCE_INSPECTION_FILE_BYTES", 24_000),
@@ -1614,6 +1622,7 @@ class ResearchLabGatewayConfig:
                     "search_matches": self.code_edit_source_inspection_search_matches,
                 },
                 "code_edit_patch_repair_attempts": self.code_edit_patch_repair_attempts,
+                "code_edit_fallback_max_target_files": self.code_edit_fallback_max_target_files,
                 "stale_parent_rebase": {
                     "enabled": self.stale_parent_rebase_enabled,
                     "repair_enabled": self.stale_parent_rebase_repair_enabled,

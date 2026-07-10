@@ -78,6 +78,23 @@ emergency_disk_preflight() {
   df -h / /var/lib/docker 2>/dev/null || df -h /
 }
 
+stop_research_lab_private_model_containers() {
+  local ids
+  ids="$(
+    sudo docker ps --format '{{.ID}} {{.Image}}' 2>/dev/null \
+      | awk '$2 ~ /(^|[./])leadpoet\/sourcing-model([:@]|$)/ {print $1}' \
+      || true
+  )"
+
+  if [ -z "$ids" ]; then
+    echo "No running Research Lab private-model containers found"
+    return 0
+  fi
+
+  echo "Stopping running Research Lab private-model containers before Docker prune"
+  echo "$ids" | xargs -r sudo docker stop -t 10
+}
+
 cd "$GATEWAY_ROOT"
 
 PID="$(pgrep -f "python3 -u main.py" | head -1 || true)"
@@ -242,6 +259,7 @@ pkill -9 -f "run_research_lab_hosted_worker" 2>/dev/null || true
 pkill -9 -f "run_research_lab_scoring_worker" 2>/dev/null || true
 pkill -9 -f "gateway.research_lab.provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "provider_evidence_proxy" 2>/dev/null || true
+stop_research_lab_private_model_containers
 
 echo "Stopping stuck private-model Docker builds or pip installs"
 sudo pkill -TERM -f "docker build -f .*/validator_models/containerizing/Dockerfile" 2>/dev/null || true

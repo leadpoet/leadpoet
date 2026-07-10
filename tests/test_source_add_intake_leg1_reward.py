@@ -11,6 +11,7 @@ def _config(**overrides):
     config = {
         "source_add_rewards_enabled": True,
         "source_add_leg1_alpha_percent": 1.0,
+        "source_add_leg1_max_per_utc_day": 10,
         "lab_reward_epochs": 20,
         "evaluation_epoch": 0,
     }
@@ -125,6 +126,35 @@ async def test_existing_leg1_reward_is_idempotent(monkeypatch):
     )
 
     assert result["source_add_leg1_reward_status"] == "already_created"
+
+
+@pytest.mark.asyncio
+async def test_leg1_daily_cap_blocks_new_reward(monkeypatch):
+    async def fake_select_many(table, **_kwargs):
+        if table == "research_lab_source_add_reward_current":
+            return []
+        if table == "research_lab_source_add_reward_events":
+            return [{"reward_ref": f"source_add_reward:{i:016x}"} for i in range(2)]
+        return []
+
+    async def fail_insert_row(*_args, **_kwargs):
+        raise AssertionError("daily cap must prevent insert")
+
+    async def fake_epoch(_configured=0):
+        return 700, None, "test"
+
+    monkeypatch.setattr(api, "select_many", fake_select_many)
+    monkeypatch.setattr(api, "insert_row", fail_insert_row)
+    monkeypatch.setattr(api, "resolve_research_lab_evaluation_epoch", fake_epoch)
+
+    result = await api._maybe_create_source_add_leg1_reward_for_precheck(
+        record=_record(),
+        precheck_status=PRECHECK_PASSED,
+        config=_config(source_add_leg1_max_per_utc_day=2),
+    )
+
+    assert result["source_add_leg1_reward_status"] == "daily_cap_reached"
+    assert result["daily_cap"] == 2
 
 
 @pytest.mark.asyncio

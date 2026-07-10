@@ -467,6 +467,22 @@ async def _maybe_create_source_add_leg1_reward_for_precheck(
     )
     if leg1 is None:
         return {"source_add_leg1_reward_status": "already_created"}
+    daily_cap = max(1, int(getattr(config, "source_add_leg1_max_per_utc_day", 10) or 10))
+    utc_day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    created_today = await select_many(
+        "research_lab_source_add_reward_events",
+        columns="reward_ref,created_at,reason",
+        filters=(
+            ("reason", "leg1_provenance_precheck_passed"),
+            ("created_at", "gte", utc_day_start.isoformat()),
+        ),
+        limit=daily_cap,
+    )
+    if len(created_today) >= daily_cap:
+        return {
+            "source_add_leg1_reward_status": "daily_cap_reached",
+            "daily_cap": daily_cap,
+        }
 
     try:
         await insert_row(

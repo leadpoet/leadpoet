@@ -135,6 +135,7 @@ rsync -a --delete \
   --exclude='validation_artifacts/' \
   --exclude='hotpatch-backups/' \
   --exclude='BUILD_INFO.json' \
+  --exclude='.source_commit' \
   "$GATEWAY_ROOT/" "$BUILD_CONTEXT_TMP/"
 mkdir -p "$BUILD_CONTEXT_TMP/_attested_runtime"
 rsync -a --delete "$DEST_ROOT/" "$BUILD_CONTEXT_TMP/_attested_runtime/"

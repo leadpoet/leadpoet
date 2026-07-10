@@ -97,6 +97,7 @@ def test_gateway_eif_build_enforces_scoring_manifest():
     assert "build_identity.py verify" in dockerfile
     assert 'COPY _enclave_source/ /app/gateway/' in dockerfile
     assert 'normalize_attested_runtime.py\" --root \"$BUILD_CONTEXT_TMP\"' in stage_script
+    assert "--exclude='.source_commit'" in stage_script
     assert 'pip download' in stage_script
     assert '--require-hashes' in stage_script
     assert '--no-index --find-links=/tmp/wheelhouse' in dockerfile

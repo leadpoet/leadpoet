@@ -422,6 +422,43 @@ async def test_sourced_zero_no_error_flag():
 
 
 # ---------------------------------------------------------------------------
+# health_status reflects only measurement-invalidating failures. Legitimate
+# zero-company outcomes and candidate-quality crashes stay informational.
+# ---------------------------------------------------------------------------
+
+
+def test_health_status_healthy_for_zero_company_outcomes():
+    rows = [
+        {"failure_reason": "candidate_model_zero_companies", "sourced_zero_no_error": True},
+        {"failure_reason": "reference_model_zero_companies"},
+        {"failure_reason": "candidate_model_runtime_invalid_json"},
+        {},
+    ]
+    health = evaluator.build_scoring_health_doc(rows)
+    # Counted and rated, but none of these invalidate the measurement.
+    assert health["sourced_zero_no_error_count"] == 1
+    assert health["candidate_zero_company_count"] == 1
+    assert health["candidate_runtime_failure_count"] == 1
+    assert health["health_status"] == "healthy"
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"failure_reason": "candidate_model_runtime_provider_error"},
+        {"failure_reason": "reference_model_runtime_invalid_json"},
+        {"failure_reason": "candidate_model_runtime_timeout"},
+        {"provider_excluded": True},
+        {"provider_cost_cap_blocked": True},
+        {"provider_cost_tracking_failed": True},
+    ],
+)
+def test_health_status_degraded_for_critical_failures(row):
+    health = evaluator.build_scoring_health_doc([row, {}])
+    assert health["health_status"] == "degraded"
+
+
+# ---------------------------------------------------------------------------
 # Loop-ending provider-error gate: only credit/auth/quota rejections and
 # provider-infra failures escalate an empty run to a runtime error. Request-
 # shaped rejections of model-generated URLs (SD 400/404/410/503) score as-is.

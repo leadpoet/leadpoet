@@ -2109,7 +2109,22 @@ def build_scoring_health_doc(
         "provider_cost_tracking_failed_icp_rate": _health_rate(total, counts["provider_cost_tracking_failed_icp_count"]),
     }
     holdout_doc = _scoring_health_holdout_doc(private_holdout_gate)
-    degraded = any(value > 0 for value in counts.values())
+    # Only failures that invalidate the measurement itself mark scoring
+    # unhealthy: provider outages/credit exhaustion, timeouts, ICPs excluded
+    # for unresolved provider errors, cost-accounting loss, and reference-side
+    # runtime crashes. Zero-company results, request-shaped provider
+    # rejections of model-generated URLs, and candidate-quality crashes are
+    # legitimate scored outcomes and stay informational (still counted and
+    # rated above, but they do not flip health_status).
+    critical_count_keys = (
+        "reference_runtime_failure_count",
+        "provider_error_count",
+        "timeout_count",
+        "provider_excluded_icp_count",
+        "provider_cost_cap_blocked_icp_count",
+        "provider_cost_tracking_failed_icp_count",
+    )
+    degraded = any(counts[key] > 0 for key in critical_count_keys)
     return {
         "schema_version": "1.0",
         "health_status": "degraded" if degraded else "healthy",

@@ -2272,15 +2272,32 @@ def _baseline_max_unresolved_icps() -> int:
         return 2
 
 
+DEFAULT_BASELINE_MAX_DAY_JUMP_POINTS = 15.0
+
+
 def _baseline_max_day_jump_points() -> float | None:
-    """Day-over-day quarantine threshold; unset means warn-only."""
+    """Day-over-day quarantine threshold, enforced by default.
+
+    A baseline that swings more than this many points against the previous
+    day is far more likely to be a provider outage or measurement failure
+    than a real model change, and must not become the promotion reference
+    without an operator raising the limit. Explicit "0"/"off"/"none"
+    disables enforcement (warn-only).
+    """
     raw = os.getenv("RESEARCH_LAB_BASELINE_MAX_DAY_JUMP_POINTS", "").strip()
     if not raw:
+        return DEFAULT_BASELINE_MAX_DAY_JUMP_POINTS
+    if raw.lower() in {"0", "0.0", "off", "none", "disabled"}:
         return None
     try:
         return abs(float(raw))
     except ValueError:
-        return None
+        logger.warning(
+            "research_lab_baseline_day_jump_threshold_invalid value=%r default=%s",
+            raw,
+            DEFAULT_BASELINE_MAX_DAY_JUMP_POINTS,
+        )
+        return DEFAULT_BASELINE_MAX_DAY_JUMP_POINTS
 
 
 def _baseline_min_utc_day_delay_seconds() -> int:
@@ -2327,10 +2344,12 @@ def _build_baseline_health(
     recovered: int,
     max_unresolved_icps: int,
 ) -> dict[str, Any]:
-    """Observe-only health summary for a completed baseline run.
+    """Health summary for a completed baseline run.
 
     Retry-exhausted provider errors are scored as zero ICPs and recorded here
-    for audit; they must not reject and re-run the whole benchmark.
+    for audit. When ``baseline_health_gate_enforced`` is on, a failing
+    ``gate_passed`` blocks publication via
+    ``_enforce_baseline_publication_gates``.
     """
     return shared_build_baseline_health(
         per_icp_summaries=per_icp_summaries,
@@ -2338,6 +2357,44 @@ def _build_baseline_health(
         recovered=recovered,
         max_unresolved_icps=max_unresolved_icps,
     )
+
+
+def _enforce_baseline_publication_gates(
+    *,
+    baseline_health: Mapping[str, Any],
+    aggregate_score: float,
+    day_jump_points: float | None,
+    health_gate_enforced: bool,
+    max_day_jump: float | None,
+) -> None:
+    """Fail-closed publication gates for a completed baseline run.
+
+    A baseline whose own health gate failed (too many retry-exhausted
+    provider-error ICPs) or whose aggregate swings implausibly against the
+    previous day is a degraded measurement and must not become the day's
+    promotion reference.
+    """
+    if health_gate_enforced and not bool(baseline_health.get("gate_passed")):
+        raise BaselineHealthGateFailure(
+            "baseline_unresolved_provider_errors_gate_failed: "
+            f"unresolved={baseline_health.get('unresolved_provider_errors')} "
+            f"max={baseline_health.get('max_unresolved_icps')} "
+            f"aggregate={aggregate_score:.4f}; "
+            "refusing to record this degraded run as the day's benchmark reference",
+            baseline_health=dict(baseline_health),
+        )
+    if (
+        max_day_jump is not None
+        and day_jump_points is not None
+        and abs(day_jump_points) > max_day_jump
+    ):
+        raise BaselineHealthGateFailure(
+            "baseline_day_over_day_jump_gate_failed: "
+            f"jump={day_jump_points:+.4f} max=±{max_day_jump} "
+            f"aggregate={aggregate_score:.4f}; "
+            "refusing to record this run as the day's benchmark reference",
+            baseline_health={**dict(baseline_health), "gate_passed": False},
+        )
 
 
 class CandidateBaselineNotReady(RuntimeError):
@@ -5186,7 +5243,13 @@ class ResearchLabGatewayScoringWorker:
                 telemetry_degraded=bool(telemetry_session and telemetry_session.degraded),
                 event_doc={
                     "outcome": (
-                        "public_gate_rejected" if private_holdout_rejected else "scored"
+                        "public_gate_rejected"
+                        if private_holdout_rejected
+                        else (
+                            "scoring_health_quarantined"
+                            if scoring_health_gate.get("decision") == "quarantine"
+                            else "scored"
+                        )
                     )
                 },
             )
@@ -5196,6 +5259,13 @@ class ResearchLabGatewayScoringWorker:
                     score_bundle_row=bundle,
                     score_bundle=score_bundle,
                     gate_result=gate_result,
+                )
+            elif scoring_health_gate.get("decision") == "quarantine":
+                promotion_result = await self._record_scoring_health_quarantined(
+                    candidate=candidate,
+                    score_bundle_row=bundle,
+                    score_bundle=score_bundle,
+                    scoring_health_gate=scoring_health_gate,
                 )
             else:
                 promotion_result = await self._maybe_promote_scored_candidate(
@@ -5631,6 +5701,13 @@ class ResearchLabGatewayScoringWorker:
                     score_bundle=score_bundle,
                     gate_result=gate_result,
                 )
+            elif scoring_health_gate.get("decision") == "quarantine":
+                promotion_result = await self._record_scoring_health_quarantined(
+                    candidate=candidate,
+                    score_bundle_row=bundle_row,
+                    score_bundle=score_bundle,
+                    scoring_health_gate=scoring_health_gate,
+                )
             else:
                 promotion_result = await self._maybe_promote_scored_candidate(
                     candidate=candidate,
@@ -5833,6 +5910,49 @@ class ResearchLabGatewayScoringWorker:
         )
         return {"status": "rejected_public_holdout_gate"}
 
+    async def _record_scoring_health_quarantined(
+        self,
+        *,
+        candidate: Mapping[str, Any],
+        score_bundle_row: Mapping[str, Any],
+        score_bundle: Mapping[str, Any],
+        scoring_health_gate: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Fail-closed divert: record the quarantine, withhold promotion.
+
+        The signed score bundle and the scored evaluation event are already
+        written (the measurement is preserved as evidence), but a bundle whose
+        scoring health violated the gate thresholds must not drive promotion.
+        The recovery reconcile requeues quarantined candidates for a clean
+        rescore once providers are healthy again.
+        """
+        candidate_parent = str(candidate.get("parent_artifact_hash") or score_bundle.get("parent_artifact_hash") or "")
+        await create_candidate_promotion_event(
+            candidate_id=str(candidate["candidate_id"]),
+            source_score_bundle_id=str(score_bundle_row.get("score_bundle_id") or ""),
+            event_type="scoring_health_quarantined",
+            promotion_status="rejected",
+            active_parent_artifact_hash=candidate_parent,
+            candidate_parent_artifact_hash=candidate_parent,
+            rolling_window_hash=str(score_bundle.get("icp_set_hash") or ""),
+            improvement_points=0.0,
+            threshold_points=float(self.config.improvement_threshold_points),
+            worker_ref=self.worker_ref,
+            event_doc={
+                "reason": "scoring_health_gate_violation",
+                "decision_path": "scoring_health_quarantined",
+                "scoring_health_gate": dict(scoring_health_gate),
+                "candidate_kind": str(candidate.get("candidate_kind") or ""),
+                "serving_model_version": _event_serving_model_version(score_bundle),
+            },
+        )
+        logger.warning(
+            "research_lab_candidate_scoring_health_quarantined candidate_id=%s violations=%s",
+            compact_ref(str(candidate.get("candidate_id") or "")),
+            json.dumps(scoring_health_gate.get("violations") or [])[:400],
+        )
+        return {"status": "scoring_health_quarantined"}
+
     def _scoring_health_gate_result(self, score_bundle: Mapping[str, Any]) -> dict[str, Any]:
         health = score_bundle.get("scoring_health") if isinstance(score_bundle.get("scoring_health"), Mapping) else {}
         thresholds = {
@@ -5868,12 +5988,18 @@ class ResearchLabGatewayScoringWorker:
                 }
             )
         configured_enabled = bool(self.config.scoring_health_gate_enabled)
+        would_quarantine = bool(violations)
+        # Fail-closed: when the gate is enabled, threshold violations divert
+        # the candidate to quarantine (score recorded, promotion withheld,
+        # rescored after providers recover) instead of treating a degraded
+        # measurement as an authoritative result.
+        decision = "quarantine" if configured_enabled and would_quarantine else "observe_only"
         return {
             "schema_version": "1.0",
-            "enabled": False,
+            "enabled": configured_enabled,
             "configured_enabled": configured_enabled,
-            "decision": "observe_only",
-            "would_quarantine": bool(violations),
+            "decision": decision,
+            "would_quarantine": would_quarantine,
             "violations": violations,
             "thresholds": {key: round(float(value), 6) for key, value in thresholds.items()},
             "observed": {key: round(float(value), 6) for key, value in observed.items()},
@@ -6114,11 +6240,22 @@ class ResearchLabGatewayScoringWorker:
                 compact_ref(score_bundle_id),
             )
             return None
-        result = await self._maybe_promote_scored_candidate(
-            candidate=candidate,
-            score_bundle_row=bundle_row,
-            score_bundle=dict(score_bundle),
-        )
+        redrive_health_gate = self._scoring_health_gate_result(dict(score_bundle))
+        if redrive_health_gate.get("decision") == "quarantine":
+            # Fail-closed also on re-driven stored bundles: a measurement that
+            # violated the health gate must not promote from the redrive path.
+            result = await self._record_scoring_health_quarantined(
+                candidate=candidate,
+                score_bundle_row=bundle_row,
+                score_bundle=dict(score_bundle),
+                scoring_health_gate=redrive_health_gate,
+            )
+        else:
+            result = await self._maybe_promote_scored_candidate(
+                candidate=candidate,
+                score_bundle_row=bundle_row,
+                score_bundle=dict(score_bundle),
+            )
         if str(result.get("status") or "") == "stale_parent_needs_rescore":
             # Mirror _score_candidate's post-promotion handling: the champion
             # moved while the candidate was held, so queue the rebase (deduped)
@@ -8393,19 +8530,13 @@ class ResearchLabGatewayScoringWorker:
                 baseline_health["day_jump_points"] = round(day_jump_points, 4)
             if self._active_baseline_context is not None:
                 self._active_baseline_context["baseline_health"] = dict(baseline_health)
-            max_day_jump = _baseline_max_day_jump_points()
-            if (
-                max_day_jump is not None
-                and day_jump_points is not None
-                and abs(day_jump_points) > max_day_jump
-            ):
-                raise BaselineHealthGateFailure(
-                    "baseline_day_over_day_jump_gate_failed: "
-                    f"jump={day_jump_points:+.4f} max=±{max_day_jump} "
-                    f"aggregate={aggregate_score:.4f}; "
-                    "refusing to record this run as the day's benchmark reference",
-                    baseline_health={**baseline_health, "gate_passed": False},
-                )
+            _enforce_baseline_publication_gates(
+                baseline_health=baseline_health,
+                aggregate_score=aggregate_score,
+                day_jump_points=day_jump_points,
+                health_gate_enforced=bool(self.config.baseline_health_gate_enforced),
+                max_day_jump=_baseline_max_day_jump_points(),
+            )
         except Exception as exc:
             await _stop_baseline_telemetry_heartbeat()
             await create_scoring_dispatch_event(

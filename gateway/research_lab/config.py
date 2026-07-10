@@ -384,15 +384,24 @@ class ResearchLabGatewayConfig:
     scoring_worker_retryable_failure_retry_seconds: int = 300
     private_model_docker_global_proxy_enabled: bool = False
     scoring_worker_allow_partial_icp_window: bool = False
-    # Scoring health is audit metadata only. Promotion is score-only against the
-    # stored daily baseline; provider/runtime health must not veto champions.
-    scoring_health_gate_enabled: bool = False
+    # Fail-closed scoring: when the gate is enabled, a measurement whose
+    # provider/runtime health violates the thresholds below quarantines the
+    # candidate (score recorded, promotion withheld, rescored after providers
+    # recover) instead of standing as an authoritative result. Zero-company
+    # thresholds default to 1.0 (never violate) because an empty result is a
+    # legitimate model outcome, not a measurement failure — operators can
+    # tighten them explicitly.
+    scoring_health_gate_enabled: bool = True
     scoring_health_max_reference_runtime_failure_rate: float = 0.25
     scoring_health_max_candidate_runtime_failure_rate: float = 0.25
-    scoring_health_max_reference_zero_company_rate: float = 0.50
-    scoring_health_max_candidate_zero_company_rate: float = 0.50
+    scoring_health_max_reference_zero_company_rate: float = 1.0
+    scoring_health_max_candidate_zero_company_rate: float = 1.0
     scoring_health_max_provider_error_rate: float = 0.10
     scoring_health_max_timeout_rate: float = 0.10
+    # Refuse to publish a daily baseline whose own health gate failed (too
+    # many unresolved provider-error ICPs after retries). A degraded baseline
+    # must not become the promotion reference.
+    baseline_health_gate_enforced: bool = True
     # Additive execution telemetry for both daily baselines and authoritative
     # candidate scoring. Disabled until migration 83 is applied.
     scoring_telemetry_v2_enabled: bool = False
@@ -750,7 +759,8 @@ class ResearchLabGatewayConfig:
                 "RESEARCH_LAB_SCORING_ALLOW_PARTIAL_ICP_WINDOW",
                 "false",
             ),
-            scoring_health_gate_enabled=_truthy("RESEARCH_LAB_SCORING_HEALTH_GATE_ENABLED", "false"),
+            scoring_health_gate_enabled=_truthy("RESEARCH_LAB_SCORING_HEALTH_GATE_ENABLED", "true"),
+            baseline_health_gate_enforced=_truthy("RESEARCH_LAB_BASELINE_HEALTH_GATE_ENFORCED", "true"),
             scoring_health_max_reference_runtime_failure_rate=min(
                 1.0,
                 max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_REFERENCE_RUNTIME_FAILURE_RATE", 0.25)),
@@ -761,11 +771,11 @@ class ResearchLabGatewayConfig:
             ),
             scoring_health_max_reference_zero_company_rate=min(
                 1.0,
-                max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_REFERENCE_ZERO_COMPANY_RATE", 0.50)),
+                max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_REFERENCE_ZERO_COMPANY_RATE", 1.0)),
             ),
             scoring_health_max_candidate_zero_company_rate=min(
                 1.0,
-                max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_CANDIDATE_ZERO_COMPANY_RATE", 0.50)),
+                max(0.0, _float("RESEARCH_LAB_SCORING_HEALTH_MAX_CANDIDATE_ZERO_COMPANY_RATE", 1.0)),
             ),
             scoring_health_max_provider_error_rate=min(
                 1.0,
@@ -1572,6 +1582,7 @@ class ResearchLabGatewayConfig:
                     "max_provider_error_rate": self.scoring_health_max_provider_error_rate,
                     "max_timeout_rate": self.scoring_health_max_timeout_rate,
                 },
+                "baseline_health_gate_enforced": self.baseline_health_gate_enforced,
                 "scoring_telemetry_v2_enabled": self.scoring_telemetry_v2_enabled,
                 "private_baseline_rebenchmark_enabled": self.private_baseline_rebenchmark_enabled,
                 "private_baseline_concurrency": self.private_baseline_concurrency,

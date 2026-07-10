@@ -693,7 +693,10 @@ def test_baseline_gate_env_parsing(monkeypatch):
     assert sw._baseline_max_unresolved_icps() == 5
     monkeypatch.setenv("RESEARCH_LAB_BASELINE_MAX_UNRESOLVED_ICPS", "not-a-number")
     assert sw._baseline_max_unresolved_icps() == 2
+    # Enforced by default; explicit "off" disables (fail-closed baseline gate).
     monkeypatch.delenv("RESEARCH_LAB_BASELINE_MAX_DAY_JUMP_POINTS", raising=False)
+    assert sw._baseline_max_day_jump_points() == sw.DEFAULT_BASELINE_MAX_DAY_JUMP_POINTS
+    monkeypatch.setenv("RESEARCH_LAB_BASELINE_MAX_DAY_JUMP_POINTS", "off")
     assert sw._baseline_max_day_jump_points() is None
     monkeypatch.setenv("RESEARCH_LAB_BASELINE_MAX_DAY_JUMP_POINTS", "-4.5")
     assert sw._baseline_max_day_jump_points() == 4.5

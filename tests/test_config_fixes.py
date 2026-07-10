@@ -70,11 +70,15 @@ def test_bug_32_reconciled_contradictions(clean_env):
 
 def test_section_6_4_recommended_defaults(clean_env):
     config = ResearchLabGatewayConfig.from_env()
-    # Score-only promotion (2026-07-02, commit 3aaee73c): scoring health is
-    # audit metadata only — the gate defaults OFF so provider/runtime health
-    # never vetoes champions. The tightened error-rate telemetry remains.
-    assert config.scoring_health_gate_enabled is False
+    # Fail-closed scoring (2026-07-10): the health gate defaults ON —
+    # measurements with critical provider/runtime failures quarantine instead
+    # of standing as authoritative results. Zero-company thresholds default to
+    # 1.0 because empty results are legitimate model outcomes.
+    assert config.scoring_health_gate_enabled is True
+    assert config.baseline_health_gate_enforced is True
     assert config.scoring_health_max_provider_error_rate == pytest.approx(0.10)
+    assert config.scoring_health_max_reference_zero_company_rate == pytest.approx(1.0)
+    assert config.scoring_health_max_candidate_zero_company_rate == pytest.approx(1.0)
     # Draft timeout: 12k-token diffs exceed 90s.
     assert config.auto_research_draft_timeout_seconds == 180
     # Build timeout includes the cold docker pull.

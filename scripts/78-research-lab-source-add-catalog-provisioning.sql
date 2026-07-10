@@ -14,12 +14,32 @@ CREATE INDEX IF NOT EXISTS idx_research_lab_source_catalog_identity
     ON public.research_lab_source_catalog (source_identity_hash)
     WHERE source_identity_hash <> '';
 
-CREATE OR REPLACE VIEW public.research_lab_source_add_submission_current
+-- Rebuild the current view explicitly. On Supabase/PostgREST, replacing a
+-- SELECT * view after ALTER TABLE can leave the exposed schema stale.
+DROP VIEW IF EXISTS public.research_lab_source_add_submission_current;
+
+CREATE VIEW public.research_lab_source_add_submission_current
 WITH (security_invoker = true) AS
 SELECT DISTINCT ON (submission_id)
-    *
+    submission_row_id,
+    submission_id,
+    schema_version,
+    adapter_id,
+    miner_hotkey,
+    stage,
+    seq,
+    measured_trial_yield,
+    submission_doc,
+    created_at,
+    precheck_status,
+    precheck_doc,
+    source_identity_hash
 FROM public.research_lab_source_add_submissions
 ORDER BY submission_id, seq DESC, created_at DESC;
+
+REVOKE ALL ON TABLE public.research_lab_source_add_submission_current FROM anon;
+REVOKE ALL ON TABLE public.research_lab_source_add_submission_current FROM authenticated;
+GRANT SELECT ON TABLE public.research_lab_source_add_submission_current TO service_role;
 
 CREATE TABLE IF NOT EXISTS public.research_lab_source_add_provisioning_events (
     provision_event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -6008,8 +6008,10 @@ class ResearchLabGatewayScoringWorker:
             return 0
         interval = float(_env_int("RESEARCH_LAB_QUARANTINE_RECOVERY_INTERVAL_SECONDS", 300))
         now = time.monotonic()
-        last = getattr(self, "_last_quarantine_recovery_at", 0.0)
-        if now - last < interval:
+        # None sentinel: a 0.0 default would wrongly throttle the first pass
+        # on hosts whose monotonic clock is younger than the interval.
+        last = getattr(self, "_last_quarantine_recovery_at", None)
+        if last is not None and now - last < interval:
             return 0
         self._last_quarantine_recovery_at = now
         max_attempts = _env_int("RESEARCH_LAB_QUARANTINE_RECOVERY_MAX_ATTEMPTS", 2)
@@ -6111,12 +6113,22 @@ class ResearchLabGatewayScoringWorker:
     def _scoring_health_gate_result(self, score_bundle: Mapping[str, Any]) -> dict[str, Any]:
         health = score_bundle.get("scoring_health") if isinstance(score_bundle.get("scoring_health"), Mapping) else {}
         thresholds = {
-            "reference_runtime_failure_rate": self.config.scoring_health_max_reference_runtime_failure_rate,
-            "candidate_runtime_failure_rate": self.config.scoring_health_max_candidate_runtime_failure_rate,
-            "reference_zero_company_rate": self.config.scoring_health_max_reference_zero_company_rate,
-            "candidate_zero_company_rate": self.config.scoring_health_max_candidate_zero_company_rate,
-            "provider_error_rate": self.config.scoring_health_max_provider_error_rate,
-            "timeout_rate": self.config.scoring_health_max_timeout_rate,
+            "reference_runtime_failure_rate": getattr(
+                self.config, "scoring_health_max_reference_runtime_failure_rate", 0.25
+            ),
+            "candidate_runtime_failure_rate": getattr(
+                self.config, "scoring_health_max_candidate_runtime_failure_rate", 0.25
+            ),
+            "reference_zero_company_rate": getattr(
+                self.config, "scoring_health_max_reference_zero_company_rate", 1.0
+            ),
+            "candidate_zero_company_rate": getattr(
+                self.config, "scoring_health_max_candidate_zero_company_rate", 1.0
+            ),
+            "provider_error_rate": getattr(
+                self.config, "scoring_health_max_provider_error_rate", 0.10
+            ),
+            "timeout_rate": getattr(self.config, "scoring_health_max_timeout_rate", 0.10),
         }
         observed = {
             "reference_runtime_failure_rate": _failure_rate_from_success(
@@ -6142,7 +6154,7 @@ class ResearchLabGatewayScoringWorker:
                     "threshold": round(float(threshold), 6),
                 }
             )
-        configured_enabled = bool(self.config.scoring_health_gate_enabled)
+        configured_enabled = bool(getattr(self.config, "scoring_health_gate_enabled", False))
         would_quarantine = bool(violations)
         # Fail-closed: when the gate is enabled, threshold violations divert
         # the candidate to quarantine (score recorded, promotion withheld,

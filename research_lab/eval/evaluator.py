@@ -9,7 +9,7 @@ import inspect
 import logging
 import os
 import re
-from typing import Any, Awaitable, Callable, Mapping, Sequence, Union
+from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence, Union
 
 from .global_scoring_pool import get_global_scoring_pool
 
@@ -60,9 +60,11 @@ TraceSink = Callable[[str, "list[dict[str, Any]]"], Union[Awaitable[Any], Any]]
 # Optional gateway-supplied observer. It is intentionally a callback instead
 # of a gateway import so the open evaluator remains reusable and telemetry
 # cannot become a scoring dependency.
+# NOTE: Optional[...] not PEP 604 `| None` — this alias is evaluated at
+# runtime and the attested scoring workers run Python 3.9.
 ScoringTelemetryHook = Callable[
     [str, Mapping[str, Any]],
-    Union[Awaitable[Mapping[str, Any] | None], Mapping[str, Any] | None],
+    Union[Awaitable[Optional[Mapping[str, Any]]], Optional[Mapping[str, Any]]],
 ]
 AttemptCostSink = Callable[
     [str, "list[dict[str, Any]]", Mapping[str, Any]],

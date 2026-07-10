@@ -138,11 +138,11 @@ MAX_LEADS_PER_EPOCH = int(os.getenv("MAX_LEADS_PER_EPOCH", "50"))
 REDIS_URL = os.getenv("REDIS_URL", None)
 
 # ============================================================
-# Gateway Ed25519 Keypair for Signed Receipts
+# Legacy Gateway Ed25519 Keypair
 # ============================================================
-# Public key is hardcoded here for miners/validators to verify signatures
-# Private key is stored encrypted in gateway/secrets/gateway_private_key.pem
-# Password is in GATEWAY_PRIVATE_KEY_PASSWORD environment variable
+# Retained for compatibility with external callers of gateway.utils.keys.
+# Production receipt integrity uses canonical hashes plus TEE-signed audit
+# events, so gateway startup does not require this legacy PEM or its password.
 
 GATEWAY_PUBLIC_KEY = os.getenv(
     "GATEWAY_PUBLIC_KEY",

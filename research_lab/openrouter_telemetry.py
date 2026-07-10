@@ -24,8 +24,9 @@ Two integration styles:
 * ``record_openrouter_trace`` — a capture-only hook for legacy sites that
   keep their own httpx/requests transport but must stop being invisible.
 
-Local/dev inertness matches the worker recorder: no S3 prefix → one log then
-silent; the P5 capture-health preflight is what makes that loud in prod.
+When the dedicated raw-trace prefix is unset, the destination defaults to the
+private-model manifest's S3 parent, matching the worker recorder. Capture stays
+inert only when neither destination is a valid S3 URI or the KMS key is absent.
 """
 
 from __future__ import annotations
@@ -54,6 +55,11 @@ OPENROUTER_EMBEDDINGS_URL = "https://openrouter.ai/api/v1/embeddings"
 RAW_TRACE_S3_PREFIX_ENV = "RESEARCH_LAB_RAW_TRACE_S3_PREFIX"
 RAW_TRACE_KMS_KEY_ENV = "RESEARCH_LAB_TRACE_KMS_KEY_ID"
 INCLUDE_REASONING_ENV = "RESEARCH_LAB_LLM_INCLUDE_REASONING"
+PRIVATE_MODEL_MANIFEST_URI_ENV = "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI"
+DEFAULT_PRIVATE_MODEL_MANIFEST_URI = (
+    "s3://leadpoet-private-model-artifacts-493765492819/"
+    "research-lab/sourcing-model/current.json"
+)
 
 _SECRET_PATTERNS = (
     re.compile(r"sk-or-[A-Za-z0-9\-_]+"),
@@ -61,6 +67,25 @@ _SECRET_PATTERNS = (
     re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]{16,}=*"),
 )
 _SECRET_KEY_NAMES = {"authorization", "api_key", "apikey", "x-api-key"}
+
+
+def resolved_raw_trace_s3_prefix() -> str:
+    """Resolve an explicit override or the private-model manifest's S3 parent."""
+
+    configured = str(os.getenv(RAW_TRACE_S3_PREFIX_ENV, "") or "").strip().rstrip("/")
+    if configured:
+        return configured
+
+    manifest_uri = str(
+        os.getenv(PRIVATE_MODEL_MANIFEST_URI_ENV, DEFAULT_PRIVATE_MODEL_MANIFEST_URI) or ""
+    ).strip()
+    if not manifest_uri.startswith("s3://"):
+        return ""
+    bucket, _sep, key = manifest_uri[5:].partition("/")
+    if not bucket:
+        return ""
+    parent = key.rsplit("/", 1)[0] if "/" in key else ""
+    return f"s3://{bucket}/{parent}".rstrip("/")
 
 
 def sha256_text(value: str) -> str:
@@ -155,10 +180,11 @@ class _TelemetryTraceUploader:
         try:
             if self._disabled:
                 return None
-            prefix = str(os.getenv(RAW_TRACE_S3_PREFIX_ENV, "")).strip().rstrip("/")
+            prefix = resolved_raw_trace_s3_prefix()
             if not prefix.startswith("s3://"):
                 self._warn_once(
-                    f"set {RAW_TRACE_S3_PREFIX_ENV}=s3://bucket/prefix to capture "
+                    f"set {PRIVATE_MODEL_MANIFEST_URI_ENV}=s3://bucket/path/current.json "
+                    f"or override {RAW_TRACE_S3_PREFIX_ENV}=s3://bucket/prefix to capture "
                     "legacy-channel OpenRouter traces"
                 )
                 return None

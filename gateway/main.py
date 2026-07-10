@@ -131,6 +131,8 @@ async def lifespan(app: FastAPI):
             print(f"⚠️  Could not generate attestation: {att_err}")
         
         print("✅ Event signing ENABLED (TEE-signed transparency log)")
+        print("✅ Receipt integrity ENABLED (canonical hashes + TEE-signed audit events)")
+        print("   Legacy static gateway PEM is not required by the active receipt path")
     except Exception as e:
         print(f"❌ CRITICAL ERROR initializing enclave keypair: {e}")
         print("   Event signing will FAIL!")
@@ -144,26 +146,6 @@ async def lifespan(app: FastAPI):
     from gateway.utils.loop_watchdog import start_loop_watchdog
     start_loop_watchdog(asyncio.get_running_loop())
 
-    # Load gateway keypair for signed receipts
-    print("="*80)
-    print("🔐 LOADING GATEWAY KEYPAIR")
-    print("="*80)
-    try:
-        from gateway.utils.keys import load_gateway_keypair
-        success = load_gateway_keypair()
-        if success:
-            print("✅ Gateway keypair loaded successfully")
-            print("✅ Signed receipts ENABLED")
-        else:
-            print("⚠️  WARNING: Gateway keypair failed to load")
-            print("   Signed receipts will be DISABLED")
-            print("   Receipts will not include gateway_signature field")
-    except Exception as e:
-        print(f"❌ ERROR loading gateway keypair: {e}")
-        print("   Signed receipts will be DISABLED")
-        print("   Gateway will continue but cannot sign receipts")
-    print("="*80 + "\n")
-    
     # ════════════════════════════════════════════════════════════════
     # ASYNC SUBTENSOR: Create single instance for entire lifecycle
     # ════════════════════════════════════════════════════════════════

@@ -166,13 +166,41 @@ def test_streaming_refused_loudly():
         _call(extra_body={"stream": True}, opener=_opener([]))
 
 
-def test_no_s3_prefix_is_inert_but_call_succeeds(fake_boto3, monkeypatch):
+def test_no_s3_prefix_falls_back_to_private_model_manifest(fake_boto3, monkeypatch):
     monkeypatch.delenv(ot.RAW_TRACE_S3_PREFIX_ENV, raising=False)
+    monkeypatch.setenv(
+        ot.PRIVATE_MODEL_MANIFEST_URI_ENV,
+        "s3://artifact-bucket/research-lab/sourcing-model/current.json",
+    )
+    monkeypatch.setenv(ot.RAW_TRACE_KMS_KEY_ENV, "kms-key-9")
     result = _call(opener=_opener([_chat_response()]))
+    ot.flush_telemetry_traces()
     assert result.content == '{"ok": true}'
-    assert result.raw_trace_ref is None
-    assert result.provider_usage["reasoning_capture"]["storage_state"] == "metadata_only"
-    assert fake_boto3 == []
+    assert result.raw_trace_ref is not None
+    assert result.raw_trace_ref["s3_ref"].startswith(
+        "s3://artifact-bucket/research-lab/sourcing-model/telemetry/"
+    )
+    assert result.provider_usage["reasoning_capture"]["storage_state"] == "raw_trace_ref"
+    assert len(fake_boto3) == 1
+
+
+def test_raw_trace_prefix_has_production_manifest_default(monkeypatch):
+    monkeypatch.delenv(ot.RAW_TRACE_S3_PREFIX_ENV, raising=False)
+    monkeypatch.delenv(ot.PRIVATE_MODEL_MANIFEST_URI_ENV, raising=False)
+
+    assert ot.resolved_raw_trace_s3_prefix() == (
+        "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model"
+    )
+
+
+def test_explicit_raw_trace_prefix_overrides_manifest(monkeypatch):
+    monkeypatch.setenv(ot.RAW_TRACE_S3_PREFIX_ENV, "s3://explicit-bucket/raw/")
+    monkeypatch.setenv(
+        ot.PRIVATE_MODEL_MANIFEST_URI_ENV,
+        "s3://artifact-bucket/research-lab/sourcing-model/current.json",
+    )
+
+    assert ot.resolved_raw_trace_s3_prefix() == "s3://explicit-bucket/raw"
 
 
 def test_s3_prefix_without_kms_does_not_create_dangling_pointer(fake_boto3, monkeypatch):

@@ -91,6 +91,7 @@ from leadpoet_canonical.weight_computation import (
     research_lab_uid_weights_from_allocation as canonical_research_lab_uid_weights_from_allocation,
     weight_config_hash as canonical_weight_config_hash,
 )
+from leadpoet_verifier.economics import DEFAULT_RESEARCH_LAB_EMISSION_PERCENT
 
 # ════════════════════════════════════════════════════════════════════════════
 # TEE SIGNING IMPORTS (Phase 2.3 - Validator TEE Weight Submission)
@@ -3962,7 +3963,8 @@ class Validator(BaseValidatorNeuron):
             # ║                                                                  ║
             # ║ Research Lab is reserved from the verified allocation bundle.   ║
             # ║ Fulfillment receives the residual after Research Lab and the    ║
-            # ║ leaderboard. Default split is 20 / 70.5 / 9.5.                  ║
+            # ║ leaderboard. The Lab default comes from shared economics       ║
+            # ║ policy; fulfillment remains the calculated residual.           ║
             # ║                                                                  ║
             # ║ History: 322f287d (2026-05-15) zeroed the leaderboard while     ║
             # ║ raising the per-epoch pool to 95%, mistakenly interpreting      ║
@@ -3984,7 +3986,8 @@ class Validator(BaseValidatorNeuron):
             # feature of the fulfillment track — it is NEVER toggled off; only
             # the split ratio between per-epoch and weekly is tunable here.
             RESEARCH_LAB_FALLBACK_SHARE = _env_percent_share(
-                "RESEARCH_LAB_EMISSION_PERCENT", 20.0,
+                "RESEARCH_LAB_EMISSION_PERCENT",
+                float(DEFAULT_RESEARCH_LAB_EMISSION_PERCENT),
             )
             RESEARCH_LAB_SHARE = _doc_percent_share(
                 research_lab_allocation_doc,

@@ -14,6 +14,7 @@ from gateway.research_lab.config import (
     MIN_IMPROVEMENT_THRESHOLD_POINTS,
     ResearchLabGatewayConfig,
 )
+from leadpoet_verifier.economics import DEFAULT_RESEARCH_LAB_EMISSION_PERCENT
 
 
 # Every env var the config reads is either RESEARCH_LAB_*-prefixed, a
@@ -154,7 +155,9 @@ def test_source_add_status_defaults_enabled_and_env_gated(clean_env):
 
 def test_research_lab_reward_allocation_defaults(clean_env):
     config = ResearchLabGatewayConfig.from_env()
-    assert config.lab_emission_percent == pytest.approx(30.0)
+    assert config.lab_emission_percent == pytest.approx(
+        float(DEFAULT_RESEARCH_LAB_EMISSION_PERCENT)
+    )
     assert config.fulfillment_emission_percent == pytest.approx(60.5)
     assert config.fulfillment_leaderboard_emission_percent == pytest.approx(9.5)
     assert config.lab_champion_min_alpha_percent == pytest.approx(7.0)

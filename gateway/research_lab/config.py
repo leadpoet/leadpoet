@@ -15,7 +15,10 @@ import logging
 import os
 from typing import Any, Mapping, Optional
 
-from leadpoet_verifier.economics import DEFAULT_RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO
+from leadpoet_verifier.economics import (
+    DEFAULT_RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO,
+    DEFAULT_RESEARCH_LAB_EMISSION_PERCENT,
+)
 from .ticket_lifecycle import UNPAID_TICKET_TTL_SECONDS
 
 
@@ -470,7 +473,7 @@ class ResearchLabGatewayConfig:
     reimbursement_dynamic_alpha_price_enabled: bool = True
     reimbursement_require_live_alpha_price: bool = False
     reimbursement_miner_alpha_per_epoch: float = 147.6
-    lab_emission_percent: float = 30.0
+    lab_emission_percent: float = float(DEFAULT_RESEARCH_LAB_EMISSION_PERCENT)
     fulfillment_emission_percent: float = 60.5
     fulfillment_leaderboard_emission_percent: float = 9.5
     lab_reward_epochs: int = 20
@@ -991,7 +994,13 @@ class ResearchLabGatewayConfig:
                 0.000001,
                 _float("RESEARCH_LAB_REIMBURSEMENT_MINER_ALPHA_PER_EPOCH", 147.6),
             ),
-            lab_emission_percent=max(0.0, _float("RESEARCH_LAB_EMISSION_PERCENT", 30.0)),
+            lab_emission_percent=max(
+                0.0,
+                _float(
+                    "RESEARCH_LAB_EMISSION_PERCENT",
+                    float(DEFAULT_RESEARCH_LAB_EMISSION_PERCENT),
+                ),
+            ),
             fulfillment_emission_percent=max(0.0, _float("RESEARCH_LAB_FULFILLMENT_EMISSION_PERCENT", 60.5)),
             fulfillment_leaderboard_emission_percent=max(
                 0.0,

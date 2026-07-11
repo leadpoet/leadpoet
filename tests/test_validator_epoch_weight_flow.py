@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR_SOURCE = ROOT / "neurons" / "validator.py"
 
@@ -11,6 +10,18 @@ def _between(source: str, start: str, end: str) -> str:
     start_index = source.index(start)
     end_index = source.index(end, start_index)
     return source[start_index:end_index]
+
+
+def test_research_lab_fallback_uses_shared_allocation_default():
+    source = VALIDATOR_SOURCE.read_text(encoding="utf-8")
+    snippet = _between(
+        source,
+        "RESEARCH_LAB_FALLBACK_SHARE = _env_percent_share(",
+        "RESEARCH_LAB_SHARE = _doc_percent_share(",
+    )
+
+    assert "DEFAULT_RESEARCH_LAB_EMISSION_PERCENT" in snippet
+    assert "20.0" not in snippet
 
 
 def test_already_processed_epoch_still_checks_weight_submission():

@@ -63,6 +63,67 @@ def _apply_sync_timeout(client: Client) -> Client:
     return client
 
 
+# Errors that mean the pooled connection died under us (Supabase's edge sends
+# HTTP/2 GOAWAY / resets idle connections; httpx surfaces the reuse attempt as
+# one of these). The request was terminated at the transport layer, so one
+# retry on a fresh connection is safe and turns an intermittent API 500 into
+# a served request. Timeouts and HTTP status codes are deliberately excluded:
+# those can mean the server already did the work, and re-firing non-idempotent
+# writes there would be worse than failing.
+_POOL_TERMINATION_ERRORS = (
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.ConnectError,
+)
+
+
+def _install_sync_send_retry(client: Client) -> Client:
+    """Retry a sync postgrest request once when the pooled connection died."""
+    try:
+        session = client.postgrest.session
+        original_send = session.send
+
+        def send_with_retry(request, **kwargs):
+            try:
+                return original_send(request, **kwargs)
+            except _POOL_TERMINATION_ERRORS as exc:
+                logger.warning(
+                    "supabase_http_send_retry transport=sync error=%s path=%s",
+                    type(exc).__name__,
+                    request.url.path,
+                )
+                return original_send(request, **kwargs)
+
+        session.send = send_with_retry
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Could not install Supabase sync send retry: %s", e)
+    return client
+
+
+def _install_async_send_retry(client: AsyncClient) -> AsyncClient:
+    """Retry an async postgrest request once when the pooled connection died."""
+    try:
+        session = client.postgrest.session
+        original_send = session.send
+
+        async def send_with_retry(request, **kwargs):
+            try:
+                return await original_send(request, **kwargs)
+            except _POOL_TERMINATION_ERRORS as exc:
+                logger.warning(
+                    "supabase_http_send_retry transport=async error=%s path=%s",
+                    type(exc).__name__,
+                    request.url.path,
+                )
+                return await original_send(request, **kwargs)
+
+        session.send = send_with_retry
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Could not install Supabase async send retry: %s", e)
+    return client
+
+
 # ============================================================
 # Sync Singleton Clients (lazily initialized)
 # ============================================================
@@ -86,9 +147,9 @@ def get_read_client() -> Client:
         logger.warning("⚠️ SUPABASE_ANON_KEY not configured - using SERVICE_ROLE_KEY for reads")
         if not SUPABASE_SERVICE_ROLE_KEY:
             raise RuntimeError("No Supabase key configured")
-        _read_client = _apply_sync_timeout(create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY))
+        _read_client = _install_sync_send_retry(_apply_sync_timeout(create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)))
     else:
-        _read_client = _apply_sync_timeout(create_client(SUPABASE_URL, SUPABASE_ANON_KEY))
+        _read_client = _install_sync_send_retry(_apply_sync_timeout(create_client(SUPABASE_URL, SUPABASE_ANON_KEY)))
         logger.info("✅ Supabase READ client initialized (ANON_KEY)")
     
     return _read_client
@@ -109,7 +170,7 @@ def get_write_client() -> Client:
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY not configured")
     
-    _write_client = _apply_sync_timeout(create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY))
+    _write_client = _install_sync_send_retry(_apply_sync_timeout(create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)))
     logger.info("✅ Supabase WRITE client initialized (SERVICE_ROLE_KEY)")
     
     return _write_client
@@ -144,9 +205,9 @@ async def get_async_read_client() -> AsyncClient:
             logger.warning("⚠️ SUPABASE_ANON_KEY not configured - using SERVICE_ROLE_KEY for async reads")
             if not SUPABASE_SERVICE_ROLE_KEY:
                 raise RuntimeError("No Supabase key configured")
-            _async_read_client = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+            _async_read_client = _install_async_send_retry(await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY))
         else:
-            _async_read_client = await create_async_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+            _async_read_client = _install_async_send_retry(await create_async_client(SUPABASE_URL, SUPABASE_ANON_KEY))
             logger.info("✅ Async Supabase READ client initialized (ANON_KEY)")
 
         return _async_read_client
@@ -172,7 +233,7 @@ async def get_async_write_client() -> AsyncClient:
         if not SUPABASE_SERVICE_ROLE_KEY:
             raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY not configured")
 
-        _async_write_client = await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        _async_write_client = _install_async_send_retry(await create_async_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY))
         logger.info("✅ Async Supabase WRITE client initialized (SERVICE_ROLE_KEY)")
 
         return _async_write_client

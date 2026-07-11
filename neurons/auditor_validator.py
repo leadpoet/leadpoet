@@ -25,6 +25,7 @@ USAGE:
 import os
 import sys
 import argparse
+import time
 
 # ════════════════════════════════════════════════════════════════════════════
 # AUTO-UPDATER: Automatically updates entire repo from GitHub for auditors
@@ -1099,6 +1100,41 @@ class AuditorValidator:
     # Weight Submission
     # ═══════════════════════════════════════════════════════════════════════════
     
+    def _set_weights_until_epoch_end(
+        self,
+        *,
+        epoch_id: int,
+        uids,
+        weights,
+    ) -> bool:
+        """Retry an explicitly rejected chain submission within one epoch."""
+
+        attempt = 0
+        while True:
+            attempt += 1
+            success, message = self.subtensor.set_weights(
+                netuid=self.config.netuid,
+                wallet=self.wallet,
+                uids=uids,
+                weights=weights,
+                wait_for_finalization=True,
+            )
+            if success:
+                return True
+
+            print(
+                f"❌ Bittensor rejected weight submission attempt {attempt}: "
+                f"{message}"
+            )
+            time.sleep(12)
+            current_block = self.subtensor.get_current_block()
+            if current_block // EPOCH_LENGTH != epoch_id:
+                print(
+                    f"⏹️ Epoch {epoch_id} ended before the weight submission "
+                    "was accepted"
+                )
+                return False
+
     def submit_burn_weights_to_uid0(self, epoch_id: int, reason: str) -> bool:
         """
         Submit 100% weight to UID 0 (burn weights).
@@ -1125,12 +1161,10 @@ class AuditorValidator:
             uids = [0]
             weights_floats = [1.0]  # 100% to UID 0
             
-            success = self.subtensor.set_weights(
-                netuid=self.config.netuid,
-                wallet=self.wallet,
+            success = self._set_weights_until_epoch_end(
+                epoch_id=epoch_id,
                 uids=uids,
                 weights=weights_floats,
-                wait_for_finalization=True,
             )
             
             if success:
@@ -1185,12 +1219,10 @@ class AuditorValidator:
                 print(f"      UID {uid} {label}: {pct:.2f}%")
             print(f"   Total: {sum(weights_floats) / total_weight * 100:.2f}%")
             
-            success = self.subtensor.set_weights(
-                netuid=self.config.netuid,
-                wallet=self.wallet,
+            success = self._set_weights_until_epoch_end(
+                epoch_id=epoch_id,
                 uids=uids,
                 weights=weights_floats,
-                wait_for_finalization=True,  # CRITICAL: Wait for finalization
             )
             
             if success:
@@ -1199,7 +1231,6 @@ class AuditorValidator:
                 
                 # Verify submission landed on chain
                 print(f"   🔍 Verifying submission landed on chain...")
-                import time
                 time.sleep(2)  # Brief wait for chain propagation
                 
                 try:

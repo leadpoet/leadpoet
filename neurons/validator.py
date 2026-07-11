@@ -3813,6 +3813,41 @@ class Validator(BaseValidatorNeuron):
                 )
             return {"abort_chain_submission": False, "verified": False, "errors": [str(exc)]}
 
+    async def _set_weights_until_epoch_end(
+        self,
+        *,
+        epoch_id: int,
+        uids,
+        weights,
+    ) -> bool:
+        """Retry an explicitly rejected chain submission within one epoch."""
+
+        attempt = 0
+        while True:
+            attempt += 1
+            success, message = self.subtensor.set_weights(
+                netuid=self.config.netuid,
+                wallet=self.wallet,
+                uids=uids,
+                weights=weights,
+                wait_for_finalization=True,
+            )
+            if success:
+                return True
+
+            print(
+                f"   ❌ Bittensor rejected weight submission attempt {attempt}: "
+                f"{message}"
+            )
+            await asyncio.sleep(12)
+            current_block = await self.get_current_block_async()
+            if current_block // 360 != epoch_id:
+                print(
+                    f"   ⏹️ Epoch {epoch_id} ended before the weight submission "
+                    "was accepted"
+                )
+                return False
+
     async def submit_weights_at_epoch_end(self):
         """
         Submit accumulated weights to Bittensor chain at end of epoch (block 345+).
@@ -4153,12 +4188,10 @@ class Validator(BaseValidatorNeuron):
                                 print("   ❌ Required v2 gateway publication failed; refusing chain submission")
                                 return False
                     
-                    result = self.subtensor.set_weights(
-                        netuid=self.config.netuid,
-                        wallet=self.wallet,
+                    result = await self._set_weights_until_epoch_end(
+                        epoch_id=current_epoch,
                         uids=[BURN_TARGET_UID],
                         weights=[1.0],
-                        wait_for_finalization=True
                     )
                     
                     if result:
@@ -4310,12 +4343,10 @@ class Validator(BaseValidatorNeuron):
                             print("   ❌ Required v2 gateway publication failed; refusing chain submission")
                             return False
 
-                result = self.subtensor.set_weights(
-                    netuid=self.config.netuid,
-                    wallet=self.wallet,
+                result = await self._set_weights_until_epoch_end(
+                    epoch_id=current_epoch,
                     uids=[BURN_TARGET_UID],
                     weights=[1.0],
-                    wait_for_finalization=True
                 )
                 
                 if result:
@@ -4720,12 +4751,10 @@ class Validator(BaseValidatorNeuron):
             
             # Submit to Bittensor chain
             print(f"\n📡 Submitting weights to Bittensor chain...")
-            result = self.subtensor.set_weights(
-                netuid=self.config.netuid,
-                wallet=self.wallet,
+            result = await self._set_weights_until_epoch_end(
+                epoch_id=current_epoch,
                 uids=uids,
                 weights=normalized_weights,
-                wait_for_finalization=True
             )
             
             if result:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
+import hmac
 import logging
 import os
 from typing import Any, Mapping
@@ -441,6 +442,16 @@ def _source_add_paid_alpha_to_date_from_snapshots(
 
 
 def _champion_paid_alpha_to_date_from_snapshots(snapshot_rows: list[Mapping[str, Any]]) -> dict[str, float]:
+    """Sum per-epoch obligation credit per champion reward.
+
+    Champions earn the scheduled rate for the full reward window; a
+    single-champion epoch can pay far above schedule from the remaining Lab
+    pool, and that surplus is a bonus — it must not retire the scheduled
+    obligation early (a sole champion once hit its 20-epoch lifetime target
+    in 8 epochs and lost the remaining 12). Each epoch therefore credits at
+    most the entry's scheduled rate against the obligation; entries without
+    a recorded schedule credit their full paid amount.
+    """
     paid_by_reward: dict[str, Decimal] = {}
     for row in snapshot_rows:
         allocation_doc = row.get("allocation_doc") or {}
@@ -456,9 +467,18 @@ def _champion_paid_alpha_to_date_from_snapshots(snapshot_rows: list[Mapping[str,
                 source_id = str(allocation.get("source_id") or allocation.get("champion_reward_id") or "")
                 if not source_id:
                     continue
-                paid_by_reward[source_id] = paid_by_reward.get(source_id, Decimal("0")) + _decimal(
-                    allocation.get("paid_alpha_percent") or 0
+                paid = _decimal(allocation.get("paid_alpha_percent") or 0)
+                scheduled_raw = (
+                    allocation.get("base_desired_alpha_percent")
+                    if allocation.get("base_desired_alpha_percent") is not None
+                    else allocation.get("intended_alpha_percent")
                 )
+                credit = paid
+                if scheduled_raw is not None:
+                    scheduled = _decimal(scheduled_raw)
+                    if scheduled > 0:
+                        credit = min(paid, scheduled)
+                paid_by_reward[source_id] = paid_by_reward.get(source_id, Decimal("0")) + credit
     return {reward_id: _rate_float(paid) for reward_id, paid in paid_by_reward.items()}
 
 
@@ -493,6 +513,39 @@ def _champion_replay_obligation(
         "current_epoch_desired_alpha_percent": _rate_float(min(desired, remaining)),
         "replay_status": "extended_replay" if int(epoch) >= nominal_end_epoch else "nominal_window",
     }
+
+
+def allocation_snapshot_persistence_decision(
+    *,
+    current_epoch: int,
+    requested_epoch: int,
+    provided_key: str | None,
+    configured_key: str,
+    live_allocation_enabled: bool,
+) -> str:
+    """Decide how an allocation GET may behave for one request.
+
+    Returns one of:
+      - "future_epoch": reject — snapshots must never exist ahead of time
+        (anonymous GETs once pre-created active rows four epochs ahead,
+        contaminating paid-to-date accounting).
+      - "read_only": compute without persisting (anonymous callers).
+      - "key_not_configured" / "invalid_key": authentication failures.
+      - "persist": authenticated validator persisting the current epoch.
+      - "authenticated_read_only": valid key but a past epoch — recomputing
+        history with today's obligations must not overwrite the record.
+    """
+    if int(requested_epoch) > int(current_epoch):
+        return "future_epoch"
+    if provided_key is None:
+        return "read_only"
+    if not configured_key:
+        return "key_not_configured"
+    if not hmac.compare_digest(str(provided_key), str(configured_key)):
+        return "invalid_key"
+    if live_allocation_enabled and int(requested_epoch) == int(current_epoch):
+        return "persist"
+    return "authenticated_read_only"
 
 
 def _epoch_active(row: Mapping[str, Any], epoch: int) -> bool:

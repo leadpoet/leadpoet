@@ -408,11 +408,15 @@ def fetch_research_lab_allocation_bundle(
     *,
     timeout_seconds: int = 20,
 ) -> dict[str, Any]:
-    """Fetch the live Research Lab allocation bundle for an epoch."""
+    """Fetch the live Research Lab allocation bundle for an epoch.
+
+    The internal key authenticates the validator so the gateway persists the
+    submission-time snapshot; anonymous callers get a read-only computation.
+    """
     base = gateway_url.rstrip("/")
     request = Request(
         f"{base}/research-lab/allocations/live/{int(epoch)}",
-        headers=_request_headers(),
+        headers=_request_headers(include_internal_key=True),
         method="GET",
     )
     with urlopen(request, timeout=timeout_seconds) as response:
@@ -430,7 +434,7 @@ def fetch_research_lab_attested_allocation_bundle(
     base = gateway_url.rstrip("/")
     request = Request(
         f"{base}/research-lab/allocations/attested/{int(epoch)}",
-        headers=_request_headers(),
+        headers=_request_headers(include_internal_key=True),
         method="GET",
     )
     with urlopen(request, timeout=timeout_seconds) as response:

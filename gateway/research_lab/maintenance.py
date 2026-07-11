@@ -1681,3 +1681,212 @@ def _is_queue_capacity_conflict(exc: BaseException) -> bool:
         or "research_lab_queue_hotkey_conflict" in message
         or "23505" in message
     )
+
+
+async def reconcile_paused_loop_projections(
+    *,
+    run_id: str | None = None,
+    limit: int = 50,
+    reason: str = "paused_queue_reconciler",
+    actor_ref: str | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Align loop projections with queue rows that are canonically paused.
+
+    Cooperative pauses (operator pause, blocked_for_credit) land on the queue
+    row, but historically the loop event schema had no paused state, so the
+    loop projection kept displaying those runs as running. Requires migration
+    88 (loop_paused/loop_resumed event types); an insert rejected by the
+    events constraint is reported per-run instead of failing the sweep.
+    """
+    queue_rows = await select_all(
+        "research_loop_run_queue_current",
+        columns=(
+            "run_id,ticket_id,current_queue_status,current_reason,current_event_seq,"
+            "current_event_hash,current_status_at,worker_ref"
+        ),
+        filters=(("current_queue_status", "paused"),),
+        order_by=(("current_status_at", True),),
+        max_rows=max(1, int(limit or 50) * 5),
+    )
+    planned: list[dict[str, Any]] = []
+    for qrow in queue_rows:
+        current_run_id = str(qrow.get("run_id") or "")
+        if run_id and current_run_id != str(run_id):
+            continue
+        loop = await select_one(
+            "research_lab_auto_research_loop_current",
+            columns=(
+                "run_id,ticket_id,receipt_id,current_loop_status,current_event_type,"
+                "current_event_seq,current_event_hash,current_status_at"
+            ),
+            filters=(("run_id", current_run_id),),
+        )
+        loop_status = str(loop.get("current_loop_status") or "") if loop else ""
+        if loop_status != "running":
+            continue
+        planned.append(
+            {
+                "run_id": current_run_id,
+                "ticket_id": str(qrow.get("ticket_id") or ""),
+                "queue_status": "paused",
+                "queue_reason": str(qrow.get("current_reason") or ""),
+                "loop_status": loop_status,
+                "loop_status_target": "paused",
+                "queue_event_hash": qrow.get("current_event_hash"),
+                "loop_event_hash": loop.get("current_event_hash") if loop else None,
+            }
+        )
+        if len(planned) >= max(1, int(limit or 50)):
+            break
+    if dry_run:
+        return {"ok": True, "dry_run": True, "action": "reconcile-paused-loop-projections", "planned": planned}
+
+    repaired: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for plan in planned:
+        event_doc = {
+            "schema_version": "1.0",
+            "source": "paused_queue_reconciler",
+            "operator_reason": reason,
+            "actor_ref": actor_ref or default_actor_ref(),
+            "queue_status": plan["queue_status"],
+            "queue_reason": plan["queue_reason"],
+            "previous_loop_status": plan["loop_status"],
+            "queue_event_hash": plan["queue_event_hash"],
+            "previous_loop_event_hash": plan["loop_event_hash"],
+        }
+        try:
+            event = await create_auto_research_loop_event(
+                run_id=str(plan["run_id"]),
+                ticket_id=str(plan["ticket_id"]),
+                receipt_id=None,
+                event_type="loop_paused",
+                loop_status="paused",
+                worker_ref=actor_ref or default_actor_ref(),
+                provider_usage=[],
+                event_doc=event_doc,
+            )
+        except Exception as exc:  # noqa: BLE001 - report per-run, keep sweeping
+            failed.append({**plan, "error": str(exc)[:200]})
+            continue
+        await safe_project_public_loop_activity(
+            str(plan["ticket_id"]),
+            source_ref=f"paused_queue_reconciler:{plan['run_id']}",
+            reason=reason,
+            force=True,
+        )
+        repaired.append({**plan, "event_seq": event.get("seq"), "event_hash": event.get("anchored_hash")})
+    return {
+        "ok": not failed,
+        "dry_run": False,
+        "action": "reconcile-paused-loop-projections",
+        "planned_count": len(planned),
+        "repaired_count": len(repaired),
+        "repaired": repaired,
+        "failed": failed,
+    }
+
+
+async def reconcile_champion_reward_statuses(
+    *,
+    epoch: int | None = None,
+    netuid: int | None = None,
+    limit: int = 50,
+    reason: str = "champion_reward_status_reconciler",
+    actor_ref: str | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Mark champion rewards whose scheduled obligation is fully retired as paid.
+
+    Uses the surplus-aware paid-to-date accounting (per-epoch credit capped at
+    the scheduled rate), so a reward stays active while its 20-epoch schedule
+    still has balance even when single-champion surplus paid far above it.
+    """
+    from gateway.config import BITTENSOR_NETUID
+    from gateway.research_lab.allocations import (
+        ACTIVE_CHAMPION_STATUSES,
+        _champion_paid_alpha_to_date,
+        _decimal,
+        _rate_float,
+    )
+    from gateway.utils.epoch import get_current_epoch_id_async
+
+    from .store import create_champion_reward_event
+
+    effective_epoch = int(epoch) if epoch is not None else await get_current_epoch_id_async()
+    effective_netuid = int(netuid) if netuid is not None else int(BITTENSOR_NETUID)
+    reward_rows: list[dict[str, Any]] = []
+    for status in sorted(ACTIVE_CHAMPION_STATUSES):
+        reward_rows.extend(
+            await select_all(
+                "research_lab_champion_reward_current",
+                filters=(("current_reward_status", status),),
+                max_rows=max(1, int(limit or 50) * 5),
+            )
+        )
+    paid_by_reward = await _champion_paid_alpha_to_date(
+        epoch=effective_epoch,
+        netuid=effective_netuid,
+        champion_rows=reward_rows,
+    )
+    planned: list[dict[str, Any]] = []
+    for row in reward_rows:
+        reward_id = str(row.get("champion_reward_id") or "")
+        if not reward_id:
+            continue
+        desired = _decimal(row.get("desired_alpha_percent") or 0)
+        epoch_count = int(row.get("epoch_count") or 0)
+        total_due = desired * epoch_count
+        paid = _decimal(paid_by_reward.get(reward_id, 0))
+        remaining = total_due - paid
+        if desired <= 0 or epoch_count <= 0 or remaining > 0:
+            continue
+        planned.append(
+            {
+                "champion_reward_id": reward_id,
+                "miner_uid": row.get("miner_uid"),
+                "current_reward_status": str(row.get("current_reward_status") or ""),
+                "reward_status_target": "paid",
+                "total_due_alpha_percent": _rate_float(total_due),
+                "paid_alpha_percent_to_date": _rate_float(paid),
+            }
+        )
+        if len(planned) >= max(1, int(limit or 50)):
+            break
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "action": "reconcile-champion-reward-statuses",
+            "epoch": effective_epoch,
+            "planned": planned,
+        }
+
+    repaired: list[dict[str, Any]] = []
+    for plan in planned:
+        event = await create_champion_reward_event(
+            champion_reward_id=str(plan["champion_reward_id"]),
+            event_type="paid",
+            reward_status="paid",
+            reason=reason,
+            event_doc={
+                "schema_version": "1.0",
+                "source": "champion_reward_status_reconciler",
+                "actor_ref": actor_ref or default_actor_ref(),
+                "epoch": effective_epoch,
+                "previous_reward_status": plan["current_reward_status"],
+                "total_due_alpha_percent": plan["total_due_alpha_percent"],
+                "paid_alpha_percent_to_date": plan["paid_alpha_percent_to_date"],
+            },
+        )
+        repaired.append({**plan, "event_seq": event.get("seq"), "event_hash": event.get("anchored_hash")})
+    return {
+        "ok": True,
+        "dry_run": False,
+        "action": "reconcile-champion-reward-statuses",
+        "epoch": effective_epoch,
+        "planned_count": len(planned),
+        "repaired_count": len(repaired),
+        "repaired": repaired,
+    }

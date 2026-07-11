@@ -26,6 +26,8 @@ from .maintenance import (
     get_scoring_maintenance_state,
     pause_pending_autoresearch_runs,
     rebase_stale_parent_candidates as maintenance_rebase_stale_parent_candidates,
+    reconcile_champion_reward_statuses,
+    reconcile_paused_loop_projections,
     reconcile_terminal_loop_projections,
     reconcile_terminal_ticket_statuses,
     repair_public_loop_cards,
@@ -271,6 +273,29 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--actor-ref", default=default_actor_ref())
     reconcile.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
     reconcile.add_argument("--write", dest="dry_run", action="store_false")
+
+    reconcile_paused = sub.add_parser(
+        "reconcile-paused-loop-projections",
+        help="Repair paused queue rows whose loop projection still shows running",
+    )
+    reconcile_paused.add_argument("--run-id")
+    reconcile_paused.add_argument("--limit", type=int, default=50)
+    reconcile_paused.add_argument("--reason", default="paused_queue_reconciler")
+    reconcile_paused.add_argument("--actor-ref", default=default_actor_ref())
+    reconcile_paused.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
+    reconcile_paused.add_argument("--write", dest="dry_run", action="store_false")
+
+    reconcile_champion = sub.add_parser(
+        "reconcile-champion-reward-statuses",
+        help="Mark champion rewards whose scheduled obligation is fully retired as paid",
+    )
+    reconcile_champion.add_argument("--epoch", type=int, default=None)
+    reconcile_champion.add_argument("--netuid", type=int, default=None)
+    reconcile_champion.add_argument("--limit", type=int, default=50)
+    reconcile_champion.add_argument("--reason", default="champion_reward_status_reconciler")
+    reconcile_champion.add_argument("--actor-ref", default=default_actor_ref())
+    reconcile_champion.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
+    reconcile_champion.add_argument("--write", dest="dry_run", action="store_false")
 
     reconcile_tickets = sub.add_parser(
         "reconcile-terminal-tickets",
@@ -1106,6 +1131,23 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "reconcile-loop-projections":
         return await reconcile_terminal_loop_projections(
             run_id=args.run_id,
+            limit=args.limit,
+            reason=args.reason,
+            actor_ref=args.actor_ref,
+            dry_run=args.dry_run,
+        )
+    if args.command == "reconcile-paused-loop-projections":
+        return await reconcile_paused_loop_projections(
+            run_id=args.run_id,
+            limit=args.limit,
+            reason=args.reason,
+            actor_ref=args.actor_ref,
+            dry_run=args.dry_run,
+        )
+    if args.command == "reconcile-champion-reward-statuses":
+        return await reconcile_champion_reward_statuses(
+            epoch=args.epoch,
+            netuid=args.netuid,
             limit=args.limit,
             reason=args.reason,
             actor_ref=args.actor_ref,

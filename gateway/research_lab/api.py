@@ -2288,18 +2288,60 @@ async def get_research_lab_shadow_report(epoch: int):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+async def _allocation_epoch_guard_and_persistence(
+    config: ResearchLabGatewayConfig,
+    epoch: int,
+    internal_key: Optional[str],
+) -> bool:
+    """Reject future epochs; return whether this request may persist a snapshot.
+
+    Anonymous GETs are read-only: an unauthenticated caller could otherwise
+    mint active snapshots for arbitrary epochs (future rows for four epochs
+    ahead were found persisted this way), which contaminates paid-to-date
+    accounting. Only the authenticated validator path persists, and only for
+    the current epoch it is about to submit.
+    """
+    from gateway.research_lab.allocations import allocation_snapshot_persistence_decision
+    from gateway.utils.epoch import get_current_epoch_id_async
+
+    current_epoch = await get_current_epoch_id_async()
+    decision = allocation_snapshot_persistence_decision(
+        current_epoch=int(current_epoch),
+        requested_epoch=int(epoch),
+        provided_key=internal_key,
+        configured_key=str(config.internal_api_key or ""),
+        live_allocation_enabled=bool(config.reimbursements_enabled or config.weight_mutation_enabled),
+    )
+    if decision == "future_epoch":
+        raise HTTPException(
+            status_code=422,
+            detail=f"allocation epoch {int(epoch)} is in the future (current {int(current_epoch)})",
+        )
+    if decision == "key_not_configured":
+        raise HTTPException(status_code=403, detail="Research Lab internal API key is not configured")
+    if decision == "invalid_key":
+        raise HTTPException(status_code=401, detail="invalid Research Lab internal API key")
+    return decision == "persist"
+
+
 @router.get("/allocations/live/{epoch}")
-async def get_research_lab_live_allocation(epoch: int):
+async def get_research_lab_live_allocation(
+    epoch: int,
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
     config = ResearchLabGatewayConfig.from_env()
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
     _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
     _require_enabled(config.shadow_bundles_enabled, "Research Lab report bundles are disabled")
+    persist_snapshot = await _allocation_epoch_guard_and_persistence(
+        config, int(epoch), x_leadpoet_internal_key
+    )
     try:
         return await build_research_lab_allocation_bundle(
             config=config,
             epoch=int(epoch),
             netuid=BITTENSOR_NETUID,
-            persist_snapshot=bool(config.reimbursements_enabled or config.weight_mutation_enabled),
+            persist_snapshot=persist_snapshot,
         )
     except ValueError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -2308,20 +2350,26 @@ async def get_research_lab_live_allocation(epoch: int):
 
 
 @router.get("/allocations/attested/{epoch}")
-async def get_research_lab_attested_allocation(epoch: int):
+async def get_research_lab_attested_allocation(
+    epoch: int,
+    x_leadpoet_internal_key: Optional[str] = Header(default=None),
+):
     """Return the unchanged live allocation plus its enclave-signed sidecar."""
 
     config = ResearchLabGatewayConfig.from_env()
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
     _require_enabled(config.reports_enabled, "Research Lab reports are disabled")
     _require_enabled(config.shadow_bundles_enabled, "Research Lab report bundles are disabled")
+    persist_snapshot = await _allocation_epoch_guard_and_persistence(
+        config, int(epoch), x_leadpoet_internal_key
+    )
     attestation: dict[str, Any] = {}
     try:
         bundle = await build_research_lab_allocation_bundle(
             config=config,
             epoch=int(epoch),
             netuid=BITTENSOR_NETUID,
-            persist_snapshot=bool(config.reimbursements_enabled or config.weight_mutation_enabled),
+            persist_snapshot=persist_snapshot,
             attestation_out=attestation,
         )
     except ValueError as exc:

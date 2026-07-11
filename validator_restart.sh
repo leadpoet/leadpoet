@@ -192,8 +192,24 @@ docker ps -aq \
   --filter "name=leadpoet-ff-worker" \
   | xargs -r docker rm
 
-nitro-cli terminate-enclave --all 2>/dev/null || true
-sleep 2
+echo "Terminating existing validator Nitro enclaves"
+sudo nitro-cli terminate-enclave --all 2>/dev/null || true
+for attempt in $(seq 1 10); do
+  enclave_count="$(
+    sudo nitro-cli describe-enclaves \
+      | python3 -c 'import json, sys; print(len(json.load(sys.stdin)))'
+  )"
+  if [ "$enclave_count" -eq 0 ]; then
+    echo "Validator Nitro enclave pool is empty"
+    break
+  fi
+  if [ "$attempt" -eq 10 ]; then
+    echo "ERROR: ${enclave_count} validator Nitro enclave(s) remain after termination" >&2
+    sudo nitro-cli describe-enclaves >&2 || true
+    exit 1
+  fi
+  sleep 1
+done
 
 docker image prune -f
 
@@ -205,7 +221,7 @@ echo "Building validator enclave"
 bash validator_tee/scripts/build_enclave.sh
 test -f validator_tee/validator-enclave.eif
 cd validator_tee
-nitro-cli run-enclave \
+sudo nitro-cli run-enclave \
   --eif-path validator-enclave.eif \
   --cpu-count "${VALIDATOR_ENCLAVE_CPU_COUNT:-2}" \
   --memory "${VALIDATOR_ENCLAVE_MEMORY_MB:-1024}"

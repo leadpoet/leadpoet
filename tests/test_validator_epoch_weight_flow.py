@@ -24,6 +24,18 @@ def test_research_lab_fallback_uses_shared_allocation_default():
     assert "20.0" not in snippet
 
 
+def test_epoch_debug_line_includes_absolute_and_within_epoch_blocks():
+    source = VALIDATOR_SOURCE.read_text(encoding="utf-8")
+    snippet = _between(
+        source,
+        "# DEBUG: Always log epoch status",
+        "# Check if we've already processed this epoch",
+    )
+
+    assert "Block: {current_block}" in snippet
+    assert "Epoch block: {blocks_into_epoch}/360" in snippet
+
+
 def test_already_processed_epoch_still_checks_weight_submission():
     source = VALIDATOR_SOURCE.read_text(encoding="utf-8")
     snippet = _between(

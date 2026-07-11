@@ -2412,7 +2412,11 @@ class Validator(BaseValidatorNeuron):
                         self._block_file_write_counter = 0
             
             # DEBUG: Always log epoch status
-            print(f"[DEBUG] Current epoch: {current_epoch}, Block: {current_block}, Last processed: {getattr(self, '_last_processed_epoch', 'None')}")
+            print(
+                f"[DEBUG] Current epoch: {current_epoch}, Block: {current_block}, "
+                f"Epoch block: {blocks_into_epoch}/360, "
+                f"Last processed: {getattr(self, '_last_processed_epoch', 'None')}"
+            )
             
             # Check if we've already processed this epoch
             if not hasattr(self, '_last_processed_epoch'):

@@ -731,7 +731,7 @@ setsid python3 -m gateway.research_lab.provider_evidence_proxy \
   --port 8791 \
   --day-cache /home/ec2-user/research_lab_evidence/day_cache.json \
   --outcome-sidecar "$RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH" \
-  >> "$GATEWAY_LOG_ROOT/provider_evidence_proxy.log" 2>&1 < /dev/null &
+  >> "$GATEWAY_LOG_ROOT/provider_evidence_proxy.log" 2>&1 < /dev/null 9>&- &
 PROVIDER_PROXY_PID="$!"
 echo "relaunched provider evidence proxy pid: $PROVIDER_PROXY_PID"
 for i in $(seq 1 10); do
@@ -748,7 +748,7 @@ if ! ss -ltn "sport = :8791" 2>/dev/null | grep -q ":8791"; then
 fi
 
 cd "$LEADPOET_REPO_ROOT"
-setsid python3 -u -m gateway.main > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null &
+setsid python3 -u -m gateway.main > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null 9>&- &
 
 GATEWAY_PID="$!"
 echo "relaunched main pid: $GATEWAY_PID"

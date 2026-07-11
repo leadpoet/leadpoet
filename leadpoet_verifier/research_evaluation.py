@@ -62,6 +62,22 @@ SECRET_VALUE_MARKERS = (
     ".dkr.ecr.",
     "private_repo",
 )
+IMMUTABLE_ECR_IMAGE_RE = re.compile(
+    r"^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?/"
+    r"[A-Za-z0-9._/-]+@sha256:[0-9a-f]{64}$"
+)
+PRIVATE_S3_MANIFEST_RE = re.compile(
+    r"^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/[A-Za-z0-9._/-]+\.json$"
+)
+SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SERVING_IMAGE_DIGEST_PATHS = {
+    ("serving_model_version", "parent_model", "image_digest"),
+    ("serving_model_version", "candidate_model", "image_digest"),
+}
+_SERVING_MANIFEST_URI_PATHS = {
+    ("serving_model_version", "parent_model", "manifest_uri"),
+    ("serving_model_version", "candidate_model", "manifest_uri"),
+}
 
 
 def canonical_json(data: Any) -> str:
@@ -781,15 +797,41 @@ def _sample_sd(values: Sequence[float]) -> float:
     return math.sqrt(variance)
 
 
-def _contains_secret_material(value: Any) -> bool:
+def _contains_secret_material(value: Any, *, _path: tuple[str, ...] = ()) -> bool:
     if isinstance(value, Mapping):
         for key, item in value.items():
+            child_path = (*_path, str(key))
+            if (
+                child_path[-3:] in _SERVING_IMAGE_DIGEST_PATHS
+                and isinstance(item, str)
+                and IMMUTABLE_ECR_IMAGE_RE.fullmatch(item)
+                and not any(
+                    marker in item.lower()
+                    for marker in SECRET_VALUE_MARKERS
+                    if marker != ".dkr.ecr."
+                )
+            ):
+                continue
+            if (
+                child_path[-3:] in _SERVING_MANIFEST_URI_PATHS
+                and isinstance(item, str)
+                and PRIVATE_S3_MANIFEST_RE.fullmatch(item)
+                and not any(marker in item.lower() for marker in SECRET_VALUE_MARKERS)
+                and SHA256_RE.fullmatch(str(value.get("manifest_hash") or ""))
+                and SHA256_RE.fullmatch(str(value.get("model_artifact_hash") or ""))
+                and isinstance(value.get("image_digest"), str)
+                and IMMUTABLE_ECR_IMAGE_RE.fullmatch(str(value["image_digest"]))
+            ):
+                continue
             if SECRET_KEY_RE.search(str(key)):
                 return True
-            if _contains_secret_material(item):
+            if _contains_secret_material(item, _path=child_path):
                 return True
     elif isinstance(value, list):
-        return any(_contains_secret_material(item) for item in value)
+        return any(
+            _contains_secret_material(item, _path=(*_path, str(index)))
+            for index, item in enumerate(value)
+        )
     elif isinstance(value, str):
         lowered = value.lower()
         return any(marker in lowered for marker in SECRET_VALUE_MARKERS)

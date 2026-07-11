@@ -21,14 +21,20 @@ import sys
 import pytest
 
 from leadpoet_verifier import aggregation
-from leadpoet_verifier.research_evaluation import verify_research_evaluation_score_bundle
+from leadpoet_verifier.research_evaluation import (
+    score_bundle_hash,
+    verify_research_evaluation_score_bundle,
+)
 from research_lab.canonical import sha256_json
 from research_lab.eval import evaluator
 from research_lab.eval.artifacts import PrivateModelArtifactManifest
 from research_lab.eval.benchmark import SealedBenchmarkSet
 from research_lab.eval import private_runtime
 from research_lab.eval.private_runtime import PrivateModelRuntimeError
-from research_lab.validator_integration import verify_research_lab_evaluation_bundle_page
+from research_lab.validator_integration import (
+    verify_research_lab_evaluation_bundle_page,
+    write_research_lab_validator_artifact,
+)
 
 
 EVAL_ENV_FLAGS = (
@@ -980,7 +986,7 @@ async def test_bundle_keeps_retry_exhausted_provider_failures_in_aggregate_and_h
     assert bundle["score_bundle_hash"] == bundle["anchored_hash"]
 
 
-def test_score_bundle_records_serving_version_and_per_icp_context():
+def test_score_bundle_records_serving_version_and_per_icp_context(tmp_path):
     parent = _artifact_manifest("parent-versioned")
     candidate = _artifact_manifest("candidate-versioned")
     benchmark = SealedBenchmarkSet(
@@ -1073,12 +1079,69 @@ def test_score_bundle_records_serving_version_and_per_icp_context():
     )
     assert page_verification["passed"], page_verification["errors"]
 
-    unsafe_bundle = json.loads(json.dumps(bundle))
-    unsafe_bundle["serving_model_version"]["candidate_model"]["image_digest"] = (
+    legacy_bundle = json.loads(json.dumps(bundle))
+    legacy_bundle["serving_model_version"]["parent_model"]["image_digest"] = parent["image_digest"]
+    legacy_bundle["serving_model_version"]["parent_model"]["manifest_uri"] = parent["manifest_uri"]
+    legacy_bundle["serving_model_version"]["candidate_model"]["image_digest"] = (
         "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:" + "f" * 64
     )
-    unsafe_verification = verify_research_evaluation_score_bundle(unsafe_bundle)
-    assert "score_bundle_contains_raw_secret_material" in unsafe_verification["errors"]
+    legacy_bundle["serving_model_version"]["candidate_model"]["manifest_uri"] = candidate["manifest_uri"]
+    legacy_bundle["score_bundle_hash"] = score_bundle_hash(legacy_bundle)
+    legacy_bundle["anchored_hash"] = legacy_bundle["score_bundle_hash"]
+    legacy_verification = verify_research_evaluation_score_bundle(legacy_bundle)
+    assert legacy_verification["passed"], legacy_verification["errors"]
+
+    legacy_page = {
+        "bundle_type": "research_lab_evaluation_score_bundle_page",
+        "epoch": 77,
+        "score_bundles": [
+            {
+                "score_bundle_id": "score_bundle:" + legacy_bundle["score_bundle_hash"].split(":", 1)[1],
+                "bundle_status": "scored",
+                "current_event_status": "scored",
+                "score_bundle_doc": legacy_bundle,
+            }
+        ],
+        "on_chain_submission_allowed": False,
+    }
+    legacy_page_verification = verify_research_lab_evaluation_bundle_page(
+        legacy_page,
+        flags={"evaluation_verify_enabled": True},
+    )
+    assert legacy_page_verification["passed"], legacy_page_verification["errors"]
+    artifact_path = write_research_lab_validator_artifact(
+        output_dir=tmp_path,
+        epoch=77,
+        bundle=legacy_page,
+        verification=legacy_page_verification,
+        component={"verified_weight_inputs": legacy_page_verification["verified_weight_inputs"]},
+        artifact_kind="evaluation",
+    )
+    rendered_artifact = artifact_path.read_text(encoding="utf-8")
+    assert "image_digest" not in rendered_artifact
+    assert "manifest_uri" not in rendered_artifact
+    assert ".dkr.ecr." not in rendered_artifact
+    assert parent["manifest_uri"] not in rendered_artifact
+    assert candidate["manifest_uri"] not in rendered_artifact
+
+    mutable_image_bundle = json.loads(json.dumps(bundle))
+    mutable_image_bundle["serving_model_version"]["candidate_model"]["image_digest"] = (
+        "123456789012.dkr.ecr.us-east-1.amazonaws.com/model:latest"
+    )
+    mutable_image_verification = verify_research_evaluation_score_bundle(mutable_image_bundle)
+    assert "score_bundle_contains_raw_secret_material" in mutable_image_verification["errors"]
+
+    misplaced_image_bundle = json.loads(json.dumps(bundle))
+    misplaced_image_bundle["image_digest"] = candidate["image_digest"]
+    misplaced_image_verification = verify_research_evaluation_score_bundle(misplaced_image_bundle)
+    assert "score_bundle_contains_raw_secret_material" in misplaced_image_verification["errors"]
+
+    secret_named_manifest_bundle = json.loads(json.dumps(legacy_bundle))
+    secret_named_manifest_bundle["serving_model_version"]["candidate_model"]["manifest_uri"] = (
+        "s3://research-lab-test/private_repo/candidate.json"
+    )
+    secret_named_manifest_verification = verify_research_evaluation_score_bundle(secret_named_manifest_bundle)
+    assert "score_bundle_contains_raw_secret_material" in secret_named_manifest_verification["errors"]
 
     unsafe_manifest_bundle = json.loads(json.dumps(bundle))
     unsafe_manifest_bundle["serving_model_version"]["candidate_model"]["manifest_uri"] = (

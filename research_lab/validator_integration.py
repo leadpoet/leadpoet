@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any, Iterable, Mapping
 from urllib.parse import quote
@@ -46,6 +47,22 @@ TRUTHY_VALUES = {"1", "true", "yes", "on"}
 PERCENT_EPSILON = 0.000001
 ATTESTED_ALLOCATION_SCHEMA_VERSION = "leadpoet.attested_allocation_bundle.v2"
 ATTESTED_ALLOCATION_PURPOSE = "research_lab.allocation.v1"
+IMMUTABLE_ECR_IMAGE_RE = re.compile(
+    r"^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?/"
+    r"[A-Za-z0-9._/-]+@sha256:[0-9a-f]{64}$"
+)
+PRIVATE_S3_MANIFEST_RE = re.compile(
+    r"^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/[A-Za-z0-9._/-]+\.json$"
+)
+SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SERVING_IMAGE_DIGEST_PATHS = {
+    ("serving_model_version", "parent_model", "image_digest"),
+    ("serving_model_version", "candidate_model", "image_digest"),
+}
+_SERVING_MANIFEST_URI_PATHS = {
+    ("serving_model_version", "parent_model", "manifest_uri"),
+    ("serving_model_version", "candidate_model", "manifest_uri"),
+}
 
 
 def load_independent_gateway_identity(commit_sha: str) -> dict[str, Any] | None:
@@ -918,7 +935,7 @@ def verify_research_lab_evaluation_bundle_page(
     if not validator_flags.evaluation_verify_enabled:
         errors.append("validator_evaluation_verify_disabled")
     errors.extend(validator_flags.enabled_mutation_flags())
-    if _contains_secret_material(page):
+    if _evaluation_page_contains_secret_material(page):
         errors.append("evaluation_bundle_page_contains_raw_secret_material")
     if page.get("on_chain_submission_allowed"):
         errors.append("evaluation_bundle_page_must_not_allow_on_chain_submission")
@@ -1126,7 +1143,12 @@ def write_research_lab_validator_artifact(
     This is a local file only; it is not a production database write and never
     contains raw provider keys.
     """
-    if _contains_secret_material(bundle) or _contains_secret_material(verification) or _contains_secret_material(component or {}):
+    artifact_bundle = (
+        _sanitize_evaluation_artifact(bundle)
+        if artifact_kind == "evaluation"
+        else dict(bundle)
+    )
+    if _contains_secret_material(artifact_bundle) or _contains_secret_material(verification) or _contains_secret_material(component or {}):
         raise ValueError("Research Lab validator artifact contains raw secret material")
     safe_kind = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in artifact_kind).strip("_") or "shadow"
     output_path = Path(output_dir)
@@ -1136,7 +1158,7 @@ def write_research_lab_validator_artifact(
         "schema_version": "1.0",
         "artifact_type": f"research_lab_validator_{safe_kind}_verification",
         "epoch": int(epoch),
-        "bundle": dict(bundle),
+        "bundle": artifact_bundle,
         "verification": dict(verification),
         "component": dict(component or {}),
     }
@@ -1604,6 +1626,61 @@ def _contains_secret_material(value: Any) -> bool:
             )
         )
     return False
+
+
+def _evaluation_page_contains_secret_material(value: Any) -> bool:
+    """Scan page metadata while score-bundle docs use their schema verifier."""
+
+    if isinstance(value, Mapping):
+        if value.get("bundle_type") == "research_lab_evaluation_score_bundle":
+            return False
+        for key, item in value.items():
+            if key == "score_bundle_doc" and isinstance(item, Mapping):
+                continue
+            if _contains_secret_material({key: None}):
+                return True
+            if _evaluation_page_contains_secret_material(item):
+                return True
+    elif isinstance(value, list):
+        return any(_evaluation_page_contains_secret_material(item) for item in value)
+    return False
+
+
+def _sanitize_evaluation_artifact(value: Any, *, _path: tuple[str, ...] = ()) -> Any:
+    """Replace permitted private image locations with their existing public hash."""
+
+    if isinstance(value, Mapping):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            child_path = (*_path, str(key))
+            if (
+                child_path[-3:] in _SERVING_IMAGE_DIGEST_PATHS
+                and isinstance(item, str)
+                and IMMUTABLE_ECR_IMAGE_RE.fullmatch(item)
+                and not _contains_secret_material(item.replace(".dkr.ecr.", ".ecr."))
+            ):
+                sanitized["image_ref_hash"] = sha256_json({"image_ref": item})
+                continue
+            if (
+                child_path[-3:] in _SERVING_MANIFEST_URI_PATHS
+                and isinstance(item, str)
+                and PRIVATE_S3_MANIFEST_RE.fullmatch(item)
+                and not _contains_secret_material(item)
+                and SHA256_RE.fullmatch(str(value.get("manifest_hash") or ""))
+                and SHA256_RE.fullmatch(str(value.get("model_artifact_hash") or ""))
+                and isinstance(value.get("image_digest"), str)
+                and IMMUTABLE_ECR_IMAGE_RE.fullmatch(str(value["image_digest"]))
+            ):
+                sanitized["manifest_ref_hash"] = sha256_json({"manifest_ref": item})
+                continue
+            sanitized[str(key)] = _sanitize_evaluation_artifact(item, _path=child_path)
+        return sanitized
+    if isinstance(value, list):
+        return [
+            _sanitize_evaluation_artifact(item, _path=(*_path, str(index)))
+            for index, item in enumerate(value)
+        ]
+    return value
 
 
 def _row_is_scored_bundle(row: Mapping[str, Any]) -> bool:

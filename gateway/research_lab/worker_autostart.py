@@ -31,6 +31,46 @@ def _truthy_env(env: Mapping[str, str], name: str, default: str = "false") -> bo
     return str(env.get(name, default)).strip().lower() in TRUTHY
 
 
+def _vmrss_mb(status_path: str) -> int | None:
+    """Parse VmRSS from a /proc status file in MB (None off-Linux/on failure)."""
+    try:
+        with open(status_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    if len(parts) < 2:
+                        return None
+                    return int(parts[1]) // 1024
+    except Exception:
+        return None
+    return None
+
+
+def _child_rss_mb(pid: int) -> int | None:
+    return _vmrss_mb(f"/proc/{pid}/status")
+
+
+def _supervisor_poll_seconds() -> float:
+    try:
+        return float(os.getenv("RESEARCH_LAB_WORKER_SUPERVISOR_POLL_SECONDS", "5"))
+    except ValueError:
+        return 5.0
+
+
+def _hard_rss_limit_mb() -> int:
+    try:
+        return int(os.getenv("RESEARCH_LAB_WORKER_HARD_RSS_LIMIT_MB", "16384"))
+    except ValueError:
+        return 16384
+
+
+def _rss_telemetry_seconds() -> float:
+    try:
+        return float(os.getenv("RESEARCH_LAB_WORKER_RSS_TELEMETRY_SECONDS", "300"))
+    except ValueError:
+        return 300.0
+
+
 def _int_env(env: Mapping[str, str], name: str, default: int = 0) -> int:
     try:
         return int(str(env.get(name, str(default))).strip())
@@ -226,10 +266,40 @@ class ResearchLabWorkerSupervisor:
         return subprocess.Popen(command, cwd=str(self._package_parent), env=env)
 
     def _monitor_children(self) -> None:
-        while not self._stop_event.wait(5):
+        hard_rss_limit_mb = _hard_rss_limit_mb()
+        telemetry_seconds = _rss_telemetry_seconds()
+        poll_seconds = _supervisor_poll_seconds()
+        last_telemetry = 0.0
+        while not self._stop_event.wait(poll_seconds):
+            emit_telemetry = (
+                telemetry_seconds > 0
+                and time.monotonic() - last_telemetry >= telemetry_seconds
+            )
+            telemetry: list[str] = []
             for key, child in list(self.children.items()):
                 code = child.poll()
                 if code is None:
+                    rss_mb = _child_rss_mb(child.pid)
+                    if emit_telemetry and rss_mb is not None:
+                        telemetry.append(f"{key}={rss_mb}MB")
+                    # Hard backstop: a worker this large is already threatening
+                    # host-wide memory pressure (API 500s, refused claims);
+                    # losing its in-flight pass to a checkpoint-resume is the
+                    # cheaper failure. Normal reclamation is the worker's own
+                    # between-pass recycle, which exits long before this.
+                    if (
+                        hard_rss_limit_mb > 0
+                        and rss_mb is not None
+                        and rss_mb >= hard_rss_limit_mb
+                    ):
+                        fleet, index = self._child_specs[key]
+                        print(
+                            f"   ⚠️  research_lab_worker_hard_rss_limit "
+                            f"{fleet.kind} worker {index + 1} rss={rss_mb}MB "
+                            f">= {hard_rss_limit_mb}MB; terminating for recycle",
+                            flush=True,
+                        )
+                        child.terminate()
                     continue
                 fleet, index = self._child_specs[key]
                 if self._stop_event.is_set():
@@ -240,6 +310,13 @@ class ResearchLabWorkerSupervisor:
                     flush=True,
                 )
                 self.children[key] = self._start_child(fleet, index)
+            if emit_telemetry:
+                last_telemetry = time.monotonic()
+                if telemetry:
+                    print(
+                        "   📊 research_lab_worker_rss " + " ".join(telemetry),
+                        flush=True,
+                    )
 
     def stop(self) -> None:
         if not self.children:

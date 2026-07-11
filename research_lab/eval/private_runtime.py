@@ -873,9 +873,17 @@ def parse_incontainer_trace_lines(stderr: str) -> list[dict[str, Any]]:
     """Decode ``INCONTAINER_TRACE_MARKER`` lines from captured runner stderr.
 
     Malformed lines are skipped; entries keep stderr emission order (each also
-    carries an in-process ``seq``).
+    carries an in-process ``seq``). Retention is byte-budgeted: one runner
+    invocation covers a single ICP, and an unbounded base64 trace of every
+    provider exchange can reach hundreds of MB — decoded dicts held per ICP
+    were a driver of scorer-worker memory exhaustion. Entries past the budget
+    are dropped (newest-first ordering preserved for what is kept) and the
+    drop is logged with a count, never silently.
     """
+    max_bytes = _trace_capture_max_bytes()
     entries: list[dict[str, Any]] = []
+    kept_bytes = 0
+    dropped = 0
     for line in (stderr or "").splitlines():
         marker_index = line.find(INCONTAINER_TRACE_MARKER)
         if marker_index < 0:
@@ -883,13 +891,34 @@ def parse_incontainer_trace_lines(stderr: str) -> list[dict[str, Any]]:
         payload = line[marker_index + len(INCONTAINER_TRACE_MARKER):].strip()
         if not payload:
             continue
+        if max_bytes > 0 and kept_bytes + len(payload) > max_bytes:
+            dropped += 1
+            continue
         try:
             decoded = json.loads(payload)
         except json.JSONDecodeError:
             continue
         if isinstance(decoded, Mapping):
             entries.append(dict(decoded))
+            kept_bytes += len(payload)
+    if dropped:
+        logger.warning(
+            "incontainer_trace_capture_truncated kept_entries=%d kept_bytes=%d "
+            "dropped_entries=%d max_bytes=%d",
+            len(entries),
+            kept_bytes,
+            dropped,
+            max_bytes,
+        )
     return entries
+
+
+def _trace_capture_max_bytes() -> int:
+    """Per-invocation retention budget for decoded trace entries (0 disables)."""
+    try:
+        return int(os.getenv("RESEARCH_LAB_INCONTAINER_TRACE_MAX_BYTES", str(64 * 1024 * 1024)))
+    except ValueError:
+        return 64 * 1024 * 1024
 
 
 def strip_incontainer_trace_lines(text: str) -> str:

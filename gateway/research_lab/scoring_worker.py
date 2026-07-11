@@ -555,6 +555,29 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _worker_recycle_rss_mb() -> int:
+    return _env_int("RESEARCH_LAB_SCORING_WORKER_RECYCLE_RSS_MB", 3072)
+
+
+def _worker_recycle_max_jobs() -> int:
+    return _env_int("RESEARCH_LAB_SCORING_WORKER_RECYCLE_JOBS", 16)
+
+
+def _read_own_rss_mb(status_path: str = "/proc/self/status") -> int | None:
+    """Current process resident set size in MB (None off-Linux/on failure)."""
+    try:
+        with open(status_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    if len(parts) < 2:
+                        return None
+                    return int(parts[1]) // 1024
+    except Exception:
+        return None
+    return None
+
+
 # Event-doc error sanitizers (bug #36) moved to logging_utils so the loop
 # engine shares them; imported at the top with underscore aliases to keep
 # existing call sites and tests stable.
@@ -2915,6 +2938,9 @@ class ResearchLabGatewayScoringWorker:
         last_error_log = 0.0
         idle_log_seconds = _idle_log_seconds()
         error_backoff_seconds = _error_backoff_seconds()
+        processed_jobs = 0
+        recycle_rss_mb = _worker_recycle_rss_mb()
+        recycle_max_jobs = _worker_recycle_max_jobs()
         while True:
             try:
                 outcome = await self.run_once()
@@ -2957,6 +2983,29 @@ class ResearchLabGatewayScoringWorker:
                     self.config.scoring_worker_poll_seconds,
                 )
                 last_idle_log = time.monotonic()
+            # Recycle between passes (never mid-job): scoring passes leave the
+            # interpreter's RSS at its high-water mark, so a worker that has
+            # finished a heavy bundle can hold gigabytes it will never reuse.
+            # Exiting cleanly hands the slot to a fresh ~60 MB process via the
+            # supervisor's existing restart-on-exit path.
+            if outcome.get("processed"):
+                processed_jobs += 1
+            rss_mb = _read_own_rss_mb()
+            recycle_reason = ""
+            if recycle_rss_mb > 0 and rss_mb is not None and rss_mb >= recycle_rss_mb:
+                recycle_reason = f"rss {rss_mb}MB >= {recycle_rss_mb}MB"
+            elif recycle_max_jobs > 0 and processed_jobs >= recycle_max_jobs:
+                recycle_reason = f"processed_jobs {processed_jobs} >= {recycle_max_jobs}"
+            if recycle_reason:
+                logger.warning(
+                    "research_lab_scoring_worker_recycle worker_ref=%s reason=%s "
+                    "rss_mb=%s processed_jobs=%s",
+                    self.worker_ref,
+                    recycle_reason,
+                    rss_mb,
+                    processed_jobs,
+                )
+                return
             await asyncio.sleep(max(1, self.config.scoring_worker_poll_seconds))
 
     async def run_once(self) -> dict[str, Any]:

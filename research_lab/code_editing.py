@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import ast
 from dataclasses import asdict, dataclass, field, replace
+import io
 import json
 import os
 import posixpath
 import re
+import tokenize
 from typing import Any, Mapping, Sequence
 
 from research_lab.canonical import sha256_json
@@ -23,6 +26,79 @@ FORBIDDEN_CODE_EDIT_TERMS = (
     "hidden_icp",
     "icp_plaintext",
     "private_repo",
+)
+
+_SENSITIVE_FIELD_NAMES = frozenset(
+    {
+        "apikey",
+        "authorization",
+        "authorizationheader",
+        "awsaccesskeyid",
+        "awssecretaccesskey",
+        "bearertoken",
+        "credential",
+        "credentials",
+        "hiddenbenchmark",
+        "hiddenicp",
+        "icpplaintext",
+        "judgeprompt",
+        "openrouterapikey",
+        "password",
+        "passwd",
+        "privatekey",
+        "privaterepo",
+        "privaterepourl",
+        "rawopenrouterkey",
+        "rawsecret",
+        "refreshtoken",
+        "secretkey",
+        "secret",
+        "servicerole",
+        "servicerolekey",
+        "supabaseservicerolekey",
+        "token",
+    }
+)
+_SENSITIVE_FIELD_SUFFIXES = (
+    "apikey",
+    "accesstoken",
+    "authorization",
+    "authorizationheader",
+    "bearertoken",
+    "credential",
+    "credentials",
+    "password",
+    "passwd",
+    "privatekey",
+    "refreshtoken",
+    "secret",
+    "secretkey",
+    "servicerolekey",
+    "token",
+)
+_SECRET_VALUE_PATTERNS = (
+    re.compile(r"\bsk-or-[A-Za-z0-9_-]{8,}\b"),
+    re.compile(r"\bsb_secret_[A-Za-z0-9_-]{8,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}"),
+    re.compile(r"(?i)\b[a-z][a-z0-9+.-]{1,20}://[^\s'\"@/]+:[^\s'\"@]+@[^\s'\"]+"),
+    re.compile(
+        r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|"
+        r"secret(?:[_-]?key)?|private[_-]?key|service[_-]?role(?:[_-]?key)?)\b"
+        r"\s*[:=]\s*[\"']?[A-Za-z0-9_./+=-]{12,}"
+    ),
+)
+_SENSITIVE_POLICY_PREFIX_RE = re.compile(
+    r"(?i)\b(?:no|do not|don't|must not|mustn't|never|avoid|without|"
+    r"forbid|prohibit|disallow|redact|exclude)(?:\s+[a-z0-9]+){0,8}\s*$"
+)
+_SENSITIVE_POLICY_SUFFIX_RE = re.compile(
+    r"(?i)^\s*(?:must not|mustn't|should not|should never|cannot|can't|"
+    r"is forbidden|is prohibited|is disallowed|is excluded|is redacted|"
+    r"is not allowed|is not permitted|must be omitted|must be removed)\b"
 )
 
 DEFAULT_ALLOWED_PATH_PREFIXES = (
@@ -271,6 +347,57 @@ def build_loop_direction_planner_messages(
         ):
             indexed_paths = [str(item) for item in editable_files if item]
     example_inspect_path = indexed_paths[0] if indexed_paths else "research_lab_adapter.py"
+    example_inspect_reference = example_inspect_path
+    for file_doc in runtime_source_index.get("files", []):
+        if not isinstance(file_doc, Mapping) or str(file_doc.get("path") or "") != example_inspect_path:
+            continue
+        symbols = file_doc.get("symbols")
+        if isinstance(symbols, Sequence) and not isinstance(symbols, (str, bytes, bytearray)):
+            for symbol in symbols:
+                if not isinstance(symbol, Mapping):
+                    continue
+                qualified_name = str(symbol.get("qualified_name") or "").strip()
+                if qualified_name:
+                    example_inspect_reference = f"{example_inspect_path}::{qualified_name}"
+                    break
+        break
+    example_path = {
+        "path_id": "query_decomposition_recall",
+        "lane": "query_construction",
+        "mechanism": "Add one bounded decomposed-search pass while preserving downstream gates.",
+        "target_behavior": ["Recover sparse searches without weakening ICP gates."],
+        "must_inspect": [example_inspect_reference],
+        "allowed_lanes": ["query_construction"],
+        "disallowed_lanes": ["provider_fallback"],
+        "must_not_try": ["Do not weaken ICP constraints."],
+        "success_criteria": ["Existing runtime checks pass and sparse-query behavior improves."],
+        "novelty_requirements": ["Use a mechanism not present in prior attempts."],
+        "anti_overfit_checks": ["Preserve multiple qualified outputs."],
+        "validation_mode": "runtime_checks",
+        "validation_paths": [],
+    }
+    example_plan = {
+        "schema_version": "1.1",
+        "miner_focus_interpretation": "Improve sparse-query recall.",
+        "loop_goal": "Recover qualified companies without weakening ICP gates.",
+        "required_lane": example_path["lane"],
+        "required_mechanism": example_path["mechanism"],
+        "generalization_claim": "The bounded behavior applies to future sealed ICPs.",
+        "target_behavior": example_path["target_behavior"],
+        "must_inspect": example_path["must_inspect"],
+        "allowed_lanes": example_path["allowed_lanes"],
+        "disallowed_lanes": example_path["disallowed_lanes"],
+        "must_not_try": example_path["must_not_try"],
+        "success_criteria": example_path["success_criteria"],
+        "novelty_requirements": example_path["novelty_requirements"],
+        "anti_overfit_checks": example_path["anti_overfit_checks"],
+        "validation_mode": example_path["validation_mode"],
+        "validation_paths": example_path["validation_paths"],
+        "novelty_contrast": "This uses a new bounded decomposition mechanism.",
+        "unresolved_references": [],
+        "ranked_paths": [example_path],
+        "selected_path_id": example_path["path_id"],
+    }
     context = {
         "ticket": _redacted_mapping(ticket),
         "artifact_manifest": _redacted_mapping(artifact_manifest),
@@ -320,31 +447,14 @@ def build_loop_direction_planner_messages(
         "- success_criteria must describe observable behavior and existing validation, not repository work such as creating a test file.\n"
         "- Return two or three ranked paths only when every path is independently safe and source-feasible. One path is valid when no safe alternative exists.\n"
         "- Every schema_version 1.1 ranked path must carry its own target_behavior, must_inspect, allowed_lanes, disallowed_lanes, must_not_try, success_criteria, novelty_requirements, anti_overfit_checks, validation_mode, and validation_paths.\n"
+        "- The ranked path named by selected_path_id is authoritative. Copy its lane, mechanism, target_behavior, must_inspect, lane constraints, safety constraints, success criteria, novelty requirements, anti-overfit checks, validation_mode, and validation_paths exactly into the duplicate top-level fields.\n"
+        "- Prefer canonical source references as file.py::qualified.symbol. file.py:symbol, an exact bare file, and a uniquely resolvable bare symbol are accepted only when they bind to the extracted source index.\n"
         "- validation_mode must be runtime_checks or existing_test_files. existing_test_files requires exact paths from candidate_edit_constraints.editable_test_paths.\n"
         "- Do not request, reveal, or store secrets, hidden ICP plaintext, judge prompts, provider keys, private repo URLs, or raw private data.\n"
         "- If no safe new path exists, return no_new_safe_path=true with a clear reason.\n\n"
-        "Required output shape:\n"
-        "{\"schema_version\":\"1.1\",\"miner_focus_interpretation\":\"...\",\"loop_goal\":\"...\","
-        "\"required_lane\":\"query_construction\",\"required_mechanism\":\"...\","
-        "\"generalization_claim\":\"Why this helps future sealed ICPs rather than one public example.\","
-        "\"target_behavior\":[\"...\"],\"must_inspect\":[\"...\"],"
-        "\"allowed_lanes\":[\"query_construction\"],\"disallowed_lanes\":[\"provider_fallback\"],"
-        "\"must_not_try\":[\"Do not weaken ICP constraints or hide completed-empty results.\"],"
-        "\"success_criteria\":[\"...\"],\"novelty_requirements\":[\"...\"],"
-        "\"anti_overfit_checks\":[\"Preserves multiple qualified company outputs.\"],"
-        "\"validation_mode\":\"runtime_checks\",\"validation_paths\":[],"
-        "\"novelty_contrast\":\"How this differs from prior attempts by mechanism, target function/file, and expected behavior.\","
-        "\"unresolved_references\":[],"
-        "\"ranked_paths\":[{\"path_id\":\"query_decomposition_recall\",\"lane\":\"query_construction\","
-        "\"mechanism\":\"Add one bounded decomposed-search pass while preserving downstream gates.\","
-        "\"target_behavior\":[\"Recover sparse searches without weakening ICP gates.\"],"
-        "\"must_inspect\":[\"" + example_inspect_path + "\"],\"allowed_lanes\":[\"query_construction\"],"
-        "\"disallowed_lanes\":[\"provider_fallback\"],\"must_not_try\":[\"Do not weaken ICP constraints.\"],"
-        "\"success_criteria\":[\"Existing runtime checks pass and sparse-query behavior improves.\"],"
-        "\"novelty_requirements\":[\"Use a mechanism not present in prior attempts.\"],"
-        "\"anti_overfit_checks\":[\"Preserve multiple qualified outputs.\"],"
-        "\"validation_mode\":\"runtime_checks\",\"validation_paths\":[]}],"
-        "\"selected_path_id\":\"query_decomposition_recall\"}\n\n"
+        "Required output shape (the selected path and duplicate top-level fields match exactly):\n"
+        + json.dumps(example_plan, sort_keys=True, separators=(",", ":"))
+        + "\n\n"
         "Context JSON:\n"
         + json.dumps(context, sort_keys=True, separators=(",", ":"))
     )
@@ -385,7 +495,10 @@ def build_loop_direction_reference_repair_messages(
         "complete schema_version 1.1 plan with required_lane, required_mechanism, selected_path_id, ranked_paths, target_behavior, "
         "must_inspect, allowed_lanes, disallowed_lanes, must_not_try, success_criteria, novelty_requirements, "
         "anti_overfit_checks, validation_mode, validation_paths, generalization_claim, and novelty_contrast. "
-        "Every ranked path must include the same complete path-local fields. unresolved_references must then be empty.\n\n"
+        "Every ranked path must include the same complete path-local fields. The selected ranked path is authoritative: "
+        "copy all duplicate top-level lane, mechanism, behavior, source-reference, safety, novelty, and validation fields "
+        "exactly from that path. Prefer canonical source references as file.py::qualified.symbol. "
+        "unresolved_references must then be empty.\n\n"
         "Never expose secrets, private ICP text, raw provider bodies, hidden prompts, or private repository URLs.\n\n"
         "Context JSON:\n"
         + json.dumps(context, sort_keys=True, separators=(",", ":"))
@@ -896,7 +1009,11 @@ def loop_direction_plan_from_mapping(value: Mapping[str, Any]) -> LoopDirectionP
     if _contains_forbidden_material(value):
         raise ValueError("loop direction plan contains forbidden private or secret material")
     no_new_safe_path = bool(_get_first_present(value, ("no_new_safe_path", "noNewSafePath", "no_viable_path", "noViablePath")) or False)
+    schema_version = _string_value(value.get("schema_version") or value.get("schemaVersion") or "1.0")[:20]
     required_lane = _string_value(_get_first_present(value, ("required_lane", "requiredLane", "lane"))).strip()[:80]
+    required_mechanism = _string_value(
+        _get_first_present(value, ("required_mechanism", "requiredMechanism", "mechanism"))
+    )[:1200]
     selected_path_id = _string_value(
         _get_first_present(value, ("selected_path_id", "selectedPathId", "path_id", "pathId"))
     ).strip()[:120]
@@ -904,59 +1021,87 @@ def loop_direction_plan_from_mapping(value: Mapping[str, Any]) -> LoopDirectionP
         _compact_mapping(item, max_string=500)
         for item in _coerce_mapping_list(_get_first_present(value, ("ranked_paths", "rankedPaths", "paths")))
     )
+    if not selected_path_id and len(ranked_paths) == 1:
+        selected_path_id = _string_value(
+            _get_first_present(ranked_paths[0], ("path_id", "pathId", "id"))
+        ).strip()[:120]
     unresolved_references = _coerce_reference_tuple(
         _get_first_present(value, ("unresolved_references", "unresolvedReferences", "missing_references"))
     )
+    selected_path = next(
+        (
+            item
+            for item in ranked_paths
+            if _string_value(_get_first_present(item, ("path_id", "pathId", "id"))).strip()
+            == selected_path_id
+        ),
+        None,
+    )
+    authoritative = selected_path if schema_version == "1.1" and not no_new_safe_path else value
+    if isinstance(authoritative, Mapping) and authoritative is selected_path:
+        required_lane = _string_value(
+            _get_first_present(authoritative, ("lane", "required_lane", "requiredLane"))
+        ).strip()[:80]
+        required_mechanism = _string_value(
+            _get_first_present(authoritative, ("mechanism", "required_mechanism", "requiredMechanism"))
+        )[:1200]
     validation_mode = _string_value(
-        _get_first_present(value, ("validation_mode", "validationMode")) or "runtime_checks"
+        _get_first_present(authoritative, ("validation_mode", "validationMode")) or "runtime_checks"
     ).strip().lower()
     if validation_mode not in LOOP_DIRECTION_VALIDATION_MODES:
         raise ValueError("loop direction plan validation_mode is invalid")
     validation_paths = _coerce_target_files(
-        _get_first_present(value, ("validation_paths", "validationPaths", "test_paths", "testPaths"))
+        _get_first_present(authoritative, ("validation_paths", "validationPaths", "test_paths", "testPaths"))
     )
     if validation_mode == "existing_test_files" and not validation_paths and not no_new_safe_path:
         raise ValueError("existing_test_files validation requires validation_paths")
     if not no_new_safe_path:
         if not required_lane:
             raise ValueError("loop direction plan requires required_lane")
-        if not _string_value(_get_first_present(value, ("required_mechanism", "requiredMechanism", "mechanism"))).strip():
+        if not required_mechanism.strip():
             raise ValueError("loop direction plan requires required_mechanism")
         if not selected_path_id:
-            if len(ranked_paths) == 1:
-                selected_path_id = _string_value(_get_first_present(ranked_paths[0], ("path_id", "pathId", "id"))).strip()[:120]
-            if not selected_path_id:
-                raise ValueError("loop direction plan requires selected_path_id")
+            raise ValueError("loop direction plan requires selected_path_id")
         if unresolved_references:
             raise ValueError("viable loop direction plan cannot retain unresolved references")
-    allowed_lanes = _coerce_string_tuple(_get_first_present(value, ("allowed_lanes", "allowedLanes")), max_items=10)
-    if required_lane and required_lane not in allowed_lanes:
+    allowed_lanes = _coerce_string_tuple(
+        _get_first_present(authoritative, ("allowed_lanes", "allowedLanes")), max_items=10
+    )
+    if schema_version != "1.1" and required_lane and required_lane not in allowed_lanes:
         allowed_lanes = (required_lane, *tuple(item for item in allowed_lanes if item != required_lane))
     return LoopDirectionPlan(
-        schema_version=_string_value(value.get("schema_version") or value.get("schemaVersion") or "1.0")[:20],
+        schema_version=schema_version,
         miner_focus_interpretation=_string_value(
             _get_first_present(value, ("miner_focus_interpretation", "minerFocusInterpretation", "focus_interpretation"))
         )[:1200],
         loop_goal=_string_value(_get_first_present(value, ("loop_goal", "loopGoal", "goal")))[:1200],
         required_lane=required_lane,
-        required_mechanism=_string_value(
-            _get_first_present(value, ("required_mechanism", "requiredMechanism", "mechanism"))
-        )[:1200],
+        required_mechanism=required_mechanism,
         generalization_claim=_string_value(
             _get_first_present(value, ("generalization_claim", "generalizationClaim", "sealed_icp_generalization", "sealedIcpGeneralization"))
         )[:1200],
-        target_behavior=_coerce_string_tuple(_get_first_present(value, ("target_behavior", "targetBehavior")), max_items=12),
-        must_inspect=_coerce_string_tuple(_get_first_present(value, ("must_inspect", "mustInspect")), max_items=12),
+        target_behavior=_coerce_string_tuple(
+            _get_first_present(authoritative, ("target_behavior", "targetBehavior")), max_items=12
+        ),
+        must_inspect=_coerce_string_tuple(
+            _get_first_present(authoritative, ("must_inspect", "mustInspect")), max_items=12
+        ),
         allowed_lanes=allowed_lanes,
-        disallowed_lanes=_coerce_string_tuple(_get_first_present(value, ("disallowed_lanes", "disallowedLanes")), max_items=12),
-        must_not_try=_coerce_string_tuple(_get_first_present(value, ("must_not_try", "mustNotTry")), max_items=16),
-        success_criteria=_coerce_string_tuple(_get_first_present(value, ("success_criteria", "successCriteria")), max_items=16),
+        disallowed_lanes=_coerce_string_tuple(
+            _get_first_present(authoritative, ("disallowed_lanes", "disallowedLanes")), max_items=12
+        ),
+        must_not_try=_coerce_string_tuple(
+            _get_first_present(authoritative, ("must_not_try", "mustNotTry")), max_items=16
+        ),
+        success_criteria=_coerce_string_tuple(
+            _get_first_present(authoritative, ("success_criteria", "successCriteria")), max_items=16
+        ),
         novelty_requirements=_coerce_string_tuple(
-            _get_first_present(value, ("novelty_requirements", "noveltyRequirements")),
+            _get_first_present(authoritative, ("novelty_requirements", "noveltyRequirements")),
             max_items=16,
         ),
         anti_overfit_checks=_coerce_string_tuple(
-            _get_first_present(value, ("anti_overfit_checks", "antiOverfitChecks", "overfit_checks", "overfitChecks")),
+            _get_first_present(authoritative, ("anti_overfit_checks", "antiOverfitChecks", "overfit_checks", "overfitChecks")),
             max_items=12,
         ),
         novelty_contrast=_string_value(
@@ -1039,6 +1184,11 @@ def loop_direction_plan_contract_errors(plan: LoopDirectionPlan) -> list[str]:
             errors.append(f"ranked_path_missing_validation_paths:{path_id[:120]}")
         if path_validation_mode == "existing_test_files" and not path_validation_paths:
             errors.append(f"ranked_path_existing_tests_missing_paths:{path_id[:120]}")
+        path_allowed_lanes = _coerce_string_tuple(
+            _get_first_present(raw_path, ("allowed_lanes", "allowedLanes")), max_items=10
+        )
+        if lane and lane not in path_allowed_lanes:
+            errors.append(f"ranked_path_lane_not_allowed:{path_id[:120]}")
         if path_id == plan.selected_path_id:
             selected = raw_path
     if selected is None:
@@ -2324,12 +2474,58 @@ def _normalize_repo_path(value: Any) -> str:
 
 def _contains_forbidden_material(value: Any) -> bool:
     if isinstance(value, Mapping):
-        return any(_contains_forbidden_material(key) or _contains_forbidden_material(item) for key, item in value.items())
-    if isinstance(value, list):
+        for key, item in value.items():
+            if _sensitive_field_name(key) or _contains_secret_shaped_value(str(key)):
+                return True
+            if _contains_forbidden_material(item):
+                return True
+        return False
+    if isinstance(value, (list, tuple)):
         return any(_contains_forbidden_material(item) for item in value)
     if isinstance(value, str):
-        lowered = value.lower()
-        return any(marker in lowered for marker in FORBIDDEN_CODE_EDIT_TERMS)
+        return _contains_secret_shaped_value(value) or _contains_nonpolicy_sensitive_reference(value)
+    return False
+
+
+def _normalized_sensitive_name(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _sensitive_field_name(value: Any) -> bool:
+    normalized = _normalized_sensitive_name(value)
+    return normalized in _SENSITIVE_FIELD_NAMES or any(
+        normalized.endswith(suffix) for suffix in _SENSITIVE_FIELD_SUFFIXES
+    )
+
+
+def _sensitive_code_identifier(value: Any) -> bool:
+    normalized = _normalized_sensitive_name(value)
+    if normalized in {"secret", "token"}:
+        return False
+    return _sensitive_field_name(value)
+
+
+def _contains_secret_shaped_value(value: str) -> bool:
+    return any(pattern.search(str(value or "")) for pattern in _SECRET_VALUE_PATTERNS)
+
+
+def _contains_nonpolicy_sensitive_reference(value: str) -> bool:
+    """Reject claimed sensitive material while allowing instructions to avoid it."""
+
+    for clause in re.split(r"[\n.!?;]+", str(value or "")):
+        policy_text = re.sub(r"[^a-z0-9']+", " ", clause.lower()).strip()
+        if not policy_text:
+            continue
+        for term in FORBIDDEN_CODE_EDIT_TERMS:
+            phrase = re.escape(term.replace("_", " "))
+            match = re.search(rf"\b{phrase}\b", policy_text)
+            if match is None:
+                continue
+            prefix = policy_text[: match.start()]
+            suffix = policy_text[match.end() :]
+            if _SENSITIVE_POLICY_PREFIX_RE.search(prefix) or _SENSITIVE_POLICY_SUFFIX_RE.search(suffix):
+                continue
+            return True
     return False
 
 
@@ -2370,16 +2566,98 @@ def _contains_forbidden_material_diff_aware(value: Any) -> bool:
     """Forbidden-term scan that ignores unified-diff context/removed lines."""
 
     if isinstance(value, Mapping):
-        return any(
-            _contains_forbidden_material_diff_aware(key) or _contains_forbidden_material_diff_aware(item)
-            for key, item in value.items()
-        )
+        for key, item in value.items():
+            if _sensitive_field_name(key) or _contains_secret_shaped_value(str(key)):
+                return True
+            if _contains_forbidden_material_diff_aware(item):
+                return True
+        return False
     if isinstance(value, list):
         return any(_contains_forbidden_material_diff_aware(item) for item in value)
     if isinstance(value, str):
         if _looks_like_unified_diff(value):
-            return _contains_forbidden_material(_diff_added_line_material(value))
+            return _diff_additions_contain_sensitive_material(value)
         return _contains_forbidden_material(value)
+    return False
+
+
+def _diff_additions_contain_sensitive_material(diff_text: str) -> bool:
+    material = _diff_added_line_material(diff_text)
+    if _contains_secret_shaped_value(material):
+        return True
+    source_lines: list[str] = []
+    for raw_line in material.splitlines():
+        if raw_line.startswith(("+++ ", "diff --git ", "--- ")):
+            normalized_header = _normalized_sensitive_name(raw_line)
+            if any(
+                sensitive_name in normalized_header
+                for sensitive_name in _SENSITIVE_FIELD_NAMES
+                if len(sensitive_name) >= 8
+            ):
+                return True
+            continue
+        if not raw_line.startswith("+"):
+            continue
+        source_line = raw_line[1:]
+        if not source_line.strip() or source_line.lstrip().startswith("#"):
+            continue
+        source_lines.append(source_line)
+    tokens: list[tokenize.TokenInfo] = []
+    try:
+        for item in tokenize.generate_tokens(io.StringIO("\n".join(source_lines)).readline):
+            tokens.append(item)
+    except (IndentationError, tokenize.TokenError):
+        # Keep tokens emitted before an incomplete hunk ended. Git/apply and
+        # py_compile still reject malformed code later; the security scan must
+        # not discard already-visible environment access.
+        pass
+    significant = [
+        item
+        for item in tokens
+        if item.type
+        not in {
+            tokenize.ENCODING,
+            tokenize.ENDMARKER,
+            tokenize.INDENT,
+            tokenize.DEDENT,
+            tokenize.NEWLINE,
+            tokenize.NL,
+            tokenize.COMMENT,
+        }
+    ]
+    for index, item in enumerate(significant):
+        if item.type == tokenize.NAME and _sensitive_code_identifier(item.string):
+            return True
+        if item.type != tokenize.STRING:
+            continue
+        try:
+            literal = ast.literal_eval(item.string)
+        except (SyntaxError, ValueError):
+            literal = ""
+        if not isinstance(literal, str) or not _sensitive_field_name(literal):
+            continue
+        previous = significant[index - 1].string if index else ""
+        following = significant[index + 1].string if index + 1 < len(significant) else ""
+        if following == ":":
+            return True
+        if previous == "[":
+            before_open = significant[index - 2] if index >= 2 else None
+            if before_open is not None and (
+                before_open.type == tokenize.NAME or before_open.string in {"]", ")"}
+            ):
+                return True
+        if previous == "(":
+            call_names = {
+                _normalized_sensitive_name(token.string)
+                for token in significant[max(0, index - 6) : index]
+                if token.type == tokenize.NAME
+            }
+            policy_call = any(
+                name.startswith(("avoid", "disallow", "forbid", "redact"))
+                for name in call_names
+            )
+            if not policy_call:
+                return True
     return False
 
 

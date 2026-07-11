@@ -9,6 +9,8 @@ head sha recorded), bug #30 (infra-vs-candidate build failure classification).
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+
 import pytest
 
 from gateway.research_lab import code_build
@@ -58,6 +60,51 @@ def test_forbidden_term_in_added_line_rejects():
     assert code_editing._contains_forbidden_material_diff_aware(diff) is True
 
 
+def test_forbidden_policy_prose_in_added_comment_or_string_passes():
+    comment_diff = _diff_with("clean = 1", "# do not use hidden ICP data")
+    string_diff = _diff_with("clean = 1", 'policy = "do not use hidden ICP data"')
+    policy_fields_diff = _diff_with(
+        "clean = 1",
+        'forbidden_fields = ["service_role", "hidden_icp"]',
+    )
+    assert code_editing._contains_forbidden_material_diff_aware(comment_diff) is False
+    assert code_editing._contains_forbidden_material_diff_aware(string_diff) is False
+    assert code_editing._contains_forbidden_material_diff_aware(policy_fields_diff) is False
+
+
+def test_multiline_sensitive_environment_access_rejects():
+    diff = (
+        "diff --git a/gateway/module.py b/gateway/module.py\n"
+        "--- a/gateway/module.py\n"
+        "+++ b/gateway/module.py\n"
+        "@@ -1 +1,4 @@\n"
+        " clean = 1\n"
+        "+value = os.environ[\n"
+        "+    \"SUPABASE_SERVICE_ROLE_KEY\"\n"
+        "+]\n"
+    )
+    assert code_editing._contains_forbidden_material_diff_aware(diff) is True
+
+
+def test_secret_shaped_value_in_added_line_rejects():
+    diff = _diff_with("clean = 1", 'token = "sk-or-v1-' + "x" * 24 + '"')
+    assert code_editing._contains_forbidden_material_diff_aware(diff) is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "AKIA" + "A" * 16,
+        "Bearer " + "token-value-" * 3,
+        "eyJ" + "a" * 12 + ".eyJ" + "b" * 12 + "." + "c" * 12,
+        "-----BEGIN PRIVATE KEY-----",
+        "https://user:password@example.test/path",
+    ],
+)
+def test_secret_shaped_values_reject(value):
+    assert code_editing._contains_forbidden_material({"reason": value}) is True
+
+
 def test_forbidden_term_in_removed_line_passes():
     diff = (
         "--- a/gateway/module.py\n"
@@ -67,6 +114,74 @@ def test_forbidden_term_in_removed_line_passes():
         "+token = fetch_public()\n"
     )
     assert code_editing._contains_forbidden_material_diff_aware(diff) is False
+
+
+def test_forbidden_api_and_path_remain_blocked():
+    api_draft = _draft(
+        target_files=("gateway/module.py",),
+        unified_diff=(
+            "diff --git a/gateway/module.py b/gateway/module.py\n"
+            "--- a/gateway/module.py\n"
+            "+++ b/gateway/module.py\n"
+            "@@ -1 +1,2 @@\n"
+            " value = 1\n"
+            "+subprocess.run(['unsafe'])\n"
+        ),
+    )
+    with pytest.raises(ValueError, match="code_edit_disallowed_diff_pattern"):
+        code_editing.validate_code_edit_draft(api_draft)
+
+    path_draft = _draft(
+        target_files=("gateway/.env",),
+        unified_diff=(
+            "diff --git a/gateway/.env b/gateway/.env\n"
+            "--- a/gateway/.env\n"
+            "+++ b/gateway/.env\n"
+            "@@ -1 +1 @@\n"
+            "-SAFE=1\n"
+            "+SAFE=2\n"
+        ),
+    )
+    with pytest.raises(ValueError, match="disallowed_repo_path"):
+        code_editing.validate_code_edit_draft(path_draft)
+
+
+def test_new_and_unread_source_paths_remain_blocked():
+    builder = object.__new__(code_build.CodeEditCandidateBuilder)
+    source_context = SimpleNamespace(editable_files=("sourcing_model/existing.py",))
+    new_file_draft = _draft(
+        target_files=("sourcing_model/new_file.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/new_file.py b/sourcing_model/new_file.py\n"
+            "--- a/sourcing_model/new_file.py\n"
+            "+++ b/sourcing_model/new_file.py\n"
+            "@@ -1 +1 @@\n"
+            "-value = 1\n"
+            "+value = 2\n"
+        ),
+    )
+    assert builder.validate_draft_against_source_context(
+        new_file_draft,
+        source_context,
+    ) == ["code_edit_path_not_in_extracted_source:sourcing_model/new_file.py"]
+
+    existing_draft = _draft(
+        target_files=("sourcing_model/existing.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/existing.py b/sourcing_model/existing.py\n"
+            "--- a/sourcing_model/existing.py\n"
+            "+++ b/sourcing_model/existing.py\n"
+            "@@ -1 +1 @@\n"
+            "-value = 1\n"
+            "+value = 2\n"
+        ),
+    )
+    assert builder.validate_draft_against_source_context(
+        existing_draft,
+        source_context,
+        read_paths=(),
+        require_read=True,
+    ) == ["code_edit_unread_source_file:sourcing_model/existing.py"]
 
 
 def test_diff_added_material_keeps_headers_and_added_lines_only():
@@ -306,19 +421,56 @@ def test_loop_direction_v1_0_checkpoint_remains_compatible():
 
 def test_loop_direction_v1_1_round_trip_and_contract_validation():
     plan = code_editing.parse_loop_direction_plan_response(json.dumps(_v1_1_plan()))
-    reparsed = code_editing.loop_direction_plan_from_mapping(plan.to_dict())
+    first_doc = plan.to_dict()
+    reparsed = code_editing.loop_direction_plan_from_mapping(first_doc)
     assert reparsed == plan
+    assert reparsed.to_dict()["plan_hash"] == first_doc["plan_hash"]
     assert code_editing.loop_direction_plan_contract_errors(plan) == []
 
 
-def test_loop_direction_v1_1_detects_selected_path_contract_mismatch():
-    payload = _v1_1_plan(required_mechanism="different top-level mechanism")
+def test_loop_direction_v1_1_selected_path_overrides_duplicate_cover_fields():
+    payload = _v1_1_plan(
+        required_lane="output_ranking",
+        required_mechanism="different top-level mechanism",
+        target_behavior=["different top-level behavior"],
+        must_inspect=["sourcing_model/other.py"],
+        allowed_lanes=["output_ranking"],
+        disallowed_lanes=["query_construction"],
+        must_not_try=["different top-level safety rule"],
+        success_criteria=["different top-level success rule"],
+        novelty_requirements=["different top-level novelty rule"],
+        anti_overfit_checks=["different top-level overfit rule"],
+        validation_mode="existing_test_files",
+        validation_paths=["tests/nonexistent.py"],
+    )
     plan = code_editing.loop_direction_plan_from_mapping(payload)
-    assert "selected_path_mechanism_mismatch" in code_editing.loop_direction_plan_contract_errors(plan)
+    selected = payload["ranked_paths"][0]
+    assert plan.required_lane == selected["lane"]
+    assert plan.required_mechanism == selected["mechanism"]
+    for field in (
+        "target_behavior",
+        "must_inspect",
+        "allowed_lanes",
+        "disallowed_lanes",
+        "must_not_try",
+        "success_criteria",
+        "novelty_requirements",
+        "anti_overfit_checks",
+        "validation_paths",
+    ):
+        assert getattr(plan, field) == tuple(selected[field])
+    assert plan.validation_mode == selected["validation_mode"]
+    assert code_editing.loop_direction_plan_contract_errors(plan) == []
 
-    payload = _v1_1_plan(must_inspect=["sourcing_model/other.py"])
+
+def test_loop_direction_v1_1_rejects_inconsistent_selected_path():
+    payload = _v1_1_plan()
+    payload["ranked_paths"][0]["allowed_lanes"] = ["output_ranking"]
     plan = code_editing.loop_direction_plan_from_mapping(payload)
-    assert "selected_path_must_inspect_mismatch" in code_editing.loop_direction_plan_contract_errors(plan)
+    assert any(
+        error.startswith("ranked_path_lane_not_allowed:")
+        for error in code_editing.loop_direction_plan_contract_errors(plan)
+    )
 
 
 def test_loop_direction_v1_1_requires_explicit_path_validation_strategy():
@@ -354,7 +506,9 @@ def test_loop_direction_v1_1_rejects_more_than_three_ranked_paths():
 
 
 def test_existing_test_validation_requires_paths():
-    payload = _v1_1_plan(validation_mode="existing_test_files", validation_paths=[])
+    payload = _v1_1_plan()
+    payload["ranked_paths"][0]["validation_mode"] = "existing_test_files"
+    payload["ranked_paths"][0]["validation_paths"] = []
     with pytest.raises(ValueError, match="requires validation_paths"):
         code_editing.loop_direction_plan_from_mapping(payload)
 
@@ -406,9 +560,62 @@ def test_structured_no_viable_refusal_round_trip_and_secret_rejection():
     )
     assert sanitized is not None
     assert sanitized.reason == "no safe patch within the current scope"
+    policy = code_editing.parse_code_edit_no_viable_patch_response(
+        json.dumps({"no_viable_patch": True, "reason": "service_role must not be accessed"})
+    )
+    assert policy is not None
     with pytest.raises(ValueError, match="forbidden"):
         code_editing.parse_code_edit_no_viable_patch_response(
-            json.dumps({"no_viable_patch": True, "reason": "service_role unavailable"})
+            json.dumps(
+                {
+                    "no_viable_patch": True,
+                    "reason": "credential unavailable",
+                    "service_role_key": "synthetic-secret-value-123456",
+                }
+            )
+        )
+
+
+def test_sensitive_material_claim_rejects_but_policy_prose_passes():
+    verdict = code_editing.parse_plan_alignment_judge_response(
+        json.dumps(
+            {
+                "verdict": "pass",
+                "reason": "Do not use hidden ICP data when evaluating this patch.",
+            }
+        )
+    )
+    assert verdict.verdict == "pass"
+
+    with pytest.raises(ValueError, match="forbidden"):
+        code_editing.parse_plan_alignment_judge_response(
+            json.dumps(
+                {
+                    "verdict": "fail",
+                    "reason": "The patch returns hidden_icp data without redaction.",
+                }
+            )
+        )
+
+    with pytest.raises(ValueError, match="forbidden"):
+        code_editing.parse_plan_alignment_judge_response(
+            json.dumps(
+                {
+                    "verdict": "fail",
+                    "reason": "credential field present",
+                    "provider_api_key": "redacted",
+                }
+            )
+        )
+
+    with pytest.raises(ValueError, match="forbidden"):
+        code_editing.parse_plan_alignment_judge_response(
+            json.dumps(
+                {
+                    "verdict": "fail",
+                    "reason": "The patch mentions hidden_icp material.",
+                }
+            )
         )
 
 
@@ -434,6 +641,42 @@ def test_planner_prompt_exposes_safe_validation_capabilities_without_command_tex
     assert context["candidate_edit_constraints"] == constraints
     assert "RESEARCH_LAB_PRIVATE_TEST_CMD" not in content
     assert "do not require adding tests" in content
+
+
+def test_planner_prompt_example_is_internally_consistent_and_source_bound():
+    messages = code_editing.build_loop_direction_planner_messages(
+        ticket={"ticket_id": "ticket-example"},
+        artifact_manifest={},
+        component_registry={},
+        benchmark_public_summary={},
+        runtime_source_index={
+            "files": [
+                {
+                    "path": "sourcing_model/discovery.py",
+                    "symbols": [{"qualified_name": "Router.discover_companies"}],
+                }
+            ]
+        },
+        budget_context={},
+        candidate_edit_constraints={},
+    )
+    content = messages[-1]["content"]
+    example_text = content.split(
+        "Required output shape (the selected path and duplicate top-level fields match exactly):\n",
+        1,
+    )[1].split("\n\nContext JSON:\n", 1)[0]
+    example = json.loads(example_text)
+    selected = example["ranked_paths"][0]
+
+    assert example["required_lane"] == selected["lane"]
+    assert example["required_mechanism"] == selected["mechanism"]
+    assert example["must_inspect"] == selected["must_inspect"]
+    assert example["must_inspect"] == [
+        "sourcing_model/discovery.py::Router.discover_companies"
+    ]
+    assert code_editing.loop_direction_plan_contract_errors(
+        code_editing.loop_direction_plan_from_mapping(example)
+    ) == []
 
 
 # --- bug #29(a): real head sha recorded instead of throwaway git-init sha ---

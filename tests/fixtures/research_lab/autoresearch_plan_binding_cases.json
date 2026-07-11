@@ -1,0 +1,912 @@
+{
+  "cases": [
+    {
+      "case": "production-plan-1",
+      "expected_mismatch_fields": [
+        "required_mechanism",
+        "target_behavior",
+        "must_inspect",
+        "must_not_try",
+        "success_criteria",
+        "novelty_requirements",
+        "anti_overfit_checks"
+      ],
+      "plan": {
+        "allowed_lanes": [
+          "intent_evidence_quality"
+        ],
+        "anti_overfit_checks": [
+          "case 1 top anti_overfit_checks item 1",
+          "case 1 top anti_overfit_checks item 2",
+          "case 1 top anti_overfit_checks item 3",
+          "case 1 top anti_overfit_checks item 4",
+          "case 1 top anti_overfit_checks item 5"
+        ],
+        "disallowed_lanes": [
+          "icp_normalization",
+          "query_construction",
+          "source_routing",
+          "provider_fallback",
+          "company_fit_filtering",
+          "openrouter_model_selection",
+          "output_ranking"
+        ],
+        "generalization_claim": "case 1 generalization claim",
+        "loop_goal": "case 1 loop goal",
+        "miner_focus_interpretation": "sanitized production plan 1",
+        "must_inspect": [
+          "model/case_1_top.py:target_1",
+          "model/case_1_top.py:target_2",
+          "model/case_1_top.py:target_3",
+          "model/case_1_top.py:target_4",
+          "model/case_1_top.py:target_5",
+          "model/case_1_top.py:target_6",
+          "model/case_1_top.py:target_7",
+          "model/case_1_top.py:target_8",
+          "model/case_1_top.py:target_9",
+          "model/case_1_top.py:target_10"
+        ],
+        "must_not_try": [
+          "case 1 top must_not_try item 1",
+          "case 1 top must_not_try item 2",
+          "case 1 top must_not_try item 3",
+          "case 1 top must_not_try item 4",
+          "case 1 top must_not_try item 5",
+          "case 1 top must_not_try item 6",
+          "case 1 top must_not_try item 7",
+          "case 1 top must_not_try item 8",
+          "case 1 top must_not_try item 9"
+        ],
+        "novelty_contrast": "case 1 novelty contrast",
+        "novelty_requirements": [
+          "case 1 top novelty_requirements item 1",
+          "case 1 top novelty_requirements item 2",
+          "case 1 top novelty_requirements item 3"
+        ],
+        "ranked_paths": [
+          {
+            "allowed_lanes": [
+              "intent_evidence_quality"
+            ],
+            "anti_overfit_checks": [
+              "case 1 path_1 anti_overfit_checks item 1",
+              "case 1 path_1 anti_overfit_checks item 2",
+              "case 1 path_1 anti_overfit_checks item 3",
+              "case 1 path_1 anti_overfit_checks item 4"
+            ],
+            "disallowed_lanes": [
+              "icp_normalization",
+              "query_construction",
+              "source_routing",
+              "provider_fallback",
+              "company_fit_filtering",
+              "openrouter_model_selection",
+              "output_ranking"
+            ],
+            "lane": "intent_evidence_quality",
+            "mechanism": "case 1 selected mechanism 1",
+            "must_inspect": [
+              "model/case_1_path_1.py:target_1",
+              "model/case_1_path_1.py:target_2",
+              "model/case_1_path_1.py:target_3",
+              "model/case_1_path_1.py:target_4",
+              "model/case_1_path_1.py:target_5",
+              "model/case_1_path_1.py:target_6",
+              "model/case_1_path_1.py:target_7",
+              "model/case_1_path_1.py:target_8",
+              "model/case_1_path_1.py:target_9"
+            ],
+            "must_not_try": [
+              "case 1 path_1 must_not_try item 1",
+              "case 1 path_1 must_not_try item 2",
+              "case 1 path_1 must_not_try item 3",
+              "case 1 path_1 must_not_try item 4",
+              "case 1 path_1 must_not_try item 5",
+              "case 1 path_1 must_not_try item 6"
+            ],
+            "novelty_requirements": [
+              "case 1 path_1 novelty_requirements item 1",
+              "case 1 path_1 novelty_requirements item 2",
+              "case 1 path_1 novelty_requirements item 3"
+            ],
+            "path_id": "case-1-path-1",
+            "success_criteria": [
+              "case 1 path_1 success_criteria item 1",
+              "case 1 path_1 success_criteria item 2",
+              "case 1 path_1 success_criteria item 3",
+              "case 1 path_1 success_criteria item 4",
+              "case 1 path_1 success_criteria item 5"
+            ],
+            "target_behavior": [
+              "case 1 path_1 target_behavior item 1",
+              "case 1 path_1 target_behavior item 2",
+              "case 1 path_1 target_behavior item 3",
+              "case 1 path_1 target_behavior item 4",
+              "case 1 path_1 target_behavior item 5"
+            ],
+            "validation_mode": "runtime_checks",
+            "validation_paths": []
+          }
+        ],
+        "required_lane": "intent_evidence_quality",
+        "required_mechanism": "case 1 top mechanism",
+        "schema_version": "1.1",
+        "selected_path_id": "case-1-path-1",
+        "success_criteria": [
+          "case 1 top success_criteria item 1",
+          "case 1 top success_criteria item 2",
+          "case 1 top success_criteria item 3",
+          "case 1 top success_criteria item 4",
+          "case 1 top success_criteria item 5",
+          "case 1 top success_criteria item 6"
+        ],
+        "target_behavior": [
+          "case 1 top target_behavior item 1",
+          "case 1 top target_behavior item 2",
+          "case 1 top target_behavior item 3",
+          "case 1 top target_behavior item 4",
+          "case 1 top target_behavior item 5"
+        ],
+        "unresolved_references": [],
+        "validation_mode": "runtime_checks",
+        "validation_paths": []
+      }
+    },
+    {
+      "case": "production-plan-2",
+      "expected_mismatch_fields": [
+        "required_mechanism",
+        "target_behavior",
+        "must_not_try",
+        "success_criteria",
+        "novelty_requirements",
+        "anti_overfit_checks"
+      ],
+      "plan": {
+        "allowed_lanes": [
+          "query_construction"
+        ],
+        "anti_overfit_checks": [
+          "case 2 top anti_overfit_checks item 1",
+          "case 2 top anti_overfit_checks item 2",
+          "case 2 top anti_overfit_checks item 3",
+          "case 2 top anti_overfit_checks item 4",
+          "case 2 top anti_overfit_checks item 5"
+        ],
+        "disallowed_lanes": [
+          "icp_normalization",
+          "source_routing",
+          "provider_fallback",
+          "intent_evidence_quality",
+          "company_fit_filtering",
+          "openrouter_model_selection",
+          "output_ranking"
+        ],
+        "generalization_claim": "case 2 generalization claim",
+        "loop_goal": "case 2 loop goal",
+        "miner_focus_interpretation": "sanitized production plan 2",
+        "must_inspect": [
+          "model/case_2_path_1.py:target_1",
+          "model/case_2_path_1.py:target_2",
+          "model/case_2_path_1.py:target_3",
+          "model/case_2_path_1.py:target_4",
+          "model/case_2_path_1.py:target_5",
+          "model/case_2_path_1.py:target_6",
+          "model/case_2_path_1.py:target_7",
+          "model/case_2_path_1.py:target_8"
+        ],
+        "must_not_try": [
+          "case 2 top must_not_try item 1",
+          "case 2 top must_not_try item 2",
+          "case 2 top must_not_try item 3",
+          "case 2 top must_not_try item 4",
+          "case 2 top must_not_try item 5",
+          "case 2 top must_not_try item 6",
+          "case 2 top must_not_try item 7",
+          "case 2 top must_not_try item 8"
+        ],
+        "novelty_contrast": "case 2 novelty contrast",
+        "novelty_requirements": [
+          "case 2 top novelty_requirements item 1",
+          "case 2 top novelty_requirements item 2",
+          "case 2 top novelty_requirements item 3",
+          "case 2 top novelty_requirements item 4"
+        ],
+        "ranked_paths": [
+          {
+            "allowed_lanes": [
+              "query_construction"
+            ],
+            "anti_overfit_checks": [
+              "case 2 path_1 anti_overfit_checks item 1",
+              "case 2 path_1 anti_overfit_checks item 2",
+              "case 2 path_1 anti_overfit_checks item 3",
+              "case 2 path_1 anti_overfit_checks item 4"
+            ],
+            "disallowed_lanes": [
+              "icp_normalization",
+              "source_routing",
+              "provider_fallback",
+              "intent_evidence_quality",
+              "company_fit_filtering",
+              "openrouter_model_selection",
+              "output_ranking"
+            ],
+            "lane": "query_construction",
+            "mechanism": "case 2 selected mechanism 1",
+            "must_inspect": [
+              "model/case_2_path_1.py:target_1",
+              "model/case_2_path_1.py:target_2",
+              "model/case_2_path_1.py:target_3",
+              "model/case_2_path_1.py:target_4",
+              "model/case_2_path_1.py:target_5",
+              "model/case_2_path_1.py:target_6",
+              "model/case_2_path_1.py:target_7",
+              "model/case_2_path_1.py:target_8"
+            ],
+            "must_not_try": [
+              "case 2 path_1 must_not_try item 1",
+              "case 2 path_1 must_not_try item 2",
+              "case 2 path_1 must_not_try item 3",
+              "case 2 path_1 must_not_try item 4"
+            ],
+            "novelty_requirements": [
+              "case 2 path_1 novelty_requirements item 1",
+              "case 2 path_1 novelty_requirements item 2",
+              "case 2 path_1 novelty_requirements item 3"
+            ],
+            "path_id": "case-2-path-1",
+            "success_criteria": [
+              "case 2 path_1 success_criteria item 1",
+              "case 2 path_1 success_criteria item 2",
+              "case 2 path_1 success_criteria item 3",
+              "case 2 path_1 success_criteria item 4",
+              "case 2 path_1 success_criteria item 5",
+              "case 2 path_1 success_criteria item 6"
+            ],
+            "target_behavior": [
+              "case 2 path_1 target_behavior item 1",
+              "case 2 path_1 target_behavior item 2",
+              "case 2 path_1 target_behavior item 3",
+              "case 2 path_1 target_behavior item 4",
+              "case 2 path_1 target_behavior item 5"
+            ],
+            "validation_mode": "runtime_checks",
+            "validation_paths": []
+          }
+        ],
+        "required_lane": "query_construction",
+        "required_mechanism": "case 2 top mechanism",
+        "schema_version": "1.1",
+        "selected_path_id": "case-2-path-1",
+        "success_criteria": [
+          "case 2 top success_criteria item 1",
+          "case 2 top success_criteria item 2",
+          "case 2 top success_criteria item 3",
+          "case 2 top success_criteria item 4",
+          "case 2 top success_criteria item 5",
+          "case 2 top success_criteria item 6",
+          "case 2 top success_criteria item 7"
+        ],
+        "target_behavior": [
+          "case 2 top target_behavior item 1",
+          "case 2 top target_behavior item 2",
+          "case 2 top target_behavior item 3",
+          "case 2 top target_behavior item 4",
+          "case 2 top target_behavior item 5",
+          "case 2 top target_behavior item 6"
+        ],
+        "unresolved_references": [],
+        "validation_mode": "runtime_checks",
+        "validation_paths": []
+      }
+    },
+    {
+      "case": "production-plan-3",
+      "expected_mismatch_fields": [
+        "required_mechanism",
+        "target_behavior",
+        "must_not_try",
+        "success_criteria",
+        "novelty_requirements",
+        "anti_overfit_checks"
+      ],
+      "plan": {
+        "allowed_lanes": [
+          "query_construction"
+        ],
+        "anti_overfit_checks": [
+          "case 3 top anti_overfit_checks item 1",
+          "case 3 top anti_overfit_checks item 2",
+          "case 3 top anti_overfit_checks item 3",
+          "case 3 top anti_overfit_checks item 4",
+          "case 3 top anti_overfit_checks item 5"
+        ],
+        "disallowed_lanes": [
+          "icp_normalization",
+          "source_routing",
+          "provider_fallback",
+          "intent_evidence_quality",
+          "company_fit_filtering",
+          "openrouter_model_selection",
+          "output_ranking"
+        ],
+        "generalization_claim": "case 3 generalization claim",
+        "loop_goal": "case 3 loop goal",
+        "miner_focus_interpretation": "sanitized production plan 3",
+        "must_inspect": [
+          "model/case_3_path_1.py:target_1",
+          "model/case_3_path_1.py:target_2",
+          "model/case_3_path_1.py:target_3",
+          "model/case_3_path_1.py:target_4",
+          "model/case_3_path_1.py:target_5",
+          "model/case_3_path_1.py:target_6",
+          "model/case_3_path_1.py:target_7",
+          "model/case_3_path_1.py:target_8"
+        ],
+        "must_not_try": [
+          "case 3 top must_not_try item 1",
+          "case 3 top must_not_try item 2",
+          "case 3 top must_not_try item 3",
+          "case 3 top must_not_try item 4",
+          "case 3 top must_not_try item 5",
+          "case 3 top must_not_try item 6"
+        ],
+        "novelty_contrast": "case 3 novelty contrast",
+        "novelty_requirements": [
+          "case 3 top novelty_requirements item 1",
+          "case 3 top novelty_requirements item 2",
+          "case 3 top novelty_requirements item 3"
+        ],
+        "ranked_paths": [
+          {
+            "allowed_lanes": [
+              "query_construction"
+            ],
+            "anti_overfit_checks": [
+              "case 3 path_1 anti_overfit_checks item 1",
+              "case 3 path_1 anti_overfit_checks item 2",
+              "case 3 path_1 anti_overfit_checks item 3",
+              "case 3 path_1 anti_overfit_checks item 4"
+            ],
+            "disallowed_lanes": [
+              "icp_normalization",
+              "source_routing",
+              "provider_fallback",
+              "intent_evidence_quality",
+              "company_fit_filtering",
+              "openrouter_model_selection",
+              "output_ranking"
+            ],
+            "lane": "query_construction",
+            "mechanism": "case 3 selected mechanism 1",
+            "must_inspect": [
+              "model/case_3_path_1.py:target_1",
+              "model/case_3_path_1.py:target_2",
+              "model/case_3_path_1.py:target_3",
+              "model/case_3_path_1.py:target_4",
+              "model/case_3_path_1.py:target_5",
+              "model/case_3_path_1.py:target_6",
+              "model/case_3_path_1.py:target_7",
+              "model/case_3_path_1.py:target_8"
+            ],
+            "must_not_try": [
+              "case 3 path_1 must_not_try item 1",
+              "case 3 path_1 must_not_try item 2",
+              "case 3 path_1 must_not_try item 3",
+              "case 3 path_1 must_not_try item 4",
+              "case 3 path_1 must_not_try item 5"
+            ],
+            "novelty_requirements": [
+              "case 3 path_1 novelty_requirements item 1",
+              "case 3 path_1 novelty_requirements item 2",
+              "case 3 path_1 novelty_requirements item 3"
+            ],
+            "path_id": "case-3-path-1",
+            "success_criteria": [
+              "case 3 path_1 success_criteria item 1",
+              "case 3 path_1 success_criteria item 2",
+              "case 3 path_1 success_criteria item 3",
+              "case 3 path_1 success_criteria item 4",
+              "case 3 path_1 success_criteria item 5",
+              "case 3 path_1 success_criteria item 6"
+            ],
+            "target_behavior": [
+              "case 3 path_1 target_behavior item 1",
+              "case 3 path_1 target_behavior item 2",
+              "case 3 path_1 target_behavior item 3"
+            ],
+            "validation_mode": "runtime_checks",
+            "validation_paths": []
+          }
+        ],
+        "required_lane": "query_construction",
+        "required_mechanism": "case 3 top mechanism",
+        "schema_version": "1.1",
+        "selected_path_id": "case-3-path-1",
+        "success_criteria": [
+          "case 3 top success_criteria item 1",
+          "case 3 top success_criteria item 2",
+          "case 3 top success_criteria item 3",
+          "case 3 top success_criteria item 4",
+          "case 3 top success_criteria item 5",
+          "case 3 top success_criteria item 6"
+        ],
+        "target_behavior": [
+          "case 3 top target_behavior item 1",
+          "case 3 top target_behavior item 2",
+          "case 3 top target_behavior item 3",
+          "case 3 top target_behavior item 4",
+          "case 3 top target_behavior item 5"
+        ],
+        "unresolved_references": [],
+        "validation_mode": "runtime_checks",
+        "validation_paths": []
+      }
+    },
+    {
+      "case": "production-plan-4",
+      "expected_mismatch_fields": [
+        "required_mechanism",
+        "target_behavior",
+        "must_inspect",
+        "must_not_try",
+        "success_criteria",
+        "novelty_requirements",
+        "anti_overfit_checks"
+      ],
+      "plan": {
+        "allowed_lanes": [
+          "source_routing"
+        ],
+        "anti_overfit_checks": [
+          "case 4 top anti_overfit_checks item 1",
+          "case 4 top anti_overfit_checks item 2",
+          "case 4 top anti_overfit_checks item 3",
+          "case 4 top anti_overfit_checks item 4",
+          "case 4 top anti_overfit_checks item 5"
+        ],
+        "disallowed_lanes": [
+          "provider_fallback",
+          "query_construction",
+          "icp_normalization",
+          "company_fit_filtering",
+          "intent_evidence_quality",
+          "output_ranking",
+          "openrouter_model_selection"
+        ],
+        "generalization_claim": "case 4 generalization claim",
+        "loop_goal": "case 4 loop goal",
+        "miner_focus_interpretation": "sanitized production plan 4",
+        "must_inspect": [
+          "model/case_4_top.py:target_1",
+          "model/case_4_top.py:target_2",
+          "model/case_4_top.py:target_3",
+          "model/case_4_top.py:target_4",
+          "model/case_4_top.py:target_5",
+          "model/case_4_top.py:target_6",
+          "model/case_4_top.py:target_7",
+          "model/case_4_top.py:target_8",
+          "model/case_4_top.py:target_9"
+        ],
+        "must_not_try": [
+          "case 4 top must_not_try item 1",
+          "case 4 top must_not_try item 2",
+          "case 4 top must_not_try item 3",
+          "case 4 top must_not_try item 4",
+          "case 4 top must_not_try item 5",
+          "case 4 top must_not_try item 6",
+          "case 4 top must_not_try item 7"
+        ],
+        "novelty_contrast": "case 4 novelty contrast",
+        "novelty_requirements": [
+          "case 4 top novelty_requirements item 1",
+          "case 4 top novelty_requirements item 2",
+          "case 4 top novelty_requirements item 3"
+        ],
+        "ranked_paths": [
+          {
+            "allowed_lanes": [
+              "source_routing"
+            ],
+            "anti_overfit_checks": [
+              "case 4 path_1 anti_overfit_checks item 1",
+              "case 4 path_1 anti_overfit_checks item 2",
+              "case 4 path_1 anti_overfit_checks item 3",
+              "case 4 path_1 anti_overfit_checks item 4"
+            ],
+            "disallowed_lanes": [
+              "provider_fallback",
+              "query_construction",
+              "icp_normalization",
+              "company_fit_filtering",
+              "intent_evidence_quality",
+              "output_ranking",
+              "openrouter_model_selection"
+            ],
+            "lane": "source_routing",
+            "mechanism": "case 4 selected mechanism 1",
+            "must_inspect": [
+              "model/case_4_path_1.py:target_1",
+              "model/case_4_path_1.py:target_2",
+              "model/case_4_path_1.py:target_3",
+              "model/case_4_path_1.py:target_4",
+              "model/case_4_path_1.py:target_5",
+              "model/case_4_path_1.py:target_6",
+              "model/case_4_path_1.py:target_7",
+              "model/case_4_path_1.py:target_8"
+            ],
+            "must_not_try": [
+              "case 4 path_1 must_not_try item 1",
+              "case 4 path_1 must_not_try item 2",
+              "case 4 path_1 must_not_try item 3",
+              "case 4 path_1 must_not_try item 4",
+              "case 4 path_1 must_not_try item 5"
+            ],
+            "novelty_requirements": [
+              "case 4 path_1 novelty_requirements item 1",
+              "case 4 path_1 novelty_requirements item 2",
+              "case 4 path_1 novelty_requirements item 3"
+            ],
+            "path_id": "case-4-path-1",
+            "success_criteria": [
+              "case 4 path_1 success_criteria item 1",
+              "case 4 path_1 success_criteria item 2",
+              "case 4 path_1 success_criteria item 3",
+              "case 4 path_1 success_criteria item 4",
+              "case 4 path_1 success_criteria item 5"
+            ],
+            "target_behavior": [
+              "case 4 path_1 target_behavior item 1",
+              "case 4 path_1 target_behavior item 2",
+              "case 4 path_1 target_behavior item 3",
+              "case 4 path_1 target_behavior item 4",
+              "case 4 path_1 target_behavior item 5"
+            ],
+            "validation_mode": "runtime_checks",
+            "validation_paths": []
+          }
+        ],
+        "required_lane": "source_routing",
+        "required_mechanism": "case 4 top mechanism",
+        "schema_version": "1.1",
+        "selected_path_id": "case-4-path-1",
+        "success_criteria": [
+          "case 4 top success_criteria item 1",
+          "case 4 top success_criteria item 2",
+          "case 4 top success_criteria item 3",
+          "case 4 top success_criteria item 4",
+          "case 4 top success_criteria item 5",
+          "case 4 top success_criteria item 6"
+        ],
+        "target_behavior": [
+          "case 4 top target_behavior item 1",
+          "case 4 top target_behavior item 2",
+          "case 4 top target_behavior item 3",
+          "case 4 top target_behavior item 4",
+          "case 4 top target_behavior item 5"
+        ],
+        "unresolved_references": [],
+        "validation_mode": "runtime_checks",
+        "validation_paths": []
+      }
+    },
+    {
+      "case": "production-plan-5",
+      "expected_mismatch_fields": [
+        "required_mechanism",
+        "target_behavior",
+        "must_inspect",
+        "must_not_try",
+        "success_criteria",
+        "novelty_requirements",
+        "anti_overfit_checks"
+      ],
+      "plan": {
+        "allowed_lanes": [
+          "source_routing"
+        ],
+        "anti_overfit_checks": [
+          "case 5 top anti_overfit_checks item 1",
+          "case 5 top anti_overfit_checks item 2",
+          "case 5 top anti_overfit_checks item 3",
+          "case 5 top anti_overfit_checks item 4",
+          "case 5 top anti_overfit_checks item 5",
+          "case 5 top anti_overfit_checks item 6"
+        ],
+        "disallowed_lanes": [
+          "provider_fallback",
+          "query_construction",
+          "icp_normalization",
+          "intent_evidence_quality",
+          "company_fit_filtering",
+          "openrouter_model_selection",
+          "output_ranking"
+        ],
+        "generalization_claim": "case 5 generalization claim",
+        "loop_goal": "case 5 loop goal",
+        "miner_focus_interpretation": "sanitized production plan 5",
+        "must_inspect": [
+          "model/case_5_top.py::target_1",
+          "model/case_5_top.py::target_2",
+          "model/case_5_top.py::target_3",
+          "model/case_5_top.py::target_4",
+          "model/case_5_top.py::target_5",
+          "model/case_5_top.py::target_6",
+          "model/case_5_top.py::target_7",
+          "model/case_5_top.py::target_8",
+          "model/case_5_top.py::target_9",
+          "model/case_5_top.py::target_10"
+        ],
+        "must_not_try": [
+          "case 5 top must_not_try item 1",
+          "case 5 top must_not_try item 2",
+          "case 5 top must_not_try item 3",
+          "case 5 top must_not_try item 4",
+          "case 5 top must_not_try item 5",
+          "case 5 top must_not_try item 6",
+          "case 5 top must_not_try item 7",
+          "case 5 top must_not_try item 8"
+        ],
+        "novelty_contrast": "case 5 novelty contrast",
+        "novelty_requirements": [
+          "case 5 top novelty_requirements item 1",
+          "case 5 top novelty_requirements item 2",
+          "case 5 top novelty_requirements item 3",
+          "case 5 top novelty_requirements item 4"
+        ],
+        "ranked_paths": [
+          {
+            "allowed_lanes": [
+              "source_routing"
+            ],
+            "anti_overfit_checks": [
+              "case 5 path_1 anti_overfit_checks item 1",
+              "case 5 path_1 anti_overfit_checks item 2",
+              "case 5 path_1 anti_overfit_checks item 3",
+              "case 5 path_1 anti_overfit_checks item 4",
+              "case 5 path_1 anti_overfit_checks item 5"
+            ],
+            "disallowed_lanes": [
+              "provider_fallback",
+              "query_construction",
+              "icp_normalization",
+              "intent_evidence_quality",
+              "company_fit_filtering",
+              "openrouter_model_selection",
+              "output_ranking"
+            ],
+            "lane": "source_routing",
+            "mechanism": "case 5 selected mechanism 1",
+            "must_inspect": [
+              "model/case_5_path_1.py::target_1",
+              "model/case_5_path_1.py::target_2",
+              "model/case_5_path_1.py::target_3",
+              "model/case_5_path_1.py::target_4",
+              "model/case_5_path_1.py::target_5",
+              "model/case_5_path_1.py::target_6",
+              "model/case_5_path_1.py::target_7",
+              "model/case_5_path_1.py::target_8",
+              "model/case_5_path_1.py::target_9"
+            ],
+            "must_not_try": [
+              "case 5 path_1 must_not_try item 1",
+              "case 5 path_1 must_not_try item 2",
+              "case 5 path_1 must_not_try item 3",
+              "case 5 path_1 must_not_try item 4",
+              "case 5 path_1 must_not_try item 5",
+              "case 5 path_1 must_not_try item 6"
+            ],
+            "novelty_requirements": [
+              "case 5 path_1 novelty_requirements item 1",
+              "case 5 path_1 novelty_requirements item 2",
+              "case 5 path_1 novelty_requirements item 3"
+            ],
+            "path_id": "case-5-path-1",
+            "success_criteria": [
+              "case 5 path_1 success_criteria item 1",
+              "case 5 path_1 success_criteria item 2",
+              "case 5 path_1 success_criteria item 3",
+              "case 5 path_1 success_criteria item 4",
+              "case 5 path_1 success_criteria item 5",
+              "case 5 path_1 success_criteria item 6",
+              "case 5 path_1 success_criteria item 7"
+            ],
+            "target_behavior": [
+              "case 5 path_1 target_behavior item 1",
+              "case 5 path_1 target_behavior item 2",
+              "case 5 path_1 target_behavior item 3",
+              "case 5 path_1 target_behavior item 4",
+              "case 5 path_1 target_behavior item 5"
+            ],
+            "validation_mode": "runtime_checks",
+            "validation_paths": []
+          }
+        ],
+        "required_lane": "source_routing",
+        "required_mechanism": "case 5 top mechanism",
+        "schema_version": "1.1",
+        "selected_path_id": "case-5-path-1",
+        "success_criteria": [
+          "case 5 top success_criteria item 1",
+          "case 5 top success_criteria item 2",
+          "case 5 top success_criteria item 3",
+          "case 5 top success_criteria item 4",
+          "case 5 top success_criteria item 5",
+          "case 5 top success_criteria item 6",
+          "case 5 top success_criteria item 7"
+        ],
+        "target_behavior": [
+          "case 5 top target_behavior item 1",
+          "case 5 top target_behavior item 2",
+          "case 5 top target_behavior item 3",
+          "case 5 top target_behavior item 4",
+          "case 5 top target_behavior item 5",
+          "case 5 top target_behavior item 6"
+        ],
+        "unresolved_references": [],
+        "validation_mode": "runtime_checks",
+        "validation_paths": []
+      }
+    },
+    {
+      "case": "production-plan-6",
+      "expected_mismatch_fields": [
+        "required_mechanism",
+        "target_behavior",
+        "must_not_try",
+        "success_criteria",
+        "novelty_requirements",
+        "anti_overfit_checks"
+      ],
+      "plan": {
+        "allowed_lanes": [
+          "source_routing"
+        ],
+        "anti_overfit_checks": [
+          "case 6 top anti_overfit_checks item 1",
+          "case 6 top anti_overfit_checks item 2",
+          "case 6 top anti_overfit_checks item 3",
+          "case 6 top anti_overfit_checks item 4",
+          "case 6 top anti_overfit_checks item 5",
+          "case 6 top anti_overfit_checks item 6"
+        ],
+        "disallowed_lanes": [
+          "provider_fallback",
+          "query_construction",
+          "icp_normalization",
+          "company_fit_filtering",
+          "intent_evidence_quality",
+          "openrouter_model_selection",
+          "output_ranking"
+        ],
+        "generalization_claim": "case 6 generalization claim",
+        "loop_goal": "case 6 loop goal",
+        "miner_focus_interpretation": "sanitized production plan 6",
+        "must_inspect": [
+          "model/case_6_path_1.py:target_1",
+          "model/case_6_path_1.py:target_2",
+          "model/case_6_path_1.py:target_3",
+          "model/case_6_path_1.py:target_4",
+          "model/case_6_path_1.py:target_5",
+          "model/case_6_path_1.py:target_6",
+          "model/case_6_path_1.py:target_7",
+          "model/case_6_path_1.py:target_8",
+          "model/case_6_path_1.py:target_9"
+        ],
+        "must_not_try": [
+          "case 6 top must_not_try item 1",
+          "case 6 top must_not_try item 2",
+          "case 6 top must_not_try item 3",
+          "case 6 top must_not_try item 4",
+          "case 6 top must_not_try item 5",
+          "case 6 top must_not_try item 6",
+          "case 6 top must_not_try item 7",
+          "case 6 top must_not_try item 8"
+        ],
+        "novelty_contrast": "case 6 novelty contrast",
+        "novelty_requirements": [
+          "case 6 top novelty_requirements item 1",
+          "case 6 top novelty_requirements item 2",
+          "case 6 top novelty_requirements item 3",
+          "case 6 top novelty_requirements item 4",
+          "case 6 top novelty_requirements item 5"
+        ],
+        "ranked_paths": [
+          {
+            "allowed_lanes": [
+              "source_routing"
+            ],
+            "anti_overfit_checks": [
+              "case 6 path_1 anti_overfit_checks item 1",
+              "case 6 path_1 anti_overfit_checks item 2",
+              "case 6 path_1 anti_overfit_checks item 3",
+              "case 6 path_1 anti_overfit_checks item 4",
+              "case 6 path_1 anti_overfit_checks item 5"
+            ],
+            "disallowed_lanes": [
+              "provider_fallback",
+              "query_construction",
+              "icp_normalization",
+              "company_fit_filtering",
+              "intent_evidence_quality",
+              "openrouter_model_selection",
+              "output_ranking"
+            ],
+            "lane": "source_routing",
+            "mechanism": "case 6 selected mechanism 1",
+            "must_inspect": [
+              "model/case_6_path_1.py:target_1",
+              "model/case_6_path_1.py:target_2",
+              "model/case_6_path_1.py:target_3",
+              "model/case_6_path_1.py:target_4",
+              "model/case_6_path_1.py:target_5",
+              "model/case_6_path_1.py:target_6",
+              "model/case_6_path_1.py:target_7",
+              "model/case_6_path_1.py:target_8",
+              "model/case_6_path_1.py:target_9"
+            ],
+            "must_not_try": [
+              "case 6 path_1 must_not_try item 1",
+              "case 6 path_1 must_not_try item 2",
+              "case 6 path_1 must_not_try item 3",
+              "case 6 path_1 must_not_try item 4",
+              "case 6 path_1 must_not_try item 5",
+              "case 6 path_1 must_not_try item 6",
+              "case 6 path_1 must_not_try item 7"
+            ],
+            "novelty_requirements": [
+              "case 6 path_1 novelty_requirements item 1",
+              "case 6 path_1 novelty_requirements item 2",
+              "case 6 path_1 novelty_requirements item 3",
+              "case 6 path_1 novelty_requirements item 4"
+            ],
+            "path_id": "case-6-path-1",
+            "success_criteria": [
+              "case 6 path_1 success_criteria item 1",
+              "case 6 path_1 success_criteria item 2",
+              "case 6 path_1 success_criteria item 3",
+              "case 6 path_1 success_criteria item 4",
+              "case 6 path_1 success_criteria item 5",
+              "case 6 path_1 success_criteria item 6"
+            ],
+            "target_behavior": [
+              "case 6 path_1 target_behavior item 1",
+              "case 6 path_1 target_behavior item 2",
+              "case 6 path_1 target_behavior item 3",
+              "case 6 path_1 target_behavior item 4",
+              "case 6 path_1 target_behavior item 5",
+              "case 6 path_1 target_behavior item 6"
+            ],
+            "validation_mode": "runtime_checks",
+            "validation_paths": []
+          }
+        ],
+        "required_lane": "source_routing",
+        "required_mechanism": "case 6 top mechanism",
+        "schema_version": "1.1",
+        "selected_path_id": "case-6-path-1",
+        "success_criteria": [
+          "case 6 top success_criteria item 1",
+          "case 6 top success_criteria item 2",
+          "case 6 top success_criteria item 3",
+          "case 6 top success_criteria item 4",
+          "case 6 top success_criteria item 5",
+          "case 6 top success_criteria item 6"
+        ],
+        "target_behavior": [
+          "case 6 top target_behavior item 1",
+          "case 6 top target_behavior item 2",
+          "case 6 top target_behavior item 3",
+          "case 6 top target_behavior item 4",
+          "case 6 top target_behavior item 5",
+          "case 6 top target_behavior item 6"
+        ],
+        "unresolved_references": [],
+        "validation_mode": "runtime_checks",
+        "validation_paths": []
+      }
+    }
+  ],
+  "schema_version": "1.0"
+}

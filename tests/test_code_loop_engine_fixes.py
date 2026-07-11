@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 import sys
 import types
 
@@ -24,6 +25,16 @@ from gateway.research_lab.source_symbol_index import build_source_symbol_index
 from gateway.research_lab.loop_engine import AutoResearchLoopSettings, OpenRouterCallResult
 from research_lab.code_editing import CodeEditDraft
 from research_lab.eval import PrivateModelArtifactManifest
+
+
+_PRODUCTION_PLAN_CASES = json.loads(
+    (
+        Path(__file__).parent
+        / "fixtures"
+        / "research_lab"
+        / "autoresearch_plan_binding_cases.json"
+    ).read_text(encoding="utf-8")
+)["cases"]
 
 
 def _draft(**overrides):
@@ -101,6 +112,54 @@ def _source_context(tmp_path):
         source_tree_hash="sha256:" + "8" * 64,
         top_level_paths=("sourcing_model/",),
         editable_files=("sourcing_model/discovery.py",),
+        file_previews=(),
+        planner_source_index=planner_source_index,
+    )
+
+
+def _production_fixture_source_context(tmp_path, plan):
+    base_context = _source_context(tmp_path)
+    source_root = base_context.source_root
+    selected = next(
+        path
+        for path in plan["ranked_paths"]
+        if path["path_id"] == plan["selected_path_id"]
+    )
+    symbols_by_path = {}
+    for reference in selected["must_inspect"]:
+        if "::" in reference:
+            path, symbol = reference.split("::", 1)
+        elif ".py:" in reference:
+            path, symbol = reference.split(":", 1)
+        else:
+            path, symbol = reference, ""
+        symbols_by_path.setdefault(path, set())
+        if symbol:
+            symbols_by_path[path].add(symbol)
+    for relative_path, symbols in symbols_by_path.items():
+        target = source_root / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lines = ["VALUE = 1", ""]
+        for symbol in sorted(symbols):
+            assert "." not in symbol
+            lines.extend([f"def {symbol}(value):", "    return value", ""])
+        target.write_text("\n".join(lines), encoding="utf-8")
+    editable_files = tuple(
+        sorted({*base_context.editable_files, *symbols_by_path.keys()})
+    )
+    planner_source_index = build_source_symbol_index(
+        source_root=source_root,
+        editable_files=editable_files,
+        source_tree_hash=base_context.source_tree_hash,
+        parent_image_digest_hash=base_context.parent_image_digest_hash,
+    )
+    return ParentImageSourceContext(
+        source_root=source_root,
+        source_mode=base_context.source_mode,
+        parent_image_digest_hash=base_context.parent_image_digest_hash,
+        source_tree_hash=base_context.source_tree_hash,
+        top_level_paths=("model/", "sourcing_model/"),
+        editable_files=editable_files,
         file_previews=(),
         planner_source_index=planner_source_index,
     )
@@ -394,6 +453,121 @@ class _PlannerBuildsCandidateBuilder(_PlannerNoCandidateBuilder):
         return _build_result()
 
 
+@pytest.mark.parametrize(
+    "fixture_case",
+    _PRODUCTION_PLAN_CASES,
+    ids=[item["case"] for item in _PRODUCTION_PLAN_CASES],
+)
+async def test_sanitized_production_plans_bind_and_reach_patch_drafting(
+    tmp_path,
+    fixture_case,
+):
+    plan = fixture_case["plan"]
+    source_context = _production_fixture_source_context(tmp_path, plan)
+    builder = _PlannerBuildsCandidateBuilder(source_context)
+    builder.config.planner_reference_repair_enabled = True
+    calls = []
+    events = []
+    selected = next(
+        path
+        for path in plan["ranked_paths"]
+        if path["path_id"] == plan["selected_path_id"]
+    )
+    first_reference = selected["must_inspect"][0]
+    inspection_path = first_reference.split("::", 1)[0].split(":", 1)[0]
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        calls.append(stage)
+        if stage == "loop_planner":
+            return OpenRouterCallResult(
+                content=json.dumps(plan),
+                provider_usage={"provider": "fixture", "response_id": fixture_case["case"]},
+                cost_microusd=1,
+            )
+        if stage == "source_inspection":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "requests": [
+                            {"operation": "read_file", "path": inspection_path},
+                            {"operation": "read_file", "path": "sourcing_model/discovery.py"},
+                        ]
+                    }
+                ),
+                provider_usage={"provider": "fixture", "response_id": "inspection"},
+                cost_microusd=1,
+            )
+        if stage == "code_edit_draft":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "candidates": [
+                            _draft(
+                                lane=selected["lane"],
+                                plan_path_id=selected["path_id"],
+                                mechanism="improve intent evidence source routing",
+                                redacted_summary="improve intent evidence source quality",
+                            ).to_dict()
+                        ]
+                    }
+                ),
+                provider_usage={"provider": "fixture", "response_id": "draft"},
+                cost_microusd=1,
+            )
+        raise AssertionError(f"unexpected stage: {stage}")
+
+    async def event_sink(event):
+        events.append(event)
+
+    result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=1,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=builder,
+    ).run(
+        run_id=f"run-{fixture_case['case']}",
+        ticket={
+            "ticket_id": f"ticket-{fixture_case['case']}",
+            "miner_hotkey": "fixture-hotkey",
+            "island": "generalist",
+            "brief_sanitized_ref": "fixture-brief",
+            "ticket_doc": {"brief_public_summary": "sanitized fixture objective"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="fixture/model",
+        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
+        requested_loop_count=1,
+    )
+
+    assert result.status == "completed"
+    assert "source_inspection" in calls
+    assert "code_edit_draft" in calls
+    assert "loop_planner_reference_repair" not in calls
+    planned = next(event for event in events if event.event_type == "loop_direction_planned")
+    normalized = planned.event_doc["loop_direction_plan"]
+    normalized_selected = next(
+        path
+        for path in normalized["ranked_paths"]
+        if path["path_id"] == normalized["selected_path_id"]
+    )
+    assert normalized["required_mechanism"] == normalized_selected["mechanism"]
+    assert normalized["must_inspect"] == normalized_selected["must_inspect"]
+    assert all("::" in reference for reference in normalized["must_inspect"])
+    assert any(event.event_type == "code_edit_drafted" for event in events)
+
+
 def _loop_direction_plan_payload(**overrides):
     payload = {
         "schema_version": "1.0",
@@ -615,6 +789,94 @@ async def test_v1_1_infeasible_test_plan_gets_one_bounded_repair(tmp_path):
     ]
     assert repair_checkpoints[0]["planner_reference_repair_status"] == "attempted"
     assert repair_checkpoints[1]["planner_reference_repair_status"] == "repaired"
+
+
+async def test_ambiguous_symbol_fails_without_paid_reference_repair(tmp_path):
+    source_context = _source_context(tmp_path)
+    helper = source_context.source_root / "sourcing_model" / "helper.py"
+    helper.write_text(
+        "def discover_companies(query):\n    return query\n",
+        encoding="utf-8",
+    )
+    editable_files = (*source_context.editable_files, "sourcing_model/helper.py")
+    source_context = ParentImageSourceContext(
+        source_root=source_context.source_root,
+        source_mode=source_context.source_mode,
+        parent_image_digest_hash=source_context.parent_image_digest_hash,
+        source_tree_hash=source_context.source_tree_hash,
+        top_level_paths=source_context.top_level_paths,
+        editable_files=editable_files,
+        file_previews=(),
+        planner_source_index=build_source_symbol_index(
+            source_root=source_context.source_root,
+            editable_files=editable_files,
+            source_tree_hash=source_context.source_tree_hash,
+            parent_image_digest_hash=source_context.parent_image_digest_hash,
+        ),
+    )
+    builder = _PlannerNoCandidateBuilder(source_context)
+    builder.config.planner_reference_repair_enabled = True
+    plan = _loop_direction_plan_v1_1_payload()
+    plan["must_inspect"] = ["discover_companies"]
+    plan["ranked_paths"][0]["must_inspect"] = ["discover_companies"]
+    calls = []
+    events = []
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        calls.append(stage)
+        if stage == "loop_planner":
+            return OpenRouterCallResult(
+                content=json.dumps(plan),
+                provider_usage={"provider": "fixture", "response_id": "ambiguous"},
+                cost_microusd=1,
+            )
+        raise AssertionError(f"unexpected paid stage: {stage}")
+
+    async def event_sink(event):
+        events.append(event)
+
+    result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=1,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=builder,
+    ).run(
+        run_id="run-ambiguous-reference",
+        ticket={
+            "ticket_id": "ticket-ambiguous-reference",
+            "miner_hotkey": "hotkey",
+            "island": "generalist",
+            "ticket_doc": {"brief_public_summary": "improve discovery"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0},
+        requested_loop_count=1,
+    )
+
+    assert result.status == "failed"
+    assert calls == ["loop_planner"]
+    assert not [
+        event
+        for event in events
+        if event.event_doc.get("stage") == "planner_reference_repair"
+    ]
+    assert any(
+        "loop_direction_plan_reference_ambiguous" in str(event.event_doc.get("error") or "")
+        for event in events
+    )
 
 
 async def test_planner_reference_repair_resolves_symbol_and_builds_once(tmp_path):
@@ -864,7 +1126,9 @@ async def test_draft_unknown_reference_gets_one_repair_before_existing_fallbacks
                 content=json.dumps(
                     {
                         "no_viable_patch": True,
+                        "failure_class": "binding_plan_unimplementable",
                         "reason": "discover_companiez is not present in editable source",
+                        "missing_references": ["discover_companiez"],
                     }
                 ),
                 provider_usage={"provider": "openrouter", "response_id": "draft-miss"},

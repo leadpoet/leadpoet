@@ -4,6 +4,7 @@ paths; the kill switch restores the old re-ask behavior."""
 
 from __future__ import annotations
 
+from pathlib import Path
 import types
 
 from gateway.research_lab.code_loop_engine import (
@@ -205,18 +206,21 @@ def test_plan_feasibility_rejects_unavailable_validation_path():
         **{key: value for key, value in path.items() if key not in {"path_id", "lane", "mechanism"}},
     }
     source_context = types.SimpleNamespace(
+        source_root=Path("."),
         editable_files=("sourcing_model/discovery.py",),
         planner_source_index={
-            "files": [{"path": "sourcing_model/discovery.py", "symbols": []}]
+            "files": [{"path": "sourcing_model/discovery.py", "parse_status": "parsed", "symbols": []}],
+            "truncated": False,
         },
     )
-    errors, _missing = _plan_source_feasibility_errors(
+    errors, missing = _plan_source_feasibility_errors(
         plan,
         source_context=source_context,
         candidate_edit_constraints={"editable_test_paths": []},
     )
     assert "loop_direction_plan_existing_tests_unavailable" in errors
     assert any(error.endswith("tests/test_missing.py") for error in errors)
+    assert missing == ("tests/test_missing.py",)
 
 
 def test_plan_feasibility_rejects_non_indexed_prose_reference():
@@ -231,9 +235,11 @@ def test_plan_feasibility_rejects_non_indexed_prose_reference():
         **{key: value for key, value in path.items() if key not in {"path_id", "lane", "mechanism"}},
     }
     source_context = types.SimpleNamespace(
+        source_root=Path("."),
         editable_files=("sourcing_model/discovery.py",),
         planner_source_index={
-            "files": [{"path": "sourcing_model/discovery.py", "symbols": []}]
+            "files": [{"path": "sourcing_model/discovery.py", "parse_status": "parsed", "symbols": []}],
+            "truncated": False,
         },
     )
     errors, missing = _plan_source_feasibility_errors(
@@ -241,5 +247,5 @@ def test_plan_feasibility_rejects_non_indexed_prose_reference():
         source_context=source_context,
         candidate_edit_constraints={"editable_test_paths": []},
     )
-    assert "loop_direction_plan_reference_not_exact" in errors
+    assert "loop_direction_plan_reference_invalid:inspect the discovery implementation" in errors
     assert missing == ()

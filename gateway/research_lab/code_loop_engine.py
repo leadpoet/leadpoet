@@ -61,6 +61,7 @@ from research_lab.code_editing import (
     parse_code_edit_source_inspection_response,
 )
 from gateway.research_lab.source_symbol_index import (
+    bind_source_references_exact,
     resolve_source_references,
     unresolved_references_from_context,
 )
@@ -239,83 +240,100 @@ def _candidate_edit_constraints(
     }
 
 
+@dataclass(frozen=True)
+class _PlanSourceBindingResult:
+    plan_doc: dict[str, Any] | None
+    errors: tuple[str, ...] = ()
+    missing_references: tuple[str, ...] = ()
+    invalid_references: tuple[str, ...] = ()
+    ambiguous_references: tuple[str, ...] = ()
+
+
+def _bind_loop_direction_plan(
+    plan_doc: Mapping[str, Any] | None,
+    *,
+    source_context: Any,
+    candidate_edit_constraints: Mapping[str, Any],
+) -> _PlanSourceBindingResult:
+    if not isinstance(plan_doc, Mapping):
+        return _PlanSourceBindingResult(plan_doc=None)
+    try:
+        plan = loop_direction_plan_from_mapping(plan_doc)
+    except Exception as exc:
+        return _PlanSourceBindingResult(
+            plan_doc=dict(plan_doc),
+            errors=(f"loop_direction_plan_invalid:{safe_event_error_text(exc)}",),
+        )
+    errors = list(loop_direction_plan_contract_errors(plan))
+    canonical_doc = plan.to_dict()
+    if str(plan.schema_version or "1.0") != "1.1" or plan.no_new_safe_path:
+        return _PlanSourceBindingResult(
+            plan_doc=canonical_doc,
+            errors=tuple(dict.fromkeys(errors)),
+        )
+
+    reference_binding = bind_source_references_exact(
+        index_doc=getattr(source_context, "planner_source_index", {}),
+        source_root=source_context.source_root,
+        editable_files=getattr(source_context, "editable_files", ()),
+        references=plan.must_inspect,
+    )
+    ranked_paths: list[dict[str, Any]] = []
+    for raw_path in canonical_doc.get("ranked_paths", []):
+        path_doc = dict(raw_path) if isinstance(raw_path, Mapping) else {}
+        if _ranked_path_id(path_doc) == plan.selected_path_id:
+            path_doc["must_inspect"] = list(reference_binding.normalized_references)
+        ranked_paths.append(path_doc)
+    canonical_doc["ranked_paths"] = ranked_paths
+    canonical_doc["must_inspect"] = list(reference_binding.normalized_references)
+    canonical_doc = loop_direction_plan_from_mapping(canonical_doc).to_dict()
+
+    for reference in reference_binding.missing_references:
+        errors.append(f"loop_direction_plan_reference_missing:{reference}")
+    for reference in reference_binding.invalid_references:
+        errors.append(f"loop_direction_plan_reference_invalid:{reference}")
+    for reference in reference_binding.ambiguous_references:
+        errors.append(f"loop_direction_plan_reference_ambiguous:{reference}")
+
+    editable_files = set(str(item) for item in getattr(source_context, "editable_files", ()) if item)
+    editable_test_paths = {path for path in editable_files if _is_editable_test_path(path)}
+    missing_references = list(reference_binding.missing_references)
+    invalid_references = list(reference_binding.invalid_references)
+    if plan.validation_mode == "existing_test_files":
+        if not editable_test_paths:
+            errors.append("loop_direction_plan_existing_tests_unavailable")
+        for path in plan.validation_paths:
+            if path not in editable_files:
+                errors.append(f"loop_direction_plan_validation_path_unavailable:{path}")
+                if path not in missing_references:
+                    missing_references.append(path)
+            elif path not in editable_test_paths:
+                errors.append(f"loop_direction_plan_validation_path_not_test_file:{path}")
+                if path not in invalid_references:
+                    invalid_references.append(path)
+    elif plan.validation_paths:
+        errors.append("loop_direction_plan_runtime_checks_must_not_require_validation_paths")
+    return _PlanSourceBindingResult(
+        plan_doc=canonical_doc,
+        errors=tuple(dict.fromkeys(errors)),
+        missing_references=tuple(missing_references),
+        invalid_references=tuple(invalid_references),
+        ambiguous_references=reference_binding.ambiguous_references,
+    )
+
+
 def _plan_source_feasibility_errors(
     plan_doc: Mapping[str, Any] | None,
     *,
     source_context: Any,
     candidate_edit_constraints: Mapping[str, Any],
 ) -> tuple[list[str], tuple[str, ...]]:
-    if not isinstance(plan_doc, Mapping):
-        return [], ()
-    try:
-        plan = loop_direction_plan_from_mapping(plan_doc)
-    except Exception as exc:
-        return [f"loop_direction_plan_invalid:{safe_event_error_text(exc)}"], ()
-    errors = list(loop_direction_plan_contract_errors(plan))
-    if str(plan.schema_version or "1.0") != "1.1" or plan.no_new_safe_path:
-        return errors, ()
-
-    selected_path = next(
-        (
-            item
-            for item in plan.ranked_paths
-            if _ranked_path_id(item) == plan.selected_path_id
-        ),
-        None,
+    binding = _bind_loop_direction_plan(
+        plan_doc,
+        source_context=source_context,
+        candidate_edit_constraints=candidate_edit_constraints,
     )
-    raw_references: list[Any] = list(plan.must_inspect)
-    if isinstance(selected_path, Mapping):
-        selected_refs = selected_path.get("must_inspect")
-        if isinstance(selected_refs, Sequence) and not isinstance(selected_refs, (str, bytes, bytearray)):
-            raw_references.extend(selected_refs)
-
-    index_doc = getattr(source_context, "planner_source_index", {})
-    file_docs = index_doc.get("files", []) if isinstance(index_doc, Mapping) else []
-    exact_references = set(str(item) for item in getattr(source_context, "editable_files", ()) if item)
-    for file_doc in file_docs:
-        if not isinstance(file_doc, Mapping):
-            continue
-        path = str(file_doc.get("path") or "")
-        if path:
-            exact_references.add(path)
-        for symbol in file_doc.get("symbols", []):
-            if not isinstance(symbol, Mapping):
-                continue
-            for key in ("name", "qualified_name"):
-                value = str(symbol.get(key) or "")
-                if value:
-                    exact_references.add(value)
-
-    unmatched_references = tuple(
-        dict.fromkeys(
-            str(item or "").strip()
-            for item in raw_references
-            if str(item or "").strip() not in exact_references
-        )
-    )
-    missing_reference_items: list[str] = []
-    for unmatched in unmatched_references:
-        safe_references = unresolved_references_from_context(explicit=[unmatched])
-        if not safe_references:
-            errors.append("loop_direction_plan_reference_not_exact")
-            continue
-        for reference in safe_references:
-            if reference not in missing_reference_items:
-                missing_reference_items.append(reference)
-            errors.append(f"loop_direction_plan_reference_not_exact:{reference}")
-    missing_references = tuple(missing_reference_items)
-
-    editable_files = set(str(item) for item in getattr(source_context, "editable_files", ()) if item)
-    editable_test_paths = {path for path in editable_files if _is_editable_test_path(path)}
-    if plan.validation_mode == "existing_test_files":
-        if not editable_test_paths:
-            errors.append("loop_direction_plan_existing_tests_unavailable")
-        for path in plan.validation_paths:
-            if path not in editable_files or path not in editable_test_paths:
-                errors.append(f"loop_direction_plan_validation_path_unavailable:{path}")
-    elif plan.validation_paths:
-        errors.append("loop_direction_plan_runtime_checks_must_not_require_validation_paths")
-    return list(dict.fromkeys(errors)), missing_references
+    return list(binding.errors), binding.missing_references
 
 
 def _ranked_path_id(path: Mapping[str, Any] | None) -> str:
@@ -1570,9 +1588,12 @@ class CodeEditLoopEngine:
         loop_direction_plan_doc: dict[str, Any] | None = None
         if isinstance(resume.get("loop_direction_plan"), Mapping):
             try:
-                loop_direction_plan_doc = loop_direction_plan_from_mapping(
-                    resume["loop_direction_plan"]
-                ).to_dict()
+                resume_binding = _bind_loop_direction_plan(
+                    resume["loop_direction_plan"],
+                    source_context=source_context,
+                    candidate_edit_constraints=candidate_edit_constraints,
+                )
+                loop_direction_plan_doc = resume_binding.plan_doc
             except Exception as exc:
                 await self.event_sink(
                     AutoResearchLoopEvent(
@@ -1673,11 +1694,12 @@ class CodeEditLoopEngine:
             next_path_id = _loop_plan_selected_path_id(next_plan)
             if not next_path_id:
                 return False
-            next_plan_errors, _next_missing_references = _plan_source_feasibility_errors(
+            next_plan_binding = _bind_loop_direction_plan(
                 next_plan,
                 source_context=source_context,
                 candidate_edit_constraints=candidate_edit_constraints,
             )
+            next_plan_errors = list(next_plan_binding.errors)
             if next_plan_errors:
                 ranked_path_attempted_ids.add(next_path_id)
                 ranked_path_fallback_count = next_index
@@ -1705,7 +1727,7 @@ class CodeEditLoopEngine:
                     )
                 )
                 return await _activate_ranked_path_fallback(trigger=trigger, reason=reason)
-            next_plan = loop_direction_plan_from_mapping(next_plan).to_dict()
+            next_plan = dict(next_plan_binding.plan_doc or next_plan)
             ranked_path_attempted_ids.add(next_path_id)
             ranked_path_fallback_count = next_index
             loop_direction_plan_doc = next_plan
@@ -1782,20 +1804,15 @@ class CodeEditLoopEngine:
 
             if reference_repair_attempted or not _planner_reference_repair_enabled(self.builder.config):
                 return None
-            raw_must_inspect = plan_doc.get("must_inspect")
-            must_inspect = (
-                raw_must_inspect
-                if isinstance(raw_must_inspect, Sequence)
-                and not isinstance(raw_must_inspect, (str, bytes, bytearray))
-                else ()
+            requested_references = unresolved_references_from_context(explicit=explicit_references)
+            exact_binding = bind_source_references_exact(
+                index_doc=source_context.planner_index(),
+                source_root=source_context.source_root,
+                editable_files=source_context.editable_files,
+                references=requested_references,
             )
-            references = unresolved_references_from_context(explicit=explicit_references)
+            references = exact_binding.missing_references
             if not references:
-                references = unresolved_references_from_context(
-                    must_inspect=must_inspect,
-                    reason=reason,
-                )
-            if not references and not feasibility_errors:
                 reference_repair_status = "no_safe_references"
                 return None
             if elapsed() >= settings.max_seconds:
@@ -1924,7 +1941,13 @@ class CodeEditLoopEngine:
                 )
             try:
                 repaired_plan = parse_loop_direction_plan_response(repair_result.content)
-                repaired_doc = repaired_plan.to_dict()
+                repaired_binding = _bind_loop_direction_plan(
+                    repaired_plan.to_dict(),
+                    source_context=source_context,
+                    candidate_edit_constraints=candidate_edit_constraints,
+                )
+                repaired_doc = dict(repaired_binding.plan_doc or repaired_plan.to_dict())
+                repaired_plan = loop_direction_plan_from_mapping(repaired_doc)
             except Exception:
                 reference_repair_status = "parse_failed"
                 await self.event_sink(
@@ -1950,11 +1973,7 @@ class CodeEditLoopEngine:
                 )
                 return None
 
-            repaired_feasibility_errors, _repaired_missing_references = _plan_source_feasibility_errors(
-                repaired_doc,
-                source_context=source_context,
-                candidate_edit_constraints=candidate_edit_constraints,
-            )
+            repaired_feasibility_errors = list(repaired_binding.errors)
             loop_direction_plan_doc = repaired_doc
             ranked_path_base_doc = dict(repaired_doc)
             ranked_path_attempted_ids = set()
@@ -2138,7 +2157,13 @@ class CodeEditLoopEngine:
                         provider_usage.append({**planner_result.provider_usage, "call_stage": "loop_planner"})
                     try:
                         loop_plan = parse_loop_direction_plan_response(raw_plan)
-                        loop_direction_plan_doc = loop_plan.to_dict()
+                        initial_binding = _bind_loop_direction_plan(
+                            loop_plan.to_dict(),
+                            source_context=source_context,
+                            candidate_edit_constraints=candidate_edit_constraints,
+                        )
+                        loop_direction_plan_doc = dict(initial_binding.plan_doc or loop_plan.to_dict())
+                        loop_plan = loop_direction_plan_from_mapping(loop_direction_plan_doc)
                         ranked_path_base_doc = dict(loop_direction_plan_doc)
                         ranked_path_attempted_ids.clear()
                         initial_path_id = _loop_plan_selected_path_id(loop_direction_plan_doc)
@@ -2200,7 +2225,7 @@ class CodeEditLoopEngine:
                         )
                     )
                     if loop_plan.no_new_safe_path:
-                        if loop_plan.unresolved_references or _binding_plan_unimplementable_reason(loop_plan.reason):
+                        if loop_plan.unresolved_references:
                             repaired_doc = await _attempt_planner_reference_repair(
                                 trigger="loop_direction_no_new_safe_path",
                                 reason=loop_plan.reason or "planner returned no_new_safe_path",
@@ -2253,11 +2278,14 @@ class CodeEditLoopEngine:
             and not planner_terminal_without_candidate
             and not binding_plan_terminal_without_candidate
         ):
-            plan_feasibility_errors, plan_missing_references = _plan_source_feasibility_errors(
+            plan_binding = _bind_loop_direction_plan(
                 loop_direction_plan_doc,
                 source_context=source_context,
                 candidate_edit_constraints=candidate_edit_constraints,
             )
+            loop_direction_plan_doc = dict(plan_binding.plan_doc or loop_direction_plan_doc)
+            plan_feasibility_errors = list(plan_binding.errors)
+            plan_missing_references = plan_binding.missing_references
             if plan_feasibility_errors:
                 feasibility_reason = "; ".join(plan_feasibility_errors)[:700]
                 await self.event_sink(
@@ -3098,7 +3126,11 @@ class CodeEditLoopEngine:
                                 stop_reason = "binding_plan_unimplementable"
                                 binding_plan_terminal_without_candidate = True
                             repaired_doc = None
-                            if terminal_binding_plan:
+                            if (
+                                terminal_binding_plan
+                                and no_viable is not None
+                                and no_viable.missing_references
+                            ):
                                 repaired_doc = await _attempt_planner_reference_repair(
                                     trigger="binding_plan_unimplementable",
                                     reason=no_viable_reason,
@@ -3106,7 +3138,6 @@ class CodeEditLoopEngine:
                                     explicit_references=(
                                         no_viable.missing_references if no_viable is not None else ()
                                     ),
-                                    feasibility_errors=(no_viable_reason,),
                                 )
                             if repaired_doc is not None and not bool(repaired_doc.get("no_new_safe_path")):
                                 retry_iteration_after_reference_repair = True

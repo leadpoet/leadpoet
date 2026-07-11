@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from copy import deepcopy
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 import json
 from pathlib import Path
@@ -39,6 +40,22 @@ _SECRET_VALUE_PATTERNS = (
     ),
 )
 _URL_RE = re.compile(r"(?i)\b(?:https?|s3)://\S+")
+
+
+@dataclass(frozen=True)
+class ExactSourceReferenceBinding:
+    normalized_references: tuple[str, ...]
+    missing_references: tuple[str, ...]
+    invalid_references: tuple[str, ...]
+    ambiguous_references: tuple[str, ...]
+
+    @property
+    def valid(self) -> bool:
+        return not (
+            self.missing_references
+            or self.invalid_references
+            or self.ambiguous_references
+        )
 
 
 def valid_unresolved_reference(value: Any) -> str:
@@ -164,6 +181,106 @@ def compact_file_inventory(index_doc: Mapping[str, Any]) -> list[dict[str, Any]]
     ]
 
 
+def bind_source_references_exact(
+    *,
+    index_doc: Mapping[str, Any],
+    source_root: Path,
+    editable_files: Sequence[str],
+    references: Sequence[Any],
+) -> ExactSourceReferenceBinding:
+    """Bind source references exactly; fuzzy matches never satisfy this gate."""
+
+    editable_paths = tuple(sorted(dict.fromkeys(str(item) for item in editable_files if item)))
+    editable_set = set(editable_paths)
+    file_docs = [item for item in index_doc.get("files", []) if isinstance(item, Mapping)]
+    indexed_by_path = {str(item.get("path") or ""): item for item in file_docs}
+    index_complete = not bool(index_doc.get("truncated")) and all(
+        path in indexed_by_path for path in editable_paths
+    ) and all(
+        not path.endswith(".py") or str(indexed_by_path[path].get("parse_status") or "") == "parsed"
+        for path in editable_paths
+    )
+
+    normalized: list[str] = []
+    missing: list[str] = []
+    invalid: list[str] = []
+    ambiguous: list[str] = []
+    seen_inputs: set[str] = set()
+
+    for raw_reference in references:
+        reference = str(raw_reference or "").strip()
+        if reference in seen_inputs:
+            continue
+        seen_inputs.add(reference)
+        safe_reference = valid_unresolved_reference(reference)
+        if not safe_reference:
+            _append_unique(invalid, reference or "<empty>")
+            _append_unique(normalized, reference)
+            continue
+        if safe_reference in editable_set:
+            _append_unique(normalized, safe_reference)
+            continue
+
+        composite_path, composite_symbol = _split_composite_reference(safe_reference)
+        if composite_path:
+            if composite_path not in editable_set:
+                _append_unique(missing, safe_reference)
+                _append_unique(normalized, safe_reference)
+                continue
+            symbols, complete = _exact_symbols_for_file(source_root, composite_path)
+            if not complete:
+                _append_unique(invalid, safe_reference)
+                _append_unique(normalized, safe_reference)
+                continue
+            matches = _matching_symbols(symbols, composite_symbol)
+            if len(matches) == 1:
+                canonical = f"{composite_path}::{matches[0]['qualified_name']}"
+                _append_unique(normalized, canonical)
+            elif len(matches) > 1:
+                _append_unique(ambiguous, safe_reference)
+                _append_unique(normalized, safe_reference)
+            else:
+                _append_unique(missing, safe_reference)
+                _append_unique(normalized, safe_reference)
+            continue
+
+        if _looks_like_file_reference(safe_reference):
+            _append_unique(missing, safe_reference)
+            _append_unique(normalized, safe_reference)
+            continue
+
+        if index_complete:
+            symbol_rows = _indexed_symbol_rows(file_docs)
+            scan_complete = True
+        else:
+            symbol_rows, scan_complete = _scan_editable_symbols(
+                source_root=source_root,
+                editable_files=editable_paths,
+            )
+        matches = [
+            row
+            for row in symbol_rows
+            if str(row.get("name") or "") == safe_reference
+            or str(row.get("qualified_name") or "") == safe_reference
+        ]
+        if len(matches) == 1 and scan_complete:
+            canonical = f"{matches[0]['path']}::{matches[0]['qualified_name']}"
+            _append_unique(normalized, canonical)
+        elif len(matches) > 1 or not scan_complete:
+            _append_unique(ambiguous, safe_reference)
+            _append_unique(normalized, safe_reference)
+        else:
+            _append_unique(missing, safe_reference)
+            _append_unique(normalized, safe_reference)
+
+    return ExactSourceReferenceBinding(
+        normalized_references=tuple(normalized),
+        missing_references=tuple(missing),
+        invalid_references=tuple(invalid),
+        ambiguous_references=tuple(ambiguous),
+    )
+
+
 def unresolved_references_from_context(
     *,
     explicit: Sequence[Any] = (),
@@ -201,15 +318,21 @@ def resolve_source_references(
     results: list[dict[str, Any]] = []
     for reference in safe_references:
         candidates: list[tuple[int, float, dict[str, Any]]] = []
-        ref_lower = reference.lower()
+        composite_path, composite_symbol = _split_composite_reference(reference)
+        path_reference = composite_path or reference
+        symbol_reference = composite_symbol or reference
+        ref_lower = symbol_reference.lower()
         ref_tail = ref_lower.rsplit(".", 1)[-1].rsplit("/", 1)[-1]
         for file_doc in file_docs:
             path = str(file_doc.get("path") or "")
             path_lower = path.lower()
-            if path_lower == ref_lower:
+            path_ref_lower = path_reference.lower()
+            if path_lower == path_ref_lower:
                 candidates.append((0, 1.0, {"kind": "exact_path", "path": path}))
-            elif path_lower.endswith(ref_lower) or path_lower.endswith("/" + ref_lower):
+            elif path_lower.endswith(path_ref_lower) or path_lower.endswith("/" + path_ref_lower):
                 candidates.append((1, 1.0, {"kind": "path_suffix", "path": path}))
+            if composite_path and path != composite_path:
+                continue
             for symbol in file_doc.get("symbols", []):
                 if not isinstance(symbol, Mapping):
                     continue
@@ -275,6 +398,89 @@ def resolve_source_references(
     }
     payload["resolution_hash"] = sha256_json(payload)
     return payload
+
+
+def _split_composite_reference(reference: str) -> tuple[str, str]:
+    if "::" in reference:
+        path, symbol = reference.split("::", 1)
+        return path.strip(), symbol.strip()
+    match = re.fullmatch(r"(.+\.py):([^:]+)", reference)
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+    return "", ""
+
+
+def _looks_like_file_reference(reference: str) -> bool:
+    return "/" in reference or bool(re.search(r"\.[A-Za-z0-9]{1,8}$", reference))
+
+
+def _exact_symbols_for_file(source_root: Path, rel: str) -> tuple[list[dict[str, Any]], bool]:
+    try:
+        path = _safe_source_path(source_root, rel)
+        raw = path.read_bytes()
+        if len(raw) > MAX_REFERENCE_SEARCH_FILE_BYTES:
+            return [], False
+        tree = ast.parse(raw.decode("utf-8", errors="replace"), filename=rel)
+    except (OSError, ValueError, SyntaxError, TypeError):
+        return [], False
+    return _symbols_from_tree(tree), True
+
+
+def _matching_symbols(symbols: Sequence[Mapping[str, Any]], reference: str) -> list[dict[str, Any]]:
+    return [
+        dict(symbol)
+        for symbol in symbols
+        if str(symbol.get("name") or "") == reference
+        or str(symbol.get("qualified_name") or "") == reference
+    ]
+
+
+def _indexed_symbol_rows(file_docs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for file_doc in file_docs:
+        path = str(file_doc.get("path") or "")
+        for symbol in file_doc.get("symbols", []):
+            if isinstance(symbol, Mapping):
+                rows.append({"path": path, **dict(symbol)})
+    return rows
+
+
+def _scan_editable_symbols(
+    *,
+    source_root: Path,
+    editable_files: Sequence[str],
+) -> tuple[list[dict[str, Any]], bool]:
+    rows: list[dict[str, Any]] = []
+    total_bytes = 0
+    complete = True
+    for rel in editable_files:
+        if not rel.endswith(".py"):
+            continue
+        try:
+            path = _safe_source_path(source_root, rel)
+            raw = path.read_bytes()
+        except (OSError, ValueError):
+            complete = False
+            continue
+        if len(raw) > MAX_REFERENCE_SEARCH_FILE_BYTES:
+            complete = False
+            continue
+        total_bytes += len(raw)
+        if total_bytes > MAX_REFERENCE_SEARCH_TOTAL_BYTES:
+            complete = False
+            break
+        try:
+            tree = ast.parse(raw.decode("utf-8", errors="replace"), filename=rel)
+        except (SyntaxError, ValueError, TypeError):
+            complete = False
+            continue
+        rows.extend({"path": rel, **symbol} for symbol in _symbols_from_tree(tree))
+    return rows, complete
+
+
+def _append_unique(values: list[str], value: str) -> None:
+    if value not in values:
+        values.append(value)
 
 
 class _SymbolVisitor(ast.NodeVisitor):

@@ -12,6 +12,7 @@ from gateway.research_lab.source_symbol_index import (
     MAX_INDEX_FILES,
     MAX_INDEX_SYMBOLS,
     MAX_PLANNER_INDEX_BYTES,
+    bind_source_references_exact,
     build_source_symbol_index,
     resolve_source_references,
     unresolved_references_from_context,
@@ -203,6 +204,98 @@ def test_reference_resolution_order_and_safe_reference_filtering(tmp_path):
                 "unresolved_references": ["x" * 121],
             }
         )
+
+
+def test_exact_binding_normalizes_supported_reference_forms(tmp_path):
+    routing = tmp_path / "model" / "routing.py"
+    helper = tmp_path / "model" / "helper.py"
+    routing.parent.mkdir(parents=True)
+    routing.write_text(
+        "class Router:\n"
+        "    def discover_companies(self, query):\n"
+        "        return query\n",
+        encoding="utf-8",
+    )
+    helper.write_text("def unique_helper(value):\n    return value\n", encoding="utf-8")
+    editable = ("model/routing.py", "model/helper.py")
+    index = _build(tmp_path, editable)
+
+    binding = bind_source_references_exact(
+        index_doc=index,
+        source_root=tmp_path,
+        editable_files=editable,
+        references=(
+            "model/routing.py",
+            "model/routing.py:Router.discover_companies",
+            "model/routing.py::Router.discover_companies",
+            "unique_helper",
+        ),
+    )
+
+    assert binding.valid is True
+    assert binding.normalized_references == (
+        "model/routing.py",
+        "model/routing.py::Router.discover_companies",
+        "model/helper.py::unique_helper",
+    )
+
+
+def test_exact_binding_rejects_missing_wrong_file_and_ambiguous_symbols(tmp_path):
+    first = tmp_path / "model" / "first.py"
+    second = tmp_path / "model" / "second.py"
+    first.parent.mkdir(parents=True)
+    first.write_text(
+        "def shared():\n    return 1\n\n"
+        "def only_in_first():\n    return 1\n",
+        encoding="utf-8",
+    )
+    second.write_text("def shared():\n    return 2\n", encoding="utf-8")
+    editable = ("model/first.py", "model/second.py")
+    index = _build(tmp_path, editable)
+
+    binding = bind_source_references_exact(
+        index_doc=index,
+        source_root=tmp_path,
+        editable_files=editable,
+        references=(
+            "model/missing.py",
+            "model/first.py:does_not_exist",
+            "model/second.py:only_in_first",
+            "model/first.py:Only_In_First",
+            "shared",
+        ),
+    )
+
+    assert binding.missing_references == (
+        "model/missing.py",
+        "model/first.py:does_not_exist",
+        "model/second.py:only_in_first",
+        "model/first.py:Only_In_First",
+    )
+    assert binding.ambiguous_references == ("shared",)
+
+
+def test_exact_binding_parses_named_file_when_index_is_truncated(tmp_path):
+    target = tmp_path / "model" / "large.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "\n".join(f"def helper_{index}():\n    return {index}" for index in range(90))
+        + "\n",
+        encoding="utf-8",
+    )
+    editable = ("model/large.py",)
+    index = _build(tmp_path, editable)
+    assert index["truncated"] is True
+
+    binding = bind_source_references_exact(
+        index_doc=index,
+        source_root=tmp_path,
+        editable_files=editable,
+        references=("model/large.py:helper_89", "helper_89"),
+    )
+
+    assert binding.valid is True
+    assert binding.normalized_references == ("model/large.py::helper_89",)
 
 
 def test_repeated_inspection_inventory_omits_symbols_and_summaries(tmp_path):

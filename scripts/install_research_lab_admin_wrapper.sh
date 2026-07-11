@@ -24,8 +24,7 @@ cat > "$tmp" <<'WRAPPER'
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${LEADPOET_REPO:-/home/ec2-user}"
-GATEWAY_RUNTIME="${LEADPOET_GATEWAY_RUNTIME:-/home/ec2-user/gateway}"
+REPO="${LEADPOET_REPO:-/home/ec2-user/leadpoet_repo}"
 ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
 
 if [[ ! -d "$REPO/gateway" ]]; then
@@ -62,7 +61,9 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 cd "$REPO"
-export PYTHONPATH="$REPO:/home/ec2-user:$GATEWAY_RUNTIME${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$REPO"
+export GATEWAY_LOG_ROOT="${GATEWAY_LOG_ROOT:-/home/ec2-user/gateway}"
+export GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"
 exec python3 -m gateway.research_lab.admin "$@"
 WRAPPER
 

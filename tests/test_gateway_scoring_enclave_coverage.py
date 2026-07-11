@@ -161,7 +161,9 @@ def test_existing_restart_scripts_preserve_attested_build_paths():
         in gateway_restart
     )
     assert "nitro-cli build-enclave --docker-uri tee-enclave:latest" in gateway_restart
-    assert "sudo ./start_enclave.sh" in gateway_restart
+    assert 'GATEWAY_ROOT="$GATEWAY_ROOT"' in gateway_restart
+    assert 'GATEWAY_TEE_EIF_ROOT="$GATEWAY_TEE_EIF_ROOT"' in gateway_restart
+    assert "./start_enclave.sh" in gateway_restart
     assert 'bash validator_tee/scripts/build_enclave.sh' in validator_restart
     assert "nitro-cli run-enclave" in validator_restart
     assert '"gateway/research_lab"' in validator_build

@@ -91,11 +91,13 @@ def test_expiry_config_and_admin_command_default_fail_closed(monkeypatch) -> Non
     assert args.apply is False
 
 
-def test_admin_wrapper_uses_live_gateway_layout_and_hydrated_env() -> None:
+def test_admin_wrapper_uses_canonical_git_checkout_and_hydrated_env() -> None:
     wrapper = (ROOT / "scripts" / "install_research_lab_admin_wrapper.sh").read_text(encoding="utf-8")
-    assert 'LEADPOET_REPO:-/home/ec2-user}' in wrapper
+    assert 'LEADPOET_REPO:-/home/ec2-user/leadpoet_repo}' in wrapper
     assert '/home/ec2-user/.config/leadpoet/gateway.env' in wrapper
-    assert '/home/ec2-user/leadpoet_repo' not in wrapper
+    assert 'export PYTHONPATH="$REPO"' in wrapper
+    assert 'GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"' in wrapper
+    assert 'PYTHONPATH="$REPO:/home/ec2-user' not in wrapper
     assert '/home/ec2-user/gw.environ' not in wrapper
 
 

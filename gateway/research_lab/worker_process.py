@@ -14,9 +14,12 @@ import sys
 GATEWAY_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_PARENT = GATEWAY_ROOT.parent
 ATTESTED_RUNTIME = GATEWAY_ROOT / "_attested_runtime"
-for path in (PACKAGE_PARENT, ATTESTED_RUNTIME):
-    if path.exists() and str(path) not in sys.path:
-        sys.path.insert(0, str(path))
+for path in (ATTESTED_RUNTIME, PACKAGE_PARENT):
+    if not path.exists():
+        continue
+    while str(path) in sys.path:
+        sys.path.remove(str(path))
+    sys.path.insert(0, str(path))
 
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
 from gateway.research_lab.logging_utils import format_worker_block  # noqa: E402

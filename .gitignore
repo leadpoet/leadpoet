@@ -153,6 +153,12 @@ test-*.json
 # Gateway secrets (Arweave keyfile, Ed25519 keypair, etc.)
 gateway/secrets/
 gateway/_attested_runtime/
+gateway/_enclave_source/
+gateway/_enclave_wheelhouse/
+gateway/.attested_runtime.tmp/
+gateway/.enclave_source.tmp/
+gateway/.enclave_wheelhouse.tmp/
+gateway/.source_commit
 gateway/BUILD_INFO.json
 *.pem
 *.jwk

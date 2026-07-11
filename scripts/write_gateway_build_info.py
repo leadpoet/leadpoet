@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Generate non-secret gateway build provenance. Run this from the repo "
-            "before rsync/docker/enclave build so prod can report the live commit."
+            "before Docker/enclave build so production can report the live commit."
         )
     )
     parser.add_argument(

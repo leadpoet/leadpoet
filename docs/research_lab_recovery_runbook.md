@@ -55,11 +55,9 @@ On the EC2 host, prefer this wrapper for Research Lab admin commands:
 ```
 
 The wrapper runs admin commands from `/home/ec2-user/leadpoet_repo`, sets
-`PYTHONPATH` to include the full repo and flat gateway runtime, and preloads
-parseable values from `/home/ec2-user/gw.environ` without printing the gateway
-env-loader banner. Direct `python3 -m gateway.research_lab.admin ...` from
-`/home/ec2-user/gateway` can fail because that flat runtime has a partial
-top-level `research_lab` package that shadows the full repo package.
+`PYTHONPATH` exclusively to that complete checkout, and preloads parseable
+values from `/home/ec2-user/.config/leadpoet/gateway.env` without printing the
+gateway env-loader banner. The legacy flat runtime is not an import source.
 
 Manual equivalent, if the guarded script is unavailable:
 
@@ -95,7 +93,9 @@ python3 -m py_compile \
   gateway/__init__.py
 ```
 
-Restart using the same supervisor/manual command currently used for the gateway fleet. If using the current `nohup` style, stop the old `main.py` process and start the gateway again from `/home/ec2-user/gateway`.
+Restart through `/home/ec2-user/gw_restart.sh`; it updates the canonical Git
+checkout and preserves the normal gateway process and enclave workflow. Do not
+manually launch `main.py` from the legacy flat runtime.
 
 ## Stale Hosted Run Recovery
 

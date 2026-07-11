@@ -133,7 +133,9 @@ async def _get_supabase_async():
         return None
 
 # Fallback logging directory (for TEE connection failures)
-FALLBACK_LOG_DIR = Path("gateway/logs/tee_fallback")
+FALLBACK_LOG_DIR = Path(
+    os.getenv("GATEWAY_TEE_FALLBACK_LOG_DIR", "gateway/logs/tee_fallback")
+).expanduser()
 FALLBACK_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 

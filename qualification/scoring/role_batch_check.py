@@ -460,8 +460,32 @@ async def batch_check(
                 if not isinstance(item, dict):
                     continue
                 lid = item.get("id")
-                if lid is None or lid not in results:
+                if lid is None:
                     continue
+                if lid not in results:
+                    # The judge echoes ids from prose, so numeric ids can come
+                    # back quoted (and vice versa). A dropped echo must not
+                    # silently revert an accept to the fail-closed default.
+                    lid = _coerce_result_id(lid, results)
+                    if lid is None:
+                        continue
                 results[lid] = bool(item.get("match"))
 
     return results
+
+
+def _coerce_result_id(lid: Any, results: Dict[Any, bool]) -> Any:
+    """Map an id echoed with a different JSON type back onto a known key."""
+    if isinstance(lid, str):
+        candidate = lid.strip()
+        if candidate in results:
+            return candidate
+        try:
+            as_int = int(candidate)
+        except ValueError:
+            return None
+        return as_int if as_int in results else None
+    if isinstance(lid, (int, float)) and not isinstance(lid, bool):
+        as_str = str(int(lid))
+        return as_str if as_str in results else None
+    return None

@@ -45,6 +45,17 @@ LOOP_DIRECTION_ALLOWED_LANES = (
     "openrouter_model_selection",
     "output_ranking",
 )
+LOOP_DIRECTION_VALIDATION_MODES = (
+    "runtime_checks",
+    "existing_test_files",
+)
+CODE_EDIT_NO_VIABLE_FAILURE_CLASSES = (
+    "binding_plan_unimplementable",
+    "insufficient_source_context",
+    "unsafe_or_out_of_scope",
+    "provider_probe_refuted_hypothesis",
+    "no_safe_patch",
+)
 DISALLOWED_PATH_PATTERNS = (
     r"(^|/)Dockerfile$",
     r"(^|/)docker-compose[^/]*\.ya?ml$",
@@ -161,6 +172,20 @@ class CodeEditSourceInspectionRequest:
 
 
 @dataclass(frozen=True)
+class CodeEditNoViablePatch:
+    schema_version: str
+    failure_class: str
+    reason: str
+    missing_references: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["no_viable_patch"] = True
+        payload["missing_references"] = list(self.missing_references)
+        return payload
+
+
+@dataclass(frozen=True)
 class LoopDirectionPlan:
     schema_version: str
     miner_focus_interpretation: str
@@ -182,6 +207,8 @@ class LoopDirectionPlan:
     no_new_safe_path: bool = False
     reason: str = ""
     unresolved_references: tuple[str, ...] = ()
+    validation_mode: str = "runtime_checks"
+    validation_paths: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -196,6 +223,7 @@ class LoopDirectionPlan:
             "anti_overfit_checks",
             "ranked_paths",
             "unresolved_references",
+            "validation_paths",
         ):
             payload[key] = list(payload[key])
         payload["plan_hash"] = sha256_json({key: value for key, value in payload.items() if key != "plan_hash"})
@@ -228,8 +256,21 @@ def build_loop_direction_planner_messages(
     prior_attempts: Sequence[Mapping[str, Any]] | None = None,
     provider_outcome_digest: Mapping[str, Any] | None = None,
     provider_capability_summary: Mapping[str, Any] | None = None,
+    candidate_edit_constraints: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     allowed_lanes = list(LOOP_DIRECTION_ALLOWED_LANES)
+    indexed_paths = [
+        str(item.get("path") or "")
+        for item in runtime_source_index.get("files", [])
+        if isinstance(item, Mapping) and item.get("path")
+    ]
+    if not indexed_paths:
+        editable_files = runtime_source_index.get("editable_files")
+        if isinstance(editable_files, Sequence) and not isinstance(
+            editable_files, (str, bytes, bytearray)
+        ):
+            indexed_paths = [str(item) for item in editable_files if item]
+    example_inspect_path = indexed_paths[0] if indexed_paths else "research_lab_adapter.py"
     context = {
         "ticket": _redacted_mapping(ticket),
         "artifact_manifest": _redacted_mapping(artifact_manifest),
@@ -239,6 +280,7 @@ def build_loop_direction_planner_messages(
         "budget_context": _redacted_mapping(budget_context or {}),
         "prior_attempts": _redacted_mapping({"attempts": list(prior_attempts or [])}).get("attempts", []),
         "allowed_lanes": allowed_lanes,
+        "candidate_edit_constraints": _redacted_mapping(candidate_edit_constraints or {}),
     }
     if provider_outcome_digest:
         # W2: recorded provider truth (error/status histograms, zero-result
@@ -250,8 +292,8 @@ def build_loop_direction_planner_messages(
     system = (
         "You are Leadpoet Research Lab's loop-direction planner. Convert a miner's "
         "public research focus into a binding, auditable code-edit plan for a later "
-        "executor model. You do not write code. Choose one safe, generalizable path "
-        "that directly addresses the miner focus and avoids repeating prior attempts."
+        "executor model. You do not write code. Choose safe, generalizable paths "
+        "that directly address the miner focus and avoid repeating prior attempts."
     )
     user = (
         "Return strict JSON only, no markdown.\n\n"
@@ -274,10 +316,15 @@ def build_loop_direction_planner_messages(
         "- If the ticket names a concrete file/path/function that is not present in runtime_source_index, do not invent it or silently translate it. Return no_new_safe_path=true and list only the exact missing path/identifier in unresolved_references so the gateway can perform one bounded clarification pass.\n"
         "- A provider endpoint or text model absent from source inventory is viable only when approved_provider_capabilities explicitly permits its provider family/policy and runtime_source_index shows an existing editable provider module.\n"
         "- Capability expansion may edit that existing provider module only; never introduce a new host, credential/env reference, dependency, or network client.\n"
+        "- candidate_edit_constraints is binding. Never require a new file. If it reports no editable test files, use validation_mode=runtime_checks and do not require adding tests.\n"
+        "- success_criteria must describe observable behavior and existing validation, not repository work such as creating a test file.\n"
+        "- Return two or three ranked paths only when every path is independently safe and source-feasible. One path is valid when no safe alternative exists.\n"
+        "- Every schema_version 1.1 ranked path must carry its own target_behavior, must_inspect, allowed_lanes, disallowed_lanes, must_not_try, success_criteria, novelty_requirements, anti_overfit_checks, validation_mode, and validation_paths.\n"
+        "- validation_mode must be runtime_checks or existing_test_files. existing_test_files requires exact paths from candidate_edit_constraints.editable_test_paths.\n"
         "- Do not request, reveal, or store secrets, hidden ICP plaintext, judge prompts, provider keys, private repo URLs, or raw private data.\n"
         "- If no safe new path exists, return no_new_safe_path=true with a clear reason.\n\n"
         "Required output shape:\n"
-        "{\"schema_version\":\"1.0\",\"miner_focus_interpretation\":\"...\",\"loop_goal\":\"...\","
+        "{\"schema_version\":\"1.1\",\"miner_focus_interpretation\":\"...\",\"loop_goal\":\"...\","
         "\"required_lane\":\"query_construction\",\"required_mechanism\":\"...\","
         "\"generalization_claim\":\"Why this helps future sealed ICPs rather than one public example.\","
         "\"target_behavior\":[\"...\"],\"must_inspect\":[\"...\"],"
@@ -285,10 +332,18 @@ def build_loop_direction_planner_messages(
         "\"must_not_try\":[\"Do not weaken ICP constraints or hide completed-empty results.\"],"
         "\"success_criteria\":[\"...\"],\"novelty_requirements\":[\"...\"],"
         "\"anti_overfit_checks\":[\"Preserves multiple qualified company outputs.\"],"
+        "\"validation_mode\":\"runtime_checks\",\"validation_paths\":[],"
         "\"novelty_contrast\":\"How this differs from prior attempts by mechanism, target function/file, and expected behavior.\","
         "\"unresolved_references\":[],"
         "\"ranked_paths\":[{\"path_id\":\"query_decomposition_recall\",\"lane\":\"query_construction\","
-        "\"mechanism\":\"Add one bounded decomposed-search pass while preserving downstream gates.\"}],"
+        "\"mechanism\":\"Add one bounded decomposed-search pass while preserving downstream gates.\","
+        "\"target_behavior\":[\"Recover sparse searches without weakening ICP gates.\"],"
+        "\"must_inspect\":[\"" + example_inspect_path + "\"],\"allowed_lanes\":[\"query_construction\"],"
+        "\"disallowed_lanes\":[\"provider_fallback\"],\"must_not_try\":[\"Do not weaken ICP constraints.\"],"
+        "\"success_criteria\":[\"Existing runtime checks pass and sparse-query behavior improves.\"],"
+        "\"novelty_requirements\":[\"Use a mechanism not present in prior attempts.\"],"
+        "\"anti_overfit_checks\":[\"Preserve multiple qualified outputs.\"],"
+        "\"validation_mode\":\"runtime_checks\",\"validation_paths\":[]}],"
         "\"selected_path_id\":\"query_decomposition_recall\"}\n\n"
         "Context JSON:\n"
         + json.dumps(context, sort_keys=True, separators=(",", ":"))
@@ -301,6 +356,8 @@ def build_loop_direction_reference_repair_messages(
     ticket: Mapping[str, Any],
     original_plan: Mapping[str, Any],
     reference_resolution: Mapping[str, Any],
+    candidate_edit_constraints: Mapping[str, Any] | None = None,
+    feasibility_errors: Sequence[str] = (),
 ) -> list[dict[str, str]]:
     """Ask the planner once to repair a plan bound to missing source names."""
 
@@ -309,6 +366,8 @@ def build_loop_direction_reference_repair_messages(
         "original_plan": _redacted_mapping(original_plan),
         "reference_resolution": _redacted_source_context(reference_resolution),
         "allowed_lanes": list(LOOP_DIRECTION_ALLOWED_LANES),
+        "candidate_edit_constraints": _redacted_mapping(candidate_edit_constraints or {}),
+        "feasibility_errors": [str(item)[:300] for item in feasibility_errors[:12]],
     }
     system = (
         "You are Leadpoet Research Lab's loop-direction planner repairing one plan "
@@ -320,11 +379,13 @@ def build_loop_direction_reference_repair_messages(
         "Use only paths and symbols present in reference_resolution matches or the original plan's valid paths. "
         "Do not invent an API, path, function, credential, dependency, host, or network client. "
         "A similar symbol is evidence to inspect, not permission to change the miner's requested mechanism. "
+        "candidate_edit_constraints and feasibility_errors are binding. Never require a new file, and when no editable test file exists use validation_mode=runtime_checks. "
         "If the objective still cannot be implemented safely, return no_new_safe_path=true with exact "
         "identifier/path values in unresolved_references. Otherwise return no_new_safe_path=false and a "
-        "complete plan with required_lane, required_mechanism, selected_path_id, ranked_paths, target_behavior, "
+        "complete schema_version 1.1 plan with required_lane, required_mechanism, selected_path_id, ranked_paths, target_behavior, "
         "must_inspect, allowed_lanes, disallowed_lanes, must_not_try, success_criteria, novelty_requirements, "
-        "anti_overfit_checks, generalization_claim, and novelty_contrast. unresolved_references must then be empty.\n\n"
+        "anti_overfit_checks, validation_mode, validation_paths, generalization_claim, and novelty_contrast. "
+        "Every ranked path must include the same complete path-local fields. unresolved_references must then be empty.\n\n"
         "Never expose secrets, private ICP text, raw provider bodies, hidden prompts, or private repository URLs.\n\n"
         "Context JSON:\n"
         + json.dumps(context, sort_keys=True, separators=(",", ":"))
@@ -347,6 +408,9 @@ def build_code_edit_source_inspection_messages(
     provider_probe_catalog: Mapping[str, Any] | None = None,
     provider_outcome_digest: Mapping[str, Any] | None = None,
     provider_capability_summary: Mapping[str, Any] | None = None,
+    candidate_edit_constraints: Mapping[str, Any] | None = None,
+    inspection_round: int = 1,
+    max_inspection_rounds: int = 1,
 ) -> list[dict[str, str]]:
     """Ask the model which extracted source files it needs before drafting.
 
@@ -361,6 +425,8 @@ def build_code_edit_source_inspection_messages(
     allowed_operations = ["search", "read_file", "finish"]
     if probes_enabled:
         allowed_operations.insert(2, "probe_provider")
+    resolved_max_rounds = max(1, int(max_inspection_rounds))
+    resolved_round = min(resolved_max_rounds, max(1, int(inspection_round)))
     context = {
         "ticket": _redacted_mapping(ticket),
         "artifact_manifest": _redacted_mapping(artifact_manifest),
@@ -372,6 +438,11 @@ def build_code_edit_source_inspection_messages(
         "loop_direction_plan": _redacted_mapping(loop_direction_plan or {}),
         "max_requests": max(1, int(max_requests)),
         "allowed_operations": allowed_operations,
+        "candidate_edit_constraints": _redacted_mapping(candidate_edit_constraints or {}),
+        "inspection_round": resolved_round,
+        "max_inspection_rounds": resolved_max_rounds,
+        "remaining_inspection_rounds": max(0, resolved_max_rounds - resolved_round),
+        "is_final_inspection_round": resolved_round >= resolved_max_rounds,
     }
     if probes_enabled:
         context["provider_probe_catalog"] = _redacted_mapping(provider_probe_catalog or {})
@@ -432,6 +503,8 @@ def build_code_edit_source_inspection_messages(
         + "- Only request paths listed in runtime_source_index.editable_files.\n"
         "- Do not request Dockerfile, dependency files, lockfiles, env files, CI, credentials, or new files.\n"
         "- Stop with finish once you have enough exact file content to draft a narrow patch.\n"
+        "- If is_final_inspection_round is true, no file has been read, and prior search results contain an editable match, request read_file for the best exact match now; do not spend the final round on another search.\n"
+        "- On the final round, finish without a read only when no safe editable source path exists.\n"
         "- Prefer source related to query construction, ICP normalization, provider fallback, intent evidence, ranking, and adapter output.\n\n"
         "LoopDirectionPlan binding:\n"
         "- If loop_direction_plan is present, request source context needed to implement selected_path_id only.\n"
@@ -456,6 +529,7 @@ def build_code_edit_auto_research_messages(
     max_candidates: int,
     provider_outcome_digest: Mapping[str, Any] | None = None,
     provider_capability_summary: Mapping[str, Any] | None = None,
+    candidate_edit_constraints: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build the code-edit candidate prompt.
 
@@ -505,6 +579,7 @@ def build_code_edit_auto_research_messages(
             "openrouter_model_selection",
             "output_ranking",
         ],
+        "candidate_edit_constraints": _redacted_mapping(candidate_edit_constraints or {}),
     }
     if provider_outcome_digest:
         context["provider_outcome_digest"] = _redacted_mapping(provider_outcome_digest)
@@ -568,7 +643,8 @@ def build_code_edit_auto_research_messages(
         "- If loop_direction_plan is present, it is binding.\n"
         "- Only emit candidates that directly implement loop_direction_plan.required_lane, required_mechanism, and selected_path_id.\n"
         "- Set plan_path_id to the exact value of loop_direction_plan.selected_path_id, not the literal text 'selected_path_id'.\n"
-        "- If no safe patch can directly implement the plan from read source files, return {\"no_viable_patch\":true,\"reason\":\"...\"}.\n"
+        "- If loop_direction_plan.validation_mode is runtime_checks, validate through the existing runtime checks; do not refuse solely because no editable test file exists.\n"
+        "- If no safe patch can directly implement the plan from read source files, return {\"no_viable_patch\":true,\"failure_class\":\"binding_plan_unimplementable|insufficient_source_context|unsafe_or_out_of_scope|provider_probe_refuted_hypothesis|no_safe_patch\",\"reason\":\"...\",\"missing_references\":[]}.\n"
         "- Do not emit a plausible unrelated cleanup or switch lanes.\n"
         "- Do not claim alignment in prose while the diff implements another change.\n\n"
         "Expected output shape:\n"
@@ -602,6 +678,7 @@ def build_code_edit_fallback_messages(
     fallback_reason: str,
     max_candidates: int = 1,
     max_target_files: int = 1,
+    candidate_edit_constraints: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build one bounded fallback pass after the first candidate draft fails.
 
@@ -635,6 +712,7 @@ def build_code_edit_fallback_messages(
         budget_context=fallback_context,
         loop_direction_plan=loop_direction_plan,
         max_candidates=min(1, max(1, int(max_candidates))),
+        candidate_edit_constraints=candidate_edit_constraints,
     )
     user = messages[-1]["content"]
     messages[-1] = {
@@ -656,9 +734,9 @@ def build_code_edit_fallback_messages(
             "- Do not add new files or broaden the target file set beyond the inspected files.\n"
             "- Prefer the smallest behavior-preserving patch that directly addresses the failure mode.\n"
             + (
-                "- If no one-file inspected-source patch is safe, return {\"no_viable_patch\":true,\"reason\":\"...\"}.\n"
+                "- If no one-file inspected-source patch is safe, return the structured no_viable_patch shape with failure_class, reason, and missing_references.\n"
                 if bounded_target_files <= 1
-                else "- If no bounded inspected-source patch is safe, return {\"no_viable_patch\":true,\"reason\":\"...\"}.\n"
+                else "- If no bounded inspected-source patch is safe, return the structured no_viable_patch shape with failure_class, reason, and missing_references.\n"
             )
         ),
     }
@@ -829,6 +907,16 @@ def loop_direction_plan_from_mapping(value: Mapping[str, Any]) -> LoopDirectionP
     unresolved_references = _coerce_reference_tuple(
         _get_first_present(value, ("unresolved_references", "unresolvedReferences", "missing_references"))
     )
+    validation_mode = _string_value(
+        _get_first_present(value, ("validation_mode", "validationMode")) or "runtime_checks"
+    ).strip().lower()
+    if validation_mode not in LOOP_DIRECTION_VALIDATION_MODES:
+        raise ValueError("loop direction plan validation_mode is invalid")
+    validation_paths = _coerce_target_files(
+        _get_first_present(value, ("validation_paths", "validationPaths", "test_paths", "testPaths"))
+    )
+    if validation_mode == "existing_test_files" and not validation_paths and not no_new_safe_path:
+        raise ValueError("existing_test_files validation requires validation_paths")
     if not no_new_safe_path:
         if not required_lane:
             raise ValueError("loop direction plan requires required_lane")
@@ -879,7 +967,186 @@ def loop_direction_plan_from_mapping(value: Mapping[str, Any]) -> LoopDirectionP
         no_new_safe_path=no_new_safe_path,
         reason=_string_value(_get_first_present(value, ("reason", "rationale", "why")))[:1000],
         unresolved_references=unresolved_references,
+        validation_mode=validation_mode,
+        validation_paths=validation_paths,
     )
+
+
+def loop_direction_plan_contract_errors(plan: LoopDirectionPlan) -> list[str]:
+    """Validate the strict v1.1 path contract without rejecting v1.0 checkpoints."""
+
+    if str(plan.schema_version or "1.0") != "1.1" or plan.no_new_safe_path:
+        return []
+    errors: list[str] = []
+    if not plan.ranked_paths:
+        errors.append("loop_direction_plan_v1_1_requires_ranked_paths")
+        return errors
+    if len(plan.ranked_paths) > 3:
+        errors.append("loop_direction_plan_v1_1_allows_at_most_three_ranked_paths")
+    selected: Mapping[str, Any] | None = None
+    seen_ids: set[str] = set()
+    required_path_fields = {
+        "target_behavior": ("target_behavior", "targetBehavior"),
+        "must_inspect": ("must_inspect", "mustInspect"),
+        "allowed_lanes": ("allowed_lanes", "allowedLanes"),
+        "disallowed_lanes": ("disallowed_lanes", "disallowedLanes"),
+        "must_not_try": ("must_not_try", "mustNotTry"),
+        "success_criteria": ("success_criteria", "successCriteria"),
+        "novelty_requirements": ("novelty_requirements", "noveltyRequirements"),
+        "anti_overfit_checks": (
+            "anti_overfit_checks",
+            "antiOverfitChecks",
+            "overfit_checks",
+            "overfitChecks",
+        ),
+    }
+    for raw_path in plan.ranked_paths:
+        path_id = _string_value(_get_first_present(raw_path, ("path_id", "pathId", "id"))).strip()
+        lane = _string_value(_get_first_present(raw_path, ("lane", "required_lane", "requiredLane"))).strip()
+        mechanism = _string_value(
+            _get_first_present(raw_path, ("mechanism", "required_mechanism", "requiredMechanism"))
+        ).strip()
+        if not path_id:
+            errors.append("ranked_path_missing_path_id")
+        elif path_id in seen_ids:
+            errors.append(f"ranked_path_duplicate_path_id:{path_id[:120]}")
+        else:
+            seen_ids.add(path_id)
+        if not lane:
+            errors.append(f"ranked_path_missing_lane:{path_id[:120]}")
+        if not mechanism:
+            errors.append(f"ranked_path_missing_mechanism:{path_id[:120]}")
+        for field_name, aliases in required_path_fields.items():
+            field_present = any(alias in raw_path for alias in aliases)
+            field_values = _coerce_string_tuple(
+                _get_first_present(raw_path, aliases),
+                max_items=16,
+            )
+            if not field_present or (field_name != "disallowed_lanes" and not field_values):
+                errors.append(f"ranked_path_missing_{field_name}:{path_id[:120]}")
+        path_validation_mode = _string_value(
+            _get_first_present(raw_path, ("validation_mode", "validationMode"))
+        ).strip().lower()
+        if path_validation_mode not in LOOP_DIRECTION_VALIDATION_MODES:
+            errors.append(f"ranked_path_invalid_validation_mode:{path_id[:120]}")
+        path_validation_paths = _coerce_target_files(
+            _get_first_present(raw_path, ("validation_paths", "validationPaths", "test_paths", "testPaths"))
+        )
+        if not any(
+            key in raw_path
+            for key in ("validation_paths", "validationPaths", "test_paths", "testPaths")
+        ):
+            errors.append(f"ranked_path_missing_validation_paths:{path_id[:120]}")
+        if path_validation_mode == "existing_test_files" and not path_validation_paths:
+            errors.append(f"ranked_path_existing_tests_missing_paths:{path_id[:120]}")
+        if path_id == plan.selected_path_id:
+            selected = raw_path
+    if selected is None:
+        errors.append("selected_path_id_not_in_ranked_paths")
+        return errors
+    selected_lane = _string_value(
+        _get_first_present(selected, ("lane", "required_lane", "requiredLane"))
+    ).strip()
+    selected_mechanism = _string_value(
+        _get_first_present(selected, ("mechanism", "required_mechanism", "requiredMechanism"))
+    ).strip()
+    selected_validation_mode = _string_value(
+        _get_first_present(selected, ("validation_mode", "validationMode"))
+    ).strip().lower()
+    selected_validation_paths = _coerce_target_files(
+        _get_first_present(selected, ("validation_paths", "validationPaths", "test_paths", "testPaths"))
+    )
+    if selected_lane != plan.required_lane:
+        errors.append("selected_path_lane_mismatch")
+    if selected_mechanism != plan.required_mechanism:
+        errors.append("selected_path_mechanism_mismatch")
+    if selected_validation_mode != plan.validation_mode:
+        errors.append("selected_path_validation_mode_mismatch")
+    if selected_validation_paths != plan.validation_paths:
+        errors.append("selected_path_validation_paths_mismatch")
+    mirrored_fields = {
+        "target_behavior": (plan.target_behavior, ("target_behavior", "targetBehavior")),
+        "must_inspect": (plan.must_inspect, ("must_inspect", "mustInspect")),
+        "allowed_lanes": (plan.allowed_lanes, ("allowed_lanes", "allowedLanes")),
+        "disallowed_lanes": (plan.disallowed_lanes, ("disallowed_lanes", "disallowedLanes")),
+        "must_not_try": (plan.must_not_try, ("must_not_try", "mustNotTry")),
+        "success_criteria": (plan.success_criteria, ("success_criteria", "successCriteria")),
+        "novelty_requirements": (
+            plan.novelty_requirements,
+            ("novelty_requirements", "noveltyRequirements"),
+        ),
+        "anti_overfit_checks": (
+            plan.anti_overfit_checks,
+            ("anti_overfit_checks", "antiOverfitChecks", "overfit_checks", "overfitChecks"),
+        ),
+    }
+    for field_name, (top_level_value, aliases) in mirrored_fields.items():
+        selected_value = _coerce_string_tuple(
+            _get_first_present(selected, aliases),
+            max_items=16,
+        )
+        if selected_value != top_level_value:
+            errors.append(f"selected_path_{field_name}_mismatch")
+    return errors
+
+
+def _legacy_no_viable_failure_class(reason: str) -> str:
+    """Classify pre-v1 structured refusals conservatively for compatibility."""
+
+    text = str(reason or "").strip().lower()
+    binding_markers = (
+        "outside the allowed edit scope",
+        "not listed in editable_files",
+        "not in editable_files",
+        "not present in editable",
+        "not present in the visible",
+        "not present in visible",
+        "not present in current",
+        "required file is not present",
+        "required path is not present",
+        "no editable",
+        "no visible",
+        "no source path",
+        "source path does not exist",
+        "no existing test file",
+        "no existing test is listed",
+        "no test file appears in",
+        "no test file is listed",
+        "test file is not listed",
+        "new files are forbidden",
+        "cannot add a test file",
+        "no sonar provider",
+        "no sonar client",
+        "no sonar parse",
+        "no sonar response",
+        "no discover_events_via_sonar",
+        "no call_sonar",
+        "no parse_sonar_json",
+    )
+    if any(marker in text for marker in binding_markers):
+        return "binding_plan_unimplementable"
+    if "probe" in text and any(marker in text for marker in ("refut", "disprov", "no result")):
+        return "provider_probe_refuted_hypothesis"
+    if any(
+        marker in text
+        for marker in (
+            "insufficient source context",
+            "not enough source context",
+            "source was not read",
+            "need to inspect",
+            "must inspect",
+        )
+    ):
+        return "insufficient_source_context"
+    if any(marker in text for marker in ("unsafe", "out of scope", "forbidden", "would weaken")):
+        return "unsafe_or_out_of_scope"
+    return "no_safe_patch"
+
+
+def _sanitize_no_viable_reason(value: Any) -> str:
+    text = _string_value(value).replace("\x00", " ")
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()[:700]
 
 
 def parse_plan_alignment_judge_response(raw_text: str) -> PlanAlignmentVerdict:
@@ -920,22 +1187,58 @@ def parse_plan_alignment_judge_response(raw_text: str) -> PlanAlignmentVerdict:
     )
 
 
-def code_edit_no_viable_patch_reason(raw_text: str) -> str:
+def parse_code_edit_no_viable_patch_response(raw_text: str) -> CodeEditNoViablePatch | None:
     try:
         decoded = _decode_json_value(raw_text)
     except ValueError:
-        return ""
+        return None
     if not isinstance(decoded, Mapping):
-        return ""
+        return None
     item = _mapping_with_any_keys(
         decoded,
         ("no_viable_patch", "noViablePatch", "no_safe_patch", "noSafePatch", "no_new_safe_path", "noNewSafePath"),
     )
     if not isinstance(item, Mapping):
-        return ""
-    if any(item.get(key) is True for key in ("no_viable_patch", "noViablePatch", "no_safe_patch", "noSafePatch", "no_new_safe_path", "noNewSafePath")):
-        return _string_value(_get_first_present(item, ("reason", "rationale", "why", "message")))[:700] or "no viable patch"
-    return ""
+        return None
+    if not any(
+        item.get(key) is True
+        for key in (
+            "no_viable_patch",
+            "noViablePatch",
+            "no_safe_patch",
+            "noSafePatch",
+            "no_new_safe_path",
+            "noNewSafePath",
+        )
+    ):
+        return None
+    if _contains_forbidden_material(item):
+        raise ValueError("no-viable-patch response contains forbidden private or secret material")
+    reason = _sanitize_no_viable_reason(
+        _get_first_present(item, ("reason", "rationale", "why", "message"))
+    )
+    reason = reason or "no viable patch"
+    failure_class = _string_value(
+        _get_first_present(item, ("failure_class", "failureClass", "reason_class", "reasonClass"))
+    ).strip().lower()
+    if not failure_class:
+        failure_class = _legacy_no_viable_failure_class(reason)
+    if failure_class not in CODE_EDIT_NO_VIABLE_FAILURE_CLASSES:
+        raise ValueError("no-viable-patch failure_class is invalid")
+    missing_references = _coerce_reference_tuple(
+        _get_first_present(item, ("missing_references", "missingReferences", "unresolved_references"))
+    )
+    return CodeEditNoViablePatch(
+        schema_version=_string_value(item.get("schema_version") or item.get("schemaVersion") or "1.0")[:20],
+        failure_class=failure_class,
+        reason=reason,
+        missing_references=missing_references,
+    )
+
+
+def code_edit_no_viable_patch_reason(raw_text: str) -> str:
+    refusal = parse_code_edit_no_viable_patch_response(raw_text)
+    return refusal.reason if refusal is not None else ""
 
 
 def code_edit_plan_alignment_errors(

@@ -250,6 +250,192 @@ def test_code_edit_prompt_names_source_routing_lane():
     assert "source routing" in content
 
 
+def _v1_1_plan(**overrides):
+    path = {
+        "path_id": "query-recall",
+        "lane": "query_construction",
+        "mechanism": "add one bounded query variant",
+        "target_behavior": ["recover sparse searches"],
+        "must_inspect": ["sourcing_model/discovery.py"],
+        "allowed_lanes": ["query_construction"],
+        "disallowed_lanes": ["provider_fallback"],
+        "must_not_try": ["do not weaken ICP gates"],
+        "success_criteria": ["runtime checks pass"],
+        "novelty_requirements": ["different from prior attempts"],
+        "anti_overfit_checks": ["preserve multiple outputs"],
+        "validation_mode": "runtime_checks",
+        "validation_paths": [],
+    }
+    payload = {
+        "schema_version": "1.1",
+        "miner_focus_interpretation": "improve sparse-query recall",
+        "loop_goal": "recover qualified companies",
+        "required_lane": path["lane"],
+        "required_mechanism": path["mechanism"],
+        "target_behavior": path["target_behavior"],
+        "must_inspect": path["must_inspect"],
+        "allowed_lanes": path["allowed_lanes"],
+        "disallowed_lanes": path["disallowed_lanes"],
+        "must_not_try": path["must_not_try"],
+        "success_criteria": path["success_criteria"],
+        "novelty_requirements": path["novelty_requirements"],
+        "anti_overfit_checks": path["anti_overfit_checks"],
+        "ranked_paths": [path],
+        "selected_path_id": path["path_id"],
+        "validation_mode": "runtime_checks",
+        "validation_paths": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_loop_direction_v1_0_checkpoint_remains_compatible():
+    plan = code_editing.loop_direction_plan_from_mapping(
+        {
+            "schema_version": "1.0",
+            "required_lane": "query_construction",
+            "required_mechanism": "bounded query variant",
+            "ranked_paths": [{"path_id": "legacy-path"}],
+            "selected_path_id": "legacy-path",
+        }
+    )
+    assert plan.validation_mode == "runtime_checks"
+    assert plan.validation_paths == ()
+    assert code_editing.loop_direction_plan_contract_errors(plan) == []
+
+
+def test_loop_direction_v1_1_round_trip_and_contract_validation():
+    plan = code_editing.parse_loop_direction_plan_response(json.dumps(_v1_1_plan()))
+    reparsed = code_editing.loop_direction_plan_from_mapping(plan.to_dict())
+    assert reparsed == plan
+    assert code_editing.loop_direction_plan_contract_errors(plan) == []
+
+
+def test_loop_direction_v1_1_detects_selected_path_contract_mismatch():
+    payload = _v1_1_plan(required_mechanism="different top-level mechanism")
+    plan = code_editing.loop_direction_plan_from_mapping(payload)
+    assert "selected_path_mechanism_mismatch" in code_editing.loop_direction_plan_contract_errors(plan)
+
+    payload = _v1_1_plan(must_inspect=["sourcing_model/other.py"])
+    plan = code_editing.loop_direction_plan_from_mapping(payload)
+    assert "selected_path_must_inspect_mismatch" in code_editing.loop_direction_plan_contract_errors(plan)
+
+
+def test_loop_direction_v1_1_requires_explicit_path_validation_strategy():
+    payload = _v1_1_plan()
+    payload["ranked_paths"][0].pop("validation_paths")
+    plan = code_editing.loop_direction_plan_from_mapping(payload)
+    assert any(
+        error.startswith("ranked_path_missing_validation_paths:")
+        for error in code_editing.loop_direction_plan_contract_errors(plan)
+    )
+
+
+def test_loop_direction_v1_1_allows_explicit_empty_disallowed_lanes():
+    payload = _v1_1_plan(disallowed_lanes=[])
+    payload["ranked_paths"][0]["disallowed_lanes"] = []
+    plan = code_editing.loop_direction_plan_from_mapping(payload)
+    assert code_editing.loop_direction_plan_contract_errors(plan) == []
+
+
+def test_loop_direction_v1_1_rejects_more_than_three_ranked_paths():
+    payload = _v1_1_plan()
+    base_path = payload["ranked_paths"][0]
+    payload["ranked_paths"] = [
+        {**base_path, "path_id": f"path-{index}"}
+        for index in range(4)
+    ]
+    payload["selected_path_id"] = "path-0"
+    plan = code_editing.loop_direction_plan_from_mapping(payload)
+    assert (
+        "loop_direction_plan_v1_1_allows_at_most_three_ranked_paths"
+        in code_editing.loop_direction_plan_contract_errors(plan)
+    )
+
+
+def test_existing_test_validation_requires_paths():
+    payload = _v1_1_plan(validation_mode="existing_test_files", validation_paths=[])
+    with pytest.raises(ValueError, match="requires validation_paths"):
+        code_editing.loop_direction_plan_from_mapping(payload)
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_class"),
+    [
+        (
+            "No existing test file appears in runtime_source_context.editable_files and new files are forbidden.",
+            "binding_plan_unimplementable",
+        ),
+        (
+            "No existing test file is listed in editable_files for the required coverage.",
+            "binding_plan_unimplementable",
+        ),
+        ("The provider probe refuted this hypothesis.", "provider_probe_refuted_hypothesis"),
+    ],
+)
+def test_legacy_no_viable_refusal_gets_structured_failure_class(reason, expected_class):
+    refusal = code_editing.parse_code_edit_no_viable_patch_response(
+        json.dumps({"no_viable_patch": True, "reason": reason})
+    )
+    assert refusal is not None
+    assert refusal.failure_class == expected_class
+
+
+def test_structured_no_viable_refusal_round_trip_and_secret_rejection():
+    refusal = code_editing.parse_code_edit_no_viable_patch_response(
+        json.dumps(
+            {
+                "no_viable_patch": True,
+                "failure_class": "binding_plan_unimplementable",
+                "reason": "required symbol is absent",
+                "missing_references": ["discover_companies"],
+            }
+        )
+    )
+    assert refusal is not None
+    assert refusal.missing_references == ("discover_companies",)
+    sanitized = code_editing.parse_code_edit_no_viable_patch_response(
+        json.dumps(
+            {
+                "no_viable_patch": True,
+                "failure_class": "no_safe_patch",
+                "reason": "no safe patch\n\twithin the current scope",
+                "missing_references": [],
+            }
+        )
+    )
+    assert sanitized is not None
+    assert sanitized.reason == "no safe patch within the current scope"
+    with pytest.raises(ValueError, match="forbidden"):
+        code_editing.parse_code_edit_no_viable_patch_response(
+            json.dumps({"no_viable_patch": True, "reason": "service_role unavailable"})
+        )
+
+
+def test_planner_prompt_exposes_safe_validation_capabilities_without_command_text():
+    constraints = {
+        "new_files_allowed": False,
+        "editable_test_path_count": 0,
+        "editable_test_paths": [],
+        "allowed_validation_modes": ["runtime_checks"],
+        "runtime_checks": {"private_test_command_configured": True},
+    }
+    messages = code_editing.build_loop_direction_planner_messages(
+        ticket={"ticket_id": "ticket-validation"},
+        artifact_manifest={},
+        component_registry={},
+        benchmark_public_summary={},
+        runtime_source_index={"editable_files": ["sourcing_model/discovery.py"]},
+        budget_context={},
+        candidate_edit_constraints=constraints,
+    )
+    content = messages[-1]["content"]
+    context = json.loads(content.split("Context JSON:\n", 1)[1])
+    assert context["candidate_edit_constraints"] == constraints
+    assert "RESEARCH_LAB_PRIVATE_TEST_CMD" not in content
+    assert "do not require adding tests" in content
+
+
 # --- bug #29(a): real head sha recorded instead of throwaway git-init sha ---
 
 

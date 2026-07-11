@@ -67,7 +67,7 @@ def build_candidate_generation_failure_summary(
     terminal_error: str = "",
     candidate_count: int = 0,
 ) -> dict[str, Any]:
-    events = list(loop_event_rows or ())
+    events = canonical_loop_event_order(loop_event_rows)
     event_types = [_event_type(row) for row in events if _event_type(row)]
     stage_counts = {
         key: int(value)
@@ -122,6 +122,27 @@ def public_candidate_generation_failure_summary(summary: Mapping[str, Any] | Non
     return public_doc
 
 
+def canonical_loop_event_order(
+    loop_event_rows: Sequence[Mapping[str, Any]] | None,
+) -> list[Mapping[str, Any]]:
+    """Return deterministic chronological order for DB, report, and in-memory rows."""
+
+    indexed = list(enumerate(loop_event_rows or ()))
+
+    def _key(item: tuple[int, Mapping[str, Any]]) -> tuple[Any, ...]:
+        original_index, row = item
+        try:
+            seq = int(row.get("seq"))
+        except (TypeError, ValueError):
+            seq = None
+        created_at = str(row.get("created_at") or "")
+        if seq is not None and seq >= 0:
+            return (0, seq, created_at, original_index)
+        return (1, created_at, original_index)
+
+    return [row for _index, row in sorted(indexed, key=_key)]
+
+
 def _classify(
     events: Sequence[Mapping[str, Any]],
     *,
@@ -131,19 +152,25 @@ def _classify(
     text = _combined_text(events, queue_reason=queue_reason, terminal_error=terminal_error)
     event_types = {_event_type(row) for row in events}
     cost_stop_reasons = {_cost_stop_reason(row) for row in events}
+    latest_no_viable = _terminal_no_viable_doc(events)
+    structured_failure_class = str(latest_no_viable.get("failure_class") or "").strip().lower()
 
     if "no endpoints found" in text or "no endpoint found" in text:
         return "provider_route_unavailable"
     if "workspace privacy verification failed" in text or "privacy verification failed" in text:
         return "provider_privacy_verification_failed"
-    if "source_inspection_failed" in event_types:
-        return "source_inspection_failed"
-    if "code_edit_no_source_files_read" in text:
-        return "source_context_empty_or_unread"
+    if structured_failure_class == "binding_plan_unimplementable":
+        return "binding_plan_source_missing"
+    if structured_failure_class == "provider_probe_refuted_hypothesis":
+        return "provider_probe_refuted_hypothesis"
     if "loop_direction_plan_parse_failed" in text or "resume_loop_direction_plan_parse_failed" in text:
         return "loop_direction_plan_invalid"
-    if _has_binding_plan_source_gap(events, text):
+    if _has_binding_plan_source_gap(latest_no_viable):
         return "binding_plan_source_missing"
+    if _terminal_source_failure(events):
+        return "source_inspection_failed"
+    if _terminal_source_unread(events):
+        return "source_context_empty_or_unread"
     if "candidate_patch_parse_failed" in event_types or "code_edit_parse_failed" in cost_stop_reasons:
         return "candidate_patch_parse_failed"
     if "candidate_patch_empty_or_noop" in event_types or "no repository changes" in text or "no-op" in text:
@@ -160,10 +187,12 @@ def _classify(
         return "candidate_image_build_failed"
     if "candidate_build_failed" in event_types:
         return "candidate_build_failed"
-    if "no_viable_patch" in event_types:
+    if latest_no_viable:
         # W4: a refusal that cites probe evidence is a learning outcome, not a
         # planner failure — surface it as its own reason.
-        if "probe" in text and "refut" in text:
+        if structured_failure_class == "provider_probe_refuted_hypothesis" or (
+            "probe" in text and "refut" in text
+        ):
             return "provider_probe_refuted_hypothesis"
         return "no_viable_patch"
     if "probe_budget_exhausted" in text:
@@ -177,7 +206,11 @@ def _classify(
     return "no_valid_image_build_finalists"
 
 
-def _has_binding_plan_source_gap(events: Sequence[Mapping[str, Any]], text: str) -> bool:
+def _has_binding_plan_source_gap(latest: Mapping[str, Any]) -> bool:
+    text = " ".join(
+        str(latest.get(key) or "")
+        for key in ("stage", "error", "reason", "stop_reason", "failure_class")
+    ).lower()
     if "binding_plan_unimplementable" in text:
         return True
     gap_markers = (
@@ -188,8 +221,120 @@ def _has_binding_plan_source_gap(events: Sequence[Mapping[str, Any]], text: str)
         "cannot be inspected",
         "selected path",
         "selected_path",
+        "no existing test file",
+        "no existing test is listed",
+        "no test file appears",
+        "no test file is listed",
     )
-    return any(_event_type(row) == "no_viable_patch" for row in events) and any(marker in text for marker in gap_markers)
+    return bool(latest) and any(marker in text for marker in gap_markers)
+
+
+_CANDIDATE_GENERATION_SIGNAL_TYPES = frozenset(
+    {
+        "source_inspection_requested",
+        "source_inspection_resolved",
+        "source_inspection_failed",
+        "code_edit_validation_failed",
+        "candidate_generation_fallback_requested",
+        "candidate_generation_fallback_drafted",
+        "candidate_generation_fallback_failed",
+        "candidate_patch_parse_failed",
+        "candidate_patch_empty_or_noop",
+        "candidate_repair_exhausted",
+        "candidate_patch_apply_failed",
+        "candidate_patch_test_failed",
+        "candidate_test_failed",
+        "candidate_artifact_missing",
+        "candidate_image_build_failed",
+        "candidate_build_failed",
+        "candidate_built",
+        "candidate_selected",
+        "no_viable_patch",
+    }
+)
+
+
+def _terminal_no_viable_doc(events: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    latest_signal_index = _last_matching_index(
+        events,
+        lambda row: _event_type(row) in _CANDIDATE_GENERATION_SIGNAL_TYPES,
+    )
+    if latest_signal_index < 0 or _event_type(events[latest_signal_index]) != "no_viable_patch":
+        return {}
+    return _event_doc(events[latest_signal_index])
+
+
+def _successful_source_read(row: Mapping[str, Any]) -> bool:
+    if _event_type(row) != "source_inspection_resolved":
+        return False
+    doc = _event_doc(row)
+    try:
+        if int(doc.get("read_file_count") or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    read_files = doc.get("read_files")
+    return isinstance(read_files, Sequence) and not isinstance(
+        read_files, (str, bytes, bytearray)
+    ) and bool(read_files)
+
+
+def _last_matching_index(
+    events: Sequence[Mapping[str, Any]], predicate: Any
+) -> int:
+    found = -1
+    for index, row in enumerate(events):
+        if predicate(row):
+            found = index
+    return found
+
+
+def _event_iteration(row: Mapping[str, Any]) -> int | None:
+    doc = _event_doc(row)
+    for value in (doc.get("iteration"), doc.get("loop_iteration"), row.get("iteration")):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed >= 0:
+            return parsed
+    return None
+
+
+def _terminal_iteration_events(
+    events: Sequence[Mapping[str, Any]],
+) -> Sequence[Mapping[str, Any]]:
+    iterations = [iteration for row in events if (iteration := _event_iteration(row)) is not None]
+    if not iterations:
+        return events
+    terminal_iteration = max(iterations)
+    return [row for row in events if _event_iteration(row) == terminal_iteration]
+
+
+def _terminal_source_failure(events: Sequence[Mapping[str, Any]]) -> bool:
+    events = _terminal_iteration_events(events)
+    last_failure = _last_matching_index(
+        events, lambda row: _event_type(row) == "source_inspection_failed"
+    )
+    last_success = _last_matching_index(events, _successful_source_read)
+    return last_failure >= 0 and last_failure > last_success
+
+
+def _terminal_source_unread(events: Sequence[Mapping[str, Any]]) -> bool:
+    events = _terminal_iteration_events(events)
+
+    def _is_unread(row: Mapping[str, Any]) -> bool:
+        if _event_type(row) != "code_edit_validation_failed":
+            return False
+        doc = _event_doc(row)
+        return (
+            str(doc.get("error") or "") == "code_edit_no_source_files_read"
+            or str(doc.get("stage") or "") == "source_inspection_exhausted_without_read"
+        )
+
+    last_unread = _last_matching_index(events, _is_unread)
+    last_success = _last_matching_index(events, _successful_source_read)
+    return last_unread >= 0 and last_unread > last_success
 
 
 def _combined_text(

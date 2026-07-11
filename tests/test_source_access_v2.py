@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -435,3 +436,30 @@ class TestPromptFlipTogether:
         monkeypatch.setenv("RESEARCH_LAB_SOURCE_ACCESS_V2", "false")
         user = self._messages(source_access_v2=None)[1]["content"]
         assert "start_line" not in user
+
+    def test_final_round_context_requires_read_after_search(self):
+        messages = build_code_edit_source_inspection_messages(
+            ticket={"ticket_id": "t-final"},
+            artifact_manifest={},
+            component_registry={},
+            benchmark_public_summary={},
+            runtime_source_index={"editable_files": ["sourcing_model/discovery.py"]},
+            source_inspection_context={
+                "read_files": [],
+                "results": [
+                    {
+                        "operation": "search",
+                        "matches": [{"path": "sourcing_model/discovery.py", "line_number": 20}],
+                    }
+                ],
+            },
+            budget_context={},
+            inspection_round=3,
+            max_inspection_rounds=3,
+        )
+        content = messages[1]["content"]
+        context = json.loads(content.split("Context JSON:\n", 1)[1])
+        assert context["inspection_round"] == 3
+        assert context["remaining_inspection_rounds"] == 0
+        assert context["is_final_inspection_round"] is True
+        assert "do not spend the final round on another search" in content

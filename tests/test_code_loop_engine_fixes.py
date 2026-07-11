@@ -423,6 +423,41 @@ def _loop_direction_plan_payload(**overrides):
     return payload
 
 
+def _loop_direction_plan_v1_1_payload(
+    *,
+    validation_mode="runtime_checks",
+    validation_paths=None,
+    **overrides,
+):
+    path = {
+        "path_id": "query_recall_path",
+        "lane": "query_construction",
+        "mechanism": "add one bounded query variant",
+        "target_behavior": ["recover sparse searches"],
+        "must_inspect": ["sourcing_model/discovery.py"],
+        "allowed_lanes": ["query_construction"],
+        "disallowed_lanes": ["provider_fallback"],
+        "must_not_try": ["do not weaken ICP constraints"],
+        "success_criteria": ["existing validation passes"],
+        "novelty_requirements": ["different from prior attempts"],
+        "anti_overfit_checks": ["preserve multiple qualified outputs"],
+        "validation_mode": validation_mode,
+        "validation_paths": list(validation_paths or []),
+    }
+    payload = {
+        "schema_version": "1.1",
+        "miner_focus_interpretation": "improve sparse-query recall",
+        "loop_goal": "recover qualified companies",
+        "required_lane": path["lane"],
+        "required_mechanism": path["mechanism"],
+        "selected_path_id": path["path_id"],
+        "ranked_paths": [path],
+        **{key: value for key, value in path.items() if key not in {"path_id", "lane", "mechanism"}},
+    }
+    payload.update(overrides)
+    return payload
+
+
 async def test_loop_direction_no_new_safe_path_preserves_stop_reason(tmp_path):
     events = []
 
@@ -481,6 +516,105 @@ async def test_loop_direction_no_new_safe_path_preserves_stop_reason(tmp_path):
     terminal = events[-1]
     assert terminal.event_type == "loop_failed"
     assert terminal.event_doc["run_summary"]["stop_reason"] == "loop_direction_no_new_safe_path"
+
+
+async def test_v1_1_infeasible_test_plan_gets_one_bounded_repair(tmp_path):
+    events = []
+    calls = []
+    builder = _PlannerBuildsCandidateBuilder(_source_context(tmp_path))
+    builder.config.planner_reference_repair_enabled = True
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        calls.append(stage)
+        if stage == "loop_planner":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    _loop_direction_plan_v1_1_payload(
+                        validation_mode="existing_test_files",
+                        validation_paths=["tests/test_missing.py"],
+                    )
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "planner"},
+                cost_microusd=1000,
+            )
+        if stage == "loop_planner_reference_repair":
+            context = json.loads(messages[1]["content"].split("Context JSON:\n", 1)[1])
+            assert context["candidate_edit_constraints"]["editable_test_path_count"] == 0
+            assert context["feasibility_errors"]
+            return OpenRouterCallResult(
+                content=json.dumps(_loop_direction_plan_v1_1_payload()),
+                provider_usage={"provider": "openrouter", "response_id": "repair"},
+                cost_microusd=1000,
+            )
+        if stage == "source_inspection":
+            return OpenRouterCallResult(
+                content='{"requests":[{"operation":"read_file","path":"sourcing_model/discovery.py"}]}',
+                provider_usage={"provider": "openrouter", "response_id": "inspect"},
+                cost_microusd=1000,
+            )
+        if stage == "code_edit_draft":
+            return OpenRouterCallResult(
+                content=json.dumps(
+                    {
+                        "candidates": [
+                            _draft(
+                                lane="query_construction",
+                                plan_path_id="query_recall_path",
+                            ).to_dict()
+                        ]
+                    }
+                ),
+                provider_usage={"provider": "openrouter", "response_id": "draft"},
+                cost_microusd=1000,
+            )
+        raise AssertionError(f"unexpected stage: {stage}")
+
+    async def event_sink(event):
+        events.append(event)
+
+    result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=2,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=builder,
+    ).run(
+        run_id="run-test-plan-repair",
+        ticket={
+            "ticket_id": "ticket-test-plan-repair",
+            "miner_hotkey": "hotkey",
+            "island": "generalist",
+            "ticket_doc": {"brief_public_summary": "improve query recall"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={"item_count": 1},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0},
+        requested_loop_count=1,
+    )
+
+    assert result.status == "completed"
+    assert calls.count("loop_planner_reference_repair") == 1
+    assert calls.index("loop_planner_reference_repair") < calls.index("source_inspection")
+    assert builder.builds == [("query_recall_path", 0)]
+    repair_checkpoints = [
+        event.event_doc["checkpoint"]
+        for event in events
+        if event.event_type == "checkpoint_saved"
+        and event.event_doc.get("checkpoint", {}).get("planner_reference_repair_attempted")
+    ]
+    assert repair_checkpoints[0]["planner_reference_repair_status"] == "attempted"
+    assert repair_checkpoints[1]["planner_reference_repair_status"] == "repaired"
 
 
 async def test_planner_reference_repair_resolves_symbol_and_builds_once(tmp_path):
@@ -902,6 +1036,8 @@ async def test_unimplementable_binding_plan_stops_after_one_draft(tmp_path):
     no_viable = [event for event in events if event.event_type == "no_viable_patch"][-1]
     assert no_viable.event_doc["terminal"] is True
     assert no_viable.event_doc["stop_reason"] == "binding_plan_unimplementable"
+    assert no_viable.event_doc["failure_class"] == "binding_plan_unimplementable"
+    assert no_viable.event_doc["missing_references"] == []
     terminal = events[-1]
     assert terminal.event_type == "loop_failed"
     assert terminal.event_doc["run_summary"]["stop_reason"] == "binding_plan_unimplementable"
@@ -1217,6 +1353,8 @@ async def test_ranked_path_fallback_exhaustion_keeps_no_buildable_diagnostics(tm
         if event.event_doc.get("terminal_after_ranked_paths_exhausted") is True
     ]
     assert exhausted
+    assert exhausted[-1].event_doc["failure_class"] == "binding_plan_unimplementable"
+    assert exhausted[-1].event_doc["missing_references"] == []
     assert events[-1].event_doc["run_summary"]["stop_reason"] == "binding_plan_unimplementable"
 
 
@@ -1280,6 +1418,69 @@ async def test_no_candidate_loop_failed_carries_final_cost_ledger(tmp_path):
     assert terminal.event_type == "loop_failed"
     assert terminal.cost_ledger["actual_openrouter_cost_microusd"] == 3000
     assert terminal.event_doc["run_summary"]["cost_ledger"]["actual_openrouter_cost_microusd"] == 3000
+
+
+async def test_final_source_inspection_round_search_only_fails_closed_without_implicit_read(tmp_path):
+    events = []
+    calls = []
+
+    async def call_model(messages, timeout_seconds, max_tokens, stage):
+        calls.append(stage)
+        assert stage == "source_inspection"
+        context = json.loads(messages[1]["content"].split("Context JSON:\n", 1)[1])
+        assert context["inspection_round"] == 1
+        assert context["max_inspection_rounds"] == 1
+        assert context["is_final_inspection_round"] is True
+        return OpenRouterCallResult(
+            content='{"requests":[{"operation":"search","query":"discover_companies"}]}',
+            provider_usage={"provider": "openrouter", "response_id": "inspect"},
+            cost_microusd=1000,
+        )
+
+    async def event_sink(event):
+        events.append(event)
+
+    result = await engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=30,
+            min_iterations=1,
+            max_iterations=1,
+            draft_timeout_seconds=10,
+            reflection_timeout_seconds=10,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=call_model,
+        event_sink=event_sink,
+        builder=_NoCandidateBuilder(_source_context(tmp_path)),
+    ).run(
+        run_id="run-final-search-only",
+        ticket={
+            "ticket_id": "ticket-final-search-only",
+            "miner_hotkey": "hotkey",
+            "island": "generalist",
+            "ticket_doc": {"brief_public_summary": "inspect query logic"},
+            "requested_loop_count": 1,
+        },
+        artifact=_manifest(),
+        component_registry={},
+        benchmark_public_summary={},
+        model_id="test/model",
+        budget_context={"requested_compute_budget_usd": 5.0},
+        requested_loop_count=1,
+    )
+
+    assert result.status == "failed"
+    assert calls == ["source_inspection"]
+    unread = [
+        event
+        for event in events
+        if event.event_doc.get("stage") == "source_inspection_exhausted_without_read"
+    ]
+    assert len(unread) == 1
+    assert unread[0].event_doc["error"] == "code_edit_no_source_files_read"
+    assert unread[0].event_doc["inspection_round"] == 1
 
 
 class _RepairFailureBuilder(_NoCandidateBuilder):

@@ -50,9 +50,10 @@ from research_lab.code_editing import (
     build_loop_direction_planner_messages,
     build_loop_direction_reference_repair_messages,
     build_plan_alignment_judge_messages,
-    code_edit_no_viable_patch_reason,
     code_edit_plan_alignment_errors,
+    loop_direction_plan_contract_errors,
     loop_direction_plan_from_mapping,
+    parse_code_edit_no_viable_patch_response,
     parse_loop_direction_plan_response,
     parse_plan_alignment_judge_response,
     parse_code_edit_repair_response,
@@ -201,6 +202,122 @@ def _planner_reference_repair_enabled(config: Any) -> bool:
     ) > 0
 
 
+def _is_editable_test_path(path: str) -> bool:
+    normalized = str(path or "").replace("\\", "/").strip().lower()
+    basename = normalized.rsplit("/", 1)[-1]
+    return (
+        "/tests/" in f"/{normalized}"
+        or basename.startswith("test_") and basename.endswith(".py")
+        or basename.endswith("_test.py")
+    )
+
+
+def _candidate_edit_constraints(
+    source_context: Any,
+    *,
+    config: Any,
+    dev_evaluator_configured: bool,
+) -> dict[str, Any]:
+    editable_files = tuple(str(item) for item in getattr(source_context, "editable_files", ()) if item)
+    editable_test_paths = tuple(sorted(path for path in editable_files if _is_editable_test_path(path)))
+    validation_modes = ["runtime_checks"]
+    if editable_test_paths:
+        validation_modes.append("existing_test_files")
+    return {
+        "schema_version": "1.0",
+        "new_files_allowed": False,
+        "editable_test_path_count": len(editable_test_paths),
+        "editable_test_paths": list(editable_test_paths),
+        "allowed_validation_modes": validation_modes,
+        "default_validation_mode": "runtime_checks",
+        "runtime_checks": {
+            "py_compile_changed_python_files": True,
+            "private_test_command_configured": bool(str(getattr(config, "private_test_cmd", "") or "").strip()),
+            "image_build_required": True,
+            "dev_eval_when_enabled": bool(dev_evaluator_configured),
+        },
+    }
+
+
+def _plan_source_feasibility_errors(
+    plan_doc: Mapping[str, Any] | None,
+    *,
+    source_context: Any,
+    candidate_edit_constraints: Mapping[str, Any],
+) -> tuple[list[str], tuple[str, ...]]:
+    if not isinstance(plan_doc, Mapping):
+        return [], ()
+    try:
+        plan = loop_direction_plan_from_mapping(plan_doc)
+    except Exception as exc:
+        return [f"loop_direction_plan_invalid:{safe_event_error_text(exc)}"], ()
+    errors = list(loop_direction_plan_contract_errors(plan))
+    if str(plan.schema_version or "1.0") != "1.1" or plan.no_new_safe_path:
+        return errors, ()
+
+    selected_path = next(
+        (
+            item
+            for item in plan.ranked_paths
+            if _ranked_path_id(item) == plan.selected_path_id
+        ),
+        None,
+    )
+    raw_references: list[Any] = list(plan.must_inspect)
+    if isinstance(selected_path, Mapping):
+        selected_refs = selected_path.get("must_inspect")
+        if isinstance(selected_refs, Sequence) and not isinstance(selected_refs, (str, bytes, bytearray)):
+            raw_references.extend(selected_refs)
+
+    index_doc = getattr(source_context, "planner_source_index", {})
+    file_docs = index_doc.get("files", []) if isinstance(index_doc, Mapping) else []
+    exact_references = set(str(item) for item in getattr(source_context, "editable_files", ()) if item)
+    for file_doc in file_docs:
+        if not isinstance(file_doc, Mapping):
+            continue
+        path = str(file_doc.get("path") or "")
+        if path:
+            exact_references.add(path)
+        for symbol in file_doc.get("symbols", []):
+            if not isinstance(symbol, Mapping):
+                continue
+            for key in ("name", "qualified_name"):
+                value = str(symbol.get(key) or "")
+                if value:
+                    exact_references.add(value)
+
+    unmatched_references = tuple(
+        dict.fromkeys(
+            str(item or "").strip()
+            for item in raw_references
+            if str(item or "").strip() not in exact_references
+        )
+    )
+    missing_reference_items: list[str] = []
+    for unmatched in unmatched_references:
+        safe_references = unresolved_references_from_context(explicit=[unmatched])
+        if not safe_references:
+            errors.append("loop_direction_plan_reference_not_exact")
+            continue
+        for reference in safe_references:
+            if reference not in missing_reference_items:
+                missing_reference_items.append(reference)
+            errors.append(f"loop_direction_plan_reference_not_exact:{reference}")
+    missing_references = tuple(missing_reference_items)
+
+    editable_files = set(str(item) for item in getattr(source_context, "editable_files", ()) if item)
+    editable_test_paths = {path for path in editable_files if _is_editable_test_path(path)}
+    if plan.validation_mode == "existing_test_files":
+        if not editable_test_paths:
+            errors.append("loop_direction_plan_existing_tests_unavailable")
+        for path in plan.validation_paths:
+            if path not in editable_files or path not in editable_test_paths:
+                errors.append(f"loop_direction_plan_validation_path_unavailable:{path}")
+    elif plan.validation_paths:
+        errors.append("loop_direction_plan_runtime_checks_must_not_require_validation_paths")
+    return list(dict.fromkeys(errors)), missing_references
+
+
 def _ranked_path_id(path: Mapping[str, Any] | None) -> str:
     if not isinstance(path, Mapping):
         return ""
@@ -257,33 +374,44 @@ def _ranked_path_fallback_plan(
         checked += 1
         if checked > max_paths:
             return None
-        candidate = dict(base_plan_doc)
-        candidate["no_new_safe_path"] = False
-        candidate["selected_path_id"] = path_id
-        candidate["required_lane"] = str(raw_path.get("lane") or raw_path.get("required_lane") or candidate.get("required_lane") or "")
-        candidate["required_mechanism"] = str(
+        required_lane = str(raw_path.get("lane") or raw_path.get("required_lane") or "")
+        required_mechanism = str(
             raw_path.get("mechanism")
             or raw_path.get("required_mechanism")
             or raw_path.get("hypothesis")
-            or candidate.get("required_mechanism")
             or ""
         )
-        for source_key, target_key in (
-            ("target_behavior", "target_behavior"),
-            ("must_inspect", "must_inspect"),
-            ("allowed_lanes", "allowed_lanes"),
-            ("success_criteria", "success_criteria"),
-            ("anti_overfit_checks", "anti_overfit_checks"),
+        if not required_lane or not required_mechanism:
+            continue
+        candidate = dict(base_plan_doc)
+        candidate["no_new_safe_path"] = False
+        candidate["selected_path_id"] = path_id
+        candidate["required_lane"] = required_lane
+        candidate["required_mechanism"] = required_mechanism
+        for field_name in (
+            "target_behavior",
+            "must_inspect",
+            "allowed_lanes",
+            "disallowed_lanes",
+            "must_not_try",
+            "success_criteria",
+            "novelty_requirements",
+            "anti_overfit_checks",
+            "validation_paths",
         ):
-            if source_key in raw_path:
-                candidate[target_key] = raw_path[source_key]
+            candidate[field_name] = raw_path.get(field_name, [])
+        for field_name in ("generalization_claim", "novelty_contrast"):
+            candidate[field_name] = raw_path.get(field_name, "")
+        candidate["validation_mode"] = raw_path.get("validation_mode", "runtime_checks")
         candidate["ranked_path_fallback"] = {
             "schema_version": "1.0",
             "fallback_index": max(1, int(fallback_index)),
             "path_id": path_id,
             "source_plan_hash": str(base_plan_doc.get("plan_hash") or ""),
         }
-        return loop_direction_plan_from_mapping(candidate).to_dict()
+        candidate.pop("plan_hash", None)
+        candidate["plan_hash"] = sha256_json(candidate)
+        return candidate
     return None
 
 
@@ -1274,6 +1402,11 @@ class CodeEditLoopEngine:
         except Exception:
             _cleanup_source_tmp()
             raise
+        candidate_edit_constraints = _candidate_edit_constraints(
+            source_context,
+            config=self.builder.config,
+            dev_evaluator_configured=self.dev_evaluator is not None,
+        )
 
         # Bug 5: resume used to discard already-built candidates, so a paused/requeued run
         # that had built+pushed an image resumed empty-handed and failed with "no finalists".
@@ -1488,14 +1621,13 @@ class CodeEditLoopEngine:
             if not ranked_path_base_doc:
                 return False
             max_ranked_paths = _ranked_path_fallback_max_paths(self.builder.config)
-            if len(ranked_path_attempted_ids) >= max_ranked_paths:
-                return False
+            remaining_path_slots = max_ranked_paths - len(ranked_path_attempted_ids)
             next_index = ranked_path_fallback_count + 1
             previous_path_id = _loop_plan_selected_path_id(loop_direction_plan_doc)
             next_plan = _ranked_path_fallback_plan(
                 ranked_path_base_doc,
                 attempted_path_ids=ranked_path_attempted_ids,
-                max_paths=max_ranked_paths,
+                max_paths=remaining_path_slots,
                 fallback_index=next_index,
                 refused_lanes=refused_lane_keys,
             )
@@ -1517,6 +1649,16 @@ class CodeEditLoopEngine:
                                 "stage": "ranked_path_fallback",
                                 "trigger": str(trigger or "")[:120],
                                 "reason": safe_event_error_text(reason),
+                                "failure_class": (
+                                    "binding_plan_unimplementable"
+                                    if trigger in {
+                                        "binding_plan_unimplementable",
+                                        "loop_direction_plan_feasibility",
+                                    }
+                                    or _binding_plan_unimplementable_reason(reason)
+                                    else "no_safe_patch"
+                                ),
+                                "missing_references": [],
                                 "ranked_path_fallback_attempted": False,
                                 "previous_path_id": previous_path_id,
                                 "next_path_id": "",
@@ -1531,6 +1673,39 @@ class CodeEditLoopEngine:
             next_path_id = _loop_plan_selected_path_id(next_plan)
             if not next_path_id:
                 return False
+            next_plan_errors, _next_missing_references = _plan_source_feasibility_errors(
+                next_plan,
+                source_context=source_context,
+                candidate_edit_constraints=candidate_edit_constraints,
+            )
+            if next_plan_errors:
+                ranked_path_attempted_ids.add(next_path_id)
+                ranked_path_fallback_count = next_index
+                await self.event_sink(
+                    AutoResearchLoopEvent(
+                        event_type="code_edit_validation_failed",
+                        loop_status="running",
+                        elapsed_seconds=elapsed(),
+                        cost_ledger=_running_cost_ledger(
+                            openrouter_calls,
+                            estimated_cost,
+                            actual_cost_microusd,
+                            "ranked_path_feasibility_failed",
+                        ),
+                        event_doc={
+                            "schema_version": "1.0",
+                            "stage": "ranked_path_feasibility",
+                            "trigger": str(trigger or "")[:120],
+                            "path_id": next_path_id,
+                            "feasibility_error_count": len(next_plan_errors),
+                            "error": "; ".join(next_plan_errors)[:700],
+                            "ranked_path_fallback_attempted": False,
+                            "fallback_index": ranked_path_fallback_count,
+                        },
+                    )
+                )
+                return await _activate_ranked_path_fallback(trigger=trigger, reason=reason)
+            next_plan = loop_direction_plan_from_mapping(next_plan).to_dict()
             ranked_path_attempted_ids.add(next_path_id)
             ranked_path_fallback_count = next_index
             loop_direction_plan_doc = next_plan
@@ -1590,6 +1765,7 @@ class CodeEditLoopEngine:
             reason: str,
             plan_doc: Mapping[str, Any],
             explicit_references: Sequence[Any] = (),
+            feasibility_errors: Sequence[str] = (),
         ) -> dict[str, Any] | None:
             nonlocal loop_direction_plan_doc
             nonlocal ranked_path_base_doc
@@ -1619,7 +1795,7 @@ class CodeEditLoopEngine:
                     must_inspect=must_inspect,
                     reason=reason,
                 )
-            if not references:
+            if not references and not feasibility_errors:
                 reference_repair_status = "no_safe_references"
                 return None
             if elapsed() >= settings.max_seconds:
@@ -1684,6 +1860,7 @@ class CodeEditLoopEngine:
                         "reference_count": int(resolution.get("reference_count") or 0),
                         "resolved_reference_count": int(resolution.get("resolved_reference_count") or 0),
                         "resolution_hash": str(resolution.get("resolution_hash") or ""),
+                        "feasibility_error_count": len(feasibility_errors),
                     },
                 )
             )
@@ -1696,6 +1873,8 @@ class CodeEditLoopEngine:
                     },
                     original_plan=plan_doc,
                     reference_resolution=resolution,
+                    candidate_edit_constraints=candidate_edit_constraints,
+                    feasibility_errors=feasibility_errors,
                 ),
                 min(settings.draft_timeout_seconds, remaining_call_seconds),
                 self.builder.config.loop_planner_max_tokens,
@@ -1771,16 +1950,35 @@ class CodeEditLoopEngine:
                 )
                 return None
 
+            repaired_feasibility_errors, _repaired_missing_references = _plan_source_feasibility_errors(
+                repaired_doc,
+                source_context=source_context,
+                candidate_edit_constraints=candidate_edit_constraints,
+            )
             loop_direction_plan_doc = repaired_doc
             ranked_path_base_doc = dict(repaired_doc)
             ranked_path_attempted_ids = set()
             repaired_path_id = _loop_plan_selected_path_id(repaired_doc)
             if repaired_path_id:
                 ranked_path_attempted_ids.add(repaired_path_id)
-            planner_terminal_without_candidate = bool(repaired_plan.no_new_safe_path)
-            binding_plan_terminal_without_candidate = False
-            stop_reason = "loop_direction_no_new_safe_path" if repaired_plan.no_new_safe_path else "max_iterations"
-            reference_repair_status = "still_unresolved" if repaired_plan.no_new_safe_path else "repaired"
+            planner_terminal_without_candidate = bool(
+                repaired_plan.no_new_safe_path or repaired_feasibility_errors
+            )
+            binding_plan_terminal_without_candidate = bool(repaired_feasibility_errors)
+            stop_reason = (
+                "binding_plan_unimplementable"
+                if repaired_feasibility_errors
+                else "loop_direction_no_new_safe_path"
+                if repaired_plan.no_new_safe_path
+                else "max_iterations"
+            )
+            reference_repair_status = (
+                "still_infeasible"
+                if repaired_feasibility_errors
+                else "still_unresolved"
+                if repaired_plan.no_new_safe_path
+                else "repaired"
+            )
             last_checkpoint = await self._emit_checkpoint(
                 run_id=run_id,
                 settings=settings,
@@ -1823,10 +2021,11 @@ class CodeEditLoopEngine:
                         "reference_count": int(resolution.get("reference_count") or 0),
                         "resolved_reference_count": int(resolution.get("resolved_reference_count") or 0),
                         "resolution_hash": str(resolution.get("resolution_hash") or ""),
+                        "feasibility_error_count": len(repaired_feasibility_errors),
                     },
                 )
             )
-            return repaired_doc
+            return None if repaired_feasibility_errors else repaired_doc
 
         if (
             self.builder.config.loop_planner_enabled
@@ -1890,6 +2089,7 @@ class CodeEditLoopEngine:
                             prior_attempts=prior_attempts,
                             provider_outcome_digest=self.provider_outcome_digest,
                             provider_capability_summary=provider_capability_summary,
+                            candidate_edit_constraints=candidate_edit_constraints,
                         ),
                         min(settings.draft_timeout_seconds, remaining_call_seconds),
                         self.builder.config.loop_planner_max_tokens,
@@ -2028,6 +2228,13 @@ class CodeEditLoopEngine:
                                 ),
                                 event_doc={
                                     "reason": loop_plan.reason or "planner returned no_new_safe_path",
+                                    "failure_class": (
+                                        "binding_plan_unimplementable"
+                                        if loop_plan.unresolved_references
+                                        or _binding_plan_unimplementable_reason(loop_plan.reason)
+                                        else "no_safe_patch"
+                                    ),
+                                    "missing_references": list(loop_plan.unresolved_references),
                                     "loop_direction_plan_hash": loop_direction_plan_doc.get("plan_hash"),
                                     "focus_signature_hash": _focus_signature_hash(ticket),
                                 },
@@ -2041,6 +2248,59 @@ class CodeEditLoopEngine:
                     break
         elif not self.builder.config.loop_planner_enabled:
             loop_direction_plan_doc = None
+        if (
+            isinstance(loop_direction_plan_doc, Mapping)
+            and not planner_terminal_without_candidate
+            and not binding_plan_terminal_without_candidate
+        ):
+            plan_feasibility_errors, plan_missing_references = _plan_source_feasibility_errors(
+                loop_direction_plan_doc,
+                source_context=source_context,
+                candidate_edit_constraints=candidate_edit_constraints,
+            )
+            if plan_feasibility_errors:
+                feasibility_reason = "; ".join(plan_feasibility_errors)[:700]
+                await self.event_sink(
+                    AutoResearchLoopEvent(
+                        event_type="code_edit_validation_failed",
+                        loop_status="running",
+                        elapsed_seconds=elapsed(),
+                        cost_ledger=_running_cost_ledger(
+                            openrouter_calls,
+                            estimated_cost,
+                            actual_cost_microusd,
+                            "loop_direction_plan_feasibility_failed",
+                        ),
+                        event_doc={
+                            "stage": "loop_direction_plan_feasibility",
+                            "error": feasibility_reason,
+                            "feasibility_error_count": len(plan_feasibility_errors),
+                            "loop_direction_plan_hash": loop_direction_plan_doc.get("plan_hash"),
+                        },
+                    )
+                )
+                repaired_doc = await _attempt_planner_reference_repair(
+                    trigger="loop_direction_plan_feasibility",
+                    reason=feasibility_reason,
+                    plan_doc=loop_direction_plan_doc,
+                    explicit_references=plan_missing_references,
+                    feasibility_errors=plan_feasibility_errors,
+                )
+                if repaired_doc is not None and not bool(repaired_doc.get("no_new_safe_path")):
+                    planner_terminal_without_candidate = False
+                    binding_plan_terminal_without_candidate = False
+                    stop_reason = "max_iterations"
+                else:
+                    planner_terminal_without_candidate = True
+                    binding_plan_terminal_without_candidate = True
+                    stop_reason = "binding_plan_unimplementable"
+                    if await _activate_ranked_path_fallback(
+                        trigger="loop_direction_plan_feasibility",
+                        reason=feasibility_reason,
+                    ):
+                        planner_terminal_without_candidate = False
+                        binding_plan_terminal_without_candidate = False
+                        stop_reason = "max_iterations"
         while iteration < settings.max_iterations:
             if planner_terminal_without_candidate or binding_plan_terminal_without_candidate:
                 break
@@ -2117,7 +2377,12 @@ class CodeEditLoopEngine:
             source_bytes_returned = 0
             budget_exhausted_after_source_inspection = False
             retry_iteration_after_reference_repair = False
-            for inspection_round in range(1, max(1, int(self.builder.config.code_edit_source_inspection_rounds)) + 1):
+            max_inspection_rounds = max(
+                1, int(self.builder.config.code_edit_source_inspection_rounds)
+            )
+            last_inspection_round = 0
+            for inspection_round in range(1, max_inspection_rounds + 1):
+                last_inspection_round = inspection_round
                 if elapsed() >= settings.max_seconds:
                     stop_reason = "max_seconds"
                     break
@@ -2174,6 +2439,9 @@ class CodeEditLoopEngine:
                             source_access_v2=source_access_v2,
                             provider_outcome_digest=self.provider_outcome_digest,
                             provider_capability_summary=provider_capability_summary,
+                            candidate_edit_constraints=candidate_edit_constraints,
+                            inspection_round=inspection_round,
+                            max_inspection_rounds=max_inspection_rounds,
                             provider_probe_catalog=(
                                 {
                                     "endpoints": [endpoint.prompt_summary() for endpoint in probe_catalog],
@@ -2427,6 +2695,11 @@ class CodeEditLoopEngine:
             if budget_exhausted_after_source_inspection:
                 break
             if not read_paths:
+                source_unread_stage = (
+                    "source_inspection_exhausted_without_read"
+                    if last_inspection_round >= max_inspection_rounds
+                    else "code_edit_no_source_files_read"
+                )
                 await self.event_sink(
                     AutoResearchLoopEvent(
                         event_type="code_edit_validation_failed",
@@ -2436,11 +2709,14 @@ class CodeEditLoopEngine:
                             openrouter_calls,
                             estimated_cost,
                             actual_cost_microusd,
-                            "code_edit_no_source_files_read",
+                            source_unread_stage,
                         ),
                         event_doc={
                             "iteration": iteration,
                             "error": "code_edit_no_source_files_read",
+                            "stage": source_unread_stage,
+                            "inspection_round": last_inspection_round,
+                            "max_inspection_rounds": max_inspection_rounds,
                             "source_tree_hash": source_context.source_tree_hash,
                         },
                     )
@@ -2546,10 +2822,11 @@ class CodeEditLoopEngine:
                                 },
                                 include_lessons=True,
                             ),
-                            fallback_reason=reason,
-                            max_candidates=1,
-                            max_target_files=_fallback_max_target_files(self.builder.config),
-                        ),
+                        fallback_reason=reason,
+                        max_candidates=1,
+                        max_target_files=_fallback_max_target_files(self.builder.config),
+                        candidate_edit_constraints=candidate_edit_constraints,
+                    ),
                         min(settings.draft_timeout_seconds, remaining_fallback_seconds),
                         3000,
                         "code_edit_fallback",
@@ -2603,7 +2880,11 @@ class CodeEditLoopEngine:
                             max_target_files=_fallback_max_target_files(self.builder.config),
                         )
                     except Exception as exc:
-                        no_viable_reason = code_edit_no_viable_patch_reason(fallback_result.content)
+                        try:
+                            no_viable = parse_code_edit_no_viable_patch_response(fallback_result.content)
+                        except ValueError:
+                            no_viable = None
+                        no_viable_reason = no_viable.reason if no_viable is not None else ""
                         await self.event_sink(
                             AutoResearchLoopEvent(
                                 event_type=(
@@ -2631,6 +2912,14 @@ class CodeEditLoopEngine:
                                         else "candidate_generation_fallback_parse_failed"
                                     ),
                                     "reason": no_viable_reason,
+                                    **(
+                                        {
+                                            "failure_class": no_viable.failure_class,
+                                            "missing_references": list(no_viable.missing_references),
+                                        }
+                                        if no_viable is not None
+                                        else {}
+                                    ),
                                     "error": safe_event_error_text(exc),
                                     "raw_response_hash": sha256_json({"raw_response": fallback_result.content}),
                                 },
@@ -2698,6 +2987,7 @@ class CodeEditLoopEngine:
                         max_candidates=draft_parse_limit,
                         provider_outcome_digest=self.provider_outcome_digest,
                         provider_capability_summary=provider_capability_summary,
+                        candidate_edit_constraints=candidate_edit_constraints,
                     ),
                     min(settings.draft_timeout_seconds, remaining_call_seconds),
                     3000,
@@ -2750,11 +3040,16 @@ class CodeEditLoopEngine:
                     try:
                         drafts = parse_code_edit_response(raw, max_candidates=draft_parse_limit)
                     except Exception as exc:
-                        no_viable_reason = code_edit_no_viable_patch_reason(raw)
+                        try:
+                            no_viable = parse_code_edit_no_viable_patch_response(raw)
+                        except ValueError:
+                            no_viable = None
+                        no_viable_reason = no_viable.reason if no_viable is not None else ""
                         fallback_drafts: list[CodeEditDraft] = []
                         if no_viable_reason:
-                            terminal_binding_plan = bool(loop_direction_plan_doc) and _binding_plan_unimplementable_reason(
-                                no_viable_reason
+                            terminal_binding_plan = bool(loop_direction_plan_doc) and bool(
+                                no_viable is not None
+                                and no_viable.failure_class == "binding_plan_unimplementable"
                             )
                             await self.event_sink(
                                 AutoResearchLoopEvent(
@@ -2774,6 +3069,14 @@ class CodeEditLoopEngine:
                                     event_doc={
                                         "iteration": iteration,
                                         "reason": no_viable_reason,
+                                        "failure_class": (
+                                            no_viable.failure_class if no_viable is not None else "no_safe_patch"
+                                        ),
+                                        "missing_references": (
+                                            list(no_viable.missing_references)
+                                            if no_viable is not None
+                                            else []
+                                        ),
                                         **(
                                             {
                                                 "terminal": True,
@@ -2800,6 +3103,10 @@ class CodeEditLoopEngine:
                                     trigger="binding_plan_unimplementable",
                                     reason=no_viable_reason,
                                     plan_doc=loop_direction_plan_doc or {},
+                                    explicit_references=(
+                                        no_viable.missing_references if no_viable is not None else ()
+                                    ),
+                                    feasibility_errors=(no_viable_reason,),
                                 )
                             if repaired_doc is not None and not bool(repaired_doc.get("no_new_safe_path")):
                                 retry_iteration_after_reference_repair = True

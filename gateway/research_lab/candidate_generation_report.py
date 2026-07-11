@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 from .candidate_diagnostics import (
     NO_BUILDABLE_CANDIDATE_EVENT_TYPE,
     build_candidate_generation_failure_summary,
+    canonical_loop_event_order,
     public_candidate_generation_failure_summary,
     sanitize_diagnostic_text,
 )
@@ -26,7 +27,7 @@ _PUBLIC_CARD_COLUMNS = ",".join(
         "current_status_at",
     )
 )
-_LOOP_EVENT_COLUMNS = "run_id,event_type,event_doc,created_at"
+_LOOP_EVENT_COLUMNS = "run_id,seq,event_type,event_doc,created_at"
 _RUN_ID_BATCH_SIZE = 150
 _EVENT_FETCH_TIMEOUT_SECONDS = 10.0
 
@@ -87,7 +88,7 @@ def _fallback_state(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     exhausted = False
     succeeded = False
     attempts = 0
-    for row in rows:
+    for row in canonical_loop_event_order(rows):
         doc = _event_doc(row)
         if doc.get("ranked_path_fallback_attempted"):
             attempted = True
@@ -134,9 +135,21 @@ def build_candidate_generation_failure_report(
             terminal_error=str(_event_doc(row).get("queue_reason") or ""),
             candidate_count=int(row.get("current_candidate_count") or row.get("candidate_count") or 0),
         )
+        raw_terminal_available = any(
+            _event_type(item) in {"loop_failed", NO_BUILDABLE_CANDIDATE_EVENT_TYPE}
+            for item in loop_rows
+        )
         public_reason = _primary_reason_from_public_row(row)
-        primary_reason = public_reason or str(failure_summary.get("primary_reason") or "no_valid_image_build_finalists")
-        latest_stage = _latest_stage_from_public_row(row) or str(failure_summary.get("latest_stage") or "")
+        primary_reason = (
+            str(failure_summary.get("primary_reason") or "no_valid_image_build_finalists")
+            if raw_terminal_available
+            else public_reason or "no_valid_image_build_finalists"
+        )
+        latest_stage = (
+            str(failure_summary.get("latest_stage") or "")
+            if raw_terminal_available
+            else _latest_stage_from_public_row(row)
+        )
         fallback = _fallback_state(loop_rows)
         summaries.append(
             {
@@ -156,7 +169,12 @@ def build_candidate_generation_failure_report(
     for run_id, rows in events_by_run.items():
         if run_id in seen_runs:
             continue
-        terminal_rows = [row for row in rows if _event_type(row) in {"loop_failed", NO_BUILDABLE_CANDIDATE_EVENT_TYPE}]
+        ordered_rows = canonical_loop_event_order(rows)
+        terminal_rows = [
+            row
+            for row in ordered_rows
+            if _event_type(row) in {"loop_failed", NO_BUILDABLE_CANDIDATE_EVENT_TYPE}
+        ]
         if not terminal_rows:
             continue
         terminal_doc = _event_doc(terminal_rows[-1])
@@ -167,7 +185,7 @@ def build_candidate_generation_failure_report(
             selected_count = 0
         if selected_count > 0:
             continue
-        summary = build_candidate_generation_failure_summary(rows, candidate_count=0)
+        summary = build_candidate_generation_failure_summary(ordered_rows, candidate_count=0)
         reason = str(summary.get("primary_reason") or "no_valid_image_build_finalists")
         latest_stage = str(summary.get("latest_stage") or "")
         summaries.append(
@@ -177,7 +195,7 @@ def build_candidate_generation_failure_report(
                 "primary_reason": sanitize_diagnostic_text(reason, max_length=120),
                 "latest_stage": sanitize_diagnostic_text(latest_stage, max_length=120),
                 "failure_category": _category_for_reason(reason, latest_stage),
-                "ranked_path_fallback": _fallback_state(rows),
+                "ranked_path_fallback": _fallback_state(ordered_rows),
                 "public_summary": public_candidate_generation_failure_summary(summary),
             }
         )
@@ -242,7 +260,7 @@ async def _fetch_loop_events_for_runs(
                 "research_lab_auto_research_loop_events",
                 columns=_LOOP_EVENT_COLUMNS,
                 filters=(*event_filters, ("run_id", "in", list(batch))),
-                order_by=(("created_at", True),),
+                order_by=(("seq", False), ("created_at", False)),
                 max_rows=10000,
                 allow_partial=True,
             )

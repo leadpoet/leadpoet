@@ -1,8 +1,15 @@
 {
   "_comment": "PCR0 allowlist for LeadPoet TEE verification. Updated by CI/CD on each enclave build.",
-  "_updated": "2026-07-11T17:30:00Z",
+  "_updated": "2026-07-11T23:20:00Z",
   "_repo": "https://github.com/leadpoet/leadpoet",
   "gateway_pcr0": [
+    {
+      "pcr0": "499bbe2f2417eadc224478f6c65a02e105a4b099f9051959bf4b988b3c23d03cbf4357ea21cd8ae7e9ec5c243342a73c",
+      "version": "2026-07-11b",
+      "deployed": "2026-07-11",
+      "commit_hash": "bc3fee777251ddb1414ec10b7f10b9ca7a2de846",
+      "notes": "gateway enclave: 2026-07-11 second deploy (champion surplus accounting + allocation guards + supabase retry)"
+    },
     {
       "pcr0": "df3999ccb89555199646b9f503e64cab5d4ad2f1b4782ae303759422d249b16b933885ae92da8e1427d64ea4a4af356a",
       "version": "2026-07-11",
@@ -39,6 +46,13 @@
     }
   ],
   "validator_pcr0": [
+    {
+      "pcr0": "9c2bea14c8c4c760ca8981e08504c516c396fb81b023833445c28d30d1c64c4846ae993d94bdd70c5337c475e2d482c6",
+      "version": "2026-07-11b",
+      "deployed": "2026-07-11",
+      "commit_hash": "bc3fee777251ddb1414ec10b7f10b9ca7a2de846",
+      "notes": "validator enclave: 2026-07-11 second deploy (champion surplus accounting + allocation guards + supabase retry)"
+    },
     {
       "pcr0": "8fcf8604a167c62d05d3e5ee9c9a2ea185f14c658aa50b4132073b5ca26d8fc50bc6b6a2aecf9a528292ec441bc21e2a",
       "version": "2026-07-11",

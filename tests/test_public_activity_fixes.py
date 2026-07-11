@@ -1,7 +1,7 @@
 """Tests for the Research Lab public-activity fixes (audit bugs 7, 33, 34).
 
 Covers:
-- scripts/69 CHECK-constraint allowlist: every label the projection can emit is
+- latest CHECK-constraint allowlist: every label the projection can emit is
   allowlisted (labels extracted from the module AST, allowlists parsed from the
   migration SQL), and the new allowlist is a strict superset of scripts/61.
 - derive_public_loop_outcome precedence fixes (bug 33a-e).
@@ -30,6 +30,7 @@ from gateway.research_lab.public_activity import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_69 = REPO_ROOT / "scripts" / "69-research-lab-candidate-generation-diagnostics.sql"
+MIGRATION_85 = REPO_ROOT / "scripts" / "85-research-lab-unpaid-ticket-expiry.sql"
 MIGRATION_61 = REPO_ROOT / "scripts" / "61-research-lab-public-status-check-allowlist.sql"
 PUBLIC_ACTIVITY_SOURCE = REPO_ROOT / "gateway" / "research_lab" / "public_activity.py"
 
@@ -45,6 +46,16 @@ def _sql_allowlist(sql_text: str, column: str) -> set[str]:
     match = re.search(rf"{column}\s+IN\s*\(([^)]*)\)", sql_text)
     assert match, f"no {column} IN (...) allowlist found"
     return set(re.findall(r"'([^']+)'", match.group(1)))
+
+
+def _all_sql_allowlisted_values(sql_text: str, column: str) -> set[str]:
+    matches = re.findall(rf"{column}\s+IN\s*\(([^)]*)\)", sql_text)
+    assert matches, f"no {column} IN (...) allowlist found"
+    return {
+        value
+        for match in matches
+        for value in re.findall(r"'([^']+)'", match)
+    }
 
 
 def _labels_writable_by_projection() -> tuple[set[str], set[str], set[str]]:
@@ -180,14 +191,14 @@ def _card(ticket_id: str, stored_label: str = "", event_doc: dict | None = None)
 
 
 # --------------------------------------------------------------------------- #
-# Bug 7 — scripts/69 allowlist covers every writable label
+# Bug 7 — latest allowlist covers every writable label
 # --------------------------------------------------------------------------- #
 class TestMigration69Allowlist:
     def test_every_writable_label_is_allowlisted(self):
-        sql = MIGRATION_69.read_text()
-        allowed_event_types = _sql_allowlist(sql, "event_type")
-        allowed_outcome_labels = _sql_allowlist(sql, "outcome_label")
-        allowed_outcome_bands = _sql_allowlist(sql, "outcome_band")
+        sql = MIGRATION_85.read_text()
+        allowed_event_types = _all_sql_allowlisted_values(sql, "event_type")
+        allowed_outcome_labels = _all_sql_allowlisted_values(sql, "outcome_label")
+        allowed_outcome_bands = _all_sql_allowlisted_values(sql, "outcome_band")
         event_types, outcome_labels, outcome_bands = _labels_writable_by_projection()
         assert event_types <= allowed_event_types, (
             f"writable event_type not allowlisted: {sorted(event_types - allowed_event_types)}"

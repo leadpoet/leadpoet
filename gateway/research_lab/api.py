@@ -44,6 +44,16 @@ from .key_vault import (
 )
 from .maintenance import get_autoresearch_maintenance_state
 from .ticket_intake_validation import validate_ticket_direction
+from .ticket_lifecycle import (
+    TERMINAL_TICKET_STATUSES,
+    UNPAID_TICKET_ELIGIBLE_STATUSES,
+    is_ticket_expiry_conflict,
+    normalized_ticket_status,
+    ticket_is_expired,
+    ticket_is_house_arm,
+    unpaid_ticket_deadline_passed,
+    unpaid_ticket_expires_at,
+)
 from .miner_diagnostics import (
     build_candidate_diagnostics,
     visibility_map_from_benchmark_split,
@@ -239,6 +249,14 @@ async def create_research_lab_ticket(payload: ResearchLabTicketCreateRequest, re
     except Exception as exc:
         _raise_storage_error(exc)
 
+    current_ticket = await select_one(
+        "research_loop_ticket_current",
+        filters=(("ticket_id", str(ticket["ticket_id"])),),
+    )
+    if current_ticket and ticket_is_expired(current_ticket):
+        _raise_ticket_expired(current_ticket)
+    expiry_at = unpaid_ticket_expires_at(current_ticket or ticket)
+
     await safe_project_public_loop_activity(
         str(ticket["ticket_id"]),
         source_ref=f"ticket_event:{event['event_id']}",
@@ -252,6 +270,7 @@ async def create_research_lab_ticket(payload: ResearchLabTicketCreateRequest, re
         event_id=event["event_id"],
         event_seq=int(event["seq"]),
         ticket_hash=ticket["ticket_hash"],
+        unpaid_expires_at=expiry_at.isoformat() if expiry_at else None,
     )
 
 
@@ -266,6 +285,7 @@ async def create_research_lab_probe(payload: ResearchLabProbeRequest):
     await _enforce_research_lab_submission_rate_limit(payload.miner_hotkey, route="probes")
 
     ticket = await _get_ticket_for_miner(str(payload.ticket_id), payload.miner_hotkey)
+    await _require_ticket_mutable(ticket, enforce_unpaid_deadline=True)
     try:
         event = await create_ticket_event(
             ticket_id=str(payload.ticket_id),
@@ -1241,6 +1261,7 @@ async def start_research_lab_paid_loop(payload: ResearchLabLoopStartRequest):
     if config.miner_openrouter_key_required and payload.miner_openrouter_preflight_status != "passed":
         raise HTTPException(status_code=400, detail="miner OpenRouter key preflight must pass before queueing")
     ticket = await _get_ticket_for_miner(str(payload.ticket_id), payload.miner_hotkey)
+    await _require_ticket_mutable(ticket, enforce_unpaid_deadline=not bool(payload.credit_id))
     await _validate_miner_openrouter_key_ref(
         config,
         miner_hotkey=payload.miner_hotkey,
@@ -1428,6 +1449,7 @@ async def top_up_research_lab_paid_loop(payload: ResearchLabLoopTopUpRequest):
     if config.miner_openrouter_key_required and payload.miner_openrouter_preflight_status != "passed":
         raise HTTPException(status_code=400, detail="miner OpenRouter key preflight must pass before queueing")
     ticket = await _get_ticket_for_miner(str(payload.ticket_id), payload.miner_hotkey)
+    await _require_ticket_mutable(ticket, enforce_unpaid_deadline=False)
     await _validate_miner_openrouter_key_ref(
         config,
         miner_hotkey=payload.miner_hotkey,
@@ -2359,12 +2381,58 @@ async def _verify_signed_miner(payload: object) -> None:
 
 async def _get_ticket_for_miner(ticket_id: str, miner_hotkey: str) -> dict[str, object]:
     ticket = await select_one(
-        "research_loop_tickets",
+        "research_loop_ticket_current",
         filters=(("ticket_id", ticket_id), ("miner_hotkey", miner_hotkey)),
     )
     if not ticket:
         raise HTTPException(status_code=404, detail="Research Lab ticket not found for miner")
     return ticket
+
+
+def _raise_ticket_expired(ticket: Mapping[str, Any]) -> None:
+    expiry_at = unpaid_ticket_expires_at(ticket)
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "code": "research_lab_ticket_expired",
+            "message": "Research Lab ticket expired before loop-start payment; create a new ticket",
+            "ticket_id": str(ticket.get("ticket_id") or ""),
+            "unpaid_expires_at": expiry_at.isoformat() if expiry_at else None,
+        },
+    )
+
+
+async def _require_ticket_mutable(
+    ticket: Mapping[str, Any],
+    *,
+    enforce_unpaid_deadline: bool,
+) -> None:
+    if ticket_is_expired(ticket):
+        _raise_ticket_expired(ticket)
+    if (
+        not enforce_unpaid_deadline
+        or ticket_is_house_arm(ticket)
+        or normalized_ticket_status(ticket) not in UNPAID_TICKET_ELIGIBLE_STATUSES
+        or not unpaid_ticket_deadline_passed(ticket)
+    ):
+        return
+    try:
+        eligible = await select_one(
+            "research_lab_unpaid_ticket_expiry_candidates",
+            columns="ticket_id,unpaid_expires_at",
+            filters=(("ticket_id", str(ticket.get("ticket_id") or "")),),
+        )
+    except Exception as exc:
+        # The DB insert trigger remains authoritative. This compatibility path
+        # keeps a code-first, expiry-disabled deployment safe before migration 85.
+        logger.warning(
+            "research_lab_unpaid_ticket_expiry_precheck_unavailable ticket_id=%s error=%s",
+            str(ticket.get("ticket_id") or ""),
+            str(exc)[:240],
+        )
+        return
+    if eligible:
+        _raise_ticket_expired(ticket)
 
 
 async def _validate_miner_openrouter_key_ref(
@@ -2575,12 +2643,11 @@ async def _enforce_open_ticket_cap(config: ResearchLabGatewayConfig, miner_hotke
         for row in public_rows
         if row.get("ticket_id")
     }
-    terminal_statuses = {"completed", "cancelled", "failed", "tombstoned"}
     open_rows = [
         row
         for row in rows
         if not public_loop_outcome_closes_ticket(public_by_ticket_id.get(str(row.get("ticket_id") or "")))
-        if str(row.get("current_ticket_status") or "").strip().lower() not in terminal_statuses
+        if str(row.get("current_ticket_status") or "").strip().lower() not in TERMINAL_TICKET_STATUSES
     ]
     if len(open_rows) < int(config.max_open_tickets_per_hotkey):
         return
@@ -3250,6 +3317,14 @@ def _raise_storage_error(exc: Exception) -> None:
         message,
         _redact_storage_error_text(str(json_detail)) if json_detail else None,
     )
+    if is_ticket_expiry_conflict(exc):
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "research_lab_ticket_expired",
+                "message": "Research Lab ticket expired before this operation completed; create a new ticket",
+            },
+        ) from exc
     if "does not exist" in message_lower or "relation" in message_lower:
         raise HTTPException(status_code=503, detail="Research Lab SQL migrations are not applied") from exc
     if "research_lab_queue_hotkey_conflict" in message_lower:

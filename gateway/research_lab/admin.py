@@ -21,6 +21,7 @@ from .maintenance import (
     candidate_scoring_status_counts,
     default_actor_ref,
     dumps_status,
+    expire_unpaid_tickets,
     get_autoresearch_maintenance_state,
     get_scoring_maintenance_state,
     pause_pending_autoresearch_runs,
@@ -281,6 +282,25 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_tickets.add_argument("--actor-ref", default=default_actor_ref())
     reconcile_tickets.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
     reconcile_tickets.add_argument("--write", dest="dry_run", action="store_false")
+
+    expire_tickets = sub.add_parser(
+        "expire-unpaid-tickets",
+        help="Expire miner tickets that passed the fixed 24-hour unpaid deadline",
+    )
+    expire_tickets.add_argument(
+        "--ticket-id",
+        action="append",
+        dest="ticket_ids",
+        help="exact ticket_id to inspect or expire (repeatable; omit for oldest eligible tickets)",
+    )
+    expire_tickets.add_argument("--limit", type=int, default=100)
+    expire_tickets.add_argument("--reason", default="operator_unpaid_ticket_expiry")
+    expire_tickets.add_argument("--actor-ref", default=default_actor_ref())
+    expire_tickets.add_argument(
+        "--apply",
+        action="store_true",
+        help="Append expired events; default is a read-only dry run",
+    )
 
     repair_cards = sub.add_parser(
         "repair-public-cards",
@@ -1098,6 +1118,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             reason=args.reason,
             actor_ref=args.actor_ref,
             dry_run=args.dry_run,
+        )
+    if args.command == "expire-unpaid-tickets":
+        return await expire_unpaid_tickets(
+            ticket_ids=args.ticket_ids,
+            limit=args.limit,
+            reason=args.reason,
+            actor_ref=args.actor_ref,
+            dry_run=not args.apply,
         )
     if args.command == "repair-public-cards":
         return await repair_public_loop_cards(

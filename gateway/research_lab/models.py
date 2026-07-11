@@ -378,6 +378,7 @@ class ResearchLabTicketResponse(BaseModel):
     event_id: str
     event_seq: int
     ticket_hash: str
+    unpaid_expires_at: Optional[str] = None
 
 
 class ResearchLabLoopStartResponse(BaseModel):

@@ -24,9 +24,9 @@ cat > "$tmp" <<'WRAPPER'
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${LEADPOET_REPO:-/home/ec2-user/leadpoet_repo}"
+REPO="${LEADPOET_REPO:-/home/ec2-user}"
 GATEWAY_RUNTIME="${LEADPOET_GATEWAY_RUNTIME:-/home/ec2-user/gateway}"
-ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/gw.environ}"
+ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
 
 if [[ ! -d "$REPO/gateway" ]]; then
   echo "research-lab-admin: repo gateway package not found at $REPO" >&2

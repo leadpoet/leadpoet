@@ -46,6 +46,7 @@ from gateway.research_lab.loop_engine import (
 )
 from gateway.research_lab.maintenance import (
     autoresearch_queue_capacity_doc,
+    expire_unpaid_tickets,
     get_autoresearch_maintenance_state,
     is_autoresearch_maintenance_paused,
     reconcile_terminal_ticket_statuses,
@@ -1182,6 +1183,7 @@ class ResearchLabHostedWorker:
         # §9.1 item 5: raw prompt/response capture at the OpenRouter boundary.
         self._raw_trace_recorder = _OpenRouterRawTraceRecorder(self.config)
         self._last_ticket_lifecycle_reconcile_at = 0.0
+        self._last_unpaid_ticket_expiry_at = 0.0
         self._last_allocator_priors_refresh_at = 0.0
 
     async def run_forever(self) -> None:
@@ -1260,6 +1262,7 @@ class ResearchLabHostedWorker:
                 status="maintenance_paused",
             )
         if not self.config.hosted_worker_dry_run:
+            await self._maybe_expire_unpaid_tickets()
             await self._recover_stale_paused_runs()
             await self._run_periodic_reconciles()
         builder_unavailable = self._code_edit_builder_unavailable_reason()
@@ -1647,6 +1650,50 @@ class ResearchLabHostedWorker:
                 planned_count,
                 repaired_count,
                 skipped_count,
+            )
+
+    async def _maybe_expire_unpaid_tickets(self) -> None:
+        if not self.config.unpaid_ticket_expiry_enabled:
+            return
+        total_workers = max(1, int(self.config.hosted_worker_total_workers or 1))
+        configured_index = int(self.config.unpaid_ticket_expiry_worker_index or 0) % total_workers
+        worker_index = int(self.config.hosted_worker_index or 0) % total_workers
+        if worker_index != configured_index:
+            return
+        now = time.monotonic()
+        interval = max(60, int(self.config.unpaid_ticket_expiry_interval_seconds or 60))
+        if self._last_unpaid_ticket_expiry_at and now - self._last_unpaid_ticket_expiry_at < interval:
+            return
+        self._last_unpaid_ticket_expiry_at = now
+        try:
+            result = await expire_unpaid_tickets(
+                limit=max(1, int(self.config.unpaid_ticket_expiry_limit or 100)),
+                reason="hosted_worker_unpaid_ticket_expiry",
+                actor_ref=self.worker_ref,
+                dry_run=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_periodic_unpaid_ticket_expiry_failed worker_ref=%s error=%s",
+                self.worker_ref,
+                str(exc)[:240],
+            )
+            return
+        if not result.get("ok"):
+            logger.warning(
+                "research_lab_periodic_unpaid_ticket_expiry_unavailable worker_ref=%s error=%s",
+                self.worker_ref,
+                str(result.get("error") or "unknown")[:240],
+            )
+            return
+        if int(result.get("planned_count") or 0) or int(result.get("expired_count") or 0):
+            logger.info(
+                "research_lab_periodic_unpaid_ticket_expiry_complete worker_ref=%s planned=%s expired=%s skipped=%s projection_pending=%s",
+                self.worker_ref,
+                result.get("planned_count"),
+                result.get("expired_count"),
+                result.get("skipped_count"),
+                result.get("projection_pending_count"),
             )
 
     async def _maybe_refresh_allocator_priors(self) -> None:

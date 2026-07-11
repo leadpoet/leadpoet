@@ -28,6 +28,7 @@ from gateway.research_lab.public_activity import (  # noqa: E402
 MIGRATION = ROOT / "scripts" / "40-research-lab-public-loop-activity.sql"
 STATUS_LABEL_MIGRATION = ROOT / "scripts" / "55-research-lab-public-loop-status-labels.sql"
 CANDIDATE_DIAGNOSTICS_MIGRATION = ROOT / "scripts" / "69-research-lab-candidate-generation-diagnostics.sql"
+EXPIRY_MIGRATION = ROOT / "scripts" / "85-research-lab-unpaid-ticket-expiry.sql"
 FORBIDDEN_GRANT_RE = re.compile(
     r"\bGRANT\b(?!\s+EXECUTE\b)[^;]*\b(?:anon|authenticated)\b",
     re.IGNORECASE | re.DOTALL,
@@ -38,6 +39,7 @@ def main() -> int:
     errors = verify_sql(MIGRATION.read_text(encoding="utf-8"))
     errors.extend(verify_status_label_sql(STATUS_LABEL_MIGRATION.read_text(encoding="utf-8")))
     errors.extend(verify_candidate_diagnostics_sql(CANDIDATE_DIAGNOSTICS_MIGRATION.read_text(encoding="utf-8")))
+    errors.extend(verify_expiry_sql(EXPIRY_MIGRATION.read_text(encoding="utf-8")))
     errors.extend(verify_projection_fixtures())
     if errors:
         for error in errors:
@@ -128,6 +130,26 @@ def verify_candidate_diagnostics_sql(sql: str) -> list[str]:
     return errors
 
 
+def verify_expiry_sql(sql: str) -> list[str]:
+    errors: list[str] = []
+    lowered = sql.lower()
+    for marker in (
+        "research_lab_unpaid_ticket_expiry_candidates",
+        "research_lab_unpaid_ticket_expires_at",
+        "guard_research_lab_ticket_lifecycle_insert",
+        "guard_research_lab_loop_start_payment_expiry_insert",
+        "guard_research_loop_start_credit_consume_insert",
+        "research_lab_ticket_expired",
+        "interval '24 hours'",
+        "'expired'",
+    ):
+        if marker not in lowered:
+            errors.append(f"unpaid ticket expiry migration missing marker: {marker}")
+    if FORBIDDEN_GRANT_RE.search(sql):
+        errors.append("unpaid ticket expiry migration must not grant privileges to anon/authenticated")
+    return errors
+
+
 def verify_projection_fixtures() -> list[str]:
     errors: list[str] = []
     text = "Improve evidence freshness and reduce overbroad matches in role targeting."
@@ -140,6 +162,26 @@ def verify_projection_fixtures() -> list[str]:
             errors.append(f"missing expected topic tag: {expected}")
     if topic_signature_hash("generalist", tags_a) != topic_signature_hash("generalist", tags_b):
         errors.append("topic signature must be deterministic")
+
+    expired = derive_public_loop_outcome(
+        ticket={
+            "ticket_id": "expired-ticket",
+            "current_ticket_status": "expired",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "unpaid_expires_at": "2026-01-02T00:00:00+00:00",
+        },
+        queue_rows=[],
+        receipt_rows=[],
+        candidate_rows=[],
+        score_bundle_rows=[],
+        promotion_event_rows=[],
+    )
+    if (expired.outcome_label, expired.outcome_band) != ("expired", "expired"):
+        errors.append("expired ticket fixture should project as expired/expired")
+    if not public_loop_outcome_closes_ticket(
+        {"current_outcome_label": "expired", "current_outcome_band": "expired"}
+    ):
+        errors.append("expired public outcome must close the open-ticket cap")
     if sanitize_public_text("sk-or-v1-test") != "[redacted]":
         errors.append("secret-like text must be redacted")
     if not contains_secret_material("candidate_patch_manifest"):

@@ -16,6 +16,7 @@ import os
 from typing import Any, Mapping, Optional
 
 from leadpoet_verifier.economics import DEFAULT_RESEARCH_LAB_CHAMPION_QUEUE_TRIGGER_RATIO
+from .ticket_lifecycle import UNPAID_TICKET_TTL_SECONDS
 
 
 TRUTHY = {"1", "true", "yes", "on"}
@@ -359,6 +360,10 @@ class ResearchLabGatewayConfig:
     ticket_reconciliation_interval_seconds: int = 300
     ticket_reconciliation_limit: int = 25
     ticket_reconciliation_worker_index: int = 0
+    unpaid_ticket_expiry_enabled: bool = False
+    unpaid_ticket_expiry_interval_seconds: int = 60
+    unpaid_ticket_expiry_limit: int = 100
+    unpaid_ticket_expiry_worker_index: int = 0
     ticket_lifecycle_age_warning_seconds: int = 900
     # Inner-loop activation Phase 2: nightly allocator-priors selection refresh.
     # The refresh job persists a deterministic daily ranking; it is harmless to
@@ -700,6 +705,21 @@ class ResearchLabGatewayConfig:
             ticket_reconciliation_worker_index=max(
                 0,
                 _int("RESEARCH_LAB_TICKET_RECONCILIATION_WORKER_INDEX", 0),
+            ),
+            unpaid_ticket_expiry_enabled=_truthy(
+                "RESEARCH_LAB_UNPAID_TICKET_EXPIRY_ENABLED", "false"
+            ),
+            unpaid_ticket_expiry_interval_seconds=max(
+                60,
+                _int("RESEARCH_LAB_UNPAID_TICKET_EXPIRY_INTERVAL_SECONDS", 60),
+            ),
+            unpaid_ticket_expiry_limit=max(
+                1,
+                _int("RESEARCH_LAB_UNPAID_TICKET_EXPIRY_LIMIT", 100),
+            ),
+            unpaid_ticket_expiry_worker_index=max(
+                0,
+                _int("RESEARCH_LAB_UNPAID_TICKET_EXPIRY_WORKER_INDEX", 0),
             ),
             ticket_lifecycle_age_warning_seconds=max(
                 60,
@@ -1518,6 +1538,13 @@ class ResearchLabGatewayConfig:
                     "limit": self.ticket_reconciliation_limit,
                     "worker_index": self.ticket_reconciliation_worker_index,
                     "age_warning_seconds": self.ticket_lifecycle_age_warning_seconds,
+                },
+                "unpaid_ticket_expiry": {
+                    "enabled": self.unpaid_ticket_expiry_enabled,
+                    "interval_seconds": self.unpaid_ticket_expiry_interval_seconds,
+                    "limit": self.unpaid_ticket_expiry_limit,
+                    "worker_index": self.unpaid_ticket_expiry_worker_index,
+                    "ttl_seconds": UNPAID_TICKET_TTL_SECONDS,
                 },
                 "auto_research_min_seconds": self.auto_research_min_seconds,
                 "auto_research_max_seconds": self.auto_research_max_seconds,

@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 PUBLIC_ACTIVITY_SCHEMA_VERSION = "1.0"
 TOPIC_POLICY_ID = "research_lab_public_activity_topics:v1"
-OUTCOME_POLICY_ID = "research_lab_public_activity_outcomes:v2"
+OUTCOME_POLICY_ID = "research_lab_public_activity_outcomes:v3"
 
 # A projection write is small and idempotent (event_ref dedup), so one bounded retry
 # recovers transient DB blips without hammering; a second failure escalates loudly so
@@ -58,6 +58,7 @@ _UUID_PREFIX_RE = re.compile(rf"^[0-9a-fA-F-]{{{PUBLIC_LOOP_TICKET_ID_PREFIX_MIN
 _TICKET_CAP_CLOSING_OUTCOME_LABELS = frozenset(
     {
         "completed_no_candidate",
+        "expired",
         "failed",
         NO_BUILDABLE_CANDIDATE_EVENT_TYPE,
         "promotion_passed",
@@ -67,7 +68,7 @@ _TICKET_CAP_CLOSING_OUTCOME_LABELS = frozenset(
     }
 )
 _TICKET_CAP_CLOSING_OUTCOME_BANDS = frozenset(
-    {"failed", "no_gain", "passed_threshold", "promoted", "small_gain"}
+    {"expired", "failed", "no_gain", "passed_threshold", "promoted", "small_gain"}
 )
 
 
@@ -769,6 +770,26 @@ def derive_public_loop_outcome(
         )
 
     ticket_status = str(ticket.get("current_ticket_status") or ticket.get("ticket_status") or "")
+    if ticket_status == "expired":
+        expired_event_doc = dict(event_doc)
+        expired_event_doc["public_status"] = "expired"
+        expired_event_doc["public_status_label"] = "Expired"
+        expired_event_doc["payment_state"] = "expired"
+        expired_event_doc["status_detail"] = "Payment window expired before the loop started."
+        if ticket.get("unpaid_expires_at"):
+            expired_event_doc["unpaid_expires_at"] = str(ticket.get("unpaid_expires_at"))
+        return PublicLoopOutcome(
+            "expired",
+            "expired",
+            "expired",
+            candidate_count,
+            scored_candidate_count,
+            best_summary,
+            run_id,
+            receipt_id,
+            last_activity_at,
+            expired_event_doc,
+        )
     if queue_status in {"paused", "failed"} and _is_credit_block_reason(queue_reason):
         return _result("blocked_for_credit", "blocked_for_credit", "blocked")
     if (
@@ -924,7 +945,7 @@ def derive_public_loop_outcome(
         # `paid_loop_queued` queue event. Surface this as its own stage so the
         # dashboard distinguishes "miner has not paid to launch" from a run the
         # platform simply has not picked up yet.
-        if ticket_status == "opened":
+        if ticket_status in {"opened", "probe_created", "funding_pending"}:
             # Emit the canonical lifecycle fields the dashboard consumes
             # (public_status / payment_state) so it renders the "Awaiting payment"
             # stage from the canonical path rather than inferring it from the legacy
@@ -932,6 +953,8 @@ def derive_public_loop_outcome(
             awaiting_event_doc = dict(event_doc)
             awaiting_event_doc["public_status"] = "awaiting_payment"
             awaiting_event_doc["payment_state"] = "no_payment"
+            if ticket.get("unpaid_expires_at"):
+                awaiting_event_doc["unpaid_expires_at"] = str(ticket.get("unpaid_expires_at"))
             return PublicLoopOutcome(
                 "awaiting_payment",
                 "awaiting_payment",

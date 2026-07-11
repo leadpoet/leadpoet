@@ -9,11 +9,16 @@ import os
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
 from .key_vault import OpenRouterKeyVaultError, decrypt_openrouter_key, preflight_openrouter_key
 from .public_activity import derive_public_loop_outcome, safe_project_public_loop_activity
+from .ticket_lifecycle import (
+    TERMINAL_TICKET_STATUSES,
+    UNPAID_TICKET_TTL_SECONDS,
+    is_ticket_expiry_conflict,
+)
 from .store import (
     create_auto_research_loop_event,
     create_candidate_evaluation_event,
@@ -40,9 +45,9 @@ AUTORESEARCH_PROXY_PREFIXES = (
     "RESEARCH_LAB_WORKER_HTTPS_PROXY",
 )
 TERMINAL_QUEUE_STATUSES = frozenset({"completed", "failed", "cancelled", "tombstoned"})
-TERMINAL_TICKET_STATUSES = frozenset({"completed", "failed", "cancelled", "tombstoned"})
 ACTIVE_QUEUE_STATUSES = frozenset({"queued", "started", "paused"})
 TICKET_LIFECYCLE_QUEUE_BATCH_SIZE = 100
+UNPAID_TICKET_EXPIRY_CANDIDATE_VIEW = "research_lab_unpaid_ticket_expiry_candidates"
 
 
 async def get_autoresearch_maintenance_state() -> dict[str, Any]:
@@ -317,6 +322,158 @@ async def find_terminal_queue_open_tickets(*, limit: int = 50) -> list[dict[str,
     return planned
 
 
+async def find_expirable_unpaid_tickets(
+    *,
+    ticket_ids: Sequence[str] | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    bounded_limit = max(1, min(10000, int(limit or 100)))
+    normalized_ids = tuple(dict.fromkeys(str(item).strip() for item in (ticket_ids or ()) if str(item).strip()))
+    filters: tuple[tuple[Any, ...], ...] = ()
+    if normalized_ids:
+        filters = (("ticket_id", "in", normalized_ids),)
+    rows = await select_all(
+        UNPAID_TICKET_EXPIRY_CANDIDATE_VIEW,
+        columns=(
+            "ticket_id,miner_hotkey,current_ticket_status,current_event_seq,current_event_hash,"
+            "current_status_at,created_at,unpaid_expires_at"
+        ),
+        filters=filters,
+        order_by=(("unpaid_expires_at", False), ("ticket_id", False)),
+        batch_size=min(1000, bounded_limit),
+        max_rows=bounded_limit,
+        allow_partial=True,
+    )
+    return rows[:bounded_limit]
+
+
+async def expire_unpaid_tickets(
+    *,
+    ticket_ids: Sequence[str] | None = None,
+    limit: int = 100,
+    reason: str = "unpaid_ticket_expired_after_24h",
+    actor_ref: str | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    try:
+        planned = await find_expirable_unpaid_tickets(ticket_ids=ticket_ids, limit=limit)
+    except Exception as exc:
+        logger.warning(
+            "research_lab_unpaid_ticket_expiry_scan_failed type=%s error=%s",
+            type(exc).__name__,
+            str(exc)[:240],
+        )
+        return {
+            "ok": False,
+            "dry_run": bool(dry_run),
+            "action": "expire-unpaid-tickets",
+            "planned_count": 0,
+            "expired_count": 0,
+            "skipped_count": 0,
+            "error": "expiry_candidate_scan_unavailable",
+        }
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "action": "expire-unpaid-tickets",
+            "planned_count": len(planned),
+            "planned": planned,
+        }
+
+    effective_actor_ref = actor_ref or default_actor_ref()
+    expired: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    projection_pending: list[str] = []
+    config = ResearchLabGatewayConfig.from_env()
+    for plan in planned:
+        ticket_id = str(plan.get("ticket_id") or "")
+        try:
+            current_candidate = await select_one(
+                UNPAID_TICKET_EXPIRY_CANDIDATE_VIEW,
+                columns=(
+                    "ticket_id,current_ticket_status,current_event_seq,current_event_hash,"
+                    "current_status_at,created_at,unpaid_expires_at"
+                ),
+                filters=(("ticket_id", ticket_id),),
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_unpaid_ticket_expiry_recheck_failed ticket_id=%s error=%s",
+                ticket_id,
+                str(exc)[:240],
+            )
+            skipped.append({"ticket_id": ticket_id, "reason": "eligibility_recheck_unavailable"})
+            continue
+        if not current_candidate:
+            skipped.append({"ticket_id": ticket_id, "reason": "no_longer_eligible"})
+            continue
+        event_doc = {
+            "schema_version": "1.0",
+            "source": "unpaid_ticket_expiry",
+            "policy_version": "research_lab_unpaid_ticket_expiry:v1",
+            "ttl_seconds": UNPAID_TICKET_TTL_SECONDS,
+            "operator_reason": reason,
+            "actor_ref": effective_actor_ref,
+            "previous_ticket_status": current_candidate.get("current_ticket_status"),
+            "previous_ticket_event_hash": current_candidate.get("current_event_hash"),
+            "ticket_created_at": current_candidate.get("created_at"),
+            "unpaid_expires_at": current_candidate.get("unpaid_expires_at"),
+        }
+        try:
+            event = await create_ticket_event(
+                ticket_id=ticket_id,
+                event_type="expired",
+                actor_hotkey=None,
+                reason=reason,
+                event_doc=event_doc,
+            )
+        except Exception as exc:
+            skip_reason = "expiry_race_lost" if is_ticket_expiry_conflict(exc) else "expiry_event_insert_failed"
+            logger.warning(
+                "research_lab_unpaid_ticket_expiry_insert_failed ticket_id=%s reason=%s error=%s",
+                ticket_id,
+                skip_reason,
+                str(exc)[:240],
+            )
+            skipped.append({"ticket_id": ticket_id, "reason": skip_reason})
+            continue
+        expired.append(
+            {
+                "ticket_id": ticket_id,
+                "previous_ticket_status": current_candidate.get("current_ticket_status"),
+                "unpaid_expires_at": current_candidate.get("unpaid_expires_at"),
+                "event_seq": event.get("seq"),
+                "event_hash": event.get("anchored_hash"),
+            }
+        )
+        projection = await safe_project_public_loop_activity(
+            ticket_id,
+            source_ref=f"unpaid_ticket_expiry:{ticket_id}",
+            reason=reason,
+            config=config,
+            force=True,
+        )
+        if projection is None:
+            projection_pending.append(ticket_id)
+            logger.warning(
+                "research_lab_unpaid_ticket_expiry_projection_pending ticket_id=%s",
+                ticket_id,
+            )
+    return {
+        "ok": not any(item.get("reason") == "expiry_event_insert_failed" for item in skipped),
+        "dry_run": False,
+        "action": "expire-unpaid-tickets",
+        "planned_count": len(planned),
+        "expired_count": len(expired),
+        "skipped_count": len(skipped),
+        "projection_pending_count": len(projection_pending),
+        "expired": expired,
+        "skipped": skipped,
+        "projection_pending_ticket_ids": projection_pending,
+    }
+
+
 async def ticket_lifecycle_health(*, sample_limit: int = 25) -> dict[str, Any]:
     open_rows = await select_all(
         "research_loop_ticket_current",
@@ -360,7 +517,24 @@ async def ticket_lifecycle_health(*, sample_limit: int = 25) -> dict[str, Any]:
         for row in terminal_queue_open_tickets
         if row.get("ticket_age_seconds") is not None
     ]
-    warning_seconds = ResearchLabGatewayConfig.from_env().ticket_lifecycle_age_warning_seconds
+    config = ResearchLabGatewayConfig.from_env()
+    warning_seconds = config.ticket_lifecycle_age_warning_seconds
+    unpaid_expiry_rows: list[dict[str, Any]] = []
+    unpaid_expiry_available = True
+    try:
+        unpaid_expiry_rows = await find_expirable_unpaid_tickets(limit=10000)
+    except Exception as exc:
+        unpaid_expiry_available = False
+        logger.warning(
+            "research_lab_unpaid_ticket_expiry_health_unavailable type=%s error=%s",
+            type(exc).__name__,
+            str(exc)[:240],
+        )
+    unpaid_expiry_ages = [
+        age
+        for row in unpaid_expiry_rows
+        if (age := _age_seconds(row.get("created_at"))) is not None
+    ]
     return {
         "ok": len(terminal_queue_open_tickets) == 0,
         "open_ticket_count": len(open_tickets),
@@ -381,6 +555,17 @@ async def ticket_lifecycle_health(*, sample_limit: int = 25) -> dict[str, Any]:
         ),
         "sample_limit": sample_limit,
         "samples": terminal_queue_open_tickets,
+        "unpaid_ticket_expiry": {
+            "enabled": config.unpaid_ticket_expiry_enabled,
+            "available": unpaid_expiry_available,
+            "interval_seconds": config.unpaid_ticket_expiry_interval_seconds,
+            "limit": config.unpaid_ticket_expiry_limit,
+            "worker_index": config.unpaid_ticket_expiry_worker_index,
+            "ttl_seconds": UNPAID_TICKET_TTL_SECONDS,
+            "eligible_count": len(unpaid_expiry_rows),
+            "oldest_eligible_age_seconds": max(unpaid_expiry_ages) if unpaid_expiry_ages else None,
+            "samples": unpaid_expiry_rows[: max(1, int(sample_limit or 25))],
+        },
     }
 
 

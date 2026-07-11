@@ -997,7 +997,7 @@ async def score_fulfillment_batch(
     role_decisions: dict = {}
     if icp.target_roles:
         try:
-            from gateway.fulfillment.icp_checks import classify_role
+            from gateway.fulfillment.icp_checks import classify_role, _role_decision_key
             from qualification.scoring.role_batch_check import batch_check as _role_batch_check
             # Route BOTH strict_match (Path 1 lexicon overlap) and
             # gray_zone (Path 2 50% token overlap) through the LLM.
@@ -1011,24 +1011,37 @@ async def score_fulfillment_batch(
             # string matches in target_roles bypass entirely (cheap path
             # already handled by the ``lead.role not in icp.target_roles``
             # guard in tier1_check).
-            judge_queue: List[dict] = []
+            candidate_count = 0
+            roles_to_judge: Dict[str, str] = {}
             for lead in leads:
                 if not lead.role:
                     continue
                 if lead.role in icp.target_roles:
                     continue  # exact match — handled by tier1_check directly
                 if classify_role(lead.role, icp.target_roles) != "no_match":
-                    lid = getattr(lead, "lead_id", None) or lead.email or lead.full_name
-                    judge_queue.append({"id": lid, "role": lead.role})
+                    candidate_count += 1
+                    role_key = _role_decision_key(lead.role)
+                    if role_key:
+                        roles_to_judge.setdefault(role_key, lead.role)
+            queued_roles = list(roles_to_judge.items())
+            judge_queue = [
+                {"id": index, "role": role}
+                for index, (_, role) in enumerate(queued_roles)
+            ]
             if judge_queue:
-                role_decisions = await _role_batch_check(judge_queue, icp.target_roles)
+                raw_decisions = await _role_batch_check(judge_queue, icp.target_roles)
+                role_decisions = {
+                    role_key: raw_decisions.get(index, False)
+                    for index, (role_key, _) in enumerate(queued_roles)
+                }
                 # logger.warning (not info) — root logger in worker
                 # containers is set to WARNING; INFO is silently dropped,
                 # which masks production visibility of accept/reject ratios.
                 logger.warning(
-                    "role-batch pre-pass: %d candidates judged "
+                    "role-batch pre-pass: %d unique roles judged for %d candidates "
                     "(%d accept, %d reject)",
                     len(judge_queue),
+                    candidate_count,
                     sum(1 for v in role_decisions.values() if v),
                     sum(1 for v in role_decisions.values() if not v),
                 )

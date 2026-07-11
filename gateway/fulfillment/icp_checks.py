@@ -331,6 +331,11 @@ def classify_role(lead_role: str, target_roles: list) -> str:
     return "gray_zone" if gray_zone_hit else "no_match"
 
 
+def _role_decision_key(role: str) -> str:
+    """Return the stable cache key for a role-batch judgment."""
+    return " ".join((role or "").split()).casefold()
+
+
 # ---------------------------------------------------------------------------
 # Tier 1: ICP Fit Gate (free, deterministic)
 # ---------------------------------------------------------------------------
@@ -346,11 +351,10 @@ def tier1_check(
     Return failure_reason string if the lead fails any ICP check, else None.
     Returns "sub_industry_needs_llm" if sub-industry needs Tier 1.5 LLM check.
 
-    ``role_decisions`` is an optional ``{lead_id: bool}`` cache pre-populated
-    by ``score_fulfillment_batch``'s LLM pre-pass for leads in the role
-    "gray zone" (Path 2 token-overlap candidates).  When provided, gray-zone
-    leads accept iff the cache says True.  When absent (e.g., called outside
-    a batch), gray-zone leads fail-closed → ``role_mismatch``.
+    ``role_decisions`` is an optional ``{normalized_role: bool}`` cache
+    pre-populated by ``score_fulfillment_batch``'s LLM pre-pass.  When
+    provided, judged leads accept iff the cache says True.  When absent
+    (e.g., called outside a batch), they fail-closed → ``role_mismatch``.
     """
     allowed_inds = _coerce_industry_list(icp.industry)
     if allowed_inds:
@@ -409,8 +413,8 @@ def tier1_check(
             # docstring for why strict_match isn't trusted on its own.
             # Missing cache (e.g., called outside the batch path) or
             # explicit False → reject (fail-closed).
-            lid = getattr(lead, "lead_id", None) or getattr(lead, "email", None)
-            if not (role_decisions and role_decisions.get(lid) is True):
+            role_key = _role_decision_key(lead.role)
+            if not (role_decisions and role_decisions.get(role_key) is True):
                 return "role_mismatch"
 
     if icp.target_seniority:

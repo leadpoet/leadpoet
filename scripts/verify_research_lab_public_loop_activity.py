@@ -136,12 +136,15 @@ def verify_expiry_sql(sql: str) -> list[str]:
     for marker in (
         "research_lab_unpaid_ticket_expiry_candidates",
         "research_lab_unpaid_ticket_expires_at",
+        "research_lab_ticket_has_unpaid_lifecycle_evidence",
         "guard_research_lab_ticket_lifecycle_insert",
         "guard_research_lab_loop_start_payment_expiry_insert",
         "guard_research_loop_start_credit_consume_insert",
         "research_lab_ticket_expired",
         "interval '24 hours'",
         "'expired'",
+        "pg_catalog.to_regclass('public.research_loop_start_credits')",
+        "pg_catalog.to_regclass('public.research_loop_balance_ledger')",
     ):
         if marker not in lowered:
             errors.append(f"unpaid ticket expiry migration missing marker: {marker}")

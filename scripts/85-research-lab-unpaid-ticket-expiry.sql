@@ -156,14 +156,95 @@ CREATE INDEX IF NOT EXISTS idx_research_loop_tickets_created
 CREATE INDEX IF NOT EXISTS idx_research_loop_start_payments_ticket
     ON public.research_loop_start_payments(ticket_id, created_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_research_loop_start_credits_ticket
-    ON public.research_loop_start_credits(ticket_id, created_at DESC);
-
 CREATE INDEX IF NOT EXISTS idx_research_loop_start_credit_events_ticket
     ON public.research_loop_start_credit_events(ticket_id, created_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_research_loop_balance_ledger_ticket
-    ON public.research_loop_balance_ledger(ticket_id, created_at DESC);
+-- Some deployed installations do not contain these migration-28 legacy
+-- tables; the event-sourced credit path is authoritative in those schemas.
+-- Preserve their historical evidence when present without making them a
+-- prerequisite for this migration.
+DO $optional_legacy_indexes$
+BEGIN
+    IF pg_catalog.to_regclass('public.research_loop_start_credits') IS NOT NULL THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_research_loop_start_credits_ticket '
+            || 'ON public.research_loop_start_credits(ticket_id, created_at DESC)';
+    END IF;
+    IF pg_catalog.to_regclass('public.research_loop_balance_ledger') IS NOT NULL THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_research_loop_balance_ledger_ticket '
+            || 'ON public.research_loop_balance_ledger(ticket_id, created_at DESC)';
+    END IF;
+END;
+$optional_legacy_indexes$;
+
+CREATE OR REPLACE FUNCTION public.research_lab_ticket_has_unpaid_lifecycle_evidence(
+    target_ticket_id UUID
+)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = ''
+AS $$
+DECLARE
+    legacy_evidence_exists BOOLEAN := FALSE;
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM public.research_loop_start_payments p
+        WHERE p.ticket_id = target_ticket_id
+    )
+    OR EXISTS (
+        SELECT 1 FROM public.research_loop_start_credit_events ce
+        WHERE ce.ticket_id = target_ticket_id
+    )
+    OR EXISTS (
+        SELECT 1 FROM public.research_loop_run_queue_events q
+        WHERE q.ticket_id = target_ticket_id
+    )
+    OR EXISTS (
+        SELECT 1 FROM public.research_loop_receipts r
+        WHERE r.ticket_id = target_ticket_id
+    )
+    OR EXISTS (
+        SELECT 1 FROM public.research_lab_auto_research_loop_events l
+        WHERE l.ticket_id = target_ticket_id
+    )
+    OR EXISTS (
+        SELECT 1 FROM public.research_lab_candidate_artifacts c
+        WHERE c.ticket_id = target_ticket_id
+    )
+    THEN
+        RETURN TRUE;
+    END IF;
+
+    IF pg_catalog.to_regclass('public.research_loop_start_credits') IS NOT NULL THEN
+        EXECUTE
+            'SELECT EXISTS (SELECT 1 FROM public.research_loop_start_credits c '
+            || 'WHERE c.ticket_id = $1)'
+            INTO legacy_evidence_exists
+            USING target_ticket_id;
+        IF legacy_evidence_exists THEN
+            RETURN TRUE;
+        END IF;
+    END IF;
+
+    IF pg_catalog.to_regclass('public.research_loop_balance_ledger') IS NOT NULL THEN
+        EXECUTE
+            'SELECT EXISTS (SELECT 1 FROM public.research_loop_balance_ledger bl '
+            || 'WHERE bl.ticket_id = $1)'
+            INTO legacy_evidence_exists
+            USING target_ticket_id;
+        IF legacy_evidence_exists THEN
+            RETURN TRUE;
+        END IF;
+    END IF;
+
+    RETURN FALSE;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.research_lab_ticket_has_unpaid_lifecycle_evidence(UUID)
+    FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.research_lab_ticket_has_unpaid_lifecycle_evidence(UUID)
+    TO service_role;
 
 CREATE OR REPLACE VIEW public.research_lab_unpaid_ticket_expiry_candidates
 WITH (security_invoker = true) AS
@@ -180,30 +261,7 @@ FROM public.research_loop_ticket_current t
 WHERE t.current_ticket_status IN ('opened', 'probe_created', 'funding_pending')
   AND t.unpaid_expires_at <= NOW()
   AND COALESCE(t.ticket_doc->>'arm', '') <> 'house'
-  AND NOT EXISTS (
-      SELECT 1 FROM public.research_loop_start_payments p WHERE p.ticket_id = t.ticket_id
-  )
-  AND NOT EXISTS (
-      SELECT 1 FROM public.research_loop_start_credits c WHERE c.ticket_id = t.ticket_id
-  )
-  AND NOT EXISTS (
-      SELECT 1 FROM public.research_loop_start_credit_events ce WHERE ce.ticket_id = t.ticket_id
-  )
-  AND NOT EXISTS (
-      SELECT 1 FROM public.research_loop_balance_ledger bl WHERE bl.ticket_id = t.ticket_id
-  )
-  AND NOT EXISTS (
-      SELECT 1 FROM public.research_loop_run_queue_events q WHERE q.ticket_id = t.ticket_id
-  )
-  AND NOT EXISTS (
-      SELECT 1 FROM public.research_loop_receipts r WHERE r.ticket_id = t.ticket_id
-  )
-  AND NOT EXISTS (
-      SELECT 1 FROM public.research_lab_auto_research_loop_events l WHERE l.ticket_id = t.ticket_id
-  )
-  AND NOT EXISTS (
-      SELECT 1 FROM public.research_lab_candidate_artifacts c WHERE c.ticket_id = t.ticket_id
-  );
+  AND NOT public.research_lab_ticket_has_unpaid_lifecycle_evidence(t.ticket_id);
 
 REVOKE ALL ON TABLE public.research_lab_unpaid_ticket_expiry_candidates FROM anon, authenticated;
 GRANT SELECT ON TABLE public.research_lab_unpaid_ticket_expiry_candidates TO service_role;
@@ -267,15 +325,7 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
-    IF EXISTS (SELECT 1 FROM public.research_loop_start_payments p WHERE p.ticket_id = NEW.ticket_id)
-       OR EXISTS (SELECT 1 FROM public.research_loop_start_credits c WHERE c.ticket_id = NEW.ticket_id)
-       OR EXISTS (SELECT 1 FROM public.research_loop_start_credit_events ce WHERE ce.ticket_id = NEW.ticket_id)
-       OR EXISTS (SELECT 1 FROM public.research_loop_balance_ledger bl WHERE bl.ticket_id = NEW.ticket_id)
-       OR EXISTS (SELECT 1 FROM public.research_loop_run_queue_events q WHERE q.ticket_id = NEW.ticket_id)
-       OR EXISTS (SELECT 1 FROM public.research_loop_receipts r WHERE r.ticket_id = NEW.ticket_id)
-       OR EXISTS (SELECT 1 FROM public.research_lab_auto_research_loop_events l WHERE l.ticket_id = NEW.ticket_id)
-       OR EXISTS (SELECT 1 FROM public.research_lab_candidate_artifacts c WHERE c.ticket_id = NEW.ticket_id)
-    THEN
+    IF public.research_lab_ticket_has_unpaid_lifecycle_evidence(NEW.ticket_id) THEN
         RAISE EXCEPTION 'research_lab_ticket_expiry_conflict: ticket % has lifecycle evidence', NEW.ticket_id
             USING ERRCODE = '23514';
     END IF;
@@ -419,6 +469,8 @@ CREATE TRIGGER guard_research_loop_start_credit_consume_insert
 
 COMMENT ON VIEW public.research_lab_unpaid_ticket_expiry_candidates IS
     'Service-role-only miner tickets eligible for append-only expiration after 24 unpaid hours.';
+COMMENT ON FUNCTION public.research_lab_ticket_has_unpaid_lifecycle_evidence(UUID) IS
+    'Checks active payment/work evidence and optional legacy credit tables after ticket-lock serialization.';
 COMMENT ON FUNCTION public.guard_research_lab_ticket_lifecycle() IS
     'Serializes ticket expiration and rejects any ticket transition after expiration.';
 COMMENT ON FUNCTION public.guard_research_lab_loop_start_payment_expiry() IS

@@ -460,6 +460,10 @@ def test_sql_contract_has_atomic_lock_guards_and_all_disqualifying_evidence() ->
     assert "guard_research_lab_ticket_lifecycle_insert" in sql
     assert "guard_research_lab_loop_start_payment_expiry_insert" in sql
     assert "guard_research_loop_start_credit_consume_insert" in sql
+    assert "research_lab_ticket_has_unpaid_lifecycle_evidence" in sql
+    assert "LANGUAGE plpgsql\nVOLATILE" in sql
+    assert "pg_catalog.to_regclass('public.research_loop_start_credits')" in sql
+    assert "pg_catalog.to_regclass('public.research_loop_balance_ledger')" in sql
     for index_name in (
         "idx_research_loop_start_payments_ticket",
         "idx_research_loop_start_credits_ticket",

@@ -61,6 +61,7 @@ def git_fixture(tmp_path: Path) -> GitFixture:
     initial_sha = _commit(source, "initial")
     _git(source, "remote", "add", "origin", str(remote))
     _git(source, "push", "-u", "origin", "main")
+    _git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
     subprocess.run(["git", "clone", str(remote), str(checkout)], check=True, capture_output=True)
     _git(checkout, "config", "user.email", "gateway-tests@example.com")
     _git(checkout, "config", "user.name", "Gateway Tests")

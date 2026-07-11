@@ -105,6 +105,22 @@ def test_deregistered_fulfillment_and_research_lab_payments_burn():
     assert result["weights"] == pytest.approx([0.95, 0.05], abs=1e-15)
 
 
+def test_source_add_allocation_is_paid_as_a_separate_research_lab_component():
+    allocation = {
+        **_snapshot()["research_lab_allocation_doc"],
+        "source_add_alpha_percent": 1.0,
+        "source_add_allocations": [
+            {"uid": 3, "miner_hotkey": "source-hotkey", "paid_alpha_percent": 1.0}
+        ],
+        "unallocated_percent": 14.0,
+    }
+    result = compute_final_weights(_snapshot(research_lab_allocation_doc=allocation))
+
+    assert result["uids"] == [0, 1, 3, 2]
+    assert result["weights"] == pytest.approx([0.185, 0.755, 0.01, 0.05], abs=1e-15)
+    assert sum(result["weights"]) == pytest.approx(1.0, abs=1e-15)
+
+
 def test_sourcing_threshold_and_rep_distribution_are_derived_inside_core():
     result = compute_final_weights(
         _snapshot(

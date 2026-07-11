@@ -1833,6 +1833,42 @@ def _artifact_version_doc(artifact: PrivateModelArtifactManifest) -> dict[str, A
     }
 
 
+def _public_artifact_version_doc(artifact: Mapping[str, Any]) -> dict[str, Any]:
+    """Hash private runtime pointers while retaining join-safe model identity."""
+
+    return {
+        "model_artifact_hash": str(artifact.get("model_artifact_hash") or ""),
+        "manifest_hash": str(artifact.get("manifest_hash") or ""),
+        "manifest_ref_hash": sha256_json({"manifest_ref": artifact.get("manifest_uri")}),
+        "git_commit_sha": str(artifact.get("git_commit_sha") or ""),
+        "image_ref_hash": sha256_json({"image_ref": artifact.get("image_digest")}),
+        "config_hash": str(artifact.get("config_hash") or ""),
+        "component_registry_version": str(artifact.get("component_registry_version") or ""),
+        "scoring_adapter_version": str(artifact.get("scoring_adapter_version") or ""),
+        "build_id": str(artifact.get("build_id") or ""),
+    }
+
+
+def public_serving_model_version_doc(serving_doc: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the validator-facing serving stamp with no raw ECR/S3 refs."""
+
+    private_pointer_fields = {"manifest_uri", "image_digest"}
+    public_doc = {
+        str(key): value
+        for key, value in serving_doc.items()
+        if key not in {"parent_model", "candidate_model", "public_stamp_hash"}
+        and key not in private_pointer_fields
+    }
+    parent = serving_doc.get("parent_model")
+    if isinstance(parent, Mapping):
+        public_doc["parent_model"] = _public_artifact_version_doc(parent)
+    candidate = serving_doc.get("candidate_model")
+    if isinstance(candidate, Mapping):
+        public_doc["candidate_model"] = _public_artifact_version_doc(candidate)
+    public_doc["public_stamp_hash"] = sha256_json(public_doc)
+    return public_doc
+
+
 def _serving_model_version_doc(
     *,
     artifact: PrivateModelArtifactManifest,
@@ -1963,18 +1999,19 @@ def build_score_bundle_from_scored_icps(
         if image_candidate
         else patch.manifest_hash()
     )
-    serving_model_version = _serving_model_version_doc(
+    private_serving_model_version = _serving_model_version_doc(
         artifact=artifact,
         benchmark_set=benchmark_set,
         run_context=run_context,
         candidate_artifact=candidate_artifact,
         candidate_patch_hash=candidate_patch_hash,
     )
+    serving_model_version = public_serving_model_version_doc(private_serving_model_version)
     enriched_per_icp_results = _enrich_per_icp_evaluation_context(
         per_icp_results,
         benchmark_set=benchmark_set,
         run_context=run_context,
-        serving_model_version_hash=str(serving_model_version["version_stamp_hash"]),
+        serving_model_version_hash=str(private_serving_model_version["version_stamp_hash"]),
     )
 
     bundle = build_research_evaluation_score_bundle(

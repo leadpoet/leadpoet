@@ -510,6 +510,7 @@ def _allocation_ref(row: Mapping[str, Any]) -> dict[str, Any]:
                 "policy_id",
                 "snapshot_status",
                 "lab_cap_alpha_percent",
+                "source_add_alpha_percent",
                 "reimbursement_alpha_percent",
                 "champion_alpha_percent",
                 "queued_champion_alpha_percent",
@@ -519,6 +520,7 @@ def _allocation_ref(row: Mapping[str, Any]) -> dict[str, Any]:
             ),
         ),
         "allocations": {
+            "source_add": allocation_doc.get("source_add_allocations", []),
             "reimbursements": allocation_doc.get("reimbursement_allocations", []),
             "champions": allocation_doc.get("champion_allocations", []),
             "queued_champions": allocation_doc.get("queued_champion_allocations", []),

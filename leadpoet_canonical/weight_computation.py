@@ -194,6 +194,7 @@ def research_lab_uid_weights_from_allocation(
     paid_share = 0.0
     deregistered_share = 0.0
     for section in (
+        "source_add_allocations",
         "reimbursement_allocations",
         "champion_allocations",
         "queued_champion_allocations",

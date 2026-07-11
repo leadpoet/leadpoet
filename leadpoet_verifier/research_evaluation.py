@@ -47,13 +47,20 @@ _AGGREGATE_ANNOTATION_KEYS = (
     "baseline_per_icp_scores",
 )
 
-SECRET_KEY_RE = re.compile(r"(api[_-]?key|raw[_-]?secret|raw[_-]?openrouter|credential|token)", re.I)
+SECRET_KEY_RE = re.compile(
+    r"(api[_-]?key|raw[_-]?secret|raw[_-]?openrouter|credential|token|"
+    r"image_digest|manifest_uri|image_repository|private_model_manifest_doc|"
+    r"candidate_patch_manifest|proxy[_-]?url)",
+    re.I,
+)
 SECRET_VALUE_MARKERS = (
     "sk-or-",
     "openrouter_api_key",
     "raw_openrouter_key",
     "raw_secret",
     "service_role",
+    ".dkr.ecr.",
+    "private_repo",
 )
 
 

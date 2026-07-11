@@ -14,6 +14,7 @@ Covers bugs #8/#14/#15/#31/#35 from the pre-launch audit:
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import sys
 
@@ -27,6 +28,7 @@ from research_lab.eval.artifacts import PrivateModelArtifactManifest
 from research_lab.eval.benchmark import SealedBenchmarkSet
 from research_lab.eval import private_runtime
 from research_lab.eval.private_runtime import PrivateModelRuntimeError
+from research_lab.validator_integration import verify_research_lab_evaluation_bundle_page
 
 
 EVAL_ENV_FLAGS = (
@@ -1035,7 +1037,15 @@ def test_score_bundle_records_serving_version_and_per_icp_context():
     assert serving["candidate_id"] == "candidate-row-1"
     assert serving["parent_model"]["model_artifact_hash"] == parent["model_artifact_hash"]
     assert serving["candidate_model"]["model_artifact_hash"] == candidate["model_artifact_hash"]
+    assert serving["parent_model"]["image_ref_hash"].startswith("sha256:")
+    assert serving["candidate_model"]["image_ref_hash"].startswith("sha256:")
+    assert serving["parent_model"]["manifest_ref_hash"].startswith("sha256:")
+    assert serving["candidate_model"]["manifest_ref_hash"].startswith("sha256:")
+    assert "image_digest" not in json.dumps(serving, sort_keys=True)
+    assert "manifest_uri" not in json.dumps(serving, sort_keys=True)
+    assert ".dkr.ecr." not in json.dumps(serving, sort_keys=True)
     assert serving["version_stamp_hash"].startswith("sha256:")
+    assert serving["public_stamp_hash"].startswith("sha256:")
     row = bundle["aggregates"]["per_icp_results"][0]
     context = row["evaluation_context"]
     assert context["schema_version"] == "research_lab_evaluation_context.v1"
@@ -1044,3 +1054,35 @@ def test_score_bundle_records_serving_version_and_per_icp_context():
     assert context["icp_set_hash"] == benchmark.icp_set_hash
     assert context["serving_model_version_hash"] == serving["version_stamp_hash"]
     assert context["result_row_hash"].startswith("sha256:")
+
+    page_verification = verify_research_lab_evaluation_bundle_page(
+        {
+            "bundle_type": "research_lab_evaluation_score_bundle_page",
+            "epoch": 77,
+            "score_bundles": [
+                {
+                    "score_bundle_id": "score_bundle:" + bundle["score_bundle_hash"].split(":", 1)[1],
+                    "bundle_status": "scored",
+                    "current_event_status": "scored",
+                    "score_bundle_doc": bundle,
+                }
+            ],
+            "on_chain_submission_allowed": False,
+        },
+        flags={"evaluation_verify_enabled": True},
+    )
+    assert page_verification["passed"], page_verification["errors"]
+
+    unsafe_bundle = json.loads(json.dumps(bundle))
+    unsafe_bundle["serving_model_version"]["candidate_model"]["image_digest"] = (
+        "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:" + "f" * 64
+    )
+    unsafe_verification = verify_research_evaluation_score_bundle(unsafe_bundle)
+    assert "score_bundle_contains_raw_secret_material" in unsafe_verification["errors"]
+
+    unsafe_manifest_bundle = json.loads(json.dumps(bundle))
+    unsafe_manifest_bundle["serving_model_version"]["candidate_model"]["manifest_uri"] = (
+        "s3://private-model-artifacts/candidate.json"
+    )
+    unsafe_manifest_verification = verify_research_evaluation_score_bundle(unsafe_manifest_bundle)
+    assert "score_bundle_contains_raw_secret_material" in unsafe_manifest_verification["errors"]

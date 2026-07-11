@@ -5,6 +5,7 @@ import pytest
 from gateway.research_lab.allocations import (
     _champion_paid_alpha_to_date_from_snapshots,
     _champion_replay_obligation,
+    _source_add_paid_alpha_to_date_from_snapshots,
 )
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from leadpoet_verifier.economics import (
@@ -138,6 +139,63 @@ def test_champion_replay_state_sums_prior_paid_alpha_from_snapshots():
     assert replay["total_due_alpha_percent"] == pytest.approx(80.0)
     assert replay["paid_alpha_percent_to_date"] == pytest.approx(2.0)
     assert replay["remaining_alpha_percent"] == pytest.approx(78.0)
+
+
+def test_source_add_replay_counts_only_first_class_snapshot_sections():
+    paid = _source_add_paid_alpha_to_date_from_snapshots(
+        [
+            {
+                "allocation_doc": {
+                    "champion_allocations": [
+                        {
+                            "source_id": "source_add_reward:legacy",
+                            "reward_kind": "source_acceptance",
+                            "paid_alpha_percent": 1.0,
+                        }
+                    ]
+                }
+            },
+            {
+                "allocation_doc": {
+                    "source_add_allocations": [
+                        {
+                            "source_id": "source_add_reward:legacy",
+                            "reward_kind": "source_acceptance",
+                            "paid_alpha_percent": 1.0,
+                        },
+                        {
+                            "source_id": "source_add_reward:new",
+                            "reward_kind": "source_implementation",
+                            "paid_alpha_percent": 5.0,
+                        },
+                    ]
+                }
+            },
+        ]
+    )
+
+    assert paid["source_add_reward:legacy"] == pytest.approx(1.0)
+    assert paid["source_add_reward:new"] == pytest.approx(5.0)
+
+
+def test_source_add_replay_does_not_settle_legacy_champion_rail_rows():
+    paid = _source_add_paid_alpha_to_date_from_snapshots(
+        [
+            {
+                "allocation_doc": {
+                    "champion_allocations": [
+                        {
+                            "source_id": "source_add_reward:unpaid",
+                            "reward_kind": "source_acceptance",
+                            "paid_alpha_percent": 1.0,
+                        }
+                    ]
+                }
+            }
+        ]
+    )
+
+    assert paid == {}
 
 
 def test_replay_tracked_champion_final_epoch_due_capped_surplus_still_flows():

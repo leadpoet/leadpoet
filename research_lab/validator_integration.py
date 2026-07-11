@@ -294,6 +294,39 @@ def allocation_referenced_score_bundle_ids(allocation_bundle: Mapping[str, Any] 
     return score_bundle_ids
 
 
+def allocation_can_skip_score_bundle_verification(allocation_doc: Mapping[str, Any] | None) -> bool:
+    """True when all paid Lab rewards are independent of candidate scoring."""
+
+    if not isinstance(allocation_doc, Mapping):
+        return False
+    for section in ("champion_allocations", "queued_champion_allocations"):
+        rows = allocation_doc.get(section) or []
+        if any(
+            float(row.get("paid_alpha_percent") or 0.0) > 0
+            for row in rows
+            if isinstance(row, Mapping)
+        ):
+            return False
+    for section in ("source_add_allocations", "reimbursement_allocations"):
+        rows = allocation_doc.get(section) or []
+        if any(
+            float(row.get("paid_alpha_percent") or 0.0) > 0
+            for row in rows
+            if isinstance(row, Mapping)
+        ):
+            return True
+    return False
+
+
+def allocation_can_proceed_without_score_bundles(
+    allocation_doc: Mapping[str, Any] | None,
+    verification_errors: Iterable[str],
+) -> bool:
+    return allocation_can_skip_score_bundle_verification(allocation_doc) and set(
+        str(error) for error in verification_errors
+    ) == {"no_verified_evaluation_score_bundles"}
+
+
 def merge_research_lab_evaluation_bundle_page(
     page: Mapping[str, Any],
     referenced_rows: Iterable[Mapping[str, Any]],
@@ -523,6 +556,7 @@ def verify_research_lab_allocation_bundle(
     paid = sum(
         float(allocation_doc.get(field) or 0.0)
         for field in (
+            "source_add_alpha_percent",
             "reimbursement_alpha_percent",
             "champion_alpha_percent",
             "queued_champion_alpha_percent",
@@ -538,6 +572,7 @@ def verify_research_lab_allocation_bundle(
 
     recomputed_allocation_hash: str | None = None
     policy = source_state.get("policy") if isinstance(source_state, Mapping) else None
+    source_add = source_state.get("source_add_obligations") if isinstance(source_state, Mapping) else None
     reimbursements = source_state.get("reimbursement_obligations") if isinstance(source_state, Mapping) else None
     champions = source_state.get("champion_obligations") if isinstance(source_state, Mapping) else None
     if not isinstance(policy, Mapping):
@@ -545,6 +580,11 @@ def verify_research_lab_allocation_bundle(
     if not isinstance(reimbursements, list):
         errors.append("allocation_reimbursement_obligations_must_be_array")
         reimbursements = []
+    if source_add is None:
+        source_add = []
+    elif not isinstance(source_add, list):
+        errors.append("allocation_source_add_obligations_must_be_array")
+        source_add = []
     if not isinstance(champions, list):
         errors.append("allocation_champion_obligations_must_be_array")
         champions = []
@@ -568,6 +608,7 @@ def verify_research_lab_allocation_bundle(
                 policy,
                 reimbursements,
                 champions,
+                active_source_add_obligations=source_add,
             )
             recomputed_allocation_hash = str(recomputed.get("allocation_hash") or "")
             if allocation_hash and recomputed_allocation_hash != str(allocation_hash):
@@ -736,6 +777,8 @@ def verify_research_lab_attested_allocation_bundle(
                 key=lambda item: (item["score_bundle_id"], item["receipt_hash"]),
             ),
         }
+        if "source_add_obligations" in source_state:
+            receipt_input["active_source_add_obligations"] = source_state.get("source_add_obligations")
         if receipt.get("input_root") != attested_sha256_json(receipt_input):
             errors.append("attested_allocation_receipt_input_diverged")
         receipt_output = {"allocation": bundle.get("allocation_doc")}

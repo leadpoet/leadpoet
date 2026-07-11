@@ -36,6 +36,7 @@ DEFAULT_RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS = Decimal("1.0")
 DEFAULT_RESEARCH_LAB_CHAMPION_EVAL_DAYS = 10
 DEFAULT_RESEARCH_LAB_CHAMPION_ICPS_PER_DAY = 6
 DEFAULT_USD_PER_0_1_PERCENT_EPOCH = Decimal("0.162")
+SOURCE_ADD_REWARD_KINDS = frozenset({"source_acceptance", "source_implementation"})
 
 
 def canonical_json(data: Any) -> str:
@@ -325,12 +326,101 @@ def allocate_research_lab_epoch(
     policy: Mapping[str, Any],
     active_reimbursement_obligations: Sequence[Mapping[str, Any]],
     active_champion_obligations: Sequence[Mapping[str, Any]],
+    *,
+    active_source_add_obligations: Sequence[Mapping[str, Any]] = (),
 ) -> Dict[str, Any]:
     """Allocate the Research Lab emission slice for one epoch.
 
     Inputs are public/anchored obligation records. The output is deterministic
     and intended to be stored as the per-epoch Lab allocation snapshot.
+
+    SOURCE_ADD is an independent, first-priority allocation. Its fixed payment
+    is deducted from the configured Lab cap, then the pre-existing
+    reimbursement/champion allocator runs unchanged against the remainder.
+    Calls without SOURCE_ADD obligations retain the exact legacy output shape
+    and hash behavior.
     """
+    if not active_source_add_obligations:
+        return _allocate_research_lab_epoch_existing(
+            epoch,
+            policy,
+            active_reimbursement_obligations,
+            active_champion_obligations,
+        )
+
+    epoch = int(epoch)
+    lab_cap = _decimal(policy.get("research_lab_emission_percent", DEFAULT_RESEARCH_LAB_EMISSION_PERCENT))
+    if lab_cap < 0 or lab_cap > 100:
+        raise ValueError("research_lab_emission_percent must be between 0 and 100")
+
+    reward_epochs = int(policy.get("reward_epochs", policy.get("reimbursement_epochs", DEFAULT_RESEARCH_LAB_REWARD_EPOCHS)))
+    if reward_epochs <= 0:
+        raise ValueError("reward_epochs must be positive")
+
+    source_add = [
+        _normalize_source_add_obligation(item, epoch=epoch, policy=policy)
+        for item in active_source_add_obligations
+        if _champion_obligation_active(item, epoch, default_epoch_count=reward_epochs)
+    ]
+    source_add = [item for item in source_add if item["desired_alpha_percent"] > 0 and item["uid"] >= 0]
+    source_add.sort(key=lambda item: (item["start_epoch"], item["source_id"]))
+    source_add_allocations = _allocate_source_add(source_add, lab_cap)
+    _cap_allocation_sections_to_pool((source_add_allocations,), lab_cap)
+    source_add_paid = sum(
+        (_decimal(item["paid_alpha_percent"]) for item in source_add_allocations),
+        Decimal("0"),
+    )
+    source_add_deferred = sum(
+        (_decimal(item["deferred_alpha_percent"]) for item in source_add_allocations),
+        Decimal("0"),
+    )
+    remaining_cap = max(Decimal("0"), lab_cap - source_add_paid)
+
+    # This is the behavioral boundary that preserves the existing economics:
+    # only the cap changes. Every reimbursement and champion input, formula,
+    # ordering rule, reserve, queue rule, and surplus rule remains untouched.
+    remaining_policy = dict(policy)
+    remaining_policy["research_lab_emission_percent"] = _rate_float(remaining_cap)
+    existing = _allocate_research_lab_epoch_existing(
+        epoch,
+        remaining_policy,
+        active_reimbursement_obligations,
+        active_champion_obligations,
+    )
+
+    input_payload = {
+        "epoch": epoch,
+        "policy": _sorted_public(policy),
+        "source_add_obligations": _sorted_public(active_source_add_obligations),
+        "reimbursement_obligations": _sorted_public(active_reimbursement_obligations),
+        "champion_obligations": _sorted_public(active_champion_obligations),
+    }
+    result = {
+        key: value
+        for key, value in existing.items()
+        if key not in {"allocation_hash", "input_hash", "lab_cap_percent"}
+    }
+    result.update(
+        {
+            "epoch": epoch,
+            "lab_cap_percent": _rate_float(lab_cap),
+            "source_add_allocations": source_add_allocations,
+            "source_add_alpha_percent": _rate_float(source_add_paid),
+            "source_add_deferred_alpha_percent": _rate_float(source_add_deferred),
+            "champion_reimbursement_cap_percent": _rate_float(remaining_cap),
+            "input_hash": sha256_json(input_payload),
+        }
+    )
+    return {**result, "allocation_hash": sha256_json(result)}
+
+
+def _allocate_research_lab_epoch_existing(
+    epoch: int,
+    policy: Mapping[str, Any],
+    active_reimbursement_obligations: Sequence[Mapping[str, Any]],
+    active_champion_obligations: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """The pre-SOURCE_ADD allocator, kept intact as the compatibility core."""
     epoch = int(epoch)
     lab_cap = _decimal(policy.get("research_lab_emission_percent", DEFAULT_RESEARCH_LAB_EMISSION_PERCENT))
     if lab_cap < 0 or lab_cap > 100:
@@ -708,6 +798,7 @@ def compose_final_weight_vector(
             uid_set.add(int(uid))
     if research_lab_allocation:
         for section in (
+            "source_add_allocations",
             "reimbursement_allocations",
             "champion_allocations",
             "queued_champion_allocations",
@@ -732,8 +823,12 @@ def compose_final_weight_vector(
         grant_score = Decimal("0")
         reimbursement_score = Decimal("0")
         queued_champion_score = Decimal("0")
+        source_add_score = Decimal("0")
 
         if research_lab_allocation:
+            for allocation in research_lab_allocation.get("source_add_allocations", []):
+                if int(allocation["uid"]) == uid:
+                    source_add_score += _decimal(allocation["paid_alpha_percent"]) * lab_score_per_alpha_percent
             for allocation in research_lab_allocation.get("champion_allocations", []):
                 if int(allocation["uid"]) == uid:
                     grant_score += _decimal(allocation["paid_alpha_percent"]) * lab_score_per_alpha_percent
@@ -756,7 +851,7 @@ def compose_final_weight_vector(
                     if int(entry["epoch"]) == int(epoch):
                         reimbursement_score += _decimal(entry["amount_microusd"]) * reimbursement_score_per_microusd
 
-        total = fulfillment + leaderboard + grant_score + queued_champion_score + reimbursement_score + floor
+        total = fulfillment + leaderboard + source_add_score + grant_score + queued_champion_score + reimbursement_score + floor
         component_doc = {
             "fulfillment": _money_float(fulfillment),
             "weekly_leaderboard": _money_float(leaderboard),
@@ -767,6 +862,8 @@ def compose_final_weight_vector(
         }
         if research_lab_allocation:
             component_doc["queued_improvement_grant_placeholder"] = _money_float(queued_champion_score)
+            if "source_add_allocations" in research_lab_allocation:
+                component_doc["source_add_reward"] = _money_float(source_add_score)
         components[uid_key] = component_doc
         raw_scores[uid] = float(total)
 
@@ -1006,12 +1103,76 @@ def _normalize_champion_obligation(
         )
         if obligation.get("replay_status") is not None:
             normalized["replay_status"] = str(obligation.get("replay_status") or "")
-    # SOURCE_ADD reward legs ride the champion rails with a reward_kind label
-    # ("source_acceptance"/"source_implementation"); absent for classic
-    # champion grants so their allocation entries keep the exact prior shape.
+    # Preserve legacy labeled champion rows without changing classic champion
+    # output shape. New SOURCE_ADD obligations use their own normalizer.
     if obligation.get("reward_kind") not in (None, "", "champion"):
         normalized["reward_kind"] = str(obligation.get("reward_kind"))
     return normalized
+
+
+def _normalize_source_add_obligation(
+    obligation: Mapping[str, Any],
+    *,
+    epoch: int,
+    policy: Mapping[str, Any],
+) -> Dict[str, Any]:
+    reward_kind = str(obligation.get("reward_kind") or "")
+    if reward_kind not in SOURCE_ADD_REWARD_KINDS:
+        raise ValueError("source add reward_kind is invalid")
+    source_id = str(
+        obligation.get("source_id")
+        or obligation.get("source_add_reward_id")
+        or obligation.get("reward_ref")
+        or ""
+    )
+    if not source_id.startswith("source_add_reward:"):
+        raise ValueError("source add source_id must be source_add_reward:-prefixed")
+    leg = int(obligation.get("leg") or 0)
+    if leg not in (1, 2):
+        raise ValueError("source add leg must be 1 or 2")
+    if leg == 1 and reward_kind != "source_acceptance":
+        raise ValueError("source add leg 1 must be source_acceptance")
+    if leg == 2 and reward_kind != "source_implementation":
+        raise ValueError("source add leg 2 must be source_implementation")
+
+    reward_epochs = int(policy.get("reward_epochs", DEFAULT_RESEARCH_LAB_REWARD_EPOCHS))
+    start_epoch = int(obligation.get("start_epoch", epoch))
+    epoch_count = int(obligation.get("epoch_count", obligation.get("reward_epochs", reward_epochs)))
+    desired = max(Decimal("0"), _decimal(obligation.get("desired_alpha_percent", obligation.get("alpha_percent", 0))))
+    total_due = _champion_total_due_alpha_percent(
+        obligation,
+        base_desired=desired,
+        epoch_count=epoch_count,
+    )
+    remaining = _champion_remaining_alpha_percent(
+        obligation,
+        policy=None,
+        default_epoch_count=reward_epochs,
+    )
+    paid_to_date = _champion_paid_alpha_percent_to_date(
+        obligation,
+        total_due=total_due,
+        remaining=remaining,
+    )
+    current_due = min(desired, remaining)
+    return {
+        "uid": int(obligation.get("uid", obligation.get("miner_uid", -1))),
+        "miner_hotkey": str(obligation.get("miner_hotkey", "")),
+        "source_id": source_id,
+        "adapter_id": str(obligation.get("adapter_id") or ""),
+        "leg": leg,
+        "reward_kind": reward_kind,
+        "start_epoch": start_epoch,
+        "epoch_count": epoch_count,
+        "intended_alpha_percent": current_due,
+        "desired_alpha_percent": current_due,
+        "base_desired_alpha_percent": desired,
+        "total_due_alpha_percent": total_due,
+        "paid_alpha_percent_to_date": paid_to_date,
+        "remaining_alpha_percent": remaining,
+        "nominal_end_epoch": start_epoch + epoch_count,
+        "replay_status": str(obligation.get("replay_status") or ""),
+    }
 
 
 def _champion_total_due_alpha_percent(
@@ -1256,6 +1417,50 @@ def _allocate_champions(
         else:
             queued.append({**allocation, "reason": "queued_no_capacity"})
     return active, queued
+
+
+def _allocate_source_add(
+    obligations: Sequence[Mapping[str, Any]],
+    pool: Decimal,
+) -> list[Dict[str, Any]]:
+    """Pay fixed SOURCE_ADD dues first, chronologically, without surplus."""
+
+    remaining_pool = max(Decimal("0"), pool)
+    allocations: list[Dict[str, Any]] = []
+    for obligation in obligations:
+        intended = max(Decimal("0"), _decimal(obligation["desired_alpha_percent"]))
+        paid = min(intended, remaining_pool)
+        remaining_pool -= paid
+        if paid >= intended:
+            reason = "active_source_add_reward"
+        elif paid > 0:
+            reason = "source_add_partial_capacity"
+        else:
+            reason = "source_add_no_capacity"
+        remaining_before = max(Decimal("0"), _decimal(obligation.get("remaining_alpha_percent", 0)))
+        row = {
+            "uid": int(obligation["uid"]),
+            "miner_hotkey": str(obligation["miner_hotkey"]),
+            "source_id": str(obligation["source_id"]),
+            "source_add_reward_id": str(obligation["source_id"]),
+            "adapter_id": str(obligation.get("adapter_id") or ""),
+            "leg": int(obligation["leg"]),
+            "reward_kind": str(obligation["reward_kind"]),
+            "intended_alpha_percent": _rate_float(intended),
+            "paid_alpha_percent": _rate_float(paid),
+            "deferred_alpha_percent": _rate_float(max(Decimal("0"), intended - paid)),
+            "base_desired_alpha_percent": _rate_float(_decimal(obligation["base_desired_alpha_percent"])),
+            "total_due_alpha_percent": _rate_float(_decimal(obligation["total_due_alpha_percent"])),
+            "paid_alpha_percent_to_date": _rate_float(_decimal(obligation["paid_alpha_percent_to_date"])),
+            "remaining_alpha_percent_before_epoch": _rate_float(remaining_before),
+            "remaining_alpha_percent_after_epoch": _rate_float(max(Decimal("0"), remaining_before - paid)),
+            "nominal_end_epoch": int(obligation.get("nominal_end_epoch", 0)),
+            "reason": reason,
+        }
+        if obligation.get("replay_status"):
+            row["replay_status"] = str(obligation["replay_status"])
+        allocations.append(row)
+    return allocations
 
 
 def _allocate_capped_pro_rata(pool: Decimal, weights: Sequence[Decimal], caps: Sequence[Decimal]) -> list[Decimal]:

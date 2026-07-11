@@ -1483,6 +1483,7 @@ async def create_research_lab_emission_allocation_snapshot(
         "policy_id": str(policy_id),
         "snapshot_status": str(snapshot_status),
         "lab_cap_alpha_percent": float(allocation_doc.get("lab_cap_percent") or 0.0),
+        "source_add_alpha_percent": float(allocation_doc.get("source_add_alpha_percent") or 0.0),
         "reimbursement_alpha_percent": float(allocation_doc.get("reimbursement_alpha_percent") or 0.0),
         "champion_alpha_percent": float(allocation_doc.get("champion_alpha_percent") or 0.0),
         "queued_champion_alpha_percent": float(allocation_doc.get("queued_champion_alpha_percent") or 0.0),

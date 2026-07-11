@@ -1,7 +1,7 @@
 """SOURCE_ADD two-leg emission rewards (sourceexperiments.md §3, owner-final).
 
 Supersedes the P1.5 USD trial-yield bounty bands. Both legs are fixed-term
-emission streams on the existing champion-allocation rails:
+emission streams within a separate, first-priority SOURCE_ADD allocation:
 
 - **Leg 1 — credible submission**: 1% of miner emissions ×
   ``RESEARCH_LAB_REWARD_EPOCHS`` (20), created when a miner-submitted source
@@ -11,9 +11,9 @@ emission streams on the existing champion-allocation rails:
   LLM final judge decides the already-winning change was helped by a known
   SOURCE_ADD API. Paid to the owner even when the house arm wires it.
 
-Reward records enter the ``champion_allocations`` / ``queued_champion_allocations``
-sections with a ``reward_kind`` field, so the validator pays them with zero
-code change (it pays whatever the allocation doc says within the lab cap).
+Reward records enter the first-priority ``source_add_allocations`` section.
+Their paid percentage is deducted from the configured Research Lab cap before
+the unchanged reimbursement/champion allocator runs against the remainder.
 """
 
 from __future__ import annotations
@@ -70,15 +70,18 @@ class SourceAddRewardRecord:
         return asdict(self)
 
     def champion_reward_row(self) -> dict[str, Any]:
-        """The row shape for the existing champion-reward rails.
+        """Compatibility alias for the SOURCE_ADD allocation obligation shape.
 
-        ``reward_kind`` is MANDATED on the row so the validator needs zero code
-        change: allocation building treats this like any champion obligation
-        under ``validator_policy_lab_cap_ceiling``; the kind only labels it.
+        The method name is retained for callers created before SOURCE_ADD was
+        separated from champion rewards. New allocation code does not place
+        this row in champion sections.
         """
 
         return {
             "champion_reward_id": self.reward_ref,
+            "source_add_reward_id": self.reward_ref,
+            "adapter_id": self.adapter_id,
+            "leg": int(self.leg),
             "miner_hotkey": self.miner_ref,
             "candidate_id": "",
             "run_id": "",

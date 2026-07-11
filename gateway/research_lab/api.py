@@ -2304,12 +2304,25 @@ async def _allocation_epoch_guard_and_persistence(
     from gateway.research_lab.allocations import allocation_snapshot_persistence_decision
     from gateway.utils.epoch import get_current_epoch_id_async
 
-    current_epoch = await get_current_epoch_id_async()
+    try:
+        current_epoch = await get_current_epoch_id_async()
+    except Exception as exc:  # noqa: BLE001 - chain lookup outage must not break reads
+        # Fail safe, not open: without the chain epoch we cannot prove the
+        # requested epoch isn't in the future, so serve the computation but
+        # never persist. The validator retries next cycle once the chain
+        # lookup recovers, so persistence is delayed, not lost.
+        logger.warning(
+            "research_lab_allocation_epoch_guard_degraded epoch=%s error=%s",
+            int(epoch),
+            str(exc)[:120],
+        )
+        return False
+    normalized_key = internal_key if isinstance(internal_key, str) else None
     decision = allocation_snapshot_persistence_decision(
         current_epoch=int(current_epoch),
         requested_epoch=int(epoch),
-        provided_key=internal_key,
-        configured_key=str(config.internal_api_key or ""),
+        provided_key=normalized_key,
+        configured_key=str(getattr(config, "internal_api_key", "") or ""),
         live_allocation_enabled=bool(config.reimbursements_enabled or config.weight_mutation_enabled),
     )
     if decision == "future_epoch":

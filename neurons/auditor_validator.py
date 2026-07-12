@@ -669,7 +669,6 @@ class AuditorValidator:
 
         cache_file = str(os.environ.get("AUDITOR_INDEPENDENT_PCR0_CACHE_FILE", "") or "").strip()
         if not cache_file:
-            logger.warning("auditor_v2_identity_cache_missing")
             return None
         try:
             cache = load_identity_cache(Path(cache_file).expanduser())
@@ -690,12 +689,7 @@ class AuditorValidator:
                 identity_cache=cache,
                 chain_signing_profile=profile,
             )
-        except Exception as exc:
-            logger.error(
-                "auditor_v2_verification_failed error_type=%s error=%s",
-                type(exc).__name__,
-                str(exc)[:240],
-            )
+        except Exception:
             return None
     
     async def fetch_gateway_attestation(self) -> bool:
@@ -1203,17 +1197,9 @@ class AuditorValidator:
                         weights_data = self.verify_attested_weights_v2(v2_bundle)
                         if weights_data is None:
                             print("❌ Auditor verification failed")
-                            logger.debug(
-                                "Authoritative V2 verification failed for epoch %s",
-                                target_epoch,
-                            )
                             await asyncio.sleep(30)
                             continue
                         print("✅ Auditor verification passed")
-                        logger.debug(
-                            "Authoritative V2 verification passed for epoch %s",
-                            target_epoch,
-                        )
                         
                         # Save pending equivocation check for next epoch verification
                         weights_pairs = list(zip(weights_data.get("uids", []), weights_data.get("weights_u16", [])))

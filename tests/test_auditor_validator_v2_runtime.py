@@ -78,6 +78,18 @@ def test_failed_auditor_verification_never_submits_fallback(monkeypatch, capsys)
     assert sleeps == [30]
 
 
+def test_verifier_failure_emits_no_diagnostic_rows(monkeypatch, caplog):
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    monkeypatch.delenv("AUDITOR_INDEPENDENT_PCR0_CACHE_FILE", raising=False)
+
+    with caplog.at_level("DEBUG"):
+        assert auditor.verify_attested_weights_v2({"authority": "fixture"}) is None
+
+    assert caplog.text == ""
+
+
 def test_successful_auditor_verification_has_one_status_line(monkeypatch, capsys):
     verified = {
         "uids": [1],

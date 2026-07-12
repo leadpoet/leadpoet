@@ -1407,10 +1407,7 @@ class AuditorValidator:
                                 print("❌ Auditor verification failed")
                             await asyncio.sleep(30)
                             continue
-                        if authority_status == "v1_verified":
-                            print("✅ Auditor V1 compatibility verification passed")
-                        else:
-                            print("✅ Auditor verification passed")
+                        print("✅ Auditor verification passed")
                         
                         # Save pending equivocation check for next epoch verification
                         weights_pairs = list(zip(weights_data.get("uids", []), weights_data.get("weights_u16", [])))

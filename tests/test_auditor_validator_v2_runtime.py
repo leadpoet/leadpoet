@@ -120,7 +120,8 @@ def test_v2_404_uses_verified_v1_fallback(monkeypatch, capsys):
     asyncio.run(auditor.run())
 
     output = capsys.readouterr().out
-    assert output.count("✅ Auditor V1 compatibility verification passed") == 1
+    assert output.count("✅ Auditor verification passed") == 1
+    assert "V1 compatibility" not in output
 
 
 def test_v2_transport_failure_does_not_use_v1():

@@ -24,8 +24,8 @@ from gateway.research_lab.allocations import (
 )
 
 
-def _snapshot_row(entries, section="champion_allocations"):
-    return {"epoch": 0, "allocation_doc": {section: entries}}
+def _snapshot_row(entries, section="champion_allocations", epoch=23890):
+    return {"epoch": epoch, "allocation_doc": {section: entries}}
 
 
 def _entry(source_id, paid, scheduled=None):
@@ -80,6 +80,28 @@ class TestChampionPaidToDate:
         ]
         paid = _champion_paid_alpha_to_date_from_snapshots(rows)
         assert paid["champion_reward:r1"] == pytest.approx(9.4545)
+
+    def test_pre_cutoff_epochs_credit_full_payment(self):
+        rows = [
+            _snapshot_row([_entry("champion_reward:old", 21.9, scheduled=3.1)], epoch=23700)
+            for _ in range(8)
+        ]
+        paid = _champion_paid_alpha_to_date_from_snapshots(rows)
+        assert paid["champion_reward:old"] == pytest.approx(8 * 21.9)
+
+    def test_cutoff_boundary_epoch_is_capped(self):
+        rows = [
+            _snapshot_row([_entry("champion_reward:r1", 21.9, scheduled=9.4545)], epoch=23877),
+            _snapshot_row([_entry("champion_reward:r1", 21.9, scheduled=9.4545)], epoch=23878),
+        ]
+        paid = _champion_paid_alpha_to_date_from_snapshots(rows)
+        assert paid["champion_reward:r1"] == pytest.approx(21.9 + 9.4545)
+
+    def test_cutoff_env_override(self, monkeypatch):
+        monkeypatch.setenv("RESEARCH_LAB_CHAMPION_SCHEDULE_CAP_START_EPOCH", "23700")
+        rows = [_snapshot_row([_entry("champion_reward:old", 21.9, scheduled=3.1)], epoch=23700)]
+        paid = _champion_paid_alpha_to_date_from_snapshots(rows)
+        assert paid["champion_reward:old"] == pytest.approx(3.1)
 
     def test_queued_section_counted_with_same_cap(self):
         rows = [

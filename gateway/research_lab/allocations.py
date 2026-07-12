@@ -441,6 +441,22 @@ def _source_add_paid_alpha_to_date_from_snapshots(
     return {reward_id: _rate_float(paid) for reward_id, paid in paid_by_reward.items()}
 
 
+def _champion_schedule_cap_start_epoch() -> int:
+    """First epoch where surplus stops retiring the scheduled obligation.
+
+    Epochs before the cutoff credit their full paid amount (legacy
+    accounting): historical single-champion eras paid far above schedule and
+    everyone treated those rewards as settled — recapping them retroactively
+    revived long-finished champions, and their reopened shortfalls crowded
+    the current champions out of the epoch pool. The default is the start
+    epoch of the first reward the surplus-as-bonus policy was written for.
+    """
+    try:
+        return int(os.getenv("RESEARCH_LAB_CHAMPION_SCHEDULE_CAP_START_EPOCH", "23878"))
+    except ValueError:
+        return 23878
+
+
 def _champion_paid_alpha_to_date_from_snapshots(snapshot_rows: list[Mapping[str, Any]]) -> dict[str, float]:
     """Sum per-epoch obligation credit per champion reward.
 
@@ -448,15 +464,22 @@ def _champion_paid_alpha_to_date_from_snapshots(snapshot_rows: list[Mapping[str,
     single-champion epoch can pay far above schedule from the remaining Lab
     pool, and that surplus is a bonus — it must not retire the scheduled
     obligation early (a sole champion once hit its 20-epoch lifetime target
-    in 8 epochs and lost the remaining 12). Each epoch therefore credits at
-    most the entry's scheduled rate against the obligation; entries without
-    a recorded schedule credit their full paid amount.
+    in 8 epochs and lost the remaining 12). From the policy cutoff epoch
+    onward, each epoch credits at most the entry's scheduled rate against
+    the obligation; earlier epochs and entries without a recorded schedule
+    credit their full paid amount.
     """
+    cap_start_epoch = _champion_schedule_cap_start_epoch()
     paid_by_reward: dict[str, Decimal] = {}
     for row in snapshot_rows:
         allocation_doc = row.get("allocation_doc") or {}
         if not isinstance(allocation_doc, Mapping):
             continue
+        try:
+            row_epoch = int(row.get("epoch") or 0)
+        except (TypeError, ValueError):
+            row_epoch = 0
+        cap_applies = row_epoch >= cap_start_epoch
         for section in ("champion_allocations", "queued_champion_allocations"):
             allocations = allocation_doc.get(section) or []
             if not isinstance(allocations, list):
@@ -468,16 +491,17 @@ def _champion_paid_alpha_to_date_from_snapshots(snapshot_rows: list[Mapping[str,
                 if not source_id:
                     continue
                 paid = _decimal(allocation.get("paid_alpha_percent") or 0)
-                scheduled_raw = (
-                    allocation.get("base_desired_alpha_percent")
-                    if allocation.get("base_desired_alpha_percent") is not None
-                    else allocation.get("intended_alpha_percent")
-                )
                 credit = paid
-                if scheduled_raw is not None:
-                    scheduled = _decimal(scheduled_raw)
-                    if scheduled > 0:
-                        credit = min(paid, scheduled)
+                if cap_applies:
+                    scheduled_raw = (
+                        allocation.get("base_desired_alpha_percent")
+                        if allocation.get("base_desired_alpha_percent") is not None
+                        else allocation.get("intended_alpha_percent")
+                    )
+                    if scheduled_raw is not None:
+                        scheduled = _decimal(scheduled_raw)
+                        if scheduled > 0:
+                            credit = min(paid, scheduled)
                 paid_by_reward[source_id] = paid_by_reward.get(source_id, Decimal("0")) + credit
     return {reward_id: _rate_float(paid) for reward_id, paid in paid_by_reward.items()}
 

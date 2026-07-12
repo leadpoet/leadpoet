@@ -1,8 +1,15 @@
 {
   "_comment": "PCR0 allowlist for LeadPoet TEE verification. Updated by CI/CD on each enclave build.",
-  "_updated": "2026-07-12T10:35:00Z",
+  "_updated": "2026-07-12T12:05:00Z",
   "_repo": "https://github.com/leadpoet/leadpoet",
   "gateway_pcr0": [
+    {
+      "pcr0": "067c766bc6fa6fd2610fb766d368918cb4d54c038043f5c4a11c33f8c32fb7727acc356922efe12d132a7f46ab9c96c4",
+      "version": "2026-07-12c",
+      "deployed": "2026-07-12",
+      "commit_hash": "bfa60f19a6a50f3d01a437ce38e62cd46258638d",
+      "notes": "gateway enclave: auto-expiry env deploy"
+    },
     {
       "pcr0": "136f887bb6573dd316d5a3330ca5382124d0e6e7a937e2a52014c632e1a81c770320cace178792070108b95f0ea9f49e",
       "version": "2026-07-12b",

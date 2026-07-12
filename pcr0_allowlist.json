@@ -4,6 +4,13 @@
   "_repo": "https://github.com/leadpoet/leadpoet",
   "gateway_pcr0": [
     {
+      "pcr0": "59a4373709f3518f6de51848e79e38513c55eb3a7991b534bf6fdfc4a37f829d5662650468e2317463d70bbefe283d1d",
+      "version": "2026-07-12d",
+      "deployed": "2026-07-12",
+      "commit_hash": "07c81c7ff751714d838428effd6c987e4a9e9db0",
+      "notes": "gateway enclave: rollback build to pre-V2 head after blocked V2 release (audit valis need this measurement)"
+    },
+    {
       "pcr0": "067c766bc6fa6fd2610fb766d368918cb4d54c038043f5c4a11c33f8c32fb7727acc356922efe12d132a7f46ab9c96c4",
       "version": "2026-07-12c",
       "deployed": "2026-07-12",

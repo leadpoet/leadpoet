@@ -2,21 +2,11 @@
 """
 LeadPoet Auditor Validator
 
-A lightweight validator that copies weights from the primary validator TEE.
-Does not run validation logic - simply verifies and replicates TEE-signed weights.
+A lightweight validator that copies authoritative V2 weights after independently
+verifying their complete attested receipt graph.
 
-SECURITY MODEL:
-1. Fetches weight bundles from gateway /weights/current/{netuid}
-2. Verifies Ed25519 signature using validator enclave pubkey
-3. Recomputes hash from bundle data (doesn't trust claimed hash)
-4. Checks anti-equivocation using chain snapshot (not live chain)
-5. Submits verified weights to Bittensor chain
-
-VERIFICATION FAILURE HANDLING:
-If verification fails (equivocation, attestation, signature/hash):
-- BURN 100% TO UID 0 - signals distrust and penalizes all miners
-- This is the strongest possible signal that something is wrong
-- Applies to: equivocation, attestation failure, signature/hash failure
+Verification failure is fail-closed: the auditor never substitutes a locally
+computed or burn vector for an unavailable authoritative V2 bundle.
 
 USAGE:
     python neurons/auditor_validator.py --netuid 71 --wallet.name my_wallet --wallet.hotkey default
@@ -209,8 +199,22 @@ logger = logging.getLogger(__name__)
 DEFAULT_GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
 
 
-# Auditors skip PCR0 verification (requires nitro-cli to verify independently)
-# AWS cert chain + COSE signature verification proves it's a REAL Nitro enclave
+def _normalize_gateway_url(value: str) -> str:
+    """Accept the current gateway transport without weakening V2 integrity."""
+
+    normalized = str(value or "").strip().rstrip("/")
+    parsed = urlparse(normalized)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError("Auditor gateway URL must be an HTTP(S) origin")
+    return normalized
+
 
 # File to store pending equivocation check (overwritten each epoch)
 PENDING_EQUIVOCATION_FILE = os.path.join(_SCRIPT_DIR, ".pending_equivocation_check.json")
@@ -218,13 +222,7 @@ PENDING_EQUIVOCATION_FILE = os.path.join(_SCRIPT_DIR, ".pending_equivocation_che
 
 class AuditorValidator:
     """
-    Lightweight validator that copies weights from the primary validator TEE.
-    
-    TRUST MODEL:
-    - Trusts gateway to relay authentic bundles (verified by gateway signature)
-    - Trusts validator TEE signature (Ed25519 over weights hash)
-    - Does NOT trust claimed hashes (recomputes from bundle data)
-    - Verifies anti-equivocation using snapshot (not live chain)
+    Lightweight validator that copies only independently verified V2 weights.
     """
     
     def __init__(self, config, gateway_url: str):
@@ -236,12 +234,7 @@ class AuditorValidator:
             gateway_url: Gateway URL (passed as parameter, not global)
         """
         self.config = config
-        self.gateway_url = str(gateway_url or "").rstrip("/")
-        parsed_gateway = urlparse(self.gateway_url)
-        if parsed_gateway.scheme != "https" or not parsed_gateway.hostname:
-            raise RuntimeError(
-                "Authoritative V2 auditors require an HTTPS gateway URL"
-            )
+        self.gateway_url = _normalize_gateway_url(gateway_url)
         self.wallet = bt.wallet(config=config)
         self.subtensor = bt.subtensor(config=config)
         self.metagraph = self.subtensor.metagraph(config.netuid)
@@ -269,10 +262,6 @@ class AuditorValidator:
         self.validator_attestation = None
         self.validator_code_hash = None
         self.validator_hotkey = None
-        
-        # Trust level tracking (CRITICAL for auditor output)
-        # Always starts as None, set to "full_nitro" after attestation verification
-        self.trust_level = None
         
         logger.info("✅ Auditor Validator initialized")
         print(f"✅ Auditor Validator initialized")
@@ -745,8 +734,6 @@ class AuditorValidator:
         - In production: Full Nitro verification required
         - In dev: Signature-only mode with warning
         
-        Sets self.trust_level based on verification result.
-        
         Returns:
             True if attestation is valid (or acceptable for dev mode)
         """
@@ -769,23 +756,14 @@ class AuditorValidator:
             )
             
             if valid:
-                self.trust_level = "full_nitro"
-                pcr0 = data.get("pcr0", "N/A")[:32]
-                logger.info(f"Gateway attestation verified (full Nitro, PCR0: {pcr0}...)")
-                print(f"✅ Gateway attestation: FULL NITRO VERIFICATION")
-                print(f"   PCR0: {pcr0}...")
+                logger.debug("Gateway Nitro attestation verified")
                 return True
             else:
                 logger.error(f"Gateway Nitro verification failed: {data}")
-                print(f"❌ Gateway Nitro verification FAILED")
-                print(f"   Details: {data.get('error', 'Unknown error')}")
                 return False
                 
         except Exception as e:
             logger.error(f"Gateway attestation verification failed: {e}")
-            print(f"❌ Gateway attestation verification failed: {e}")
-            import traceback
-            traceback.print_exc()
             return False
     
     def verify_validator_attestation(self, bundle: Dict) -> bool:
@@ -845,27 +823,17 @@ class AuditorValidator:
             )
             
             if valid:
-                self.trust_level = data.get("trust_level", "aws_verified")
-                pcr0 = data.get("pcr0", "N/A")[:32]
-                logger.info(f"Validator attestation verified for epoch {epoch_id} (trust_level={self.trust_level})")
-                print(f"✅ Validator attestation: AWS VERIFIED")
-                print(f"   Trust level: {self.trust_level.upper()}")
-                print(f"   Epoch: {epoch_id}")
-                print(f"   PCR0: {pcr0}... (not verified - requires nitro-cli)")
-                print(f"   Pubkey: {pubkey[:16]}...")
-                print(f"   ℹ️  AWS cert chain + COSE signature verified (proves real Nitro enclave)")
+                logger.debug(
+                    "Validator Nitro attestation verified for epoch %s",
+                    epoch_id,
+                )
                 return True
             else:
                 logger.error(f"Validator attestation verification failed: {data}")
-                print(f"❌ Validator attestation verification FAILED")
-                print(f"   Details: {data.get('error', 'Unknown error')}")
                 return False
                 
         except Exception as e:
             logger.error(f"Validator attestation verification failed: {e}")
-            print(f"❌ Validator attestation verification failed: {e}")
-            import traceback
-            traceback.print_exc()
             return False
     
     async def fetch_signed_event(self, event_hash: str) -> Optional[Dict]:
@@ -1101,53 +1069,6 @@ class AuditorValidator:
                 )
                 return False
 
-    def submit_burn_weights_to_uid0(self, epoch_id: int, reason: str) -> bool:
-        """
-        Submit 100% weight to UID 0 (burn weights).
-        
-        Called when equivocation is detected or verification fails.
-        This effectively burns all miner rewards for the epoch.
-        
-        Args:
-            epoch_id: Epoch being burned
-            reason: Why we're burning (for logging)
-            
-        Returns:
-            True if submission succeeded
-        """
-        try:
-            print(f"\n🔥 BURNING WEIGHTS TO UID 0")
-            print(f"   Reason: {reason}")
-            print(f"   Epoch: {epoch_id}")
-            print(f"   Weight breakdown:")
-            print(f"      UID 0 (Burn): 100.00%")
-            print(f"   Total: 100.00%")
-            
-            # Submit 100% weight to UID 0
-            uids = [0]
-            weights_floats = [1.0]  # 100% to UID 0
-            
-            success = self._set_weights_until_epoch_end(
-                epoch_id=epoch_id,
-                uids=uids,
-                weights=weights_floats,
-            )
-            
-            if success:
-                print(f"🔥 BURN COMPLETE - 100% weight to UID 0 for epoch {epoch_id}")
-                self.last_submitted_epoch = epoch_id
-                logger.warning(f"BURN: 100% to UID 0 for epoch {epoch_id} - reason: {reason}")
-                return True
-            else:
-                print(f"❌ Burn submission failed")
-                return False
-                
-        except Exception as e:
-            print(f"❌ Burn submission error: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
     def submit_weights_to_chain(self, epoch_id: int, bundle: Dict) -> bool:
         """
         Submit verified weights to the Bittensor chain.
@@ -1252,8 +1173,6 @@ class AuditorValidator:
         print(f"{'='*60}")
         logger.info("Auditor validator starting")
         
-        print("🔐 Authoritative V2 receipt verification is mandatory")
-        
         while not self.should_exit:
             try:
                 # Get current block and epoch
@@ -1283,24 +1202,18 @@ class AuditorValidator:
                             continue
                         weights_data = self.verify_attested_weights_v2(v2_bundle)
                         if weights_data is None:
-                            print("   ❌ Authoritative V2 receipt-chain verification failed")
-                            print("   🔥 BURNING 100% TO UID 0 (V2 verification failed)")
-                            self.submit_burn_weights_to_uid0(
+                            print("❌ Auditor verification failed")
+                            logger.debug(
+                                "Authoritative V2 verification failed for epoch %s",
                                 target_epoch,
-                                "authoritative_v2_verification_failed",
                             )
+                            await asyncio.sleep(30)
                             continue
-                        self.trust_level = "full_nitro_v2"
-                        print(
-                            "   ✅ Authoritative V2 receipt chain verified against "
-                            f"{len(weights_data['independent_receipt_identities'])} "
-                            "independent PCR0 identities"
+                        print("✅ Auditor verification passed")
+                        logger.debug(
+                            "Authoritative V2 verification passed for epoch %s",
+                            target_epoch,
                         )
-                        
-                        # All checks passed - safe to copy weights
-                        logger.info(f"All verifications passed for epoch {target_epoch} (trust_level={self.trust_level})")
-                        print(f"\n   ✅ All verifications passed")
-                        print(f"   🔐 Trust level: {self.trust_level.upper()}")
                         
                         # Save pending equivocation check for next epoch verification
                         weights_pairs = list(zip(weights_data.get("uids", []), weights_data.get("weights_u16", [])))
@@ -1388,22 +1301,8 @@ def main():
         description="LeadPoet Auditor Validator - Copies TEE-verified weights from primary validator",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-SECURITY MODEL:
-  The auditor validator does NOT run validation logic itself.
-  It fetches weights from the primary validator TEE, verifies:
-    1. Ed25519 signature over weights hash
-    2. Hash recomputation matches claimed hash
-    3. Anti-equivocation (chain snapshot match)
-  Then copies the verified weights to its own chain submission.
-
-TRUST LEVEL:
-  - full_nitro: Full AWS Nitro attestation verified (ALWAYS REQUIRED)
-  - PCR0 verified against GitHub allowlist automatically
-
 VERIFICATION FAILURE HANDLING:
-  If verification fails (equivocation, attestation, signature/hash):
-  - BURN 100% weight to UID 0 (strongest distrust signal)
-  - This prevents copying malicious weights AND penalizes all miners
+  If authoritative V2 verification fails, no vector is submitted.
 
 EXAMPLES:
   python neurons/auditor_validator.py --netuid 71
@@ -1453,14 +1352,6 @@ EXAMPLES:
     print(f"   Gateway: {gateway_url}")
     print(f"   Log level: {args.log_level}")
     print(f"{'='*60}")
-    
-    # Auditor verification mode - verify AWS signature, skip PCR0
-    print(f"\n🔐 AUDITOR VERIFICATION MODE")
-    print(f"   ✅ AWS certificate chain verified (proves REAL Nitro enclave)")
-    print(f"   ✅ COSE signature verified (proves authentic attestation)")
-    print(f"   ✅ Ed25519 signature verified (proves weights from enclave)")
-    print(f"   ✅ Epoch binding verified (replay protection)")
-    print(f"   ℹ️  Trust level: AWS_VERIFIED (real enclave, unverified code)")
     
     print(f"{'='*60}\n")
     

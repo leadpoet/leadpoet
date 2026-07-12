@@ -23,7 +23,12 @@ GRANT EXECUTE ON FUNCTION public.prevent_research_lab_attested_v2_mutation()
 
 CREATE TABLE IF NOT EXISTS public.research_lab_provider_credential_envelopes_v2 (
     envelope_hash            TEXT        PRIMARY KEY CHECK (envelope_hash ~ '^sha256:[0-9a-f]{64}$'),
-    schema_version           TEXT        NOT NULL CHECK (schema_version = 'leadpoet.provider_credential_envelope.v2'),
+    schema_version           TEXT        NOT NULL CHECK (
+                                            schema_version IN (
+                                                'leadpoet.provider_credential_envelope.v2',
+                                                'leadpoet.provider_credential_envelope.enclave.v2'
+                                            )
+                                        ),
     key_ref                  TEXT        NOT NULL CHECK (key_ref ~ '^encrypted_ref:openrouter:[0-9a-f]{32}$'),
     key_ref_hash             TEXT        NOT NULL CHECK (key_ref_hash ~ '^sha256:[0-9a-f]{64}$'),
     miner_hotkey_hash        TEXT        NOT NULL CHECK (miner_hotkey_hash ~ '^sha256:[0-9a-f]{64}$'),
@@ -43,6 +48,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_provider_credential_envelopes_v2 
     created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (key_ref, credential_kind)
 );
+ALTER TABLE public.research_lab_provider_credential_envelopes_v2
+    ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS public.research_lab_attested_boot_identities_v2 (
     boot_identity_hash       TEXT        PRIMARY KEY CHECK (boot_identity_hash ~ '^sha256:[0-9a-f]{64}$'),
@@ -80,6 +87,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_attested_boot_identities_v2 (
     created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (physical_role, commit_sha, pcr0, boot_nonce)
 );
+ALTER TABLE public.research_lab_attested_boot_identities_v2
+    ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS public.research_lab_attested_transport_attempts_v2 (
     attempt_hash             TEXT        PRIMARY KEY CHECK (attempt_hash ~ '^sha256:[0-9a-f]{64}$'),
@@ -123,6 +132,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_attested_transport_attempts_v2 (
     ),
     UNIQUE (logical_operation_id, attempt_number)
 );
+ALTER TABLE public.research_lab_attested_transport_attempts_v2
+    ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS public.research_lab_attested_execution_receipts_v2 (
     receipt_hash             TEXT        PRIMARY KEY CHECK (receipt_hash ~ '^sha256:[0-9a-f]{64}$'),
@@ -223,6 +234,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_attested_execution_receipts_v2 (
     ),
     UNIQUE (role, purpose, job_id, input_root, config_hash)
 );
+ALTER TABLE public.research_lab_attested_execution_receipts_v2
+    ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS public.research_lab_attested_receipt_edges_v2 (
     child_receipt_hash       TEXT        NOT NULL REFERENCES public.research_lab_attested_execution_receipts_v2(receipt_hash) ON DELETE RESTRICT,
@@ -231,6 +244,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_attested_receipt_edges_v2 (
     PRIMARY KEY (child_receipt_hash, parent_receipt_hash),
     CHECK (child_receipt_hash <> parent_receipt_hash)
 );
+ALTER TABLE public.research_lab_attested_receipt_edges_v2
+    ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS public.research_lab_attested_receipt_transport_v2 (
     receipt_hash             TEXT        NOT NULL REFERENCES public.research_lab_attested_execution_receipts_v2(receipt_hash) ON DELETE RESTRICT,
@@ -238,6 +253,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_attested_receipt_transport_v2 (
     created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (receipt_hash, attempt_hash)
 );
+ALTER TABLE public.research_lab_attested_receipt_transport_v2
+    ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS public.research_lab_attested_host_operations_v2 (
     request_hash             TEXT        PRIMARY KEY CHECK (request_hash ~ '^sha256:[0-9a-f]{64}$'),
@@ -264,6 +281,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_attested_host_operations_v2 (
     ),
     UNIQUE (receipt_hash, sequence)
 );
+ALTER TABLE public.research_lab_attested_host_operations_v2
+    ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS public.research_lab_attested_artifact_links_v2 (
     link_id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -277,6 +296,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_attested_artifact_links_v2 (
     created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (receipt_hash, artifact_kind, artifact_ref, artifact_hash)
 );
+ALTER TABLE public.research_lab_attested_artifact_links_v2
+    ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS public.research_lab_attested_business_artifact_links_v2 (
     receipt_hash             TEXT        NOT NULL REFERENCES public.research_lab_attested_execution_receipts_v2(receipt_hash) ON DELETE RESTRICT,
@@ -287,6 +308,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_attested_business_artifact_links_
     PRIMARY KEY (artifact_kind, artifact_ref, artifact_hash),
     UNIQUE (receipt_hash, artifact_kind, artifact_ref, artifact_hash)
 );
+ALTER TABLE public.research_lab_attested_business_artifact_links_v2
+    ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS public.research_lab_signed_transition_commands_v2 (
     command_hash             TEXT        PRIMARY KEY CHECK (command_hash ~ '^sha256:[0-9a-f]{64}$'),
@@ -309,6 +332,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_signed_transition_commands_v2 (
     CHECK (expires_at > issued_at),
     UNIQUE (target, idempotency_key)
 );
+ALTER TABLE public.research_lab_signed_transition_commands_v2
+    ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS public.research_lab_attested_weight_bundles_v2 (
     bundle_hash              TEXT        PRIMARY KEY CHECK (bundle_hash ~ '^sha256:[0-9a-f]{64}$'),
@@ -327,6 +352,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_attested_weight_bundles_v2 (
     created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (netuid, epoch_id, validator_hotkey)
 );
+ALTER TABLE public.research_lab_attested_weight_bundles_v2
+    ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS public.research_lab_attested_publication_events_v2 (
     weight_submission_event_hash TEXT    PRIMARY KEY CHECK (weight_submission_event_hash ~ '^sha256:[0-9a-f]{64}$'),
@@ -340,6 +367,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_attested_publication_events_v2 (
                                         ),
     created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE public.research_lab_attested_publication_events_v2
+    ENABLE ROW LEVEL SECURITY;
 
 CREATE TABLE IF NOT EXISTS public.research_lab_attested_weight_finalizations_v2 (
     weight_finalization_event_hash TEXT  PRIMARY KEY CHECK (weight_finalization_event_hash ~ '^sha256:[0-9a-f]{64}$'),
@@ -357,6 +386,8 @@ CREATE TABLE IF NOT EXISTS public.research_lab_attested_weight_finalizations_v2 
                                         ),
     created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE public.research_lab_attested_weight_finalizations_v2
+    ENABLE ROW LEVEL SECURITY;
 
 CREATE INDEX IF NOT EXISTS idx_research_lab_attested_v2_boot_role
     ON public.research_lab_attested_boot_identities_v2(role, commit_sha, created_at DESC);
@@ -380,6 +411,7 @@ CREATE INDEX IF NOT EXISTS idx_research_lab_provider_credentials_v2_ref
 DO $$
 DECLARE
     table_name TEXT;
+    trigger_name TEXT;
 BEGIN
     FOREACH table_name IN ARRAY ARRAY[
         'research_lab_provider_credential_envelopes_v2',
@@ -397,26 +429,54 @@ BEGIN
         'research_lab_attested_weight_finalizations_v2'
     ]
     LOOP
-        EXECUTE format('DROP TRIGGER IF EXISTS prevent_%I_mutation ON public.%I', table_name, table_name);
-        EXECUTE format(
-            'CREATE TRIGGER prevent_%I_mutation BEFORE UPDATE OR DELETE ON public.%I '
-            'FOR EACH ROW EXECUTE FUNCTION public.prevent_research_lab_attested_v2_mutation()',
-            table_name,
-            table_name
+        -- PostgreSQL truncates identifiers at 63 bytes. A short hash-derived
+        -- name prevents long table names from colliding on an idempotent rerun.
+        trigger_name := format(
+            'prevent_v2_%s_mutation',
+            substring(md5(table_name) FROM 1 FOR 16)
         );
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_trigger
+            WHERE tgrelid = format('public.%I', table_name)::regclass
+              AND tgname = trigger_name
+              AND NOT tgisinternal
+        ) THEN
+            EXECUTE format(
+                'CREATE TRIGGER %I BEFORE UPDATE OR DELETE ON public.%I '
+                'FOR EACH ROW EXECUTE FUNCTION public.prevent_research_lab_attested_v2_mutation()',
+                trigger_name,
+                table_name
+            );
+        END IF;
         EXECUTE format('REVOKE ALL ON TABLE public.%I FROM anon, authenticated', table_name);
         EXECUTE format('GRANT SELECT, INSERT ON TABLE public.%I TO service_role', table_name);
-        EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', table_name);
-        EXECUTE format('DROP POLICY IF EXISTS service_role_read ON public.%I', table_name);
-        EXECUTE format(
-            'CREATE POLICY service_role_read ON public.%I FOR SELECT TO service_role USING (true)',
-            table_name
-        );
-        EXECUTE format('DROP POLICY IF EXISTS service_role_insert ON public.%I', table_name);
-        EXECUTE format(
-            'CREATE POLICY service_role_insert ON public.%I FOR INSERT TO service_role WITH CHECK (true)',
-            table_name
-        );
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_policies
+            WHERE schemaname = 'public'
+              AND tablename = table_name
+              AND policyname = 'service_role_read'
+        ) THEN
+            EXECUTE format(
+                'CREATE POLICY service_role_read ON public.%I '
+                'FOR SELECT TO service_role USING (true)',
+                table_name
+            );
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_policies
+            WHERE schemaname = 'public'
+              AND tablename = table_name
+              AND policyname = 'service_role_insert'
+        ) THEN
+            EXECUTE format(
+                'CREATE POLICY service_role_insert ON public.%I '
+                'FOR INSERT TO service_role WITH CHECK (true)',
+                table_name
+            );
+        END IF;
     END LOOP;
 END;
 $$;

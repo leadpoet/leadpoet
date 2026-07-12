@@ -1,9 +1,26 @@
 -- V2 encrypted daily provider-evidence cache.
 --
--- Apply after script 86. The measured coordinator is the only plaintext
--- authority: PostgREST stores AES-GCM ciphertext plus content commitments.
+-- Apply after script 86. The shared append-only trigger function is repeated
+-- idempotently here so a partially ordered rollout cannot create an unguarded
+-- cache table. The measured coordinator is the only plaintext authority:
+-- PostgREST stores AES-GCM ciphertext plus content commitments.
 
 BEGIN;
+
+CREATE OR REPLACE FUNCTION public.prevent_research_lab_attested_v2_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+BEGIN
+    RAISE EXCEPTION '% is append-only; insert a new V2 record', TG_TABLE_NAME;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.prevent_research_lab_attested_v2_mutation()
+    FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.prevent_research_lab_attested_v2_mutation()
+    TO service_role;
 
 CREATE TABLE IF NOT EXISTS public.research_lab_provider_evidence_cache_v2 (
     schema_version            TEXT        NOT NULL
@@ -42,34 +59,63 @@ CREATE TABLE IF NOT EXISTS public.research_lab_provider_evidence_cache_v2 (
     UNIQUE (cache_entry_hash),
     UNIQUE (cache_artifact_id)
 );
+ALTER TABLE public.research_lab_provider_evidence_cache_v2
+    ENABLE ROW LEVEL SECURITY;
 
 CREATE INDEX IF NOT EXISTS idx_research_lab_provider_evidence_cache_v2_created
     ON public.research_lab_provider_evidence_cache_v2(utc_day DESC, created_at DESC);
 
-DROP TRIGGER IF EXISTS prevent_research_lab_provider_evidence_cache_v2_mutation
-    ON public.research_lab_provider_evidence_cache_v2;
-CREATE TRIGGER prevent_research_lab_provider_evidence_cache_v2_mutation
-    BEFORE UPDATE OR DELETE ON public.research_lab_provider_evidence_cache_v2
-    FOR EACH ROW EXECUTE FUNCTION public.prevent_research_lab_attested_v2_mutation();
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_trigger
+        WHERE tgrelid =
+              'public.research_lab_provider_evidence_cache_v2'::regclass
+          AND tgname =
+              'prevent_research_lab_provider_evidence_cache_v2_mutation'
+          AND NOT tgisinternal
+    ) THEN
+        CREATE TRIGGER prevent_research_lab_provider_evidence_cache_v2_mutation
+            BEFORE UPDATE OR DELETE
+            ON public.research_lab_provider_evidence_cache_v2
+            FOR EACH ROW EXECUTE FUNCTION
+                public.prevent_research_lab_attested_v2_mutation();
+    END IF;
+END;
+$$;
 
 REVOKE ALL ON TABLE public.research_lab_provider_evidence_cache_v2
     FROM anon, authenticated;
 GRANT SELECT, INSERT ON TABLE public.research_lab_provider_evidence_cache_v2
     TO service_role;
 
-ALTER TABLE public.research_lab_provider_evidence_cache_v2 ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS service_role_read
-    ON public.research_lab_provider_evidence_cache_v2;
-CREATE POLICY service_role_read
-    ON public.research_lab_provider_evidence_cache_v2
-    FOR SELECT TO service_role USING (true);
-
-DROP POLICY IF EXISTS service_role_insert
-    ON public.research_lab_provider_evidence_cache_v2;
-CREATE POLICY service_role_insert
-    ON public.research_lab_provider_evidence_cache_v2
-    FOR INSERT TO service_role WITH CHECK (true);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_policies
+        WHERE schemaname = 'public'
+          AND tablename = 'research_lab_provider_evidence_cache_v2'
+          AND policyname = 'service_role_read'
+    ) THEN
+        CREATE POLICY service_role_read
+            ON public.research_lab_provider_evidence_cache_v2
+            FOR SELECT TO service_role USING (true);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_policies
+        WHERE schemaname = 'public'
+          AND tablename = 'research_lab_provider_evidence_cache_v2'
+          AND policyname = 'service_role_insert'
+    ) THEN
+        CREATE POLICY service_role_insert
+            ON public.research_lab_provider_evidence_cache_v2
+            FOR INSERT TO service_role WITH CHECK (true);
+    END IF;
+END;
+$$;
 
 COMMENT ON TABLE public.research_lab_provider_evidence_cache_v2 IS
     'Append-only AES-GCM provider-evidence cache. Plaintext is available only inside approved coordinator enclaves.';

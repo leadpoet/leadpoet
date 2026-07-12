@@ -200,7 +200,8 @@ def test_all_active_submission_paths_use_epoch_bounded_helpers():
 
     assert primary_source.count("await self._authorize_and_set_weights_v2(") == 3
     assert primary_source.count("await self._set_weights_until_epoch_end(") == 2
-    assert auditor_source.count("self._set_weights_until_epoch_end(") == 2
+    assert auditor_source.count("self._set_weights_until_epoch_end(") == 1
+    assert "submit_burn_weights_to_uid0" not in auditor_source
     assert primary_source.count("self.subtensor.set_weights(") == 1
     assert auditor_source.count("self.subtensor.set_weights(") == 1
     assert "_submit_weights_to_gateway" not in primary_source

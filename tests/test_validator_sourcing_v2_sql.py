@@ -16,6 +16,12 @@ def test_sourcing_v2_table_is_additive_append_only_and_service_role_only():
     assert "TO service_role" in SQL
     assert "ENABLE ROW LEVEL SECURITY" in SQL
     assert "ALTER TABLE public.research_lab" not in SQL
+    assert "Apply script 86 before script 92" in SQL
+    assert "DROP TRIGGER" not in SQL
+    assert "DROP POLICY" not in SQL
+    assert SQL.index("ENABLE ROW LEVEL SECURITY") < SQL.index(
+        "CREATE INDEX IF NOT EXISTS"
+    )
 
 
 def test_sourcing_v2_row_binds_canonical_document_and_scoring_receipt():

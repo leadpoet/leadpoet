@@ -7,6 +7,19 @@
 
 BEGIN;
 
+DO $$
+BEGIN
+    IF to_regclass(
+        'public.research_lab_attested_execution_receipts_v2'
+    ) IS NULL OR to_regprocedure(
+        'public.prevent_research_lab_attested_v2_mutation()'
+    ) IS NULL THEN
+        RAISE EXCEPTION
+            'Missing V2 receipt authority. Apply script 86 before script 92.';
+    END IF;
+END;
+$$;
+
 CREATE TABLE IF NOT EXISTS public.validator_sourcing_epoch_inputs_v2 (
     epoch_id                 INTEGER     PRIMARY KEY CHECK (epoch_id >= 0),
     schema_version           TEXT        NOT NULL CHECK (schema_version = 'leadpoet.sourcing_epoch.v2'),
@@ -33,27 +46,61 @@ CREATE TABLE IF NOT EXISTS public.validator_sourcing_epoch_inputs_v2 (
     CHECK (receipt_doc->>'purpose' = 'qualification.sourcing_epoch.v2'),
     CHECK ((receipt_doc->>'epoch_id')::INTEGER = epoch_id)
 );
+ALTER TABLE public.validator_sourcing_epoch_inputs_v2
+    ENABLE ROW LEVEL SECURITY;
 
 CREATE INDEX IF NOT EXISTS idx_validator_sourcing_epoch_inputs_v2_created
     ON public.validator_sourcing_epoch_inputs_v2(created_at DESC);
 
-DROP TRIGGER IF EXISTS prevent_validator_sourcing_epoch_inputs_v2_mutation
-    ON public.validator_sourcing_epoch_inputs_v2;
-CREATE TRIGGER prevent_validator_sourcing_epoch_inputs_v2_mutation
-    BEFORE UPDATE OR DELETE ON public.validator_sourcing_epoch_inputs_v2
-    FOR EACH ROW EXECUTE FUNCTION public.prevent_research_lab_attested_v2_mutation();
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_trigger
+        WHERE tgrelid =
+              'public.validator_sourcing_epoch_inputs_v2'::regclass
+          AND tgname =
+              'prevent_validator_sourcing_epoch_inputs_v2_mutation'
+          AND NOT tgisinternal
+    ) THEN
+        CREATE TRIGGER prevent_validator_sourcing_epoch_inputs_v2_mutation
+            BEFORE UPDATE OR DELETE
+            ON public.validator_sourcing_epoch_inputs_v2
+            FOR EACH ROW EXECUTE FUNCTION
+                public.prevent_research_lab_attested_v2_mutation();
+    END IF;
+END;
+$$;
 
 REVOKE ALL ON TABLE public.validator_sourcing_epoch_inputs_v2 FROM anon, authenticated;
 GRANT SELECT, INSERT ON TABLE public.validator_sourcing_epoch_inputs_v2 TO service_role;
 
-ALTER TABLE public.validator_sourcing_epoch_inputs_v2 ENABLE ROW LEVEL SECURITY;
-
-DROP POLICY IF EXISTS service_role_read ON public.validator_sourcing_epoch_inputs_v2;
-CREATE POLICY service_role_read ON public.validator_sourcing_epoch_inputs_v2
-    FOR SELECT TO service_role USING (true);
-DROP POLICY IF EXISTS service_role_insert ON public.validator_sourcing_epoch_inputs_v2;
-CREATE POLICY service_role_insert ON public.validator_sourcing_epoch_inputs_v2
-    FOR INSERT TO service_role WITH CHECK (true);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_policies
+        WHERE schemaname = 'public'
+          AND tablename = 'validator_sourcing_epoch_inputs_v2'
+          AND policyname = 'service_role_read'
+    ) THEN
+        CREATE POLICY service_role_read
+            ON public.validator_sourcing_epoch_inputs_v2
+            FOR SELECT TO service_role USING (true);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_policies
+        WHERE schemaname = 'public'
+          AND tablename = 'validator_sourcing_epoch_inputs_v2'
+          AND policyname = 'service_role_insert'
+    ) THEN
+        CREATE POLICY service_role_insert
+            ON public.validator_sourcing_epoch_inputs_v2
+            FOR INSERT TO service_role WITH CHECK (true);
+    END IF;
+END;
+$$;
 
 COMMENT ON TABLE public.validator_sourcing_epoch_inputs_v2 IS
     'Append-only measured sourcing epoch aggregates for authoritative V2 final-weight lineage. Legacy host JSON is not a V2 source.';

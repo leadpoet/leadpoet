@@ -11,3 +11,4 @@ def test_enclave_sealed_openrouter_migration_is_additive_and_append_only():
     assert "UPDATE " not in sql.upper()
     assert "DELETE " not in sql.upper()
     assert "research_lab_provider_credential_envelopes_v2" in sql
+    assert "Apply script 86 before script 91" in sql

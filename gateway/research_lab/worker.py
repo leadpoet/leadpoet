@@ -5360,7 +5360,12 @@ def _fetch_openrouter_generation_stats(
             delay_index = min(attempt - 1, len(_OPENROUTER_GENERATION_STATS_RETRY_DELAYS_SECONDS) - 1)
             time.sleep(_OPENROUTER_GENERATION_STATS_RETRY_DELAYS_SECONDS[delay_index])
 
-    logger.warning(
+    # A terminal 404 means OpenRouter never indexed this generation (common
+    # for some routed completions); the cost pipeline falls back to the
+    # chat-completion usage figure and records the reconciliation status, so
+    # this is expected telemetry degradation — not worth a recurring WARNING.
+    terminal_log = logger.info if last_status == "http_404" else logger.warning
+    terminal_log(
         "research_lab_openrouter_generation_stats_unavailable response_id=%s status=%s attempts=%s",
         compact_ref(response_id),
         last_status,

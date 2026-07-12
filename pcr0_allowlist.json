@@ -1,8 +1,15 @@
 {
   "_comment": "PCR0 allowlist for LeadPoet TEE verification. Updated by CI/CD on each enclave build.",
-  "_updated": "2026-07-11T23:20:00Z",
+  "_updated": "2026-07-12T00:45:00Z",
   "_repo": "https://github.com/leadpoet/leadpoet",
   "gateway_pcr0": [
+    {
+      "pcr0": "2b55d76bbf814443fcfd137b0a82384a2c2ff395372bb6b09b0396c529763589801031354e8a2a3a032f2245d7385728",
+      "version": "2026-07-12",
+      "deployed": "2026-07-12",
+      "commit_hash": "4bfbb40b31f5c129350a8db67da0f7f44764dd8a",
+      "notes": "gateway enclave: champion schedule-cap cutoff deploy"
+    },
     {
       "pcr0": "499bbe2f2417eadc224478f6c65a02e105a4b099f9051959bf4b988b3c23d03cbf4357ea21cd8ae7e9ec5c243342a73c",
       "version": "2026-07-11b",
@@ -46,6 +53,13 @@
     }
   ],
   "validator_pcr0": [
+    {
+      "pcr0": "bae58e32228990381dba0facd1066578fd1a0979bfa7a7b7761391ece8ecf4ebcd0f42f82c2104cf2f0b4ed4d33a1273",
+      "version": "2026-07-12",
+      "deployed": "2026-07-12",
+      "commit_hash": "4bfbb40b31f5c129350a8db67da0f7f44764dd8a",
+      "notes": "validator enclave: champion schedule-cap cutoff deploy"
+    },
     {
       "pcr0": "9c2bea14c8c4c760ca8981e08504c516c396fb81b023833445c28d30d1c64c4846ae993d94bdd70c5337c475e2d482c6",
       "version": "2026-07-11b",

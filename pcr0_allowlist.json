@@ -4,6 +4,13 @@
   "_repo": "https://github.com/leadpoet/leadpoet",
   "gateway_pcr0": [
     {
+      "pcr0": "76e4ae994da0f839862be12605117a84b11b4ad116db4443d8f7e2d34cb230153cffc8447bc4671d65eb33409406561f",
+      "version": "2026-07-12e",
+      "deployed": "2026-07-12",
+      "commit_hash": "07c81c7ff751714d838428effd6c987e4a9e9db0",
+      "notes": "gateway enclave: pinned re-restart of the pre-V2 head"
+    },
+    {
       "pcr0": "59a4373709f3518f6de51848e79e38513c55eb3a7991b534bf6fdfc4a37f829d5662650468e2317463d70bbefe283d1d",
       "version": "2026-07-12d",
       "deployed": "2026-07-12",

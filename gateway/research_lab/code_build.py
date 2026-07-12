@@ -297,7 +297,12 @@ class CodeEditCandidateBuilder:
             diff_path = tmp_dir / "candidate.diff"
             diff_path.write_text(draft.unified_diff, encoding="utf-8")
             try:
-                _run(["git", "apply", "--recount", "--check", str(diff_path)], cwd=repo_dir, timeout_seconds=120)
+                _run_git_apply(
+                    diff_path,
+                    cwd=repo_dir,
+                    timeout_seconds=120,
+                    check=True,
+                )
             except CodeEditBuildError as exc:
                 raise CodeEditPatchApplyError(
                     str(exc),
@@ -361,8 +366,18 @@ class CodeEditCandidateBuilder:
             draft_path.write_text(json.dumps(draft.to_dict(), sort_keys=True), encoding="utf-8")
             parent_manifest_path.write_text(json.dumps(parent_artifact.to_dict(), sort_keys=True), encoding="utf-8")
             try:
-                _run(["git", "apply", "--recount", "--check", str(diff_path)], cwd=repo_dir, timeout_seconds=120)
-                _run(["git", "apply", "--recount", str(diff_path)], cwd=repo_dir, timeout_seconds=120)
+                _run_git_apply(
+                    diff_path,
+                    cwd=repo_dir,
+                    timeout_seconds=120,
+                    check=True,
+                )
+                _run_git_apply(
+                    diff_path,
+                    cwd=repo_dir,
+                    timeout_seconds=120,
+                    check=False,
+                )
             except CodeEditBuildError as exc:
                 raise CodeEditPatchApplyError(
                     str(exc),
@@ -1608,6 +1623,91 @@ def _run(cmd: list[str], *, cwd: Path, timeout_seconds: int) -> str:
             stdout=_safe_text(exc.stdout, limit=12000),
             exit_code=int(exc.returncode),
         ) from exc
+
+
+def _run_git_apply(
+    diff_path: Path,
+    *,
+    cwd: Path,
+    timeout_seconds: int,
+    check: bool,
+) -> str:
+    args = ["git", "apply", "--recount"]
+    if check:
+        args.append("--check")
+    args.append(str(diff_path))
+    try:
+        return _run(args, cwd=cwd, timeout_seconds=timeout_seconds)
+    except CodeEditBuildError as strict_error:
+        unified_diff = diff_path.read_text(encoding="utf-8")
+        if not _can_retry_git_apply_without_edge_context(unified_diff):
+            raise
+
+        fallback_args = ["git", "apply", "--recount", "--unidiff-zero"]
+        if check:
+            fallback_args.append("--check")
+        fallback_args.append(str(diff_path))
+        try:
+            result = _run(fallback_args, cwd=cwd, timeout_seconds=timeout_seconds)
+        except CodeEditBuildError:
+            raise strict_error
+        logger.info(
+            "research_lab_patch_apply_zero_edge_context_fallback check=%s diff_hash=%s",
+            int(check),
+            sha256_json({"unified_diff": unified_diff}),
+        )
+        return result
+
+
+def _can_retry_git_apply_without_edge_context(unified_diff: str) -> bool:
+    """Allow Git's zero-context mode only for exact replacement hunks.
+
+    Git rejects model-generated hunks that omit unchanged context at either
+    edge, even when every removed byte matches the parent source. Requiring a
+    removal in each edge-context-free hunk keeps the fallback anchored to
+    existing source and excludes line-number-only insertion patches. Hunks
+    with normal context at both edges remain safely anchored as usual.
+    """
+
+    hunk_prefixes: list[str] = []
+    saw_hunk = False
+    needs_fallback = False
+
+    def finish_hunk() -> bool:
+        nonlocal needs_fallback
+        if not hunk_prefixes:
+            return False
+        missing_edge_context = hunk_prefixes[0] != " " or hunk_prefixes[-1] != " "
+        if missing_edge_context and "-" not in hunk_prefixes:
+            return False
+        if missing_edge_context:
+            needs_fallback = True
+        return True
+
+    for line in str(unified_diff or "").rstrip("\r\n").splitlines():
+        if line.startswith("@@ "):
+            if hunk_prefixes and not finish_hunk():
+                return False
+            hunk_prefixes = []
+            saw_hunk = True
+            continue
+        if not saw_hunk:
+            continue
+        if line.startswith("diff --git "):
+            if not finish_hunk():
+                return False
+            hunk_prefixes = []
+            saw_hunk = False
+            continue
+        if line.startswith("\\ No newline at end of file"):
+            continue
+        if not line or line[0] not in {" ", "+", "-"}:
+            return False
+        hunk_prefixes.append(line[0])
+
+    if not saw_hunk or not finish_hunk():
+        return False
+    return needs_fallback
 
 
 def _run_shell(cmd: str, *, cwd: Path, env: Mapping[str, str], timeout_seconds: int) -> str:

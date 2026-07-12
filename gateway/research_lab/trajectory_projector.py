@@ -91,6 +91,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field, fields
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -187,6 +188,11 @@ ENGINE_VERSION = "gateway_code_edit_image_build:v1"
 
 _TERMINAL_LOOP_EVENT_TYPES = frozenset({"loop_completed", "loop_failed"})
 _QUEUE_TERMINAL_STATUSES = ("completed", "failed")
+_CANDIDATE_EVALUATION_TERMINAL_STATUSES = frozenset(
+    {"scored", "failed", "rejected", "tombstoned"}
+)
+_TRAJECTORY_SETTLE_SECONDS_ENV = "RESEARCH_LAB_TRAJECTORY_SETTLE_SECONDS"
+_DEFAULT_TRAJECTORY_SETTLE_SECONDS = 900
 
 _SCHEMA_PATH = (
     Path(__file__).resolve().parents[2] / "schemas" / TRAJECTORY_SCHEMA_NAME
@@ -2303,7 +2309,8 @@ class ProjectionResult:
     status: str  # projected | dry_run | skipped_existing | skipped_disabled |
     #             skipped_incomplete | failed | traces_backfilled |
     #             traces_dry_run | skipped_traces_existing |
-    #             skipped_unprojected | skipped_no_trace_sources
+    #             skipped_unprojected | skipped_no_trace_sources |
+    #             skipped_event_drift
     trajectory_id: str | None = None
     event_count: int = 0
     ledger_row_count: int = 0
@@ -3486,6 +3493,98 @@ async def _insert_missing(
     return True
 
 
+async def _missing_trajectory_event_rows(
+    store: Any, projection: TrajectoryProjection
+) -> list[dict[str, Any]]:
+    """Return only absent deterministic events, failing closed on drift."""
+
+    existing_rows = await store.select_all(
+        TRAJECTORY_EVENTS_TABLE,
+        filters=(("trajectory_id", projection.trajectory_id),),
+        order_by=(("seq", False),),
+        max_rows=max(5000, len(projection.event_rows) + 1),
+    )
+    expected_by_seq = {int(row["seq"]): row for row in projection.event_rows}
+    existing_seqs: set[int] = set()
+    for existing in existing_rows:
+        seq = _i(existing.get("seq"), default=-1)
+        expected = expected_by_seq.get(seq)
+        if expected is None:
+            raise RuntimeError(
+                f"trajectory_event_drift:unexpected_existing_seq:{seq}"
+            )
+        if (
+            str(existing.get("event_type") or "")
+            != str(expected.get("event_type") or "")
+            or str(existing.get("anchored_hash") or "")
+            != str(expected.get("anchored_hash") or "")
+        ):
+            raise RuntimeError(f"trajectory_event_drift:hash_mismatch_seq:{seq}")
+        existing_seqs.add(seq)
+    return [
+        dict(row)
+        for row in projection.event_rows
+        if int(row["seq"]) not in existing_seqs
+    ]
+
+
+async def _insert_missing_trajectory_event_row(
+    store: Any, row: Mapping[str, Any]
+) -> bool:
+    filters = (
+        ("trajectory_id", row["trajectory_id"]),
+        ("seq", row["seq"]),
+    )
+    existing = await store.select_one(TRAJECTORY_EVENTS_TABLE, filters=filters)
+    if existing:
+        if (
+            str(existing.get("event_type") or "")
+            != str(row.get("event_type") or "")
+            or str(existing.get("anchored_hash") or "")
+            != str(row.get("anchored_hash") or "")
+        ):
+            raise RuntimeError(
+                f"trajectory_event_drift:insert_conflict_seq:{int(row['seq'])}"
+            )
+        return False
+    try:
+        await store.insert_row(TRAJECTORY_EVENTS_TABLE, dict(row))
+    except Exception as exc:
+        message = str(exc).lower()
+        if not (
+            "duplicate" in message
+            or "unique" in message
+            or "conflict" in message
+        ):
+            raise
+        existing = await store.select_one(TRAJECTORY_EVENTS_TABLE, filters=filters)
+        if not existing or (
+            str(existing.get("event_type") or "")
+            != str(row.get("event_type") or "")
+            or str(existing.get("anchored_hash") or "")
+            != str(row.get("anchored_hash") or "")
+        ):
+            raise RuntimeError(
+                f"trajectory_event_drift:insert_race_seq:{int(row['seq'])}"
+            ) from exc
+        return False
+    return True
+
+
+async def _missing_results_ledger_rows(
+    store: Any, projection: TrajectoryProjection
+) -> list[dict[str, Any]]:
+    missing: list[dict[str, Any]] = []
+    for row in projection.ledger_rows:
+        existing = await store.select_one(
+            RESULTS_LEDGER_TABLE,
+            filters=(("ledger_row_id", row["ledger_row_id"]),),
+        )
+        if not existing:
+            missing.append(dict(row))
+    return missing
+
+
 def _trace_call_key(call: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
     s3_ref = str(call.get("s3_ref") or "")
     sha256 = str(call.get("sha256") or "")
@@ -4020,6 +4119,79 @@ async def load_projection_inputs(
     }
 
 
+def _projection_readiness_errors(
+    *,
+    candidate_rows: Sequence[Mapping[str, Any]],
+    evaluation_events: Sequence[Mapping[str, Any]],
+    now: datetime | None = None,
+) -> list[str]:
+    candidate_ids = {
+        str(row.get("candidate_id") or "")
+        for row in candidate_rows
+        if str(row.get("candidate_id") or "")
+    }
+    if not candidate_ids:
+        return []
+
+    latest_by_candidate: dict[str, Mapping[str, Any]] = {}
+    latest_keys: dict[str, tuple[int, str]] = {}
+    for row in evaluation_events:
+        candidate_id = str(row.get("candidate_id") or "")
+        if candidate_id not in candidate_ids:
+            continue
+        key = (_i(row.get("seq"), default=-1), str(row.get("created_at") or ""))
+        if candidate_id not in latest_keys or key > latest_keys[candidate_id]:
+            latest_keys[candidate_id] = key
+            latest_by_candidate[candidate_id] = row
+
+    pending = [
+        candidate_id
+        for candidate_id in sorted(candidate_ids)
+        if str(
+            latest_by_candidate.get(candidate_id, {}).get("candidate_status")
+            or latest_by_candidate.get(candidate_id, {}).get("event_type")
+            or ""
+        )
+        not in _CANDIDATE_EVALUATION_TERMINAL_STATUSES
+    ]
+    if pending:
+        return [f"candidate_evaluations_pending:{len(pending)}"]
+
+    terminal_times: list[datetime] = []
+    for candidate_id in sorted(candidate_ids):
+        created_at = latest_by_candidate[candidate_id].get("created_at")
+        if not created_at:
+            return ["candidate_evaluation_terminal_timestamp_missing"]
+        try:
+            terminal_times.append(
+                datetime.fromisoformat(
+                    coerce_iso_z(created_at).replace("Z", "+00:00")
+                )
+            )
+        except Exception:
+            return ["candidate_evaluation_terminal_timestamp_invalid"]
+
+    try:
+        settle_seconds = max(
+            0,
+            int(
+                os.getenv(
+                    _TRAJECTORY_SETTLE_SECONDS_ENV,
+                    str(_DEFAULT_TRAJECTORY_SETTLE_SECONDS),
+                )
+            ),
+        )
+    except ValueError:
+        settle_seconds = _DEFAULT_TRAJECTORY_SETTLE_SECONDS
+    observed_at = now or datetime.now(timezone.utc)
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    remaining = settle_seconds - (observed_at - max(terminal_times)).total_seconds()
+    if remaining > 0:
+        return [f"candidate_evaluation_settling:{max(1, int(remaining))}"]
+    return []
+
+
 async def project_run(
     run_id: str,
     *,
@@ -4057,6 +4229,17 @@ async def project_run(
                 trajectory_id=tid,
                 errors=["no live loop events for run"],
             )
+        readiness_errors = _projection_readiness_errors(
+            candidate_rows=inputs["candidate_rows"],
+            evaluation_events=inputs["evaluation_events"],
+        )
+        if readiness_errors:
+            return ProjectionResult(
+                run_id=run_id,
+                status="skipped_incomplete",
+                trajectory_id=tid,
+                errors=readiness_errors,
+            )
         projection = build_trajectory_projection(**inputs)
         if projection.errors:
             logger.warning(
@@ -4084,11 +4267,21 @@ async def project_run(
         # Envelope first (events FK-reference it), then append-only events in
         # seq order, then ledger rows, then the pointer rows.  A crash between
         # envelope and pointer writes is repaired by --traces-backfill.
-        await store.insert_row(TRAJECTORIES_TABLE, projection.envelope_row)
+        await _insert_missing(
+            store,
+            TRAJECTORIES_TABLE,
+            "trajectory_id",
+            projection.envelope_row,
+        )
         for row in projection.event_rows:
-            await store.insert_row(TRAJECTORY_EVENTS_TABLE, row)
+            await _insert_missing_trajectory_event_row(store, row)
         for row in projection.ledger_rows:
-            await store.insert_row(RESULTS_LEDGER_TABLE, row)
+            await _insert_missing(
+                store,
+                RESULTS_LEDGER_TABLE,
+                "ledger_row_id",
+                row,
+            )
         trace_written, evidence_written, provider_usage_written = await _write_missing_corpus_trace_rows(
             store, projection
         )
@@ -4187,14 +4380,12 @@ async def backfill_run_corpus_trace_rows(
     store: Any | None = None,
     dry_run: bool = True,
 ) -> ProjectionResult:
-    """Add missing execution_traces / evidence_bundles rows for ONE
-    already-projected run (fablefollowup.md item 5.5 re-projection command).
+    """Repair missing append-only projection and pointer rows for one run.
 
-    Forward-only: NEVER touches the run's envelope/events/ledger rows -- the
-    event log is append-only + hash-anchored, so historical runs get pointer
-    rows without event retrofit.  Absence-tolerant: a historical run with no
-    raw traces and no score bundles reports ``skipped_no_trace_sources``.
-    Best-effort: never raises.
+    Forward-only: existing envelope/event/ledger rows are never updated or
+    deleted. Late deterministic events and ledger rows are inserted only after
+    every stored event hash matches a fresh projection. Absence-tolerant and
+    best-effort: never raises.
     """
     run_id = str(run_id)
     store = store or GatewayProjectorStore()
@@ -4225,6 +4416,17 @@ async def backfill_run_corpus_trace_rows(
                 trajectory_id=tid,
                 errors=["no live loop events for run"],
             )
+        readiness_errors = _projection_readiness_errors(
+            candidate_rows=inputs["candidate_rows"],
+            evaluation_events=inputs["evaluation_events"],
+        )
+        if readiness_errors:
+            return ProjectionResult(
+                run_id=run_id,
+                status="skipped_incomplete",
+                trajectory_id=tid,
+                errors=readiness_errors,
+            )
         projection = build_trajectory_projection(**inputs)
         if projection.errors:
             return ProjectionResult(
@@ -4233,14 +4435,18 @@ async def backfill_run_corpus_trace_rows(
                 trajectory_id=tid,
                 errors=projection.errors,
             )
-        if (
-            not projection.execution_trace_rows
-            and not projection.evidence_bundle_rows
-            and not projection.provider_usage_ledger_rows
-        ):
-            return ProjectionResult(
-                run_id=run_id, status="skipped_no_trace_sources", trajectory_id=tid
-            )
+        try:
+            missing_events = await _missing_trajectory_event_rows(store, projection)
+        except RuntimeError as exc:
+            if str(exc).startswith("trajectory_event_drift:"):
+                return ProjectionResult(
+                    run_id=run_id,
+                    status="skipped_event_drift",
+                    trajectory_id=tid,
+                    errors=[str(exc)],
+                )
+            raise
+        missing_ledger = await _missing_results_ledger_rows(store, projection)
         missing_traces = [
             row
             for row in projection.execution_trace_rows
@@ -4256,7 +4462,13 @@ async def backfill_run_corpus_trace_rows(
             for row in projection.provider_usage_ledger_rows
             if await _provider_usage_ledger_row_needs_write(store, row)
         ]
-        if not missing_traces and not missing_evidence and not missing_provider_usage:
+        if not (
+            missing_events
+            or missing_ledger
+            or missing_traces
+            or missing_evidence
+            or missing_provider_usage
+        ):
             return ProjectionResult(
                 run_id=run_id, status="skipped_traces_existing", trajectory_id=tid
             )
@@ -4265,10 +4477,25 @@ async def backfill_run_corpus_trace_rows(
                 run_id=run_id,
                 status="traces_dry_run",
                 trajectory_id=tid,
+                event_count=len(missing_events),
+                ledger_row_count=len(missing_ledger),
                 execution_trace_count=len(missing_traces),
                 evidence_bundle_count=len(missing_evidence),
                 provider_usage_ledger_count=len(missing_provider_usage),
             )
+        event_written = 0
+        for row in missing_events:
+            if await _insert_missing_trajectory_event_row(store, row):
+                event_written += 1
+        ledger_written = 0
+        for row in missing_ledger:
+            if await _insert_missing(
+                store,
+                RESULTS_LEDGER_TABLE,
+                "ledger_row_id",
+                row,
+            ):
+                ledger_written += 1
         trace_written = 0
         for row in missing_traces:
             trace_status = await _upsert_execution_trace_row(store, row)
@@ -4284,10 +4511,13 @@ async def backfill_run_corpus_trace_rows(
             if await _insert_provider_usage_ledger_row(store, row):
                 provider_usage_written += 1
         logger.info(
-            "research_lab_corpus_traces_backfilled run_id=%s trajectory_id=%s "
-            "execution_traces=%s evidence_bundles=%s provider_usage_rows=%s",
+            "research_lab_projection_backfilled run_id=%s trajectory_id=%s "
+            "events=%s ledger_rows=%s execution_traces=%s evidence_bundles=%s "
+            "provider_usage_rows=%s",
             run_id,
             tid,
+            event_written,
+            ledger_written,
             trace_written,
             evidence_written,
             provider_usage_written,
@@ -4296,6 +4526,8 @@ async def backfill_run_corpus_trace_rows(
             run_id=run_id,
             status="traces_backfilled",
             trajectory_id=tid,
+            event_count=event_written,
+            ledger_row_count=ledger_written,
             execution_trace_count=trace_written,
             evidence_bundle_count=evidence_written,
             provider_usage_ledger_count=provider_usage_written,
@@ -4319,7 +4551,7 @@ async def backfill_corpus_trace_rows(
     max_candidates: int = 5000,
     max_attempts: int | None = None,
 ) -> list[ProjectionResult]:
-    """Scan already-projected terminal runs and add missing pointer rows.
+    """Scan projected terminal runs and add missing append-only rows.
 
     Batch-capped: stops after ``batch_size`` runs produced (or, in dry-run,
     would produce) writes. ``max_attempts`` separately caps row inspections so
@@ -4515,8 +4747,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--traces-backfill",
         action="store_true",
         help=(
-            "add missing execution_traces/evidence_bundles pointer rows to "
-            "already-projected runs (append-only events are never touched); "
+            "add missing append-only events/ledger rows and trace/evidence "
+            "pointers to already-projected runs; "
             "combine with --run-id to target one run"
         ),
     )

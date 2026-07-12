@@ -45,7 +45,20 @@ def coerce_iso_z(value: str | datetime) -> str:
     if isinstance(value, datetime):
         dt = value
     else:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        text = str(value).strip().replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            match = re.fullmatch(
+                r"(?P<prefix>.+T\d{2}:\d{2}:\d{2})\.(?P<fraction>\d+)(?P<suffix>[+-]\d{2}:\d{2})",
+                text,
+            )
+            if match is None:
+                raise
+            fraction = match.group("fraction")[:6].ljust(6, "0")
+            dt = datetime.fromisoformat(
+                f"{match.group('prefix')}.{fraction}{match.group('suffix')}"
+            )
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

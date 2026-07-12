@@ -184,6 +184,62 @@ def test_new_and_unread_source_paths_remain_blocked():
     ) == ["code_edit_unread_source_file:sourcing_model/existing.py"]
 
 
+def test_git_apply_accepts_exact_replacement_hunk_without_trailing_context(tmp_path):
+    source_dir = tmp_path / "sourcing_model"
+    source_dir.mkdir()
+    source_path = source_dir / "discovery.py"
+    source_path.write_text(
+        "def build_query_variants():\n"
+        "    variants = []\n"
+        "    variants.append('strict')\n"
+        "    return variants\n"
+        "\n"
+        "def next_function():\n"
+        "    return True\n",
+        encoding="utf-8",
+    )
+    diff_path = tmp_path / "candidate.diff"
+    diff_path.write_text(
+        "diff --git a/sourcing_model/discovery.py b/sourcing_model/discovery.py\n"
+        "--- a/sourcing_model/discovery.py\n"
+        "+++ b/sourcing_model/discovery.py\n"
+        "@@ -1,4 +1,3 @@\n"
+        " def build_query_variants():\n"
+        "-    variants = []\n"
+        "-    variants.append('strict')\n"
+        "-    return variants\n"
+        "+    return ['strict', 'companion']\n",
+        encoding="utf-8",
+    )
+
+    code_build._run_git_apply(
+        diff_path,
+        cwd=tmp_path,
+        timeout_seconds=10,
+        check=True,
+    )
+    code_build._run_git_apply(
+        diff_path,
+        cwd=tmp_path,
+        timeout_seconds=10,
+        check=False,
+    )
+
+    assert "return ['strict', 'companion']" in source_path.read_text(encoding="utf-8")
+
+
+def test_git_apply_context_fallback_rejects_addition_only_hunks():
+    addition_only = (
+        "diff --git a/sourcing_model/discovery.py b/sourcing_model/discovery.py\n"
+        "--- a/sourcing_model/discovery.py\n"
+        "+++ b/sourcing_model/discovery.py\n"
+        "@@ -1,0 +1,1 @@\n"
+        "+unsafe_by_line_number = True\n"
+    )
+
+    assert code_build._can_retry_git_apply_without_edge_context(addition_only) is False
+
+
 def test_diff_added_material_keeps_headers_and_added_lines_only():
     # File headers stay (paths are model-chosen — a smuggling vector); context
     # and removed lines are verbatim parent source and are excluded.

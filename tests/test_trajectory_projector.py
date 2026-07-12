@@ -12,6 +12,7 @@ research_lab.trajectory_corpus.validate_trajectory_corpus_source_record.
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timezone
 import uuid
 from typing import Any, Mapping, Sequence
 
@@ -24,6 +25,7 @@ from gateway.research_lab.trajectory_projector import (
     RESULTS_LEDGER_TABLE,
     TRAJECTORIES_TABLE,
     TRAJECTORY_EVENTS_TABLE,
+    backfill_run_corpus_trace_rows,
     build_trajectory_projection,
     find_protected_material,
     project_completed_runs,
@@ -33,7 +35,7 @@ from gateway.research_lab.trajectory_projector import (
     trajectory_id_for_run,
     verify_anchored_hash,
 )
-from research_lab.canonical import sha256_json
+from research_lab.canonical import coerce_iso_z, sha256_json
 from research_lab.schema_validation import validate_schema_record
 from research_lab.trajectory_corpus import validate_trajectory_corpus_source_record
 
@@ -425,7 +427,19 @@ def happy_path_tables() -> dict[str, list[dict[str, Any]]]:
                 },
             },
             "created_at": "2026-06-20T11:00:00Z",
-        }
+        },
+        {
+            "event_id": str(uuid.uuid4()),
+            "candidate_id": CANDIDATE_3,
+            "run_id": RUN_ID,
+            "ticket_id": TICKET_ID,
+            "seq": 1,
+            "event_type": "tombstoned",
+            "candidate_status": "tombstoned",
+            "score_bundle_id": None,
+            "event_doc": {"reason": "candidate_evaluation_closed_without_score"},
+            "created_at": "2026-06-20T11:01:00Z",
+        },
     ]
     promotion_events = [
         {
@@ -757,6 +771,114 @@ async def test_rerun_is_idempotent(tables, enabled):
     assert store.write_count() == writes_after_first
 
 
+def test_projection_waits_for_terminal_candidate_and_settlement(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_TRAJECTORY_SETTLE_SECONDS", "900")
+    candidate = {"candidate_id": CANDIDATE_1}
+    now = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
+
+    pending = trajectory_projector_mod._projection_readiness_errors(
+        candidate_rows=[candidate],
+        evaluation_events=[
+            {
+                "candidate_id": CANDIDATE_1,
+                "seq": 1,
+                "candidate_status": "evaluating",
+                "created_at": "2026-07-12T07:30:00Z",
+            }
+        ],
+        now=now,
+    )
+    settling = trajectory_projector_mod._projection_readiness_errors(
+        candidate_rows=[candidate],
+        evaluation_events=[
+            {
+                "candidate_id": CANDIDATE_1,
+                "seq": 2,
+                "candidate_status": "scored",
+                "created_at": "2026-07-12T07:55:00Z",
+            }
+        ],
+        now=now,
+    )
+    ready = trajectory_projector_mod._projection_readiness_errors(
+        candidate_rows=[candidate],
+        evaluation_events=[
+            {
+                "candidate_id": CANDIDATE_1,
+                "seq": 2,
+                "candidate_status": "scored",
+                "created_at": "2026-07-12T07:30:00Z",
+            }
+        ],
+        now=now,
+    )
+
+    assert pending == ["candidate_evaluations_pending:1"]
+    assert settling == ["candidate_evaluation_settling:600"]
+    assert ready == []
+
+
+def test_coerce_iso_z_accepts_postgres_variable_fraction_precision():
+    assert coerce_iso_z("2026-07-12T03:56:42.81687+00:00") == "2026-07-12T03:56:42Z"
+    assert coerce_iso_z("2026-07-12T03:56:42.816870123Z") == "2026-07-12T03:56:42Z"
+
+
+async def test_backfill_appends_late_event_without_rewriting_existing_rows(tables, enabled):
+    store = FakeStore(tables)
+    first = await project_run(RUN_ID, store=store, dry_run=False)
+    assert first.status == "projected"
+    trajectory_id = trajectory_id_for_run(RUN_ID)
+    existing = store.tables[TRAJECTORY_EVENTS_TABLE]
+    removed = existing.pop()
+    assert removed["trajectory_id"] == trajectory_id
+    hashes_before = {
+        int(row["seq"]): row["anchored_hash"]
+        for row in existing
+        if row["trajectory_id"] == trajectory_id
+    }
+    writes_before = store.write_count()
+
+    repaired = await backfill_run_corpus_trace_rows(
+        RUN_ID,
+        store=store,
+        dry_run=False,
+    )
+
+    assert repaired.status == "traces_backfilled"
+    assert repaired.event_count == 1
+    assert store.write_count() == writes_before + 1
+    stored = sorted(
+        (
+            row
+            for row in store.tables[TRAJECTORY_EVENTS_TABLE]
+            if row["trajectory_id"] == trajectory_id
+        ),
+        key=lambda row: row["seq"],
+    )
+    assert [row["seq"] for row in stored] == list(range(len(stored)))
+    assert stored[-1]["anchored_hash"] == removed["anchored_hash"]
+    assert {
+        int(row["seq"]): row["anchored_hash"] for row in stored[:-1]
+    } == hashes_before
+
+
+async def test_backfill_fails_closed_when_existing_event_hash_drifted(tables, enabled):
+    store = FakeStore(tables)
+    await project_run(RUN_ID, store=store, dry_run=False)
+    store.tables[TRAJECTORY_EVENTS_TABLE][0]["anchored_hash"] = "sha256:drift"
+    writes_before = store.write_count()
+
+    result = await backfill_run_corpus_trace_rows(
+        RUN_ID,
+        store=store,
+        dry_run=False,
+    )
+
+    assert result.status == "skipped_event_drift"
+    assert "trajectory_event_drift:hash_mismatch_seq:0" in result.errors
+    assert store.write_count() == writes_before
+
+
 async def test_dry_run_writes_nothing(tables, enabled):
     store = FakeStore(tables)
     result = await project_run(RUN_ID, store=store, dry_run=True)
@@ -996,7 +1118,18 @@ async def test_scorer_crash_yields_crash_trace_row(enabled):
             "candidate_status": "failed",
             "event_doc": {"error": "scoring worker crashed mid-evaluation"},
             "created_at": "2026-06-20T11:00:00Z",
-        }
+        },
+        {
+            "event_id": str(uuid.uuid4()),
+            "candidate_id": CANDIDATE_3,
+            "run_id": RUN_ID,
+            "ticket_id": TICKET_ID,
+            "seq": 1,
+            "event_type": "tombstoned",
+            "candidate_status": "tombstoned",
+            "event_doc": {"reason": "candidate_evaluation_closed_without_score"},
+            "created_at": "2026-06-20T11:01:00Z",
+        },
     ]
     tables["research_evaluation_score_bundles"] = []
     tables["research_lab_candidate_promotion_events"] = []

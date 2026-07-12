@@ -54,6 +54,9 @@ from .ticket_lifecycle import (
     unpaid_ticket_deadline_passed,
     unpaid_ticket_expires_at,
 )
+from .candidate_diagnostics import (
+    _sanitized_run_summary_from_terminal_event,
+)
 from .miner_diagnostics import (
     build_candidate_diagnostics,
     visibility_map_from_benchmark_split,
@@ -1404,13 +1407,57 @@ async def _build_ticket_candidate_diagnostics(
     return diagnostics
 
 
+async def _build_ticket_run_summaries(
+    ticket_id: str, run_id: str | None = None
+) -> list[dict[str, Any]]:
+    """One sanitized run-level summary per terminal loop run on the ticket.
+
+    Zero-candidate runs produce no candidate diagnostics, so this is the
+    owner's only window into WHY a paid loop stopped (stop_reason, last
+    stage, call count, actual spend).
+    """
+    rows = await select_many(
+        "research_lab_auto_research_loop_events",
+        filters=(("ticket_id", ticket_id),),
+        order_by=(("seq", False),),
+        limit=2000,
+    )
+    failure_classes_by_run: dict[str, list[str]] = {}
+    terminal_by_run: dict[str, tuple[str, Mapping[str, Any]]] = {}
+    for row in rows or []:
+        row_run_id = str(row.get("run_id") or "")
+        if not row_run_id or (run_id and row_run_id != str(run_id)):
+            continue
+        event_doc = row.get("event_doc")
+        event_doc = event_doc if isinstance(event_doc, Mapping) else {}
+        failure_class = str(event_doc.get("failure_class") or "")
+        if failure_class:
+            classes = failure_classes_by_run.setdefault(row_run_id, [])
+            if failure_class not in classes:
+                classes.append(failure_class)
+        if str(row.get("event_type") or "") in {"loop_completed", "loop_failed"}:
+            terminal_by_run[row_run_id] = (str(row.get("loop_status") or ""), event_doc)
+    return [
+        _sanitized_run_summary_from_terminal_event(
+            terminal_run_id,
+            loop_status,
+            event_doc,
+            failure_classes_by_run.get(terminal_run_id, []),
+        )
+        for terminal_run_id, (loop_status, event_doc) in sorted(terminal_by_run.items())
+    ]
+
+
 @router.post("/loop-diagnostics")
 async def get_research_lab_loop_diagnostics(payload: ResearchLabLoopDiagnosticsRequest):
     """Sanitized own-run diagnostics for the miner who paid for the loop.
 
     Ownership-gated: the ticket must belong to the signing hotkey, so a miner
     can only read diagnostics for their own runs. Returns one diagnostics doc
-    per TERMINAL candidate on the ticket (scored / rejected / failed).
+    per TERMINAL candidate on the ticket (scored / rejected / failed), plus a
+    run-level summary per terminal loop run — zero-candidate runs have no
+    candidate diagnostics, and the run summary (stop_reason, last stage,
+    call count, actual spend) is the owner's only way to diagnose them.
     """
     config = ResearchLabGatewayConfig.from_env()
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
@@ -1422,9 +1469,14 @@ async def get_research_lab_loop_diagnostics(payload: ResearchLabLoopDiagnosticsR
     diagnostics = await _build_ticket_candidate_diagnostics(
         str(payload.ticket_id), payload.candidate_id
     )
-    if not diagnostics:
-        raise HTTPException(status_code=404, detail="no terminal candidate diagnostics for this ticket yet")
-    return {"ticket_id": str(payload.ticket_id), "diagnostics": diagnostics}
+    run_summaries = await _build_ticket_run_summaries(str(payload.ticket_id))
+    if not diagnostics and not run_summaries:
+        raise HTTPException(status_code=404, detail="no terminal diagnostics for this ticket yet")
+    return {
+        "ticket_id": str(payload.ticket_id),
+        "diagnostics": diagnostics,
+        "run_summaries": run_summaries,
+    }
 
 
 @router.get("/admin/loops/{ticket_id}/diagnostics")

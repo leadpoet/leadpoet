@@ -414,3 +414,61 @@ def _cost_stop_reason(row: Mapping[str, Any]) -> str:
 def _event_doc(row: Mapping[str, Any]) -> Mapping[str, Any]:
     doc = row.get("event_doc")
     return doc if isinstance(doc, Mapping) else {}
+
+
+_RUN_SUMMARY_SAFE_COUNT_FIELDS = (
+    "wall_clock_seconds",
+    "openrouter_call_count",
+    "iterations_completed",
+    "selected_candidate_count",
+)
+
+
+def _sanitized_run_summary_from_terminal_event(
+    run_id: str,
+    loop_status: str,
+    event_doc: Mapping[str, Any],
+    failure_classes: list[str],
+) -> dict[str, Any]:
+    """Project ONLY structured/enum fields from a terminal loop event.
+
+    Free-text reason/error strings are deliberately excluded: patch-draft
+    failures quote the model's own analysis of the private source tree, and
+    an owner-readable endpoint must not leak private benchmark/model detail.
+    Enum-like codes (stop_reason, failure_class, stage names) plus the
+    miner's own spend are safe and are exactly what a miner needs to
+    diagnose a paid zero-candidate loop.
+    """
+    run_summary = event_doc.get("run_summary")
+    run_summary = run_summary if isinstance(run_summary, Mapping) else {}
+    cost_ledger = run_summary.get("cost_ledger")
+    cost_ledger = cost_ledger if isinstance(cost_ledger, Mapping) else {}
+    generation_failure = event_doc.get("candidate_generation_failure")
+    generation_failure = generation_failure if isinstance(generation_failure, Mapping) else {}
+    stage_counts = generation_failure.get("stage_counts")
+    stage_counts = stage_counts if isinstance(stage_counts, Mapping) else {}
+    doc: dict[str, Any] = {
+        "run_id": run_id,
+        "loop_status": loop_status,
+        "stop_reason": str(event_doc.get("stop_reason") or run_summary.get("stop_reason") or ""),
+        "failure_reason": str(event_doc.get("failure_reason") or ""),
+        "public_label": str(generation_failure.get("public_label") or ""),
+        "last_completed_stage": str(generation_failure.get("latest_stage") or ""),
+        "stage_counts": {
+            str(key): int(value)
+            for key, value in stage_counts.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        },
+        "failure_classes": failure_classes,
+    }
+    for key in _RUN_SUMMARY_SAFE_COUNT_FIELDS:
+        value = run_summary.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            doc[key] = value
+    actual_cost = cost_ledger.get("actual_openrouter_cost_usd")
+    if isinstance(actual_cost, (int, float)) and not isinstance(actual_cost, bool):
+        doc["actual_compute_used_usd"] = float(actual_cost)
+    estimated = cost_ledger.get("estimated_cost_usd")
+    if isinstance(estimated, (int, float)) and not isinstance(estimated, bool):
+        doc["estimated_cost_usd"] = float(estimated)
+    return doc

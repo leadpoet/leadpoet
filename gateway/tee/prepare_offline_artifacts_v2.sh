@@ -54,7 +54,7 @@ print(value["artifact_filename"], value["source_url"])
 PY
 )
 echo "Preparing the hash-locked gVisor runtime"
-if python3 "$SCRIPT_DIR/sandbox_runtime_artifact.py" verify \
+if PYTHONPATH="$REPO_ROOT" python3 "$SCRIPT_DIR/sandbox_runtime_artifact.py" verify \
     --lock "$RUNSC_LOCK" \
     --artifact "$ARTIFACT_ROOT/$RUNSC_NAME" >/dev/null 2>&1; then
   cp "$ARTIFACT_ROOT/$RUNSC_NAME" "$TEMP_ROOT/$RUNSC_NAME"
@@ -62,7 +62,7 @@ else
   curl --fail --location --proto '=https' --tlsv1.2 \
     --output "$TEMP_ROOT/$RUNSC_NAME" "$RUNSC_URL"
 fi
-python3 "$SCRIPT_DIR/sandbox_runtime_artifact.py" verify \
+PYTHONPATH="$REPO_ROOT" python3 "$SCRIPT_DIR/sandbox_runtime_artifact.py" verify \
   --lock "$RUNSC_LOCK" \
   --artifact "$TEMP_ROOT/$RUNSC_NAME"
 chmod 755 "$TEMP_ROOT/$RUNSC_NAME"

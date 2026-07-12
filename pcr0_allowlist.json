@@ -76,6 +76,13 @@
   "validator_pcr0": [
     {
       "pcr0": "8b56c0be4cfc55131ce299a6c7f9f2dde56d0cc2e75ffcef5558af5efc60ee3bd0c5e8b3db822659b50c175ed906a009",
+      "version": "2026-07-12d",
+      "deployed": "2026-07-12",
+      "commit_hash": "a41e0ad3f440a58893333cef4cf556dbe0d2d3f1",
+      "notes": "validator enclave: unchanged measurement rebound (script/allowlist-only commits keep the EIF identical)"
+    },
+    {
+      "pcr0": "8b56c0be4cfc55131ce299a6c7f9f2dde56d0cc2e75ffcef5558af5efc60ee3bd0c5e8b3db822659b50c175ed906a009",
       "version": "2026-07-12c",
       "deployed": "2026-07-12",
       "commit_hash": "bfa60f19a6a50f3d01a437ce38e62cd46258638d",

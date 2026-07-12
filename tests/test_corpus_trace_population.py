@@ -1270,9 +1270,13 @@ async def test_historical_run_without_pointers_still_gets_valid_evidence(enabled
 
 async def test_run_with_zero_sources_is_skipped_by_backfill(enabled):
     tables = build_run_tables(with_raw_traces=False, with_bundle_doc=False)
-    # Remove scoring entirely: no bundles, no scored events.
+    # Remove scoring entirely: no candidates, bundles, or evaluation events.
+    # The projector's settle gate only holds runs with pending candidate
+    # evaluations; a run that never produced a candidate has nothing to wait
+    # for and projects (empty) immediately.
     tables["research_evaluation_score_bundles"] = []
     tables["research_lab_candidate_evaluation_events"] = []
+    tables["research_lab_candidate_artifacts"] = []
     store = FakeStore(tables)
     result = await project_run(RUN_ID, store=store, dry_run=False)
     assert result.status == "projected", result.errors
@@ -1281,7 +1285,11 @@ async def test_run_with_zero_sources_is_skipped_by_backfill(enabled):
     assert store.write_count(EXECUTION_TRACES_TABLE) == 0
     assert store.write_count(EVIDENCE_BUNDLES_TABLE) == 0
     backfill = await backfill_run_corpus_trace_rows(RUN_ID, store=store, dry_run=False)
-    assert backfill.status == "skipped_no_trace_sources"
+    # The idempotent backfill finds the (empty) projection complete with
+    # nothing missing to write, which covers the zero-source case.
+    assert backfill.status == "skipped_traces_existing"
+    assert store.write_count(EXECUTION_TRACES_TABLE) == 0
+    assert store.write_count(EVIDENCE_BUNDLES_TABLE) == 0
 
 
 # ---------------------------------------------------------------------------

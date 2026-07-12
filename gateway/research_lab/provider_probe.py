@@ -27,7 +27,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from gateway.research_lab.code_build import _redact_secret_values
 from gateway.research_lab.provider_evidence_proxy import (
@@ -180,6 +180,8 @@ class ProbeResolution:
     event_doc: dict[str, Any]
     cost_microusd: int = 0
     snapshot_overlay_written: bool = False
+    transport_attempts: tuple[dict[str, Any], ...] = ()
+    evidence_artifact_hashes: tuple[str, ...] = ()
 
 
 def _sanitize_probe_body(body: bytes) -> tuple[str, bool]:
@@ -247,6 +249,7 @@ def resolve_provider_probe(
     snapshot_overlay_uri: str = "",
     caller_token: str = "",
     timeout_seconds: int = 60,
+    evidence_resolver: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
 ) -> ProbeResolution:
     """Resolve one probe_provider request. Synchronous (callers thread it)."""
 
@@ -310,7 +313,7 @@ def resolve_provider_probe(
             },
             event_doc={**base_event, "skipped": "probe_budget_exhausted", "budget": budget.to_context()},
         )
-    if not proxy_url:
+    if not proxy_url and evidence_resolver is None:
         return ProbeResolution(
             outcome="upstream_error",
             model_result={
@@ -329,6 +332,7 @@ def resolve_provider_probe(
         name: value for name, value in normalized_params.items()
         if _param_location(endpoint, name) == "body"
     }
+    upstream_url = (registry_base_urls or {}).get(endpoint.provider_id, "").rstrip("/")
     target = proxy_url.rstrip("/") + "/" + endpoint.provider_id + endpoint.path
     if query_params:
         target += "?" + urllib.parse.urlencode(sorted((str(k), str(v)) for k, v in query_params.items()))
@@ -338,39 +342,77 @@ def resolve_provider_probe(
     if not live_enabled:
         headers[REPLAY_ONLY_HEADER] = "1"
     data = json.dumps(body_params, sort_keys=True).encode("utf-8") if endpoint.method == "POST" else None
-    http_request = urllib.request.Request(target, data=data, headers=headers, method=endpoint.method)
-    try:
-        with urllib.request.urlopen(http_request, timeout=max(5, int(timeout_seconds))) as response:
-            status = int(getattr(response, "status", 0) or 0)
-            body = response.read()
-            evidence = str(response.headers.get("X-Research-Lab-Evidence") or "")
-    except urllib.error.HTTPError as exc:
-        status = int(exc.code)
+    transport_attempts: tuple[dict[str, Any], ...] = ()
+    evidence_artifact_hashes: tuple[str, ...] = ()
+    if evidence_resolver is not None:
         try:
-            body = exc.read()
+            resolved = dict(
+                evidence_resolver(
+                    {
+                        "endpoint": endpoint.to_dict(),
+                        "upstream_base_url": upstream_url,
+                        "query_params": dict(query_params),
+                        "body_params": dict(body_params),
+                        "live_enabled": bool(live_enabled),
+                        "timeout_seconds": max(5, int(timeout_seconds)),
+                    }
+                )
+            )
+            status = int(resolved["status"])
+            body = bytes(resolved["body"])
+            evidence = str(resolved["evidence"])
+            transport_attempts = tuple(
+                dict(item) for item in resolved.get("transport_attempts") or ()
+            )
+            evidence_artifact_hashes = tuple(
+                str(item) for item in resolved.get("evidence_artifact_hashes") or ()
+            )
         except Exception:
-            body = b""
-        evidence = str(exc.headers.get("X-Research-Lab-Evidence") or "") if exc.headers else ""
-        if status == 409 and not live_enabled:
             return ProbeResolution(
-                outcome="replay_miss",
+                outcome="upstream_error",
                 model_result={
                     "operation": "probe_provider",
                     "endpoint": endpoint.endpoint_id,
-                    "error_class": "probe_replay_miss",
-                    "detail": "live probes are disabled and no recorded evidence matched",
+                    "error_class": "probe_upstream_error",
                 },
-                event_doc={**base_event, "error_class": "probe_replay_miss"},
+                event_doc={**base_event, "error_class": "probe_upstream_error"},
             )
-    except Exception:
+    else:
+        http_request = urllib.request.Request(target, data=data, headers=headers, method=endpoint.method)
+        try:
+            with urllib.request.urlopen(http_request, timeout=max(5, int(timeout_seconds))) as response:
+                status = int(getattr(response, "status", 0) or 0)
+                body = response.read()
+                evidence = str(response.headers.get("X-Research-Lab-Evidence") or "")
+        except urllib.error.HTTPError as exc:
+            status = int(exc.code)
+            try:
+                body = exc.read()
+            except Exception:
+                body = b""
+            evidence = str(exc.headers.get("X-Research-Lab-Evidence") or "") if exc.headers else ""
+        except Exception:
+            return ProbeResolution(
+                outcome="upstream_error",
+                model_result={
+                    "operation": "probe_provider",
+                    "endpoint": endpoint.endpoint_id,
+                    "error_class": "probe_upstream_error",
+                },
+                event_doc={**base_event, "error_class": "probe_upstream_error"},
+            )
+    if status == 409 and not live_enabled:
         return ProbeResolution(
-            outcome="upstream_error",
+            outcome="replay_miss",
             model_result={
                 "operation": "probe_provider",
                 "endpoint": endpoint.endpoint_id,
-                "error_class": "probe_upstream_error",
+                "error_class": "probe_replay_miss",
+                "detail": "live probes are disabled and no recorded evidence matched",
             },
-            event_doc={**base_event, "error_class": "probe_upstream_error"},
+            event_doc={**base_event, "error_class": "probe_replay_miss"},
+            transport_attempts=transport_attempts,
+            evidence_artifact_hashes=evidence_artifact_hashes,
         )
 
     # Charge only calls that reached evidence resolution (replayed or live) —
@@ -400,6 +442,8 @@ def resolve_provider_probe(
             },
             event_doc={**base_event, "status": status, "error_class": "probe_upstream_error", "evidence": evidence},
             cost_microusd=cost,
+            transport_attempts=transport_attempts,
+            evidence_artifact_hashes=evidence_artifact_hashes,
         )
     return ProbeResolution(
         outcome="resolved",
@@ -424,6 +468,8 @@ def resolve_provider_probe(
         },
         cost_microusd=cost,
         snapshot_overlay_written=overlay_written,
+        transport_attempts=transport_attempts,
+        evidence_artifact_hashes=evidence_artifact_hashes,
     )
 
 

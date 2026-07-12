@@ -37,6 +37,13 @@ ENV SOURCE_DATE_EPOCH=0
 COPY validator_tee/enclave/requirements.txt /tmp/requirements.txt
 RUN python3 -m pip install --no-cache-dir --no-compile -r /tmp/requirements.txt
 
+# V2 hotkey signing uses the last sr25519 wheel published for the enclave's
+# pinned CPython 3.7 ABI. The parent build stages this exact hash from
+# runtime-artifacts-v2.lock.json before Docker sees the context.
+COPY .validator-tee-artifacts/py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl /tmp/sr25519.whl
+RUN python3 -m pip install --no-cache-dir --no-compile --no-deps /tmp/sr25519.whl \
+    && rm -f /tmp/sr25519.whl
+
 # =============================================================================
 # CRITICAL: Delete ALL .pyc files and __pycache__ directories
 # Even with --no-compile, pip may create .pyc files in some edge cases.
@@ -66,6 +73,8 @@ RUN mkdir -p \
 
 # Copy enclave-specific files (runs INSIDE the enclave)
 COPY validator_tee/enclave/ /app/validator_tee/enclave/
+COPY validator_tee/runtime-artifacts-v2.lock.json /app/validator_tee/runtime-artifacts-v2.lock.json
+COPY .validator-tee-artifacts/manifest.json /app/validator_tee/runtime-artifacts-v2.manifest.json
 
 # Copy leadpoet_canonical module (for canonical weight hashing)
 COPY leadpoet_canonical/ /app/leadpoet_canonical/

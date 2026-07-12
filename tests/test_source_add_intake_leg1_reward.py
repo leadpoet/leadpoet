@@ -4,6 +4,7 @@ import pytest
 
 from gateway.research_lab import allocations
 from gateway.research_lab import api
+from gateway.research_lab import v2_authority
 from gateway.research_lab.source_add_provenance import PRECHECK_MANUAL, PRECHECK_PASSED, PRECHECK_REJECTED
 
 
@@ -29,6 +30,21 @@ def _record(**overrides):
     return SimpleNamespace(**record)
 
 
+def _provenance_graph():
+    return {"root_receipt_hash": "sha256:" + "a" * 64}
+
+
+@pytest.fixture(autouse=True)
+def _measured_reward_authority(monkeypatch):
+    async def authorize(**kwargs):
+        assert kwargs["decision_kind"] == "source_add_leg1"
+        assert kwargs["artifact_kind"] == "source_add_reward_decision"
+        assert kwargs["parent_graphs"] == (_provenance_graph(),)
+        return {"status": "matched"}
+
+    monkeypatch.setattr(v2_authority, "authorize_reward_decision_v2", authorize)
+
+
 @pytest.mark.asyncio
 async def test_precheck_pass_creates_leg1_reward_with_null_catalog(monkeypatch):
     writes = []
@@ -50,6 +66,7 @@ async def test_precheck_pass_creates_leg1_reward_with_null_catalog(monkeypatch):
     result = await api._maybe_create_source_add_leg1_reward_for_precheck(
         record=_record(),
         precheck_status=PRECHECK_PASSED,
+        provenance_graph=_provenance_graph(),
         config=_config(),
     )
 
@@ -82,6 +99,7 @@ async def test_non_pass_precheck_does_not_create_leg1_reward(monkeypatch, status
     result = await api._maybe_create_source_add_leg1_reward_for_precheck(
         record=_record(),
         precheck_status=status,
+        provenance_graph=_provenance_graph(),
         config=_config(),
     )
 
@@ -98,6 +116,7 @@ async def test_rewards_disabled_does_not_create_leg1_reward(monkeypatch):
     result = await api._maybe_create_source_add_leg1_reward_for_precheck(
         record=_record(),
         precheck_status=PRECHECK_PASSED,
+        provenance_graph=_provenance_graph(),
         config=_config(source_add_rewards_enabled=False),
     )
 
@@ -122,6 +141,7 @@ async def test_existing_leg1_reward_is_idempotent(monkeypatch):
     result = await api._maybe_create_source_add_leg1_reward_for_precheck(
         record=_record(),
         precheck_status=PRECHECK_PASSED,
+        provenance_graph=_provenance_graph(),
         config=_config(),
     )
 
@@ -150,6 +170,7 @@ async def test_leg1_daily_cap_blocks_new_reward(monkeypatch):
     result = await api._maybe_create_source_add_leg1_reward_for_precheck(
         record=_record(),
         precheck_status=PRECHECK_PASSED,
+        provenance_graph=_provenance_graph(),
         config=_config(source_add_leg1_max_per_utc_day=2),
     )
 
@@ -175,6 +196,7 @@ async def test_duplicate_insert_is_treated_as_already_created(monkeypatch):
     result = await api._maybe_create_source_add_leg1_reward_for_precheck(
         record=_record(),
         precheck_status=PRECHECK_PASSED,
+        provenance_graph=_provenance_graph(),
         config=_config(),
     )
 

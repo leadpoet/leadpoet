@@ -1,10 +1,10 @@
 """Measured destination policy for gateway-enclave scoring egress.
 
 The scoring enclave must reach public HTTPS providers and miner-supplied
-company/evidence URLs.  A fixed hostname allowlist cannot cover those inputs,
-so the policy allows DNS hostnames on HTTP(S) ports while rejecting every IP
-literal and local/private naming convention.  The parent forwarder separately
-rejects DNS answers that are not globally routable.
+company/evidence URLs. A fixed hostname allowlist cannot cover those inputs,
+so the policy allows public DNS hostnames on TLS port 443 while rejecting every
+IP literal, plaintext destination, and local/private naming convention. The
+parent forwarder separately rejects DNS answers that are not globally routable.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import re
 from typing import Any, Dict, Tuple
 
 
-EGRESS_POLICY_VERSION = "leadpoet.gateway_enclave_egress.v1"
-ALLOWED_PORTS = (80, 443)
+EGRESS_POLICY_VERSION = "leadpoet.gateway_enclave_egress.v2"
+ALLOWED_PORTS = (443,)
 BLOCKED_EXACT_HOSTS = (
     "0.0.0.0",
     "instance-data",
@@ -50,6 +50,8 @@ def policy_document() -> Dict[str, Any]:
         "blocked_exact_hosts": list(BLOCKED_EXACT_HOSTS),
         "blocked_suffixes": list(BLOCKED_SUFFIXES),
         "ip_literals_allowed": False,
+        "external_plaintext_http_allowed": False,
+        "loopback_http_allowed": True,
         "parent_requires_global_dns_answers": True,
     }
 

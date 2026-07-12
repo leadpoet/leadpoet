@@ -239,7 +239,10 @@ def encrypt_source_add_credential(
     credential = (raw_credential or "").strip()
     if not (8 <= len(credential) <= 512):
         raise OpenRouterKeyVaultError("SOURCE_ADD credential length is out of bounds")
-    context = _source_add_kms_encryption_context(miner_hotkey=miner_hotkey, adapter_ref=adapter_ref)
+    context = source_add_kms_encryption_context(
+        miner_hotkey=miner_hotkey,
+        adapter_ref=adapter_ref,
+    )
     try:
         import boto3  # type: ignore
     except Exception as exc:  # pragma: no cover - environment-specific
@@ -277,7 +280,10 @@ def decrypt_source_add_credential(
         raise OpenRouterKeyVaultError("stored SOURCE_ADD credential ciphertext is invalid base64") from exc
     response = boto3.client("kms").decrypt(
         CiphertextBlob=ciphertext,
-        EncryptionContext=_source_add_kms_encryption_context(miner_hotkey=miner_hotkey, adapter_ref=adapter_ref),
+        EncryptionContext=source_add_kms_encryption_context(
+            miner_hotkey=miner_hotkey,
+            adapter_ref=adapter_ref,
+        ),
     )
     plaintext = response.get("Plaintext")
     if not plaintext:
@@ -285,12 +291,25 @@ def decrypt_source_add_credential(
     return plaintext.decode("utf-8")
 
 
-def _source_add_kms_encryption_context(*, miner_hotkey: str, adapter_ref: str) -> dict[str, str]:
+def source_add_kms_encryption_context(
+    *, miner_hotkey: str, adapter_ref: str
+) -> dict[str, str]:
     return {
         "purpose": "leadpoet_research_lab_source_add_credential",
         "miner_hotkey": str(miner_hotkey),
         "adapter_ref": str(adapter_ref),
     }
+
+
+def _source_add_kms_encryption_context(
+    *, miner_hotkey: str, adapter_ref: str
+) -> dict[str, str]:
+    """Compatibility alias for existing callers."""
+
+    return source_add_kms_encryption_context(
+        miner_hotkey=miner_hotkey,
+        adapter_ref=adapter_ref,
+    )
 
 
 def openrouter_key_ref(*, miner_hotkey: str, key_hash: str, management_key_hash: str = "") -> str:
@@ -304,6 +323,13 @@ def _local_key_hash(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
 
+def openrouter_credential_value_hash(raw_key: str) -> str:
+    """Return the local, provider-independent V2 commitment for one key."""
+
+    key = validate_openrouter_key_format(raw_key)
+    return "sha256:" + _local_key_hash(key)
+
+
 def _optional_hash(value: Any) -> str | None:
     text = "" if value is None else str(value).strip()
     return _local_key_hash(text) if text else None
@@ -315,6 +341,14 @@ def _kms_encryption_context(*, miner_hotkey: str, key_ref: str) -> dict[str, str
         "miner_hotkey": str(miner_hotkey),
         "key_ref": str(key_ref),
     }
+
+
+def openrouter_kms_encryption_context(
+    *, miner_hotkey: str, key_ref: str
+) -> dict[str, str]:
+    """Public constructor for the exact existing OpenRouter KMS context."""
+
+    return _kms_encryption_context(miner_hotkey=miner_hotkey, key_ref=key_ref)
 
 
 def _openrouter_api_request(

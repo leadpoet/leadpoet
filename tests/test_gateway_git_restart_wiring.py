@@ -25,6 +25,8 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
         script,
         (
             'echo "Preparing exact gateway commit from configured GitHub branch"',
+            'echo "Validating the prepared V2 release before production shutdown"',
+            'echo "Preparing exact hash-locked V2 build artifacts before production shutdown"',
             'echo "Stopping existing gateway and Research Lab worker processes"',
             'echo "Waiting for :8000 to free"',
             'echo "Activating prepared gateway Git commit after process shutdown"',
@@ -37,7 +39,7 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
             'bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"',
             'echo "Installing Python dependencies"',
             'echo "Relaunching gateway with cloned runtime env"',
-            'echo "Starting Research Lab provider evidence proxy"',
+            'unset RESEARCH_LAB_EVIDENCE_PROXY_URL RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH',
             'setsid python3 -u -m gateway.main',
             'sleep 240',
             'curl -fsS http://localhost:8000/health',
@@ -45,6 +47,29 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
             'finalize_deployment_record succeeded',
         ),
     )
+
+
+def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    preflight = script.index(
+        'echo "Validating the prepared V2 release before production shutdown"'
+    )
+    shutdown = script.index(
+        'echo "Stopping existing gateway and Research Lab worker processes"'
+    )
+    artifact_prepare = script.index(
+        'echo "Preparing exact hash-locked V2 build artifacts before production shutdown"'
+    )
+    assert preflight < shutdown
+    assert preflight < artifact_prepare < shutdown
+    assert script.index('git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA"') < shutdown
+    assert script.index("gateway.tee.restart_preflight_v2") < shutdown
+    assert script.index('--deploy-commit "$PREPARED_GATEWAY_SHA"') < shutdown
+    assert script.index('--release-manifest "$GATEWAY_V2_RELEASE_MANIFEST"') < shutdown
+    assert script.index('--parent-env-file "$ENV_CLONE"') < shutdown
+    assert script.index('--topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}"') < shutdown
+    assert script.index("prepare_offline_artifacts_v2.sh") < shutdown
+    assert script.index('pkill -9 -f "python3 -u -m gateway.main"') > shutdown
 
 
 def test_gateway_restart_uses_one_canonical_checkout_for_host_processes() -> None:
@@ -63,6 +88,17 @@ def test_gateway_restart_uses_one_canonical_checkout_for_host_processes() -> Non
     assert 'bash ./start_enclave.sh' in script
     assert 'setsid python3 -u -m gateway.main' in script
     assert 'pkill -9 -f "python3 -u -m gateway.main"' in script
+
+
+def test_gateway_restart_removes_legacy_plaintext_provider_proxy() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    assert 'pkill -9 -f "gateway.research_lab.provider_evidence_proxy"' in script
+    assert "python3 -m gateway.research_lab.provider_evidence_proxy" not in script
+    assert "--outcome-sidecar" not in script
+    assert (
+        "unset RESEARCH_LAB_EVIDENCE_PROXY_URL "
+        "RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH"
+    ) in script
 
 
 def test_gateway_restart_has_fail_closed_lock_and_no_validator_deploy_gate() -> None:
@@ -206,3 +242,17 @@ def test_generated_gateway_artifacts_are_ignored_by_deploy_checkout() -> None:
         "gateway/BUILD_INFO.json",
     ):
         assert path in ignore
+
+
+def test_gateway_docker_image_copies_complete_runtime_package_graph() -> None:
+    dockerfile = (ROOT / "gateway" / "Dockerfile").read_text(encoding="utf-8")
+    for path in (
+        "leadpoet_canonical",
+        "leadpoet_verifier",
+        "research_lab",
+        "qualification",
+        "validator_models",
+        "Leadpoet",
+        "schemas",
+    ):
+        assert f"COPY {path}/ ./{path}/" in dockerfile

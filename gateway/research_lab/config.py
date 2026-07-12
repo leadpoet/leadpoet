@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from leadpoet_verifier.economics import (
@@ -423,7 +424,6 @@ class ResearchLabGatewayConfig:
     scrapingdog_cost_per_credit_usd: float = DEFAULT_SCRAPINGDOG_COST_PER_CREDIT_USD
     scrapingdog_unknown_endpoint_credits: int = DEFAULT_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS
     provider_cost_unknown_endpoint_policy: str = DEFAULT_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY
-    benchmark_exa_api_key: str = ""
     benchmark_exa_max_rps: float = 0.0
     auto_research_min_seconds: int = 600
     auto_research_max_seconds: int = 2700
@@ -863,7 +863,6 @@ class ResearchLabGatewayConfig:
                 ).strip()
                 or DEFAULT_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY
             ),
-            benchmark_exa_api_key=os.getenv("RESEARCH_LAB_BENCHMARK_EXA_API_KEY", ""),
             benchmark_exa_max_rps=max(
                 0.0,
                 _float("RESEARCH_LAB_BENCHMARK_EXA_MAX_RPS", 0.0),
@@ -1640,7 +1639,6 @@ class ResearchLabGatewayConfig:
                 "scrapingdog_cost_per_credit_usd": self.scrapingdog_cost_per_credit_usd,
                 "scrapingdog_unknown_endpoint_credits": self.scrapingdog_unknown_endpoint_credits,
                 "provider_cost_unknown_endpoint_policy": self.provider_cost_unknown_endpoint_policy,
-                "benchmark_exa_key_configured": bool(self.benchmark_exa_api_key),
                 "benchmark_exa_max_rps": self.benchmark_exa_max_rps,
                 "auto_promotion_enabled": self.auto_promotion_enabled,
                 "auto_commit_enabled": self.auto_commit_enabled,
@@ -1666,8 +1664,10 @@ class ResearchLabGatewayConfig:
                     "check_interval_seconds": self.stale_parent_check_interval_seconds,
                     "max_depth": self.stale_parent_rebase_max_depth,
                     "repair_operator_key_configured": bool(
-                        os.getenv("RESEARCH_LAB_STALE_PARENT_REBASE_OPENROUTER_API_KEY")
-                        or os.getenv("OPENROUTER_API_KEY")
+                        Path(
+                            "/home/ec2-user/.config/leadpoet/v2/"
+                            "stale_parent_openrouter.json"
+                        ).is_file()
                     ),
                 },
                 "auto_research_model_configured": bool(self.auto_research_model),

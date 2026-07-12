@@ -22,8 +22,22 @@ GATEWAY_DEPLOYMENT_MANIFEST="${GATEWAY_DEPLOYMENT_MANIFEST:-$GATEWAY_DEPLOYMENT_
 GATEWAY_LAST_GOOD_MANIFEST="${GATEWAY_LAST_GOOD_MANIFEST:-$GATEWAY_DEPLOYMENT_DIR/gateway-last-good.json}"
 GATEWAY_HOST_RESTART_SCRIPT="${GATEWAY_HOST_RESTART_SCRIPT:-/home/ec2-user/gw_restart.sh}"
 GATEWAY_TEE_EIF_ROOT="${GATEWAY_TEE_EIF_ROOT:-/home/ec2-user/tee}"
+GATEWAY_V2_CONFIG_DIR="${GATEWAY_V2_CONFIG_DIR:-/home/ec2-user/.config/leadpoet/v2}"
+GATEWAY_V2_RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-manifest.json}"
+GATEWAY_V2_ARTIFACT_POLICY="${GATEWAY_V2_ARTIFACT_POLICY:-$GATEWAY_V2_CONFIG_DIR/encrypted-artifact-policy.json}"
+export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
+export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:-$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT/validator-runtime}"
 GATEWAY_DEPLOY_STAGE="${GATEWAY_DEPLOY_STAGE:-bootstrap}"
 GATEWAY_DEPLOY_COMPLETED=0
+V2_CREDENTIAL_ENVELOPES=(
+  "$GATEWAY_V2_CONFIG_DIR/artifact_master_key.json"
+  "$GATEWAY_V2_CONFIG_DIR/openrouter.json"
+  "$GATEWAY_V2_CONFIG_DIR/exa.json"
+  "$GATEWAY_V2_CONFIG_DIR/scrapingdog.json"
+  "$GATEWAY_V2_CONFIG_DIR/deepline.json"
+  "$GATEWAY_V2_CONFIG_DIR/supabase_service_role.json"
+  "$GATEWAY_V2_CONFIG_DIR/truelist.json"
+)
 
 deployment_field() {
   python3 "$GATEWAY_GIT_HELPER" field \
@@ -78,6 +92,7 @@ enforce_deployment_environment() {
   unset BUILD_ID BUILD_TIME_UTC BUILD_TIMESTAMP GITHUB_TAG GIT_TAG
   export LEADPOET_REPO_ROOT GATEWAY_ROOT GATEWAY_LOG_ROOT GATEWAY_LOG_FILE
   export GATEWAY_TEE_EIF_ROOT
+  export GATEWAY_V2_CONFIG_DIR GATEWAY_V2_RELEASE_MANIFEST GATEWAY_V2_ARTIFACT_POLICY
   export GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"
   export PYTHONPATH="$LEADPOET_REPO_ROOT"
   export GITHUB_SHA="$GATEWAY_DEPLOY_SHA"
@@ -447,6 +462,44 @@ PREPARED_GATEWAY_SHA="$(
 )"
 echo "Prepared gateway commit: $PREPARED_GATEWAY_SHA"
 
+echo "Validating the prepared V2 release before production shutdown"
+GATEWAY_DEPLOY_STAGE="v2_pre_shutdown_preflight"
+export GATEWAY_DEPLOY_STAGE
+GATEWAY_PREFLIGHT_TREE="$(mktemp -d /tmp/gateway-v2-preflight.XXXXXX)"
+if ! git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA" \
+    | tar -xf - -C "$GATEWAY_PREFLIGHT_TREE"; then
+  rm -rf "$GATEWAY_PREFLIGHT_TREE"
+  echo "ERROR: unable to materialize the prepared commit for V2 preflight" >&2
+  exit 1
+fi
+V2_PREFLIGHT_CREDENTIAL_ARGS=()
+for envelope in "${V2_CREDENTIAL_ENVELOPES[@]}"; do
+  V2_PREFLIGHT_CREDENTIAL_ARGS+=(--credential-envelope "$envelope")
+done
+if ! PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" python3 -m gateway.tee.restart_preflight_v2 \
+    --deploy-commit "$PREPARED_GATEWAY_SHA" \
+    --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+    --topology-manifest "$GATEWAY_PREFLIGHT_TREE/gateway/tee/topology.json" \
+    --artifact-policy "$GATEWAY_V2_ARTIFACT_POLICY" \
+    --config-dir "$GATEWAY_V2_CONFIG_DIR" \
+    --parent-env-file "$ENV_CLONE" \
+    --topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}" \
+    "${V2_PREFLIGHT_CREDENTIAL_ARGS[@]}"; then
+  rm -rf "$GATEWAY_PREFLIGHT_TREE"
+  echo "ERROR: prepared V2 release failed before-shutdown validation" >&2
+  exit 1
+fi
+echo "Preparing exact hash-locked V2 build artifacts before production shutdown"
+GATEWAY_DEPLOY_STAGE="v2_offline_artifact_prepare"
+export GATEWAY_DEPLOY_STAGE
+if ! GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
+    bash "$GATEWAY_PREFLIGHT_TREE/gateway/tee/prepare_offline_artifacts_v2.sh"; then
+  rm -rf "$GATEWAY_PREFLIGHT_TREE"
+  echo "ERROR: V2 offline artifact preparation failed before shutdown" >&2
+  exit 1
+fi
+rm -rf "$GATEWAY_PREFLIGHT_TREE"
+
 echo "Stopping existing gateway and Research Lab worker processes"
 pkill -9 -f "python3 main.py" 2>/dev/null || true
 pkill -9 -f "python3 -u main.py" 2>/dev/null || true
@@ -457,6 +510,7 @@ pkill -9 -f "run_research_lab_hosted_worker" 2>/dev/null || true
 pkill -9 -f "run_research_lab_scoring_worker" 2>/dev/null || true
 pkill -9 -f "gateway.research_lab.provider_evidence_proxy" 2>/dev/null || true
 pkill -9 -f "provider_evidence_proxy" 2>/dev/null || true
+pkill -9 -f "gateway.utils.tee_inter_enclave_relay" 2>/dev/null || true
 stop_research_lab_private_model_containers
 
 echo "Stopping stuck private-model Docker builds or pip installs"
@@ -506,6 +560,11 @@ exec env \
   GATEWAY_LAST_GOOD_MANIFEST="$GATEWAY_LAST_GOOD_MANIFEST" \
   GATEWAY_HOST_RESTART_SCRIPT="$GATEWAY_HOST_RESTART_SCRIPT" \
   GATEWAY_TEE_EIF_ROOT="$GATEWAY_TEE_EIF_ROOT" \
+  GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
+  GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
+  GATEWAY_V2_ARTIFACT_POLICY="$GATEWAY_V2_ARTIFACT_POLICY" \
+  GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
+  VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
   GATEWAY_DEPLOY_STAGE="$GATEWAY_DEPLOY_STAGE" \
   bash "$LEADPOET_REPO_ROOT/gw_restart.sh" "$@"
 fi
@@ -670,28 +729,75 @@ then
   echo "ERROR: gateway dependencies and staged attested runtime are out of sync." >&2
   exit 1
 fi
-sudo docker build --no-cache -f "$GATEWAY_ROOT/tee/Dockerfile.enclave" -t tee-enclave:latest "$GATEWAY_ROOT/"
-ENCLAVE_BUILD_METADATA_TMP="$(mktemp /tmp/gateway-enclave-build.XXXXXX.json)"
-set +e
-sudo nitro-cli build-enclave --docker-uri tee-enclave:latest --output-file "$GATEWAY_TEE_EIF_ROOT/tee-enclave.eif" > "$ENCLAVE_BUILD_METADATA_TMP" 2>/dev/null
-ENCLAVE_BUILD_STATUS="$?"
-set -e
-echo "Cleaning temporary enclave Docker image/layers before gateway relaunch"
-sudo docker rmi -f tee-enclave:latest 2>/dev/null || true
+echo "Building deterministic gateway role EIFs from the staged runtime"
+GATEWAY_TEE_SKIP_STAGE=1 bash "$GATEWAY_ROOT/tee/build_role_enclaves.sh"
+echo "Cleaning temporary role Docker images/layers before gateway relaunch"
+for role in gateway_coordinator gateway_scoring_a gateway_scoring_b gateway_autoresearch; do
+  sudo docker rmi -f "tee-enclave:${role}" 2>/dev/null || true
+done
 sudo docker builder prune -af 2>/dev/null || true
 df -h / /var/lib/docker 2>/dev/null || df -h /
-if [ "$ENCLAVE_BUILD_STATUS" -ne 0 ]; then
-  rm -f "$ENCLAVE_BUILD_METADATA_TMP"
-  echo "ERROR: nitro-cli build-enclave failed with status $ENCLAVE_BUILD_STATUS"
-  exit "$ENCLAVE_BUILD_STATUS"
-fi
-sudo install -m 644 "$ENCLAVE_BUILD_METADATA_TMP" "$GATEWAY_TEE_EIF_ROOT/enclave-build-gateway.json"
-rm -f "$ENCLAVE_BUILD_METADATA_TMP"
+echo "Configuring Nitro allocator for the measured gateway topology"
+bash "$GATEWAY_ROOT/tee/configure_allocator.sh"
 sudo env \
   GATEWAY_ROOT="$GATEWAY_ROOT" \
   GATEWAY_TEE_EIF_ROOT="$GATEWAY_TEE_EIF_ROOT" \
   GATEWAY_ENV_FILE="$GATEWAY_ENV_FILE" \
   bash ./start_enclave.sh
+
+echo "Starting opaque inter-enclave TLS relay"
+cd "$LEADPOET_REPO_ROOT"
+PYTHONPATH="$LEADPOET_REPO_ROOT" setsid python3 -m gateway.utils.tee_inter_enclave_relay \
+  >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null &
+INTER_ENCLAVE_RELAY_PID="$!"
+sleep 2
+if ! ps -p "$INTER_ENCLAVE_RELAY_PID" >/dev/null 2>&1; then
+  tail -80 "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" || true
+  echo "ERROR: inter-enclave relay did not start" >&2
+  exit 1
+fi
+
+echo "Bootstrapping mutually attested V2 enclave runtime"
+GATEWAY_DEPLOY_STAGE="v2_runtime_bootstrap"
+export GATEWAY_DEPLOY_STAGE
+test -s "$GATEWAY_V2_RELEASE_MANIFEST" || {
+  echo "ERROR: approved V2 release manifest is missing" >&2
+  exit 1
+}
+test -s "$GATEWAY_V2_ARTIFACT_POLICY" || {
+  echo "ERROR: encrypted V2 artifact policy is missing" >&2
+  exit 1
+}
+echo "Verifying encrypted TLS proxy profiles for all V2 workers"
+PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.research_lab.provider_profiles_v2 \
+  --config-dir "$GATEWAY_V2_CONFIG_DIR" \
+  --require-worker-proxies
+V2_BOOTSTRAP_ARGS=()
+V2_PROVISION_ARGS=()
+for envelope in "${V2_CREDENTIAL_ENVELOPES[@]}"; do
+  test -s "$envelope" || {
+    echo "ERROR: encrypted V2 credential envelope is missing: $envelope" >&2
+    exit 1
+  }
+  V2_BOOTSTRAP_ARGS+=(--credential-envelope "$envelope")
+  V2_PROVISION_ARGS+=(--envelope "$envelope")
+done
+PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.utils.tee_v2_bootstrap \
+  --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+  "${V2_BOOTSTRAP_ARGS[@]}" \
+  --protected-workflow-manifest "$GATEWAY_ROOT/_attested_runtime/protected_workflows.json" \
+  --encrypted-artifact-policy "$GATEWAY_V2_ARTIFACT_POLICY"
+
+echo "Provisioning KMS ciphertext directly to the attested coordinator"
+GATEWAY_DEPLOY_STAGE="v2_kms_provision"
+export GATEWAY_DEPLOY_STAGE
+PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.utils.tee_kms_provision_v2 \
+  "${V2_PROVISION_ARGS[@]}"
+
+echo "Verifying V2 provider and execution-manager readiness"
+GATEWAY_DEPLOY_STAGE="v2_runtime_readiness"
+export GATEWAY_DEPLOY_STAGE
+PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.tee.verify_v2_runtime_ready
 
 echo "Installing Python dependencies"
 GATEWAY_DEPLOY_STAGE="dependency_install"
@@ -719,33 +825,8 @@ export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 export GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
 export LEADPOET_GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-leadpoet/prod/gateway/env}"
 export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="${RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI:-s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json}"
-export RESEARCH_LAB_EVIDENCE_PROXY_URL="${RESEARCH_LAB_EVIDENCE_PROXY_URL:-http://172.17.0.1:8791}"
-export RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH="${RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH:-/home/ec2-user/research_lab_evidence/provider_outcomes.json}"
+unset RESEARCH_LAB_EVIDENCE_PROXY_URL RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
-
-echo "Starting Research Lab provider evidence proxy"
-mkdir -p /home/ec2-user/research_lab_evidence "$GATEWAY_LOG_ROOT"
-cd "$LEADPOET_REPO_ROOT"
-setsid python3 -m gateway.research_lab.provider_evidence_proxy \
-  --host 172.17.0.1 \
-  --port 8791 \
-  --day-cache /home/ec2-user/research_lab_evidence/day_cache.json \
-  --outcome-sidecar "$RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH" \
-  >> "$GATEWAY_LOG_ROOT/provider_evidence_proxy.log" 2>&1 < /dev/null 9>&- &
-PROVIDER_PROXY_PID="$!"
-echo "relaunched provider evidence proxy pid: $PROVIDER_PROXY_PID"
-for i in $(seq 1 10); do
-  if ss -ltn "sport = :8791" 2>/dev/null | grep -q ":8791"; then
-    echo "provider evidence proxy listening on :8791 after ${i}s"
-    break
-  fi
-  sleep 1
-done
-if ! ss -ltn "sport = :8791" 2>/dev/null | grep -q ":8791"; then
-  echo "ERROR: provider evidence proxy did not start on :8791"
-  tail -80 "$GATEWAY_LOG_ROOT/provider_evidence_proxy.log" || true
-  exit 1
-fi
 
 cd "$LEADPOET_REPO_ROOT"
 setsid python3 -u -m gateway.main > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null 9>&- &

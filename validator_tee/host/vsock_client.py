@@ -5,13 +5,8 @@ Validator TEE vsock Client
 This module runs on the HOST (parent EC2) and communicates with the 
 validator enclave via vsock.
 
-Usage:
-    from validator_tee.vsock_client import ValidatorEnclaveClient
-    
-    client = ValidatorEnclaveClient()
-    pubkey = client.get_public_key()
-    signature = client.sign_weights(weights_hash)
-    attestation = client.get_attestation(epoch_id)
+Only authoritative V2 boot, hotkey, weight, recovery, and health RPCs are
+exposed. The V1 blind-signing and host-snapshot APIs are absent.
 """
 
 import socket
@@ -117,7 +112,12 @@ class ValidatorEnclaveClient:
         self.enclave_cid = cid
         return cid
     
-    def _send_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    def _send_request(
+        self,
+        request: Dict[str, Any],
+        *,
+        timeout_seconds: int = 30,
+    ) -> Dict[str, Any]:
         """
         Send request to enclave via vsock.
         
@@ -131,7 +131,7 @@ class ValidatorEnclaveClient:
         
         # Create vsock socket
         sock = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
-        sock.settimeout(30)  # 30 second timeout
+        sock.settimeout(timeout_seconds)
         
         try:
             # Connect to enclave
@@ -164,78 +164,6 @@ class ValidatorEnclaveClient:
         finally:
             sock.close()
     
-    def get_public_key(self) -> str:
-        """
-        Get the enclave's public key.
-        
-        Returns:
-            Public key as hex string
-        """
-        if self._cached_pubkey:
-            return self._cached_pubkey
-        
-        response = self._send_request({"command": "get_public_key"})
-        
-        self._cached_pubkey = response["public_key"]
-        self._cached_code_hash = response.get("code_hash")
-        
-        return self._cached_pubkey
-    
-    def get_code_hash(self) -> str:
-        """
-        Get the enclave's code hash.
-        
-        Returns:
-            Code hash as hex string
-        """
-        if self._cached_code_hash:
-            return self._cached_code_hash
-        
-        response = self._send_request({"command": "get_public_key"})
-        
-        self._cached_pubkey = response["public_key"]
-        self._cached_code_hash = response.get("code_hash")
-        
-        return self._cached_code_hash
-    
-    def sign_weights(self, weights_hash: str) -> str:
-        """
-        Sign a weights hash.
-        
-        Args:
-            weights_hash: SHA256 hex string (64 chars)
-            
-        Returns:
-            Ed25519 signature as hex string
-        """
-        response = self._send_request({
-            "command": "sign_weights",
-            "weights_hash": weights_hash
-        })
-        
-        return response["signature"]
-    
-    def get_attestation(self, epoch_id: int) -> Dict[str, Any]:
-        """
-        Get attestation document for an epoch.
-        
-        Args:
-            epoch_id: Epoch being attested
-            
-        Returns:
-            Dict with attestation_b64, user_data, is_mock
-        """
-        response = self._send_request({
-            "command": "get_attestation",
-            "epoch_id": epoch_id
-        })
-        
-        return {
-            "attestation_b64": response["attestation_b64"],
-            "user_data": response["user_data"],
-            "is_mock": response.get("is_mock", False)
-        }
-    
     def health_check(self) -> Dict[str, Any]:
         """
         Check enclave health.
@@ -245,18 +173,173 @@ class ValidatorEnclaveClient:
         """
         return self._send_request({"command": "health"})
 
-    def compute_weights_v2(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
-        """Ask the enclave to derive and sign weights from a canonical snapshot."""
-        response = self._send_request({
-            "command": "compute_weights_v2",
-            "snapshot": snapshot,
-        })
+    def configure_authoritative_v2(
+        self,
+        configuration: Dict[str, Any],
+        expected_config_hash: str,
+    ) -> Dict[str, Any]:
+        response = self._send_request(
+            {
+                "command": "configure_authoritative_v2",
+                "configuration": configuration,
+                "expected_config_hash": expected_config_hash,
+            },
+            timeout_seconds=120,
+        )
+        return dict(response["boot_identity"])
+
+    def get_authoritative_v2_boot_identity(self) -> Dict[str, Any]:
+        response = self._send_request(
+            {"command": "get_authoritative_v2_boot_identity"}
+        )
+        return dict(response["boot_identity"])
+
+    def configure_hotkey_authority_v2(
+        self,
+        configuration: Dict[str, Any],
+        expected_config_hash: str,
+    ) -> Dict[str, Any]:
+        response = self._send_request(
+            {
+                "command": "configure_hotkey_authority_v2",
+                "configuration": configuration,
+                "expected_config_hash": expected_config_hash,
+            },
+            timeout_seconds=120,
+        )
+        return dict(response["hotkey_state"])
+
+    def get_hotkey_recipient_v2(self) -> Dict[str, Any]:
+        response = self._send_request({"command": "get_hotkey_recipient_v2"})
+        return dict(response["recipient_request"])
+
+    def provision_hotkey_v2(
+        self,
+        ciphertext_for_recipient_b64: str,
+    ) -> Dict[str, Any]:
+        response = self._send_request(
+            {
+                "command": "provision_hotkey_v2",
+                "ciphertext_for_recipient_b64": ciphertext_for_recipient_b64,
+            },
+            timeout_seconds=120,
+        )
+        return dict(response["hotkey_state"])
+
+    def get_hotkey_state_v2(self) -> Dict[str, Any]:
+        response = self._send_request({"command": "get_hotkey_state_v2"})
+        return dict(response["hotkey_state"])
+
+    def sign_application_message_v2(
+        self,
+        message: bytes,
+        *,
+        parent_receipt_hash: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not isinstance(message, bytes):
+            raise TypeError("application message must be bytes")
+        request = {
+            "command": "sign_application_message_v2",
+            "message_hex": message.hex(),
+        }
+        if parent_receipt_hash is not None:
+            request["parent_receipt_hash"] = parent_receipt_hash
+        response = self._send_request(request)
+        return dict(response["signature_result"])
+
+    def prepare_weight_commit_v2(
+        self,
+        commit_request: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        response = self._send_request(
+            {
+                "command": "prepare_weight_commit_v2",
+                "commit_request": commit_request,
+            },
+            timeout_seconds=120,
+        )
+        return dict(response["commit_result"])
+
+    def sign_weight_extrinsic_v2(
+        self,
+        signature_request: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        response = self._send_request(
+            {
+                "command": "sign_weight_extrinsic_v2",
+                "signature_request": signature_request,
+            },
+            timeout_seconds=120,
+        )
+        return dict(response["signature_result"])
+
+    def confirm_weight_publication_v2(
+        self,
+        weight_authorization_id: str,
+    ) -> Dict[str, Any]:
+        response = self._send_request(
+            {
+                "command": "confirm_weight_publication_v2",
+                "weight_authorization_id": str(weight_authorization_id),
+            },
+            timeout_seconds=600,
+        )
+        return dict(response["finalization_result"])
+
+    def recover_weight_publication_v2(
+        self,
+        *,
+        published_bundle: Dict[str, Any],
+        weight_submission_event_hash: str,
+        extrinsic_signature_results: list,
+    ) -> Dict[str, Any]:
+        response = self._send_request(
+            {
+                "command": "recover_weight_publication_v2",
+                "published_bundle": published_bundle,
+                "weight_submission_event_hash": str(
+                    weight_submission_event_hash
+                ),
+                "extrinsic_signature_results": list(
+                    extrinsic_signature_results
+                ),
+            },
+            timeout_seconds=600,
+        )
+        return dict(response["recovery_result"])
+
+    def sign_serve_axon_extrinsic_v2(
+        self,
+        signature_request: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        response = self._send_request(
+            {
+                "command": "sign_serve_axon_extrinsic_v2",
+                "signature_request": signature_request,
+            },
+            timeout_seconds=120,
+        )
+        return dict(response["signature_result"])
+
+    def compute_authoritative_weights_v2(
+        self,
+        weight_request: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        response = self._send_request(
+            {
+                "command": "compute_authoritative_weights_v2",
+                "weight_request": weight_request,
+            },
+            timeout_seconds=180,
+        )
         return {
+            "weight_snapshot": response["weight_snapshot"],
             "weight_result": response["weight_result"],
             "weights_signature": response["weights_signature"],
-            "receipt": response["receipt"],
-            "attestation_user_data": response["attestation_user_data"],
-            "attestation_is_mock": response.get("attestation_is_mock", False),
+            "receipt_graph": response["receipt_graph"],
+            "boot_identity": response["boot_identity"],
+            "weight_authorization_id": response["weight_authorization_id"],
+            "source_artifacts": response["source_artifacts"],
         }
 
 
@@ -275,29 +358,75 @@ def _get_client() -> ValidatorEnclaveClient:
     return _client
 
 
-def sign_weights_via_enclave(weights_hash: str) -> str:
-    """Sign weights hash via enclave."""
-    return _get_client().sign_weights(weights_hash)
+def configure_authoritative_enclave_v2(
+    configuration: Dict[str, Any],
+    expected_config_hash: str,
+) -> Dict[str, Any]:
+    return _get_client().configure_authoritative_v2(
+        configuration,
+        expected_config_hash,
+    )
 
 
-def get_enclave_pubkey() -> str:
-    """Get enclave public key."""
-    return _get_client().get_public_key()
+def get_authoritative_boot_identity_v2() -> Dict[str, Any]:
+    return _get_client().get_authoritative_v2_boot_identity()
 
 
-def get_enclave_code_hash() -> str:
-    """Get enclave code hash."""
-    return _get_client().get_code_hash()
+def configure_hotkey_authority_v2(
+    configuration: Dict[str, Any],
+    expected_config_hash: str,
+) -> Dict[str, Any]:
+    return _get_client().configure_hotkey_authority_v2(
+        configuration,
+        expected_config_hash,
+    )
 
 
-def get_enclave_attestation(epoch_id: int) -> Dict[str, Any]:
-    """Get enclave attestation for epoch."""
-    return _get_client().get_attestation(epoch_id)
+def get_hotkey_recipient_v2() -> Dict[str, Any]:
+    return _get_client().get_hotkey_recipient_v2()
 
 
-def compute_weights_via_enclave_v2(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    """Compute and sign final weights inside the validator enclave."""
-    return _get_client().compute_weights_v2(snapshot)
+def provision_hotkey_v2(ciphertext_for_recipient_b64: str) -> Dict[str, Any]:
+    return _get_client().provision_hotkey_v2(ciphertext_for_recipient_b64)
+
+
+def get_hotkey_state_v2() -> Dict[str, Any]:
+    return _get_client().get_hotkey_state_v2()
+
+
+def sign_application_message_v2(
+    message: bytes,
+    *,
+    parent_receipt_hash: Optional[str] = None,
+) -> Dict[str, Any]:
+    return _get_client().sign_application_message_v2(
+        message,
+        parent_receipt_hash=parent_receipt_hash,
+    )
+
+
+def prepare_weight_commit_v2(
+    commit_request: Dict[str, Any],
+) -> Dict[str, Any]:
+    return _get_client().prepare_weight_commit_v2(commit_request)
+
+
+def sign_weight_extrinsic_v2(
+    signature_request: Dict[str, Any],
+) -> Dict[str, Any]:
+    return _get_client().sign_weight_extrinsic_v2(signature_request)
+
+
+def sign_serve_axon_extrinsic_v2(
+    signature_request: Dict[str, Any],
+) -> Dict[str, Any]:
+    return _get_client().sign_serve_axon_extrinsic_v2(signature_request)
+
+
+def compute_authoritative_weights_via_enclave_v2(
+    weight_request: Dict[str, Any],
+) -> Dict[str, Any]:
+    return _get_client().compute_authoritative_weights_v2(weight_request)
 
 
 def is_enclave_available() -> bool:

@@ -3,6 +3,12 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import bittensor as bt
+from bittensor_wallet import Wallet
+
+if not hasattr(bt, "wallet"):
+    bt.wallet = Wallet
+
 import neurons.auditor_validator as auditor_module
 import neurons.validator as validator_module
 
@@ -12,6 +18,7 @@ class _FakeSubtensor:
         self._results = list(results)
         self._blocks = list(blocks)
         self.calls = []
+        self.substrate = object()
 
     def set_weights(self, **kwargs):
         self.calls.append(dict(kwargs))
@@ -44,6 +51,25 @@ def _auditor(results, *, blocks=()):
     return auditor
 
 
+class _AuthoritativeContext:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.extrinsic_signature_results = [{"receipt": "signed"}]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+
+def _authoritative_args():
+    return {
+        "weight_authorization_id": "sha256:" + "1" * 64,
+        "weight_submission_event_hash": "sha256:" + "2" * 64,
+    }
+
+
 def test_primary_retries_false_tuples_until_true(monkeypatch, capsys):
     validator = _primary(
         [(False, "rejected-one"), (False, "rejected-two"), (True, "accepted")],
@@ -55,11 +81,15 @@ def test_primary_retries_false_tuples_until_true(monkeypatch, capsys):
         sleeps.append(seconds)
 
     monkeypatch.setattr(validator_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        validator_module, "AuthoritativeSetWeightsContextV2", _AuthoritativeContext
+    )
     result = asyncio.run(
         validator._set_weights_until_epoch_end(
             epoch_id=0,
             uids=[1, 2],
             weights=[0.25, 0.75],
+            **_authoritative_args(),
         )
     )
 
@@ -69,6 +99,9 @@ def test_primary_retries_false_tuples_until_true(monkeypatch, capsys):
     assert all(call["uids"] == [1, 2] for call in validator.subtensor.calls)
     assert all(call["weights"] == [0.25, 0.75] for call in validator.subtensor.calls)
     assert validator._last_weight_submission_epoch is None
+    assert validator._last_weight_extrinsic_receipts_v2 == [
+        {"receipt": "signed"}
+    ]
     output = capsys.readouterr().out
     assert "rejected-one" in output
     assert "rejected-two" in output
@@ -81,11 +114,15 @@ def test_primary_stops_before_retry_after_epoch_rollover(monkeypatch):
         return None
 
     monkeypatch.setattr(validator_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        validator_module, "AuthoritativeSetWeightsContextV2", _AuthoritativeContext
+    )
     result = asyncio.run(
         validator._set_weights_until_epoch_end(
             epoch_id=0,
             uids=[0],
             weights=[1.0],
+            **_authoritative_args(),
         )
     )
 
@@ -101,11 +138,15 @@ def test_primary_returns_immediately_on_true(monkeypatch):
         raise AssertionError("successful submission must not sleep")
 
     monkeypatch.setattr(validator_module.asyncio, "sleep", unexpected_sleep)
+    monkeypatch.setattr(
+        validator_module, "AuthoritativeSetWeightsContextV2", _AuthoritativeContext
+    )
     result = asyncio.run(
         validator._set_weights_until_epoch_end(
             epoch_id=3,
             uids=[9],
             weights=[1.0],
+            **_authoritative_args(),
         )
     )
 
@@ -157,7 +198,11 @@ def test_all_active_submission_paths_use_epoch_bounded_helpers():
     primary_source = validator_module.Path(validator_module.__file__).read_text(encoding="utf-8")
     auditor_source = auditor_module.Path(auditor_module.__file__).read_text(encoding="utf-8")
 
-    assert primary_source.count("await self._set_weights_until_epoch_end(") == 3
+    assert primary_source.count("await self._authorize_and_set_weights_v2(") == 3
+    assert primary_source.count("await self._set_weights_until_epoch_end(") == 2
     assert auditor_source.count("self._set_weights_until_epoch_end(") == 2
     assert primary_source.count("self.subtensor.set_weights(") == 1
     assert auditor_source.count("self.subtensor.set_weights(") == 1
+    assert "_submit_weights_to_gateway" not in primary_source
+    assert "_submit_weights_v2" not in primary_source
+    assert "VALIDATOR_ATTESTED_WEIGHT_MODE" not in primary_source

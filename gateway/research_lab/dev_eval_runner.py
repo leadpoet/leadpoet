@@ -64,6 +64,17 @@ DEV_EVAL_CACHE_DIR_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_CACHE_DIR"
 DEFAULT_TOTAL_TIMEOUT_SECONDS = 300
 CONTAINER_SNAPSHOT_DIR = "/research_lab_dev_snapshots"
 _TRUTHY = ("1", "true", "yes", "on")
+_PROVIDER_CREDENTIAL_ENV_NAMES = frozenset(
+    {
+        "DEEPLINE_API_KEY",
+        "EXA_API_KEY",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_KEY",
+        "QUALIFICATION_OPENROUTER_API_KEY",
+        "QUALIFICATION_SCRAPINGDOG_API_KEY",
+        "SCRAPINGDOG_API_KEY",
+    }
+)
 
 
 class DevEvalRunnerError(RuntimeError):
@@ -344,6 +355,181 @@ class DockerReplayDevEvaluator:
         return [item for item in decoded if isinstance(item, Mapping)]
 
 
+class AttestedReplayDevEvaluatorV2:
+    """The existing dev-evaluator seam backed by the measured scoring EIF."""
+
+    def __init__(
+        self,
+        *,
+        epoch_id: int,
+        worker_index: int,
+        snapshot_uri: str | None = None,
+        cache_root: Path | None = None,
+        execute: Any = None,
+    ) -> None:
+        self._epoch_id = max(0, int(epoch_id))
+        self._worker_index = int(worker_index)
+        self._snapshot_uri = str(
+            snapshot_uri if snapshot_uri is not None else os.getenv(SNAPSHOT_URI_ENV) or ""
+        ).strip()
+        self._cache_root = cache_root
+        self._execute = execute
+        self._prepare_lock = asyncio.Lock()
+        self._local_dir: Path | None = None
+        self._replay_store: ProviderSnapshotStore | None = None
+        self._snapshot_bundle: dict[str, Any] | None = None
+
+    async def _ensure_prepared(
+        self,
+    ) -> tuple[Path, ProviderSnapshotStore, dict[str, Any]]:
+        async with self._prepare_lock:
+            if (
+                self._local_dir is None
+                or self._replay_store is None
+                or self._snapshot_bundle is None
+            ):
+                from gateway.tee.source_bundle_v2 import build_source_bundle_v2
+
+                local_dir = await asyncio.to_thread(
+                    ensure_local_snapshot_set,
+                    self._snapshot_uri,
+                    cache_root=self._cache_root,
+                )
+                replay_store = ProviderSnapshotStore(
+                    str(local_dir),
+                    mode=MODE_REPLAY,
+                    miss_policy=default_miss_policy(),
+                )
+                await asyncio.to_thread(load_verified_dev_items, replay_store)
+                verification = await asyncio.to_thread(replay_store.verify_manifest)
+                if not verification.get("passed"):
+                    raise DevEvalRunnerError(
+                        "snapshot-set manifest failed verification: "
+                        + "; ".join(verification.get("errors") or ())
+                    )
+                snapshot_bundle = await asyncio.to_thread(
+                    build_source_bundle_v2,
+                    local_dir,
+                )
+                self._local_dir = local_dir
+                self._replay_store = replay_store
+                self._snapshot_bundle = snapshot_bundle
+            return (
+                self._local_dir,
+                self._replay_store,
+                dict(self._snapshot_bundle),
+            )
+
+    async def __call__(self, candidate: Any) -> Mapping[str, Any]:
+        from gateway.research_lab.attested_scoring_v2 import execute_scoring_v2
+        from gateway.research_lab.model_authority_v2 import (
+            source_bundle_for_artifact_v2,
+        )
+        from gateway.tee.scoring_executor_v2 import (
+            DEV_REPLAY_REQUEST_SCHEMA_VERSION,
+            OP_DEV_REPLAY_V2,
+        )
+        from leadpoet_canonical.attested_v2 import sha256_json
+        from research_lab.eval.private_runtime import private_model_env_passthrough
+
+        artifact = candidate.build.candidate_model_manifest
+        image_digest = str(artifact.image_digest or "").strip()
+        if "@sha256:" not in image_digest:
+            raise DevEvalRunnerError("candidate image digest is not immutable")
+        _local_dir, replay_store, snapshot_bundle = await self._ensure_prepared()
+        manifest = replay_store.load_manifest()
+        if not isinstance(manifest, Mapping):
+            raise DevEvalRunnerError("snapshot-set manifest is required and missing")
+        source_bundle = await source_bundle_for_artifact_v2(
+            artifact,
+            timeout_seconds=dev_eval_total_timeout_seconds(),
+        )
+        environment: dict[str, str] = {}
+        credential_env_names: list[str] = []
+        for name in private_model_env_passthrough():
+            if name not in os.environ:
+                continue
+            if name in _PROVIDER_CREDENTIAL_ENV_NAMES:
+                credential_env_names.append(name)
+            else:
+                environment[name] = str(os.environ[name])
+        per_icp_timeout = _per_icp_timeout_seconds(
+            len(load_verified_dev_items(replay_store))
+        )
+        execute = self._execute or execute_scoring_v2
+        outcome = await execute(
+            operation=OP_DEV_REPLAY_V2,
+            purpose="research_lab.candidate_test.v2",
+            epoch_id=self._epoch_id,
+            sequence=max(0, int(candidate.iteration)),
+            payload={
+                "schema_version": DEV_REPLAY_REQUEST_SCHEMA_VERSION,
+                "artifact": artifact.to_dict(),
+                "source_bundle": source_bundle,
+                "snapshot_bundle": snapshot_bundle,
+                "snapshot_tree_hash": snapshot_bundle["source_tree_hash"],
+                "snapshot_manifest_hash": str(manifest.get("manifest_hash") or ""),
+                "module_name": "research_lab_adapter",
+                "callable_name": "run_icp",
+                "environment": environment,
+                "credential_env_names": sorted(credential_env_names),
+                "run_label": str(candidate.node_id or ""),
+                "miss_policy": replay_store.miss_policy,
+                "per_icp_timeout_seconds": per_icp_timeout,
+                "total_timeout_seconds": dev_eval_total_timeout_seconds(),
+            },
+            worker_index=self._worker_index,
+            input_artifact_hashes=(
+                artifact.model_artifact_hash,
+                artifact.manifest_hash,
+                str(source_bundle["archive_sha256"]),
+                str(snapshot_bundle["archive_sha256"]),
+                str(snapshot_bundle["source_tree_hash"]),
+                str(manifest.get("manifest_hash") or ""),
+            ),
+            timeout_seconds=float(dev_eval_total_timeout_seconds() + 120),
+        )
+        result = outcome.get("result")
+        graph = outcome.get("receipt_graph")
+        if not isinstance(result, Mapping) or not isinstance(graph, Mapping):
+            raise DevEvalRunnerError("measured dev replay result is incomplete")
+        if str(result.get("dev_set_hash") or "") != str(
+            manifest.get("icp_set_hash") or ""
+        ):
+            raise DevEvalRunnerError("measured dev replay ICP commitment differs")
+        if str(result.get("snapshot_manifest_hash") or "") != str(
+            manifest.get("manifest_hash") or ""
+        ):
+            raise DevEvalRunnerError("measured dev replay snapshot commitment differs")
+        root = next(
+            (
+                item
+                for item in graph.get("receipts", ())
+                if item.get("receipt_hash") == graph.get("root_receipt_hash")
+            ),
+            None,
+        )
+        if not isinstance(root, Mapping) or root.get("output_root") != sha256_json(
+            dict(result)
+        ):
+            raise DevEvalRunnerError("measured dev replay output commitment differs")
+        logger.info(
+            "research_lab_loop_dev_eval_result node_id=%s lane=%s aggregate_dev_score=%s "
+            "icp_count=%s scored_icp_count=%s snapshot_miss_count=%s failure_count=%s "
+            "miss_policy=%s dev_score_version=%s",
+            str(candidate.node_id or "")[:80],
+            str(getattr(getattr(candidate, "draft", None), "lane", "") or "")[:80],
+            round(float(result.get("aggregate_dev_score") or 0.0), 6),
+            int(result.get("icp_count") or 0),
+            int(result.get("scored_icp_count") or 0),
+            int(result.get("snapshot_miss_count") or 0),
+            int(result.get("failure_count") or 0),
+            replay_store.miss_policy,
+            str(result.get("dev_score_version") or ""),
+        )
+        return {"result": dict(result), "receipt_graph": dict(graph)}
+
+
 def build_code_edit_dev_evaluator(
     *,
     snapshot_uri: str | None = None,
@@ -370,3 +556,33 @@ def build_code_edit_dev_evaluator(
         )
         return None
     return DockerReplayDevEvaluator(snapshot_uri=uri, cache_root=cache_root)
+
+
+def build_attested_code_edit_dev_evaluator_v2(
+    *,
+    epoch_id: int,
+    worker_index: int,
+    snapshot_uri: str | None = None,
+    cache_root: Path | None = None,
+    execute: Any = None,
+) -> AttestedReplayDevEvaluatorV2 | None:
+    """V2 worker factory preserving the existing optional dev-eval gate."""
+    if not dev_eval_runner_enabled():
+        return None
+    uri = str(
+        snapshot_uri if snapshot_uri is not None else os.getenv(SNAPSHOT_URI_ENV) or ""
+    ).strip()
+    if not uri:
+        logger.info(
+            "research_lab_loop_dev_eval_unwired (%s is on but %s is unset)",
+            DEV_EVAL_ENABLED_ENV,
+            SNAPSHOT_URI_ENV,
+        )
+        return None
+    return AttestedReplayDevEvaluatorV2(
+        epoch_id=epoch_id,
+        worker_index=worker_index,
+        snapshot_uri=uri,
+        cache_root=cache_root,
+        execute=execute,
+    )

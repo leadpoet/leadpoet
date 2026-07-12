@@ -65,7 +65,11 @@ _SERVING_MANIFEST_URI_PATHS = {
 }
 
 
-def load_independent_gateway_identity(commit_sha: str) -> dict[str, Any] | None:
+def load_independent_gateway_identity(
+    commit_sha: str,
+    *,
+    role: str = "gateway_coordinator",
+) -> dict[str, Any] | None:
     """Load a repeated-build gateway PCR0 record for one exact commit."""
 
     from validator_tee.host.gateway_pcr0_builder import load_cached_gateway_identity
@@ -76,7 +80,11 @@ def load_independent_gateway_identity(commit_sha: str) -> dict[str, Any] | None:
         if configured
         else Path.home() / ".cache" / "leadpoet" / "gateway-pcr0-cache.json"
     )
-    return load_cached_gateway_identity(cache_path, str(commit_sha or "").strip().lower())
+    return load_cached_gateway_identity(
+        cache_path,
+        str(commit_sha or "").strip().lower(),
+        role=role,
+    )
 
 
 def _request_headers(*, include_internal_key: bool = False) -> dict[str, str]:

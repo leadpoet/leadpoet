@@ -24,16 +24,20 @@ from urllib.error import HTTPError, URLError
 from gateway.research_lab.candidate_diagnostics import (
     build_candidate_generation_failure_summary,
 )
+from gateway.research_lab.autoresearch_authority_v2 import (
+    autoresearch_result_document_v2 as _autoresearch_result_document_v2,
+    run_authoritative_autoresearch_v2,
+    verify_openrouter_guard_v2,
+)
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.code_build import CodeEditCandidateBuilder, CodeEditInfraFailureError
-from gateway.research_lab.code_loop_engine import CodeEditLoopEngine
-from gateway.research_lab.provider_outcome_digest import build_run_provider_outcome_digest
+from gateway.research_lab.model_authority_v2 import AttestedPrivateModelRunnerV2
 from gateway.research_lab.provider_probe import build_probe_guard_term_hashes
 from gateway.research_lab.config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
-from gateway.research_lab.dev_eval_runner import build_code_edit_dev_evaluator
+from gateway.research_lab.dev_eval_runner import (
+    build_attested_code_edit_dev_evaluator_v2,
+)
 from gateway.research_lab.key_vault import (
-    OpenRouterKeyVaultError,
-    decrypt_openrouter_key,
     preflight_openrouter_key,
     strict_openrouter_provider_policy,
     verify_openrouter_workspace_privacy,
@@ -109,7 +113,6 @@ from research_lab.axis_provenance import (
 )
 from research_lab.canonical import canonical_json, sha256_bytes, sha256_json
 from research_lab.eval import (
-    DockerPrivateModelRunner,
     DockerPrivateModelSpec,
     private_model_env_passthrough,
 )
@@ -1091,84 +1094,6 @@ class HostedRunContext:
         return str(self.queue_row["ticket_id"])
 
 
-class OpenRouterKeyResolver:
-    """Resolve miner key refs to process-local env values without persisting raw keys."""
-
-    def __init__(self, config: ResearchLabGatewayConfig):
-        self.config = config
-
-    async def resolve(self, key_ref: str, *, miner_hotkey: str) -> dict[str, str]:
-        value = await self._resolve_key_value(key_ref, miner_hotkey=miner_hotkey)
-        return {
-            "OPENROUTER_API_KEY": value,
-            "QUALIFICATION_OPENROUTER_API_KEY": value,
-            "OPENROUTER_KEY": value,
-        }
-
-    async def resolve_management_key(self, key_ref: str, *, miner_hotkey: str) -> str:
-        if not str(key_ref).startswith("encrypted_ref:openrouter:"):
-            raise HostedResearchLabWorkerError("encrypted OpenRouter key ref with management proof is required")
-        row = await select_one(
-            "research_lab_openrouter_key_refs",
-            filters=(("key_ref", key_ref), ("miner_hotkey", miner_hotkey)),
-        )
-        if not row:
-            raise HostedResearchLabWorkerError("encrypted OpenRouter key ref was not found for miner")
-        if str(row.get("privacy_status") or "") != "verified":
-            raise HostedResearchLabWorkerError("encrypted OpenRouter key ref has not passed privacy verification")
-        ciphertext = str(row.get("encrypted_management_key_ciphertext") or "").strip()
-        if not ciphertext:
-            raise HostedResearchLabWorkerError("encrypted OpenRouter management key is missing")
-        try:
-            return await asyncio.to_thread(
-                decrypt_openrouter_key,
-                ciphertext_b64=ciphertext,
-                miner_hotkey=miner_hotkey,
-                key_ref=key_ref,
-            )
-        except OpenRouterKeyVaultError as exc:
-            raise HostedResearchLabWorkerError(str(exc)) from exc
-
-    async def _resolve_key_value(self, key_ref: str, *, miner_hotkey: str) -> str:
-        if str(key_ref).startswith("encrypted_ref:openrouter:"):
-            row = await select_one(
-                "research_lab_openrouter_key_refs",
-                filters=(("key_ref", key_ref), ("miner_hotkey", miner_hotkey)),
-            )
-            if not row:
-                raise HostedResearchLabWorkerError("encrypted OpenRouter key ref was not found for miner")
-            try:
-                return await asyncio.to_thread(
-                    decrypt_openrouter_key,
-                    ciphertext_b64=str(row["encrypted_key_ciphertext"]),
-                    miner_hotkey=miner_hotkey,
-                    key_ref=key_ref,
-                )
-            except OpenRouterKeyVaultError as exc:
-                raise HostedResearchLabWorkerError(str(exc)) from exc
-
-        env_name = self._env_name_for_ref(key_ref)
-        if not env_name:
-            raise HostedResearchLabWorkerError("no OpenRouter key env var configured for miner key ref")
-        value = os.getenv(env_name)
-        if not value:
-            raise HostedResearchLabWorkerError(f"configured OpenRouter key env var is empty: {env_name}")
-        return value
-
-    def _env_name_for_ref(self, key_ref: str) -> str:
-        if self.config.miner_openrouter_key_ref_env_map_json:
-            try:
-                mapping = json.loads(self.config.miner_openrouter_key_ref_env_map_json)
-            except json.JSONDecodeError as exc:
-                raise HostedResearchLabWorkerError("invalid OpenRouter key-ref env map JSON") from exc
-            if not isinstance(mapping, Mapping):
-                raise HostedResearchLabWorkerError("OpenRouter key-ref env map must be an object")
-            mapped = mapping.get(str(key_ref))
-            if mapped:
-                return str(mapped)
-        return self.config.miner_openrouter_key_env_var
-
-
 class ResearchLabHostedWorker:
     """Poll and execute one hosted Research Lab queue run at a time."""
 
@@ -1179,7 +1104,6 @@ class ResearchLabHostedWorker:
             or self.config.hosted_worker_id
             or f"research-lab-hosted-worker:{os.uname().nodename}:{os.getpid()}"
         )
-        self.key_resolver = OpenRouterKeyResolver(self.config)
         # §9.1 item 5: raw prompt/response capture at the OpenRouter boundary.
         self._raw_trace_recorder = _OpenRouterRawTraceRecorder(self.config)
         self._last_ticket_lifecycle_reconcile_at = 0.0
@@ -1293,6 +1217,7 @@ class ResearchLabHostedWorker:
                 actor_ref=self.worker_ref,
                 is_paused=get_autoresearch_maintenance_state,
                 set_paused=set_autoresearch_maintenance_paused,
+                worker_index=int(self.config.hosted_worker_index or 0),
             )
             if not preflight.get("proceed"):
                 return HostedWorkerOutcome(
@@ -1961,25 +1886,14 @@ class ResearchLabHostedWorker:
                 reason="maintenance_pause_before_execution",
             )
         openrouter_key_ref = _miner_openrouter_key_ref(context)
-        resolved_openrouter_env = await self.key_resolver.resolve(
-            openrouter_key_ref,
-            miner_hotkey=str(context.ticket["miner_hotkey"]),
-        )
         context.openrouter_key_ref = openrouter_key_ref
-        context.openrouter_management_key = await self.key_resolver.resolve_management_key(
-            openrouter_key_ref,
-            miner_hotkey=str(context.ticket["miner_hotkey"]),
-        )
-        provider_env = dict(resolved_openrouter_env)
+        # V2 authority leases both encrypted credentials directly into the
+        # coordinator enclave.  The hosted parent never decrypts either key.
+        provider_env: dict[str, str] = {}
         context.provider_env = provider_env
-        # Credit gate before any expensive OpenRouter generation (covers start + resume).
-        await self._preflight_openrouter_credit(context, provider_env)
         docker_provider_env = _private_model_docker_env(
             self.config,
-            {
-                **provider_env,
-                **_worker_proxy_env(self.config),
-            },
+            _worker_proxy_env(self.config),
         )
         budget_context = self._run_budget_context(context)
         _tier, model_id, model_doc = self.config.resolve_auto_research_model(
@@ -1999,22 +1913,36 @@ class ResearchLabHostedWorker:
             budget_context["active_parent_outcome_memory"] = outcome_memory
 
         def _load_runtime_metadata() -> Mapping[str, Any]:
-            runner = DockerPrivateModelRunner(
-                DockerPrivateModelSpec(
+            runner = AttestedPrivateModelRunnerV2(
+                artifact=artifact,
+                spec=DockerPrivateModelSpec(
                     image_digest=artifact.image_digest,
                     env_passthrough=_private_model_env_passthrough(self.config),
                     extra_env=docker_provider_env,
                     timeout_seconds=900,
-                )
+                ),
+                model_kind="private",
+                worker_index=int(self.config.hosted_worker_index or 0),
             )
-            return runner.metadata()
+            metadata = runner.metadata()
+            authorities = runner.attested_authorities()
+            if len(authorities) != 1:
+                raise HostedResearchLabWorkerError(
+                    "private runtime metadata lacks one measured authority"
+                )
+            return {
+                "metadata": dict(metadata),
+                "authority": dict(authorities[0]),
+            }
 
         with _temporary_env(provider_env):
-            metadata = await self._to_thread_with_queue_heartbeat(
+            metadata_authority = await self._to_thread_with_queue_heartbeat(
                 context,
                 heartbeat_label="private_runtime_metadata",
                 func=_load_runtime_metadata,
             )
+            metadata = dict(metadata_authority["metadata"])
+            component_registry_authority = dict(metadata_authority["authority"])
             registry = coerce_component_registry(metadata)
             benchmark_public_summary = await latest_public_benchmark_summary()
             logger.info(
@@ -2131,108 +2059,7 @@ class ResearchLabHostedWorker:
                             node=compact_ref(event.node_id),
                         )
                     )
-
-            async def _call_loop_model(
-                messages: Sequence[Mapping[str, str]],
-                timeout_seconds: int,
-                max_tokens: int,
-                call_stage: str = "code_edit_draft",
-            ) -> str:
-                if context.claim_lost:
-                    # A heartbeat already observed that another worker owns this
-                    # run; never start more OpenRouter spend on the miner's key
-                    # even if an intermediate layer swallowed the abort.
-                    raise HostedResearchLabClaimLost(
-                        "hosted run claim was lost; refusing further OpenRouter calls"
-                    )
-                stage_options = _resolve_code_edit_loop_stage_model_request(
-                    self.config,
-                    stage=call_stage,
-                    model_id=model_id,
-                    model_doc=model_doc,
-                    requested_max_tokens=max_tokens,
-                )
-                stage = stage_options["stage"]
-                stage_model_id = str(stage_options["model_id"])
-                stage_reasoning_effort = str(stage_options["reasoning_effort"])
-                stage_temperature = float(stage_options["temperature"])
-                stage_max_tokens = int(stage_options["max_tokens"])
-                stage_model_ids = tuple(str(item) for item in stage_options.get("model_ids", ()) if str(item).strip())
-                if not stage_model_ids:
-                    stage_model_ids = (stage_model_id,)
-                allow_non_zdr = bool(stage_options.get("allow_non_zdr"))
-                if stage in {"loop_planner", "plan_alignment_judge"}:
-                    effective_max_tokens = max(1, int(stage_max_tokens or 0))
-                else:
-                    effective_max_tokens = self._auto_research_max_tokens_for_call(
-                        requested_max_tokens=stage_max_tokens,
-                        model_doc=model_doc,
-                    )
-                last_exc: Exception | None = None
-                fallback_usage: list[dict[str, Any]] = []
-                for model_attempt_index, attempt_model_id in enumerate(stage_model_ids):
-                    try:
-                        result = await self._call_openrouter(
-                            messages=messages,
-                            api_key=context.provider_env["OPENROUTER_API_KEY"],
-                            model_id=attempt_model_id,
-                            reasoning_effort=stage_reasoning_effort,
-                            timeout_seconds=timeout_seconds,
-                            max_tokens=effective_max_tokens,
-                            temperature=stage_temperature,
-                            allow_non_zdr=allow_non_zdr,
-                            capture_run_id=context.run_id,
-                            capture_stage=stage,
-                            privacy_key_ref=context.openrouter_key_ref,
-                            privacy_miner_hotkey=str(context.ticket["miner_hotkey"]),
-                            privacy_management_key=context.openrouter_management_key,
-                        )
-                        if fallback_usage:
-                            provider_usage = dict(result.provider_usage or {})
-                            provider_usage["model_fallback_attempts"] = fallback_usage
-                            provider_usage["model_fallback_attempt_count"] = len(fallback_usage)
-                            result = OpenRouterCallResult(
-                                content=result.content,
-                                provider_usage=provider_usage,
-                                cost_microusd=result.cost_microusd,
-                            )
-                        return result
-                    except CreditBlockedHostedRunError:
-                        raise
-                    except HostedResearchLabWorkerError as exc:
-                        last_exc = exc
-                        if model_attempt_index >= len(stage_model_ids) - 1:
-                            raise
-                        fallback_usage.append(
-                            {
-                                "stage": stage,
-                                "model_ref": compact_ref(attempt_model_id),
-                                "error_hash": sha256_json({"error": str(exc)}),
-                                **(
-                                    {
-                                        "failed_request": dict(
-                                            getattr(exc, "openrouter_request_diagnostics")
-                                        )
-                                    }
-                                    if isinstance(
-                                        getattr(exc, "openrouter_request_diagnostics", None),
-                                        Mapping,
-                                    )
-                                    else {}
-                                ),
-                                "next_model_ref": compact_ref(stage_model_ids[model_attempt_index + 1]),
-                            }
-                        )
-                        logger.warning(
-                            "research_lab_openrouter_stage_model_fallback stage=%s model=%s next_model=%s error_hash=%s",
-                            stage,
-                            compact_ref(attempt_model_id),
-                            compact_ref(stage_model_ids[model_attempt_index + 1]),
-                            fallback_usage[-1]["error_hash"],
-                        )
-                if last_exc is not None:
-                    raise last_exc
-                raise HostedResearchLabWorkerError("OpenRouter stage model resolution failed")
+                return dict(loop_event_row or {})
 
             loop_settings = AutoResearchLoopSettings(
                 min_seconds=self.config.auto_research_min_seconds,
@@ -2247,12 +2074,10 @@ class ResearchLabHostedWorker:
             code_builder = CodeEditCandidateBuilder(self.config)
             self._require_code_edit_builder_ready()
 
-            # §6.3 dev-eval seam: wire the docker replay runner when the flag
+            # §6.3 dev-eval seam: wire the measured replay runner when the flag
             # + snapshot URI are configured (None otherwise — the engine's
             # existing safe default logs research_lab_loop_dev_eval_unwired).
             # Evaluated per run so the flag can flip without a worker restart.
-            dev_evaluator = build_code_edit_dev_evaluator()
-
             # W4 probe query guard: hash the current private-window ICP/company
             # terms for this run. Window unavailable → empty set → the engine
             # fails CLOSED and disables probes for the run.
@@ -2268,30 +2093,95 @@ class ResearchLabHostedWorker:
                         str(exc)[:200],
                     )
 
-            loop_result = await CodeEditLoopEngine(
-                settings=loop_settings,
-                call_openrouter=_call_loop_model,
-                event_sink=_record_loop_event,
-                builder=code_builder,
-                dev_evaluator=dev_evaluator,
-                probe_private_window_term_hashes=probe_guard_hashes,
-                # W2: load only the proxy's compact, hash-verified sidecar.
-                # Keep filesystem I/O off the hosted worker's async loop.
-                provider_outcome_digest=await asyncio.to_thread(
-                    build_run_provider_outcome_digest
+            evaluation_epoch, _evaluation_block, _epoch_source = (
+                await resolve_research_lab_evaluation_epoch()
+            )
+            dev_evaluator = build_attested_code_edit_dev_evaluator_v2(
+                epoch_id=evaluation_epoch,
+                worker_index=int(self.config.hosted_worker_index or 0),
+            )
+            openrouter_guard = await verify_openrouter_guard_v2(
+                key_ref=context.openrouter_key_ref,
+                miner_hotkey=str(context.ticket["miner_hotkey"]),
+                epoch_id=evaluation_epoch,
+                worker_index=int(self.config.hosted_worker_index or 0),
+                require_egress_proxy=bool(
+                    self.config.hosted_worker_require_proxy
                 ),
-            ).run(
+            )
+            if openrouter_guard.credit_depleted:
+                raise CreditBlockedHostedRunError(
+                    "OpenRouter key insufficient credits before generation "
+                    "(limit_remaining=%s)"
+                    % openrouter_guard.credit_limit_remaining
+                )
+            privacy_proof_doc = dict(openrouter_guard.proof_doc)
+            privacy_row = await asyncio.to_thread(
+                create_openrouter_privacy_proof_event_sync,
+                key_ref=context.openrouter_key_ref,
+                miner_hotkey=str(context.ticket["miner_hotkey"]),
+                run_id=context.run_id,
+                stage="autoresearch_v2_authority",
+                proof_status="passed",
+                proof_doc=dict(privacy_proof_doc),
+            )
+            expected_event_state_hash = sha256_json(
+                {
+                    "run_id": context.run_id,
+                    "ticket_id": context.ticket_id,
+                    "receipt_id": context.receipt_id,
+                    "resume_state_hash": sha256_json(dict(resume_state or {})),
+                    "queue_event_hash": str(
+                        context.queue_row.get("current_event_hash")
+                        or context.queue_row.get("anchored_hash")
+                        or ""
+                    ),
+                }
+            )
+
+            def _record_v2_privacy_proof(**command: Any) -> Mapping[str, Any]:
+                return create_openrouter_privacy_proof_event_sync(
+                    key_ref=str(command.get("key_ref") or ""),
+                    miner_hotkey=str(command.get("miner_hotkey") or ""),
+                    run_id=(str(command["run_id"]) if command.get("run_id") else None),
+                    stage=str(command.get("stage") or ""),
+                    proof_status=str(command.get("proof_status") or ""),
+                    proof_doc=dict(command.get("proof_doc") or {}),
+                )
+
+            authoritative_loop = await run_authoritative_autoresearch_v2(
                 run_id=context.run_id,
                 ticket=context.ticket,
                 artifact=artifact,
                 component_registry=registry.to_dict(),
                 benchmark_public_summary=benchmark_public_summary,
                 model_id=model_id,
+                model_doc=model_doc,
                 budget_context=budget_context,
-                requested_loop_count=int(context.ticket.get("requested_loop_count") or 1),
+                requested_loop_count=int(
+                    context.ticket.get("requested_loop_count") or 1
+                ),
                 resume_state=resume_state,
+                loop_settings=loop_settings,
+                probe_private_window_term_hashes=tuple(probe_guard_hashes),
+                openrouter_key_ref=context.openrouter_key_ref,
+                miner_hotkey=str(context.ticket["miner_hotkey"]),
+                openrouter_guard=openrouter_guard,
+                component_registry_authority=component_registry_authority,
+                expected_event_state_hash=expected_event_state_hash,
+                record_loop_event=_record_loop_event,
+                code_builder=code_builder,
                 should_pause=is_autoresearch_maintenance_paused,
+                record_privacy_proof=_record_v2_privacy_proof,
+                dev_evaluator=dev_evaluator,
+                epoch_id=evaluation_epoch,
+                worker_index=int(self.config.hosted_worker_index or 0),
+                require_egress_proxy=bool(
+                    self.config.hosted_worker_require_proxy
+                ),
             )
+            loop_result = authoritative_loop.loop_result
+            autoresearch_authority = dict(authoritative_loop.authority)
             if loop_result.status == "paused":
                 return await self._mark_paused(
                     context,
@@ -2299,6 +2189,28 @@ class ResearchLabHostedWorker:
                     checkpoint_doc=loop_result.checkpoint_doc or latest_checkpoint,
                     reason="maintenance_pause_checkpointed",
                 )
+            terminal_authority_receipt = (
+                autoresearch_authority.get("execution_receipt")
+                or autoresearch_authority.get("receipt")
+            )
+            if not isinstance(terminal_authority_receipt, Mapping):
+                raise HostedResearchLabWorkerError(
+                    "V2 autoresearch terminal authority is missing"
+                )
+            from gateway.research_lab.attested_v2_store import (
+                persist_business_artifact_links_v2,
+            )
+
+            await persist_business_artifact_links_v2(
+                receipt_hash=str(terminal_authority_receipt["receipt_hash"]),
+                artifacts=(
+                    {
+                        "artifact_kind": "autoresearch_run",
+                        "artifact_ref": context.run_id,
+                        "artifact_hash": str(terminal_authority_receipt["output_root"]),
+                    },
+                ),
+            )
             if not loop_result.selected_candidates:
                 failure_summary = build_candidate_generation_failure_summary(
                     recorded_loop_events,
@@ -2425,6 +2337,42 @@ class ResearchLabHostedWorker:
             candidate_row, _candidate_event = await self._store_write_with_retry(
                 "candidate_artifact_create",
                 lambda request=request: create_candidate_artifact(request),
+            )
+            authority_receipt = (
+                autoresearch_authority.get("execution_receipt")
+                or autoresearch_authority.get("receipt")
+            )
+            candidate_model_manifest = finalist.get("candidate_model_manifest")
+            if not isinstance(authority_receipt, Mapping) or not isinstance(
+                candidate_model_manifest,
+                Mapping,
+            ):
+                raise HostedResearchLabWorkerError(
+                    "V2 autoresearch candidate authority is missing"
+                )
+            from gateway.research_lab.attested_v2_store import (
+                persist_business_artifact_links_v2,
+            )
+
+            await persist_business_artifact_links_v2(
+                receipt_hash=str(authority_receipt["receipt_hash"]),
+                artifacts=(
+                    {
+                        "artifact_kind": "candidate_model",
+                        "artifact_ref": str(candidate_row["candidate_id"]),
+                        "artifact_hash": str(candidate_model_manifest["manifest_hash"]),
+                    },
+                    {
+                        "artifact_kind": "candidate_patch",
+                        "artifact_ref": str(candidate_row["candidate_id"]),
+                        "artifact_hash": candidate_patch_hash,
+                    },
+                    {
+                        "artifact_kind": "candidate_source",
+                        "artifact_ref": str(candidate_row["candidate_id"]),
+                        "artifact_hash": str(finalist["candidate_source_diff_hash"]),
+                    },
+                ),
             )
             duplicate_existing_candidate = bool(
                 str(candidate_row.get("run_id") or "") and str(candidate_row.get("run_id") or "") != context.run_id
@@ -3237,6 +3185,7 @@ class ResearchLabHostedWorker:
         context: HostedRunContext,
         budget_context: Mapping[str, Any],
         loop_result: Any | None = None,
+        autoresearch_result: Mapping[str, Any] | None = None,
         cost_evidence: Mapping[str, Any] | None = None,
         source: str = "hosted_auto_research_loop_completion",
         failed_run_reimbursement: bool = False,
@@ -3273,6 +3222,15 @@ class ResearchLabHostedWorker:
             preserved_loop_start_credit=bool(await self._resolve_loop_start_credit_id(context)),
             require_positive_cost=require_positive_cost,
             skip_ineligible_prereqs=skip_ineligible_prereqs,
+            autoresearch_result=(
+                dict(autoresearch_result)
+                if isinstance(autoresearch_result, Mapping)
+                else (
+                    _autoresearch_result_document_v2(loop_result)
+                    if loop_result is not None
+                    else None
+                )
+            ),
         )
         if decision and "award_id" in decision:
             logger.info(
@@ -3558,6 +3516,36 @@ class ResearchLabHostedWorker:
         cost_evidence = _merge_failure_exception_cost_evidence(cost_evidence, failure_exception)
         cost_ledger = cost_evidence_cost_ledger(cost_evidence)
         provider_usage = cost_evidence_provider_usage(cost_evidence)
+        failure_authority = getattr(failure_exception, "authority", None)
+        signed_failure_result = None
+        if isinstance(failure_authority, Mapping):
+            candidate_result = failure_authority.get("result")
+            execution_receipt = (
+                failure_authority.get("execution_receipt")
+                or failure_authority.get("receipt")
+            )
+            if (
+                isinstance(candidate_result, Mapping)
+                and candidate_result.get("status") == "failed"
+                and isinstance(execution_receipt, Mapping)
+                and execution_receipt.get("status") == "failed"
+            ):
+                from gateway.research_lab.attested_v2_store import (
+                    persist_business_artifact_links_v2,
+                )
+
+                await persist_business_artifact_links_v2(
+                    receipt_hash=str(execution_receipt["receipt_hash"]),
+                    artifacts=(
+                        {
+                            "artifact_kind": "autoresearch_run",
+                            "artifact_ref": context.run_id,
+                            "artifact_hash": str(execution_receipt["output_root"]),
+                        },
+                    ),
+                    allow_failed_root=True,
+                )
+                signed_failure_result = dict(candidate_result)
         receipt_id = context.receipt_id
         if not receipt_id:
             await self._resolve_loop_start_credit_id(context)
@@ -3573,6 +3561,7 @@ class ResearchLabHostedWorker:
                 context=context,
                 budget_context=budget_context,
                 cost_evidence=cost_evidence,
+                autoresearch_result=signed_failure_result,
                 source="hosted_auto_research_loop_failed",
                 failed_run_reimbursement=True,
                 failure_reason=error,
@@ -4002,6 +3991,9 @@ class ResearchLabHostedWorker:
         privacy_key_ref: str = "",
         privacy_miner_hotkey: str = "",
         privacy_management_key: str = "",
+        privacy_verifier: Any | None = None,
+        privacy_event_recorder: Any | None = None,
+        raw_trace_recorder: Any | None = None,
     ) -> OpenRouterCallResult:
         if not api_key:
             raise HostedResearchLabWorkerError("OpenRouter key is required for hosted auto-research")
@@ -4049,16 +4041,21 @@ class ResearchLabHostedWorker:
 
         proxy_opener = _worker_llm_proxy_opener(self.config)
         open_fn = proxy_opener.open if proxy_opener else urlrequest.urlopen
+        effective_privacy_verifier = privacy_verifier or verify_openrouter_workspace_privacy
+        effective_privacy_event_recorder = (
+            privacy_event_recorder or create_openrouter_privacy_proof_event_sync
+        )
+        effective_raw_trace_recorder = raw_trace_recorder or self._raw_trace_recorder
 
         def _record_privacy_proof() -> None:
             try:
-                proof_doc = verify_openrouter_workspace_privacy(
+                proof_doc = effective_privacy_verifier(
                     runtime_key=api_key,
                     management_key=privacy_management_key,
                     stage=capture_stage or "openrouter_call",
                     request_policy=strict_openrouter_provider_policy(),
                 )
-                create_openrouter_privacy_proof_event_sync(
+                effective_privacy_event_recorder(
                     key_ref=privacy_key_ref,
                     miner_hotkey=privacy_miner_hotkey,
                     run_id=capture_run_id or None,
@@ -4076,7 +4073,7 @@ class ResearchLabHostedWorker:
                 }
                 failure_doc["proof_hash"] = canonical_hash(failure_doc)
                 try:
-                    create_openrouter_privacy_proof_event_sync(
+                    effective_privacy_event_recorder(
                         key_ref=privacy_key_ref,
                         miner_hotkey=privacy_miner_hotkey,
                         run_id=capture_run_id or None,
@@ -4115,7 +4112,7 @@ class ResearchLabHostedWorker:
                 # training signal. Never raises and never blocks: the recorder
                 # wraps itself and uploads on a background pool. Authorization
                 # headers / api keys are deliberately never part of the doc.
-                return self._raw_trace_recorder.capture(
+                return effective_raw_trace_recorder.capture(
                     run_id=capture_run_id,
                     stage=capture_stage,
                     request_doc={

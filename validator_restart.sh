@@ -6,6 +6,15 @@ VALIDATOR_ENV_FILE="${VALIDATOR_ENV_FILE:-/home/ec2-user/.config/leadpoet/valida
 LEADPOET_VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-leadpoet/prod/validator/env}"
 VALIDATOR_ENV_BACKUP_DIR="${VALIDATOR_ENV_BACKUP_DIR:-/home/ec2-user/.config/leadpoet/env-backups}"
 EXPECTED_AWS_ACCOUNT="${EXPECTED_AWS_ACCOUNT:-493765492819}"
+VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST="${VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/gateway-v2-release-manifest.json}"
+VALIDATOR_V2_RELEASE_MANIFEST="${VALIDATOR_V2_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
+VALIDATOR_V2_RELEASE_ARCHIVE_ROOT="${VALIDATOR_V2_RELEASE_ARCHIVE_ROOT:-/home/ec2-user/.config/leadpoet/validator-releases-v2}"
+VALIDATOR_V2_HOTKEY_CONFIG="${VALIDATOR_V2_HOTKEY_CONFIG:-/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json}"
+VALIDATOR_V2_HOTKEY_ENVELOPE="${VALIDATOR_V2_HOTKEY_ENVELOPE:-/home/ec2-user/.config/leadpoet/validator-hotkey-envelope-v2.json}"
+export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts/validator-runtime}"
+VALIDATOR_WALLET_ROOT="${VALIDATOR_WALLET_ROOT:-$HOME/.bittensor/wallets}"
+VALIDATOR_WALLET_NAME="${VALIDATOR_WALLET_NAME:-validator_72}"
+VALIDATOR_WALLET_HOTKEY="${VALIDATOR_WALLET_HOTKEY:-default}"
 VALIDATOR_ENV_EXPORT="$(mktemp /tmp/validator_env_export.XXXXXX)"
 SECRET_TMP="$(mktemp /tmp/validator_secret_env.XXXXXX)"
 
@@ -120,7 +129,6 @@ set -a
 set +a
 
 required_keys=(
-  ENABLE_TEE_SUBMISSION
   ENABLE_FULFILLMENT
   ENABLE_QUALIFICATION_EVALUATION
   LEADPOET_WRAPPER_ACTIVE
@@ -146,6 +154,8 @@ required_keys=(
   RESEARCH_LAB_WEIGHT_MUTATION_ENABLED
   RESEARCH_LAB_SUBMIT_ON_CHAIN_ENABLED
   QUALIFICATION_WEBSHARE_PROXY_1
+  VALIDATOR_V2_GATEWAY_URL
+  EXPECTED_CHAIN
   NO_PROXY
 )
 
@@ -161,7 +171,55 @@ if [ "${#missing[@]}" -gt 0 ]; then
 fi
 
 export no_proxy="${no_proxy:-$NO_PROXY}"
+unset ENABLE_TEE_SUBMISSION VALIDATOR_ATTESTED_WEIGHT_MODE
+unset VALIDATOR_REQUIRE_GATEWAY_WEIGHT_SUBMISSION DISABLE_GATEWAY_WEIGHT_SUBMISSION
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
+
+for required_file in \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+  "$VALIDATOR_V2_RELEASE_MANIFEST" \
+  "$VALIDATOR_V2_HOTKEY_CONFIG" \
+  "$VALIDATOR_V2_HOTKEY_ENVELOPE"; do
+  if [ ! -r "$required_file" ]; then
+    echo "ERROR: authoritative V2 input is unavailable: $required_file" >&2
+    exit 1
+  fi
+done
+
+HOST_HOTKEY_DIR="$VALIDATOR_WALLET_ROOT/$VALIDATOR_WALLET_NAME/hotkeys"
+if [ -L "$HOST_HOTKEY_DIR" ] || { [ -e "$HOST_HOTKEY_DIR" ] && [ ! -d "$HOST_HOTKEY_DIR" ]; }; then
+  echo "ERROR: validator hotkey directory is not a plain directory: $HOST_HOTKEY_DIR" >&2
+  exit 1
+fi
+HOST_HOTKEY_ENTRY=""
+if [ -d "$HOST_HOTKEY_DIR" ]; then
+  HOST_HOTKEY_ENTRY="$(find "$HOST_HOTKEY_DIR" -mindepth 1 -maxdepth 1 -print -quit)"
+fi
+if [ -n "$HOST_HOTKEY_ENTRY" ]; then
+  echo "ERROR: usable validator hotkey material remains on the parent: $HOST_HOTKEY_ENTRY" >&2
+  echo "Create and verify the KMS envelope, move the host hotkey to approved offline custody, then restart." >&2
+  exit 1
+fi
+if [ ! -r "$VALIDATOR_WALLET_ROOT/$VALIDATOR_WALLET_NAME/coldkeypub.txt" ]; then
+  echo "ERROR: public validator coldkey file is unavailable" >&2
+  exit 1
+fi
+
+VALIDATOR_DEPLOY_SHA="$(git rev-parse HEAD)"
+echo "Preparing exact hash-locked validator artifacts before production shutdown"
+python3 -m validator_tee.scripts.stage_runtime_artifacts_v2 \
+  --lock "$VALIDATOR_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
+  --output-dir "$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
+  --allow-download >/dev/null
+echo "Validating the exact validator V2 release before production shutdown"
+python3 -m validator_tee.host.restart_preflight_v2 \
+  --deploy-commit "$VALIDATOR_DEPLOY_SHA" \
+  --validator-release "$VALIDATOR_V2_RELEASE_MANIFEST" \
+  --gateway-release "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+  --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG" \
+  --hotkey-envelope "$VALIDATOR_V2_HOTKEY_ENVELOPE" \
+  --runtime-artifact-lock "$VALIDATOR_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
+  --host-hotkey-directory "$HOST_HOTKEY_DIR"
 
 actual_aws_account="$(aws sts get-caller-identity --query Account --output text)"
 if [ "$actual_aws_account" != "$EXPECTED_AWS_ACCOUNT" ]; then
@@ -173,11 +231,13 @@ echo "Stopping validator processes/containers/enclave"
 sudo pkill -TERM -f ".auto_update_wrapper.sh" 2>/dev/null || true
 sudo pkill -TERM -f "neurons/validator.py" 2>/dev/null || true
 sudo pkill -TERM -f "docker logs -f leadpoet-validator-main" 2>/dev/null || true
+sudo pkill -TERM -f "validator_tee.host.chain_relay_v2" 2>/dev/null || true
 sleep 5
 
 sudo pkill -KILL -f ".auto_update_wrapper.sh" 2>/dev/null || true
 sudo pkill -KILL -f "neurons/validator.py" 2>/dev/null || true
 sudo pkill -KILL -f "docker logs -f leadpoet-validator-main" 2>/dev/null || true
+sudo pkill -KILL -f "validator_tee.host.chain_relay_v2" 2>/dev/null || true
 sleep 2
 
 docker ps -aq \
@@ -220,6 +280,17 @@ docker builder prune -af
 echo "Building validator enclave"
 bash validator_tee/scripts/build_enclave.sh
 test -f validator_tee/validator-enclave.eif
+echo "Verifying local EIF against the approved six-build validator release"
+python3 -m validator_tee.host.verify_release_gate_v2 \
+  --verify-manifest "$VALIDATOR_V2_RELEASE_MANIFEST" \
+  --local-release "$VALIDATOR_ROOT/validator_tee/validator-v2-release.json"
+echo "Archiving the complete verified validator V2 release"
+python3 -m validator_tee.host.release_archive_v2 \
+  --archive \
+  --release-manifest "$VALIDATOR_V2_RELEASE_MANIFEST" \
+  --validator-tee-root "$VALIDATOR_ROOT/validator_tee" \
+  --archive-root "$VALIDATOR_V2_RELEASE_ARCHIVE_ROOT" \
+  --retain 3
 cd validator_tee
 sudo nitro-cli run-enclave \
   --eif-path validator-enclave.eif \
@@ -228,6 +299,30 @@ sudo nitro-cli run-enclave \
 sleep 3
 cd "$VALIDATOR_ROOT"
 
+echo "Starting validator-enclave opaque chain TLS relay"
+CHAIN_RELAY_LOG="${VALIDATOR_CHAIN_RELAY_LOG:-/home/ec2-user/validator-chain-relay-v2.log}"
+setsid env PYTHONPATH="$VALIDATOR_ROOT" python3 -m validator_tee.host.chain_relay_v2 \
+  >> "$CHAIN_RELAY_LOG" 2>&1 < /dev/null &
+CHAIN_RELAY_PID=$!
+sleep 2
+if ! kill -0 "$CHAIN_RELAY_PID" 2>/dev/null; then
+  echo "ERROR: validator chain relay failed to start" >&2
+  tail -80 "$CHAIN_RELAY_LOG" >&2 || true
+  exit 1
+fi
+echo "Validator chain relay ready (pid=$CHAIN_RELAY_PID)"
+
+echo "Configuring the authoritative validator V2 release"
+python3 -m validator_tee.host.runtime_v2_bootstrap \
+  --validator-release "$VALIDATOR_V2_RELEASE_MANIFEST" \
+  --gateway-release "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+  --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG"
+
+echo "Provisioning the validator hotkey directly into Nitro with KMS"
+python3 -m validator_tee.host.hotkey_bootstrap_v2 \
+  --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG" \
+  --hotkey-envelope "$VALIDATOR_V2_HOTKEY_ENVELOPE"
+
 echo "Starting validator"
 export PATH="$HOME/.local/bin:$PATH"
 export PYTHONPATH="${PYTHONPATH:-$VALIDATOR_ROOT}"
@@ -235,5 +330,5 @@ export PYTHONPATH="${PYTHONPATH:-$VALIDATOR_ROOT}"
 python3 neurons/validator.py \
   --netuid "${VALIDATOR_NETUID:-71}" \
   --subtensor_network "${VALIDATOR_SUBTENSOR_NETWORK:-finney}" \
-  --wallet_name "${VALIDATOR_WALLET_NAME:-validator_72}" \
-  --wallet_hotkey "${VALIDATOR_WALLET_HOTKEY:-default}"
+  --wallet_name "$VALIDATOR_WALLET_NAME" \
+  --wallet_hotkey "$VALIDATOR_WALLET_HOTKEY"

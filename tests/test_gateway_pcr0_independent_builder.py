@@ -8,13 +8,26 @@ import pytest
 from validator_tee.host import gateway_pcr0_builder
 
 
-def _result(commit, *, pcr0="a" * 96, image="sha256:image", eif="sha256:eif"):
+def _result(
+    commit,
+    *,
+    role="gateway_coordinator",
+    pcr0="a" * 96,
+    image="sha256:image",
+    eif="sha256:eif",
+):
     return {
         "commit_sha": commit,
+        "role": role,
         "pcr0": pcr0,
         "image_id": image,
         "eif_sha256": eif,
         "source_manifest_hash": "sha256:source",
+        "build_identity_hash": "sha256:identity",
+        "execution_manifest_hash": "sha256:execution",
+        "dependency_lock_hash": "sha256:dependencies",
+        "dockerfile_hash": "sha256:dockerfile",
+        "topology_hash": "sha256:topology",
     }
 
 
@@ -36,6 +49,13 @@ def test_repeated_builds_must_match_every_identity_field(tmp_path, monkeypatch):
     )
     assert result["verified_build_count"] == 3
     assert result["pcr0"] == "a" * 96
+    assert [row["build_ordinal"] for row in result["build_evidence"]] == [1, 2, 3]
+    assert {row["builder_domain"] for row in result["build_evidence"]} == {
+        "validator"
+    }
+    assert {row["physical_role"] for row in result["build_evidence"]} == {
+        "gateway_coordinator"
+    }
 
 
 def test_repeated_build_divergence_fails_closed(tmp_path, monkeypatch):
@@ -79,7 +99,7 @@ def test_cache_keeps_latest_twenty_verified_commits(tmp_path):
         commit = ("%040x" % index)
         gateway_pcr0_builder.write_cache_entry(
             cache_path=cache,
-            entry={**_result(commit), "verified_build_count": 3, "role": "gateway_scoring"},
+            entry={**_result(commit), "verified_build_count": 3},
         )
     document = json.loads(cache.read_text())
     assert len(document["entries"]) == 20
@@ -93,7 +113,7 @@ def test_cache_never_evicts_explicitly_pinned_deployed_commit(tmp_path):
     deployed_commit = "1" * 40
     gateway_pcr0_builder.write_cache_entry(
         cache_path=cache,
-        entry={**_result(deployed_commit), "verified_build_count": 3, "role": "gateway_scoring"},
+        entry={**_result(deployed_commit), "verified_build_count": 3},
         pin=True,
     )
 
@@ -101,12 +121,14 @@ def test_cache_never_evicts_explicitly_pinned_deployed_commit(tmp_path):
         commit = "%040x" % (index + 100)
         gateway_pcr0_builder.write_cache_entry(
             cache_path=cache,
-            entry={**_result(commit), "verified_build_count": 3, "role": "gateway_scoring"},
+            entry={**_result(commit), "verified_build_count": 3},
         )
 
     document = json.loads(cache.read_text())
     assert len(document["entries"]) == 20
-    assert document["pinned_commit_shas"] == [deployed_commit]
+    assert document["pinned_deployments"] == [
+        {"role": "gateway_coordinator", "commit_sha": deployed_commit}
+    ]
     assert gateway_pcr0_builder.load_cached_gateway_identity(cache, deployed_commit)
 
 
@@ -115,9 +137,46 @@ def test_cache_rejects_two_build_identity(tmp_path):
     commit = "2" * 40
     gateway_pcr0_builder.write_cache_entry(
         cache_path=cache,
-        entry={**_result(commit), "verified_build_count": 2, "role": "gateway_scoring"},
+        entry={**_result(commit), "verified_build_count": 2},
     )
     assert gateway_pcr0_builder.load_cached_gateway_identity(cache, commit) is None
+
+
+def test_cache_retains_twenty_commits_per_physical_role(tmp_path):
+    cache = tmp_path / "cache.json"
+    for role_index, role in enumerate(gateway_pcr0_builder.GATEWAY_ROLES):
+        for index in range(25):
+            commit = "%040x" % (role_index * 1000 + index)
+            gateway_pcr0_builder.write_cache_entry(
+                cache_path=cache,
+                entry={
+                    **_result(commit, role=role),
+                    "verified_build_count": 3,
+                },
+            )
+    document = json.loads(cache.read_text())
+    assert len(document["entries"]) == 80
+    for role in gateway_pcr0_builder.GATEWAY_ROLES:
+        assert len([row for row in document["entries"] if row["role"] == role]) == 20
+
+
+def test_same_commit_requires_explicit_role_when_cache_has_multiple_eifs(tmp_path):
+    cache = tmp_path / "cache.json"
+    commit = "9" * 40
+    for role in ("gateway_coordinator", "gateway_scoring_a"):
+        gateway_pcr0_builder.write_cache_entry(
+            cache_path=cache,
+            entry={
+                **_result(commit, role=role, pcr0=("a" if role.endswith("a") else "b") * 96),
+                "verified_build_count": 3,
+            },
+        )
+    assert gateway_pcr0_builder.load_cached_gateway_identity(cache, commit) is None
+    assert gateway_pcr0_builder.load_cached_gateway_identity(
+        cache,
+        commit,
+        role="gateway_scoring_a",
+    )["role"] == "gateway_scoring_a"
 
 
 def test_git_archive_rejects_symlinks(tmp_path):

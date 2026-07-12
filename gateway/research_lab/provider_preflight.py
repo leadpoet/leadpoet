@@ -29,7 +29,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,17 @@ def _preflight_failure_streak_threshold() -> int:
         return max(1, int(os.getenv("RESEARCH_LAB_PROVIDER_PREFLIGHT_FAILURE_STREAK", "3")))
     except ValueError:
         return 3
+
+
+def provider_preflight_settings() -> dict[str, Any]:
+    """Return the existing non-secret runtime knobs as a canonical document."""
+
+    return {
+        "enabled": preflight_enabled(),
+        "ttl_seconds": _preflight_ttl_seconds(),
+        "timeout_seconds": _preflight_timeout_seconds(),
+        "failure_streak_threshold": _preflight_failure_streak_threshold(),
+    }
 
 
 def _scrapingdog_key() -> str:
@@ -217,7 +228,7 @@ def probe_exa(timeout_seconds: float | None = None) -> ProviderVerdict:
         )
 
 
-_PROBES: dict[str, Callable[[], ProviderVerdict]] = {
+_PROBES: dict[str, Callable[[float | None], ProviderVerdict]] = {
     "scrapingdog": probe_scrapingdog,
     "exa": probe_exa,
 }
@@ -231,11 +242,18 @@ class ProviderPreflight:
         self._verdicts: dict[str, ProviderVerdict] = {}
         self._failure_streaks: dict[str, int] = {}
 
-    def check(self, *, force: bool = False) -> dict[str, Any]:
+    def check(
+        self,
+        *,
+        force: bool = False,
+        settings: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Return {"healthy": bool, "verdicts": [...], "pause_worthy": bool}."""
-        if not preflight_enabled():
+        effective = dict(settings or provider_preflight_settings())
+        if not bool(effective.get("enabled")):
             return {"healthy": True, "verdicts": [], "pause_worthy": False, "disabled": True}
-        ttl = _preflight_ttl_seconds()
+        ttl = max(60.0, float(effective["ttl_seconds"]))
+        timeout = max(2.0, float(effective["timeout_seconds"]))
         now = time.time()
         verdicts: list[ProviderVerdict] = []
         for name, probe in _PROBES.items():
@@ -244,7 +262,7 @@ class ProviderPreflight:
             if cached is not None and not force and now - cached.checked_at < ttl:
                 verdicts.append(cached)
                 continue
-            verdict = probe()
+            verdict = probe(timeout)
             with self._lock:
                 self._verdicts[name] = verdict
                 if verdict.status == "transport_failure":
@@ -260,7 +278,7 @@ class ProviderPreflight:
                     self._failure_streaks.get(name, 0),
                 )
             verdicts.append(verdict)
-        streak_threshold = _preflight_failure_streak_threshold()
+        streak_threshold = max(1, int(effective["failure_streak_threshold"]))
         pause_worthy = False
         healthy = True
         for verdict in verdicts:
@@ -291,6 +309,8 @@ async def preflight_gate(
     actor_ref: str,
     is_paused: Callable[[], Any],
     set_paused: Callable[..., Any],
+    worker_index: int = 0,
+    authority_check: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Async preflight gate for one maintenance scope (scoring/autoresearch).
 
@@ -300,9 +320,23 @@ async def preflight_gate(
     a previous preflight (marker present), auto-resumes it. Operator pauses
     (no marker) are never resumed here.
     """
-    import asyncio
+    if authority_check is None:
+        from gateway.research_lab.v2_authority import (
+            execute_provider_preflight_v2,
+        )
 
-    result = await asyncio.to_thread(shared_preflight().check)
+        authority_check = execute_provider_preflight_v2
+    result = authority_check(
+        scope_key="%s:%s" % (str(scope), str(actor_ref)),
+        worker_index=int(worker_index),
+        settings=provider_preflight_settings(),
+        force=False,
+        provider_credential_profile="benchmark_model",
+    )
+    if hasattr(result, "__await__"):
+        result = await result
+    if not isinstance(result, Mapping):
+        raise RuntimeError("attested provider preflight result is invalid")
     if result.get("disabled"):
         return {"proceed": True, "reason": "preflight_disabled", "verdicts": []}
     verdicts = result.get("verdicts") or []

@@ -122,6 +122,41 @@ scoring_egress_proxy = None
 scoring_egress_proxy_lock = Lock()
 scoring_runtime_configuration = None
 scoring_runtime_configuration_lock = Lock()
+v2_runtime_identity = None
+v2_runtime_identity_lock = Lock()
+v2_peer_registry = None
+v2_peer_registry_lock = Lock()
+v2_tls_server = None
+v2_tls_server_thread = None
+v2_tls_server_lock = Lock()
+v2_provider_broker = None
+v2_provider_broker_lock = Lock()
+v2_provider_cache_store = None
+v2_provider_cache_store_lock = Lock()
+v2_provider_outcome_store = None
+v2_provider_outcome_store_lock = Lock()
+v2_provider_semantics_authority = None
+v2_provider_semantics_authority_lock = Lock()
+v2_provider_evidence_authority = None
+v2_provider_evidence_authority_lock = Lock()
+v2_inter_enclave_client = None
+v2_inter_enclave_client_lock = Lock()
+v2_scoring_job_manager = None
+v2_scoring_job_manager_lock = Lock()
+v2_autoresearch_job_manager = None
+v2_autoresearch_job_manager_lock = Lock()
+v2_coordinator_job_manager = None
+v2_coordinator_job_manager_lock = Lock()
+v2_kms_recipient = None
+v2_kms_recipient_lock = Lock()
+v2_artifact_vault = None
+v2_artifact_vault_lock = Lock()
+v2_inter_enclave_artifact_ingest = None
+v2_inter_enclave_artifact_ingest_lock = Lock()
+v2_artifact_persistence_verifier = None
+v2_artifact_persistence_verifier_lock = Lock()
+v2_ingress_seal_cache = {}
+v2_ingress_seal_cache_lock = Lock()
 
 print("=" * 80, flush=True)
 print("🐛 DEBUG: All imports and global state OK", flush=True)
@@ -1036,20 +1071,41 @@ def get_scoring_job_manager():
         _scoring_runtime_paths()
         from gateway.tee.scoring_import_closure import verify_staged_manifest
         from gateway.tee.build_identity import load_identity
+        from gateway.tee.protected_workflows import load_manifest as load_protected_manifest
+        from gateway.tee.protected_workflows import verify_manifest as verify_protected_manifest
         from gateway.tee.scoring_job_manager import ScoringJobManager
 
         gateway_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        manifest = verify_staged_manifest(gateway_root=Path(gateway_root))
-        identity = load_identity(gateway_root=Path(gateway_root))
-        if identity["scoring_manifest_hash"] != manifest["manifest_hash"]:
+        expected_role = str(
+            os.getenv("LEADPOET_ENCLAVE_ROLE", "gateway_coordinator")
+            or "gateway_coordinator"
+        ).strip()
+        manifest = verify_staged_manifest(
+            gateway_root=Path(gateway_root),
+            expected_role=expected_role,
+        )
+        identity = load_identity(
+            gateway_root=Path(gateway_root),
+            expected_role=expected_role,
+        )
+        protected_manifest = load_protected_manifest(
+            Path(gateway_root) / "tee" / "protected_workflows.json"
+        )
+        verify_protected_manifest(Path(gateway_root), protected_manifest)
+        role_manifest = manifest["role_manifests"].get(expected_role)
+        if not isinstance(role_manifest, dict):
+            raise RuntimeError("gateway enclave role import manifest missing")
+        if identity["execution_manifest_hash"] != role_manifest["manifest_hash"]:
             raise RuntimeError("gateway enclave build identity manifest mismatch")
+        if identity["protected_manifest_hash"] != protected_manifest["manifest_hash"]:
+            raise RuntimeError("gateway enclave protected workflow manifest mismatch")
         configured_mode = str(
             os.getenv("RESEARCH_LAB_ATTESTED_SCORING_MODE", "off") or "off"
         ).strip().lower()
         if configured_mode != "off":
             get_scoring_egress_proxy()
         scoring_job_manager = ScoringJobManager(
-            build_manifest_hash=str(manifest["manifest_hash"]),
+            build_manifest_hash=str(role_manifest["manifest_hash"]),
             commit_sha=str(identity["commit_sha"]),
             signer=sign_data,
             public_key_supplier=lambda: get_public_key_bytes().hex(),
@@ -1064,6 +1120,1185 @@ def get_scoring_job_manager():
             flush=True,
         )
         return scoring_job_manager
+
+
+def get_v2_runtime_identity():
+    global v2_runtime_identity
+    with v2_runtime_identity_lock:
+        if v2_runtime_identity is not None:
+            return v2_runtime_identity
+        from gateway.tee.rpc_authority import active_enclave_role
+        from gateway.tee.runtime_identity_v2 import RuntimeIdentityV2
+
+        physical_role = active_enclave_role()
+        gateway_root = Path(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        v2_runtime_identity = RuntimeIdentityV2(
+            gateway_root=gateway_root,
+            physical_role=physical_role,
+            signing_pubkey_supplier=lambda: get_public_key_bytes().hex(),
+            pcr0_supplier=lambda: str(pcr_measurements.get("PCR0") or ""),
+        )
+        return v2_runtime_identity
+
+
+def handle_v2_runtime_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    manager = get_v2_runtime_identity()
+    if method == "v2_configure_runtime":
+        if not isinstance(params, dict) or set(params) != {
+            "schema_version",
+            "configuration",
+            "configuration_hash",
+        }:
+            raise ValueError("V2 runtime configuration fields are invalid")
+        if params.get("schema_version") != "leadpoet.enclave_runtime_config.v2":
+            raise ValueError("V2 runtime configuration schema is invalid")
+        return {
+            "result": manager.configure(
+                configuration=params.get("configuration"),
+                expected_config_hash=str(params.get("configuration_hash") or ""),
+            )
+        }
+    if method == "v2_get_boot_identity":
+        return {"result": manager.boot_identity()}
+    if method == "v2_get_transport_certificate":
+        return {
+            "result": {
+                "certificate_pem_b64": base64.b64encode(
+                    manager.transport_certificate_pem()
+                ).decode("ascii"),
+                "status": manager.public_status(),
+            }
+        }
+    if method == "v2_register_peer":
+        if not isinstance(params, dict) or set(params) != {
+            "boot_identity",
+            "certificate_pem_b64",
+        }:
+            raise ValueError("V2 peer registration fields are invalid")
+        peer_boot = params.get("boot_identity")
+        if not isinstance(peer_boot, dict):
+            raise ValueError("V2 peer boot identity is invalid")
+        try:
+            certificate_pem = base64.b64decode(
+                str(params.get("certificate_pem_b64") or ""),
+                validate=True,
+            )
+        except Exception as exc:
+            raise ValueError("V2 peer certificate is invalid") from exc
+        expectation = manager.peer_release_expectation(
+            str(peer_boot.get("physical_role") or "")
+        )
+        registry = get_v2_peer_registry()
+        return {
+            "result": registry.register(
+                boot_identity=peer_boot,
+                certificate_pem=certificate_pem,
+                expected_pcr0=expectation["pcr0"],
+                expected_commit_sha=expectation["commit_sha"],
+                expected_build_manifest_hash=expectation["build_manifest_hash"],
+            )
+        }
+    if method == "v2_peer_status":
+        return {
+            "result": {
+                "registered_roles": list(get_v2_peer_registry().registered_roles()),
+            }
+        }
+    if method == "v2_start_tls_service":
+        return {"result": start_v2_tls_service()}
+    if method == "v2_call_peer_health":
+        if not isinstance(params, dict) or set(params) != {"physical_role"}:
+            raise ValueError("V2 peer health fields are invalid")
+        from gateway.tee.inter_enclave_tls import AttestedTLSRPCClient
+        from gateway.tee.rpc_authority import active_enclave_role
+        import secrets
+
+        client = AttestedTLSRPCClient(
+            local_physical_role=active_enclave_role(),
+            local_boot_identity=manager.boot_identity(),
+            local_tls_identity=manager.tls_identity(),
+            peer_registry=get_v2_peer_registry(),
+        )
+        return {
+            "result": client.call(
+                target_physical_role=str(params.get("physical_role") or ""),
+                method="channel_health",
+                params={},
+                channel_id=secrets.token_hex(16),
+            )
+        }
+    if method == "v2_provider_broker_health":
+        return {"result": get_v2_provider_broker().health()}
+    if method == "v2_provider_semantics_health":
+        return {"result": get_v2_provider_semantics_authority().health()}
+    if method == "v2_get_kms_recipient":
+        if not isinstance(params, dict) or set(params) != {"credential_slot"}:
+            raise ValueError("V2 KMS recipient fields are invalid")
+        return {
+            "result": get_v2_kms_recipient().recipient_request(
+                str(params.get("credential_slot") or "")
+            )
+        }
+    if method == "v2_get_source_add_ingress_recipient":
+        if not isinstance(params, dict) or set(params) != {
+            "miner_hotkey",
+            "adapter_ref",
+            "credential_ref",
+        }:
+            raise ValueError("V2 SOURCE_ADD ingress recipient fields are invalid")
+        return {
+            "result": get_v2_kms_recipient().source_add_ingress_recipient_request(
+                miner_hotkey=str(params.get("miner_hotkey") or ""),
+                adapter_ref=str(params.get("adapter_ref") or ""),
+                credential_ref=str(params.get("credential_ref") or ""),
+            )
+        }
+    if method == "v2_get_openrouter_ingress_recipient":
+        if not isinstance(params, dict) or set(params) != {
+            "miner_hotkey",
+            "credential_kind",
+        }:
+            raise ValueError("V2 OpenRouter ingress recipient fields are invalid")
+        return {
+            "result": get_v2_kms_recipient().openrouter_ingress_recipient_request(
+                miner_hotkey=str(params.get("miner_hotkey") or ""),
+                credential_kind=str(params.get("credential_kind") or ""),
+            )
+        }
+    if method == "v2_seal_source_add_ingress_credential":
+        if not isinstance(params, dict) or set(params) != {
+            "request_id",
+            "ciphertext_b64",
+        }:
+            raise ValueError("V2 SOURCE_ADD ingress ciphertext fields are invalid")
+        from gateway.tee.source_add_credential_ingress_v2 import (
+            seal_source_add_ingress_credential_v2,
+        )
+
+        request_id = str(params.get("request_id") or "").lower()
+        ciphertext_b64 = str(params.get("ciphertext_b64") or "")
+        from leadpoet_canonical.attested_v2 import sha256_bytes
+
+        try:
+            ciphertext_hash = sha256_bytes(
+                base64.b64decode(ciphertext_b64, validate=True)
+            )
+        except Exception as exc:
+            raise ValueError("V2 SOURCE_ADD ingress ciphertext is invalid") from exc
+        cache_key = ("source_add", request_id)
+        with v2_ingress_seal_cache_lock:
+            existing = v2_ingress_seal_cache.get(cache_key)
+            if existing is not None:
+                if existing["ciphertext_hash"] != ciphertext_hash:
+                    raise ValueError("V2 SOURCE_ADD ingress ciphertext changed")
+                envelope = dict(existing["credential_envelope"])
+            else:
+                lease = get_v2_kms_recipient().unwrap_source_add_ingress_credential(
+                    request_id=request_id,
+                    ciphertext_b64=ciphertext_b64,
+                )
+                envelope = seal_source_add_ingress_credential_v2(
+                    lease,
+                    vault=get_v2_artifact_vault(),
+                )
+                v2_ingress_seal_cache[cache_key] = {
+                    "ciphertext_hash": ciphertext_hash,
+                    "credential_envelope": dict(envelope),
+                }
+        return {"result": {"credential_envelope": envelope}}
+    if method == "v2_seal_openrouter_ingress_credential":
+        if not isinstance(params, dict) or set(params) != {
+            "request_id",
+            "ciphertext_b64",
+        }:
+            raise ValueError("V2 OpenRouter ingress ciphertext fields are invalid")
+        from gateway.tee.openrouter_credential_v2 import (
+            seal_openrouter_ingress_credential_v2,
+        )
+
+        request_id = str(params.get("request_id") or "").lower()
+        ciphertext_b64 = str(params.get("ciphertext_b64") or "")
+        from leadpoet_canonical.attested_v2 import sha256_bytes
+
+        try:
+            ciphertext_hash = sha256_bytes(
+                base64.b64decode(ciphertext_b64, validate=True)
+            )
+        except Exception as exc:
+            raise ValueError("V2 OpenRouter ingress ciphertext is invalid") from exc
+        cache_key = ("openrouter", request_id)
+        with v2_ingress_seal_cache_lock:
+            existing = v2_ingress_seal_cache.get(cache_key)
+            if existing is not None:
+                if existing["ciphertext_hash"] != ciphertext_hash:
+                    raise ValueError("V2 OpenRouter ingress ciphertext changed")
+                envelope = dict(existing["credential_envelope"])
+            else:
+                lease = get_v2_kms_recipient().unwrap_openrouter_ingress_credential(
+                    request_id=request_id,
+                    ciphertext_b64=ciphertext_b64,
+                )
+                envelope = seal_openrouter_ingress_credential_v2(
+                    lease,
+                    vault=get_v2_artifact_vault(),
+                )
+                v2_ingress_seal_cache[cache_key] = {
+                    "ciphertext_hash": ciphertext_hash,
+                    "credential_envelope": dict(envelope),
+                }
+        return {"result": {"credential_envelope": envelope}}
+    if method == "v2_provision_encrypted_secret":
+        if not isinstance(params, dict) or set(params) != {
+            "credential_slot",
+            "ciphertext_for_recipient_b64",
+        }:
+            raise ValueError("V2 encrypted credential fields are invalid")
+        slot = str(params.get("credential_slot") or "")
+        ciphertext = str(params.get("ciphertext_for_recipient_b64") or "")
+        from gateway.tee.artifact_vault_v2 import ARTIFACT_MASTER_KEY_SLOT
+
+        if slot == ARTIFACT_MASTER_KEY_SLOT:
+            return {"result": provision_v2_artifact_master_key(ciphertext)}
+        if v2_artifact_vault is None:
+            raise RuntimeError(
+                "V2 artifact master key must be provisioned before provider credentials"
+            )
+        credential = get_v2_kms_recipient().unwrap_credential(
+            slot=slot,
+            ciphertext_for_recipient_b64=ciphertext,
+        )
+        return {
+            "result": get_v2_provider_broker().provision_credential(
+                slot=slot,
+                credential=credential,
+            )
+        }
+    if method == "v2_get_job_kms_recipient":
+        if not isinstance(params, dict) or set(params) != {
+            "job_id",
+            "credential_slot",
+            "credential_value_hash",
+            "key_ref_hash",
+        }:
+            raise ValueError("V2 job KMS recipient fields are invalid")
+        return {
+            "result": get_v2_kms_recipient().job_recipient_request(
+                job_id=str(params.get("job_id") or ""),
+                slot=str(params.get("credential_slot") or ""),
+                credential_value_hash_expected=str(
+                    params.get("credential_value_hash") or ""
+                ),
+                key_ref_hash=str(params.get("key_ref_hash") or ""),
+            )
+        }
+    if method == "v2_provision_job_encrypted_secret":
+        if not isinstance(params, dict) or set(params) != {
+            "request_id",
+            "ciphertext_for_recipient_b64",
+        }:
+            raise ValueError("V2 encrypted job credential fields are invalid")
+        lease = get_v2_kms_recipient().unwrap_job_credential(
+            request_id=str(params.get("request_id") or ""),
+            ciphertext_for_recipient_b64=str(
+                params.get("ciphertext_for_recipient_b64") or ""
+            ),
+        )
+        return {
+            "result": get_v2_provider_broker().provision_job_credential(
+                job_id=lease["job_id"],
+                slot=lease["credential_slot"],
+                credential=lease["credential"],
+                credential_value_hash_expected=lease[
+                    "credential_value_hash"
+                ],
+            )
+        }
+    if method == "v2_provision_job_sealed_source_add_secret":
+        if not isinstance(params, dict) or set(params) != {"envelope"}:
+            raise ValueError("V2 sealed SOURCE_ADD job credential fields are invalid")
+        from gateway.tee.source_add_credential_ingress_v2 import (
+            unseal_source_add_job_credential_v2,
+        )
+
+        lease = unseal_source_add_job_credential_v2(
+            params.get("envelope") or {},
+            vault=get_v2_artifact_vault(),
+        )
+        return {
+            "result": get_v2_provider_broker().provision_job_credential(
+                job_id=lease["job_id"],
+                slot=lease["credential_slot"],
+                credential=lease["credential"],
+                credential_value_hash_expected=lease["credential_value_hash"],
+            )
+        }
+    if method == "v2_provision_job_sealed_openrouter_secret":
+        if not isinstance(params, dict) or set(params) != {"envelope"}:
+            raise ValueError(
+                "V2 sealed OpenRouter job credential fields are invalid"
+            )
+        from gateway.tee.openrouter_credential_v2 import (
+            unseal_openrouter_job_credential_v2,
+        )
+
+        lease = unseal_openrouter_job_credential_v2(
+            params.get("envelope") or {},
+            vault=get_v2_artifact_vault(),
+        )
+        return {
+            "result": get_v2_provider_broker().provision_job_credential(
+                job_id=lease["job_id"],
+                slot=lease["credential_slot"],
+                credential=lease["credential"],
+                credential_value_hash_expected=lease["credential_value_hash"],
+            )
+        }
+    if method == "v2_release_job_credentials":
+        if not isinstance(params, dict) or set(params) != {"job_id"}:
+            raise ValueError("V2 job credential release fields are invalid")
+        return {
+            "result": get_v2_provider_broker().release_job_credentials(
+                str(params.get("job_id") or "")
+            )
+        }
+    if method == "v2_list_encrypted_artifacts":
+        if not isinstance(params, dict) or set(params) != {"job_id", "purpose"}:
+            raise ValueError("V2 encrypted artifact query fields are invalid")
+        return {
+            "result": {
+                "artifacts": list(
+                    get_v2_artifact_vault().job_artifacts(
+                        job_id=str(params.get("job_id") or ""),
+                        purpose=str(params.get("purpose") or ""),
+                    )
+                )
+            }
+        }
+    if method == "v2_export_encrypted_artifact":
+        if not isinstance(params, dict) or set(params) != {"artifact_id"}:
+            raise ValueError("V2 encrypted artifact export fields are invalid")
+        return {
+            "result": get_v2_artifact_vault().export_ciphertext(
+                str(params.get("artifact_id") or "")
+            )
+        }
+    if method == "v2_verify_encrypted_artifact_persistence":
+        if not isinstance(params, dict) or set(params) != {
+            "artifact_id",
+            "attestation_job_id",
+            "artifact_ref",
+            "get_url",
+            "head_url",
+        }:
+            raise ValueError("V2 encrypted artifact verification fields are invalid")
+        return {
+            "result": get_v2_artifact_persistence_verifier().verify(
+                artifact_id=str(params.get("artifact_id") or ""),
+                attestation_job_id=str(params.get("attestation_job_id") or ""),
+                artifact_ref=str(params.get("artifact_ref") or ""),
+                get_url=str(params.get("get_url") or ""),
+                head_url=str(params.get("head_url") or ""),
+            )
+        }
+    raise ValueError("Unknown V2 runtime method")
+
+
+def get_v2_provider_broker():
+    global v2_provider_broker
+    with v2_provider_broker_lock:
+        if v2_provider_broker is not None:
+            return v2_provider_broker
+        from gateway.tee.provider_broker_v2 import ProviderBrokerV2
+        from gateway.tee.rpc_authority import active_enclave_role
+
+        if active_enclave_role() != "gateway_coordinator":
+            raise RuntimeError("provider broker is coordinator-only")
+        configuration = get_v2_runtime_identity().runtime_configuration()[
+            "configuration"
+        ]
+        credential_hashes = configuration.get("provider_ref_hashes")
+        retry_hashes = configuration.get("provider_retry_policy_hashes")
+        if not isinstance(credential_hashes, dict) or not isinstance(
+            retry_hashes, dict
+        ):
+            raise RuntimeError("provider broker configuration is incomplete")
+        from gateway.tee.provider_broker_v2 import provider_registry_hash
+
+        if configuration.get("provider_registry_hash") != provider_registry_hash():
+            raise RuntimeError("provider registry differs from measured routes")
+        get_scoring_egress_proxy()
+        v2_provider_broker = ProviderBrokerV2(
+            credential_ref_hashes=credential_hashes,
+            retry_policy_hashes=retry_hashes,
+            job_credential_slot_ref_hashes=configuration.get(
+                "job_lease_slot_ref_hashes"
+            ),
+            artifact_sink=get_v2_artifact_vault().seal,
+        )
+        return v2_provider_broker
+
+
+def get_v2_provider_evidence_authority():
+    global v2_provider_evidence_authority
+    with v2_provider_evidence_authority_lock:
+        if v2_provider_evidence_authority is not None:
+            return v2_provider_evidence_authority
+        from gateway.tee.provider_evidence_v2 import ProviderEvidenceAuthorityV2
+        from gateway.tee.rpc_authority import active_enclave_role
+
+        if active_enclave_role() != "gateway_coordinator":
+            raise RuntimeError("provider evidence authority is coordinator-only")
+        broker = get_v2_provider_broker()
+        v2_provider_evidence_authority = ProviderEvidenceAuthorityV2(
+            broker=broker,
+            boot_identity_supplier=get_v2_runtime_identity().boot_identity,
+            sign_digest=sign_data,
+            cache_store=get_v2_provider_cache_store(),
+        )
+        return v2_provider_evidence_authority
+
+
+def _verify_v2_provider_cache_source_boot(identity):
+    from leadpoet_canonical.attested_v2 import verify_boot_identity_nitro
+
+    if (
+        str(identity.get("role") or "") != "gateway_coordinator"
+        or str(identity.get("physical_role") or "") != "gateway_coordinator"
+    ):
+        raise RuntimeError("provider cache source is not a coordinator boot")
+    # Historical same-day rows can come from a prior KMS-approved release. The
+    # persistent artifact key authenticates the encrypted payload; Nitro
+    # verification additionally proves the exact source boot claim and key.
+    return verify_boot_identity_nitro(
+        identity,
+        expected_pcr0=str(identity.get("pcr0") or ""),
+    )
+
+
+def get_v2_provider_cache_store():
+    global v2_provider_cache_store
+    with v2_provider_cache_store_lock:
+        if v2_provider_cache_store is not None:
+            return v2_provider_cache_store
+        from gateway.tee.provider_evidence_cache_store_v2 import (
+            ProviderEvidenceCacheStoreV2,
+        )
+        from gateway.tee.rpc_authority import active_enclave_role
+
+        if active_enclave_role() != "gateway_coordinator":
+            raise RuntimeError("provider evidence cache is coordinator-only")
+        v2_provider_cache_store = ProviderEvidenceCacheStoreV2(
+            broker=get_v2_provider_broker(),
+            vault=get_v2_artifact_vault(),
+            source_boot_verifier=_verify_v2_provider_cache_source_boot,
+        )
+        return v2_provider_cache_store
+
+
+def get_v2_provider_outcome_store():
+    global v2_provider_outcome_store
+    with v2_provider_outcome_store_lock:
+        if v2_provider_outcome_store is not None:
+            return v2_provider_outcome_store
+        from gateway.tee.provider_outcome_store_v2 import ProviderOutcomeStoreV2
+        from gateway.tee.rpc_authority import active_enclave_role
+
+        if active_enclave_role() != "gateway_coordinator":
+            raise RuntimeError("provider outcome store is coordinator-only")
+        v2_provider_outcome_store = ProviderOutcomeStoreV2(
+            broker=get_v2_provider_broker(),
+            vault=get_v2_artifact_vault(),
+        )
+        return v2_provider_outcome_store
+
+
+def get_v2_provider_semantics_authority():
+    global v2_provider_semantics_authority
+    with v2_provider_semantics_authority_lock:
+        if v2_provider_semantics_authority is not None:
+            return v2_provider_semantics_authority
+        from gateway.tee.provider_semantics_v2 import ProviderSemanticsAuthorityV2
+        from gateway.tee.rpc_authority import active_enclave_role
+
+        if active_enclave_role() != "gateway_coordinator":
+            raise RuntimeError("provider semantics authority is coordinator-only")
+        v2_provider_semantics_authority = ProviderSemanticsAuthorityV2(
+            broker=get_v2_provider_broker(),
+            cache_store=get_v2_provider_cache_store(),
+            artifact_sink=get_v2_artifact_vault().seal,
+            boot_identity_supplier=get_v2_runtime_identity().boot_identity,
+            sign_digest=sign_data,
+            outcome_store=get_v2_provider_outcome_store(),
+        )
+        return v2_provider_semantics_authority
+
+
+def get_v2_kms_recipient():
+    global v2_kms_recipient
+    with v2_kms_recipient_lock:
+        if v2_kms_recipient is not None:
+            return v2_kms_recipient
+        from gateway.tee.kms_recipient_v2 import KMSRecipientV2
+        from gateway.tee.rpc_authority import active_enclave_role
+        from gateway.tee.runtime_identity_v2 import nsm_attestation_document
+
+        if active_enclave_role() != "gateway_coordinator":
+            raise RuntimeError("V2 KMS recipient is coordinator-only")
+        runtime = get_v2_runtime_identity()
+        configuration = runtime.runtime_configuration()["configuration"]
+        expected = configuration.get("provider_ref_hashes")
+        job_expected = configuration.get("job_lease_slot_ref_hashes")
+        if not isinstance(expected, dict):
+            raise RuntimeError("V2 provider credential references are unavailable")
+        if not isinstance(job_expected, dict):
+            raise RuntimeError("V2 job credential references are unavailable")
+        artifact_key_ref = configuration.get("artifact_master_key_ref_hash")
+        if not isinstance(artifact_key_ref, str):
+            raise RuntimeError("V2 artifact master key reference is unavailable")
+        v2_kms_recipient = KMSRecipientV2(
+            boot_identity_supplier=runtime.boot_identity,
+            expected_credential_ref_hashes=expected,
+            expected_job_slot_ref_hashes=job_expected,
+            expected_binary_ref_hashes={
+                "artifact_master_key": artifact_key_ref,
+            },
+            attestation_supplier=nsm_attestation_document,
+        )
+        return v2_kms_recipient
+
+
+def provision_v2_artifact_master_key(ciphertext_for_recipient_b64: str):
+    global v2_artifact_vault
+    from gateway.tee.artifact_vault_v2 import (
+        ARTIFACT_MASTER_KEY_HASH_DOMAIN,
+        ARTIFACT_MASTER_KEY_SLOT,
+        EncryptedArtifactVaultV2,
+    )
+
+    with v2_artifact_vault_lock:
+        if v2_artifact_vault is not None:
+            raise RuntimeError("V2 artifact master key is already provisioned")
+        runtime = get_v2_runtime_identity()
+        policy = runtime.runtime_configuration()["configuration"].get(
+            "encrypted_artifact_policy"
+        )
+        if not isinstance(policy, dict):
+            raise RuntimeError("V2 encrypted artifact policy is unavailable")
+        master_key = get_v2_kms_recipient().unwrap_binary_secret(
+            slot=ARTIFACT_MASTER_KEY_SLOT,
+            ciphertext_for_recipient_b64=ciphertext_for_recipient_b64,
+            hash_domain=ARTIFACT_MASTER_KEY_HASH_DOMAIN,
+        )
+        v2_artifact_vault = EncryptedArtifactVaultV2(
+            master_key=master_key,
+            boot_identity_hash=runtime.boot_identity()["boot_identity_hash"],
+            retention_days=int(policy["minimum_retention_days"]),
+        )
+        provider_slots = set(
+            runtime.runtime_configuration()["configuration"][
+                "provider_ref_hashes"
+            ]
+        )
+        configured_slots = set(get_v2_kms_recipient().provisioned_slots())
+        return {
+            "status": "provisioning",
+            "credential_slots": sorted(configured_slots),
+            "missing_credential_slots": sorted(provider_slots - configured_slots),
+        }
+
+
+def get_v2_artifact_vault():
+    if v2_artifact_vault is None:
+        raise RuntimeError("V2 artifact vault is not provisioned")
+    return v2_artifact_vault
+
+
+def get_v2_inter_enclave_artifact_ingest():
+    global v2_inter_enclave_artifact_ingest
+    with v2_inter_enclave_artifact_ingest_lock:
+        if v2_inter_enclave_artifact_ingest is None:
+            from gateway.tee.inter_enclave_artifact_v2 import (
+                InterEnclaveArtifactIngestV2,
+            )
+            from gateway.tee.rpc_authority import active_enclave_role
+
+            if active_enclave_role() != "gateway_coordinator":
+                raise RuntimeError("artifact ingestion is coordinator-only")
+            v2_inter_enclave_artifact_ingest = InterEnclaveArtifactIngestV2(
+                vault=get_v2_artifact_vault(),
+            )
+        return v2_inter_enclave_artifact_ingest
+
+
+def get_v2_artifact_persistence_verifier():
+    global v2_artifact_persistence_verifier
+    with v2_artifact_persistence_verifier_lock:
+        if v2_artifact_persistence_verifier is not None:
+            return v2_artifact_persistence_verifier
+        from gateway.tee.artifact_persistence_v2 import ArtifactPersistenceVerifierV2
+
+        configuration = get_v2_runtime_identity().runtime_configuration()[
+            "configuration"
+        ]
+        policy = configuration.get("encrypted_artifact_policy")
+        if not isinstance(policy, dict):
+            raise RuntimeError("V2 encrypted artifact policy is unavailable")
+        v2_artifact_persistence_verifier = ArtifactPersistenceVerifierV2(
+            vault=get_v2_artifact_vault(),
+            policy=policy,
+        )
+        return v2_artifact_persistence_verifier
+
+
+def get_v2_inter_enclave_client():
+    global v2_inter_enclave_client
+    with v2_inter_enclave_client_lock:
+        if v2_inter_enclave_client is not None:
+            return v2_inter_enclave_client
+        from gateway.tee.inter_enclave_tls import AttestedTLSRPCClient
+        from gateway.tee.rpc_authority import active_enclave_role
+
+        manager = get_v2_runtime_identity()
+        v2_inter_enclave_client = AttestedTLSRPCClient(
+            local_physical_role=active_enclave_role(),
+            local_boot_identity=manager.boot_identity(),
+            local_tls_identity=manager.tls_identity(),
+            peer_registry=get_v2_peer_registry(),
+        )
+        return v2_inter_enclave_client
+
+
+def execute_v2_provider_request(request: Dict[str, Any]) -> Dict[str, Any]:
+    import secrets
+
+    return get_v2_inter_enclave_client().call(
+        target_physical_role="gateway_coordinator",
+        method="provider_execute",
+        params=request,
+        channel_id=secrets.token_hex(16),
+    )
+
+
+def execute_v2_provider_probe_request(request: Dict[str, Any]) -> Dict[str, Any]:
+    import secrets
+
+    return get_v2_inter_enclave_client().call(
+        target_physical_role="gateway_coordinator",
+        method="provider_probe_resolve",
+        params=request,
+        channel_id=secrets.token_hex(16),
+    )
+
+
+def seal_v2_inter_enclave_artifact(
+    *,
+    plaintext: bytes,
+    job_id: str,
+    purpose: str,
+    artifact_kind: str,
+) -> Dict[str, Any]:
+    from gateway.tee.inter_enclave_artifact_v2 import (
+        seal_artifact_over_attested_tls_v2,
+    )
+
+    return seal_artifact_over_attested_tls_v2(
+        client=get_v2_inter_enclave_client(),
+        plaintext=plaintext,
+        job_id=job_id,
+        purpose=purpose,
+        artifact_kind=artifact_kind,
+    )
+
+
+def get_v2_scoring_job_manager():
+    global v2_scoring_job_manager
+    with v2_scoring_job_manager_lock:
+        if v2_scoring_job_manager is not None:
+            return v2_scoring_job_manager
+        from gateway.tee.rpc_authority import SCORING_ROLES, active_enclave_role
+
+        physical_role = active_enclave_role()
+        if physical_role not in SCORING_ROLES:
+            raise RuntimeError("V2 scoring manager is scoring-role only")
+        runtime = get_v2_runtime_identity()
+        runtime.apply_research_lab_behavior_environment()
+
+        from gateway.tee.execution_job_manager_v2 import ExecutionJobManagerV2
+        from gateway.tee.model_sandbox_v2 import (
+            RunscModelSandboxV2,
+            RunscSandboxConfigV2,
+        )
+        from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
+        from gateway.tee.scoring_executor_v2 import (
+            SCORING_OPERATIONS_V2,
+            ScoringExecutorV2,
+        )
+
+        configuration = runtime.runtime_configuration()["configuration"]
+        retry_hashes = configuration.get("provider_retry_policy_hashes")
+        if not isinstance(retry_hashes, dict):
+            raise RuntimeError("V2 scoring retry policy configuration is missing")
+        worker_count = int(configuration.get("execution_worker_count") or 0)
+        if not 1 <= worker_count <= 10:
+            raise RuntimeError("V2 scoring execution worker count is invalid")
+        sandbox_transport = BrokeredProviderTransportV2(
+            execute_v2_provider_request
+        )
+        executor = ScoringExecutorV2(
+            provider_execute=execute_v2_provider_request,
+            retry_policy_hashes=retry_hashes,
+            config_supplier=runtime.research_lab_config,
+            execution_config=configuration["research_lab_execution_config"],
+            model_sandbox=RunscModelSandboxV2(
+                config=RunscSandboxConfigV2.from_measured_runtime(),
+                transport=sandbox_transport,
+            ),
+            artifact_seal=seal_v2_inter_enclave_artifact,
+        )
+        v2_scoring_job_manager = ExecutionJobManagerV2(
+            boot_identity_supplier=runtime.boot_identity,
+            sign_digest=sign_data,
+            operations=SCORING_OPERATIONS_V2,
+            executor=executor,
+            worker_count=worker_count,
+        )
+        return v2_scoring_job_manager
+
+
+def get_v2_coordinator_job_manager():
+    global v2_coordinator_job_manager
+    with v2_coordinator_job_manager_lock:
+        if v2_coordinator_job_manager is not None:
+            return v2_coordinator_job_manager
+        from gateway.tee.rpc_authority import active_enclave_role
+
+        if active_enclave_role() != "gateway_coordinator":
+            raise RuntimeError("V2 coordinator manager is coordinator-only")
+        runtime = get_v2_runtime_identity()
+        runtime.apply_research_lab_behavior_environment()
+
+        from gateway.tee.coordinator_executor_v2 import (
+            COORDINATOR_OPERATIONS_V2,
+            CoordinatorExecutorV2,
+            coordinator_failed_parent_graph_policy_v2,
+        )
+        from gateway.tee.execution_job_manager_v2 import ExecutionJobManagerV2
+        from gateway.tee.openrouter_credential_v2 import (
+            OpenRouterRegistrationAuthorityV2,
+        )
+        from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
+        configuration = runtime.runtime_configuration()["configuration"]
+        retry_hashes = configuration.get("provider_retry_policy_hashes")
+        if not isinstance(retry_hashes, dict) or not isinstance(
+            retry_hashes.get("supabase"), str
+        ):
+            raise RuntimeError("V2 Supabase retry policy is unavailable")
+        from gateway.tee.coordinator_weight_source_v2 import (
+            CoordinatorWeightSourceV2,
+        )
+        from gateway.tee.coordinator_allocation_source_v2 import (
+            CoordinatorAllocationSourceV2,
+        )
+        from gateway.tee.coordinator_chain_source_v2 import (
+            CoordinatorChainSourceV2,
+        )
+        from gateway.tee.coordinator_source_add_v2 import (
+            CoordinatorSourceAddProvenanceV2,
+        )
+        from gateway.tee.coordinator_reward_source_v2 import (
+            CoordinatorRewardSourceV2,
+        )
+        from gateway.tee.qualification_admission_v2 import (
+            CoordinatorQualificationAdmissionV2,
+        )
+        from gateway.tee.supabase_source_v2 import SupabaseSourceReaderV2
+        source_reader = SupabaseSourceReaderV2(
+            execute_provider=get_v2_provider_broker().execute,
+            retry_policy_hash=retry_hashes["supabase"],
+        )
+        weight_source = CoordinatorWeightSourceV2(source_reader)
+        chain_source = CoordinatorChainSourceV2(
+            execute_provider=get_v2_provider_broker().execute,
+            retry_policy_hashes=retry_hashes,
+        )
+        allocation_source = CoordinatorAllocationSourceV2(
+            reader=source_reader,
+            chain_source=chain_source,
+            config_supplier=runtime.research_lab_config,
+            network_supplier=lambda: str(
+                configuration["research_lab_execution_config"]["deployment"][
+                    "network"
+                ]
+            ),
+        )
+        qualification_admission = CoordinatorQualificationAdmissionV2(
+            source_reader
+        )
+        source_add_provenance = CoordinatorSourceAddProvenanceV2(
+            execute_provider=get_v2_provider_broker().execute,
+            retry_policy_hash=retry_hashes["scrapingdog"],
+        )
+        reward_source = CoordinatorRewardSourceV2(
+            reader=source_reader,
+            chain_source=chain_source,
+            config_supplier=runtime.research_lab_config,
+        )
+        openrouter_registration = OpenRouterRegistrationAuthorityV2(
+            broker=get_v2_provider_broker(),
+            transport=BrokeredProviderTransportV2(
+                get_v2_provider_broker().execute
+            ),
+            retry_policy_hashes=retry_hashes,
+            vault=get_v2_artifact_vault(),
+        )
+        v2_coordinator_job_manager = ExecutionJobManagerV2(
+            boot_identity_supplier=runtime.boot_identity,
+            sign_digest=sign_data,
+            operations=COORDINATOR_OPERATIONS_V2,
+            executor=CoordinatorExecutorV2(
+                artifact_evidence_supplier=lambda artifact_ids, _context: (
+                    get_v2_artifact_vault().persistence_evidence(artifact_id)
+                    for artifact_id in artifact_ids
+                ),
+                weight_source_resolver=lambda payload, context: weight_source.resolve(
+                    payload=payload,
+                    context=context,
+                ),
+                qualification_admission_resolver=lambda payload, context: (
+                    qualification_admission.resolve(
+                        payload=payload,
+                        context=context,
+                    )
+                ),
+                allocation_source_resolver=lambda payload, context: (
+                    allocation_source.resolve(payload=payload, context=context)
+                ),
+                source_add_provenance_resolver=lambda payload, context: (
+                    source_add_provenance.resolve(
+                        payload=payload,
+                        context=context,
+                    )
+                ),
+                reward_source_resolver=lambda payload, context: (
+                    reward_source.resolve(payload=payload, context=context)
+                ),
+                source_add_catalog_resolver=lambda payload, context: (
+                    reward_source.catalog_snapshot(payload=payload, context=context)
+                ),
+                provider_outcome_supplier=(
+                    get_v2_provider_semantics_authority().provider_outcome_snapshot_evidence
+                ),
+                openrouter_registration_resolver=(
+                    openrouter_registration.execute
+                ),
+                openrouter_preflight_resolver=(
+                    openrouter_registration.preflight
+                ),
+                config_supplier=runtime.research_lab_config,
+            ),
+            worker_count=1,
+            failed_parent_graph_policy=coordinator_failed_parent_graph_policy_v2,
+        )
+        return v2_coordinator_job_manager
+
+
+def get_v2_autoresearch_job_manager():
+    global v2_autoresearch_job_manager
+    with v2_autoresearch_job_manager_lock:
+        if v2_autoresearch_job_manager is not None:
+            return v2_autoresearch_job_manager
+        from gateway.tee.rpc_authority import active_enclave_role
+
+        if active_enclave_role() != "gateway_autoresearch":
+            raise RuntimeError("V2 autoresearch manager is autoresearch-role only")
+        runtime = get_v2_runtime_identity()
+        runtime.apply_research_lab_behavior_environment()
+
+        from gateway.tee.autoresearch_executor_v2 import (
+            AUTORESEARCH_HOST_OPERATIONS_V2,
+            AUTORESEARCH_OPERATIONS_V2,
+            AutoresearchExecutorV2,
+        )
+        from gateway.tee.execution_job_manager_v2 import ExecutionJobManagerV2
+        from gateway.tee.host_operation_channel_v2 import HostOperationChannelV2
+        configuration = runtime.runtime_configuration()["configuration"]
+        retry_hashes = configuration.get("provider_retry_policy_hashes")
+        if not isinstance(retry_hashes, dict):
+            raise RuntimeError("V2 autoresearch retry policy configuration is missing")
+        worker_count = int(configuration.get("execution_worker_count") or 0)
+        if worker_count != 10:
+            raise RuntimeError("V2 autoresearch execution worker count is invalid")
+
+        def channel_factory(job_id: str, purpose: str):
+            return HostOperationChannelV2(
+                job_id=job_id,
+                purpose=purpose,
+                boot_identity=runtime.boot_identity(),
+                sign_digest=sign_data,
+                allowed_operations=AUTORESEARCH_HOST_OPERATIONS_V2,
+            )
+
+        def verify_scoring_boot(identity: Dict[str, Any]):
+            from leadpoet_canonical.attested_v2 import verify_boot_identity_nitro
+
+            physical_role = str(identity.get("physical_role") or "")
+            if physical_role not in {"gateway_scoring_a", "gateway_scoring_b"}:
+                raise RuntimeError("autoresearch dev-eval boot role is invalid")
+            expectation = runtime.release_role_expectation(physical_role)
+            for field in (
+                "commit_sha",
+                "pcr0",
+                "build_manifest_hash",
+                "dependency_lock_hash",
+            ):
+                if identity.get(field) != expectation[field]:
+                    raise RuntimeError(
+                        "autoresearch dev-eval boot differs at %s" % field
+                    )
+            return verify_boot_identity_nitro(
+                identity,
+                expected_pcr0=expectation["pcr0"],
+            )
+
+        def verify_coordinator_boot(identity: Dict[str, Any]):
+            from leadpoet_canonical.attested_v2 import verify_boot_identity_nitro
+
+            if str(identity.get("physical_role") or "") != "gateway_coordinator":
+                raise RuntimeError("autoresearch provider coordinator role is invalid")
+            expectation = runtime.release_role_expectation("gateway_coordinator")
+            for field in (
+                "commit_sha",
+                "pcr0",
+                "build_manifest_hash",
+                "dependency_lock_hash",
+            ):
+                if identity.get(field) != expectation[field]:
+                    raise RuntimeError(
+                        "autoresearch provider coordinator differs at %s" % field
+                    )
+            return verify_boot_identity_nitro(
+                identity,
+                expected_pcr0=expectation["pcr0"],
+            )
+
+        v2_autoresearch_job_manager = ExecutionJobManagerV2(
+            boot_identity_supplier=runtime.boot_identity,
+            sign_digest=sign_data,
+            operations=AUTORESEARCH_OPERATIONS_V2,
+            executor=AutoresearchExecutorV2(
+                provider_execute=execute_v2_provider_request,
+                retry_policy_hashes=retry_hashes,
+                config_supplier=runtime.research_lab_config,
+                scoring_graph_verifier=verify_scoring_boot,
+                probe_execute=execute_v2_provider_probe_request,
+                coordinator_boot_verifier=verify_coordinator_boot,
+                artifact_seal=seal_v2_inter_enclave_artifact,
+            ),
+            worker_count=worker_count,
+            host_operation_channel_factory=channel_factory,
+        )
+        return v2_autoresearch_job_manager
+
+
+def _handle_v2_job_rpc(
+    method: str,
+    params: Dict[str, Any],
+    *,
+    prefix: str,
+    manager: Any,
+) -> Dict[str, Any]:
+    action = method[len(prefix):]
+    if action == "health":
+        return manager.health()
+    if action == "submit_job":
+        return manager.submit(params.get("manifest"))
+    if action == "put_chunk":
+        return manager.put_chunk(
+            job_id=params.get("job_id"),
+            offset=params.get("offset"),
+            data_b64=params.get("data_b64"),
+            chunk_sha256=params.get("chunk_sha256"),
+        )
+    if action == "seal_job":
+        return manager.seal(params.get("job_id"))
+    if action == "get_status":
+        return manager.status(params.get("job_id"))
+    if action == "cancel_job":
+        return manager.cancel(params.get("job_id"))
+    if action == "get_result":
+        return manager.result_chunk(
+            job_id=params.get("job_id"),
+            offset=params.get("offset", 0),
+            max_bytes=params.get("max_bytes", 512 * 1024),
+        )
+    if action == "get_receipt":
+        return manager.receipt(params.get("job_id"))
+    if action == "get_receipts":
+        return list(manager.receipts(params.get("job_id")))
+    if action == "get_transitions":
+        return list(manager.transitions(params.get("job_id")))
+    if action == "get_transport_attempts":
+        return list(manager.transport_attempts(params.get("job_id")))
+    if action == "get_artifact_hashes":
+        return list(manager.artifact_hashes(params.get("job_id")))
+    if action == "next_host_operation":
+        return manager.next_host_operation(
+            job_id=params.get("job_id"),
+            wait_ms=params.get("wait_ms", 0),
+        )
+    if action == "complete_host_operation":
+        return manager.complete_host_operation(
+            job_id=params.get("job_id"),
+            request_hash=params.get("request_hash"),
+            terminal_status=params.get("terminal_status"),
+            response=params.get("response"),
+            failure_code=params.get("failure_code"),
+        )
+    if action == "get_host_operations":
+        return list(manager.host_operations(params.get("job_id")))
+    if action == "get_external_receipt_graphs":
+        return list(manager.external_receipt_graphs(params.get("job_id")))
+    raise ValueError("unknown V2 execution method")
+
+
+def handle_v2_execution_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        if method.startswith("scoring_v2_"):
+            result = _handle_v2_job_rpc(
+                method,
+                params,
+                prefix="scoring_v2_",
+                manager=get_v2_scoring_job_manager(),
+            )
+        elif method.startswith("coordinator_v2_"):
+            result = _handle_v2_job_rpc(
+                method,
+                params,
+                prefix="coordinator_v2_",
+                manager=get_v2_coordinator_job_manager(),
+            )
+        elif method.startswith("autoresearch_v2_"):
+            result = _handle_v2_job_rpc(
+                method,
+                params,
+                prefix="autoresearch_v2_",
+                manager=get_v2_autoresearch_job_manager(),
+            )
+        else:
+            raise ValueError("unknown V2 execution namespace")
+        return {"result": result}
+    except Exception as exc:
+        print(
+            "[TEE] V2 execution RPC rejected method=%s type=%s"
+            % (method, type(exc).__name__),
+            flush=True,
+        )
+        return {"status": "error", "error": str(exc)}
+
+
+def get_v2_peer_registry():
+    global v2_peer_registry
+    with v2_peer_registry_lock:
+        if v2_peer_registry is not None:
+            return v2_peer_registry
+        from gateway.tee.inter_enclave_tls import AttestedPeerRegistry
+        from gateway.tee.rpc_authority import active_enclave_role
+
+        manager = get_v2_runtime_identity()
+        manager.boot_identity()
+        v2_peer_registry = AttestedPeerRegistry(
+            local_physical_role=active_enclave_role(),
+        )
+        return v2_peer_registry
+
+
+def handle_inter_enclave_rpc(
+    method: str,
+    params: Dict[str, Any],
+    peer: Dict[str, Any],
+) -> Dict[str, Any]:
+    from gateway.tee.rpc_authority import active_enclave_role
+
+    if method == "channel_health":
+        return {
+            "status": "healthy",
+            "local_role": active_enclave_role(),
+            "peer_role": peer["physical_role"],
+            "local_boot_identity_hash": get_v2_runtime_identity()
+            .boot_identity()["boot_identity_hash"],
+        }
+    if method == "provider_execute":
+        if active_enclave_role() != "gateway_coordinator":
+            raise ValueError("provider execution is coordinator-only")
+        if peer["physical_role"] not in {
+            "gateway_scoring_a",
+            "gateway_scoring_b",
+            "gateway_autoresearch",
+        }:
+            raise ValueError("provider caller role is not authorized")
+        return get_v2_provider_semantics_authority().execute(params)
+    if method == "provider_probe_resolve":
+        if active_enclave_role() != "gateway_coordinator":
+            raise ValueError("provider evidence resolution is coordinator-only")
+        if peer["physical_role"] != "gateway_autoresearch":
+            raise ValueError("provider evidence caller role is not authorized")
+        return get_v2_provider_evidence_authority().resolve(params)
+    if method in {
+        "artifact_seal_begin",
+        "artifact_seal_chunk",
+        "artifact_seal_finish",
+        "artifact_seal_cancel",
+    }:
+        if active_enclave_role() != "gateway_coordinator":
+            raise ValueError("artifact ingestion is coordinator-only")
+        ingest = get_v2_inter_enclave_artifact_ingest()
+        action = {
+            "artifact_seal_begin": ingest.begin,
+            "artifact_seal_chunk": ingest.put_chunk,
+            "artifact_seal_finish": ingest.finish,
+            "artifact_seal_cancel": ingest.cancel,
+        }[method]
+        return action(params, peer=peer)
+    raise ValueError("inter-enclave method is not authorized")
+
+
+def start_v2_tls_service() -> Dict[str, Any]:
+    global v2_tls_server, v2_tls_server_thread
+    with v2_tls_server_lock:
+        if v2_tls_server_thread is not None and v2_tls_server_thread.is_alive():
+            return {
+                "status": "running",
+                "registered_roles": list(get_v2_peer_registry().registered_roles()),
+            }
+        from gateway.tee.inter_enclave_tls import AttestedTLSRPCServer
+        from gateway.tee.rpc_authority import active_enclave_role
+
+        manager = get_v2_runtime_identity()
+        registry = get_v2_peer_registry()
+        expected_roles = manager.expected_peer_roles()
+        if tuple(registry.registered_roles()) != expected_roles:
+            raise RuntimeError("V2 TLS service requires every configured attested peer")
+        v2_tls_server = AttestedTLSRPCServer(
+            local_physical_role=active_enclave_role(),
+            local_boot_identity=manager.boot_identity(),
+            local_tls_identity=manager.tls_identity(),
+            peer_registry=registry,
+            handler=handle_inter_enclave_rpc,
+        )
+        import threading
+
+        v2_tls_server_thread = threading.Thread(
+            target=v2_tls_server.serve_forever,
+            name="gateway-v2-inter-enclave-tls",
+            daemon=True,
+        )
+        v2_tls_server_thread.start()
+        return {
+            "status": "running",
+            "registered_roles": list(registry.registered_roles()),
+        }
 
 
 def handle_scoring_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -1146,6 +2381,14 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         Response dict with result or error
     """
     try:
+        from gateway.tee.rpc_authority import active_enclave_role, rpc_method_allowed
+
+        enclave_role = active_enclave_role()
+        if not rpc_method_allowed(enclave_role, method):
+            return {
+                "error": "RPC method is not authorized for enclave role %s"
+                % enclave_role
+            }
         if method == "append_event":
             event = params.get("event")
             if not event:
@@ -1172,6 +2415,44 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         
         elif method == "get_attestation":
             return {"result": get_attestation_document()}
+
+        elif method == "role_health":
+            from gateway.tee.build_identity import load_identity
+            from gateway.tee.topology import role_spec
+
+            gateway_root = Path(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            )
+            identity = load_identity(
+                gateway_root=gateway_root,
+                expected_role=enclave_role,
+            )
+            v2_status = {"status": "unavailable"}
+            try:
+                v2_status = get_v2_runtime_identity().public_status()
+            except Exception as exc:
+                v2_status = {
+                    "status": "error",
+                    "error_type": type(exc).__name__,
+                }
+            return {
+                "result": {
+                    "status": "healthy",
+                    "role": enclave_role,
+                    "service_role": role_spec(enclave_role)["service_role"],
+                    "commit_sha": identity["commit_sha"],
+                    "build_identity_hash": identity["identity_hash"],
+                    "execution_manifest_hash": identity["execution_manifest_hash"],
+                    "dependency_lock_hash": identity["dependency_lock_hash"],
+                    "topology_hash": identity["topology_hash"],
+                    "public_key": get_public_key_bytes().hex(),
+                    "pcr0": pcr_measurements.get("PCR0"),
+                    "v2_runtime": v2_status,
+                }
+            }
+
+        elif method.startswith("v2_"):
+            return handle_v2_runtime_rpc(method, params)
         
         elif method == "set_pcr_measurements":
             pcr0 = params.get("pcr0")
@@ -1199,7 +2480,14 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
                 }
             }
 
+        elif method.startswith(
+            ("scoring_v2_", "coordinator_v2_", "autoresearch_v2_")
+        ):
+            return handle_v2_execution_rpc(method, params)
+
         elif method.startswith("scoring_"):
+            if enclave_role in {"gateway_scoring_a", "gateway_scoring_b"}:
+                return {"error": "V1 scoring RPC is disabled for V2 role"}
             return handle_scoring_rpc(method, params)
         
         else:

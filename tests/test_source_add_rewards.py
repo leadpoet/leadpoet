@@ -24,6 +24,59 @@ from research_lab.validator_integration import (
 )
 
 
+def _allocation_authority_outcome(
+    *,
+    epoch: int,
+    netuid: int,
+    policy: dict,
+    source_obligations: list[dict],
+    include_source: bool,
+) -> dict:
+    allocation_inputs = {
+        "epoch": int(epoch),
+        "policy": dict(policy),
+        "active_reimbursement_obligations": [],
+        "active_champion_obligations": [],
+    }
+    if include_source:
+        allocation_inputs["active_source_add_obligations"] = list(source_obligations)
+    allocation = allocate_research_lab_epoch(
+        int(epoch),
+        policy,
+        [],
+        [],
+        active_source_add_obligations=(source_obligations if include_source else []),
+    )
+    source_state = {
+        "epoch": int(epoch),
+        "netuid": int(netuid),
+        "policy_id": str(policy["policy_id"]),
+        "policy": dict(policy),
+        "reimbursement_obligation_count": 0,
+        "champion_obligation_count": 0,
+        "reimbursement_obligations": [],
+        "champion_obligations": [],
+        "skipped": {"reimbursements": [], "champions": []},
+    }
+    if include_source:
+        source_state.update(
+            {
+                "source_add_obligation_count": len(source_obligations),
+                "source_add_obligations": list(source_obligations),
+            }
+        )
+        source_state["skipped"]["source_add"] = []
+    return {
+        "status": "matched",
+        "result": {
+            "allocation": allocation,
+            "allocation_inputs": allocation_inputs,
+            "source_state": source_state,
+            "source_state_hash": sha256_json(source_state),
+        },
+    }
+
+
 class TestLeg1:
     def test_creation_defaults_match_spec(self):
         record = create_leg1_reward(adapter_id="adapter:a", miner_ref="miner:1", start_epoch=100)
@@ -515,29 +568,16 @@ class TestAllocationRails:
         source_obligation = self._source_obligation(source)
         monkeypatch.setattr(
             gateway_allocations,
-            "resolve_epoch_alpha_price_valuation",
-            lambda **_kwargs: _async_value({}),
-        )
-        monkeypatch.setattr(gateway_allocations, "inject_alpha_price_valuation", lambda policy, _value: policy)
-        monkeypatch.setattr(
-            gateway_allocations,
-            "_active_reimbursement_obligations",
-            lambda *_args, **_kwargs: _async_value(([], [])),
-        )
-        monkeypatch.setattr(
-            gateway_allocations,
-            "_active_champion_obligations",
-            lambda *_args, **_kwargs: _async_value(([], [])),
-        )
-        monkeypatch.setattr(
-            gateway_allocations,
-            "_active_source_add_obligations",
-            lambda *_args, **_kwargs: _async_value(([source_obligation], [])),
-        )
-        monkeypatch.setattr(
-            gateway_allocations,
-            "compare_allocation",
-            lambda **_kwargs: _async_value({"status": "matched"}),
+            "build_allocation_v2",
+            lambda **_kwargs: _async_value(
+                _allocation_authority_outcome(
+                    epoch=105,
+                    netuid=71,
+                    policy=dict(self.POLICY),
+                    source_obligations=[source_obligation],
+                    include_source=True,
+                )
+            ),
         )
         config = SimpleNamespace(
             reimbursement_policy_doc=lambda enabled: dict(self.POLICY),
@@ -565,34 +605,18 @@ class TestAllocationRails:
     async def test_gateway_bundle_without_source_preserves_legacy_input_shape(self, monkeypatch):
         from gateway.research_lab import allocations as gateway_allocations
 
-        captured = {}
-
-        async def capture_allocation(**kwargs):
-            captured.update(kwargs["payload"])
-            return {"status": "matched"}
-
-        monkeypatch.setattr(
-            gateway_allocations,
-            "resolve_epoch_alpha_price_valuation",
-            lambda **_kwargs: _async_value({}),
-        )
-        monkeypatch.setattr(gateway_allocations, "inject_alpha_price_valuation", lambda policy, _value: policy)
-        monkeypatch.setattr(
-            gateway_allocations,
-            "_active_reimbursement_obligations",
-            lambda *_args, **_kwargs: _async_value(([], [])),
+        authority = _allocation_authority_outcome(
+            epoch=105,
+            netuid=71,
+            policy=dict(self.POLICY),
+            source_obligations=[],
+            include_source=False,
         )
         monkeypatch.setattr(
             gateway_allocations,
-            "_active_champion_obligations",
-            lambda *_args, **_kwargs: _async_value(([], [])),
+            "build_allocation_v2",
+            lambda **_kwargs: _async_value(authority),
         )
-        monkeypatch.setattr(
-            gateway_allocations,
-            "_active_source_add_obligations",
-            lambda *_args, **_kwargs: _async_value(([], [])),
-        )
-        monkeypatch.setattr(gateway_allocations, "compare_allocation", capture_allocation)
         config = SimpleNamespace(
             reimbursement_policy_doc=lambda enabled: dict(self.POLICY),
             reimbursement_dynamic_alpha_price_enabled=False,
@@ -610,7 +634,7 @@ class TestAllocationRails:
             netuid=71,
         )
 
-        assert "active_source_add_obligations" not in captured
+        assert "active_source_add_obligations" not in authority["result"]["allocation_inputs"]
         assert "source_add_obligations" not in bundle["source_state"]
         assert "source_add_allocations" not in bundle["allocation_doc"]
         assert "source_add_alpha_percent" not in bundle["observability"]

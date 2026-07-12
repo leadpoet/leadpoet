@@ -128,13 +128,13 @@ def test_exa_200_healthy():
 def test_verdicts_cached_within_ttl(monkeypatch):
     calls = {"n": 0}
 
-    def probe():
+    def probe(_timeout=None):
         calls["n"] += 1
         return pp.ProviderVerdict(provider="scrapingdog", healthy=True, status="healthy")
 
     monkeypatch.setitem(pp._PROBES, "scrapingdog", probe)
     monkeypatch.setitem(
-        pp._PROBES, "exa", lambda: pp.ProviderVerdict(provider="exa", healthy=True, status="healthy")
+        pp._PROBES, "exa", lambda _timeout=None: pp.ProviderVerdict(provider="exa", healthy=True, status="healthy")
     )
     preflight = pp.ProviderPreflight()
     first = preflight.check()
@@ -150,10 +150,10 @@ def test_transport_failures_pause_only_after_streak(monkeypatch):
     monkeypatch.setitem(
         pp._PROBES,
         "scrapingdog",
-        lambda: pp.ProviderVerdict(provider="scrapingdog", healthy=False, status="transport_failure"),
+        lambda _timeout=None: pp.ProviderVerdict(provider="scrapingdog", healthy=False, status="transport_failure"),
     )
     monkeypatch.setitem(
-        pp._PROBES, "exa", lambda: pp.ProviderVerdict(provider="exa", healthy=True, status="healthy")
+        pp._PROBES, "exa", lambda _timeout=None: pp.ProviderVerdict(provider="exa", healthy=True, status="healthy")
     )
     preflight = pp.ProviderPreflight()
     first = preflight.check(force=True)
@@ -168,12 +168,12 @@ def test_credit_failure_pause_worthy_immediately(monkeypatch):
     monkeypatch.setitem(
         pp._PROBES,
         "exa",
-        lambda: pp.ProviderVerdict(provider="exa", healthy=False, status="credit_or_auth"),
+        lambda _timeout=None: pp.ProviderVerdict(provider="exa", healthy=False, status="credit_or_auth"),
     )
     monkeypatch.setitem(
         pp._PROBES,
         "scrapingdog",
-        lambda: pp.ProviderVerdict(provider="scrapingdog", healthy=True, status="healthy"),
+        lambda _timeout=None: pp.ProviderVerdict(provider="scrapingdog", healthy=True, status="healthy"),
     )
     result = pp.ProviderPreflight().check(force=True)
     assert result["healthy"] is False
@@ -191,14 +191,20 @@ def test_disabled_preflight_short_circuits(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+_AUTHORITY_RESULT = {}
+
+
 def _stub_shared(monkeypatch, result):
-    stub = mock.Mock()
-    stub.check.return_value = result
-    monkeypatch.setattr(pp, "_shared_preflight", stub)
-    return stub
+    del monkeypatch
+    global _AUTHORITY_RESULT
+    _AUTHORITY_RESULT = dict(result)
 
 
 def _gate(**kwargs):
+    async def authority_check(**_request):
+        return dict(_AUTHORITY_RESULT)
+
+    kwargs["authority_check"] = authority_check
     return asyncio.run(pp.preflight_gate(**kwargs))
 
 

@@ -6,42 +6,29 @@ import sys
 from pathlib import Path
 
 
-class _FakeManager:
-    def health(self):
-        return {"mode": "shadow"}
-
-    def status(self, job_id):
-        return {"job_id": job_id, "state": "running"}
-
-
 def _tee_service(monkeypatch):
     tee_dir = Path(__file__).resolve().parents[1] / "gateway" / "tee"
     monkeypatch.syspath_prepend(str(tee_dir))
+    monkeypatch.setenv("LEADPOET_ENCLAVE_ROLE", "gateway_scoring_a")
     return importlib.import_module("gateway.tee.tee_service")
 
 
-def test_new_scoring_rpc_does_not_replace_existing_methods(monkeypatch):
+def test_v1_scoring_rpc_is_not_authorized_for_v2_role(monkeypatch):
     service = _tee_service(monkeypatch)
-    fake = _FakeManager()
-    monkeypatch.setattr(service, "get_scoring_job_manager", lambda: fake)
-
-    assert service.handle_rpc("scoring_health", {}) == {"result": {"mode": "shadow"}}
-    assert service.handle_rpc("scoring_get_status", {"job_id": "job-1"}) == {
-        "result": {"job_id": "job-1", "state": "running"}
+    for method in (
+        "scoring_configure_runtime",
+        "scoring_health",
+        "scoring_submit_job",
+        "scoring_get_status",
+        "scoring_get_result",
+    ):
+        response = service.handle_rpc(method, {})
+        assert response == {
+            "error": "RPC method is not authorized for enclave role gateway_scoring_a"
+        }
+    assert service.handle_rpc("unknown", {}) == {
+        "error": "RPC method is not authorized for enclave role gateway_scoring_a"
     }
-    assert isinstance(service.handle_rpc("get_buffer_size", {})["result"], int)
-    assert service.handle_rpc("unknown", {})["error"] == "Unknown method: unknown"
-
-
-def test_scoring_rpc_rejections_use_existing_client_error_shape(monkeypatch):
-    service = _tee_service(monkeypatch)
-
-    def fail():
-        raise ValueError("invalid scoring request")
-
-    monkeypatch.setattr(service, "get_scoring_job_manager", fail)
-    response = service.handle_rpc("scoring_health", {})
-    assert response == {"status": "error", "error": "invalid scoring request"}
 
 
 def test_scoring_attestation_binds_exact_job_purpose_and_inputs(monkeypatch):
@@ -71,7 +58,7 @@ def test_scoring_attestation_binds_exact_job_purpose_and_inputs(monkeypatch):
     }
 
 
-def test_scoring_runtime_configuration_is_one_time_hashed_and_secret_safe(monkeypatch):
+def test_v1_scoring_runtime_configuration_is_inaccessible(monkeypatch):
     from gateway.tee.scoring_executor import (
         SCORING_RUNTIME_ENV_NAMES,
         configuration_hash,
@@ -91,24 +78,8 @@ def test_scoring_runtime_configuration_is_one_time_hashed_and_secret_safe(monkey
         "configuration_hash": expected_hash,
     }
 
-    first = service.handle_rpc("scoring_configure_runtime", params)
-    second = service.handle_rpc("scoring_configure_runtime", params)
-
-    assert first == second
-    assert first["result"]["status"] == "configured"
-    assert first["result"]["configuration_hash"] == expected_hash
-    assert "secret-value-never-returned" not in json.dumps(first)
-    assert os.environ["QUALIFICATION_OPENROUTER_API_KEY"] == "secret-value-never-returned"
-
-    changed = dict(environment)
-    changed["QUALIFICATION_OPENROUTER_API_KEY"] = "different-secret"
-    rejected = service.handle_rpc(
-        "scoring_configure_runtime",
-        {
-            **params,
-            "environment": changed,
-            "configuration_hash": configuration_hash(changed),
-        },
-    )
-    assert rejected["status"] == "error"
-    assert "immutable" in rejected["error"]
+    response = service.handle_rpc("scoring_configure_runtime", params)
+    assert response == {
+        "error": "RPC method is not authorized for enclave role gateway_scoring_a"
+    }
+    assert "QUALIFICATION_OPENROUTER_API_KEY" not in os.environ

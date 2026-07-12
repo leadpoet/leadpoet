@@ -3,12 +3,14 @@ FROM python:3.9.24-slim-bookworm@sha256:9b89d7e0d7e84de70c5e441198fdccb25b8d3831
 # Docker BuildKit consumes this predefined build argument when normalizing
 # image/layer creation timestamps. The value is also exported below for tools.
 ARG SOURCE_DATE_EPOCH=0
+ARG LEADPOET_ENCLAVE_ROLE=gateway_coordinator
 
 # The scoring implementation uses Python 3.9 syntax. The exact x86_64 base
 # manifest and all wheels are immutable inputs to independent PCR0 rebuilds.
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONHASHSEED=0
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+ENV LEADPOET_ENCLAVE_ROLE=${LEADPOET_ENCLAVE_ROLE}
 ENV PYTHONPATH=/app:/app/gateway/_attested_runtime
 
 # Install the exact live scoring dependency closure from the offline wheelhouse.
@@ -35,11 +37,18 @@ WORKDIR /app
 # Copy ENTIRE gateway directory for code_hash verification
 # Build context must be gateway root, not tee/ subdirectory
 COPY _enclave_source/ /app/gateway/
+COPY _enclave_source/tee/runtime/runsc /usr/local/bin/runsc
+RUN python3 /app/gateway/tee/sandbox_runtime_artifact.py verify \
+        --lock /app/gateway/tee/runsc-runtime.lock.json \
+        --artifact /usr/local/bin/runsc \
+    && chmod 0555 /usr/local/bin/runsc \
+    && touch -d @0 /usr/local/bin/runsc
 
 # These packages are imported by Research Lab as top-level modules at runtime.
 # They must be staged into the gateway build context before enclave build so
 # PCR0 and code_hash bind to the same runtime code the host process imports.
 RUN test -d /app/gateway/_attested_runtime/research_lab \
+    && test -d /app/gateway/_attested_runtime/Leadpoet \
     && test -d /app/gateway/_attested_runtime/leadpoet_verifier \
     && test -d /app/gateway/_attested_runtime/schemas \
     && test -d /app/gateway/_attested_runtime/leadpoet_canonical \
@@ -47,10 +56,26 @@ RUN test -d /app/gateway/_attested_runtime/research_lab \
     && test -d /app/gateway/_attested_runtime/validator_models
 
 RUN python3 /app/gateway/tee/scoring_import_closure.py verify-staged \
-    --gateway-root /app/gateway
+    --gateway-root /app/gateway \
+    --role "${LEADPOET_ENCLAVE_ROLE}"
+RUN python3 /app/gateway/tee/protected_workflows.py \
+    --root /app/gateway \
+    --manifest /app/gateway/tee/protected_workflows.json
+RUN python3 /app/gateway/tee/topology.py \
+    --verify /app/gateway/tee/topology.json
+RUN test -f "/app/gateway/_attested_runtime/gateway_enclave_build_identities/${LEADPOET_ENCLAVE_ROLE}.json" \
+    && cp "/app/gateway/_attested_runtime/gateway_enclave_build_identities/${LEADPOET_ENCLAVE_ROLE}.json" \
+        /app/gateway/_attested_runtime/gateway_enclave_build_identity.json
 RUN python3 /app/gateway/tee/build_identity.py verify \
-    --gateway-root /app/gateway
-RUN python3 -c "import gateway.qualification.models; import qualification.scoring.lead_scorer; import qualification.scoring.intent_verification_three_stage; import research_lab.eval.evaluator; import research_lab.eval.http_tape"
+    --gateway-root /app/gateway \
+    --role "${LEADPOET_ENCLAVE_ROLE}"
+RUN python3 -c "import gateway.qualification.models; import qualification.scoring.lead_scorer; import qualification.scoring.intent_verification_three_stage; import research_lab.eval.evaluator; import research_lab.eval.http_tape; import validator_models.automated_checks"
+RUN python3 /app/gateway/tee/sandbox_runtime_artifact.py write-rootfs-manifest \
+        --lock /app/gateway/tee/runsc-runtime.lock.json \
+        --requirements-lock /app/gateway/tee/requirements-scoring-py39.lock \
+        --python-version 3.9.24 \
+        --output /leadpoet-model-rootfs.manifest.json \
+    && touch -d @0 /leadpoet-model-rootfs.manifest.json
 
 # Create keys directory
 RUN mkdir -p /app/gateway/keys

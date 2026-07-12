@@ -19,10 +19,15 @@ CRITICAL_IMPORTS = (
     "bs4",
     "cbor2",
     "cryptography",
+    "disposable_email_domains",
+    "dns",
     "httpx",
     "lxml",
+    "numpy",
     "pydantic",
+    "requests",
     "trafilatura",
+    "whois",
 )
 _PIN_RE = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)")
 _HASH_RE = re.compile(r"--hash=sha256:([0-9a-f]{64})")

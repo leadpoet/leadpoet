@@ -17,7 +17,7 @@ Covers, with fake store rows (no live Supabase):
     started-claim leasing, measurement recording (side artifact, never the
     day's benchmark), symmetric ICP exclusion + unhealthy-measurement re-hold,
     closed-marker settling.
-  * §0-N6 — benchmark scorer key isolation scope (env + module attrs restored),
+  * §0-N6 — benchmark scorer scope without host credential mutation,
     scorer-error non-fatality (marked unresolved + retryable), inline retry,
     and the scorer concurrency semaphore.
   * Baseline lease — post-write confirm: earliest unexpired open lease wins,
@@ -27,8 +27,6 @@ Covers, with fake store rows (no live Supabase):
 from __future__ import annotations
 
 import asyncio
-import sys
-import types
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -194,6 +192,7 @@ def _approved_gate(**overrides: Any) -> dict[str, Any]:
 
 def _score_bundle(gate: Mapping[str, Any] | None = None) -> dict[str, Any]:
     return {
+        "score_bundle_hash": "sha256:" + "e" * 64,
         "private_holdout_gate": dict(gate or _approved_gate()),
         "aggregates": {},
         "icp_set_hash": WINDOW_HASH,
@@ -232,6 +231,50 @@ def controller(store: ConfirmationFakeStore, monkeypatch: pytest.MonkeyPatch) ->
         return ActivePrivateModel(artifact=artifact, version_row={"private_model_version_id": "v-1"})
 
     monkeypatch.setattr(promotion, "load_active_private_model", _fake_load_active)
+
+    async def _fake_compare_metric(
+        *,
+        epoch_id: int,
+        score_bundle: Mapping[str, Any],
+        expected_improvement_points: float,
+        expected_event_doc: Mapping[str, Any],
+        parent_receipt_hashes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        metric = promotion.promotion_improvement_metric(score_bundle)
+        assert expected_improvement_points == float(metric.improvement_points)
+        assert dict(expected_event_doc) == metric.event_doc()
+        assert parent_receipt_hashes in (None, [])
+        return {
+            "result": {
+                "improvement_points": expected_improvement_points,
+                "event_doc": dict(expected_event_doc),
+            },
+            "receipt_graph": {"root_receipt_hash": "sha256:" + "9" * 64},
+            "epoch_id": int(epoch_id),
+        }
+
+    async def _fake_compare_gate(
+        *,
+        epoch_id: int,
+        score_bundle: Mapping[str, Any],
+        decision_payload: Mapping[str, Any],
+        expected_decision: Mapping[str, Any],
+        metric_outcome: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        expected = promotion.promotion_gate_decision(
+            score_bundle,
+            **dict(decision_payload),
+        )
+        assert dict(expected_decision) == expected.to_dict()
+        assert int(metric_outcome["epoch_id"]) == int(epoch_id)
+        return {"result": dict(expected_decision)}
+
+    monkeypatch.setattr(promotion, "compare_promotion_metric", _fake_compare_metric)
+    monkeypatch.setattr(
+        promotion,
+        "compare_promotion_gate_decision",
+        _fake_compare_gate,
+    )
 
     merges: list[dict[str, Any]] = []
 
@@ -937,6 +980,50 @@ async def test_end_to_end_score_only_merge_and_legacy_hold_drain(confirmation_en
 
     monkeypatch.setattr(promotion, "load_active_private_model", _fake_load_active)
 
+    async def _fake_compare_metric(
+        *,
+        epoch_id: int,
+        score_bundle: Mapping[str, Any],
+        expected_improvement_points: float,
+        expected_event_doc: Mapping[str, Any],
+        parent_receipt_hashes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        metric = promotion.promotion_improvement_metric(score_bundle)
+        assert expected_improvement_points == float(metric.improvement_points)
+        assert dict(expected_event_doc) == metric.event_doc()
+        assert parent_receipt_hashes in (None, [])
+        return {
+            "result": {
+                "improvement_points": expected_improvement_points,
+                "event_doc": dict(expected_event_doc),
+            },
+            "receipt_graph": {"root_receipt_hash": "sha256:" + "9" * 64},
+            "epoch_id": int(epoch_id),
+        }
+
+    async def _fake_compare_gate(
+        *,
+        epoch_id: int,
+        score_bundle: Mapping[str, Any],
+        decision_payload: Mapping[str, Any],
+        expected_decision: Mapping[str, Any],
+        metric_outcome: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        expected = promotion.promotion_gate_decision(
+            score_bundle,
+            **dict(decision_payload),
+        )
+        assert dict(expected_decision) == expected.to_dict()
+        assert int(metric_outcome["epoch_id"]) == int(epoch_id)
+        return {"result": dict(expected_decision)}
+
+    monkeypatch.setattr(promotion, "compare_promotion_metric", _fake_compare_metric)
+    monkeypatch.setattr(
+        promotion,
+        "compare_promotion_gate_decision",
+        _fake_compare_gate,
+    )
+
     merges: list[str] = []
 
     async def _fake_promote(self: Any, **kwargs: Any) -> dict[str, Any]:
@@ -995,19 +1082,7 @@ async def test_end_to_end_score_only_merge_and_legacy_hold_drain(confirmation_en
 # ---------------------------------------------------------------------------
 
 
-def _install_fake_scorer_modules(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    helpers = types.ModuleType("gateway.qualification.utils.helpers")
-    helpers.OPENROUTER_API_KEY = "prod-openrouter"
-    verification = types.ModuleType("qualification.scoring.verification_helpers")
-    verification.OPENROUTER_API_KEY = "prod-openrouter"
-    verification.SCRAPINGDOG_API_KEY = "prod-scrapingdog"
-    monkeypatch.setitem(sys.modules, "gateway.qualification.utils.helpers", helpers)
-    monkeypatch.setitem(sys.modules, "qualification.scoring.verification_helpers", verification)
-    return {"helpers": helpers, "verification": verification}
-
-
-def test_scorer_isolation_overrides_and_restores(monkeypatch):
-    modules = _install_fake_scorer_modules(monkeypatch)
+def test_scorer_isolation_never_places_benchmark_keys_in_host_state(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_BENCHMARK_SCRAPINGDOG_API_KEY", "bench-sd")
     monkeypatch.setenv("RESEARCH_LAB_BENCHMARK_OPENROUTER_API_KEY", "bench-or")
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", "prod-sd")
@@ -1016,22 +1091,15 @@ def test_scorer_isolation_overrides_and_restores(monkeypatch):
     import os
 
     with sw._benchmark_scorer_isolation():
-        assert os.environ["SCRAPINGDOG_API_KEY"] == "bench-sd"
-        assert os.environ["QUALIFICATION_SCRAPINGDOG_API_KEY"] == "bench-sd"
-        assert os.environ["QUALIFICATION_OPENROUTER_API_KEY"] == "bench-or"
-        assert modules["helpers"].OPENROUTER_API_KEY == "bench-or"
-        assert modules["verification"].OPENROUTER_API_KEY == "bench-or"
-        assert modules["verification"].SCRAPINGDOG_API_KEY == "bench-sd"
-    # Restored, including the previously-absent variable being removed again.
+        assert os.environ["SCRAPINGDOG_API_KEY"] == "prod-sd"
+        assert "QUALIFICATION_SCRAPINGDOG_API_KEY" not in os.environ
+        assert os.environ["QUALIFICATION_OPENROUTER_API_KEY"] == "prod-or"
     assert os.environ["SCRAPINGDOG_API_KEY"] == "prod-sd"
     assert "QUALIFICATION_SCRAPINGDOG_API_KEY" not in os.environ
     assert os.environ["QUALIFICATION_OPENROUTER_API_KEY"] == "prod-or"
-    assert modules["helpers"].OPENROUTER_API_KEY == "prod-openrouter"
-    assert modules["verification"].SCRAPINGDOG_API_KEY == "prod-scrapingdog"
 
 
 def test_scorer_isolation_noop_when_unset(monkeypatch):
-    modules = _install_fake_scorer_modules(monkeypatch)
     monkeypatch.delenv("RESEARCH_LAB_BENCHMARK_SCRAPINGDOG_API_KEY", raising=False)
     monkeypatch.delenv("RESEARCH_LAB_BENCHMARK_OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", "prod-sd")
@@ -1040,7 +1108,6 @@ def test_scorer_isolation_noop_when_unset(monkeypatch):
     with sw._benchmark_scorer_isolation():
         # Falls back to prod values untouched.
         assert os.environ["SCRAPINGDOG_API_KEY"] == "prod-sd"
-        assert modules["verification"].SCRAPINGDOG_API_KEY == "prod-scrapingdog"
 
 
 def test_benchmark_scorer_max_concurrency_env(monkeypatch):

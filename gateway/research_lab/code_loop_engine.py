@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, fields, replace
+import inspect
 import json
 import logging
 import math
@@ -685,11 +686,22 @@ class CodeEditLoopEngine:
     # never held on the engine; empty means only the forbidden-term screen
     # applies. The worker wires this per run alongside the private window.
     probe_private_window_term_hashes: frozenset[str] = frozenset()
+    # V2 supplies a measured coordinator resolver.  Legacy host execution
+    # leaves this unset and retains the existing evidence-proxy path.
+    probe_evidence_resolver: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None
     # W2: sanitized per-parent/day provider-outcome digest
     # (provider_outcome_digest.build_provider_outcome_digest), wired by the
     # worker from already-recorded truth. None keeps prompts byte-identical
     # to pre-W2 behavior.
     provider_outcome_digest: Mapping[str, Any] | None = None
+    # V2 enclave seam for the existing private S3 artifact operations. None
+    # preserves the original boto3 behavior; the measured role supplies a
+    # signed host-operation adapter.
+    artifact_io: Any | None = None
+    # V2 supplies authenticated, receipt-bound provider inputs. None preserves
+    # the existing host loaders and their exact continuity behavior.
+    provider_registry_loader: Callable[[], tuple[list[Any], Any]] | None = None
+    provider_probe_catalog_loader: Callable[[], list[Any]] | None = None
     # Set by run() so stage/build spans can attach to the run's deterministic
     # Langfuse trace (run_trace_id(run_id)) without threading run_id through
     # every stage-call signature. One engine instance serves one run at a time.
@@ -786,13 +798,22 @@ class CodeEditLoopEngine:
             try:
                 bucket, object_key = _parse_s3_uri(uri)
 
-                def _get(bucket: str = bucket, object_key: str = object_key) -> dict[str, Any]:
-                    import boto3  # type: ignore
+                if self.artifact_io is not None:
+                    if not expected_hash:
+                        raise ValueError("rehydration_artifact_hash_missing")
+                    payload = await _artifact_io_read_json(
+                        self.artifact_io,
+                        uri,
+                        content_hash=expected_hash,
+                    )
+                else:
+                    def _get(bucket: str = bucket, object_key: str = object_key) -> dict[str, Any]:
+                        import boto3  # type: ignore
 
-                    body = boto3.client("s3").get_object(Bucket=bucket, Key=object_key)["Body"].read()
-                    return json.loads(body.decode("utf-8"))
+                        body = boto3.client("s3").get_object(Bucket=bucket, Key=object_key)["Body"].read()
+                        return json.loads(body.decode("utf-8"))
 
-                payload = await asyncio.to_thread(_get)
+                    payload = await asyncio.to_thread(_get)
                 stored_hash = str(payload.get("loop_candidate_artifact_hash") or "")
                 if expected_hash and stored_hash and stored_hash != expected_hash:
                     raise ValueError("rehydration_artifact_hash_mismatch")
@@ -1216,8 +1237,12 @@ class CodeEditLoopEngine:
         effective_provider_entries: list[Any] = []
         if bool(getattr(self.builder.config, "provider_capability_catalog_enabled", True)):
             try:
-                effective_provider_entries, provider_capabilities = await asyncio.to_thread(
-                    load_provider_registry_with_capabilities
+                registry_loader = (
+                    self.provider_registry_loader
+                    or load_provider_registry_with_capabilities
+                )
+                effective_provider_entries, provider_capabilities = (
+                    await asyncio.to_thread(registry_loader)
                 )
                 if provider_capabilities.private_snapshot_loaded:
                     provider_capability_summary = provider_capabilities.prompt_summary()
@@ -1243,7 +1268,11 @@ class CodeEditLoopEngine:
         probe_budget = None
         if probes_enabled:
             try:
-                if provider_capabilities is not None and provider_capabilities.private_snapshot_loaded:
+                if self.provider_probe_catalog_loader is not None:
+                    probe_catalog = await asyncio.to_thread(
+                        self.provider_probe_catalog_loader
+                    )
+                elif provider_capabilities is not None and provider_capabilities.private_snapshot_loaded:
                     probe_catalog = [
                         ProviderProbeEndpoint.from_mapping(item)
                         for entry in effective_provider_entries
@@ -2609,6 +2638,7 @@ class CodeEditLoopEngine:
                             private_window_term_hashes=self.probe_private_window_term_hashes,
                             registry_base_urls=probe_registry_base_urls,
                             snapshot_overlay_uri=_probe_snapshot_overlay_uri(),
+                            evidence_resolver=self.probe_evidence_resolver,
                         )
                         # Probe spend charges the run's existing microusd ledger.
                         actual_cost_microusd += max(0, int(resolution.cost_microusd))
@@ -3530,6 +3560,7 @@ class CodeEditLoopEngine:
                         build=build,
                         dev_score=built_candidate.dev_score,
                         dev_score_version=built_candidate.dev_score_version,
+                        artifact_io=self.artifact_io,
                     )
                     built_candidate = replace(
                         built_candidate,
@@ -3611,6 +3642,7 @@ class CodeEditLoopEngine:
                         stage=event_type,
                         draft=candidate_draft,
                         error=exc,
+                        artifact_io=self.artifact_io,
                     )
                     await self.event_sink(
                         AutoResearchLoopEvent(
@@ -4502,6 +4534,7 @@ class CodeEditLoopEngine:
                     stage=failure_stage,
                     draft=candidate_draft,
                     error=exc,
+                    artifact_io=self.artifact_io,
                 )
                 await self.event_sink(
                     AutoResearchLoopEvent(
@@ -4843,6 +4876,7 @@ async def _write_private_code_edit_diagnostic(
     stage: str,
     draft: CodeEditDraft,
     error: BaseException,
+    artifact_io: Any | None = None,
 ) -> dict[str, Any]:
     manifest_uri = str(getattr(artifact, "manifest_uri", "") or "")
     if not manifest_uri.startswith("s3://"):
@@ -4872,18 +4906,28 @@ async def _write_private_code_edit_diagnostic(
     }
     payload_hash = sha256_json(payload)
 
-    def _put() -> None:
-        import boto3  # type: ignore
-
-        boto3.client("s3").put_object(
-            Bucket=bucket,
-            Key=object_key,
-            Body=json.dumps({**payload, "diagnostic_hash": payload_hash}, sort_keys=True).encode("utf-8"),
-            ContentType="application/json",
-        )
-
     try:
-        await asyncio.to_thread(_put)
+        stored_payload = {**payload, "diagnostic_hash": payload_hash}
+        if artifact_io is not None:
+            await _artifact_io_write_json(
+                artifact_io,
+                uri=f"s3://{bucket}/{object_key}",
+                document=stored_payload,
+                content_hash=payload_hash,
+                artifact_kind="code_edit_failure_diagnostic",
+            )
+        else:
+            def _put() -> None:
+                import boto3  # type: ignore
+
+                boto3.client("s3").put_object(
+                    Bucket=bucket,
+                    Key=object_key,
+                    Body=json.dumps(stored_payload, sort_keys=True).encode("utf-8"),
+                    ContentType="application/json",
+                )
+
+            await asyncio.to_thread(_put)
     except Exception as exc:
         return {
             "diagnostic_artifact_hash": payload_hash,
@@ -5108,6 +5152,7 @@ async def _write_private_loop_candidate_artifact(
     build: CodeEditBuildResult,
     dev_score: float | None = None,
     dev_score_version: str = "",
+    artifact_io: Any | None = None,
 ) -> dict[str, Any]:
     """Persist a full rehydration doc for a built candidate (bug #5).
 
@@ -5144,18 +5189,28 @@ async def _write_private_loop_candidate_artifact(
         payload["dev_score_version"] = str(dev_score_version or "")
     payload_hash = sha256_json(payload)
 
-    def _put() -> None:
-        import boto3  # type: ignore
-
-        boto3.client("s3").put_object(
-            Bucket=bucket,
-            Key=object_key,
-            Body=json.dumps({**payload, "loop_candidate_artifact_hash": payload_hash}, sort_keys=True).encode("utf-8"),
-            ContentType="application/json",
-        )
-
     try:
-        await asyncio.to_thread(_put)
+        stored_payload = {**payload, "loop_candidate_artifact_hash": payload_hash}
+        if artifact_io is not None:
+            await _artifact_io_write_json(
+                artifact_io,
+                uri=f"s3://{bucket}/{object_key}",
+                document=stored_payload,
+                content_hash=payload_hash,
+                artifact_kind="loop_candidate_rehydration",
+            )
+        else:
+            def _put() -> None:
+                import boto3  # type: ignore
+
+                boto3.client("s3").put_object(
+                    Bucket=bucket,
+                    Key=object_key,
+                    Body=json.dumps(stored_payload, sort_keys=True).encode("utf-8"),
+                    ContentType="application/json",
+                )
+
+            await asyncio.to_thread(_put)
     except Exception as exc:
         return {
             "loop_candidate_artifact_hash": payload_hash,
@@ -5165,6 +5220,44 @@ async def _write_private_loop_candidate_artifact(
         "loop_candidate_artifact_uri": f"s3://{bucket}/{object_key}",
         "loop_candidate_artifact_hash": payload_hash,
     }
+
+
+async def _artifact_io_read_json(
+    artifact_io: Any,
+    uri: str,
+    *,
+    content_hash: str,
+) -> dict[str, Any]:
+    value = artifact_io.read_json(uri=uri, content_hash=content_hash)
+    if inspect.isawaitable(value):
+        value = await value
+    if not isinstance(value, Mapping):
+        raise ValueError("artifact reader returned a non-object")
+    return dict(value)
+
+
+async def _artifact_io_write_json(
+    artifact_io: Any,
+    *,
+    uri: str,
+    document: Mapping[str, Any],
+    content_hash: str,
+    artifact_kind: str,
+) -> dict[str, Any]:
+    value = artifact_io.write_json(
+        uri=uri,
+        document=dict(document),
+        content_hash=content_hash,
+        artifact_kind=artifact_kind,
+    )
+    if inspect.isawaitable(value):
+        value = await value
+    if not isinstance(value, Mapping):
+        raise ValueError("artifact writer returned a non-object")
+    result = dict(value)
+    if result.get("uri") != uri or result.get("content_hash") != content_hash:
+        raise ValueError("artifact writer acknowledgement differs from request")
+    return result
 
 
 def _rehydrated_candidate_from_artifact_payload(

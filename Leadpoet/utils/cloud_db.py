@@ -8,7 +8,7 @@ import time
 import base64
 import requests
 import bittensor as bt
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from Leadpoet.utils.misc import generate_timestamp
@@ -2668,6 +2668,44 @@ def gateway_submit_fulfillment_scores(
     return False
 
 
+def gateway_get_fulfillment_leaderboard_snapshot(
+    wallet: bt.wallet, limit: int = 3
+) -> Dict[str, Any]:
+    """Fetch the unchanged leaderboard response including its exact time window."""
+
+    last_err: Optional[Exception] = None
+    backoffs = [1, 3]
+    for attempt in range(len(backoffs) + 1):
+        try:
+            response = requests.get(
+                f"{GATEWAY_URL}/fulfillment/leaderboard",
+                params={"limit": limit},
+                timeout=45,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if (
+                not isinstance(data, dict)
+                or not isinstance(data.get("leaderboard"), list)
+                or not isinstance(data.get("period_start"), str)
+                or not isinstance(data.get("period_end"), str)
+            ):
+                raise RuntimeError("gateway fulfillment leaderboard response is incomplete")
+            return data
+        except Exception as e:
+            last_err = e
+            if attempt < len(backoffs):
+                delay = backoffs[attempt]
+                bt.logging.warning(
+                    f"gateway_get_fulfillment_leaderboard attempt {attempt + 1} failed "
+                    f"({type(e).__name__}: {e}); retrying in {delay}s"
+                )
+                time.sleep(delay)
+    raise RuntimeError(
+        f"gateway_get_fulfillment_leaderboard failed after {len(backoffs) + 1} attempts: {last_err}"
+    )
+
+
 def gateway_get_fulfillment_leaderboard(wallet: bt.wallet, limit: int = 3) -> List[Dict]:
     """Fetch the top-N fulfillment miners ranked by wins in the last 140 epochs.
 
@@ -2697,30 +2735,9 @@ def gateway_get_fulfillment_leaderboard(wallet: bt.wallet, limit: int = 3) -> Li
         treat this as "no leaderboard available, full bonus pool to burn"
         rather than silently retry forever.
     """
-    last_err: Optional[Exception] = None
-    backoffs = [1, 3]
-    for attempt in range(len(backoffs) + 1):
-        try:
-            response = requests.get(
-                f"{GATEWAY_URL}/fulfillment/leaderboard",
-                params={"limit": limit},
-                timeout=45,
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data.get("leaderboard", [])
-        except Exception as e:
-            last_err = e
-            if attempt < len(backoffs):
-                delay = backoffs[attempt]
-                bt.logging.warning(
-                    f"gateway_get_fulfillment_leaderboard attempt {attempt + 1} failed "
-                    f"({type(e).__name__}: {e}); retrying in {delay}s"
-                )
-                time.sleep(delay)
-    raise RuntimeError(
-        f"gateway_get_fulfillment_leaderboard failed after {len(backoffs) + 1} attempts: {last_err}"
-    )
+    return gateway_get_fulfillment_leaderboard_snapshot(wallet, limit=limit)[
+        "leaderboard"
+    ]
 
 
 def gateway_get_all_fulfillment_rewards(wallet: bt.wallet, current_epoch: int) -> Dict[str, float]:

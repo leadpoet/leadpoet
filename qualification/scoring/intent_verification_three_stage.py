@@ -499,7 +499,7 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as cli:
             avail = await cli.get(
-                f"http://archive.org/wayback/available?url={url}",
+                f"https://archive.org/wayback/available?url={url}",
             )
             data = avail.json()
             snap = (data.get("archived_snapshots") or {}).get("closest") or {}

@@ -53,6 +53,17 @@ COPY --from=builder /root/.local /home/gateway/.local
 # Copy gateway application code
 COPY gateway/ ./gateway/
 
+# Gateway runtime imports shared canonical, Research Lab, qualification, and
+# fulfillment-verification packages from the repository root. Keep the Docker
+# smoke image aligned with the production /home/ec2-user package layout.
+COPY leadpoet_canonical/ ./leadpoet_canonical/
+COPY leadpoet_verifier/ ./leadpoet_verifier/
+COPY research_lab/ ./research_lab/
+COPY qualification/ ./qualification/
+COPY validator_models/ ./validator_models/
+COPY Leadpoet/ ./Leadpoet/
+COPY schemas/ ./schemas/
+
 # Do not bake local .env files into images. Configure the container with
 # runtime environment variables or mount a GATEWAY_ENV_FILE fallback.
 

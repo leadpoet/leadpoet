@@ -32,7 +32,7 @@ def test_production_scoring_lock_is_exact_complete_and_matches_input():
     inputs = _input_records(input_path)
     locked = _lock_records(lock_path)
 
-    assert len(inputs) == 47
+    assert len(inputs) == 53
     assert inputs == {name: value[0] for name, value in locked.items()}
     assert all(len(digest) == 64 for _version, digest in locked.values())
     assert inputs["python-dateutil"] == "2.9.0"
@@ -41,6 +41,12 @@ def test_production_scoring_lock_is_exact_complete_and_matches_input():
     assert inputs["click"] == "8.1.8"
     assert inputs["chardet"] == "4.0.0"
     assert inputs["pysocks"] == "1.7.1"
+    assert inputs["numpy"] == "2.0.2"
+    assert inputs["requests"] == "2.32.5"
+    assert inputs["dnspython"] == "2.7.0"
+    assert inputs["python-whois"] == "0.9.6"
+    assert inputs["python-dotenv"] == "1.2.1"
+    assert inputs["disposable-email-domains"] == "0.0.218"
     assert "rapidfuzz" not in inputs
 
 
@@ -85,6 +91,9 @@ def test_wheelhouse_verifier_accepts_exact_wheel_and_rejects_tamper(tmp_path: Pa
 def test_gateway_eif_uses_pinned_python39_offline_lock_and_unchanged_outer_context():
     dockerfile = (ROOT / "gateway" / "tee" / "Dockerfile.enclave").read_text()
     stage = (ROOT / "gateway" / "tee" / "stage_attested_runtime.sh").read_text()
+    prepare = (
+        ROOT / "gateway" / "tee" / "prepare_offline_artifacts_v2.sh"
+    ).read_text()
 
     assert (
         "FROM python:3.9.24-slim-bookworm@sha256:"
@@ -95,7 +104,11 @@ def test_gateway_eif_uses_pinned_python39_offline_lock_and_unchanged_outer_conte
     assert "--no-deps" in dockerfile
     assert "verify-installed" in dockerfile
     assert "yum install" not in dockerfile
-    assert "--python-version 39" in stage
-    assert "--abi cp39" in stage
-    assert "--no-deps" in stage
+    assert "pip download" not in stage
+    assert "prepared offline scoring wheelhouse is unavailable" in stage
+    assert "pip download" in prepare
+    assert "--python-version 39" in prepare
+    assert "--abi cp39" in prepare
+    assert "--no-deps" in prepare
+    assert "--require-hashes" in prepare
     assert "verify-wheelhouse" in stage

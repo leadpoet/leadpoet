@@ -7,11 +7,11 @@ class BaseNeuron:
     def add_args(cls, parser: argparse.ArgumentParser):
         pass
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, wallet=None):
         if config is None:
             config = bt.config()
         self.config = config
-        self.wallet = bt.wallet(config=self.config)
+        self.wallet = wallet if wallet is not None else bt.wallet(config=self.config)
         bt.logging.debug("Initializing subtensor for real network")
         
         # ════════════════════════════════════════════════════════════

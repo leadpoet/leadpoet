@@ -12,6 +12,7 @@ from gateway.tee.scoring_import_closure import (
     AUTORESEARCH_ENTRYPOINT_MODULES,
     DYNAMIC_IMPORT_MODULES,
     ENTRYPOINT_MODULES,
+    MEASURED_DATA_PATHS,
     ScoringClosureError,
     build_manifest,
     verify_staged_manifest,
@@ -42,6 +43,11 @@ def _stage_manifest_files(manifest: dict, destination: Path) -> None:
         target = destination / item["staged_path"]
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
+    for item in manifest["data_files"]:
+        source = ROOT / item["source_path"]
+        target = destination / item["staged_path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
 
 
 def test_scoring_import_closure_contains_authority_modules():
@@ -67,8 +73,17 @@ def test_scoring_import_closure_contains_authority_modules():
     assert "research_lab.eval.private_runtime" in modules
     assert "qualification.scoring.intent_verification_three_stage" in modules
     assert "leadpoet_verifier.economics" in modules
+    assert "leadpoet_canonical.attested_v2" in modules
+    assert "gateway.tee.protected_workflows" in modules
     assert "gateway.tee.egress_policy" in modules
     assert "gateway.tee.egress_proxy" in modules
+    assert "gateway.tee.autoresearch_executor_v2" in modules
+    assert "gateway.tee.model_sandbox_v2" in modules
+    assert "gateway.tee.provider_broker_v2" in modules
+    assert "gateway.tee.scoring_executor_v2" in modules
+    assert {item["source_path"] for item in manifest["data_files"]} == set(
+        MEASURED_DATA_PATHS
+    )
     assert "RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE" in manifest["environment_variables"]
     assert "QUALIFICATION_OPENROUTER_API_KEY" in manifest["environment_variables"]
     assert manifest["manifest_hash"].startswith("sha256:")
@@ -98,6 +113,19 @@ def test_staged_manifest_fails_closed_on_tampered_dependency(tmp_path: Path):
         verify_staged_manifest(gateway_root=tmp_path, manifest_path=manifest_path)
 
 
+def test_staged_manifest_fails_closed_on_tampered_runtime_data(tmp_path: Path):
+    manifest = build_manifest(gateway_root=ROOT / "gateway", source_root=ROOT)
+    _stage_manifest_files(manifest, tmp_path)
+    manifest_path = tmp_path / "_attested_runtime" / "scoring_import_closure.json"
+    write_manifest(manifest, manifest_path)
+    normalize_runtime_tree(tmp_path / "_attested_runtime")
+    staged = tmp_path / manifest["data_files"][0]["staged_path"]
+    staged.write_bytes(staged.read_bytes() + b"\n")
+
+    with pytest.raises(ScoringClosureError, match="mismatch"):
+        verify_staged_manifest(gateway_root=tmp_path, manifest_path=manifest_path)
+
+
 def test_staged_manifest_fails_closed_when_autoresearch_root_is_omitted(
     tmp_path: Path,
 ):
@@ -117,6 +145,9 @@ def test_staged_manifest_fails_closed_when_autoresearch_root_is_omitted(
 def test_gateway_eif_build_enforces_scoring_manifest():
     dockerfile = (ROOT / "gateway" / "tee" / "Dockerfile.enclave").read_text(encoding="utf-8")
     stage_script = (ROOT / "gateway" / "tee" / "stage_attested_runtime.sh").read_text(encoding="utf-8")
+    prepare_script = (
+        ROOT / "gateway" / "tee" / "prepare_offline_artifacts_v2.sh"
+    ).read_text(encoding="utf-8")
     start_script = (ROOT / "gateway" / "tee" / "start_enclave.sh").read_text(encoding="utf-8")
 
     assert "scoring_import_closure.py verify-staged" in dockerfile
@@ -125,6 +156,13 @@ def test_gateway_eif_build_enforces_scoring_manifest():
     assert "normalize_attested_runtime.py" in stage_script
     assert "build_identity.py" in stage_script
     assert "build_identity.py verify" in dockerfile
+    assert "protected_workflows.py" in dockerfile
+    assert "protected_workflows.py" in stage_script
+    assert "--protected-manifest" in stage_script
+    assert "--topology-manifest" in stage_script
+    assert "gateway_scoring_a gateway_scoring_b" in stage_script
+    assert "LEADPOET_ENCLAVE_ROLE" in dockerfile
+    assert "topology.py" in dockerfile
     assert 'COPY _enclave_source/ /app/gateway/' in dockerfile
     assert 'normalize_attested_runtime.py\" --root \"$BUILD_CONTEXT_TMP\"' in stage_script
     assert "--exclude='.source_commit'" in stage_script
@@ -133,16 +171,22 @@ def test_gateway_eif_build_enforces_scoring_manifest():
     assert 'if [ "$RESOLVED_SOURCE_COMMIT" != "$ATTESTED_COMMIT_SHA" ]' in stage_script
     assert '"$SOURCE_GATEWAY_ROOT/" "$BUILD_CONTEXT_TMP/"' in stage_script
     assert '"$GATEWAY_ROOT/" "$BUILD_CONTEXT_TMP/"' not in stage_script
-    assert 'pip download' in stage_script
-    assert '--require-hashes' in stage_script
+    assert 'pip download' not in stage_script
+    assert 'pip download' in prepare_script
+    assert '--require-hashes' in prepare_script
     assert '--no-index --find-links=/tmp/wheelhouse' in dockerfile
     assert 'requirements-scoring-py39.lock' in stage_script
     assert 'requirements-scoring-py39.lock' in dockerfile
-    assert '--python-version 39' in stage_script
-    assert '--abi cp39' in stage_script
-    assert 'GATEWAY_ENCLAVE_CPU_COUNT 2' in start_script
-    assert 'GATEWAY_ENCLAVE_MEMORY_MB 8192' in start_script
-    assert '/home/ec2-user/.config/leadpoet/gateway.env' in start_script
+    assert '--python-version 39' in prepare_script
+    assert '--abi cp39' in prepare_script
+    assert 'GATEWAY_TEE_TOPOLOGY_MODE:-full' in start_script
+    assert 'gateway_coordinator' in start_script
+    assert 'gateway_scoring_a' in start_script
+    assert 'gateway_scoring_b' in start_script
+    assert 'gateway_autoresearch' in start_script
+    assert 'TOTAL_CPUS' in start_script
+    assert 'TOTAL_MEMORY_MIB' in start_script
+    assert 'verify_topology.py' in start_script
 
 
 def test_existing_restart_scripts_preserve_attested_build_paths():
@@ -156,14 +200,17 @@ def test_existing_restart_scripts_preserve_attested_build_paths():
     ).read_text(encoding="utf-8")
 
     assert 'bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"' in gateway_restart
-    assert (
-        'docker build --no-cache -f "$GATEWAY_ROOT/tee/Dockerfile.enclave"'
-        in gateway_restart
-    )
-    assert "nitro-cli build-enclave --docker-uri tee-enclave:latest" in gateway_restart
+    assert 'build_role_enclaves.sh' in gateway_restart
+    assert 'GATEWAY_TEE_SKIP_STAGE=1' in gateway_restart
     assert 'GATEWAY_ROOT="$GATEWAY_ROOT"' in gateway_restart
     assert 'GATEWAY_TEE_EIF_ROOT="$GATEWAY_TEE_EIF_ROOT"' in gateway_restart
     assert "./start_enclave.sh" in gateway_restart
+    role_builder = (
+        ROOT / "gateway" / "tee" / "build_role_enclaves.sh"
+    ).read_text(encoding="utf-8")
+    assert 'docker build' in role_builder
+    assert '--build-arg "LEADPOET_ENCLAVE_ROLE=${role}"' in role_builder
+    assert 'nitro-cli build-enclave' in role_builder
     assert 'bash validator_tee/scripts/build_enclave.sh' in validator_restart
     assert "nitro-cli run-enclave" in validator_restart
     assert '"gateway/research_lab"' in validator_build
@@ -191,18 +238,31 @@ def test_gateway_build_identity_resolve_command_returns_exact_commit(tmp_path: P
     assert result.stdout.strip() == commit
 
 
-def test_gateway_build_identity_binds_commit_and_scoring_manifest(tmp_path: Path):
+def test_gateway_build_identity_binds_commit_role_and_execution_manifest(tmp_path: Path):
     gateway_root = tmp_path / "gateway"
     identity = build_identity(
+        role="gateway_scoring_a",
+        service_role="gateway_scoring",
         commit_sha="a" * 40,
-        scoring_manifest_hash="sha256:" + "b" * 64,
+        execution_manifest_hash="sha256:" + "b" * 64,
+        dependency_lock_hash="sha256:" + "e" * 64,
+        protected_manifest_hash="sha256:" + "c" * 64,
+        topology_hash="sha256:" + "d" * 64,
     )
     write_identity(
         identity,
         gateway_root / "_attested_runtime" / "gateway_enclave_build_identity.json",
     )
 
-    assert load_identity(gateway_root=gateway_root) == identity
+    assert load_identity(
+        gateway_root=gateway_root,
+        expected_role="gateway_scoring_a",
+    ) == identity
+    with pytest.raises(Exception, match="role mismatch"):
+        load_identity(
+            gateway_root=gateway_root,
+            expected_role="gateway_coordinator",
+        )
 
 
 def test_staged_manifest_fails_closed_on_metadata_drift(tmp_path: Path):

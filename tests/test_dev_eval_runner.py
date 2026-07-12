@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.research_lab.dev_eval_runner import (
+    AttestedReplayDevEvaluatorV2,
     DEV_EVAL_ENABLED_ENV,
     DevEvalRunnerError,
     DockerReplayDevEvaluator,
@@ -25,7 +26,9 @@ from gateway.research_lab.dev_eval_runner import (
     ensure_local_snapshot_set,
     load_verified_dev_items,
 )
+from gateway.tee.source_bundle_v2 import build_source_bundle_v2
 from research_lab.canonical import sha256_json
+from research_lab.eval import PrivateModelArtifactManifest, build_local_private_artifact_manifest
 from research_lab.eval.dev_eval import DEV_SCORE_VERSION, compute_dev_set_hash
 from research_lab.eval.snapshot_store import (
     MODE_RECORD,
@@ -239,6 +242,94 @@ async def test_evaluator_scores_candidate_and_is_deterministic(tmp_path):
     assert all(call["image_digest"] == IMAGE_DIGEST for call in fake_docker.calls)
     assert all(call["snapshot_dir"] == root for call in fake_docker.calls)
     assert all(call["context_dev_eval"] is True for call in fake_docker.calls)
+
+
+@pytest.mark.asyncio
+async def test_attested_evaluator_preserves_legacy_result_and_requests_candidate_test(
+    monkeypatch, tmp_path
+):
+    items = _dev_items(2)
+    root = _write_snapshot_set(tmp_path, items)
+    source = tmp_path / "candidate-source"
+    source.mkdir()
+    (source / "research_lab_adapter.py").write_text(
+        "def run_icp(icp, context):\n    return []\n",
+        encoding="utf-8",
+    )
+    artifact = PrivateModelArtifactManifest.from_mapping(
+        build_local_private_artifact_manifest(
+            source_path=source,
+            git_commit_sha="a" * 40,
+            image_digest=IMAGE_DIGEST,
+            manifest_uri="s3://private/candidate.json",
+            signature_ref="kms:signature",
+            component_registry_version="1",
+            scoring_adapter_version="1",
+        )
+    )
+    candidate = SimpleNamespace(
+        node_id="node-attested",
+        iteration=3,
+        draft=SimpleNamespace(lane="conservative"),
+        build=SimpleNamespace(candidate_model_manifest=artifact),
+    )
+    fake_runner = _fake_docker_runner(
+        {
+            item["icp"]["icp_id"]: [_rich_company(index)]
+            for index, item in enumerate(items)
+        }
+    )
+    legacy = DockerReplayDevEvaluator(
+        snapshot_uri=root,
+        run_icp_in_docker=fake_runner,
+    )
+    expected = await legacy(candidate)
+    source_bundle = build_source_bundle_v2(source)
+
+    async def measured_source_bundle(_artifact, *, timeout_seconds):
+        assert timeout_seconds >= 30
+        return source_bundle
+
+    monkeypatch.setattr(
+        "gateway.research_lab.model_authority_v2.source_bundle_for_artifact_v2",
+        measured_source_bundle,
+    )
+    observed = {}
+
+    async def execute(**kwargs):
+        observed.update(kwargs)
+        root_hash = "sha256:" + "9" * 64
+        return {
+            "result": expected,
+            "receipt_graph": {
+                "root_receipt_hash": root_hash,
+                "receipts": [
+                    {
+                        "receipt_hash": root_hash,
+                        "output_root": sha256_json(expected),
+                    }
+                ],
+            },
+        }
+
+    evaluator = AttestedReplayDevEvaluatorV2(
+        epoch_id=24000,
+        worker_index=4,
+        snapshot_uri=root,
+        execute=execute,
+    )
+    result = await evaluator(candidate)
+
+    assert result["result"] == expected
+    assert observed["operation"] == "run_dev_replay_v2"
+    assert observed["purpose"] == "research_lab.candidate_test.v2"
+    assert observed["epoch_id"] == 24000
+    assert observed["worker_index"] == 4
+    assert observed["payload"]["run_label"] == "node-attested"
+    assert observed["payload"]["snapshot_manifest_hash"] == expected[
+        "snapshot_manifest_hash"
+    ]
+    assert observed["payload"]["source_bundle"] == source_bundle
 
 
 async def test_evaluator_rejects_mutable_image_reference(tmp_path):

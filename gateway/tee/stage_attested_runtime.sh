@@ -16,7 +16,10 @@ BUILD_CONTEXT_ROOT="$GATEWAY_ROOT/_enclave_source"
 BUILD_CONTEXT_TMP="$GATEWAY_ROOT/.enclave_source.tmp"
 WHEELHOUSE_ROOT="$GATEWAY_ROOT/_enclave_wheelhouse"
 WHEELHOUSE_TMP="$GATEWAY_ROOT/.enclave_wheelhouse.tmp"
+RUNSC_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
+OFFLINE_WHEELHOUSE_ROOT="$RUNSC_ARTIFACT_ROOT/scoring-wheelhouse-py39"
 PACKAGES=(
+  "Leadpoet"
   "research_lab"
   "leadpoet_verifier"
   "schemas"
@@ -65,8 +68,11 @@ else
 fi
 
 SOURCE_GATEWAY_ROOT="$SOURCE_ROOT/gateway"
+RUNSC_LOCK="$SOURCE_GATEWAY_ROOT/tee/runsc-runtime.lock.json"
 SCORING_REQUIREMENTS_INPUT="$SOURCE_GATEWAY_ROOT/tee/requirements-scoring-py39.in"
 SCORING_REQUIREMENTS_LOCK="$SOURCE_GATEWAY_ROOT/tee/requirements-scoring-py39.lock"
+PROTECTED_WORKFLOW_MANIFEST="$SOURCE_GATEWAY_ROOT/tee/protected_workflows.json"
+TOPOLOGY_MANIFEST="$SOURCE_GATEWAY_ROOT/tee/topology.json"
 
 if [ ! -d "$SOURCE_GATEWAY_ROOT" ]; then
   echo "ERROR: clean gateway source missing: $SOURCE_GATEWAY_ROOT" >&2
@@ -113,12 +119,29 @@ python3 "$SOURCE_GATEWAY_ROOT/tee/scoring_import_closure.py" build \
   --source-root "$SOURCE_ROOT" \
   --output "$TMP_ROOT/scoring_import_closure.json"
 
-python3 "$SOURCE_GATEWAY_ROOT/tee/build_identity.py" build \
-  --gateway-root "$SOURCE_GATEWAY_ROOT" \
-  --source-root "$SOURCE_ROOT" \
-  --manifest "$TMP_ROOT/scoring_import_closure.json" \
-  --output "$TMP_ROOT/gateway_enclave_build_identity.json" \
-  --commit "$ATTESTED_COMMIT_SHA"
+python3 "$SOURCE_GATEWAY_ROOT/tee/protected_workflows.py" \
+  --root "$SOURCE_ROOT" \
+  --manifest "$PROTECTED_WORKFLOW_MANIFEST"
+cp "$PROTECTED_WORKFLOW_MANIFEST" "$TMP_ROOT/protected_workflows.json"
+
+python3 "$SOURCE_GATEWAY_ROOT/tee/topology.py" --verify "$TOPOLOGY_MANIFEST"
+cp "$TOPOLOGY_MANIFEST" "$TMP_ROOT/topology.json"
+
+mkdir -p "$TMP_ROOT/gateway_enclave_build_identities"
+for role in gateway_coordinator gateway_scoring_a gateway_scoring_b gateway_autoresearch; do
+  python3 "$SOURCE_GATEWAY_ROOT/tee/build_identity.py" build \
+    --gateway-root "$SOURCE_GATEWAY_ROOT" \
+    --source-root "$SOURCE_ROOT" \
+    --manifest "$TMP_ROOT/scoring_import_closure.json" \
+    --dependency-lock "$SCORING_REQUIREMENTS_LOCK" \
+    --protected-manifest "$TMP_ROOT/protected_workflows.json" \
+    --topology-manifest "$TMP_ROOT/topology.json" \
+    --role "$role" \
+    --output "$TMP_ROOT/gateway_enclave_build_identities/${role}.json" \
+    --commit "$ATTESTED_COMMIT_SHA"
+done
+cp "$TMP_ROOT/gateway_enclave_build_identities/gateway_coordinator.json" \
+  "$TMP_ROOT/gateway_enclave_build_identity.json"
 
 python3 "$SOURCE_GATEWAY_ROOT/tee/normalize_attested_runtime.py" --root "$TMP_ROOT"
 
@@ -130,16 +153,17 @@ mv "$TMP_ROOT" "$DEST_ROOT"
 
 rm -rf "$WHEELHOUSE_TMP"
 mkdir -p "$WHEELHOUSE_TMP"
-python3 -m pip download \
-  --no-deps \
-  --require-hashes \
-  --dest "$WHEELHOUSE_TMP" \
-  --only-binary=:all: \
-  --platform manylinux2014_x86_64 \
-  --implementation cp \
-  --python-version 39 \
-  --abi cp39 \
-  -r "$SCORING_REQUIREMENTS_LOCK"
+test -d "$OFFLINE_WHEELHOUSE_ROOT" || {
+  echo "ERROR: prepared offline scoring wheelhouse is unavailable: $OFFLINE_WHEELHOUSE_ROOT" >&2
+  echo "Run gateway/tee/prepare_offline_artifacts_v2.sh before release builds" >&2
+  exit 1
+}
+if find "$OFFLINE_WHEELHOUSE_ROOT" -mindepth 1 -maxdepth 1 \
+    \( ! -type f -o ! -name '*.whl' \) | grep -q .; then
+  echo "ERROR: offline scoring wheelhouse contains an unexpected entry" >&2
+  exit 1
+fi
+rsync -a --delete "$OFFLINE_WHEELHOUSE_ROOT/" "$WHEELHOUSE_TMP/"
 python3 "$SOURCE_GATEWAY_ROOT/tee/scoring_wheelhouse.py" verify-wheelhouse \
   --input "$SCORING_REQUIREMENTS_INPUT" \
   --lock "$SCORING_REQUIREMENTS_LOCK" \
@@ -182,6 +206,18 @@ rsync -a --delete \
   --exclude='BUILD_INFO.json' \
   --exclude='.source_commit' \
   "$SOURCE_GATEWAY_ROOT/" "$BUILD_CONTEXT_TMP/"
+RUNSC_ARTIFACT_NAME="$(python3 - "$RUNSC_LOCK" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1]))["artifact_filename"])
+PY
+)"
+RUNSC_ARTIFACT="$RUNSC_ARTIFACT_ROOT/$RUNSC_ARTIFACT_NAME"
+python3 "$SOURCE_GATEWAY_ROOT/tee/sandbox_runtime_artifact.py" verify \
+  --lock "$RUNSC_LOCK" \
+  --artifact "$RUNSC_ARTIFACT"
+mkdir -p "$BUILD_CONTEXT_TMP/tee/runtime"
+install -m 755 "$RUNSC_ARTIFACT" "$BUILD_CONTEXT_TMP/tee/runtime/runsc"
 mkdir -p "$BUILD_CONTEXT_TMP/_attested_runtime"
 rsync -a --delete "$DEST_ROOT/" "$BUILD_CONTEXT_TMP/_attested_runtime/"
 mkdir -p "$BUILD_CONTEXT_TMP/tee/wheelhouse"

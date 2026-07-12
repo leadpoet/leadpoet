@@ -160,6 +160,7 @@ gateway/.enclave_source.tmp/
 gateway/.enclave_wheelhouse.tmp/
 gateway/.source_commit
 gateway/BUILD_INFO.json
+.validator-tee-artifacts/
 *.pem
 *.jwk
 *_keyfile.json

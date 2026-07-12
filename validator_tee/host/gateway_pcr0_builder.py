@@ -20,9 +20,18 @@ import tarfile
 import tempfile
 from typing import Any, Mapping, Optional, Sequence
 
+from gateway.tee.release_manifest_v2 import BUILD_EVIDENCE_SCHEMA_VERSION
+from gateway.tee.topology import ROLE_SPECS
 
-CACHE_SCHEMA_VERSION = "leadpoet.gateway_pcr0_cache.v1"
+
+CACHE_SCHEMA_VERSION = "leadpoet.gateway_pcr0_cache.v2"
 DEFAULT_CACHE_SIZE = 20
+GATEWAY_ROLES = (
+    "gateway_coordinator",
+    "gateway_scoring_a",
+    "gateway_scoring_b",
+    "gateway_autoresearch",
+)
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
 
@@ -138,7 +147,16 @@ def _parse_measurement(output: str) -> str:
     raise GatewayPCR0BuildError("nitro-cli output did not contain a valid PCR0")
 
 
-def _build_once(*, source_root: Path, commit: str, work_root: Path, index: int) -> dict[str, Any]:
+def _build_once(
+    *,
+    source_root: Path,
+    commit: str,
+    work_root: Path,
+    index: int,
+    role: str,
+) -> dict[str, Any]:
+    if role not in GATEWAY_ROLES:
+        raise GatewayPCR0BuildError("gateway build role is invalid")
     gateway_root = source_root / "gateway"
     env = dict(os.environ)
     env.update(
@@ -152,8 +170,20 @@ def _build_once(*, source_root: Path, commit: str, work_root: Path, index: int) 
     _run(["bash", str(gateway_root / "tee" / "stage_attested_runtime.sh")], env=env, timeout=900)
     context_root = gateway_root / "_enclave_source"
     context_hash = source_manifest_hash(context_root)
+    identity_path = (
+        gateway_root
+        / "_attested_runtime"
+        / "gateway_enclave_build_identities"
+        / (role + ".json")
+    )
+    try:
+        build_identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise GatewayPCR0BuildError("gateway role build identity is unavailable") from exc
+    if build_identity.get("role") != role:
+        raise GatewayPCR0BuildError("gateway role build identity mismatch")
 
-    image = "leadpoet-gateway-verify:%s-%s" % (commit[:12], index)
+    image = "leadpoet-gateway-verify:%s-%s-%s" % (role, commit[:12], index)
     _run(["docker", "rmi", "-f", image], check=False, timeout=120)
     _run(
         [
@@ -161,6 +191,8 @@ def _build_once(*, source_root: Path, commit: str, work_root: Path, index: int) 
             "build",
             "--pull",
             "--no-cache",
+            "--build-arg",
+            "LEADPOET_ENCLAVE_ROLE=%s" % role,
             "-f",
             str(gateway_root / "tee" / "Dockerfile.enclave"),
             "-t",
@@ -176,7 +208,9 @@ def _build_once(*, source_root: Path, commit: str, work_root: Path, index: int) 
     if not image_id.startswith("sha256:"):
         raise GatewayPCR0BuildError("gateway image ID is invalid")
 
-    eif_path = work_root / ("gateway-%s-%s.eif" % (commit[:12], index))
+    eif_path = work_root / (
+        "gateway-%s-%s-%s.eif" % (role, commit[:12], index)
+    )
     eif_path.unlink(missing_ok=True)
     result = _run(
         [
@@ -191,13 +225,26 @@ def _build_once(*, source_root: Path, commit: str, work_root: Path, index: int) 
     )
     pcr0 = _parse_measurement(result.stdout)
     eif_hash = "sha256:" + hashlib.sha256(eif_path.read_bytes()).hexdigest()
+    dockerfile_hash = "sha256:" + hashlib.sha256(
+        (gateway_root / "tee" / "Dockerfile.enclave").read_bytes()
+    ).hexdigest()
     _run(["docker", "rmi", "-f", image], check=False, timeout=120)
     return {
         "commit_sha": commit,
+        "role": role,
         "pcr0": pcr0,
         "image_id": image_id,
         "eif_sha256": eif_hash,
         "source_manifest_hash": context_hash,
+        "build_identity_hash": str(build_identity.get("identity_hash") or ""),
+        "execution_manifest_hash": str(
+            build_identity.get("execution_manifest_hash") or ""
+        ),
+        "dependency_lock_hash": str(
+            build_identity.get("dependency_lock_hash") or ""
+        ),
+        "dockerfile_hash": dockerfile_hash,
+        "topology_hash": str(build_identity.get("topology_hash") or ""),
     }
 
 
@@ -207,9 +254,18 @@ def build_reproducible_gateway_pcr0(
     revision: str,
     work_root: Path,
     repetitions: int = 3,
+    role: str = "gateway_coordinator",
+    builder_domain: str = "validator",
+    builder_id: str = "validator-parent",
 ) -> dict[str, Any]:
     if repetitions < 3:
         raise GatewayPCR0BuildError("at least three independent builds are required")
+    if role not in GATEWAY_ROLES:
+        raise GatewayPCR0BuildError("gateway build role is invalid")
+    if builder_domain not in {"gateway", "validator"}:
+        raise GatewayPCR0BuildError("gateway build evidence domain is invalid")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", builder_id):
+        raise GatewayPCR0BuildError("gateway build evidence builder id is invalid")
     commit = resolve_commit(repo_root, revision)
     work_root.mkdir(parents=True, exist_ok=True)
     source_root = work_root / "source"
@@ -220,21 +276,59 @@ def build_reproducible_gateway_pcr0(
             commit=commit,
             work_root=work_root,
             index=index + 1,
+            role=role,
         )
         for index in range(repetitions)
     ]
-    for field in ("pcr0", "image_id", "eif_sha256", "source_manifest_hash"):
+    for field in (
+        "pcr0",
+        "image_id",
+        "eif_sha256",
+        "source_manifest_hash",
+        "build_identity_hash",
+        "execution_manifest_hash",
+        "dependency_lock_hash",
+        "dockerfile_hash",
+        "topology_hash",
+    ):
         values = {result[field] for result in results}
         if len(values) != 1:
             raise GatewayPCR0BuildError("gateway builds diverged at %s" % field)
+    evidence = [
+        {
+            "schema_version": BUILD_EVIDENCE_SCHEMA_VERSION,
+            "builder_domain": builder_domain,
+            "builder_id": builder_id,
+            "build_ordinal": index + 1,
+            "physical_role": role,
+            "service_role": ROLE_SPECS[role]["service_role"],
+            "commit_sha": result["commit_sha"],
+            "pcr0": result["pcr0"],
+            "normalized_image_hash": result["image_id"],
+            "eif_hash": result["eif_sha256"],
+            "source_manifest_hash": result["source_manifest_hash"],
+            "build_identity_hash": result["build_identity_hash"],
+            "execution_manifest_hash": result["execution_manifest_hash"],
+            "dependency_lock_hash": result["dependency_lock_hash"],
+            "dockerfile_hash": result["dockerfile_hash"],
+            "topology_hash": result["topology_hash"],
+        }
+        for index, result in enumerate(results)
+    ]
     return {
-        "role": "gateway_scoring",
+        "role": role,
         "commit_sha": commit,
         "pcr0": results[0]["pcr0"],
         "image_id": results[0]["image_id"],
         "eif_sha256": results[0]["eif_sha256"],
         "source_manifest_hash": results[0]["source_manifest_hash"],
+        "build_identity_hash": results[0]["build_identity_hash"],
+        "execution_manifest_hash": results[0]["execution_manifest_hash"],
+        "dependency_lock_hash": results[0]["dependency_lock_hash"],
+        "dockerfile_hash": results[0]["dockerfile_hash"],
+        "topology_hash": results[0]["topology_hash"],
         "verified_build_count": repetitions,
+        "build_evidence": evidence,
     }
 
 
@@ -251,33 +345,73 @@ def write_cache_entry(
         current = {
             "schema_version": CACHE_SCHEMA_VERSION,
             "entries": [],
-            "pinned_commit_shas": [],
+            "pinned_deployments": [],
         }
     if current.get("schema_version") != CACHE_SCHEMA_VERSION or not isinstance(current.get("entries"), list):
         raise GatewayPCR0BuildError("gateway PCR0 cache schema is invalid")
     commit = str(entry.get("commit_sha") or "")
     if not _COMMIT_RE.fullmatch(commit):
         raise GatewayPCR0BuildError("gateway PCR0 cache entry commit is invalid")
+    role = str(entry.get("role") or "")
+    if role not in GATEWAY_ROLES:
+        raise GatewayPCR0BuildError("gateway PCR0 cache entry role is invalid")
     limit = max(1, int(cache_size))
-    pinned_commits = [
-        str(value)
-        for value in current.get("pinned_commit_shas", [])
-        if _COMMIT_RE.fullmatch(str(value))
+    pinned_deployments = [
+        {
+            "role": str(value.get("role") or ""),
+            "commit_sha": str(value.get("commit_sha") or ""),
+        }
+        for value in current.get("pinned_deployments", [])
+        if isinstance(value, Mapping)
+        and str(value.get("role") or "") in GATEWAY_ROLES
+        and _COMMIT_RE.fullmatch(str(value.get("commit_sha") or ""))
     ]
-    if pin and commit not in pinned_commits:
-        pinned_commits.insert(0, commit)
-    entries = [dict(entry)] + [row for row in current["entries"] if row.get("commit_sha") != commit]
-    pinned_entries = [row for row in entries if row.get("commit_sha") in pinned_commits]
-    if len(pinned_entries) > limit:
-        raise GatewayPCR0BuildError("pinned gateway commits exceed cache capacity")
-    unpinned_entries = [row for row in entries if row.get("commit_sha") not in pinned_commits]
-    retained_entries = pinned_entries + unpinned_entries[: limit - len(pinned_entries)]
-    retained_commits = {str(row.get("commit_sha") or "") for row in retained_entries}
+    deployment = {"role": role, "commit_sha": commit}
+    if pin and deployment not in pinned_deployments:
+        pinned_deployments.insert(0, deployment)
+    entries = [dict(entry)] + [
+        row
+        for row in current["entries"]
+        if not (row.get("commit_sha") == commit and row.get("role") == role)
+    ]
+    retained_entries = []
+    for cache_role in GATEWAY_ROLES:
+        role_entries = [row for row in entries if row.get("role") == cache_role]
+        role_pins = [
+            value for value in pinned_deployments if value["role"] == cache_role
+        ]
+        pinned_entries = [
+            row
+            for value in role_pins
+            for row in role_entries
+            if row.get("commit_sha") == value["commit_sha"]
+        ]
+        if len(pinned_entries) > limit:
+            raise GatewayPCR0BuildError(
+                "pinned gateway deployments exceed per-role cache capacity"
+            )
+        pinned_keys = {
+            (row.get("role"), row.get("commit_sha")) for row in pinned_entries
+        }
+        unpinned_entries = [
+            row
+            for row in role_entries
+            if (row.get("role"), row.get("commit_sha")) not in pinned_keys
+        ]
+        retained_entries.extend(
+            pinned_entries + unpinned_entries[: limit - len(pinned_entries)]
+        )
+    retained_keys = {
+        (str(row.get("role") or ""), str(row.get("commit_sha") or ""))
+        for row in retained_entries
+    }
     document = {
         "schema_version": CACHE_SCHEMA_VERSION,
         "entries": retained_entries,
-        "pinned_commit_shas": [
-            commit_sha for commit_sha in pinned_commits if commit_sha in retained_commits
+        "pinned_deployments": [
+            value
+            for value in pinned_deployments
+            if (value["role"], value["commit_sha"]) in retained_keys
         ],
     }
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -286,18 +420,31 @@ def write_cache_entry(
     os.replace(str(temporary), str(cache_path))
 
 
-def load_cached_gateway_identity(cache_path: Path, commit_sha: str) -> Optional[dict[str, Any]]:
+def load_cached_gateway_identity(
+    cache_path: Path,
+    commit_sha: str,
+    *,
+    role: str = "",
+) -> Optional[dict[str, Any]]:
     try:
         document = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if document.get("schema_version") != CACHE_SCHEMA_VERSION:
         return None
-    for entry in document.get("entries", []):
-        if entry.get("commit_sha") == commit_sha and int(entry.get("verified_build_count") or 0) >= 3:
-            pcr0 = str(entry.get("pcr0") or "")
-            if _PCR0_RE.fullmatch(pcr0) and pcr0 != "0" * 96:
-                return dict(entry)
+    matches = [
+        entry
+        for entry in document.get("entries", [])
+        if entry.get("commit_sha") == commit_sha
+        and (not role or entry.get("role") == role)
+        and int(entry.get("verified_build_count") or 0) >= 3
+    ]
+    if len(matches) != 1:
+        return None
+    for entry in matches:
+        pcr0 = str(entry.get("pcr0") or "")
+        if _PCR0_RE.fullmatch(pcr0) and pcr0 != "0" * 96:
+            return dict(entry)
     return None
 
 
@@ -317,19 +464,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument(
+        "--builder-domain",
+        choices=("gateway", "validator"),
+        default="validator",
+    )
+    parser.add_argument("--builder-id", default="validator-parent")
+    parser.add_argument("--role", choices=GATEWAY_ROLES)
+    parser.add_argument("--all-roles", action="store_true")
+    parser.add_argument(
         "--pin",
         action="store_true",
         help="retain this deployed commit when newer cache entries are added",
     )
     args = parser.parse_args(argv)
-    entry = build_reproducible_gateway_pcr0(
-        repo_root=args.repo_root.resolve(),
-        revision=args.revision,
-        work_root=args.work_root.resolve(),
-        repetitions=args.repetitions,
-    )
-    write_cache_entry(cache_path=args.cache_file, entry=entry, pin=args.pin)
-    print(json.dumps(entry, sort_keys=True, indent=2))
+    if bool(args.role) == bool(args.all_roles):
+        raise GatewayPCR0BuildError("select exactly one --role or --all-roles")
+    roles = GATEWAY_ROLES if args.all_roles else (args.role,)
+    entries = []
+    for role in roles:
+        entry = build_reproducible_gateway_pcr0(
+            repo_root=args.repo_root.resolve(),
+            revision=args.revision,
+            work_root=args.work_root.resolve() / str(role),
+            repetitions=args.repetitions,
+            role=str(role),
+            builder_domain=args.builder_domain,
+            builder_id=args.builder_id,
+        )
+        write_cache_entry(cache_path=args.cache_file, entry=entry, pin=args.pin)
+        entries.append(entry)
+    print(json.dumps(entries if args.all_roles else entries[0], sort_keys=True, indent=2))
     return 0
 
 

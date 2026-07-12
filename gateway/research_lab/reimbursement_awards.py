@@ -183,6 +183,7 @@ async def create_reimbursement_decision(
     preserved_loop_start_credit: bool = False,
     require_positive_cost: bool = False,
     skip_ineligible_prereqs: bool = False,
+    autoresearch_result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Create a reimbursement award/schedule using the canonical formula.
 
@@ -243,48 +244,75 @@ async def create_reimbursement_decision(
                 source=source,
             )
 
-    run_day = str(run_day or _utc_day())
-    policy = config.reimbursement_policy_doc(
-        enabled=config.reimbursements_enabled or config.shadow_reimbursements_enabled
-    )
-    snapshot_doc, snapshot_row = await _create_participation_snapshot(config, ticket, policy)
-    cap_usage = await _reimbursement_cap_usage(config, ticket, run_day=run_day)
-    run_cost = {
-        "run_id": run_id,
-        "miner_hotkey": str(ticket.get("miner_hotkey") or ""),
-        "island": str(ticket.get("island") or config.reimbursement_default_island),
-        "run_day": run_day,
-        "funded_compute_budget_usd": float(budget_context.get("requested_compute_budget_usd") or 0.0),
-        "actual_openrouter_cost_usd": actual_usd,
-        "loop_start_tao_fee_usd": float(config.loop_start_fee_usd),
-        "paid_research_loop": True,
-        "valid_receipt": bool(receipt_id) and (not require_positive_cost or actual_microusd > 0),
-        "verified_loop_start_payment": bool(payment),
-        "preserved_loop_start_credit": bool(preserved_loop_start_credit),
-        "miner_openrouter_key_present": key_present,
-        "trusted_cost_ledger": trusted_cost,
-        "passed_abuse_checks": True,
-        "refunded": False,
-        "voided": False,
-        "duplicate": False,
-        "novelty_rejected": False,
-        "self_cancelled_before_minimum_work": False,
-        "banned_hotkey": False,
-    }
-    award_obj = compute_reimbursement_award(
-        run_cost,
-        snapshot_doc,
-        policy,
-        ReimbursementCapUsage.from_mapping(cap_usage),
-    )
-    award = award_obj.to_dict()
+    if not isinstance(autoresearch_result, Mapping):
+        raise RuntimeError(
+            "V2 reimbursement requires the exact signed autoresearch result"
+        )
     evaluation_epoch, _block, _epoch_source = await resolve_research_lab_evaluation_epoch(
         config.evaluation_epoch
     )
-    schedule = build_reimbursement_schedule(
-        award,
-        start_epoch=max(0, int(evaluation_epoch) + 1),
-    ).to_dict()
+    from gateway.research_lab.attested_v2_store import (
+        load_business_artifact_graph_by_ref_v2,
+    )
+    from gateway.research_lab.v2_authority import authorize_reward_decision_v2
+
+    graph_lookup = {
+        "artifact_kind": "autoresearch_run",
+        "artifact_ref": str(run_id),
+    }
+    if autoresearch_result.get("status") == "failed":
+        graph_lookup["allow_failed_root"] = True
+    autoresearch_graph = await load_business_artifact_graph_by_ref_v2(
+        **graph_lookup
+    )
+    authority = await authorize_reward_decision_v2(
+        epoch_id=int(evaluation_epoch),
+        decision_kind="reimbursement",
+        decision_payload={
+            "source_request": {
+                "run_id": str(run_id),
+                "ticket_id": str(ticket_id),
+                "receipt_id": str(receipt_id or ""),
+            },
+            "autoresearch_result": dict(autoresearch_result),
+        },
+        expected_result=None,
+        artifact_kind="reimbursement_decision",
+        artifact_ref="",
+        parent_graphs=(autoresearch_graph,),
+    )
+    result = authority.get("result")
+    if not isinstance(result, Mapping):
+        raise RuntimeError("V2 reimbursement result is missing")
+    award = result.get("award")
+    schedule = result.get("schedule")
+    source_state = result.get("source_state")
+    if (
+        not isinstance(award, Mapping)
+        or not isinstance(schedule, Mapping)
+        or not isinstance(source_state, Mapping)
+    ):
+        raise RuntimeError("V2 reimbursement result is incomplete")
+    award = dict(award)
+    schedule = dict(schedule)
+    snapshot_doc = source_state.get("participation_snapshot")
+    policy = source_state.get("policy")
+    cap_usage = source_state.get("cap_usage")
+    run_cost = source_state.get("run_cost")
+    if any(
+        not isinstance(value, Mapping)
+        for value in (snapshot_doc, policy, cap_usage, run_cost)
+    ):
+        raise RuntimeError("V2 reimbursement source state is incomplete")
+    snapshot_doc = dict(snapshot_doc)
+    policy = dict(policy)
+    cap_usage = dict(cap_usage)
+    run_cost = dict(run_cost)
+    evaluation_epoch = max(0, int(schedule.get("start_epoch") or 1) - 1)
+    snapshot_row = await _persist_participation_snapshot(
+        snapshot_doc=snapshot_doc,
+        policy=policy,
+    )
     shadow_only = not config.reimbursements_enabled
     award_doc = {
         "schema_version": "1.0",
@@ -325,11 +353,9 @@ async def create_reimbursement_decision(
         award_doc=award_doc,
     )
     if str(award_row["award_id"]) != str(schedule["award_id"]):
-        schedule = build_reimbursement_schedule(
-            {**award, "award_id": str(award_row["award_id"])},
-            start_epoch=max(0, int(evaluation_epoch) + 1),
-        ).to_dict()
-        schedule_doc = {**schedule_doc, "schedule": schedule}
+        raise RuntimeError(
+            "persisted reimbursement award differs from the V2 signed decision"
+        )
     schedule_row = await create_reimbursement_schedule(schedule=schedule, schedule_doc=schedule_doc)
     logger.info(
         "research_lab_reimbursement_decision run_id=%s status=%s target_usd=%.6f openrouter_usd=%.6f source=%s failed_run=%s shadow_only=%s",
@@ -354,11 +380,11 @@ async def create_reimbursement_decision(
     }
 
 
-async def _create_participation_snapshot(
+async def _build_participation_snapshot(
     config: Any,
     ticket: Mapping[str, Any],
     policy: Mapping[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> dict[str, Any]:
     island = str(ticket.get("island") or config.reimbursement_default_island)
     lookback_end = datetime.now(timezone.utc)
     lookback_start = lookback_end - timedelta(days=7)
@@ -403,9 +429,17 @@ async def _create_participation_snapshot(
         "paid_loop_count": len(funded_queue_rows),
         "unique_brief_count": len(brief_refs),
     }
+    return snapshot_doc
+
+
+async def _persist_participation_snapshot(
+    *,
+    snapshot_doc: Mapping[str, Any],
+    policy: Mapping[str, Any],
+) -> dict[str, Any]:
     participation_score = compute_participation_score(snapshot_doc, policy)
-    snapshot_row = await store_create_participation_snapshot(
-        island=island,
+    return await store_create_participation_snapshot(
+        island=str(snapshot_doc["island"]),
         lookback_start=snapshot_doc["lookback_start"],
         lookback_end=snapshot_doc["lookback_end"],
         distinct_funded_hotkeys=snapshot_doc["distinct_funded_hotkeys"],
@@ -420,7 +454,6 @@ async def _create_participation_snapshot(
             "postgrest_limit": 1000,
         },
     )
-    return snapshot_doc, snapshot_row
 
 
 async def _reimbursement_cap_usage(

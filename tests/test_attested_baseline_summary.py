@@ -151,7 +151,6 @@ async def test_candidate_receipt_binds_exact_baseline_summary_and_company_receip
         captured.update(kwargs)
         return {"status": "matched"}
 
-    monkeypatch.setattr(sw, "attested_scoring_mode", lambda: "shadow")
     monkeypatch.setattr(sw, "resolve_attested_artifact_lineage", _resolve)
     monkeypatch.setattr(sw, "compare_attested_score_bundle", _compare)
 

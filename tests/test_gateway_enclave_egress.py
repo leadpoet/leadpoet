@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
 import json
 from pathlib import Path
 import socket
@@ -39,9 +40,8 @@ def _read_frame(connection: socket.socket) -> dict:
     return json.loads(body.decode("ascii"))
 
 
-def test_destination_policy_allows_public_dns_http_and_https():
+def test_destination_policy_allows_public_dns_https_only():
     assert normalize_destination("API.OpenRouter.AI.", 443) == ("api.openrouter.ai", 443)
-    assert normalize_destination("example-company.com", "80") == ("example-company.com", 80)
     assert destination_policy_hash().startswith("sha256:")
 
 
@@ -53,6 +53,7 @@ def test_destination_policy_allows_public_dns_http_and_https():
         ("localhost", 443),
         ("service.internal", 443),
         ("example.com", 22),
+        ("example.com", 80),
         ("user@example.com", 443),
     ],
 )
@@ -167,19 +168,26 @@ def test_enclave_proxy_parses_connect_without_exposing_http_payload():
     }
 
 
-def test_enclave_proxy_rewrites_plain_http_and_strips_proxy_credentials():
+def test_enclave_proxy_accepts_upstream_proxy_only_as_loopback_control_metadata():
+    proxy_url = "https://worker-7:password@proxy.example.com:443"
+    encoded = base64.b64encode(proxy_url.encode("utf-8"))
     parsed = _parse_proxy_request(
-        b"GET http://archive.org/wayback/available?url=x HTTP/1.1\r\n"
-        b"Host: archive.org\r\nProxy-Authorization: Basic secret\r\n\r\n"
+        b"CONNECT api.exa.ai:443 HTTP/1.1\r\n"
+        b"Host: api.exa.ai:443\r\n"
+        b"X-Leadpoet-Upstream-Proxy-B64: " + encoded + b"\r\n\r\n"
     )
-    assert parsed["host"] == "archive.org"
-    assert parsed["port"] == 80
-    assert parsed["tls_protected"] is False
-    assert parsed["forward_headers"].startswith(
-        b"GET /wayback/available?url=x HTTP/1.1\r\n"
-    )
-    assert b"Proxy-Authorization" not in parsed["forward_headers"]
-    assert b"secret" not in parsed["forward_headers"]
+
+    assert parsed["host"] == "api.exa.ai"
+    assert parsed["upstream_proxy_url"] == proxy_url
+    assert parsed["forward_headers"] == b""
+
+
+def test_enclave_proxy_rejects_external_plaintext_http():
+    with pytest.raises(egress_proxy.EnclaveEgressProxyError, match="forbidden"):
+        _parse_proxy_request(
+            b"GET http://archive.org/wayback/available?url=x HTTP/1.1\r\n"
+            b"Host: archive.org\r\nProxy-Authorization: Basic secret\r\n\r\n"
+        )
 
 
 def test_enclave_parent_handshake_uses_same_length_prefixed_json_contract():

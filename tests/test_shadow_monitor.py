@@ -226,6 +226,30 @@ class FakeScorer:
 
 
 @dataclass
+class FakeAttestedAsyncRunner:
+    scores_by_icp_id: Mapping[str, float]
+    calls: list[str] = field(default_factory=list)
+
+    async def __call__(
+        self,
+        icp: Mapping[str, Any],
+        context: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        icp_id = str(icp.get("icp_id"))
+        assert context == {"mode": "post_merge_shadow"}
+        self.calls.append(icp_id)
+        return [{"planted_score": float(self.scores_by_icp_id[icp_id])}]
+
+    def attested_receipts(self) -> list[dict[str, Any]]:
+        return [{"receipt_hash": "sha256:" + "a" * 64}]
+
+
+class FakeAttestedScorer(FakeScorer):
+    def attested_receipts(self) -> list[dict[str, Any]]:
+        return [{"receipt_hash": "sha256:" + "b" * 64}]
+
+
+@dataclass
 class Clock:
     current: datetime
 
@@ -460,6 +484,101 @@ async def test_run_shadow_day_diff_is_live_minus_shadow() -> None:
     legend = report["icp_index_legend"]
     assert set(legend.values()) == {_icp_ref(401, "icp_a"), _icp_ref(401, "icp_b")}
     assert sorted(runner.calls) == ["icp_a", "icp_b"]
+
+
+async def test_run_shadow_day_uses_async_authorities_and_emits_receipt_roots() -> None:
+    benchmark = _benchmark_row(
+        "2026-07-01",
+        bundle_id="private_benchmark:attested",
+        summaries=[_summary(401, "icp_a", 10.0)],
+        epoch=77,
+    )
+    base_deps, _db, store, _runner, clock = _deps(_base_tables())
+    runner = FakeAttestedAsyncRunner(scores_by_icp_id={"icp_a": 11.0})
+    scorer = FakeAttestedScorer()
+    scorer_epochs: list[int] = []
+    runner_epochs: list[int] = []
+
+    def _scorer_factory(epoch_id: int) -> FakeAttestedScorer:
+        scorer_epochs.append(epoch_id)
+        return scorer
+
+    def _runner_factory(
+        _artifact: PrivateModelArtifactManifest,
+        epoch_id: int,
+    ) -> FakeAttestedAsyncRunner:
+        runner_epochs.append(epoch_id)
+        return runner
+
+    deps = ShadowMonitorDeps(
+        select_many=base_deps.select_many,
+        load_manifest=base_deps.load_manifest,
+        runner_factory=lambda _artifact: runner,
+        scorer_factory=FakeScorer,
+        report_store=store,
+        attested_runner_factory=_runner_factory,
+        attested_scorer_factory=_scorer_factory,
+        now=clock.now,
+    )
+    state = new_window_state(
+        event=_merge_event(),
+        version_row=_version_rows()[0],
+        settings=_settings(),
+        env=CLEAN_ENV,
+    )
+    artifact = await resolve_shadow_artifact(deps, previous_artifact_hash=OLD_HASH)
+
+    _entry, report = await run_shadow_day(
+        deps,
+        _settings(),
+        state=state,
+        benchmark_row=benchmark,
+        shadow_artifact=artifact,
+        env=CLEAN_ENV,
+    )
+
+    assert scorer_epochs == [77]
+    assert runner_epochs == [77]
+    assert runner.calls == ["icp_a"]
+    assert report["attested_v2_receipt_hashes"] == [
+        "sha256:" + "a" * 64,
+        "sha256:" + "b" * 64,
+    ]
+
+
+def test_default_shadow_runner_is_measured_and_does_not_package_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _measured_runner(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(shadow_monitor, "AttestedPrivateModelRunnerV2", _measured_runner)
+    monkeypatch.setenv("RESEARCH_LAB_SCORING_WORKER_INDEX", "12")
+    monkeypatch.setenv("RESEARCH_LAB_BENCHMARK_EXA_MAX_RPS", "2.5")
+    monkeypatch.setenv("EXA_API_KEY", "must-not-cross")
+    monkeypatch.setenv("RESEARCH_LAB_BENCHMARK_EXA_API_KEY", "must-not-cross-either")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "must-not-cross")
+    artifact = PrivateModelArtifactManifest.from_mapping(
+        _manifest_doc(OLD_HASH, OLD_MANIFEST_URI)
+    )
+
+    runner = shadow_monitor._default_runner_factory(_settings(), epoch_id=88)(artifact)
+
+    assert runner is not None
+    assert captured["artifact"] == artifact
+    assert captured["model_kind"] == "private"
+    assert captured["worker_index"] == 12
+    assert captured["epoch_id"] == 88
+    spec = captured["spec"]
+    assert spec.extra_env == {
+        "EXA_MAX_RPS": "2.5",
+        "LEADPOET_V2_PROVIDER_CREDENTIAL_PROFILE": "benchmark_model",
+    }
+    assert "EXA_API_KEY" not in spec.extra_env
+    assert "OPENROUTER_API_KEY" not in spec.extra_env
 
 
 async def test_run_shadow_day_excludes_runtime_errors_symmetrically() -> None:

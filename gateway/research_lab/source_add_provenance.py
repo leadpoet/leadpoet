@@ -14,7 +14,7 @@ import json
 import os
 import re
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -122,6 +122,10 @@ def evaluate_source_add_provenance(
     source_metadata: Mapping[str, Any],
     scrapingdog_api_key: str | None = None,
     timeout_seconds: int = 45,
+    provider_fetch: Callable[
+        [str, Mapping[str, str], int], Mapping[str, Any]
+    ]
+    | None = None,
 ) -> SourceAddProvenanceResult:
     """Run a lightweight, provider-backed legitimacy precheck.
 
@@ -163,9 +167,18 @@ def evaluate_source_add_provenance(
     if not docs_domain_aligned:
         reasons.append("docs_domain_not_related_to_api_domain")
 
-    docs_fetch = _scrapingdog_scrape(documentation_url, api_key=key, timeout_seconds=timeout_seconds) if key else {
-        "provider_status": "missing_scrapingdog_key"
-    }
+    if provider_fetch is not None:
+        docs_fetch = dict(
+            provider_fetch(
+                "/scrape",
+                {"url": documentation_url},
+                timeout_seconds,
+            )
+        )
+    else:
+        docs_fetch = _scrapingdog_scrape(documentation_url, api_key=key, timeout_seconds=timeout_seconds) if key else {
+            "provider_status": "missing_scrapingdog_key"
+        }
     doc["docs_fetch"] = _summarize_fetch(docs_fetch)
     docs_text = _extract_text(docs_fetch)
     lowered_docs = docs_text.lower()
@@ -183,9 +196,18 @@ def evaluate_source_add_provenance(
         reasons.append("scrapingdog_key_missing")
 
     ai_query = _build_ai_query(source_name, api_base_url, documentation_url, third_party_refs)
-    ai_result = _scrapingdog_ai_mode(ai_query, api_key=key, timeout_seconds=timeout_seconds) if key else {
-        "provider_status": "missing_scrapingdog_key"
-    }
+    if provider_fetch is not None:
+        ai_result = dict(
+            provider_fetch(
+                "/google/ai_mode",
+                {"query": ai_query, "country": "us"},
+                timeout_seconds,
+            )
+        )
+    else:
+        ai_result = _scrapingdog_ai_mode(ai_query, api_key=key, timeout_seconds=timeout_seconds) if key else {
+            "provider_status": "missing_scrapingdog_key"
+        }
     ai_summary = _summarize_ai(ai_result)
     doc["ai_mode"] = ai_summary
     reference_evidence = _reference_evidence(

@@ -31,6 +31,44 @@ EVENT_DOC_BANNED_RE = re.compile(
 )
 
 
+def test_measured_private_scoring_env_never_contains_host_provider_credentials(
+    monkeypatch,
+):
+    credential_names = {
+        "DEEPLINE_API_KEY",
+        "EXA_API_KEY",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_KEY",
+        "QUALIFICATION_OPENROUTER_API_KEY",
+        "QUALIFICATION_SCRAPINGDOG_API_KEY",
+        "SCRAPINGDOG_API_KEY",
+    }
+    for name in credential_names:
+        monkeypatch.setenv(name, "host-plaintext-must-not-cross-v2-boundary")
+    monkeypatch.setenv("EXA_MAX_RPS", "2.5")
+
+    worker = sw.ResearchLabGatewayScoringWorker(sw.ResearchLabGatewayConfig())
+    candidate_env = worker._private_scoring_env()
+    benchmark_env = worker._private_baseline_scoring_env()
+
+    assert credential_names.isdisjoint(candidate_env)
+    assert credential_names.isdisjoint(benchmark_env)
+    assert candidate_env["EXA_MAX_RPS"] == "2.5"
+    assert benchmark_env[sw.V2_PROVIDER_PROFILE_ENV] == "benchmark_model"
+
+
+def test_gateway_config_does_not_retain_plaintext_benchmark_exa_key(monkeypatch):
+    monkeypatch.setenv(
+        "RESEARCH_LAB_BENCHMARK_EXA_API_KEY",
+        "host-plaintext-must-not-enter-config",
+    )
+
+    config = sw.ResearchLabGatewayConfig.from_env()
+
+    assert not hasattr(config, "benchmark_exa_api_key")
+    assert "benchmark_exa_key_configured" not in json.dumps(config.public_status())
+
+
 def test_scored_event_serving_model_version_matches_db_leak_guard_contract():
     score_bundle = {
         "score_bundle_hash": "sha256:" + "6" * 64,
@@ -998,16 +1036,42 @@ async def test_private_baseline_repo_head_check_allows_same_sha(monkeypatch):
     assert sync_called is False
 
 
+def _retry_test_runner(*, image_digest: str, scope: str):
+    manifest_payload = {
+        "model_artifact_hash": "sha256:" + "9" * 64,
+        "git_commit_sha": "a" * 40,
+        "image_digest": image_digest,
+        "config_hash": "sha256:" + "8" * 64,
+        "component_registry_version": "1",
+        "scoring_adapter_version": "1",
+        "manifest_uri": "s3://private/model.json",
+        "signature_ref": "kms:test",
+        "build_id": "test",
+    }
+    artifact = sw.PrivateModelArtifactManifest(
+        **manifest_payload,
+        manifest_hash=sw.sha256_json(manifest_payload),
+    )
+    return sw.AttestedPrivateModelRunnerV2(
+        artifact=artifact,
+        spec=sw.DockerPrivateModelSpec(
+            image_digest=image_digest,
+            pull_before_run=False,
+            extra_env={sw.PROVIDER_COST_EVALUATION_SCOPE_ENV: scope},
+        ),
+        model_kind="private",
+        worker_index=0,
+        execute=lambda **_kwargs: None,
+    )
+
+
 def test_private_baseline_retry_runner_gets_fresh_cost_scope(monkeypatch):
     monkeypatch.setattr(sw.time, "time", lambda: 1234.567)
     base_scope = "sha256:" + "1" * 64
     image_digest = "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:" + "a" * 64
-    retry_runner = sw.DockerPrivateModelRunner(
-        sw.DockerPrivateModelSpec(
-            image_digest=image_digest,
-            pull_before_run=False,
-            extra_env={sw.PROVIDER_COST_EVALUATION_SCOPE_ENV: base_scope},
-        )
+    retry_runner = _retry_test_runner(
+        image_digest=image_digest,
+        scope=base_scope,
     )
 
     round_one = sw._retry_runner_with_provider_cost_scope(retry_runner, retry_round=1)
@@ -1036,19 +1100,13 @@ async def test_private_baseline_retry_round_uses_fresh_cost_scope(monkeypatch):
     )
     window = SimpleNamespace(benchmark_items=[{"icp_ref": "icp-a", "icp_hash": "hash-a"}])
     image_digest = "123456789012.dkr.ecr.us-east-1.amazonaws.com/model@sha256:" + "b" * 64
-    first_runner = sw.DockerPrivateModelRunner(
-        sw.DockerPrivateModelSpec(
-            image_digest=image_digest,
-            pull_before_run=False,
-            extra_env={sw.PROVIDER_COST_EVALUATION_SCOPE_ENV: "sha256:" + "1" * 64},
-        )
+    first_runner = _retry_test_runner(
+        image_digest=image_digest,
+        scope="sha256:" + "1" * 64,
     )
-    retry_runner = sw.DockerPrivateModelRunner(
-        sw.DockerPrivateModelSpec(
-            image_digest=image_digest,
-            pull_before_run=False,
-            extra_env={sw.PROVIDER_COST_EVALUATION_SCOPE_ENV: "sha256:" + "2" * 64},
-        )
+    retry_runner = _retry_test_runner(
+        image_digest=image_digest,
+        scope="sha256:" + "2" * 64,
     )
     seen_scopes: list[str] = []
 

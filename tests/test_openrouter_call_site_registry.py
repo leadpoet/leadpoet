@@ -17,6 +17,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #   captured                 — routes through research_lab/openrouter_telemetry
 #                              (transport or record hook) or its own encrypted
 #                              raw-trace recorder (hosted worker).
+#   captured_v2_receipt      — enclave-originated TLS attempts and provider
+#                              outcomes are committed to signed V2 receipts.
 #   uncaptured_by_decision   — dated owner decision 2026-07-02: no fulfillment
 #                              trajectory capture (fulfillment gateway paths,
 #                              miner production models, subnet validator).
@@ -36,6 +38,7 @@ CALL_SITE_REGISTRY = {
     "qualification/validator/hardcoding_detector.py": "captured",
     "validator_models/stage5_verification.py": "captured",
     "gateway/qualification/utils/helpers.py": "captured",
+    "gateway/tee/provider_semantics_v2.py": "captured_v2_receipt",
     # -- uncaptured by dated owner decision (2026-07-02): no fulfillment
     # trajectory capture ----------------------------------------------------
     "gateway/fulfillment/icp_checks.py": "uncaptured_by_decision",
@@ -66,27 +69,28 @@ CALL_SITE_REGISTRY = {
 
 def _files_mentioning_openrouter() -> set[str]:
     result = subprocess.run(
-        [
-            "grep",
-            "-rl",
-            "openrouter.ai/api/v1",
-            "--include=*.py",
-            "gateway",
-            "qualification",
-            "research_lab",
-            "validator_models",
-            "miner_models",
-            "neurons",
-            "leadpoet_verifier",
-        ],
+        ["git", "ls-files", "*.py"],
         cwd=REPO_ROOT,
+        check=True,
         capture_output=True,
         text=True,
     )
+    roots = {
+        "gateway",
+        "qualification",
+        "research_lab",
+        "validator_models",
+        "miner_models",
+        "neurons",
+        "leadpoet_verifier",
+    }
     return {
-        line.strip()
+        path
         for line in result.stdout.splitlines()
-        if line.strip() and "__pycache__" not in line
+        if (path := line.strip())
+        and path.split("/", 1)[0] in roots
+        and "openrouter.ai/api/v1"
+        in (REPO_ROOT / path).read_text(encoding="utf-8")
     }
 
 
@@ -112,6 +116,16 @@ def test_captured_sites_actually_reference_the_telemetry_layer():
             or "_OpenRouterRawTraceRecorder" in text
             or rel_path == "research_lab/openrouter_telemetry.py"
         ), f"{rel_path} is classified 'captured' but references no capture layer"
+
+
+def test_v2_receipt_sites_record_transport_and_provider_outcomes():
+    for rel_path, classification in CALL_SITE_REGISTRY.items():
+        if classification != "captured_v2_receipt":
+            continue
+        text = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+        assert "ProviderOutcomeLedgerV2" in text
+        assert "transport_attempt" in text
+        assert "evidence_artifact_hashes" in text
 
 
 def test_registry_entries_still_exist():

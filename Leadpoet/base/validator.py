@@ -22,8 +22,8 @@ class BaseValidatorNeuron(BaseNeuron):
         super().add_args(parser)
         add_validator_args(cls, parser)
 
-    def __init__(self, config=None):
-        super().__init__(config=config)
+    def __init__(self, config=None, wallet=None):
+        super().__init__(config=config, wallet=wallet)
         self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
 
         self.config_neuron("./validator_state")
@@ -45,19 +45,40 @@ class BaseValidatorNeuron(BaseNeuron):
 
     def serve_axon(self):
         bt.logging.info("Serving validator axon...")
+        enclave_backed = hasattr(self.wallet.hotkey, "enclave_client_v2")
         try:
             self.axon = bt.axon(wallet=self.wallet, config=self.config)
             self.axon.attach(self.forward)
-            self.subtensor.serve_axon(
-                netuid=self.config.netuid,
-                axon=self.axon,
-            )
+            if enclave_backed:
+                from validator_tee import AuthoritativeServeAxonContextV2
+
+                with AuthoritativeServeAxonContextV2(
+                    substrate=self.subtensor.substrate,
+                    wallet=self.wallet,
+                ) as signing_context:
+                    served = self.subtensor.serve_axon(
+                        netuid=self.config.netuid,
+                        axon=self.axon,
+                        period=signing_context.period,
+                    )
+                self._last_serve_axon_receipts_v2 = list(
+                    signing_context.extrinsic_signature_results
+                )
+                if served is not True:
+                    raise RuntimeError("authoritative V2 axon registration failed")
+            else:
+                self.subtensor.serve_axon(
+                    netuid=self.config.netuid,
+                    axon=self.axon,
+                )
             bt.logging.info(
                 f"Running validator for subnet: {self.config.netuid} on network: {self.config.subtensor.chain_endpoint} with config: {self.config}"
             )
         except Exception as e:
             bt.logging.error(f"Failed to serve axon: {e}")
             self.axon = None
+            if enclave_backed:
+                raise
 
     async def concurrent_forward(self):
         coroutines = [

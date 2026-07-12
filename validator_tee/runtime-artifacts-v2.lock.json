@@ -1,0 +1,10 @@
+{
+  "artifacts": {
+    "sr25519_cp37": {
+      "filename": "py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "sha256": "b74c31e2960c4af5b709b562aaf610989af532aee771fcdf175533de60441607",
+      "url": "https://files.pythonhosted.org/packages/c1/fe/a5c6c0fba6ad9753894f60b3d668870bccbebc6928dbdd46bbebf07507d5/py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+    }
+  },
+  "schema_version": "leadpoet.validator_runtime_artifacts.v2"
+}

@@ -36,6 +36,10 @@ cryptography==41.0.7 \
     --hash=sha256:841df4caa01008bad253bce2a6f7b47f86dc9f08df4b433c404def869f590a15
 dateparser==1.2.2 \
     --hash=sha256:5a5d7211a09013499867547023a2a0c91d5a27d15dd4dbcea676ea9fe66f2482
+disposable-email-domains==0.0.218 \
+    --hash=sha256:2b50de94633417b7e0feb6c41537d23597012add0f9734da6f5d725f04773c8e
+dnspython==2.7.0 \
+    --hash=sha256:b4c34b7d10b51bcc3a5071e7b8dee77939f1e878477eeecc965e9835f63c6c86
 exceptiongroup==1.3.0 \
     --hash=sha256:4d111e6e0c13d0644cad6ddaa7ed0261a0b36971f6d23e7ec9b4b9097da78a10
 frozenlist==1.8.0 \
@@ -58,6 +62,8 @@ lxml-html-clean==0.4.5 \
     --hash=sha256:c76fcadd1e5bfb9b8bafc2200d51e4e78eb0dad67f56881c21dfb6484c7e7746
 multidict==6.7.0 \
     --hash=sha256:ec81878ddf0e98817def1e77d4f50dae5ef5b0e4fe796fae3bd674304172416e
+numpy==2.0.2 \
+    --hash=sha256:f26b258c385842546006213344c50655ff1555a9338e2e5e02a0756dc3e803dd
 propcache==0.4.1 \
     --hash=sha256:fd2dbc472da1f772a4dae4fa24be938a6c544671a912e30529984dd80400cd88
 pycparser==2.21 \
@@ -66,14 +72,20 @@ pydantic==2.12.4 \
     --hash=sha256:92d3d202a745d46f9be6df459ac5a064fdaa3c1c4cd8adcfa332ccf3c05f871e
 pydantic-core==2.41.5 \
     --hash=sha256:707625ef0983fcfb461acfaf14de2067c5942c6bb0f3b4c99158bed6fedd3cf3
+python-dotenv==1.2.1 \
+    --hash=sha256:b81ee9561e9ca4004139c6cbba3a238c32b03e4894671e181b671e8cb8425d61
 python-dateutil==2.9.0 \
     --hash=sha256:cbf2f1da5e6083ac2fbfd4da39a25f34312230110440f424a14c7558bb85d82e
+python-whois==0.9.6 \
+    --hash=sha256:153261941a4d238b1278a4ca9b5b5e0590ed3b4d0c534ba111c4434d5d339410
 pytz==2026.2 \
     --hash=sha256:04156e608bee23d3792fd45c94ae47fae1036688e75032eea2e3bf0323d1f126
 PySocks==1.7.1 \
     --hash=sha256:2725bd0a9925919b9b51739eea5f9e2bae91e83288108a9ad338b2e3a4435ee5
 regex==2026.1.15 \
     --hash=sha256:008b185f235acd1e53787333e5690082e4f156c44c87d894f880056089e9bc7c
+requests==2.32.5 \
+    --hash=sha256:2462f94637a34fd532264295e186976db0f5d453d1cdd31473c85a6a161affb6
 six==1.15.0 \
     --hash=sha256:8b74bedcbbbaca38ff6d7491d76f2b06b3592611af620f8426e82dddb04a5ced
 sniffio==1.3.1 \

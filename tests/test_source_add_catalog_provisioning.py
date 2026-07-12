@@ -1,11 +1,17 @@
 from datetime import datetime, timedelta, timezone
 import base64
+import time
 from types import SimpleNamespace
 
 import pytest
 
-from gateway.research_lab import api, source_add_catalog
-from gateway.research_lab.models import ResearchLabSourceAdapterProvisionRequest
+from gateway.research_lab import api, source_add_catalog, v2_authority
+from gateway.research_lab.models import (
+    AttestedCredentialCiphertextV2,
+    ResearchLabSourceAdapterProvisionRequest,
+    ResearchLabSourceAdapterSubmissionRequest,
+    ResearchLabSourceAddCredentialRecipientRequest,
+)
 from gateway.research_lab.source_add_catalog import (
     PROVISION_STATUS_ELIGIBLE,
     provider_registry_entries_from_provisioned_rows,
@@ -37,6 +43,103 @@ def _manifest_doc(**overrides):
     }
     doc.update(overrides)
     return doc
+
+
+@pytest.mark.asyncio
+async def test_source_add_recipient_is_signed_and_scoped_without_secret(monkeypatch):
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(lambda: SimpleNamespace(api_enabled=True, source_add_enabled=True)),
+    )
+    monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
+    observed = {}
+
+    async def fake_recipient(**kwargs):
+        observed.update(kwargs)
+        return {
+            "schema_version": "leadpoet.source_add_ingress_recipient.v2",
+            "purpose": "leadpoet.source_add_credential_ingress.v2",
+            "request_id": "sha256:" + "1" * 64,
+            "boot_identity_hash": "sha256:" + "2" * 64,
+            "miner_hotkey_hash": "sha256:" + "3" * 64,
+            "adapter_ref_hash": "sha256:" + "4" * 64,
+            "credential_ref": api._source_add_intake_credential_ref(
+                kwargs["miner_hotkey"], kwargs["adapter_id"]
+            ),
+            "key_ref_hash": "sha256:" + "5" * 64,
+            "recipient_public_key_hash": "sha256:" + "6" * 64,
+            "request_nonce": "7" * 32,
+            "recipient_public_key_der_b64": base64.b64encode(b"public").decode(),
+            "attestation_document_b64": base64.b64encode(b"attestation").decode(),
+            "key_encryption_algorithm": "RSAES_OAEP_SHA_256",
+        }
+
+    monkeypatch.setattr(api, "_source_add_credential_recipient", fake_recipient)
+    payload = ResearchLabSourceAddCredentialRecipientRequest(
+        miner_hotkey="miner-hotkey-value",
+        signature="signature-value-123",
+        timestamp=int(time.time()),
+        idempotency_key="recipient-request-1",
+        adapter_id="adapter:test-source",
+    )
+    response = await api.create_source_add_credential_recipient(payload)
+    assert response.request_id == "sha256:" + "1" * 64
+    assert observed == {
+        "miner_hotkey": "miner-hotkey-value",
+        "adapter_id": "adapter:test-source",
+        "credential_ref": api._source_add_intake_credential_ref(
+            "miner-hotkey-value", "adapter:test-source"
+        ),
+    }
+
+
+async def _async_none():
+    return None
+
+
+@pytest.mark.asyncio
+async def test_source_add_plaintext_credential_is_retired_and_v2_is_signed(monkeypatch):
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                miner_submissions_enabled=True,
+                source_add_enabled=True,
+            )
+        ),
+    )
+    monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
+    monkeypatch.setattr(
+        api,
+        "_enforce_research_lab_submission_rate_limit",
+        lambda *_args, **_kwargs: _async_none(),
+    )
+    payload = ResearchLabSourceAdapterSubmissionRequest(
+        miner_hotkey="miner-hotkey-value",
+        signature="signature-value-123",
+        timestamp=int(time.time()),
+        idempotency_key="source-submit-1",
+        manifest=_manifest_doc(credential_policy="credential_ref_only"),
+        adapter_credential="plaintext-secret-value",
+    )
+    with pytest.raises(api.HTTPException, match="plaintext SOURCE_ADD"):
+        await api.submit_research_lab_source_adapter(payload)
+
+    encrypted = AttestedCredentialCiphertextV2(
+        request_id="sha256:" + "8" * 64,
+        ciphertext_b64=base64.b64encode(b"x" * 384).decode(),
+    )
+    v2_payload = payload.model_copy(
+        update={"adapter_credential": None, "adapter_credential_v2": encrypted}
+    )
+    signed = v2_payload.signed_payload()
+    assert "adapter_credential" not in signed
+    assert signed["adapter_credential_v2"]["request_id"] == encrypted.request_id
+    assert "plaintext-secret-value" not in str(signed)
 
 
 def test_intake_rejects_duplicate_source_identity_hash():
@@ -466,6 +569,7 @@ async def test_owner_recheck_advances_manual_submission_and_creates_leg1(monkeyp
 
     async def fake_reward(**kwargs):
         assert kwargs["precheck_status"] == PRECHECK_PASSED
+        assert kwargs["provenance_graph"]["root_receipt_hash"] == "sha256:" + "9" * 64
         return {
             "source_add_leg1_reward_status": "created",
             "reward_ref": "source_add_reward:" + "2" * 16,
@@ -473,14 +577,20 @@ async def test_owner_recheck_advances_manual_submission_and_creates_leg1(monkeyp
         }
 
     monkeypatch.setattr(api, "select_one", fake_select_one)
+    async def fake_provenance(**_kwargs):
+        return (
+            SourceAddProvenanceResult(
+                PRECHECK_PASSED,
+                ("provenance_reference_backed",),
+                {"docs_completeness": {"score": 5}},
+            ),
+            {"receipt_graph": {"root_receipt_hash": "sha256:" + "9" * 64}},
+        )
+
     monkeypatch.setattr(
-        api,
-        "evaluate_source_add_provenance",
-        lambda **_kwargs: SourceAddProvenanceResult(
-            PRECHECK_PASSED,
-            ("provenance_reference_backed",),
-            {"docs_completeness": {"score": 5}},
-        ),
+        v2_authority,
+        "evaluate_source_add_provenance_v2",
+        fake_provenance,
     )
     monkeypatch.setattr(api, "persist_source_add_submission", fake_persist)
     monkeypatch.setattr(api, "_maybe_create_source_add_leg1_reward_for_precheck", fake_reward)

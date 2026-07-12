@@ -7,7 +7,9 @@ require explicit Research Lab flags and write only Research Lab tables/events.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import logging
 import os
@@ -36,11 +38,9 @@ from .candidate_generation_report import fetch_candidate_generation_failure_repo
 from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
 from .key_vault import (
     OpenRouterKeyVaultError,
-    encrypt_openrouter_key,
-    encrypt_source_add_credential,
-    openrouter_key_ref,
-    preflight_openrouter_key,
-    verify_openrouter_workspace_privacy,
+)
+from .v2_credential_envelopes import (
+    persist_openrouter_credential_envelope_v2,
 )
 from .maintenance import get_autoresearch_maintenance_state
 from .ticket_intake_validation import validate_ticket_direction
@@ -67,6 +67,9 @@ from .models import (
     ResearchLabLoopTopUpResponse,
     ResearchLabOpenRouterKeyRegisterRequest,
     ResearchLabOpenRouterKeyRegisterResponse,
+    ResearchLabOpenRouterCredentialRecipientRequest,
+    ResearchLabOpenRouterCredentialRecipientV2,
+    ResearchLabOpenRouterCredentialRecipientsResponse,
     ResearchLabLoopDiagnosticsRequest,
     ResearchLabProbeRequest,
     ResearchLabReceiptCreateRequest,
@@ -77,6 +80,8 @@ from .models import (
     ResearchLabScoreBundleResponse,
     ResearchLabSourceAdapterSubmissionRequest,
     ResearchLabSourceAdapterSubmissionResponse,
+    ResearchLabSourceAddCredentialRecipientRequest,
+    ResearchLabCredentialRecipientResponse,
     ResearchLabSourceAdapterRecheckResponse,
     ResearchLabSourceAdapterProvisionRequest,
     ResearchLabSourceAdapterProvisionResponse,
@@ -93,7 +98,7 @@ from .public_activity import (
 )
 from .chain import resolve_research_lab_evaluation_epoch
 from .promotion import private_repo_head_alignment_status
-from .source_add_provenance import PRECHECK_MANUAL, PRECHECK_PASSED, SourceAddProvenanceResult, evaluate_source_add_provenance
+from .source_add_provenance import PRECHECK_MANUAL, PRECHECK_PASSED
 from .source_add_catalog import (
     ALREADY_SUBMITTED_DETAIL,
     PROVISION_STATUS_DISABLED,
@@ -103,7 +108,6 @@ from .source_add_catalog import (
     reject_source_add_secret_text,
     sanitize_source_add_doc,
     source_add_encrypted_envelope_valid,
-    source_add_env_ref_resolves,
 )
 from .store import (
     canonical_hash,
@@ -157,6 +161,168 @@ AUTORESEARCH_PROXY_PREFIXES = (
     "RESEARCH_LAB_WORKER_PROXY",
     "RESEARCH_LAB_WORKER_HTTPS_PROXY",
 )
+
+
+def _source_add_intake_credential_ref(miner_hotkey: str, adapter_id: str) -> str:
+    adapter_ref = "source_add:%s" % str(adapter_id)
+    suffix = hashlib.sha256(
+        (str(miner_hotkey) + ":" + adapter_ref).encode("utf-8")
+    ).hexdigest()[:32]
+    return "encrypted_ref:source_add:" + suffix
+
+
+def _source_add_provision_credential_ref(miner_hotkey: str, adapter_id: str) -> str:
+    return (
+        "encrypted_ref:source_add:"
+        + canonical_hash(
+            {"adapter_id": str(adapter_id), "miner": str(miner_hotkey)}
+        )[-32:]
+    )
+
+
+async def _source_add_credential_recipient(
+    *,
+    miner_hotkey: str,
+    adapter_id: str,
+    credential_ref: str,
+) -> dict[str, Any]:
+    from gateway.utils.tee_client import coordinator_tee_client
+
+    try:
+        return dict(
+            await coordinator_tee_client.v2_get_source_add_ingress_recipient(
+                miner_hotkey=str(miner_hotkey),
+                adapter_ref="source_add:%s" % str(adapter_id),
+                credential_ref=str(credential_ref),
+            )
+        )
+    except Exception as exc:
+        logger.warning(
+            "SOURCE_ADD_V2_RECIPIENT_UNAVAILABLE type=%s", type(exc).__name__
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="attested SOURCE_ADD credential recipient is unavailable",
+        ) from exc
+
+
+async def _seal_source_add_credential_v2(
+    *,
+    encrypted: Any,
+    miner_hotkey: str,
+    adapter_id: str,
+    expected_credential_ref: str,
+) -> dict[str, Any]:
+    from gateway.tee.source_add_credential_ingress_v2 import (
+        source_add_encryption_context,
+    )
+    from gateway.tee.source_add_runtime_v2 import (
+        validate_source_add_credential_envelope_v2,
+    )
+    from gateway.utils.tee_client import coordinator_tee_client
+
+    try:
+        result = await coordinator_tee_client.v2_seal_source_add_ingress_credential(
+            request_id=str(encrypted.request_id),
+            ciphertext_b64=str(encrypted.ciphertext_b64),
+        )
+        envelope = validate_source_add_credential_envelope_v2(
+            result.get("credential_envelope") or {}
+        )
+    except Exception as exc:
+        logger.warning(
+            "SOURCE_ADD_V2_CREDENTIAL_SEAL_FAILED type=%s", type(exc).__name__
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="attested SOURCE_ADD credential ciphertext is invalid or expired",
+        ) from exc
+    expected_context = source_add_encryption_context(
+        miner_hotkey=str(miner_hotkey),
+        adapter_ref="source_add:%s" % str(adapter_id),
+    )
+    if (
+        envelope.get("envelope_kind") != "coordinator_sealed"
+        or envelope.get("credential_ref") != expected_credential_ref
+        or envelope.get("encryption_context") != expected_context
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="attested SOURCE_ADD credential scope differs",
+        )
+    return {
+        key: item
+        for key, item in envelope.items()
+        if key != "ciphertext_blob"
+    }
+
+
+async def _openrouter_credential_recipient_v2(
+    *,
+    miner_hotkey: str,
+    credential_kind: str,
+) -> dict[str, Any]:
+    from gateway.utils.tee_client import coordinator_tee_client
+
+    try:
+        return dict(
+            await coordinator_tee_client.v2_get_openrouter_ingress_recipient(
+                miner_hotkey=str(miner_hotkey),
+                credential_kind=str(credential_kind),
+            )
+        )
+    except Exception as exc:
+        logger.warning(
+            "OPENROUTER_V2_RECIPIENT_UNAVAILABLE kind=%s type=%s",
+            credential_kind,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="attested OpenRouter credential recipient is unavailable",
+        ) from exc
+
+
+async def _seal_openrouter_credential_v2(
+    *,
+    encrypted: Any,
+    miner_hotkey: str,
+    credential_kind: str,
+) -> dict[str, Any]:
+    from gateway.tee.openrouter_credential_v2 import (
+        validate_openrouter_ingress_envelope_v2,
+    )
+    from gateway.utils.tee_client import coordinator_tee_client
+    from leadpoet_canonical.attested_v2 import sha256_bytes
+
+    try:
+        result = await coordinator_tee_client.v2_seal_openrouter_ingress_credential(
+            request_id=str(encrypted.request_id),
+            ciphertext_b64=str(encrypted.ciphertext_b64),
+        )
+        envelope = validate_openrouter_ingress_envelope_v2(
+            result.get("credential_envelope") or {}
+        )
+    except Exception as exc:
+        logger.warning(
+            "OPENROUTER_V2_CREDENTIAL_SEAL_FAILED kind=%s type=%s",
+            credential_kind,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="attested OpenRouter credential ciphertext is invalid or expired",
+        ) from exc
+    if (
+        envelope.get("credential_kind") != credential_kind
+        or envelope.get("miner_hotkey_hash")
+        != sha256_bytes(str(miner_hotkey).encode("utf-8"))
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="attested OpenRouter credential scope differs",
+        )
+    return dict(envelope)
 
 
 @router.get("/status")
@@ -400,6 +566,32 @@ async def _source_add_intake_context(miner_hotkey: str) -> tuple[int, int, int, 
     return open_count, last_day_count, last_30d_count, domains, sorted(set(identity_hashes))
 
 
+@router.post(
+    "/source-adapters/credential-recipient",
+    response_model=ResearchLabCredentialRecipientResponse,
+)
+async def create_source_add_credential_recipient(
+    payload: ResearchLabSourceAddCredentialRecipientRequest,
+):
+    """Return a one-use Nitro-attested recipient for a miner provider key."""
+
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.source_add_enabled, "Research Lab SOURCE_ADD submissions are disabled")
+    await _verify_signed_miner(payload)
+    credential_ref = _source_add_intake_credential_ref(
+        payload.miner_hotkey,
+        payload.adapter_id,
+    )
+    return ResearchLabCredentialRecipientResponse(
+        **await _source_add_credential_recipient(
+            miner_hotkey=payload.miner_hotkey,
+            adapter_id=payload.adapter_id,
+            credential_ref=credential_ref,
+        )
+    )
+
+
 @router.post("/source-adapters", response_model=ResearchLabSourceAdapterSubmissionResponse)
 async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSubmissionRequest):
     """W5 SOURCE_ADD intake: manifest validation, anti-spam caps, catalog
@@ -414,9 +606,14 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
     await _verify_signed_miner(payload)
     await _enforce_research_lab_submission_rate_limit(payload.miner_hotkey, route="source_adapters")
 
-    kms_key_id = config.source_add_credential_kms_key_id or config.openrouter_key_kms_key_id
-    if payload.adapter_credential and not kms_key_id:
-        raise HTTPException(status_code=503, detail="SOURCE_ADD credential KMS key is not configured")
+    if payload.adapter_credential:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "plaintext SOURCE_ADD credentials are retired; use the "
+                "attested credential-recipient endpoint"
+            ),
+        )
 
     open_count, last_day_count, last_30d_count, catalog_domains, source_identity_hashes = await _source_add_intake_context(payload.miner_hotkey)
     source_metadata = dict(payload.source_metadata or {})
@@ -426,20 +623,45 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
         declared_base_domains=[str(item) for item in declared_domains] if isinstance(declared_domains, Sequence) else (),
     )
 
-    def _kms_encrypt(raw_credential: str, miner_hotkey: str, adapter_ref: str) -> dict[str, str]:
-        return encrypt_source_add_credential(
-            raw_credential=raw_credential,
-            kms_key_id=kms_key_id,
-            miner_hotkey=miner_hotkey,
-            adapter_ref=adapter_ref,
+    sealed_credential_envelope: dict[str, Any] = {}
+    if payload.adapter_credential_v2 is not None:
+        adapter_id = str(payload.manifest.get("adapter_id") or "")
+        expected_ref = _source_add_intake_credential_ref(
+            payload.miner_hotkey,
+            adapter_id,
         )
+        sealed_credential_envelope = await _seal_source_add_credential_v2(
+            encrypted=payload.adapter_credential_v2,
+            miner_hotkey=payload.miner_hotkey,
+            adapter_id=adapter_id,
+            expected_credential_ref=expected_ref,
+        )
+
+    def _kms_encrypt(
+        _credential_marker: str,
+        _miner_hotkey: str,
+        _adapter_ref: str,
+    ) -> dict[str, str]:
+        if not sealed_credential_envelope:
+            raise ValueError("attested SOURCE_ADD credential envelope is unavailable")
+        return {
+            "ciphertext_b64": str(sealed_credential_envelope["ciphertext_b64"]),
+            "kms_key_id": str(sealed_credential_envelope["kms_key_id"]),
+            "encryption_context_hash": str(
+                sealed_credential_envelope["encryption_context_hash"]
+            ),
+        }
 
     try:
         record, errors = await asyncio.to_thread(
             intake_source_add_submission,
             payload.manifest,
             miner_hotkey=payload.miner_hotkey,
-            raw_credential=payload.adapter_credential or "",
+            raw_credential=(
+                "attested-source-add-credential-v2"
+                if sealed_credential_envelope
+                else ""
+            ),
             source_brief=payload.source_brief or "",
             submitted_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             existing_catalog_domains=catalog_domains,
@@ -459,22 +681,32 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
         if any(str(error) == "duplicate_source" or str(error).endswith(".DUPLICATE_SOURCE") for error in (errors or [])):
             raise HTTPException(status_code=409, detail=ALREADY_SUBMITTED_DETAIL)
         raise HTTPException(status_code=400, detail="; ".join(errors or ["submission rejected"]))
+    if sealed_credential_envelope:
+        if (
+            record.credential_envelope.get("credential_ref")
+            != sealed_credential_envelope.get("credential_ref")
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="attested SOURCE_ADD credential reference differs",
+            )
+        record = replace(
+            record,
+            credential_envelope=dict(sealed_credential_envelope),
+        )
 
-    try:
-        precheck = await asyncio.to_thread(
-            evaluate_source_add_provenance,
-            source_name=record.manifest.source_name,
-            source_kind=record.manifest.source_kind,
-            declared_base_domains=record.manifest.declared_base_domains,
-            source_metadata=source_metadata,
-        )
-    except Exception as exc:
-        logger.warning("SOURCE_ADD_PROVENANCE_PRECHECK_ERROR type=%s", type(exc).__name__)
-        precheck = SourceAddProvenanceResult(
-            PRECHECK_MANUAL,
-            ("precheck_internal_error",),
-            {"error_type": type(exc).__name__},
-        )
+    from gateway.research_lab.v2_authority import (
+        evaluate_source_add_provenance_v2,
+    )
+
+    precheck, provenance_outcome = await evaluate_source_add_provenance_v2(
+        submission_id=record.submission_id,
+        source_name=record.manifest.source_name,
+        source_kind=record.manifest.source_kind,
+        declared_base_domains=record.manifest.declared_base_domains,
+        source_metadata=source_metadata,
+        epoch_id=max(0, int(getattr(config, "evaluation_epoch", 0) or 0)),
+    )
     record = apply_provenance_precheck_result(
         record,
         precheck_status=precheck.precheck_status,
@@ -488,6 +720,7 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
         await _maybe_create_source_add_leg1_reward_for_precheck(
             record=record,
             precheck_status=precheck.precheck_status,
+            provenance_graph=provenance_outcome["receipt_graph"],
             config=config,
         )
     except Exception as exc:
@@ -507,6 +740,7 @@ async def _maybe_create_source_add_leg1_reward_for_precheck(
     *,
     record: Any,
     precheck_status: str,
+    provenance_graph: Mapping[str, Any],
     config: ResearchLabGatewayConfig,
 ) -> dict[str, Any]:
     """Create the 1% SOURCE_ADD leg when provenance precheck passes.
@@ -531,13 +765,18 @@ async def _maybe_create_source_add_leg1_reward_for_precheck(
         filters=(("adapter_id", adapter_id),),
         limit=20,
     )
+    start_epoch = await _source_add_leg1_start_epoch(config)
+    alpha_percent = float(
+        getattr(config, "source_add_leg1_alpha_percent", 1.0) or 1.0
+    )
+    reward_epochs = int(getattr(config, "lab_reward_epochs", 20) or 20)
     leg1 = create_leg1_reward(
         adapter_id=adapter_id,
         miner_ref=miner_hotkey,
-        start_epoch=await _source_add_leg1_start_epoch(config),
+        start_epoch=start_epoch,
         existing_rewards=existing_rewards,
-        alpha_percent=float(getattr(config, "source_add_leg1_alpha_percent", 1.0) or 1.0),
-        reward_epochs=int(getattr(config, "lab_reward_epochs", 20) or 20),
+        alpha_percent=alpha_percent,
+        reward_epochs=reward_epochs,
     )
     if leg1 is None:
         return {"source_add_leg1_reward_status": "already_created"}
@@ -557,6 +796,40 @@ async def _maybe_create_source_add_leg1_reward_for_precheck(
             "source_add_leg1_reward_status": "daily_cap_reached",
             "daily_cap": daily_cap,
         }
+
+    from gateway.research_lab.v2_authority import authorize_reward_decision_v2
+    from gateway.tee.coordinator_source_add_v2 import (
+        SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
+    )
+
+    precheck_doc = dict(getattr(record, "precheck_doc", {}) or {})
+    provenance_result = {
+        "schema_version": SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
+        "submission_id": str(getattr(record, "submission_id", "") or ""),
+        "precheck_status": str(precheck_status),
+        "reasons": [str(item) for item in precheck_doc.get("reasons") or ()],
+        "precheck_doc": precheck_doc,
+    }
+    await authorize_reward_decision_v2(
+        epoch_id=max(0, int(start_epoch) - 1),
+        decision_kind="source_add_leg1",
+        decision_payload={
+            "adapter_id": adapter_id,
+            "miner_ref": miner_hotkey,
+            "start_epoch": start_epoch,
+            "existing_rewards": list(existing_rewards),
+            "alpha_percent": alpha_percent,
+            "reward_epochs": reward_epochs,
+            "provenance_result": provenance_result,
+        },
+        expected_result={
+            "decision_kind": "source_add_leg1",
+            "reward": leg1.to_dict(),
+        },
+        artifact_kind="source_add_reward_decision",
+        artifact_ref=leg1.reward_ref,
+        parent_graphs=(provenance_graph,),
+    )
 
     try:
         await insert_row(
@@ -703,25 +976,32 @@ async def recheck_research_lab_source_adapter_provenance(
         raise HTTPException(status_code=400, detail="only manual-review or passed submissions can be rechecked")
 
     record, source_metadata = _source_add_record_from_current_row(row)
+    provenance_graph: Mapping[str, Any]
     if stage == PRECHECK_PASSED:
         precheck_status = PRECHECK_PASSED
         reasons = list((record.precheck_doc or {}).get("reasons") or [])
+        from gateway.research_lab.attested_v2_store import (
+            load_business_artifact_graph_by_ref_v2,
+        )
+
+        provenance_graph = await load_business_artifact_graph_by_ref_v2(
+            artifact_kind="source_add_provenance",
+            artifact_ref=record.submission_id,
+        )
     else:
-        try:
-            precheck = await asyncio.to_thread(
-                evaluate_source_add_provenance,
-                source_name=record.manifest.source_name,
-                source_kind=record.manifest.source_kind,
-                declared_base_domains=record.manifest.declared_base_domains,
-                source_metadata=source_metadata,
-            )
-        except Exception as exc:
-            logger.warning("SOURCE_ADD_PROVENANCE_RECHECK_ERROR type=%s", type(exc).__name__)
-            precheck = SourceAddProvenanceResult(
-                PRECHECK_MANUAL,
-                ("precheck_internal_error",),
-                {"error_type": type(exc).__name__},
-            )
+        from gateway.research_lab.v2_authority import (
+            evaluate_source_add_provenance_v2,
+        )
+
+        precheck, provenance_outcome = await evaluate_source_add_provenance_v2(
+            submission_id=record.submission_id,
+            source_name=record.manifest.source_name,
+            source_kind=record.manifest.source_kind,
+            declared_base_domains=record.manifest.declared_base_domains,
+            source_metadata=source_metadata,
+            epoch_id=max(0, int(getattr(config, "evaluation_epoch", 0) or 0)),
+        )
+        provenance_graph = provenance_outcome["receipt_graph"]
         record = apply_provenance_precheck_result(
             record,
             precheck_status=precheck.precheck_status,
@@ -740,6 +1020,7 @@ async def recheck_research_lab_source_adapter_provenance(
         reward = await _maybe_create_source_add_leg1_reward_for_precheck(
             record=record,
             precheck_status=precheck_status,
+            provenance_graph=provenance_graph,
             config=config,
         )
     except Exception as exc:
@@ -753,6 +1034,46 @@ async def recheck_research_lab_source_adapter_provenance(
         leg1_reward_status=str(reward.get("source_add_leg1_reward_status") or "unknown"),
         reward_ref=str(reward.get("reward_ref") or "") or None,
         start_epoch=int(reward["start_epoch"]) if reward.get("start_epoch") is not None else None,
+    )
+
+
+@router.post(
+    "/admin/source-adapters/{submission_id}/credential-recipient",
+    response_model=ResearchLabCredentialRecipientResponse,
+)
+async def create_admin_source_add_credential_recipient(
+    submission_id: str,
+    authorization: str = Header(default=""),
+):
+    """Return a one-use Nitro recipient scoped to an approved adapter."""
+
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(config.source_add_enabled, "Research Lab SOURCE_ADD submissions are disabled")
+    _require_source_add_admin(authorization)
+    row = await select_one(
+        "research_lab_source_add_submission_current",
+        columns="submission_id,adapter_id,miner_hotkey,submission_doc",
+        filters=(("submission_id", submission_id),),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="submission not found")
+    doc = row.get("submission_doc") if isinstance(row.get("submission_doc"), Mapping) else {}
+    manifest = doc.get("manifest") if isinstance(doc.get("manifest"), Mapping) else {}
+    adapter_id = str(row.get("adapter_id") or doc.get("adapter_id") or manifest.get("adapter_id") or "")
+    miner_hotkey = str(row.get("miner_hotkey") or doc.get("miner_hotkey") or manifest.get("miner_ref") or "")
+    if not adapter_id or not miner_hotkey:
+        raise HTTPException(status_code=400, detail="submission identity is incomplete")
+    credential_ref = _source_add_provision_credential_ref(
+        miner_hotkey,
+        adapter_id,
+    )
+    return ResearchLabCredentialRecipientResponse(
+        **await _source_add_credential_recipient(
+            miner_hotkey=miner_hotkey,
+            adapter_id=adapter_id,
+            credential_ref=credential_ref,
+        )
     )
 
 
@@ -815,28 +1136,27 @@ async def provision_research_lab_source_adapter(
         )
     probe_endpoints = [item.to_dict() for item in probe_objects]
 
-    credential_envelope: dict[str, str] = {}
+    credential_envelope: dict[str, Any] = {}
     credential_refs = [str(item).strip() for item in payload.credential_env_refs if str(item or "").strip()]
     if payload.api_credential:
-        kms_key_id = config.source_add_credential_kms_key_id or config.openrouter_key_kms_key_id
-        if not kms_key_id:
-            raise HTTPException(status_code=503, detail="SOURCE_ADD credential KMS key is not configured")
-        adapter_ref = f"source_add:{adapter_id}"
-        try:
-            envelope = encrypt_source_add_credential(
-                raw_credential=payload.api_credential,
-                kms_key_id=kms_key_id,
-                miner_hotkey=miner_hotkey,
-                adapter_ref=adapter_ref,
-            )
-        except OpenRouterKeyVaultError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        credential_envelope = {
-            "ciphertext_b64": str(envelope["ciphertext_b64"]),
-            "kms_key_id": str(envelope.get("kms_key_id") or ""),
-            "encryption_context_hash": str(envelope.get("encryption_context_hash") or ""),
-            "credential_ref": f"encrypted_ref:source_add:{canonical_hash({'adapter_id': adapter_id, 'miner': miner_hotkey})[-32:]}",
-        }
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "plaintext SOURCE_ADD credentials are retired; use the "
+                "attested admin credential-recipient endpoint"
+            ),
+        )
+    if payload.api_credential_v2 is not None:
+        credential_ref = _source_add_provision_credential_ref(
+            miner_hotkey,
+            adapter_id,
+        )
+        credential_envelope = await _seal_source_add_credential_v2(
+            encrypted=payload.api_credential_v2,
+            miner_hotkey=miner_hotkey,
+            adapter_id=adapter_id,
+            expected_credential_ref=credential_ref,
+        )
         if not source_add_encrypted_envelope_valid(credential_envelope):
             raise HTTPException(status_code=500, detail="SOURCE_ADD credential encryption returned an invalid envelope")
         credential_refs = [credential_envelope["credential_ref"]]
@@ -846,13 +1166,12 @@ async def provision_research_lab_source_adapter(
         status == PROVISION_STATUS_ELIGIBLE
         and auth_kind != "none"
         and not credential_envelope
-        and not any(source_add_env_ref_resolves(ref) for ref in credential_refs)
     ):
         raise HTTPException(
             status_code=400,
             detail=(
                 "authenticated source cannot become provisioned_autoresearch_eligible "
-                "until an encrypted credential or configured environment reference resolves"
+                "until an attested encrypted credential is supplied"
             ),
         )
 
@@ -1145,57 +1464,132 @@ async def get_research_lab_admin_loop_diagnostics(
     }
 
 
+@router.post(
+    "/openrouter-keys/credential-recipient",
+    response_model=ResearchLabOpenRouterCredentialRecipientsResponse,
+)
+async def create_openrouter_credential_recipients(
+    payload: ResearchLabOpenRouterCredentialRecipientRequest,
+):
+    """Return one-use Nitro-attested recipients for the miner key pair."""
+
+    config = ResearchLabGatewayConfig.from_env()
+    _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
+    _require_enabled(
+        config.miner_submissions_enabled,
+        "Research Lab miner submissions are disabled",
+    )
+    await _verify_signed_miner(payload)
+    runtime, management = await asyncio.gather(
+        _openrouter_credential_recipient_v2(
+            miner_hotkey=payload.miner_hotkey,
+            credential_kind="runtime",
+        ),
+        _openrouter_credential_recipient_v2(
+            miner_hotkey=payload.miner_hotkey,
+            credential_kind="management",
+        ),
+    )
+    return ResearchLabOpenRouterCredentialRecipientsResponse(
+        runtime=ResearchLabOpenRouterCredentialRecipientV2(**runtime),
+        management=ResearchLabOpenRouterCredentialRecipientV2(**management),
+    )
+
+
 @router.post("/openrouter-keys", response_model=ResearchLabOpenRouterKeyRegisterResponse)
 async def register_research_lab_openrouter_key(payload: ResearchLabOpenRouterKeyRegisterRequest):
     config = ResearchLabGatewayConfig.from_env()
     _require_enabled(config.api_enabled, "Research Lab gateway API is disabled")
     _require_enabled(config.production_writes_enabled, "Research Lab production writes are disabled")
     _require_enabled(config.miner_submissions_enabled, "Research Lab miner submissions are disabled")
-    if not config.openrouter_key_kms_key_id:
-        raise HTTPException(status_code=503, detail="Research Lab OpenRouter key vault KMS key is not configured")
     await _verify_signed_miner(payload)
     _enforce_openrouter_key_registration_rate_limit(payload.miner_hotkey)
 
+    if payload.openrouter_api_key or payload.openrouter_management_key:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "plaintext OpenRouter credentials are retired; use the "
+                "attested credential-recipient endpoint"
+            ),
+        )
+    if (
+        payload.openrouter_api_key_v2 is None
+        or payload.openrouter_management_key_v2 is None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="attested OpenRouter credential pair is required",
+        )
+
     try:
-        preflight_doc = await asyncio.to_thread(preflight_openrouter_key, payload.openrouter_api_key)
-        key_hash = str(preflight_doc["key_hash"])
-        privacy_proof_doc = await asyncio.to_thread(
-            verify_openrouter_workspace_privacy,
-            runtime_key=payload.openrouter_api_key,
-            management_key=payload.openrouter_management_key,
-            stage="key_registration",
+        runtime_credential, management_credential = await asyncio.gather(
+            _seal_openrouter_credential_v2(
+                encrypted=payload.openrouter_api_key_v2,
+                miner_hotkey=payload.miner_hotkey,
+                credential_kind="runtime",
+            ),
+            _seal_openrouter_credential_v2(
+                encrypted=payload.openrouter_management_key_v2,
+                miner_hotkey=payload.miner_hotkey,
+                credential_kind="management",
+            ),
         )
-        management_key_hash = str(privacy_proof_doc["management_key_hash"])
-        key_ref = openrouter_key_ref(
+        evaluation_epoch, _block, _source = await resolve_research_lab_evaluation_epoch(
+            config.evaluation_epoch
+        )
+        from gateway.research_lab.attested_coordinator_v2 import (
+            register_openrouter_credentials_v2,
+        )
+        from gateway.tee.openrouter_credential_v2 import (
+            COORDINATOR_SEALED_KEY_ID,
+            OPENROUTER_REGISTRATION_RESULT_SCHEMA_VERSION,
+        )
+
+        authority = await register_openrouter_credentials_v2(
             miner_hotkey=payload.miner_hotkey,
-            key_hash=key_hash,
-            management_key_hash=management_key_hash,
+            key_label=payload.key_label,
+            runtime_credential=runtime_credential,
+            management_credential=management_credential,
+            epoch_id=int(evaluation_epoch),
+            sequence=int(payload.timestamp),
         )
-        encrypted = await asyncio.to_thread(
-            encrypt_openrouter_key,
-            raw_key=payload.openrouter_api_key,
-            kms_key_id=config.openrouter_key_kms_key_id,
-            miner_hotkey=payload.miner_hotkey,
-            key_ref=key_ref,
-        )
-        encrypted_management = await asyncio.to_thread(
-            encrypt_openrouter_key,
-            raw_key=payload.openrouter_management_key,
-            kms_key_id=config.openrouter_key_kms_key_id,
-            miner_hotkey=payload.miner_hotkey,
-            key_ref=key_ref,
-        )
+        result = authority.get("result")
+        if (
+            not isinstance(result, Mapping)
+            or result.get("schema_version")
+            != OPENROUTER_REGISTRATION_RESULT_SCHEMA_VERSION
+        ):
+            raise RuntimeError("attested OpenRouter registration result is invalid")
+        key_ref = str(result["key_ref"])
+        key_hash = str(result["key_hash"])
+        management_key_hash = str(result["management_key_hash"])
+        preflight_doc = dict(result["preflight_doc"])
+        privacy_proof_doc = dict(result["privacy_proof_doc"])
+        envelopes = result.get("credential_envelopes")
+        if (
+            not isinstance(envelopes, list)
+            or len(envelopes) != 2
+            or {str(item.get("credential_kind") or "") for item in envelopes}
+            != {"runtime", "management"}
+        ):
+            raise RuntimeError("attested OpenRouter credential envelopes are invalid")
+        envelope_by_kind = {
+            str(item["credential_kind"]): dict(item) for item in envelopes
+        }
+        runtime_envelope = envelope_by_kind["runtime"]
+        management_envelope = envelope_by_kind["management"]
         await create_openrouter_key_ref(
             key_ref=key_ref,
             miner_hotkey=payload.miner_hotkey,
             key_hash=key_hash,
-            encrypted_key_ciphertext=encrypted["ciphertext_b64"],
-            kms_key_id=encrypted["kms_key_id"],
-            encryption_context_hash=encrypted["encryption_context_hash"],
-            encrypted_management_key_ciphertext=encrypted_management["ciphertext_b64"],
+            encrypted_key_ciphertext=runtime_envelope["ciphertext_blob_b64"],
+            kms_key_id=COORDINATOR_SEALED_KEY_ID,
+            encryption_context_hash=runtime_envelope["encryption_context_hash"],
+            encrypted_management_key_ciphertext=management_envelope["ciphertext_blob_b64"],
             management_key_hash=management_key_hash,
-            management_kms_key_id=encrypted_management["kms_key_id"],
-            management_encryption_context_hash=encrypted_management["encryption_context_hash"],
+            management_kms_key_id=COORDINATOR_SEALED_KEY_ID,
+            management_encryption_context_hash=management_envelope["encryption_context_hash"],
             openrouter_workspace_hash=str(privacy_proof_doc["workspace_id_hash"]),
             privacy_status="verified",
             privacy_verified_at=str(privacy_proof_doc["verified_at"]),
@@ -1214,9 +1608,33 @@ async def register_research_lab_openrouter_key(payload: ResearchLabOpenRouterKey
                 "key_label": payload.key_label,
             },
         )
+        for envelope in envelopes:
+            await persist_openrouter_credential_envelope_v2(
+                envelope
+            )
     except OpenRouterKeyVaultError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        from gateway.research_lab.attested_scoring_v2 import (
+            AttestedScoringV2Error,
+        )
+
+        if isinstance(exc, AttestedScoringV2Error):
+            authority_doc = exc.authority or {}
+            attempts = authority_doc.get("transport_attempts") or []
+            if any(
+                isinstance(item, Mapping)
+                and item.get("terminal_status") == "transport_failure"
+                for item in attempts
+            ):
+                raise HTTPException(
+                    status_code=503,
+                    detail="OpenRouter credential verification transport is unavailable",
+                ) from exc
+            raise HTTPException(
+                status_code=400,
+                detail="OpenRouter credential verification failed",
+            ) from exc
         _raise_storage_error(exc)
 
     return ResearchLabOpenRouterKeyRegisterResponse(

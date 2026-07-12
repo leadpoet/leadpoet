@@ -25,7 +25,9 @@ USAGE:
 import os
 import sys
 import argparse
+import json
 import time
+from urllib.parse import urlparse
 
 # ════════════════════════════════════════════════════════════════════════════
 # AUTO-UPDATER: Automatically updates entire repo from GitHub for auditors
@@ -189,7 +191,7 @@ from leadpoet_canonical.chain import normalize_chain_weights
 from leadpoet_canonical.events import verify_log_entry
 from leadpoet_canonical.auditor_v2 import (
     load_identity_cache,
-    verify_attested_weight_bundle_v2,
+    verify_attested_weight_authority_v2,
 )
 
 # Constants from canonical module
@@ -204,12 +206,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # default gateway URL
-DEFAULT_GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
+DEFAULT_GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
 
-
-def _attested_v2_mode() -> str:
-    value = str(os.environ.get("AUDITOR_ATTESTED_WEIGHT_MODE", "off") or "off").strip().lower()
-    return value if value in {"off", "shadow", "required"} else "off"
 
 # Auditors skip PCR0 verification (requires nitro-cli to verify independently)
 # AWS cert chain + COSE signature verification proves it's a REAL Nitro enclave
@@ -238,7 +236,12 @@ class AuditorValidator:
             gateway_url: Gateway URL (passed as parameter, not global)
         """
         self.config = config
-        self.gateway_url = gateway_url
+        self.gateway_url = str(gateway_url or "").rstrip("/")
+        parsed_gateway = urlparse(self.gateway_url)
+        if parsed_gateway.scheme != "https" or not parsed_gateway.hostname:
+            raise RuntimeError(
+                "Authoritative V2 auditors require an HTTPS gateway URL"
+            )
         self.wallet = bt.wallet(config=config)
         self.subtensor = bt.subtensor(config=config)
         self.metagraph = self.subtensor.metagraph(config.netuid)
@@ -564,10 +567,15 @@ class AuditorValidator:
             # (hash comparison is too strict due to ±1 u16 round-trip tolerance)
             print(f"   Fetching bundle for epoch {epoch_id} to compare weights...")
             
-            bundle = await self.fetch_verified_weights(epoch_id)
-            
+            raw_bundle = await self.fetch_attested_weights_v2(epoch_id)
+            bundle = (
+                self.verify_attested_weights_v2(raw_bundle)
+                if isinstance(raw_bundle, dict)
+                else None
+            )
+
             if not bundle:
-                print(f"   ⚠️  Could not fetch bundle for epoch {epoch_id}, skipping check")
+                print(f"   ⚠️  Could not verify V2 bundle for epoch {epoch_id}, skipping check")
                 self.clear_pending_equivocation_check(epoch_id)
                 return True
             
@@ -640,65 +648,11 @@ class AuditorValidator:
     # Gateway Communication
     # ═══════════════════════════════════════════════════════════════════════════
     
-    async def fetch_verified_weights(self, epoch_id: int) -> Optional[Dict]:
-        """
-        Fetch published weights for an epoch from the gateway.
-        
-        Uses /weights/latest/{netuid}/{epoch_id} endpoint.
-        
-        Returns:
-            Weight bundle dict, or None if not available
-        """
-        try:
-            async with aiohttp.ClientSession() as session:
-                url = f"{self.gateway_url}/weights/latest/{self.config.netuid}/{epoch_id}"
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                    if response.status == 404:
-                        return None
-                    elif response.status == 200:
-                        return await response.json()
-                    else:
-                        print(f"⚠️  Unexpected response: {response.status}")
-                        return None
-        except aiohttp.ClientError as e:
-            print(f"❌ Network error fetching weights: {e}")
-            return None
-        except Exception as e:
-            print(f"❌ Failed to fetch weights: {e}")
-            return None
-    
-    async def fetch_current_weights(self) -> Optional[Dict]:
-        """
-        Fetch most recent published weights from the gateway.
-        
-        Uses /weights/current/{netuid} endpoint.
-        
-        Returns:
-            Weight bundle dict, or None if not available
-        """
-        try:
-            async with aiohttp.ClientSession() as session:
-                url = f"{self.gateway_url}/weights/current/{self.config.netuid}"
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                    if response.status == 404:
-                        return None
-                    elif response.status == 200:
-                        return await response.json()
-                    else:
-                        print(f"⚠️  Unexpected response: {response.status}")
-                        return None
-        except aiohttp.ClientError as e:
-            print(f"❌ Network error fetching current weights: {e}")
-            return None
-        except Exception as e:
-            print(f"❌ Failed to fetch current weights: {e}")
-            return None
-
     async def fetch_attested_weights_v2(self, epoch_id: int) -> Optional[Dict]:
-        """Fetch the additive v2 sidecar; never substitutes for the v1 bundle."""
+        """Fetch the sole authoritative V2 bundle."""
 
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(trust_env=False) as session:
                 url = f"{self.gateway_url}/weights/v2/latest/{self.config.netuid}/{int(epoch_id)}"
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
                     if response.status == 404:
@@ -721,8 +675,8 @@ class AuditorValidator:
             )
             return None
 
-    def verify_attested_weights_v2(self, bundle: Dict) -> Optional[Dict]:
-        """Verify all v2 receipts against auditor-owned independent PCR0 builds."""
+    def verify_attested_weights_v2(self, authority: Dict) -> Optional[Dict]:
+        """Verify finalized V2 authority against independent PCR0 builds."""
 
         cache_file = str(os.environ.get("AUDITOR_INDEPENDENT_PCR0_CACHE_FILE", "") or "").strip()
         if not cache_file:
@@ -730,10 +684,22 @@ class AuditorValidator:
             return None
         try:
             cache = load_identity_cache(Path(cache_file).expanduser())
-            return verify_attested_weight_bundle_v2(
-                bundle,
+            profile_file = Path(
+                os.environ.get(
+                    "AUDITOR_CHAIN_SIGNING_PROFILE_FILE",
+                    os.path.join(
+                        _REPO_ROOT,
+                        "validator_tee",
+                        "enclave",
+                        "chain_signing_profile_v2.json",
+                    ),
+                )
+            ).expanduser()
+            profile = json.loads(profile_file.read_text(encoding="utf-8"))
+            return verify_attested_weight_authority_v2(
+                authority,
                 identity_cache=cache,
-                require_allocation_ancestry=True,
+                chain_signing_profile=profile,
             )
         except Exception as exc:
             logger.error(
@@ -1286,22 +1252,7 @@ class AuditorValidator:
         print(f"{'='*60}")
         logger.info("Auditor validator starting")
         
-        # Fetch the gateway enclave pubkey and attestation for log verification.
-        # This legacy startup check remains non-fatal for v1 compatibility; required
-        # v2 verification independently enforces every receipt and role PCR0.
-        if await self.fetch_gateway_attestation():
-            print(f"✅ Gateway pubkey fetched: {self.gateway_pubkey[:16]}...")
-            if self.gateway_attestation:
-                if self.verify_gateway_attestation():
-                    logger.info(f"Gateway attestation verified (trust_level={self.trust_level})")
-                else:
-                    print(f"ℹ️  Gateway attestation did not pass the legacy startup check")
-            else:
-                print(f"ℹ️  Gateway attestation document was not returned")
-                print(f"   Legacy v1 startup continues; required v2 verification remains fail-closed")
-        else:
-            logger.warning("Could not fetch gateway info")
-            print(f"⚠️ Could not fetch gateway info")
+        print("🔐 Authoritative V2 receipt verification is mandatory")
         
         while not self.should_exit:
             try:
@@ -1325,91 +1276,26 @@ class AuditorValidator:
                         target_epoch = current_epoch
                         print(f"   Fetching weights for epoch {target_epoch}...")
                         
-                        weights_data = await self.fetch_verified_weights(target_epoch)
-                        
+                        v2_bundle = await self.fetch_attested_weights_v2(target_epoch)
+                        if v2_bundle is None:
+                            print(f"   ⏳ Authoritative V2 weights not yet published. Waiting 30s...")
+                            await asyncio.sleep(30)
+                            continue
+                        weights_data = self.verify_attested_weights_v2(v2_bundle)
                         if weights_data is None:
-                            print(f"   ⏳ Weights not yet published. Waiting 30s...")
-                            await asyncio.sleep(30)  # CRITICAL: Prevent hot-loop DOSing gateway
-                            continue
-
-                        attested_v2_mode = _attested_v2_mode()
-                        if attested_v2_mode != "off":
-                            v2_bundle = await self.fetch_attested_weights_v2(target_epoch)
-                            v2_verified = (
-                                self.verify_attested_weights_v2(v2_bundle)
-                                if isinstance(v2_bundle, dict)
-                                else None
+                            print("   ❌ Authoritative V2 receipt-chain verification failed")
+                            print("   🔥 BURNING 100% TO UID 0 (V2 verification failed)")
+                            self.submit_burn_weights_to_uid0(
+                                target_epoch,
+                                "authoritative_v2_verification_failed",
                             )
-                            if v2_verified is not None:
-                                v1_pairs = list(
-                                    zip(
-                                        weights_data.get("uids", []),
-                                        weights_data.get("weights_u16", []),
-                                    )
-                                )
-                                v2_pairs = list(
-                                    zip(
-                                        v2_verified.get("uids", []),
-                                        v2_verified.get("weights_u16", []),
-                                    )
-                                )
-                                if v1_pairs != v2_pairs:
-                                    logger.error(
-                                        "auditor_v2_differs_from_v1 epoch=%s",
-                                        target_epoch,
-                                    )
-                                    v2_verified = None
-                            if v2_verified is None:
-                                print("   ⚠️  Attested v2 receipt-chain verification unavailable or failed")
-                                if attested_v2_mode == "required":
-                                    print("   🔥 BURNING 100% TO UID 0 (required v2 verification failed)")
-                                    self.submit_burn_weights_to_uid0(
-                                        target_epoch,
-                                        "attested_v2_verification_failed",
-                                    )
-                                    continue
-                            else:
-                                print(
-                                    "   ✅ Attested v2 receipt chain verified against "
-                                    f"{len(v2_verified['independent_receipt_identities'])} "
-                                    "independent PCR0 identities"
-                                )
-                        
-                        # Extract VALIDATOR attestation from weight bundle
-                        if not self.extract_validator_attestation(weights_data):
-                            logger.warning(f"No validator attestation in bundle for epoch {target_epoch}")
-                            print(f"   ⚠️  No validator attestation - cannot verify TEE origin")
-                        
-                        # Verify validator attestation (if present)
-                        if self.validator_attestation:
-                            if not self.verify_validator_attestation(weights_data):
-                                logger.error(f"Validator attestation verification failed for epoch {target_epoch}")
-                                print(f"   ❌ Validator attestation verification failed.")
-                                print(f"   🔥 BURNING 100% TO UID 0 (attestation verification failed)")
-                                self.submit_burn_weights_to_uid0(target_epoch, "validator_attestation_failed")
-                                continue
-                        
-                        # Verify bundle signature and hash (recomputes hash)
-                        if not self.verify_bundle_signature(weights_data):
-                            logger.error(f"Bundle signature/hash verification failed for epoch {target_epoch}")
-                            print(f"   ❌ Bundle signature/hash verification failed.")
-                            print(f"   🔥 BURNING 100% TO UID 0 (signature/hash verification failed)")
-                            self.submit_burn_weights_to_uid0(target_epoch, "signature_hash_verification_failed")
                             continue
-                        
-                        # Verify anti-equivocation (prefers snapshot)
-                        if not self.verify_anti_equivocation(weights_data):
-                            logger.error(f"Equivocation detected for epoch {target_epoch}")
-                            print(f"   ❌ Equivocation check failed. Not copying.")
-                            # ═══════════════════════════════════════════════════════════════
-                            # EXPLICIT AUDITOR BEHAVIOR ON EQUIVOCATION
-                            # ═══════════════════════════════════════════════════════════════
-                            # BURN 100% TO UID 0 - signals distrust and penalizes all miners
-                            # This is the strongest possible signal that something is wrong.
-                            # ═══════════════════════════════════════════════════════════════
-                            print(f"   🔥 BURNING 100% TO UID 0 (equivocation detected)")
-                            self.submit_burn_weights_to_uid0(target_epoch, "equivocation_detected")
-                            continue
+                        self.trust_level = "full_nitro_v2"
+                        print(
+                            "   ✅ Authoritative V2 receipt chain verified against "
+                            f"{len(weights_data['independent_receipt_identities'])} "
+                            "independent PCR0 identities"
+                        )
                         
                         # All checks passed - safe to copy weights
                         logger.info(f"All verifications passed for epoch {target_epoch} (trust_level={self.trust_level})")

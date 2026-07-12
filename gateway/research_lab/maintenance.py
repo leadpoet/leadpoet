@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
-from .key_vault import OpenRouterKeyVaultError, decrypt_openrouter_key, preflight_openrouter_key
 from .public_activity import derive_public_loop_outcome, safe_project_public_loop_activity
 from .ticket_lifecycle import (
     TERMINAL_TICKET_STATUSES,
@@ -1475,10 +1474,39 @@ async def _preflight_openrouter_key_for_run(ticket_id: str) -> dict[str, Any]:
     )
     if not ticket:
         return {"ok": False, "error": "ticket_not_found", "ticket_id": ticket_id}
+    key_ref = str(ticket.get("miner_openrouter_key_ref") or "")
+    miner_hotkey = str(ticket.get("miner_hotkey") or "")
+    if not key_ref.startswith("encrypted_ref:openrouter:") or not miner_hotkey:
+        return {
+            "ok": False,
+            "error": "openrouter_preflight_failed",
+            "detail": "encrypted OpenRouter key ref is required",
+        }
     try:
-        raw_key = await _resolve_openrouter_key_for_ticket(ticket)
-        doc = await asyncio.to_thread(preflight_openrouter_key, raw_key)
-    except OpenRouterKeyVaultError as exc:
+        from gateway.research_lab.attested_coordinator_v2 import (
+            preflight_openrouter_key_ref_v2,
+        )
+        from gateway.research_lab.chain import (
+            resolve_research_lab_evaluation_epoch,
+        )
+
+        config = ResearchLabGatewayConfig.from_env()
+        epoch_id, _block, _source = await resolve_research_lab_evaluation_epoch(
+            config.evaluation_epoch
+        )
+        authority = await preflight_openrouter_key_ref_v2(
+            key_ref=key_ref,
+            miner_hotkey=miner_hotkey,
+            epoch_id=int(epoch_id),
+            sequence=0,
+        )
+        result = authority.get("result")
+        if not isinstance(result, Mapping) or not isinstance(
+            result.get("preflight_doc"), Mapping
+        ):
+            raise RuntimeError("attested OpenRouter preflight result is invalid")
+        doc = dict(result["preflight_doc"])
+    except Exception as exc:
         return {"ok": False, "error": "openrouter_preflight_failed", "detail": str(exc)[:240]}
     remaining = doc.get("limit_remaining")
     try:
@@ -1494,39 +1522,6 @@ async def _preflight_openrouter_key_for_run(ticket_id: str) -> dict[str, Any]:
         "limit_remaining": remaining,
         "limit_reset": doc.get("limit_reset"),
     }
-
-
-async def _resolve_openrouter_key_for_ticket(ticket: Mapping[str, Any]) -> str:
-    config = ResearchLabGatewayConfig.from_env()
-    key_ref = str(ticket.get("miner_openrouter_key_ref") or "")
-    miner_hotkey = str(ticket.get("miner_hotkey") or "")
-    if key_ref.startswith("encrypted_ref:openrouter:"):
-        row = await select_one(
-            "research_lab_openrouter_key_refs",
-            filters=(("key_ref", key_ref), ("miner_hotkey", miner_hotkey)),
-        )
-        if not row:
-            raise OpenRouterKeyVaultError("encrypted OpenRouter key ref was not found")
-        return await asyncio.to_thread(
-            decrypt_openrouter_key,
-            ciphertext_b64=str(row["encrypted_key_ciphertext"]),
-            miner_hotkey=miner_hotkey,
-            key_ref=key_ref,
-        )
-    env_name = str(config.miner_openrouter_key_env_var or "")
-    if config.miner_openrouter_key_ref_env_map_json:
-        try:
-            mapping = json.loads(config.miner_openrouter_key_ref_env_map_json)
-        except json.JSONDecodeError as exc:
-            raise OpenRouterKeyVaultError("OpenRouter key-ref env map is invalid") from exc
-        if isinstance(mapping, Mapping) and mapping.get(key_ref):
-            env_name = str(mapping[key_ref])
-    if not env_name:
-        raise OpenRouterKeyVaultError("no OpenRouter key env var configured for miner key ref")
-    value = os.getenv(env_name)
-    if not value:
-        raise OpenRouterKeyVaultError("configured OpenRouter key env var is empty")
-    return value
 
 
 async def rebase_stale_parent_candidates(

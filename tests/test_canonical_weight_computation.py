@@ -179,26 +179,18 @@ def test_pure_u16_conversion_matches_pinned_bittensor_for_random_vectors():
             assert actual_weights == list(expected_weights)
 
 
-def test_validator_enclave_v2_computes_then_signs_its_own_result():
+def test_legacy_validator_host_snapshot_rpc_is_removed_from_boot():
     from validator_tee.enclave import tee_service
 
     response = tee_service.handle_request({"command": "compute_weights_v2", "snapshot": _snapshot()})
-    assert response["status"] == "ok"
-    result = response["weight_result"]
-    assert result == compute_final_weights(_snapshot())
-    Ed25519PublicKey.from_public_bytes(bytes.fromhex(response["receipt"]["enclave_pubkey"])).verify(
-        bytes.fromhex(response["weights_signature"]),
-        bytes.fromhex(result["weights_hash"]),
-    )
-    validate_signed_receipt(response["receipt"])
-    assert response["receipt"]["purpose"] == WEIGHT_PURPOSE
-    assert response["attestation_user_data"]["purpose"] == WEIGHT_PURPOSE
+    assert response == {
+        "status": "error",
+        "error": "Legacy validator V1 RPC is permanently removed",
+    }
+    assert compute_final_weights(_snapshot())["weights_hash"]
 
 
-def test_validator_enclave_v2_rejects_tampered_snapshot_before_signing():
-    from validator_tee.enclave import tee_service
-
+def test_canonical_weight_core_rejects_tampered_snapshot_before_authority():
     snapshot = _snapshot(expected_burn_target_hotkey="attacker")
-    response = tee_service.handle_request({"command": "compute_weights_v2", "snapshot": snapshot})
-    assert response["status"] == "error"
-    assert "ownership mismatch" in response["error"]
+    with pytest.raises(WeightComputationError, match="ownership mismatch"):
+        compute_final_weights(snapshot)

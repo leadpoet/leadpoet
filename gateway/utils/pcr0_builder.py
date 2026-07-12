@@ -66,6 +66,12 @@ PCR0_CHECK_INTERVAL = int(os.environ.get("PCR0_CHECK_INTERVAL", "480"))  # 8 min
 # How many CODE VERSIONS to cache PCR0 for
 # Allows validators on older code to still be accepted
 PCR0_CACHE_SIZE = int(os.environ.get("PCR0_CACHE_SIZE", "20"))
+VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT = os.path.expanduser(
+    os.environ.get(
+        "VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT",
+        "~/.cache/leadpoet-v2-artifacts/validator-runtime",
+    )
+)
 
 # Git history depth for the builder's working clone.  The historical warm-up
 # advertises "last N commits", but with a depth-1 clone the repo only ever
@@ -97,6 +103,8 @@ MONITORED_FILES: Set[str] = {
     "validator_tee/Dockerfile.base",  # Base image definition
     "validator_tee/Dockerfile.enclave",
     "validator_tee/enclave/requirements.txt",
+    "validator_tee/runtime-artifacts-v2.lock.json",
+    "validator_tee/scripts/stage_runtime_artifacts_v2.py",
     "validator_tee/enclave/__init__.py",
     "validator_tee/enclave/nsm_lib.py",
     "validator_tee/enclave/tee_service.py",
@@ -136,6 +144,7 @@ BUILD_DIR = os.environ.get("PCR0_BUILD_DIR", "/tmp/pcr0_builder")
 # build inputs that must be clean and mode-normalized before Docker sees them.
 PCR0_COPY_PATHS: List[str] = [
     "validator_tee/enclave",
+    "validator_tee/runtime-artifacts-v2.lock.json",
     "leadpoet_canonical",
     "leadpoet_verifier",
     "research_lab",
@@ -810,6 +819,28 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
         )
         await proc.communicate()
 
+        artifact_dir = os.path.join(repo_dir, ".validator-tee-artifacts")
+        proc = await asyncio.create_subprocess_exec(
+            "python3",
+            "validator_tee/scripts/stage_runtime_artifacts_v2.py",
+            "--lock",
+            "validator_tee/runtime-artifacts-v2.lock.json",
+            "--output-dir",
+            artifact_dir,
+            "--offline-artifact-root",
+            VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT,
+            cwd=repo_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _artifact_stdout, artifact_stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.error(
+                "[PCR0] Failed to stage validator V2 artifacts: %s",
+                artifact_stderr.decode()[-500:],
+            )
+            return None
+
         # __pycache__ directories and .pyc files can differ between machines.
         import shutil
         for rel_path in PCR0_COPY_PATHS:
@@ -848,6 +879,22 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
             elif os.path.isfile(full_path):
                 os.chmod(full_path, 0o644)
                 copied_files.append(rel_path)
+
+        if not os.path.isdir(artifact_dir):
+            logger.error("[PCR0] Validator V2 artifact directory is missing")
+            return None
+        for root, dirs, files in os.walk(artifact_dir):
+            for dirname in dirs:
+                directory = os.path.join(root, dirname)
+                os.chmod(directory, 0o755)
+                os.utime(directory, (0, 0))
+            os.chmod(root, 0o755)
+            os.utime(root, (0, 0))
+            for fname in files:
+                fpath = os.path.join(root, fname)
+                os.chmod(fpath, 0o644)
+                os.utime(fpath, (0, 0))
+                copied_files.append(os.path.relpath(fpath, repo_dir))
 
         manifest_hash = hashlib.sha256()
         for rel_path in sorted(set(copied_files)):

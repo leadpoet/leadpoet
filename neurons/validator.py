@@ -84,7 +84,6 @@ from math import isclose
 from pathlib import Path
 import warnings
 import subprocess
-import aiohttp
 from leadpoet_canonical.weight_computation import (
     WEIGHT_SNAPSHOT_SCHEMA_VERSION,
     compute_final_weights as compute_canonical_final_weights,
@@ -99,19 +98,18 @@ from leadpoet_verifier.economics import DEFAULT_RESEARCH_LAB_EMISSION_PERCENT
 # These imports are optional at startup - only used if TEE is enabled
 try:
     from validator_tee import (
-        initialize_enclave_keypair,
-        sign_weights,
-        compute_weights_v2,
-        get_enclave_pubkey,
-        get_attestation_document_b64,
-        get_attestation,
-        get_code_hash,
-        is_keypair_initialized,
-        is_enclave_running,
+        AuthoritativeSetWeightsContextV2,
+        build_enclave_backed_wallet_v2,
     )
-    from validator_tee.host.weight_shadow import build_weight_bundle_v2, execute_attested_weight_mode
-    from leadpoet_canonical.weights import normalize_to_u16, normalize_to_u16_with_uids, bundle_weights_hash
-    from leadpoet_canonical.binding import create_binding_message
+    from validator_tee.host.authoritative_weight_flow_v2 import (
+        finalize_authoritative_weight_publication_v2,
+        prepare_authoritative_weight_publication_v2,
+        resume_prepared_weight_publication_v2,
+    )
+    from validator_tee.host.publication_journal_v2 import (
+        AuthoritativeWeightPublicationJournalV2,
+    )
+    from validator_tee.host.vsock_client import ValidatorEnclaveClient
     TEE_AVAILABLE = True
 except ImportError as e:
     TEE_AVAILABLE = False
@@ -474,11 +472,6 @@ def _research_lab_production_subnet_default() -> bool:
     return network == "finney" and netuid == "71"
 
 
-def _attested_weight_mode() -> str:
-    value = str(os.environ.get("VALIDATOR_ATTESTED_WEIGHT_MODE", "off") or "off").strip().lower()
-    return value if value in {"off", "shadow", "required"} else "off"
-
-
 def _current_validator_commit_sha() -> str:
     for key in ("GITHUB_SHA", "GIT_COMMIT_HASH", "GIT_COMMIT"):
         value = str(os.environ.get(key) or "").strip().lower()
@@ -507,54 +500,6 @@ def _finalize_attested_weight_snapshot(values: Dict[str, Any]) -> Dict[str, Any]
     snapshot["config_hash"] = canonical_weight_config_hash(snapshot)
     compute_canonical_final_weights(snapshot)
     return snapshot
-
-
-async def _compute_attested_weight_shadow(
-    *,
-    mode: str,
-    snapshot: Dict[str, Any],
-    host_uids: List[int],
-    host_weights: List[float],
-) -> Optional[Dict[str, Any]]:
-    """Compute and verify enclave weights without changing the host vector."""
-
-    if mode == "off":
-        return None
-    def _log_error(exc: Exception) -> None:
-        bt.logging.error(
-            "validator_attested_weight_failed mode=%s epoch=%s error_type=%s error=%s",
-            mode,
-            snapshot.get("epoch_id"),
-            type(exc).__name__,
-            exc,
-        )
-
-    def _unavailable(_snapshot: Dict[str, Any]) -> Dict[str, Any]:
-        raise RuntimeError("validator TEE modules are unavailable")
-
-    compute_callable = compute_weights_v2 if TEE_AVAILABLE else _unavailable
-    try:
-        response = await execute_attested_weight_mode(
-            mode=mode,
-            snapshot=snapshot,
-            host_uids=host_uids,
-            host_weights=host_weights,
-            compute_weights=compute_callable,
-            on_error=_log_error,
-        )
-        if response is None:
-            return None
-        bt.logging.info(
-            "validator_attested_weight_match epoch=%s hash=%s receipt=%s",
-            snapshot["epoch_id"],
-            response["weight_result"]["weights_hash"],
-            response["receipt"]["receipt_hash"],
-        )
-        return dict(response)
-    except Exception as exc:
-        if mode == "required":
-            raise RuntimeError("required validator enclave weight computation failed") from exc
-        return None
 
 
 def _research_lab_allocation_has_live_payments(allocation_doc: Any) -> bool:
@@ -946,7 +891,28 @@ def _normalize_research_lab_sha256_ref(value: Any, *, fallback: Any = None, fiel
 
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
-        super().__init__(config=config)
+        if not TEE_AVAILABLE:
+            raise RuntimeError("authoritative validator V2 modules are unavailable")
+        if config is None or not hasattr(config, "wallet"):
+            raise RuntimeError("authoritative validator V2 wallet configuration is missing")
+        self._validator_v2_client = ValidatorEnclaveClient()
+        enclave_wallet = build_enclave_backed_wallet_v2(
+            name=str(config.wallet.name),
+            hotkey_name=str(config.wallet.hotkey),
+            path=str(config.wallet.path),
+            client=self._validator_v2_client,
+        )
+        super().__init__(config=config, wallet=enclave_wallet)
+        journal_path = Path(
+            os.environ.get("VALIDATOR_V2_PUBLICATION_JOURNAL_PATH")
+            or (
+                Path(self.config.neuron.full_path)
+                / "authoritative_weight_publication_v2.json"
+            )
+        ).expanduser()
+        self._weight_publication_journal_v2 = (
+            AuthoritativeWeightPublicationJournalV2(journal_path)
+        )
         
         # Add async subtensor (initialized later in run())
         # This eliminates memory leaks and HTTP 429 errors from repeated instance creation
@@ -3516,16 +3482,13 @@ class Validator(BaseValidatorNeuron):
                 allocation_can_proceed_without_score_bundles,
                 allocation_referenced_score_bundle_ids,
                 build_research_lab_allocation_component,
-                fetch_research_lab_attested_allocation_bundle,
                 fetch_research_lab_evaluation_bundle_page,
                 fetch_research_lab_score_bundle,
                 build_research_lab_weight_component,
                 fetch_research_lab_allocation_bundle,
                 fetch_research_lab_shadow_bundle,
-                load_independent_gateway_identity,
                 merge_research_lab_evaluation_bundle_page,
                 verify_research_lab_allocation_bundle,
-                verify_research_lab_attested_allocation_bundle,
                 verify_research_lab_evaluation_bundle_page,
                 verify_research_lab_shadow_bundle,
                 write_research_lab_validator_artifact,
@@ -3627,99 +3590,12 @@ class Validator(BaseValidatorNeuron):
                     f"champions={float(allocation_doc.get('champion_alpha_percent') or 0):.4f}%, "
                     f"queued={float(allocation_doc.get('queued_champion_alpha_percent') or 0):.4f}%)"
                 )
-                attested_mode = _attested_weight_mode()
-                if attested_mode != "off":
-                    try:
-                        attested_allocation = await asyncio.to_thread(
-                            fetch_research_lab_attested_allocation_bundle,
-                            gateway_url,
-                            current_epoch,
-                        )
-                        attested_receipt = attested_allocation.get("receipt", {})
-                        attested_lineage_receipts = attested_allocation.get("parent_receipts", [])
-                        if not isinstance(attested_lineage_receipts, list):
-                            attested_lineage_receipts = []
-                        expected_gateway_identity = load_independent_gateway_identity(
-                            str(attested_receipt.get("commit_sha") or "")
-                        )
-                        expected_gateway_identities = {}
-                        for lineage_receipt in [attested_receipt, *attested_lineage_receipts]:
-                            if not isinstance(lineage_receipt, Mapping):
-                                continue
-                            lineage_commit = str(lineage_receipt.get("commit_sha") or "")
-                            if not lineage_commit or lineage_commit in expected_gateway_identities:
-                                continue
-                            lineage_identity = load_independent_gateway_identity(lineage_commit)
-                            if lineage_identity:
-                                expected_gateway_identities[lineage_commit] = lineage_identity
-                        attested_allocation_verification = (
-                            verify_research_lab_attested_allocation_bundle(
-                                attested_allocation,
-                                flags=flags,
-                                expected_gateway_pcr0=(
-                                    str(expected_gateway_identity.get("pcr0") or "")
-                                    if expected_gateway_identity
-                                    else None
-                                ),
-                                expected_gateway_commit=(
-                                    str(expected_gateway_identity.get("commit_sha") or "")
-                                    if expected_gateway_identity
-                                    else None
-                                ),
-                                expected_gateway_identities=expected_gateway_identities,
-                            )
-                        )
-                        attested_bundle = attested_allocation.get("bundle", {})
-                        if (
-                            attested_bundle.get("source_state_hash")
-                            != allocation_bundle.get("source_state_hash")
-                            or attested_bundle.get("allocation_hash")
-                            != allocation_bundle.get("allocation_hash")
-                        ):
-                            attested_allocation_verification = {
-                                **attested_allocation_verification,
-                                "passed": False,
-                                "required_ready": False,
-                                "errors": [
-                                    *list(attested_allocation_verification.get("errors") or []),
-                                    "attested_allocation_differs_from_live_bundle",
-                                ],
-                            }
-                        if attested_allocation_verification.get("passed"):
-                            attested_allocation_receipt = dict(attested_allocation["receipt"])
-                            attested_allocation_parent_receipts = [
-                                dict(item)
-                                for item in attested_lineage_receipts
-                                if isinstance(item, Mapping)
-                            ]
-                            print(
-                                "   ✅ Research Lab allocation receipt verified: "
-                                f"{attested_allocation_receipt.get('receipt_hash')} "
-                                f"({attested_allocation_verification.get('pcr0_verification_mode')})"
-                            )
-                        else:
-                            print(
-                                "   ⚠️ Research Lab allocation receipt shadow verification failed: "
-                                f"{attested_allocation_verification.get('errors')}"
-                            )
-                        if attested_mode == "required" and not (
-                            attested_allocation_verification.get("required_ready")
-                        ):
-                            return _research_lab_failed_closed(
-                                "research_lab_attested_allocation_not_required_ready",
-                                errors=list(attested_allocation_verification.get("errors") or [])
-                                or ["independent_gateway_pcr0_not_verified"],
-                            )
-                    except Exception as exc:
-                        if attested_mode == "required":
-                            return _research_lab_failed_closed(
-                                "research_lab_attested_allocation_fetch_failed",
-                                errors=[str(exc)],
-                            )
-                        print(
-                            "   ⚠️ Research Lab attested allocation shadow unavailable: "
-                            f"{str(exc)[:180]}"
-                        )
+                attested_allocation_verification = {
+                    "passed": True,
+                    "required_ready": True,
+                    "verification_mode": "authoritative_v2_weight_input_handoff",
+                    "allocation_hash": allocation_component.get("allocation_hash"),
+                }
 
             evaluation_verification = None
             if flags.evaluation_verify_enabled:
@@ -3813,40 +3689,226 @@ class Validator(BaseValidatorNeuron):
                 )
             return {"abort_chain_submission": False, "verified": False, "errors": [str(exc)]}
 
+    async def _authorize_and_set_weights_v2(
+        self,
+        *,
+        snapshot: Dict[str, Any],
+        host_uids: List[int],
+        host_weights: List[float],
+        allocation_hash: str,
+        leaderboard_window_start: str,
+        leaderboard_window_end: str,
+    ) -> bool:
+        """Persist one exact V2 bundle before allowing the chain call."""
+
+        gateway_url = str(os.environ.get("VALIDATOR_V2_GATEWAY_URL") or "").strip()
+        if not gateway_url:
+            raise RuntimeError("VALIDATOR_V2_GATEWAY_URL is required for V2 weight authority")
+        expected_chain = str(
+            os.environ.get(
+                "EXPECTED_CHAIN",
+                "wss://entrypoint-finney.opentensor.ai:443",
+            )
+        ).strip()
+        recovered_epoch = await self._recover_weight_publication_journal_v2(
+            gateway_url=gateway_url
+        )
+        if recovered_epoch is not None:
+            if int(recovered_epoch) == int(snapshot["epoch_id"]):
+                return True
+            print(
+                "   ✅ Recovered and finalized earlier authoritative V2 epoch "
+                f"{recovered_epoch}"
+            )
+        journal = self._weight_publication_journal_v2
+        publication = await prepare_authoritative_weight_publication_v2(
+            calculation_snapshot=snapshot,
+            host_uids=host_uids,
+            host_weights=host_weights,
+            validator_hotkey=self.wallet.hotkey.ss58_address,
+            allocation_hash=allocation_hash,
+            leaderboard_window_start=leaderboard_window_start,
+            leaderboard_window_end=leaderboard_window_end,
+            gateway_url=gateway_url,
+            expected_chain=expected_chain,
+            client=self._validator_v2_client,
+            before_publish=journal.record_prepared,
+        )
+        journal.record_published(publication["publication"])
+        self._last_authoritative_weight_v2 = publication
+        print(
+            "   ✅ Authoritative V2 gateway bundle persisted: "
+            f"{publication['weight_submission_event_hash'][:20]}..."
+        )
+        submitted = await self._set_weights_until_epoch_end(
+            epoch_id=int(snapshot["epoch_id"]),
+            uids=list(publication["uids"]),
+            weights=list(publication["weights"]),
+            weight_authorization_id=publication["weight_authorization_id"],
+            weight_submission_event_hash=publication[
+                "weight_submission_event_hash"
+            ],
+            on_signed_extrinsic=journal.record_signed,
+        )
+        if not submitted:
+            return False
+        finalization = await finalize_authoritative_weight_publication_v2(
+            prepared_publication=publication,
+            validator_hotkey=self.wallet.hotkey.ss58_address,
+            gateway_url=gateway_url,
+            client=self._validator_v2_client,
+        )
+        self._last_authoritative_weight_finalization_v2 = finalization
+        journal.clear(
+            expected_event_hash=publication["weight_submission_event_hash"]
+        )
+        print(
+            "   ✅ Authoritative V2 finalized chain state persisted: "
+            f"{finalization['acknowledgment']['weight_finalization_event_hash'][:20]}..."
+        )
+        return True
+
+    async def _recover_weight_publication_journal_v2(
+        self, *, gateway_url: str
+    ) -> Optional[int]:
+        """Resume one exact journaled publication without blind re-signing."""
+
+        journal = self._weight_publication_journal_v2
+        record = journal.load()
+        if record is None:
+            return None
+        if record["publication"] is None:
+            acknowledgment = await resume_prepared_weight_publication_v2(
+                journal_record=record,
+                gateway_url=gateway_url,
+            )
+            record = journal.record_published(acknowledgment)
+        event_hash = str(
+            record["publication"]["weight_submission_event_hash"]
+        )
+        recovery = await asyncio.to_thread(
+            self._validator_v2_client.recover_weight_publication_v2,
+            published_bundle=record["published_bundle"],
+            weight_submission_event_hash=event_hash,
+            extrinsic_signature_results=record[
+                "extrinsic_signature_results"
+            ],
+        )
+        authorization_id = str(recovery["weight_authorization_id"])
+        record = journal.replace_authorization(authorization_id)
+        weight_result = record["published_bundle"]["weight_result"]
+        epoch_id = int(weight_result["epoch_id"])
+        signed_extrinsics = list(recovery["signed_extrinsics"])
+        if not signed_extrinsics:
+            submitted = await self._set_weights_until_epoch_end(
+                epoch_id=epoch_id,
+                uids=list(weight_result["uids"]),
+                weights=list(weight_result["weights"]),
+                weight_authorization_id=authorization_id,
+                weight_submission_event_hash=event_hash,
+                on_signed_extrinsic=journal.record_signed,
+            )
+            if not submitted:
+                raise RuntimeError(
+                    "journaled authoritative weight publication was not "
+                    "accepted before its epoch ended"
+                )
+        else:
+            try:
+                await asyncio.to_thread(
+                    self._validator_v2_client.confirm_weight_publication_v2,
+                    authorization_id,
+                )
+            except Exception:
+                # Re-submit only the exact enclave-signed bytes already fsynced
+                # before the original SDK call. The enclave independently
+                # proves finalized inclusion; this host response is not trusted.
+                latest = signed_extrinsics[-1]
+                try:
+                    await asyncio.to_thread(
+                        self.subtensor.substrate.rpc_request,
+                        "author_submitExtrinsic",
+                        ["0x" + str(latest["extrinsic_hex"])],
+                    )
+                except Exception as exc:
+                    bt.logging.warning(
+                        "Exact V2 recovery rebroadcast returned %s; awaiting "
+                        "enclave-authenticated finalization",
+                        type(exc).__name__,
+                    )
+        last_error = None
+        for attempt in range(10):
+            try:
+                finalization = await finalize_authoritative_weight_publication_v2(
+                    prepared_publication={
+                        "weight_authorization_id": authorization_id,
+                        "weight_submission_event_hash": event_hash,
+                    },
+                    validator_hotkey=self.wallet.hotkey.ss58_address,
+                    gateway_url=gateway_url,
+                    client=self._validator_v2_client,
+                )
+                self._last_authoritative_weight_finalization_v2 = finalization
+                journal.clear(expected_event_hash=event_hash)
+                return epoch_id
+            except Exception as exc:
+                last_error = exc
+                if attempt < 9:
+                    await asyncio.sleep(12)
+        raise RuntimeError(
+            "journaled authoritative V2 publication lacks finalized-chain proof"
+        ) from last_error
+
     async def _set_weights_until_epoch_end(
         self,
         *,
         epoch_id: int,
         uids,
         weights,
+        weight_authorization_id: str,
+        weight_submission_event_hash: str,
+        on_signed_extrinsic=None,
     ) -> bool:
-        """Retry an explicitly rejected chain submission within one epoch."""
+        """Retry the unchanged chain call under one enclave authorization."""
 
         attempt = 0
-        while True:
-            attempt += 1
-            success, message = self.subtensor.set_weights(
-                netuid=self.config.netuid,
-                wallet=self.wallet,
-                uids=uids,
-                weights=weights,
-                wait_for_finalization=True,
-            )
-            if success:
-                return True
-
-            print(
-                f"   ❌ Bittensor rejected weight submission attempt {attempt}: "
-                f"{message}"
-            )
-            await asyncio.sleep(12)
-            current_block = await self.get_current_block_async()
-            if current_block // 360 != epoch_id:
-                print(
-                    f"   ⏹️ Epoch {epoch_id} ended before the weight submission "
-                    "was accepted"
+        with AuthoritativeSetWeightsContextV2(
+            substrate=self.subtensor.substrate,
+            wallet=self.wallet,
+            weight_authorization_id=weight_authorization_id,
+            weight_submission_event_hash=weight_submission_event_hash,
+            on_signed_extrinsic=on_signed_extrinsic,
+        ) as signing_context:
+            while True:
+                attempt += 1
+                success, message = self.subtensor.set_weights(
+                    netuid=self.config.netuid,
+                    wallet=self.wallet,
+                    uids=uids,
+                    weights=weights,
+                    wait_for_finalization=True,
                 )
-                return False
+                if success:
+                    self._last_weight_extrinsic_receipts_v2 = list(
+                        signing_context.extrinsic_signature_results
+                    )
+                    return True
+
+                print(
+                    f"   ❌ Bittensor rejected weight submission attempt {attempt}: "
+                    f"{message}"
+                )
+                await asyncio.sleep(12)
+                current_block = await self.get_current_block_async()
+                if current_block // 360 != epoch_id:
+                    self._last_weight_extrinsic_receipts_v2 = list(
+                        signing_context.extrinsic_signature_results
+                    )
+                    print(
+                        f"   ⏹️ Epoch {epoch_id} ended before the weight submission "
+                        "was accepted"
+                    )
+                    return False
 
     async def submit_weights_at_epoch_end(self):
         """
@@ -3897,44 +3959,21 @@ class Validator(BaseValidatorNeuron):
                 if isinstance(research_lab_allocation_component, dict)
                 else {}
             )
-            research_lab_allocation_receipt = (
-                research_lab_guard.get("attested_allocation_receipt")
-                if isinstance(research_lab_guard, dict)
-                and isinstance(research_lab_guard.get("attested_allocation_receipt"), dict)
-                else None
-            )
-            research_lab_allocation_parent_receipts = (
-                research_lab_guard.get("attested_allocation_parent_receipts")
-                if isinstance(research_lab_guard, dict)
-                and isinstance(
-                    research_lab_guard.get("attested_allocation_parent_receipts"),
-                    list,
+            research_lab_allocation_hash = str(
+                research_lab_allocation_doc.get("allocation_hash") or ""
+            ).lower()
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", research_lab_allocation_hash):
+                print(
+                    "   ❌ Authoritative V2 requires the exact Research Lab "
+                    "allocation artifact hash"
                 )
-                else []
-            )
-            attested_parent_receipts = (
-                [
-                    research_lab_allocation_receipt,
-                    *[
-                        dict(item)
-                        for item in research_lab_allocation_parent_receipts
-                        if isinstance(item, Mapping)
-                    ],
-                ]
-                if research_lab_allocation_receipt is not None
-                else []
-            )
-            research_lab_allocation_receipt_hash = (
-                str(research_lab_allocation_receipt.get("receipt_hash") or "")
-                if research_lab_allocation_receipt is not None
-                else ""
-            )
+                return False
+            # The validator enclave replaces these placeholders with the complete
+            # measured V2 input receipt set before computing final weights.
+            research_lab_allocation_receipt_hash = ""
             research_lab_has_live_allocations = _research_lab_allocation_has_live_payments(
                 research_lab_allocation_doc
             )
-            attested_weight_mode = _attested_weight_mode()
-            attested_weight_snapshot = None
-            attested_weight_response = None
             
             # ═══════════════════════════════════════════════════════════════════
             # Load current epoch data (may be empty if gateway was down)
@@ -4143,6 +4182,32 @@ class Validator(BaseValidatorNeuron):
                     "sourcing_floor_threshold": SOURCING_FLOOR_THRESHOLD,
                     "min_total_rep_for_distribution": MIN_TOTAL_REP_FOR_DISTRIBUTION,
                 })
+
+            try:
+                from Leadpoet.utils.cloud_db import (
+                    gateway_get_fulfillment_leaderboard_snapshot,
+                )
+
+                leaderboard_snapshot = await asyncio.to_thread(
+                    gateway_get_fulfillment_leaderboard_snapshot,
+                    self.wallet,
+                    3,
+                )
+                leaderboard_window_start = str(
+                    leaderboard_snapshot["period_start"]
+                )
+                leaderboard_window_end = str(leaderboard_snapshot["period_end"])
+                observed_leaders = (
+                    list(leaderboard_snapshot["leaderboard"])
+                    if ff_enabled
+                    else []
+                )
+            except Exception as exc:
+                print(
+                    "   ❌ Authoritative V2 leaderboard snapshot failed; "
+                    f"refusing weight publication: {exc}"
+                )
+                return False
             
             # ═══════════════════════════════════════════════════════════════════
             # Check if we have ANYTHING to submit (current OR rolling)
@@ -4166,32 +4231,13 @@ class Validator(BaseValidatorNeuron):
                     ):
                         return False
 
-                    if attested_weight_mode != "off":
-                        attested_weight_snapshot = _weight_snapshot()
-                        attested_response = await _compute_attested_weight_shadow(
-                            mode=attested_weight_mode,
-                            snapshot=attested_weight_snapshot,
-                            host_uids=[BURN_TARGET_UID],
-                            host_weights=[1.0],
-                        )
-                        if attested_response is not None:
-                            self._last_attested_weight_v2_response = attested_response
-                            attested_weight_response = attested_response
-                            v2_result = await self._submit_weights_v2(
-                                snapshot=attested_weight_snapshot,
-                                enclave_response=attested_weight_response,
-                                parent_receipts=attested_parent_receipts,
-                            )
-                            if attested_weight_mode == "required" and not (
-                                v2_result and v2_result.get("weight_submission_event_hash")
-                            ):
-                                print("   ❌ Required v2 gateway publication failed; refusing chain submission")
-                                return False
-                    
-                    result = await self._set_weights_until_epoch_end(
-                        epoch_id=current_epoch,
-                        uids=[BURN_TARGET_UID],
-                        weights=[1.0],
+                    result = await self._authorize_and_set_weights_v2(
+                        snapshot=_weight_snapshot(),
+                        host_uids=[BURN_TARGET_UID],
+                        host_weights=[1.0],
+                        allocation_hash=research_lab_allocation_hash,
+                        leaderboard_window_start=leaderboard_window_start,
+                        leaderboard_window_end=leaderboard_window_end,
                     )
                     
                     if result:
@@ -4321,32 +4367,13 @@ class Validator(BaseValidatorNeuron):
                 ):
                     return False
 
-                if attested_weight_mode != "off":
-                    attested_weight_snapshot = _weight_snapshot()
-                    attested_response = await _compute_attested_weight_shadow(
-                        mode=attested_weight_mode,
-                        snapshot=attested_weight_snapshot,
-                        host_uids=[BURN_TARGET_UID],
-                        host_weights=[1.0],
-                    )
-                    if attested_response is not None:
-                        self._last_attested_weight_v2_response = attested_response
-                        attested_weight_response = attested_response
-                        v2_result = await self._submit_weights_v2(
-                            snapshot=attested_weight_snapshot,
-                            enclave_response=attested_weight_response,
-                            parent_receipts=attested_parent_receipts,
-                        )
-                        if attested_weight_mode == "required" and not (
-                            v2_result and v2_result.get("weight_submission_event_hash")
-                        ):
-                            print("   ❌ Required v2 gateway publication failed; refusing chain submission")
-                            return False
-
-                result = await self._set_weights_until_epoch_end(
-                    epoch_id=current_epoch,
-                    uids=[BURN_TARGET_UID],
-                    weights=[1.0],
+                result = await self._authorize_and_set_weights_v2(
+                    snapshot=_weight_snapshot(),
+                    host_uids=[BURN_TARGET_UID],
+                    host_weights=[1.0],
+                    allocation_hash=research_lab_allocation_hash,
+                    leaderboard_window_start=leaderboard_window_start,
+                    leaderboard_window_end=leaderboard_window_end,
                 )
                 
                 if result:
@@ -4409,18 +4436,13 @@ class Validator(BaseValidatorNeuron):
             unused_fulfillment = 0.0 if ff_enabled else effective_fulfillment_pool
             try:
                 if ff_enabled:
-                    if attested_weight_mode == "off":
-                        fulfillment_share, fulfillment_per_miner = self._get_fulfillment_emission_share(
-                            current_epoch, effective_fulfillment_pool,
+                    fulfillment_share, fulfillment_per_miner, fulfillment_fetch_ok = (
+                        self._get_fulfillment_emission_share(
+                            current_epoch,
+                            effective_fulfillment_pool,
+                            include_status=True,
                         )
-                    else:
-                        fulfillment_share, fulfillment_per_miner, fulfillment_fetch_ok = (
-                            self._get_fulfillment_emission_share(
-                                current_epoch,
-                                effective_fulfillment_pool,
-                                include_status=True,
-                            )
-                        )
+                    )
                     unused_fulfillment = effective_fulfillment_pool - fulfillment_share
                     if fulfillment_share > 0:
                         print(f"      Fulfillment active: {fulfillment_share*100:.4f}% used of {effective_fulfillment_pool*100:.0f}% pool "
@@ -4455,8 +4477,7 @@ class Validator(BaseValidatorNeuron):
             leaderboard_burn = 0.0 if ff_enabled else LEADERBOARD_BONUS_SHARE
             try:
                 if ff_enabled and effective_leaderboard_share > 0:
-                    from Leadpoet.utils.cloud_db import gateway_get_fulfillment_leaderboard
-                    leaders = gateway_get_fulfillment_leaderboard(self.wallet, limit=3)
+                    leaders = observed_leaders
                     leaderboard_entries = [
                         {
                             "miner_hotkey": str(entry.get("miner_hotkey") or ""),
@@ -4671,90 +4692,27 @@ class Validator(BaseValidatorNeuron):
                 print(f"   ❌ ERROR: Negative weight remained after sanitization: {normalized_weights}")
                 return False
 
-            if attested_weight_mode != "off":
-                attested_weight_snapshot = _weight_snapshot(
-                    champion_uid_value=champion_uid,
-                    effective_champion_share_value=effective_champion_share,
-                    fulfillment_share_value=fulfillment_share,
-                    fulfillment_rows_value=[
-                        {"hotkey": str(hotkey), "share": share}
-                        for hotkey, share in fulfillment_per_miner.items()
-                    ],
-                    fulfillment_fetch_ok_value=fulfillment_fetch_ok,
-                    leaderboard_entries_value=leaderboard_entries,
-                    leaderboard_fetch_ok_value=leaderboard_fetch_ok,
-                )
-                attested_response = await _compute_attested_weight_shadow(
-                    mode=attested_weight_mode,
-                    snapshot=attested_weight_snapshot,
-                    host_uids=list(uids),
-                    host_weights=list(normalized_weights),
-                )
-                if attested_response is not None:
-                    self._last_attested_weight_v2_response = attested_response
-                    attested_weight_response = attested_response
-                    if attested_weight_mode == "required":
-                        enclave_result = attested_response["weight_result"]
-                        uids = list(enclave_result["uids"])
-                        normalized_weights = list(enclave_result["weights"])
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # TEE GATEWAY SUBMISSION (Phase 2.3)
-            # Submit to gateway BEFORE chain for auditor validators
-            # ═══════════════════════════════════════════════════════════════════
-            tee_event_hash = None
-            if TEE_AVAILABLE and os.environ.get("ENABLE_TEE_SUBMISSION", "").lower() == "true":
-                print(f"\n🔐 TEE weight submission enabled - submitting to gateway first...")
-                v2_result = None
-                if attested_weight_response is not None and attested_weight_snapshot is not None:
-                    v2_result = await self._submit_weights_v2(
-                        snapshot=attested_weight_snapshot,
-                        enclave_response=attested_weight_response,
-                        parent_receipts=attested_parent_receipts,
-                    )
-                if attested_weight_mode == "required":
-                    tee_event_hash = (
-                        v2_result.get("weight_submission_event_hash")
-                        if isinstance(v2_result, dict)
-                        else None
-                    )
-                else:
-                    tee_event_hash = await self._submit_weights_to_gateway(
-                        epoch_id=current_epoch,
-                        block=current_block,
-                        uids=uids,
-                        weights=normalized_weights,
-                    )
-                if tee_event_hash:
-                    print(f"   ✅ Gateway accepted weights (hash: {tee_event_hash[:16]}...)")
-                else:
-                    if attested_weight_mode == "required":
-                        print("   ❌ Required v2 gateway publication failed; refusing chain submission")
-                        return False
-                    require_gateway_submission = _env_flag(
-                        "VALIDATOR_REQUIRE_GATEWAY_WEIGHT_SUBMISSION",
-                        _research_lab_production_subnet_default(),
-                    )
-                    if require_gateway_submission:
-                        print(
-                            "   ❌ Gateway submission failed and "
-                            "VALIDATOR_REQUIRE_GATEWAY_WEIGHT_SUBMISSION is enabled; "
-                            "refusing chain submission to avoid an unaudited weight epoch"
-                        )
-                        return False
-                    print(f"   ⚠️ Gateway submission failed - proceeding to chain anyway")
-            elif TEE_AVAILABLE:
-                if attested_weight_mode == "required":
-                    print("\n❌ Required v2 weight publication needs ENABLE_TEE_SUBMISSION=true")
-                    return False
-                print(f"\nℹ️ TEE available but submission disabled (set ENABLE_TEE_SUBMISSION=true to enable)")
-            
-            # Submit to Bittensor chain
+            authoritative_snapshot = _weight_snapshot(
+                champion_uid_value=champion_uid,
+                effective_champion_share_value=effective_champion_share,
+                fulfillment_share_value=fulfillment_share,
+                fulfillment_rows_value=[
+                    {"hotkey": str(hotkey), "share": share}
+                    for hotkey, share in fulfillment_per_miner.items()
+                ],
+                fulfillment_fetch_ok_value=fulfillment_fetch_ok,
+                leaderboard_entries_value=leaderboard_entries,
+                leaderboard_fetch_ok_value=leaderboard_fetch_ok,
+            )
+
             print(f"\n📡 Submitting weights to Bittensor chain...")
-            result = await self._set_weights_until_epoch_end(
-                epoch_id=current_epoch,
-                uids=uids,
-                weights=normalized_weights,
+            result = await self._authorize_and_set_weights_v2(
+                snapshot=authoritative_snapshot,
+                host_uids=list(uids),
+                host_weights=list(normalized_weights),
+                allocation_hash=research_lab_allocation_hash,
+                leaderboard_window_start=leaderboard_window_start,
+                leaderboard_window_end=leaderboard_window_end,
             )
             
             if result:
@@ -4789,286 +4747,9 @@ class Validator(BaseValidatorNeuron):
             bt.logging.error(traceback.format_exc())
             return False
     
-    async def _submit_weights_v2(
-        self,
-        *,
-        snapshot: Dict[str, Any],
-        enclave_response: Dict[str, Any],
-        parent_receipts: Optional[List[Dict[str, Any]]] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Send an enclave-computed bundle to the additive v2 verification path."""
-
-        gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
-        try:
-            receipt = enclave_response["receipt"]
-            user_data = enclave_response["attestation_user_data"]
-            enclave_pubkey = str(receipt["enclave_pubkey"])
-            code_hash = str(user_data["code_hash"])
-            expected_chain = os.environ.get(
-                "EXPECTED_CHAIN",
-                "wss://entrypoint-finney.opentensor.ai:443",
-            )
-            try:
-                git_commit_short = subprocess.check_output(
-                    ["git", "rev-parse", "--short", "HEAD"],
-                    text=True,
-                    stderr=subprocess.DEVNULL,
-                ).strip()
-            except Exception:
-                git_commit_short = "unknown"
-            binding_message = create_binding_message(
-                netuid=int(snapshot["netuid"]),
-                chain=expected_chain,
-                enclave_pubkey=enclave_pubkey,
-                validator_code_hash=code_hash,
-                version=git_commit_short,
-            )
-            hotkey_signature = self.wallet.hotkey.sign(binding_message.encode()).hex()
-            submission = build_weight_bundle_v2(
-                snapshot=snapshot,
-                enclave_response=enclave_response,
-                validator_hotkey=self.wallet.hotkey.ss58_address,
-                binding_message=binding_message,
-                validator_hotkey_signature=hotkey_signature,
-                parent_receipts=list(parent_receipts or []),
-            )
-            print("📡 Submitting enclave-computed weights to gateway v2...")
-            print(f"   Endpoint: {gateway_url}/weights/submit/v2")
-            print(
-                f"   Epoch: {snapshot['epoch_id']}, Block: {snapshot['block']}, "
-                f"UIDs: {len(enclave_response['weight_result']['sparse_uids'])}"
-            )
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{gateway_url}/weights/submit/v2",
-                    json=submission,
-                    timeout=aiohttp.ClientTimeout(total=60),
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        print(f"✅ Gateway v2 verification accepted ({result.get('mode', 'unknown')})")
-                        return result
-                    error = await response.text()
-                    print(f"⚠️ Gateway v2 verification rejected: {response.status}")
-                    print(f"   Error: {error[:200]}...")
-                    return None
-        except aiohttp.ClientError as exc:
-            bt.logging.error(f"Network error submitting v2 weights to gateway: {exc}")
-            return None
-        except Exception as exc:
-            bt.logging.error(f"Error submitting v2 weights to gateway: {exc}")
-            return None
-
-    async def _submit_weights_to_gateway(
-        self,
-        epoch_id: int,
-        block: int,
-        uids: List[int],
-        weights: List[float],
-    ) -> Optional[str]:
-        """
-        Submit weights to TEE gateway for auditor validators (Phase 2.3).
-        
-        Uses CANONICAL format: UIDs + u16 weights, not floats/hotkeys.
-        See business_files/tasks8.md for exact format specification.
-        
-        SECURITY:
-        - Signs weights inside enclave (private key never leaves)
-        - Attestation includes epoch_id for replay protection
-        - Binding message proves hotkey authorized enclave
-        
-        Args:
-            epoch_id: Current epoch
-            block: Block number when weights were computed
-            uids: List of UIDs (sorted ascending)
-            weights: Corresponding float weights (will be converted to u16)
-            
-        Returns:
-            weight_submission_event_hash if accepted, None if failed/rejected
-        """
-        # Check if TEE is available
-        if not TEE_AVAILABLE:
-            bt.logging.warning("⚠️ TEE modules not available - skipping gateway submission")
-            bt.logging.warning("   Install validator_tee package to enable gateway submission")
-            return None
-        
-        # Check if enclave is initialized
-        if not is_keypair_initialized():
-            bt.logging.warning("⚠️ Validator enclave not initialized - skipping gateway submission")
-            return None
-        
-        # Check if gateway submission is enabled
-        gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
-        if os.environ.get("DISABLE_GATEWAY_WEIGHT_SUBMISSION", "").lower() == "true":
-            bt.logging.info("ℹ️ Gateway weight submission disabled via env var")
-            return None
-        
-        try:
-            netuid = self.config.netuid
-            
-            # Get expected chain endpoint for binding message
-            expected_chain = os.environ.get(
-                "EXPECTED_CHAIN", 
-                "wss://entrypoint-finney.opentensor.ai:443"
-            )
-            
-            # Get git commit for version info
-            try:
-                git_commit_short = subprocess.check_output(
-                    ["git", "rev-parse", "--short", "HEAD"],
-                    text=True,
-                    stderr=subprocess.DEVNULL,
-                ).strip()
-            except Exception:
-                git_commit_short = "unknown"
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # Step 1: Convert floats to u16 using canonical function.
-            #
-            # Bittensor's convert_weights_and_uids_for_emit drops UIDs whose
-            # u16 weight rounds to 0 — that includes tiny-but-positive floats
-            # (e.g. 1/65535 / N) that survive our ``w > 0`` pre-filter but
-            # quantize to zero after scaling.  Previous implementation pre-
-            # filtered ``w > 0`` and then aborted when bittensor STILL
-            # dropped a UID (length mismatch check), which silently killed
-            # every gateway submission since those tiny weights are a
-            # normal outcome of weighted-stake distribution.  Auditor
-            # validators starved: the ``published_weight_bundles`` table
-            # went 23 h without an insert.
-            #
-            # Fix: use ``normalize_to_u16_with_uids`` which returns the
-            # same list of UIDs bittensor actually accepted, so our
-            # (uids, weights_u16) stay in lockstep regardless of how many
-            # small-weight rows bittensor decided to truncate.
-            # ═══════════════════════════════════════════════════════════════════
-
-            non_zero_pairs = [(uid, w) for uid, w in zip(uids, weights) if w > 0]
-            if not non_zero_pairs:
-                bt.logging.warning("⚠️ No non-zero weights to submit")
-                return None
-
-            non_zero_pairs.sort(key=lambda x: x[0])  # Sort by UID
-            pre_uids = [p[0] for p in non_zero_pairs]
-            pre_weights = [p[1] for p in non_zero_pairs]
-
-            sparse_uids, sparse_weights_u16 = normalize_to_u16_with_uids(
-                pre_uids, pre_weights
-            )
-
-            if not sparse_uids or not sparse_weights_u16:
-                bt.logging.warning(
-                    "⚠️ All weights rounded to 0 during u16 conversion - nothing to submit"
-                )
-                return None
-
-            if len(sparse_uids) != len(sparse_weights_u16):
-                bt.logging.error(
-                    f"⚠️ UID/weight length mismatch after u16 conversion: "
-                    f"{len(sparse_uids)} vs {len(sparse_weights_u16)}"
-                )
-                return None
-
-            if len(sparse_uids) < len(pre_uids):
-                dropped = len(pre_uids) - len(sparse_uids)
-                bt.logging.info(
-                    f"ℹ️ bittensor dropped {dropped} UID(s) with u16-rounded-to-0 "
-                    f"weight during normalization "
-                    f"({len(pre_uids)} -> {len(sparse_uids)}). "
-                    f"Gateway bundle will match what actually lands on chain."
-                )
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # Step 2: Sign weights with enclave key
-            # ═══════════════════════════════════════════════════════════════════
-            weights_hash, signature_hex = sign_weights(
-                netuid=netuid,
-                epoch_id=epoch_id,
-                block=block,
-                uids=sparse_uids,
-                weights_u16=sparse_weights_u16,
-            )
-            
-            enclave_pubkey = get_enclave_pubkey()
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # Step 3: Get attestation (includes epoch_id for replay protection)
-            # ═══════════════════════════════════════════════════════════════════
-            attestation_b64 = get_attestation(epoch_id=epoch_id)
-            code_hash = get_code_hash()
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # Step 4: Build binding message (proves hotkey authorized enclave)
-            # ═══════════════════════════════════════════════════════════════════
-            binding_message = create_binding_message(
-                netuid=netuid,
-                chain=expected_chain,
-                enclave_pubkey=enclave_pubkey,
-                validator_code_hash=code_hash,
-                version=git_commit_short,
-            )
-            
-            # Sign binding message with hotkey (sr25519)
-            hotkey_signature = self.wallet.hotkey.sign(binding_message.encode())
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # Step 5: Build submission payload (matches WeightSubmission model)
-            # ═══════════════════════════════════════════════════════════════════
-            submission = {
-                "netuid": netuid,
-                "epoch_id": epoch_id,
-                "block": block,
-                "uids": sparse_uids,
-                "weights_u16": sparse_weights_u16,
-                "weights_hash": weights_hash,
-                "validator_hotkey": self.wallet.hotkey.ss58_address,
-                "validator_enclave_pubkey": enclave_pubkey,
-                "validator_signature": signature_hex,
-                "validator_attestation_b64": attestation_b64,
-                "validator_code_hash": code_hash,
-                "binding_message": binding_message,
-                "validator_hotkey_signature": hotkey_signature.hex(),
-            }
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # Step 6: Submit to gateway
-            # ═══════════════════════════════════════════════════════════════════
-            print(f"📡 Submitting TEE-signed weights to gateway...")
-            print(f"   Endpoint: {gateway_url}/weights/submit")
-            print(f"   Epoch: {epoch_id}, Block: {block}, UIDs: {len(sparse_uids)}")
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{gateway_url}/weights/submit",
-                    json=submission,
-                    timeout=aiohttp.ClientTimeout(total=60),
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        event_hash = result.get("weight_submission_event_hash")
-                        print(f"✅ Weights accepted by gateway")
-                        print(f"   Event hash: {event_hash[:16] if event_hash else 'N/A'}...")
-                        return event_hash
-                        
-                    elif response.status == 409:
-                        # Duplicate submission - already submitted for this epoch
-                        print(f"⚠️ Duplicate submission rejected (already submitted for epoch {epoch_id})")
-                        return None
-                        
-                    else:
-                        error = await response.text()
-                        print(f"❌ Gateway rejected submission: {response.status}")
-                        print(f"   Error: {error[:200]}...")
-                        return None
-                        
-        except aiohttp.ClientError as e:
-            bt.logging.error(f"Network error submitting to gateway: {e}")
-            return None
-        except Exception as e:
-            bt.logging.error(f"Error submitting weights to gateway: {e}")
-            import traceback
-            bt.logging.error(traceback.format_exc())
-            return None
-    
+    # V1/off/shadow weight submission helpers were removed. The only chain
+    # path is `_authorize_and_set_weights_v2`, which persists the complete
+    # enclave receipt graph before entering the constrained SDK call.
     def archive_weights_to_history(self, epoch_id: int, epoch_data: Dict):
         """
         [DEPRECATED] Archive submitted weights to validator_weights_history for record keeping.

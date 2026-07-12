@@ -26,6 +26,7 @@ class SourceAddJudgeVerdict:
     model_id: str = ""
     provider_usage: dict[str, Any] = field(default_factory=dict)
     raw_doc: dict[str, Any] = field(default_factory=dict)
+    raw_doc_hash: str = ""
 
     @property
     def passed(self) -> bool:
@@ -42,7 +43,7 @@ class SourceAddJudgeVerdict:
             "evidence_summary": self.evidence_summary[:1000],
             "reason_codes": list(self.reason_codes)[:20],
             "judge_model": self.model_id,
-            "judge_doc_hash": canonical_hash(self.raw_doc or {}),
+            "judge_doc_hash": self.raw_doc_hash or canonical_hash(self.raw_doc or {}),
             "provider_usage": _safe_usage(self.provider_usage),
         }
 

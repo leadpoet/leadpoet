@@ -1,0 +1,29 @@
+{
+  "block_time_millis": 12000,
+  "chain_endpoint": "wss://entrypoint-finney.opentensor.ai:443",
+  "commit_call_index": "0776",
+  "serve_axon_call_index": "0704",
+  "commit_reveal_version": 4,
+  "extrinsic_period": 8,
+  "genesis_hash": "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
+  "max_snapshot_block_drift": 64,
+  "mechid": 0,
+  "network": "finney",
+  "schema_version": "leadpoet.chain_signing_profile.v2",
+  "signed_extensions": [
+    "CheckMortality",
+    "CheckNonce",
+    "ChargeTransactionPayment",
+    "CheckMetadataHash",
+    "CheckSpecVersion",
+    "CheckTxVersion",
+    "CheckGenesis",
+    "CheckMortalityAdditionalSigned",
+    "CheckMetadataHashAdditionalSigned"
+  ],
+  "spec_version": 424,
+  "subnet_reveal_period_epochs": 1,
+  "tempo": 360,
+  "transaction_version": 1,
+  "version_key": 9012000
+}

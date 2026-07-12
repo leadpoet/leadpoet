@@ -1,112 +1,99 @@
 #!/bin/bash
-################################################################################
-# Start TEE Enclave - AWS Nitro Enclaves
-################################################################################
-# 
-# This script starts the Nitro Enclave with the TEE service.
-# Must be run with sudo on the parent EC2 instance.
-#
-# Usage: sudo bash start_enclave.sh
-#
+# Start the approved four-role Nitro topology, or one role for component tests.
 
-set -e  # Exit on error
+set -euo pipefail
 
-echo "================================================================================"
-echo "🚀 STARTING TEE ENCLAVE"
-echo "================================================================================"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GATEWAY_ROOT="${GATEWAY_ROOT:-/home/ec2-user/gateway}"
+EIF_ROOT="${GATEWAY_TEE_EIF_ROOT:-/home/ec2-user/tee}"
+TOPOLOGY_MODE="${GATEWAY_TEE_TOPOLOGY_MODE:-full}"
+RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$EIF_ROOT/gateway-v2-release-manifest.json}"
+ALL_ROLES=(
+  gateway_coordinator
+  gateway_scoring_a
+  gateway_scoring_b
+  gateway_autoresearch
+)
 
-# Configuration
-# Use absolute paths (not $HOME) since this runs with sudo. The restart wrapper
-# intentionally invokes this script through sudo, so read the two non-secret
-# resource values from the hydrated gateway env file instead of relying on
-# sudo preserving the caller's environment.
-EIF_PATH="/home/ec2-user/tee/tee-enclave.eif"
-ENCLAVE_CID=16
-GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
+python3 "$SCRIPT_DIR/topology.py" --verify "$SCRIPT_DIR/topology.json"
 
-read_numeric_env_setting() {
-    local key="$1"
-    local fallback="$2"
-    local value="${!key:-}"
+if [ "$TOPOLOGY_MODE" = "full" ]; then
+  TOTAL_CPUS="$(getconf _NPROCESSORS_CONF)"
+  TOTAL_MEMORY_MIB="$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)"
+  if [ "$TOTAL_CPUS" -lt 32 ] || [ "$TOTAL_MEMORY_MIB" -lt 250000 ]; then
+    echo "ERROR: full V2 topology requires an r7i.8xlarge-class parent" >&2
+    echo "Observed CPUs=${TOTAL_CPUS} memory_mib=${TOTAL_MEMORY_MIB}" >&2
+    exit 1
+  fi
+  ROLES=("${ALL_ROLES[@]}")
+elif [ "$TOPOLOGY_MODE" = "component" ]; then
+  COMPONENT_ROLE="${GATEWAY_TEE_COMPONENT_ROLE:-gateway_coordinator}"
+  case "$COMPONENT_ROLE" in
+    gateway_coordinator|gateway_scoring_a|gateway_scoring_b|gateway_autoresearch) ;;
+    *) echo "ERROR: invalid GATEWAY_TEE_COMPONENT_ROLE" >&2; exit 1 ;;
+  esac
+  ROLES=("$COMPONENT_ROLE")
+else
+  echo "ERROR: GATEWAY_TEE_TOPOLOGY_MODE must be full or component" >&2
+  exit 1
+fi
 
-    if [ -z "$value" ] && [ -r "$GATEWAY_ENV_FILE" ]; then
-        value="$(
-            grep -E "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$GATEWAY_ENV_FILE" \
-                | tail -n 1 \
-                | cut -d= -f2- \
-                | tr -d "'\"[:space:]" \
-                || true
-        )"
-    fi
-    value="${value:-$fallback}"
-    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: ${key} must be a positive integer" >&2
-        exit 1
-    fi
-    printf '%s' "$value"
+for role in "${ROLES[@]}"; do
+  test -s "$EIF_ROOT/tee-enclave-${role}.eif" || {
+    echo "ERROR: missing role EIF $EIF_ROOT/tee-enclave-${role}.eif" >&2
+    exit 1
+  }
+done
+
+sudo nitro-cli terminate-enclave --all 2>/dev/null || true
+sleep 2
+
+start_role() {
+  local role="$1"
+  read -r cid vcpus memory_mib < <(
+    python3 - "$SCRIPT_DIR/topology.json" "$role" <<'PY'
+import json
+import sys
+spec = json.load(open(sys.argv[1]))["roles"][sys.argv[2]]
+print(spec["cid"], spec["vcpus"], spec["memory_mib"])
+PY
+  )
+  echo "Starting ${role} CID=${cid} vcpus=${vcpus} memory_mib=${memory_mib}"
+  sudo nitro-cli run-enclave \
+    --cpu-count "$vcpus" \
+    --memory "$memory_mib" \
+    --eif-path "$EIF_ROOT/tee-enclave-${role}.eif" \
+    --enclave-cid "$cid"
 }
 
-CPU_COUNT="$(read_numeric_env_setting GATEWAY_ENCLAVE_CPU_COUNT 2)"
-MEMORY_MB="$(read_numeric_env_setting GATEWAY_ENCLAVE_MEMORY_MB 8192)"
+verify_roles() {
+  local verify_args=()
+  if [ "$TOPOLOGY_MODE" = "full" ] || [ -s "$RELEASE_MANIFEST" ]; then
+    test -s "$RELEASE_MANIFEST" || {
+      echo "ERROR: approved gateway V2 release manifest is unavailable" >&2
+      exit 1
+    }
+    verify_args+=(--release-manifest "$RELEASE_MANIFEST")
+  fi
+  PYTHONPATH="${GATEWAY_ROOT%/gateway}" \
+    python3 "$SCRIPT_DIR/verify_topology.py" "${verify_args[@]}" "$@"
+}
 
-if [ "$CPU_COUNT" -lt 2 ] || [ "$MEMORY_MB" -lt 8192 ]; then
-    echo "ERROR: gateway enclave requires at least 2 vCPUs and 8192 MB" >&2
-    exit 1
+if [ "$TOPOLOGY_MODE" = "full" ]; then
+  start_role gateway_coordinator
+  sleep 15
+  verify_roles gateway_coordinator
+  for role in gateway_scoring_a gateway_scoring_b gateway_autoresearch; do
+    start_role "$role"
+  done
+  sleep 15
+  verify_roles "${ROLES[@]}"
+else
+  start_role "${ROLES[0]}"
+  sleep 15
+  verify_roles "${ROLES[@]}"
 fi
 
-# Check if EIF exists
-if [ ! -f "$EIF_PATH" ]; then
-    echo "❌ ERROR: Enclave image not found at $EIF_PATH"
-    echo "   Run: cd ~/tee && bash build_enclave.sh"
-    exit 1
-fi
-
-echo "📦 Enclave Image: $EIF_PATH"
-echo "🔢 CID: $ENCLAVE_CID"
-echo "🧮 CPU: $CPU_COUNT cores"
-echo "💾 Memory: ${MEMORY_MB} MB"
-echo ""
-
-# Check if enclave already running
-RUNNING=$(sudo nitro-cli describe-enclaves 2>/dev/null | jq -r 'length')
-if [ "$RUNNING" -gt 0 ]; then
-    echo "⚠️  WARNING: Enclave already running. Stopping..."
-    sudo nitro-cli terminate-enclave --all
-    sleep 2
-fi
-
-# Start enclave
-echo "🚀 Starting enclave..."
-sudo nitro-cli run-enclave \
-  --cpu-count $CPU_COUNT \
-  --memory $MEMORY_MB \
-  --eif-path "$EIF_PATH" \
-  --enclave-cid $ENCLAVE_CID
-
-echo ""
-echo "✅ Enclave started!"
-echo ""
-
-# Show status
-echo "📊 Enclave Status:"
 sudo nitro-cli describe-enclaves
 
-# Get enclave ID
-ENCLAVE_ID=$(sudo nitro-cli describe-enclaves | jq -r '.[0].EnclaveID')
-
-echo ""
-echo "================================================================================"
-echo "✅ ENCLAVE RUNNING"
-echo "================================================================================"
-echo "Enclave ID: $ENCLAVE_ID"
-echo "CID: $ENCLAVE_CID"
-echo ""
-echo "⏳ Waiting 15 seconds for enclave service to initialize..."
-sleep 15
-echo "✅ Enclave service should be ready"
-echo ""
-echo "Next steps:"
-echo "  1. Provision PCRs: python3 ~/tee/provision_pcrs.py"
-echo "  2. Test enclave:   python3 ~/tee/test_enclave_rpc.py"
-echo "  3. View console:   sudo nitro-cli console --enclave-id $ENCLAVE_ID"
-echo "================================================================================"
+echo "Gateway enclave topology is healthy"

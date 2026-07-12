@@ -17,6 +17,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VALIDATOR_TEE_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_ROOT="$(dirname "$VALIDATOR_TEE_DIR")"
 BASE_IMAGE_STAMP_FILE="$REPO_ROOT/.validator-base.dockerfile.sha256"
+RUNTIME_ARTIFACT_LOCK="$VALIDATOR_TEE_DIR/runtime-artifacts-v2.lock.json"
+RUNTIME_ARTIFACT_DIR="$REPO_ROOT/.validator-tee-artifacts"
+OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts/validator-runtime}"
 
 echo "=========================================="
 echo "🔨 Building Validator Nitro Enclave Image"
@@ -31,6 +34,7 @@ cd "$REPO_ROOT"
 
 PCR0_COPY_PATHS=(
     "validator_tee/enclave"
+    "validator_tee/runtime-artifacts-v2.lock.json"
     "leadpoet_canonical"
     "leadpoet_verifier"
     "research_lab"
@@ -72,11 +76,20 @@ for path in "${PCR0_COPY_PATHS[@]}"; do
 done
 echo "   ✓ PCR0 Docker context cleaned"
 
-# Step 0b: Normalize file and directory permissions for reproducibility.
+# Step 0b: Stage exact, hash-locked V2 binary dependencies. The generated
+# directory is staged after git clean so local leftovers cannot select code.
+echo "📥 Step 0b: Staging hash-locked validator V2 runtime artifacts..."
+python3 "$VALIDATOR_TEE_DIR/scripts/stage_runtime_artifacts_v2.py" \
+    --lock "$RUNTIME_ARTIFACT_LOCK" \
+    --output-dir "$RUNTIME_ARTIFACT_DIR" \
+    --offline-artifact-root "$OFFLINE_ARTIFACT_ROOT" >/dev/null
+echo "   ✓ Validator V2 runtime artifacts staged and verified"
+
+# Step 0c: Normalize file and directory permissions for reproducibility.
 #
 # Docker COPY preserves mode bits. A local checkout with 664 files and a sparse
 # GitHub checkout with 644 files have identical content but different PCR0.
-echo "🔧 Step 0b: Normalizing PCR0 Docker context permissions..."
+echo "🔧 Step 0c: Normalizing PCR0 Docker context permissions..."
 for path in "${PCR0_COPY_PATHS[@]}"; do
     if [ -d "$path" ]; then
         find "$path" -type d -exec chmod 755 {} + 2>/dev/null || true
@@ -85,11 +98,14 @@ for path in "${PCR0_COPY_PATHS[@]}"; do
         chmod 644 "$path" 2>/dev/null || true
     fi
 done
+find "$RUNTIME_ARTIFACT_DIR" -type d -exec chmod 755 {} + 2>/dev/null || true
+find "$RUNTIME_ARTIFACT_DIR" -type f -exec chmod 644 {} + 2>/dev/null || true
+find "$RUNTIME_ARTIFACT_DIR" -exec touch -h -d @0 {} + 2>/dev/null || true
 
 echo "   ✓ PCR0 Docker context permissions normalized"
 
-echo "🔎 Step 0c: PCR0 Docker context manifest hash..."
-python3 - "${PCR0_COPY_PATHS[@]}" <<'PY'
+echo "🔎 Step 0d: PCR0 Docker context manifest hash..."
+python3 - "${PCR0_COPY_PATHS[@]}" ".validator-tee-artifacts" <<'PY'
 import hashlib
 import os
 import sys
@@ -353,6 +369,30 @@ echo "════════════════════════�
 grep -E "PCR0|PCR1|PCR2" enclave_build_output.txt || echo "(PCR values not found)"
 echo "═══════════════════════════════════════════════════════════"
 echo ""
+
+# Step 6: Emit canonical V2 release metadata from the normalized image and
+# exact EIF. This does not alter the image or PCR0 build procedure.
+echo "🔏 Step 6: Writing validator V2 release metadata..."
+APP_MANIFEST_HASH="$(
+    docker run --rm --entrypoint python3 validator-tee-enclave:latest \
+        -c 'from validator_tee.enclave.runtime_v2 import compute_app_manifest_hash; print(compute_app_manifest_hash())'
+)"
+DEPENDENCY_LOCK_HASH="$(
+    docker run --rm --entrypoint python3 validator-tee-enclave:latest \
+        -c 'from validator_tee.enclave.runtime_v2 import dependency_lock_hash; print(dependency_lock_hash())'
+)"
+NORMALIZED_IMAGE_HASH="$(docker image inspect -f '{{.Id}}' validator-tee-enclave:latest)"
+python3 -m validator_tee.host.release_v2 \
+    --repo-root "$REPO_ROOT" \
+    --measurements "$VALIDATOR_TEE_DIR/enclave_build_output.txt" \
+    --eif "$VALIDATOR_TEE_DIR/validator-enclave.eif" \
+    --app-manifest-hash "$APP_MANIFEST_HASH" \
+    --dependency-lock-hash "$DEPENDENCY_LOCK_HASH" \
+    --normalized-image-hash "$NORMALIZED_IMAGE_HASH" \
+    --output "$VALIDATOR_TEE_DIR/validator-v2-release.json"
+echo "   ✓ Validator V2 release metadata written"
+echo ""
+
 echo "Next steps:"
 echo "  1. Run enclave: bash scripts/start_enclave.sh"
 echo "  2. Check status: nitro-cli describe-enclaves"

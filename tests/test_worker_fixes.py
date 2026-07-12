@@ -18,6 +18,7 @@ verified against a staging database before production rollout.
 """
 
 from datetime import datetime, timedelta, timezone
+import inspect
 from pathlib import Path
 from urllib.error import URLError
 
@@ -39,6 +40,16 @@ MINER_HOTKEY = "5F3sa2TJAWMqDhXG6jhV4N8ko9SxwGy8TpaNS1repo5EYjQX"
 @pytest.fixture
 def hosted_worker():
     return worker_mod.ResearchLabHostedWorker(ResearchLabGatewayConfig(), worker_ref="worker-a")
+
+
+def test_live_autoresearch_run_never_resolves_plaintext_openrouter_keys_on_parent():
+    source = inspect.getsource(worker_mod.ResearchLabHostedWorker._process_run)
+    assert "key_resolver.resolve(" not in source
+    assert "key_resolver.resolve_management_key(" not in source
+    assert "_preflight_openrouter_credit(" not in source
+    assert "verify_openrouter_guard_v2(" in source
+    assert "build_attested_code_edit_dev_evaluator_v2(" in source
+    assert "build_code_edit_dev_evaluator(" not in source
 
 
 def test_dev_eval_candidate_width_is_separate_from_paid_finalist_count():

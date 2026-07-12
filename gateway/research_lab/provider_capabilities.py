@@ -311,7 +311,23 @@ def _credential_ready(provider: Mapping[str, Any]) -> bool:
     return False
 
 
-def _provider_doc_from_source_row(row: Mapping[str, Any]) -> dict[str, Any] | None:
+def _resolved_credential_ready(
+    provider: Mapping[str, Any],
+    resolver: Callable[[Mapping[str, Any]], bool | None] | None,
+) -> bool:
+    if resolver is not None:
+        resolved = resolver(provider)
+        if resolved is not None:
+            return bool(resolved)
+    return _credential_ready(provider)
+
+
+def _provider_doc_from_source_row(
+    row: Mapping[str, Any],
+    *,
+    credential_ready_resolver: Callable[[Mapping[str, Any]], bool | None]
+    | None = None,
+) -> dict[str, Any] | None:
     if str(row.get("provision_status") or "") != "provisioned_autoresearch_eligible":
         return None
     provision = row.get("provision_doc") if isinstance(row.get("provision_doc"), Mapping) else {}
@@ -364,7 +380,10 @@ def _provider_doc_from_source_row(row: Mapping[str, Any]) -> dict[str, Any] | No
             },
         }
     )
-    provider["credential_ready"] = _credential_ready(provider)
+    provider["credential_ready"] = _resolved_credential_ready(
+        provider,
+        credential_ready_resolver,
+    )
     return provider
 
 
@@ -383,7 +402,12 @@ def _load_private_snapshot_rows_sync() -> list[Mapping[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def _parse_private_snapshot(row: Mapping[str, Any]) -> tuple[list[dict[str, Any]], str]:
+def _parse_private_snapshot(
+    row: Mapping[str, Any],
+    *,
+    credential_ready_resolver: Callable[[Mapping[str, Any]], bool | None]
+    | None = None,
+) -> tuple[list[dict[str, Any]], str]:
     doc = row.get("registry_doc") if isinstance(row.get("registry_doc"), Mapping) else {}
     raw_providers = doc.get("providers") if isinstance(doc.get("providers"), list) else None
     if not raw_providers:
@@ -402,7 +426,10 @@ def _parse_private_snapshot(row: Mapping[str, Any]) -> tuple[list[dict[str, Any]
         errors = validate_capability_provider_doc(provider)
         if errors:
             raise ValueError("invalid private capability provider: " + ";".join(errors))
-        provider["credential_ready"] = _credential_ready(provider)
+        provider["credential_ready"] = _resolved_credential_ready(
+            provider,
+            credential_ready_resolver,
+        )
     expected_hash = sha256_json(doc)
     registry_hash = str(row.get("registry_hash") or "")
     if registry_hash != expected_hash:
@@ -410,14 +437,22 @@ def _parse_private_snapshot(row: Mapping[str, Any]) -> tuple[list[dict[str, Any]
     return providers, registry_hash
 
 
-def _legacy_provider_doc(value: Mapping[str, Any]) -> dict[str, Any]:
+def _legacy_provider_doc(
+    value: Mapping[str, Any],
+    *,
+    credential_ready_resolver: Callable[[Mapping[str, Any]], bool | None]
+    | None = None,
+) -> dict[str, Any]:
     provider = dict(value)
     provider.setdefault("origin", "legacy_fallback")
     provider.setdefault("reward_eligible", False)
     provider.setdefault("capability_policy", {})
     provider.setdefault("planner_summary", {})
     provider.setdefault("probe_endpoints", [])
-    provider["credential_ready"] = _credential_ready(provider)
+    provider["credential_ready"] = _resolved_credential_ready(
+        provider,
+        credential_ready_resolver,
+    )
     return provider
 
 
@@ -427,10 +462,18 @@ def load_effective_provider_capabilities_sync(
     strict_remote: bool = False,
     private_row_loader: Callable[[], Mapping[str, Any] | Sequence[Mapping[str, Any]] | None] | None = None,
     source_row_loader: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
+    credential_ready_resolver: Callable[[Mapping[str, Any]], bool | None]
+    | None = None,
 ) -> EffectiveProviderCapabilities:
     """Merge private snapshot, ready SOURCE_ADD rows, then continuity fallback."""
 
-    static_docs = [_legacy_provider_doc(item) for item in static_provider_docs]
+    static_docs = [
+        _legacy_provider_doc(
+            item,
+            credential_ready_resolver=credential_ready_resolver,
+        )
+        for item in static_provider_docs
+    ]
     private_loaded = False
     private_hash = ""
     private_docs: list[dict[str, Any]] = []
@@ -446,7 +489,10 @@ def load_effective_provider_capabilities_sync(
         last_error: Exception | None = None
         for candidate_row in candidate_rows:
             try:
-                private_docs, private_hash = _parse_private_snapshot(candidate_row)
+                private_docs, private_hash = _parse_private_snapshot(
+                    candidate_row,
+                    credential_ready_resolver=credential_ready_resolver,
+                )
                 private_loaded = True
                 break
             except Exception as exc:
@@ -477,7 +523,10 @@ def load_effective_provider_capabilities_sync(
     reserved_ids = {str(item.get("id") or "") for item in static_docs + private_docs}
     source_docs: list[dict[str, Any]] = []
     for row in source_rows:
-        provider = _provider_doc_from_source_row(row)
+        provider = _provider_doc_from_source_row(
+            row,
+            credential_ready_resolver=credential_ready_resolver,
+        )
         if provider is None:
             warning_codes.append("source_add_provider_missing_registry_entry")
             continue

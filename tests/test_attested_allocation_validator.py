@@ -179,14 +179,16 @@ def test_independent_gateway_identity_loader_uses_configured_cache(tmp_path, mon
     cache.write_text(
         __import__("json").dumps(
             {
-                "schema_version": "leadpoet.gateway_pcr0_cache.v1",
+                "schema_version": "leadpoet.gateway_pcr0_cache.v2",
                 "entries": [
                     {
                         "commit_sha": COMMIT,
+                        "role": "gateway_coordinator",
                         "pcr0": PCR0,
                         "verified_build_count": 3,
                     }
                 ],
+                "pinned_deployments": [],
             }
         )
     )

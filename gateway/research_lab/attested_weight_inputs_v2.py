@@ -1,0 +1,211 @@
+"""Build the complete gateway-owned input set for validator V2 authority."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Mapping, Sequence
+
+from gateway.research_lab.attested_coordinator_v2 import execute_coordinator_v2
+from gateway.research_lab.attested_v2_store import (
+    load_sourcing_epoch_graphs_v2,
+)
+from gateway.tee.coordinator_executor_v2 import OP_ATTEST_WEIGHT_INPUT
+from leadpoet_canonical.attested_v2 import canonical_json, validate_receipt_graph
+from leadpoet_canonical.weight_authority_v2 import (
+    GATEWAY_WEIGHT_INPUT_CATEGORIES,
+    WEIGHT_INPUT_PURPOSES,
+    gateway_weight_input_value_documents_v2,
+)
+
+
+_ALLOCATION_CATEGORIES = frozenset(
+    {
+        "research_lab_allocation",
+        "champions",
+        "reimbursements",
+        "source_add_rewards",
+    }
+)
+_ANOMALY_SOURCE_CATEGORIES = (
+    "research_lab_allocation",
+    "fulfillment_rewards",
+    "leaderboard",
+    "bans",
+    "sourcing_history",
+)
+
+
+class AttestedWeightInputsV2Error(RuntimeError):
+    """Gateway weight inputs are incomplete, conflicting, or unverifiable."""
+
+
+def _union_receipt_sets(
+    graphs: Sequence[Mapping[str, Any]],
+) -> Dict[str, list[dict[str, Any]]]:
+    collections = {
+        "boot_identities": ("boot_identity_hash", {}),
+        "receipts": ("receipt_hash", {}),
+        "transport_attempts": ("attempt_hash", {}),
+        "host_operations": ("request", {}),
+    }
+    for graph in graphs:
+        validate_receipt_graph(graph)
+        for field, (key_field, values) in collections.items():
+            for item in graph[field]:
+                key = (
+                    str(item["request"]["request_hash"])
+                    if key_field == "request"
+                    else str(item[key_field])
+                )
+                normalized = dict(item)
+                if key in values and values[key] != normalized:
+                    raise AttestedWeightInputsV2Error(
+                        "V2 receipt graph hash conflicts across weight inputs"
+                    )
+                values[key] = normalized
+    return {
+        field: [values[key] for key in sorted(values)]
+        for field, (_key_field, values) in collections.items()
+    }
+
+
+async def build_gateway_weight_inputs_v2(
+    *,
+    calculation_snapshot: Mapping[str, Any],
+    allocation_graph: Mapping[str, Any],
+    leaderboard_window_start: str,
+    leaderboard_window_end: str,
+    execute: Any = execute_coordinator_v2,
+    load_sourcing_graphs: Any = load_sourcing_epoch_graphs_v2,
+    execution_options: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Produce every coordinator input receipt from measured source reads."""
+
+    calculation = dict(calculation_snapshot)
+    epoch_id = calculation.get("epoch_id")
+    if not isinstance(epoch_id, int) or isinstance(epoch_id, bool) or epoch_id < 0:
+        raise AttestedWeightInputsV2Error("weight input epoch is invalid")
+    validate_receipt_graph(
+        allocation_graph,
+        required_purposes={"research_lab.allocation.v2"},
+    )
+    allocation_receipts = {
+        str(receipt["receipt_hash"]): receipt
+        for receipt in allocation_graph["receipts"]
+    }
+    allocation_hash = str(allocation_graph["root_receipt_hash"])
+    allocation_receipt = allocation_receipts.get(allocation_hash)
+    if (
+        not isinstance(allocation_receipt, Mapping)
+        or allocation_receipt.get("role") != "gateway_coordinator"
+        or allocation_receipt.get("purpose") != "research_lab.allocation.v2"
+        or int(allocation_receipt.get("epoch_id", -1)) != epoch_id
+    ):
+        raise AttestedWeightInputsV2Error(
+            "allocation graph root is not the epoch authority receipt"
+        )
+    expected_documents = gateway_weight_input_value_documents_v2(
+        calculation_snapshot=calculation,
+        gateway_authority_event_hash=allocation_hash,
+    )
+    sourcing_graphs = await load_sourcing_graphs(current_epoch=epoch_id)
+    options = dict(execution_options or {})
+    executions = {}
+    ordered_categories = sorted(
+        category
+        for category in GATEWAY_WEIGHT_INPUT_CATEGORIES
+        if category != "anomaly_adjustments"
+    ) + ["anomaly_adjustments"]
+    for sequence, category in enumerate(ordered_categories):
+        role, purpose = WEIGHT_INPUT_PURPOSES[category]
+        if role != "gateway_coordinator":
+            raise AttestedWeightInputsV2Error(
+                "gateway input category has a non-coordinator role"
+            )
+        if category in _ALLOCATION_CATEGORIES:
+            parents = (allocation_graph,)
+        elif category == "sourcing_history":
+            parents = tuple(sourcing_graphs)
+        elif category == "anomaly_adjustments":
+            missing = [
+                source
+                for source in _ANOMALY_SOURCE_CATEGORIES
+                if source not in executions
+            ]
+            if missing:
+                raise AttestedWeightInputsV2Error(
+                    "anomaly sources were not executed first"
+                )
+            parents = tuple(
+                executions[source]["receipt_graph"]
+                for source in _ANOMALY_SOURCE_CATEGORIES
+            )
+        else:
+            parents = ()
+        payload = {
+            "category": category,
+            "calculation_snapshot": calculation,
+            "gateway_authority_event_hash": allocation_hash,
+            "allocation_receipt": dict(allocation_receipt),
+            "leaderboard_window_start": str(leaderboard_window_start),
+            "leaderboard_window_end": str(leaderboard_window_end),
+        }
+        if category == "anomaly_adjustments":
+            payload["upstream_documents"] = {
+                source: dict(executions[source]["result"])
+                for source in _ANOMALY_SOURCE_CATEGORIES
+            }
+        value = await execute(
+            operation=OP_ATTEST_WEIGHT_INPUT,
+            purpose=purpose,
+            epoch_id=epoch_id,
+            sequence=sequence,
+            payload=payload,
+            parent_graphs=parents,
+            **options,
+        )
+        if not isinstance(value, Mapping) or value.get("status") != "succeeded":
+            raise AttestedWeightInputsV2Error(
+                "%s measured input failed" % category
+            )
+        graph = value.get("receipt_graph")
+        receipt = value.get("receipt")
+        document = value.get("result")
+        if (
+            not isinstance(graph, Mapping)
+            or not isinstance(receipt, Mapping)
+            or not isinstance(document, Mapping)
+        ):
+            raise AttestedWeightInputsV2Error(
+                "%s measured input is incomplete" % category
+            )
+        validate_receipt_graph(graph, required_purposes={purpose})
+        if (
+            graph.get("root_receipt_hash") != receipt.get("receipt_hash")
+            or receipt.get("purpose") != purpose
+            or canonical_json(document)
+            != canonical_json(expected_documents[category])
+        ):
+            raise AttestedWeightInputsV2Error(
+                "%s measured input differs from calculation" % category
+            )
+        executions[category] = dict(value)
+
+    all_graphs = [
+        executions[category]["receipt_graph"]
+        for category in sorted(executions)
+    ]
+    receipt_set = _union_receipt_sets(all_graphs)
+    input_hashes = {
+        category: str(executions[category]["receipt"]["receipt_hash"])
+        for category in sorted(executions)
+    }
+    if set(input_hashes) != set(GATEWAY_WEIGHT_INPUT_CATEGORIES):
+        raise AttestedWeightInputsV2Error(
+            "gateway V2 weight input categories are incomplete"
+        )
+    return {
+        "input_receipt_hashes": input_hashes,
+        "gateway_authority_event_hash": allocation_hash,
+        "upstream_receipt_set": receipt_set,
+        "executions": executions,
+    }

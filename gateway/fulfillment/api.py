@@ -1973,6 +1973,7 @@ def get_fulfillment_leaderboard(limit: int = 3):
             .select("miner_hotkey, reward_pct") \
             .eq("is_winner", True) \
             .gte("computed_at", window_start.isoformat()) \
+            .lte("computed_at", now_iso) \
             .range(offset, offset + 999) \
             .execute()
         if not page.data:

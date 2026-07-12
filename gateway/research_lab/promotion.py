@@ -2577,6 +2577,43 @@ class ResearchLabPromotionController:
         obligation = build_champion_reward_obligation(obligation_input, policy)
         if obligation["status"] != "active":
             return {"champion_reward_status": obligation["status"]}
+        promotion_decision = promotion_gate_decision(
+            score_bundle,
+            candidate_kind=str(candidate.get("candidate_kind") or "image_build"),
+            candidate_parent=str(candidate.get("parent_artifact_hash") or ""),
+            active_parent=str(candidate.get("parent_artifact_hash") or ""),
+            threshold_points=threshold,
+            auto_promotion_enabled=True,
+        ).to_dict()
+        from gateway.research_lab.attested_v2_store import (
+            load_business_artifact_graph_v2,
+        )
+        from gateway.research_lab.v2_authority import (
+            authorize_reward_decision_v2,
+        )
+
+        bundle_hash = str(score_bundle.get("score_bundle_hash") or "").lower()
+        promotion_graph = await load_business_artifact_graph_v2(
+            artifact_kind="promotion_decision",
+            artifact_ref="score_bundle:" + bundle_hash.removeprefix("sha256:"),
+            artifact_hash=bundle_hash,
+        )
+        await authorize_reward_decision_v2(
+            epoch_id=max(int(current_epoch), int(evaluation_epoch)),
+            decision_kind="champion",
+            decision_payload={
+                "obligation_input": obligation_input,
+                "policy": policy,
+                "promotion_decision": promotion_decision,
+            },
+            expected_result={
+                "decision_kind": "champion",
+                "reward": obligation,
+            },
+            artifact_kind="champion_reward_decision",
+            artifact_ref=str(obligation["champion_reward_id"]),
+            parent_graphs=(promotion_graph,),
+        )
         row, _event = await create_champion_reward_obligation(
             obligation=obligation,
             ticket_id=str(candidate["ticket_id"]),
@@ -2631,16 +2668,17 @@ class ResearchLabPromotionController:
             )
             if not provisioned_rows:
                 return {"source_add_reward_status": "blocked", "blockers": ["no_provisioned_source_add_sources"]}
-            from gateway.research_lab.source_add_llm_judge import (
-                judge_source_add_implementation,
-                openrouter_key_for_source_add_judge,
+            from gateway.research_lab.v2_authority import (
+                judge_source_add_implementation_v2,
+                persist_source_add_judge_reward_link_v2,
             )
 
-            api_key = openrouter_key_for_source_add_judge()
-            if not api_key:
-                return {"source_add_reward_status": "blocked", "blockers": ["source_add_llm_judge_key_missing"]}
-            verdict = await judge_source_add_implementation(
-                api_key=api_key,
+            verdict, judge_outcome = await judge_source_add_implementation_v2(
+                epoch_id=int(
+                    score_bundle.get("evaluation_epoch")
+                    or getattr(self.config, "evaluation_epoch", 0)
+                    or 0
+                ),
                 candidate=candidate,
                 score_bundle=score_bundle,
                 provisioned_sources=provisioned_rows,
@@ -2732,6 +2770,46 @@ class ResearchLabPromotionController:
             else:
                 reward_doc = leg2.to_dict()
                 try:
+                    from gateway.research_lab.v2_authority import (
+                        authorize_reward_decision_v2,
+                    )
+
+                    judge_graph = judge_outcome.get("receipt_graph")
+                    judge_result = judge_outcome.get("result")
+                    if not isinstance(judge_graph, Mapping) or not isinstance(
+                        judge_result, Mapping
+                    ):
+                        raise RuntimeError("SOURCE_ADD Leg 2 judge receipt graph is missing")
+                    await authorize_reward_decision_v2(
+                        epoch_id=max(int(current_epoch), int(evaluation_epoch)),
+                        decision_kind="source_add_leg2",
+                        decision_payload={
+                            "adapter_id": adapter_id,
+                            "miner_ref": str(matched_row.get("miner_hotkey") or ""),
+                            "start_epoch": start_epoch,
+                            "trigger_evidence": dict(leg2.trigger_evidence or {}),
+                            "judge_result": dict(judge_result),
+                            "existing_rewards": list(reward_rows),
+                            "alpha_percent": float(
+                                getattr(self.config, "source_add_leg2_alpha_percent", 5.0)
+                                or 5.0
+                            ),
+                            "reward_epochs": int(
+                                getattr(self.config, "lab_reward_epochs", 20) or 20
+                            ),
+                        },
+                        expected_result={
+                            "decision_kind": "source_add_leg2",
+                            "reward": reward_doc,
+                        },
+                        artifact_kind="source_add_reward_decision",
+                        artifact_ref=leg2.reward_ref,
+                        parent_graphs=(judge_graph,),
+                    )
+                    await persist_source_add_judge_reward_link_v2(
+                        outcome=judge_outcome,
+                        reward_ref=leg2.reward_ref,
+                    )
                     await insert_row(
                         "research_lab_source_add_reward_obligations",
                         {

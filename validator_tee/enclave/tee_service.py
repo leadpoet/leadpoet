@@ -44,9 +44,6 @@ from cryptography.hazmat.primitives import serialization
 
 print("🐛 DEBUG: Cryptography imports OK", flush=True)
 
-# CBOR for attestation documents
-import cbor2
-
 # The enclave interpreter only has this script's directory on sys.path; the
 # repo-level packages copied to /app (leadpoet_canonical, research_lab, ...)
 # must be importable before the imports below or the enclave dies at boot.
@@ -54,15 +51,7 @@ _APP_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 if _APP_ROOT not in sys.path:
     sys.path.insert(0, _APP_ROOT)
 
-from leadpoet_canonical.attested_receipts import (
-    WEIGHT_PURPOSE,
-    WEIGHT_ROLE,
-    build_receipt_body,
-    create_signed_receipt,
-)
-from leadpoet_canonical.weight_computation import compute_final_weights, sha256_json
-
-print("🐛 DEBUG: CBOR imports OK", flush=True)
+print("🐛 DEBUG: Canonical runtime path configured", flush=True)
 
 # ============================================================================
 # VSOCK CONFIGURATION
@@ -90,6 +79,13 @@ code_hash: Optional[str] = None
 
 # Boot ID for this enclave session
 boot_id: Optional[str] = None
+
+# Authoritative V2 runtime state. Configuration is immutable for one enclave
+# boot; once enabled, legacy blind-signing RPCs stay disabled until restart.
+validator_runtime_v2: Optional[Any] = None
+validator_weight_authority_v2: Optional[Any] = None
+validator_hotkey_authority_v2: Optional[Any] = None
+validator_chain_source_v2: Optional[Any] = None
 
 
 # ============================================================================
@@ -179,168 +175,102 @@ def compute_code_hash() -> str:
     return code_hash
 
 
-# ============================================================================
-# SIGNING (CONSTRAINED - Only Signs Weight Hashes)
-# ============================================================================
+def configure_authoritative_v2(
+    configuration: Dict[str, Any],
+    expected_config_hash: str,
+) -> Dict[str, Any]:
+    """Configure the hardware-only V2 release and weight authority once."""
 
-def sign_weights_hash(weights_hash: str) -> str:
-    """
-    Sign a weights hash using the enclave's private key.
-    
-    SECURITY: This function ONLY signs weight hashes, not arbitrary data.
-    The hash is verified to be a valid SHA256 hex string before signing.
-    
-    Args:
-        weights_hash: SHA256 hex string (64 characters)
-        
-    Returns:
-        Ed25519 signature as hex string
-        
-    Raises:
-        ValueError: If hash format is invalid
-    """
-    if private_key is None:
-        generate_keypair()
-    
-    # Validate hash format (must be 64 hex chars = 32 bytes)
-    if not weights_hash or len(weights_hash) != 64:
-        raise ValueError(f"Invalid weights_hash length: {len(weights_hash) if weights_hash else 0}, expected 64")
-    
-    try:
-        hash_bytes = bytes.fromhex(weights_hash)
-    except ValueError as e:
-        raise ValueError(f"Invalid hex in weights_hash: {e}")
-    
-    if len(hash_bytes) != 32:
-        raise ValueError(f"weights_hash must be 32 bytes, got {len(hash_bytes)}")
-    
-    # Sign the hash bytes directly (Ed25519 signs raw bytes)
-    signature = private_key.sign(hash_bytes)
-    signature_hex = signature.hex()
-    
-    print(f"[TEE] ✅ Signed weights hash: {weights_hash[:16]}...", flush=True)
-    
-    return signature_hex
+    global validator_runtime_v2, validator_weight_authority_v2, validator_chain_source_v2
+    from validator_tee.enclave.runtime_v2 import ValidatorRuntimeIdentityV2
+    from validator_tee.enclave.chain_source_v2 import ValidatorChainSourceV2
+    from validator_tee.enclave.weight_authority_v2 import ValidatorWeightAuthorityV2
 
-
-# ============================================================================
-# ATTESTATION DOCUMENT
-# ============================================================================
-
-def get_attestation_document(epoch_id: int, purpose: str = "validator_weights") -> Dict[str, Any]:
-    """
-    Get attestation document with epoch_id binding.
-    
-    The attestation includes:
-    - purpose: "validator_weights"
-    - epoch_id: Bound to specific epoch (replay protection)
-    - enclave_pubkey: The signing public key
-    - code_hash: Hash of validator code
-    
-    Args:
-        epoch_id: Epoch being attested
-        
-    Returns:
-        Dict with attestation_b64 and user_data
-    """
-    if public_key_hex is None:
-        generate_keypair()
-    
-    # Build user_data for attestation
-    user_data = {
-        "purpose": str(purpose),
-        "epoch_id": epoch_id,
-        "enclave_pubkey": public_key_hex,
-        "code_hash": compute_code_hash(),
-    }
-    
-    # Encode user_data as CBOR
-    user_data_cbor = cbor2.dumps(user_data)
-    
-    # Try to get real Nitro attestation
-    try:
-        from nsm_lib import get_attestation_document as get_nsm_attestation
-        
-        # Request attestation from NSM device
-        attestation_response = get_nsm_attestation(
-            user_data=user_data_cbor,
-            public_key=public_key.public_bytes(
-                encoding=serialization.Encoding.Raw,
-                format=serialization.PublicFormat.Raw
-            )
+    if validator_runtime_v2 is None:
+        validator_runtime_v2 = ValidatorRuntimeIdentityV2(
+            signing_pubkey_supplier=get_public_key,
         )
-        
-        # Extract the raw COSE_Sign1 attestation document from NSM response
-        # NSM returns: {"Attestation": {"document": <bytes - COSE_Sign1>}}
-        # The "document" is already the raw COSE_Sign1 structure (CBOR bytes)
-        import base64
-        attestation_bytes = attestation_response["Attestation"]["document"]
-        attestation_b64 = base64.b64encode(attestation_bytes).decode()
-        
-        print(f"[TEE] ✅ Generated REAL Nitro attestation for epoch {epoch_id}", flush=True)
-        
-        return {
-            "attestation_b64": attestation_b64,
-            "user_data": user_data,
-            "is_mock": False
-        }
-    except Exception as e:
-        # Fall back to mock attestation (for development/testing)
-        print(f"[TEE] ⚠️ NSM not available ({e}), using mock attestation", flush=True)
-        
-        import base64
-        mock_attestation = {
-            "mock": True,
-            "user_data": user_data,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-        attestation_b64 = base64.b64encode(cbor2.dumps(mock_attestation)).decode()
-        
-        return {
-            "attestation_b64": attestation_b64,
-            "user_data": user_data,
-            "is_mock": True
-        }
-
-
-def compute_and_sign_weights_v2(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    """Compute final weights inside the enclave and sign only that result."""
-
-    result = compute_final_weights(snapshot)
-    signature = sign_weights_hash(result["weights_hash"])
-    attestation = get_attestation_document(result["epoch_id"], purpose=WEIGHT_PURPOSE)
-    evidence_roots = {}
-    allocation_receipt_hash = str(snapshot.get("research_lab_allocation_receipt_hash") or "")
-    if allocation_receipt_hash:
-        evidence_roots["research_lab_allocation_receipt"] = allocation_receipt_hash
-    body = build_receipt_body(
-        role=WEIGHT_ROLE,
-        purpose=WEIGHT_PURPOSE,
-        job_id="validator-weights:%s:%s" % (result["epoch_id"], result["snapshot_hash"].split(":", 1)[1][:32]),
-        epoch_id=result["epoch_id"],
-        commit_sha=str(snapshot["commit_sha"]),
-        build_manifest_hash="sha256:" + compute_code_hash(),
-        config_hash=str(snapshot["config_hash"]),
-        input_root=result["snapshot_hash"],
-        output_root=sha256_json(result),
-        evidence_roots=evidence_roots,
-        parent_receipt_hashes=snapshot["parent_receipt_hashes"],
-        status="succeeded",
-        issued_at=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    boot_identity = validator_runtime_v2.configure(
+        configuration,
+        expected_config_hash=expected_config_hash,
     )
-    receipt = create_signed_receipt(
-        body=body,
-        enclave_pubkey=get_public_key(),
-        attestation_document_b64=attestation["attestation_b64"],
-        sign_digest=lambda digest: private_key.sign(digest),
+    if validator_chain_source_v2 is None:
+        validator_chain_source_v2 = ValidatorChainSourceV2()
+    if validator_weight_authority_v2 is None:
+        validator_weight_authority_v2 = ValidatorWeightAuthorityV2(
+            boot_identity_supplier=validator_runtime_v2.boot_identity,
+            gateway_expectations_supplier=validator_runtime_v2.gateway_expectations,
+            sign_digest=lambda digest: private_key.sign(digest),
+            chain_source=validator_chain_source_v2,
+        )
+    return boot_identity
+
+
+def get_authoritative_v2_boot_identity() -> Dict[str, Any]:
+    if validator_runtime_v2 is None:
+        raise RuntimeError("validator authoritative V2 runtime is not configured")
+    return validator_runtime_v2.boot_identity()
+
+
+def configure_hotkey_authority_v2(
+    configuration: Dict[str, Any],
+    expected_config_hash: str,
+) -> Dict[str, Any]:
+    """Configure the measured drand backend and KMS-sealed sr25519 authority."""
+
+    global validator_hotkey_authority_v2, validator_chain_source_v2
+    if validator_runtime_v2 is None:
+        raise RuntimeError("validator authoritative V2 runtime is not configured")
+    from leadpoet_canonical.attested_v2 import sha256_json as sha256_json_v2
+    from validator_tee.enclave.drand_v2 import CtypesDrandCommitBackendV2
+    from validator_tee.enclave.hotkey_authority_v2 import (
+        ValidatorHotkeyAuthorityV2,
+        load_chain_signing_profile,
+        validate_hotkey_authority_configuration,
     )
-    return {
-        "weight_result": result,
-        "weights_signature": signature,
-        "receipt": receipt,
-        "attestation_user_data": attestation["user_data"],
-        "attestation_is_mock": bool(attestation.get("is_mock")),
-    }
+    from validator_tee.enclave.runtime_v2 import _nsm_attest
+
+    normalized = validate_hotkey_authority_configuration(configuration)
+    observed_hash = sha256_json_v2(normalized)
+    if observed_hash != str(expected_config_hash or "").lower():
+        raise RuntimeError("validator hotkey configuration hash mismatch")
+    if observed_hash != validator_runtime_v2.hotkey_authority_config_hash():
+        raise RuntimeError("validator hotkey configuration differs from boot release")
+    profile = load_chain_signing_profile()
+    if sha256_json_v2(profile) != normalized["chain_signing_profile_hash"]:
+        raise RuntimeError("measured chain signing profile hash mismatch")
+    if validator_hotkey_authority_v2 is None:
+        drand_backend = CtypesDrandCommitBackendV2(
+            library_path=normalized["drand_library_path"],
+            expected_sha256=normalized["drand_library_sha256"],
+        )
+        validator_hotkey_authority_v2 = ValidatorHotkeyAuthorityV2(
+            boot_identity_supplier=validator_runtime_v2.boot_identity,
+            validator_hotkey=normalized["validator_hotkey"],
+            hotkey_public_key_hex=normalized["hotkey_public_key"],
+            chain_profile=profile,
+            sign_receipt_digest=lambda digest: private_key.sign(digest),
+            attestation_supplier=_nsm_attest,
+            drand_backend=drand_backend,
+            chain_source=validator_chain_source_v2,
+        )
+    return validator_hotkey_authority_v2.public_state()
+
+
+def compute_authoritative_weights_v2(request: Dict[str, Any]) -> Dict[str, Any]:
+    if validator_weight_authority_v2 is None:
+        raise RuntimeError("validator authoritative V2 runtime is not configured")
+    if validator_hotkey_authority_v2 is None:
+        raise RuntimeError("validator V2 hotkey authority is not configured")
+    result = validator_weight_authority_v2.compute(request)
+    result["weight_authorization_id"] = (
+        validator_hotkey_authority_v2.register_weight_result(result)
+    )
+    return result
+
+
+def _authoritative_v2_enabled() -> bool:
+    return validator_runtime_v2 is not None
 
 
 # ============================================================================
@@ -352,61 +282,257 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
     Handle RPC request from parent EC2.
     
     Supported commands:
-    - get_public_key: Return enclave's public key
-    - sign_weights: Sign a weights hash
-    - get_attestation: Get attestation document for epoch
-    - compute_weights_v2: Compute and sign final weights from an immutable snapshot
+    - configure_authoritative_v2: Lock the measured V2 release for this boot
+    - get_authoritative_v2_boot_identity: Return the hardware V2 boot identity
+    - configure_hotkey_authority_v2: Lock hotkey, chain, and drand identity
+    - get_hotkey_recipient_v2: Return an attested KMS recipient request
+    - provision_hotkey_v2: Unseal the validator seed directly inside Nitro
+    - get_hotkey_state_v2: Return non-secret hotkey authority state
+    - sign_application_message_v2: Sign one recognized application domain
+    - prepare_weight_commit_v2: Generate the exact timelocked weight commitment
+    - sign_weight_extrinsic_v2: Sign one enclave-authorized SCALE payload
+    - recover_weight_publication_v2: Validate and restore public signed state
+    - sign_serve_axon_extrinsic_v2: Sign the exact measured serve_axon payload
+    - compute_authoritative_weights_v2: Verify ancestry, compute, and sign weights
     - health: Health check
     """
     command = request.get("command")
+
+    if command in {
+        "get_public_key",
+        "sign_weights",
+        "get_attestation",
+        "compute_weights_v2",
+    }:
+        return {
+            "status": "error",
+            "error": "Legacy validator V1 RPC is permanently removed",
+        }
     
     try:
-        if command == "get_public_key":
+        if command == "configure_authoritative_v2":
+            configuration = request.get("configuration")
+            expected_config_hash = request.get("expected_config_hash")
+            if not isinstance(configuration, dict) or not isinstance(
+                expected_config_hash, str
+            ):
+                return {
+                    "status": "error",
+                    "error": "Missing authoritative V2 configuration",
+                }
             return {
                 "status": "ok",
-                "public_key": get_public_key(),
-                "code_hash": compute_code_hash(),
-                "boot_id": boot_id,
-            }
-        
-        elif command == "sign_weights":
-            weights_hash = request.get("weights_hash")
-            if not weights_hash:
-                return {"status": "error", "error": "Missing weights_hash"}
-            
-            signature = sign_weights_hash(weights_hash)
-            return {
-                "status": "ok",
-                "signature": signature,
-                "public_key": public_key_hex,
-            }
-        
-        elif command == "get_attestation":
-            epoch_id = request.get("epoch_id")
-            if epoch_id is None:
-                return {"status": "error", "error": "Missing epoch_id"}
-            
-            attestation = get_attestation_document(epoch_id)
-            return {
-                "status": "ok",
-                **attestation
+                "boot_identity": configure_authoritative_v2(
+                    configuration,
+                    expected_config_hash,
+                ),
             }
 
-        elif command == "compute_weights_v2":
-            snapshot = request.get("snapshot")
-            if not isinstance(snapshot, dict):
-                return {"status": "error", "error": "Missing or invalid snapshot"}
+        elif command == "get_authoritative_v2_boot_identity":
             return {
                 "status": "ok",
-                **compute_and_sign_weights_v2(snapshot),
+                "boot_identity": get_authoritative_v2_boot_identity(),
             }
-        
+
+        elif command == "configure_hotkey_authority_v2":
+            configuration = request.get("configuration")
+            expected_config_hash = request.get("expected_config_hash")
+            if not isinstance(configuration, dict) or not isinstance(
+                expected_config_hash, str
+            ):
+                return {
+                    "status": "error",
+                    "error": "Missing validator hotkey V2 configuration",
+                }
+            return {
+                "status": "ok",
+                "hotkey_state": configure_hotkey_authority_v2(
+                    configuration,
+                    expected_config_hash,
+                ),
+            }
+
+        elif command == "get_hotkey_recipient_v2":
+            if validator_hotkey_authority_v2 is None:
+                raise RuntimeError("validator V2 hotkey authority is not configured")
+            return {
+                "status": "ok",
+                "recipient_request": (
+                    validator_hotkey_authority_v2.recipient_request()
+                ),
+            }
+
+        elif command == "provision_hotkey_v2":
+            if validator_hotkey_authority_v2 is None:
+                raise RuntimeError("validator V2 hotkey authority is not configured")
+            ciphertext = request.get("ciphertext_for_recipient_b64")
+            if not isinstance(ciphertext, str):
+                return {
+                    "status": "error",
+                    "error": "Missing KMS CiphertextForRecipient",
+                }
+            return {
+                "status": "ok",
+                "hotkey_state": validator_hotkey_authority_v2.provision_seed(
+                    ciphertext_for_recipient_b64=ciphertext,
+                ),
+            }
+
+        elif command == "get_hotkey_state_v2":
+            if validator_hotkey_authority_v2 is None:
+                raise RuntimeError("validator V2 hotkey authority is not configured")
+            return {
+                "status": "ok",
+                "hotkey_state": validator_hotkey_authority_v2.public_state(),
+            }
+
+        elif command == "sign_application_message_v2":
+            if validator_hotkey_authority_v2 is None:
+                raise RuntimeError("validator V2 hotkey authority is not configured")
+            message_hex = request.get("message_hex")
+            parent_receipt_hash = request.get("parent_receipt_hash")
+            if not isinstance(message_hex, str) or (
+                parent_receipt_hash is not None
+                and not isinstance(parent_receipt_hash, str)
+            ):
+                return {
+                    "status": "error",
+                    "error": "Invalid application signature request",
+                }
+            return {
+                "status": "ok",
+                "signature_result": (
+                    validator_hotkey_authority_v2.sign_application_message(
+                        message_hex=message_hex,
+                        parent_receipt_hash=parent_receipt_hash,
+                    )
+                ),
+            }
+
+        elif command == "prepare_weight_commit_v2":
+            if validator_hotkey_authority_v2 is None:
+                raise RuntimeError("validator V2 hotkey authority is not configured")
+            commit_request = request.get("commit_request")
+            if not isinstance(commit_request, dict):
+                return {
+                    "status": "error",
+                    "error": "Missing weight commitment request",
+                }
+            return {
+                "status": "ok",
+                "commit_result": (
+                    validator_hotkey_authority_v2.prepare_weight_commit(
+                        **commit_request
+                    )
+                ),
+            }
+
+        elif command == "sign_weight_extrinsic_v2":
+            if validator_hotkey_authority_v2 is None:
+                raise RuntimeError("validator V2 hotkey authority is not configured")
+            signature_request = request.get("signature_request")
+            if not isinstance(signature_request, dict):
+                return {
+                    "status": "error",
+                    "error": "Missing weight extrinsic signature request",
+                }
+            return {
+                "status": "ok",
+                "signature_result": (
+                    validator_hotkey_authority_v2.sign_weight_extrinsic(
+                        **signature_request
+                    )
+                ),
+            }
+
+        elif command == "confirm_weight_publication_v2":
+            if validator_hotkey_authority_v2 is None:
+                raise RuntimeError("validator V2 hotkey authority is not configured")
+            weight_authorization_id = request.get("weight_authorization_id")
+            if not isinstance(weight_authorization_id, str):
+                return {
+                    "status": "error",
+                    "error": "Missing weight publication authorization",
+                }
+            return {
+                "status": "ok",
+                "finalization_result": (
+                    validator_hotkey_authority_v2.confirm_weight_publication(
+                        weight_authorization_id=weight_authorization_id
+                    )
+                ),
+            }
+
+        elif command == "recover_weight_publication_v2":
+            if validator_hotkey_authority_v2 is None:
+                raise RuntimeError("validator V2 hotkey authority is not configured")
+            published_bundle = request.get("published_bundle")
+            event_hash = request.get("weight_submission_event_hash")
+            signed_results = request.get("extrinsic_signature_results")
+            if (
+                not isinstance(published_bundle, dict)
+                or not isinstance(event_hash, str)
+                or not isinstance(signed_results, list)
+            ):
+                return {
+                    "status": "error",
+                    "error": "Invalid weight publication recovery request",
+                }
+            return {
+                "status": "ok",
+                "recovery_result": (
+                    validator_hotkey_authority_v2.recover_weight_publication(
+                        published_bundle=published_bundle,
+                        weight_submission_event_hash=event_hash,
+                        extrinsic_signature_results=signed_results,
+                    )
+                ),
+            }
+
+        elif command == "sign_serve_axon_extrinsic_v2":
+            if validator_hotkey_authority_v2 is None:
+                raise RuntimeError("validator V2 hotkey authority is not configured")
+            signature_request = request.get("signature_request")
+            if not isinstance(signature_request, dict):
+                return {
+                    "status": "error",
+                    "error": "Missing serve axon signature request",
+                }
+            return {
+                "status": "ok",
+                "signature_result": (
+                    validator_hotkey_authority_v2.sign_serve_axon_extrinsic(
+                        **signature_request
+                    )
+                ),
+            }
+
+        elif command == "compute_authoritative_weights_v2":
+            weight_request = request.get("weight_request")
+            if not isinstance(weight_request, dict):
+                return {
+                    "status": "error",
+                    "error": "Missing authoritative V2 weight request",
+                }
+            return {
+                "status": "ok",
+                **compute_authoritative_weights_v2(weight_request),
+            }
+
         elif command == "health":
+            hotkey_state = None
+            if validator_hotkey_authority_v2 is not None:
+                hotkey_state = validator_hotkey_authority_v2.public_state()
             return {
                 "status": "ok",
                 "service": "validator_tee",
                 "keypair_initialized": private_key is not None,
                 "boot_id": boot_id,
+                "authoritative_v2_configured": _authoritative_v2_enabled(),
+                "hotkey_authority_v2_configured": (
+                    validator_hotkey_authority_v2 is not None
+                ),
+                "hotkey_state_v2": hotkey_state,
             }
         
         else:

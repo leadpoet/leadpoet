@@ -29,7 +29,7 @@ from typing import Any, Mapping
 import pytest
 
 import gateway.research_lab.promotion as promotion
-from gateway.research_lab import source_add_llm_judge
+from gateway.research_lab import attested_v2_store, v2_authority
 import gateway.research_lab.store as store_module
 from gateway.research_lab.promotion import (
     ActiveManifestHashMismatchError,
@@ -730,6 +730,50 @@ def controller_env(store: FakeStore, monkeypatch: pytest.MonkeyPatch) -> dict[st
         return ActivePrivateModel(artifact=artifact, version_row=_active_row(artifact))
 
     monkeypatch.setattr(promotion, "load_active_private_model", _fake_load_active)
+
+    async def _fake_compare_metric(
+        *,
+        epoch_id: int,
+        score_bundle: Mapping[str, Any],
+        expected_improvement_points: float,
+        expected_event_doc: Mapping[str, Any],
+        parent_receipt_hashes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        metric = promotion_improvement_metric(score_bundle)
+        assert expected_improvement_points == float(metric.improvement_points)
+        assert dict(expected_event_doc) == metric.event_doc()
+        assert parent_receipt_hashes in (None, [])
+        return {
+            "result": {
+                "improvement_points": expected_improvement_points,
+                "event_doc": dict(expected_event_doc),
+            },
+            "receipt_graph": {"root_receipt_hash": "sha256:" + "9" * 64},
+            "epoch_id": int(epoch_id),
+        }
+
+    async def _fake_compare_gate(
+        *,
+        epoch_id: int,
+        score_bundle: Mapping[str, Any],
+        decision_payload: Mapping[str, Any],
+        expected_decision: Mapping[str, Any],
+        metric_outcome: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        expected = promotion.promotion_gate_decision(
+            score_bundle,
+            **dict(decision_payload),
+        )
+        assert dict(expected_decision) == expected.to_dict()
+        assert int(metric_outcome["epoch_id"]) == int(epoch_id)
+        return {"result": dict(expected_decision)}
+
+    monkeypatch.setattr(promotion, "compare_promotion_metric", _fake_compare_metric)
+    monkeypatch.setattr(
+        promotion,
+        "compare_promotion_gate_decision",
+        _fake_compare_gate,
+    )
     store.select_many_results["research_lab_candidate_promotion_events:scoring_health_quarantined"] = []
     controller = ResearchLabPromotionController(_controller_config(), worker_ref="test-worker")
     return {"artifact": artifact, "controller": controller, "store": store}
@@ -1165,6 +1209,28 @@ def _capture_obligation(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]
         return {"status": "active", "champion_reward_id": "cr-1", **obligation_input}
 
     monkeypatch.setattr(promotion, "build_champion_reward_obligation", _build)
+
+    async def _load_promotion_graph(**_kwargs: Any) -> dict[str, Any]:
+        return {"root_receipt_hash": "sha256:" + "a" * 64}
+
+    async def _authorize_reward(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["decision_kind"] == "champion"
+        assert kwargs["expected_result"]["reward"]["status"] == "active"
+        assert "promotion_decision" in kwargs["decision_payload"]
+        assert kwargs["artifact_kind"] == "champion_reward_decision"
+        assert kwargs["parent_graphs"][0]["root_receipt_hash"] == "sha256:" + "a" * 64
+        return {"status": "matched"}
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_v2",
+        _load_promotion_graph,
+    )
+    monkeypatch.setattr(
+        v2_authority,
+        "authorize_reward_decision_v2",
+        _authorize_reward,
+    )
     return captured
 
 
@@ -1258,6 +1324,45 @@ def _source_add_attribution_bundle() -> dict[str, Any]:
     }
 
 
+def _install_source_add_v2_judge(monkeypatch, judge):
+    async def _measured_judge(**kwargs: Any):
+        verdict = await judge(**kwargs)
+        return verdict, {
+            "receipt": {
+                "receipt_hash": "sha256:" + "a" * 64,
+                "output_root": "sha256:" + "b" * 64,
+            },
+            "receipt_graph": {"root_receipt_hash": "sha256:" + "a" * 64},
+            "result": {"verdict": verdict.verdict},
+        }
+
+    async def _persist_link(**_kwargs: Any):
+        return {"business_artifact_link_count": 1}
+
+    async def _authorize_reward(**kwargs: Any):
+        assert kwargs["decision_kind"] == "source_add_leg2"
+        assert kwargs["artifact_kind"] == "source_add_reward_decision"
+        assert kwargs["expected_result"]["reward"]["leg"] == 2
+        assert kwargs["parent_graphs"][0]["root_receipt_hash"] == "sha256:" + "a" * 64
+        return {"status": "matched"}
+
+    monkeypatch.setattr(
+        v2_authority,
+        "judge_source_add_implementation_v2",
+        _measured_judge,
+    )
+    monkeypatch.setattr(
+        v2_authority,
+        "persist_source_add_judge_reward_link_v2",
+        _persist_link,
+    )
+    monkeypatch.setattr(
+        v2_authority,
+        "authorize_reward_decision_v2",
+        _authorize_reward,
+    )
+
+
 async def test_source_add_leg2_created_when_llm_judge_says_helped(store, monkeypatch):
     store.select_many_results["research_lab_source_add_provisioning_current"] = [
         {
@@ -1290,8 +1395,7 @@ async def test_source_add_leg2_created_when_llm_judge_says_helped(store, monkeyp
         )
 
     monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _live_epoch)
-    monkeypatch.setattr(source_add_llm_judge, "openrouter_key_for_source_add_judge", lambda: "test-openrouter-key")
-    monkeypatch.setattr(source_add_llm_judge, "judge_source_add_implementation", _judge)
+    _install_source_add_v2_judge(monkeypatch, _judge)
     controller = ResearchLabPromotionController(_source_add_reward_config(), worker_ref="test-worker")
     result = await controller._maybe_create_source_add_implementation_rewards(
         candidate={
@@ -1348,8 +1452,7 @@ async def test_source_add_leg2_blocks_when_llm_judge_says_not_helped(store, monk
             model_id="openai/gpt-5.6-sol",
         )
 
-    monkeypatch.setattr(source_add_llm_judge, "openrouter_key_for_source_add_judge", lambda: "test-openrouter-key")
-    monkeypatch.setattr(source_add_llm_judge, "judge_source_add_implementation", _judge)
+    _install_source_add_v2_judge(monkeypatch, _judge)
     controller = ResearchLabPromotionController(_source_add_reward_config(), worker_ref="test-worker")
     result = await controller._maybe_create_source_add_implementation_rewards(
         candidate={
@@ -1398,12 +1501,7 @@ async def test_source_add_leg2_non_helped_and_uncertain_never_create_reward(
             model_id="test/judge",
         )
 
-    monkeypatch.setattr(
-        source_add_llm_judge,
-        "openrouter_key_for_source_add_judge",
-        lambda: "test-openrouter-key",
-    )
-    monkeypatch.setattr(source_add_llm_judge, "judge_source_add_implementation", _judge)
+    _install_source_add_v2_judge(monkeypatch, _judge)
     controller = ResearchLabPromotionController(_source_add_reward_config(), worker_ref="test-worker")
     result = await controller._maybe_create_source_add_implementation_rewards(
         candidate={"candidate_id": "candidate:" + "1" * 64},
@@ -1441,12 +1539,7 @@ async def test_source_add_leg2_helped_verdict_must_match_provisioned_source(stor
             model_id="test/judge",
         )
 
-    monkeypatch.setattr(
-        source_add_llm_judge,
-        "openrouter_key_for_source_add_judge",
-        lambda: "test-openrouter-key",
-    )
-    monkeypatch.setattr(source_add_llm_judge, "judge_source_add_implementation", _judge)
+    _install_source_add_v2_judge(monkeypatch, _judge)
     controller = ResearchLabPromotionController(_source_add_reward_config(), worker_ref="test-worker")
     result = await controller._maybe_create_source_add_implementation_rewards(
         candidate={"candidate_id": "candidate:" + "1" * 64},
@@ -1496,12 +1589,7 @@ async def test_source_add_leg2_duplicate_is_idempotently_blocked(store, monkeypa
         return 250, None, "test"
 
     monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _live_epoch)
-    monkeypatch.setattr(
-        source_add_llm_judge,
-        "openrouter_key_for_source_add_judge",
-        lambda: "test-openrouter-key",
-    )
-    monkeypatch.setattr(source_add_llm_judge, "judge_source_add_implementation", _judge)
+    _install_source_add_v2_judge(monkeypatch, _judge)
     controller = ResearchLabPromotionController(_source_add_reward_config(), worker_ref="test-worker")
     result = await controller._maybe_create_source_add_implementation_rewards(
         candidate={"candidate_id": "candidate:" + "1" * 64},
@@ -1548,12 +1636,7 @@ async def test_source_add_leg2_persistence_failure_is_non_blocking(store, monkey
 
     monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _live_epoch)
     monkeypatch.setattr(promotion, "insert_row", _failed_insert)
-    monkeypatch.setattr(
-        source_add_llm_judge,
-        "openrouter_key_for_source_add_judge",
-        lambda: "test-openrouter-key",
-    )
-    monkeypatch.setattr(source_add_llm_judge, "judge_source_add_implementation", _judge)
+    _install_source_add_v2_judge(monkeypatch, _judge)
     controller = ResearchLabPromotionController(_source_add_reward_config(), worker_ref="test-worker")
     champion_status = {"champion_reward_status": "created", "champion_reward_id": "cr-1"}
     result = await controller._maybe_create_source_add_implementation_rewards(
@@ -1840,6 +1923,9 @@ def _pending_reward_rows(store: FakeStore) -> None:
             "evaluation_epoch": 7,
             "score_bundle_hash": "sha256:" + "4" * 64,
             "aggregates": {"per_icp_results": []},
+            "private_holdout_gate": _approved_gate(
+                candidate_delta_vs_daily_baseline=2.5,
+            ),
         },
     }
 
@@ -1872,6 +1958,40 @@ async def test_reward_reconciler_happy_path_creates_reward(store, monkeypatch):
             "input_hash": "sha256:" + "5" * 64,
             "anchored_hash": "sha256:" + "6" * 64,
         },
+    )
+
+    promotion_graph = {
+        "root_receipt_hash": "sha256:" + "7" * 64,
+        "receipts": [],
+    }
+
+    async def _load_promotion_graph(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs == {
+            "artifact_kind": "promotion_decision",
+            "artifact_ref": "score_bundle:" + "4" * 64,
+            "artifact_hash": "sha256:" + "4" * 64,
+        }
+        return promotion_graph
+
+    async def _authorize_reward(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["decision_kind"] == "champion"
+        assert (
+            kwargs["decision_payload"]["promotion_decision"]["status"]
+            == "promotion_passed"
+        )
+        assert kwargs["expected_result"]["reward"]["champion_reward_id"] == "cr-1"
+        assert kwargs["parent_graphs"] == (promotion_graph,)
+        return {"result": dict(kwargs["expected_result"])}
+
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_v2",
+        _load_promotion_graph,
+    )
+    monkeypatch.setattr(
+        v2_authority,
+        "authorize_reward_decision_v2",
+        _authorize_reward,
     )
     result = await reconcile_pending_champion_rewards(
         _reward_config(),

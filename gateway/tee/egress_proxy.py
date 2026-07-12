@@ -2,22 +2,23 @@
 
 HTTPS clients terminate TLS and validate certificates inside the enclave.  The
 parent receives only a destination handshake followed by opaque TLS bytes.
-Plain HTTP remains supported for behavior compatibility, but its bytes are not
-confidential or tamper-evident and receipts must not describe it as protected
-provider evidence.
+External plaintext HTTP is rejected. Loopback HTTP remains available for the
+local proxy endpoint and other services inside the measured enclave.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import select
 import socket
+import ssl
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from gateway.tee.egress_policy import destination_policy_hash, normalize_destination
 
@@ -31,6 +32,7 @@ MAX_CONTROL_BYTES = 16 * 1024
 MAX_TUNNEL_BYTES_PER_DIRECTION = 256 * 1024 * 1024
 DEFAULT_IDLE_TIMEOUT_SECONDS = 300.0
 RELAY_CHUNK_BYTES = 64 * 1024
+UPSTREAM_PROXY_HEADER = "x-leadpoet-upstream-proxy-b64"
 
 _AIOHTTP_PATCH_LOCK = threading.Lock()
 _AIOHTTP_PROXY_URL = ""
@@ -120,40 +122,44 @@ def _parse_proxy_request(header_bytes: bytes) -> Dict[str, Any]:
     if version not in ("HTTP/1.0", "HTTP/1.1"):
         raise EnclaveEgressProxyError("proxy HTTP version is unsupported")
     if method == "CONNECT":
+        upstream_values = []
+        for line in lines[1:]:
+            if not line:
+                break
+            if ":" not in line:
+                raise EnclaveEgressProxyError("proxy header line is invalid")
+            name, value = line.split(":", 1)
+            if name.strip().lower() == UPSTREAM_PROXY_HEADER:
+                upstream_values.append(value.strip())
+        if len(upstream_values) > 1:
+            raise EnclaveEgressProxyError("upstream proxy header is duplicated")
+        upstream_proxy_url = ""
+        if upstream_values:
+            try:
+                upstream_proxy_url = base64.b64decode(
+                    upstream_values[0],
+                    validate=True,
+                ).decode("utf-8")
+            except Exception as exc:
+                raise EnclaveEgressProxyError(
+                    "upstream proxy header is invalid"
+                ) from exc
+            if len(upstream_proxy_url.encode("utf-8")) > 16 * 1024:
+                raise EnclaveEgressProxyError("upstream proxy URL exceeds limit")
         host, port = _parse_authority(target, 443)
-        return {
+        request = {
             "method": method,
             "host": host,
             "port": port,
             "forward_headers": b"",
             "tls_protected": True,
         }
-    parsed = urlsplit(target)
-    if parsed.scheme.lower() != "http" or not parsed.hostname:
-        raise EnclaveEgressProxyError("plaintext proxy requests require an absolute http URL")
-    try:
-        target_port = parsed.port or 80
-    except ValueError as exc:
-        raise EnclaveEgressProxyError("proxy destination port is invalid") from exc
-    host, port = normalize_destination(parsed.hostname, target_port)
-    origin_target = parsed.path or "/"
-    if parsed.query:
-        origin_target += "?" + parsed.query
-    forwarded_lines = [method + " " + origin_target + " " + version]
-    for line in lines[1:]:
-        if not line:
-            continue
-        name = line.split(":", 1)[0].strip().lower() if ":" in line else ""
-        if name in ("proxy-authorization", "proxy-connection"):
-            continue
-        forwarded_lines.append(line)
-    return {
-        "method": method,
-        "host": host,
-        "port": port,
-        "forward_headers": ("\r\n".join(forwarded_lines) + "\r\n\r\n").encode("iso-8859-1"),
-        "tls_protected": False,
-    }
+        if upstream_proxy_url:
+            request["upstream_proxy_url"] = upstream_proxy_url
+        return request
+    raise EnclaveEgressProxyError(
+        "external plaintext HTTP is forbidden; use HTTPS CONNECT"
+    )
 
 
 def _relay_bidirectional(
@@ -237,7 +243,9 @@ class EnclaveEgressProxy:
             "forwarder_port": self.forwarder_port,
             "policy_hash": destination_policy_hash(),
             "https_tls_terminates_in_enclave": True,
-            "plaintext_http_integrity_protected": False,
+            "external_plaintext_http_allowed": False,
+            "loopback_http_allowed": True,
+            "tls_upstream_proxy_supported": True,
         }
 
     def stop(self) -> None:
@@ -314,6 +322,78 @@ class EnclaveEgressProxy:
                 pass
             raise
 
+    def _open_upstream_proxy_tunnel(
+        self,
+        *,
+        proxy_url: str,
+        destination_host: str,
+        destination_port: int,
+    ) -> Any:
+        parsed = urlsplit(str(proxy_url or ""))
+        try:
+            proxy_port = parsed.port or 443
+        except ValueError as exc:
+            raise EnclaveEgressProxyError("upstream proxy port is invalid") from exc
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or proxy_port != 443
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise EnclaveEgressProxyError(
+                "upstream proxy must use verified TLS on port 443"
+            )
+        proxy_host, proxy_port = normalize_destination(parsed.hostname, proxy_port)
+        if (parsed.username is None) != (parsed.password is None):
+            raise EnclaveEgressProxyError("upstream proxy credentials are incomplete")
+        parent = self._open_parent_tunnel(proxy_host, proxy_port)
+        try:
+            import certifi
+
+            context = ssl.create_default_context(cafile=certifi.where())
+            protected = context.wrap_socket(parent, server_hostname=proxy_host)
+            lines = [
+                "CONNECT %s:%s HTTP/1.1" % (destination_host, destination_port),
+                "Host: %s:%s" % (destination_host, destination_port),
+                "Proxy-Connection: Keep-Alive",
+            ]
+            if parsed.username is not None:
+                username = unquote(parsed.username)
+                password = unquote(parsed.password or "")
+                if any(character in username + password for character in "\x00\r\n"):
+                    raise EnclaveEgressProxyError(
+                        "upstream proxy credentials are invalid"
+                    )
+                token = base64.b64encode(
+                    (username + ":" + password).encode("utf-8")
+                ).decode("ascii")
+                lines.append("Proxy-Authorization: Basic " + token)
+            request = ("\r\n".join(lines) + "\r\n\r\n").encode("iso-8859-1")
+            protected.sendall(request)
+            response_headers, remainder = _read_headers(protected)
+            if remainder:
+                raise EnclaveEgressProxyError(
+                    "upstream proxy returned unexpected CONNECT payload"
+                )
+            status_line = response_headers.split(b"\r\n", 1)[0]
+            parts = status_line.split(b" ", 2)
+            if len(parts) < 2 or not parts[1].isdigit():
+                raise EnclaveEgressProxyError("upstream proxy response is malformed")
+            status = int(parts[1])
+            if status < 200 or status >= 300:
+                raise EnclaveEgressProxyError(
+                    "upstream proxy CONNECT was not authenticated as successful"
+                )
+            return protected
+        except Exception:
+            try:
+                parent.close()
+            except Exception:
+                pass
+            raise
+
     def _handle_client(self, client: Any) -> None:
         parent = None
         destination_ref = "unknown"
@@ -323,7 +403,15 @@ class EnclaveEgressProxy:
             host = str(request["host"])
             port = int(request["port"])
             destination_ref = _destination_ref(host, port)
-            parent = self._open_parent_tunnel(host, port)
+            upstream_proxy_url = str(request.get("upstream_proxy_url") or "")
+            if upstream_proxy_url:
+                parent = self._open_upstream_proxy_tunnel(
+                    proxy_url=upstream_proxy_url,
+                    destination_host=host,
+                    destination_port=port,
+                )
+            else:
+                parent = self._open_parent_tunnel(host, port)
             if request["method"] == "CONNECT":
                 client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             else:

@@ -1,0 +1,11 @@
+{
+  "architecture": "x86_64",
+  "artifact_filename": "runsc-release-20260706.0-x86_64",
+  "install_path": "/usr/local/bin/runsc",
+  "schema_version": "leadpoet.runsc_runtime_lock.v2",
+  "sha256": "sha256:8fba09b71c8971d01940b9223fcfa5ebeb37e2b021ae334ca591a70c3c85c037",
+  "sha512": "73938c145ebe554cf61a01da455688f4b732eebdf7b1b635bdef5b195868b363d8cb400e3d92ed1f377b78996805556c247a4849583910cb04e92b156053033e",
+  "size_bytes": 130918823,
+  "source_url": "https://storage.googleapis.com/gvisor/releases/release/20260706.0/x86_64/runsc",
+  "version": "release-20260706.0"
+}

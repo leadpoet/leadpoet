@@ -10,13 +10,12 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import functools
 import hashlib
-import importlib
+import inspect
 import json
 import logging
 import os
 from pathlib import Path
 import re
-import tempfile
 import threading
 import time
 from typing import Any, Callable, Mapping
@@ -26,7 +25,6 @@ from urllib.error import HTTPError, URLError
 
 from gateway.research_lab.bundles import build_research_lab_audit_bundle
 from gateway.research_lab.attested_scoring import (
-    attested_scoring_mode,
     canonical_json_bytes as attested_canonical_json_bytes,
     compare_baseline_score_summary as compare_attested_baseline_score_summary,
     compare_promotion_metric as compare_attested_promotion_metric,
@@ -35,12 +33,14 @@ from gateway.research_lab.attested_scoring import (
     resolve_attested_artifact_lineage,
     sha256_bytes as attested_sha256_bytes,
 )
+from gateway.research_lab.autoresearch_authority_v2 import (
+    attest_stale_parent_rebase_v2,
+)
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.code_build import (
     CodeEditBuildError,
     CodeEditCandidateBuilder,
     CodeEditPatchApplyError,
-    resolve_source_inspection_requests,
 )
 from gateway.research_lab.config import (
     DEFAULT_BASELINE_START_UTC_OFFSET_SECONDS,
@@ -65,9 +65,18 @@ from gateway.research_lab.maintenance import (
     get_scoring_maintenance_state,
     set_scoring_maintenance_paused,
 )
+from gateway.research_lab.model_authority_v2 import (
+    AttestedPrivateModelRunnerV2,
+    V2_PROVIDER_PROFILE_ENV,
+    retry_attested_model_runner_v2,
+)
 from gateway.research_lab.provider_preflight import (
     PREFLIGHT_REASON_PREFIX,
     preflight_gate,
+)
+from gateway.research_lab.provider_profiles_v2 import (
+    BENCHMARK_MODEL_PROFILE,
+    load_provider_profile_v2,
 )
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabScoreBundleCreateRequest
 from gateway.research_lab.promotion import (
@@ -131,13 +140,9 @@ from gateway.research_lab.store import (
 from research_lab.canonical import canonical_json, sha256_json
 from research_lab.code_editing import (
     CodeEditDraft,
-    CodeEditSourceInspectionRequest,
-    build_code_edit_repair_messages,
     extract_unified_diff_paths,
-    parse_code_edit_repair_response,
 )
 from research_lab.eval import (
-    DockerPrivateModelRunner,
     DockerPrivateModelSpec,
     PrivateModelArtifactManifest,
     PrivateModelRuntimeError,
@@ -238,8 +243,6 @@ async def _compare_candidate_score_bundle_in_enclave(
     expected_score_bundle: Mapping[str, Any],
     parent_receipts: list[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    if attested_scoring_mode() == "off":
-        return {"status": "off"}
     normalized_parents: dict[str, dict[str, Any]] = {}
     direct_parent_hashes: set[str] = set()
     for receipt in parent_receipts or []:
@@ -472,10 +475,10 @@ def _daily_noise_budget_doc(
 
 
 def _retry_runner_with_provider_cost_scope(
-    runner: DockerPrivateModelRunner,
+    runner: AttestedPrivateModelRunnerV2,
     *,
     retry_round: int,
-) -> DockerPrivateModelRunner:
+) -> AttestedPrivateModelRunnerV2:
     """Clone a retry runner with a fresh provider-cost budget scope.
 
     The Docker runtime hashes this evaluation scope together with the actual
@@ -494,14 +497,47 @@ def _retry_runner_with_provider_cost_scope(
         }
     )
     extra_env[PROVIDER_COST_EVALUATION_SCOPE_ENV] = retry_scope
-    return DockerPrivateModelRunner(
-        replace(
-            runner.spec,
-            extra_env=extra_env,
-            # The first-pass runner already pulled this immutable digest.
-            pull_before_run=False,
-        )
+    return retry_attested_model_runner_v2(
+        runner,
+        extra_env=extra_env,
     )
+
+
+def _attested_receipts_from(*sources: Any) -> list[dict[str, Any]]:
+    receipts: dict[str, dict[str, Any]] = {}
+    for source in sources:
+        supplier = getattr(source, "attested_receipts", None)
+        if not callable(supplier):
+            continue
+        for receipt in supplier():
+            if not isinstance(receipt, Mapping):
+                continue
+            receipt_hash = str(receipt.get("receipt_hash") or "")
+            if receipt_hash:
+                receipts[receipt_hash] = dict(receipt)
+    return [receipts[key] for key in sorted(receipts)]
+
+
+async def _attested_model_parent_graphs(
+    *,
+    model_kind: str,
+    artifact: PrivateModelArtifactManifest,
+    candidate_id: str = "",
+) -> tuple[dict[str, Any], ...]:
+    if model_kind == "private":
+        return ()
+    if model_kind != "candidate" or not candidate_id:
+        raise RuntimeError("candidate model V2 lineage identity is missing")
+    from gateway.research_lab.attested_v2_store import (
+        load_business_artifact_graph_v2,
+    )
+
+    graph = await load_business_artifact_graph_v2(
+        artifact_kind="candidate_model",
+        artifact_ref=str(candidate_id),
+        artifact_hash=str(artifact.manifest_hash),
+    )
+    return (dict(graph),)
 
 
 class StaleParentDuringScoring(RuntimeError):
@@ -694,14 +730,6 @@ class ConfirmationMeasurementUnhealthy(RuntimeError):
 # values when unset — mirroring how the benchmark Exa key is plumbed.
 
 
-def _benchmark_scorer_scrapingdog_api_key() -> str:
-    return os.getenv("RESEARCH_LAB_BENCHMARK_SCRAPINGDOG_API_KEY", "").strip()
-
-
-def _benchmark_scorer_openrouter_api_key() -> str:
-    return os.getenv("RESEARCH_LAB_BENCHMARK_OPENROUTER_API_KEY", "").strip()
-
-
 def _benchmark_scorer_max_concurrency() -> int:
     """Optional cap on concurrent scorer calls inside a baseline batch.
     0 (default) = unlimited (scorer calls fan out at batch concurrency)."""
@@ -711,71 +739,22 @@ def _benchmark_scorer_max_concurrency() -> int:
         return 0
 
 
-# Module attributes that cache provider keys at import time inside the
-# qualification scoring stack (the Scrapingdog fetches read os.environ per
-# request; the OpenRouter calls read these module constants).
-_SCORER_KEY_MODULE_ATTRS: tuple[tuple[str, str, str], ...] = (
-    ("gateway.qualification.utils.helpers", "OPENROUTER_API_KEY", "openrouter"),
-    ("qualification.scoring.verification_helpers", "OPENROUTER_API_KEY", "openrouter"),
-    ("qualification.scoring.verification_helpers", "SCRAPINGDOG_API_KEY", "scrapingdog"),
-)
+def _provider_profile_has_override(profile: str, provider_id: str) -> bool:
+    """Report encrypted profile presence without reading plaintext credentials."""
+
+    document = load_provider_profile_v2(profile)
+    return str(provider_id) in dict(document["credential_ref_hashes"])
 
 
 @contextlib.contextmanager
 def _benchmark_scorer_isolation():
-    """Apply the dedicated benchmark scorer keys for a baseline-batch scope.
+    """Retain the existing batch scope without exposing keys on the host.
 
-    The scoring worker is a dedicated process (worker_process.py), so a
-    process-env override scoped to the batch cannot touch live qualification
-    traffic; candidate scoring in the same process runs strictly after the
-    batch returns and sees the restored prod values. Container runs inside the
-    batch keep their prod provider keys: DockerPrivateModelSpec.extra_env was
-    captured at runner construction and overrides os.environ passthrough.
-
-    No-op when neither benchmark scorer key is configured.
+    Dedicated benchmark credentials are now selected by the measured
+    ``benchmark_scorer`` profile and leased directly to the coordinator.
     """
-    scrapingdog = _benchmark_scorer_scrapingdog_api_key()
-    openrouter = _benchmark_scorer_openrouter_api_key()
-    if not scrapingdog and not openrouter:
-        yield
-        return
-    env_overrides: dict[str, str] = {}
-    if scrapingdog:
-        env_overrides["SCRAPINGDOG_API_KEY"] = scrapingdog
-        env_overrides["QUALIFICATION_SCRAPINGDOG_API_KEY"] = scrapingdog
-    if openrouter:
-        env_overrides["QUALIFICATION_OPENROUTER_API_KEY"] = openrouter
-    saved_env: dict[str, str | None] = {}
-    saved_attrs: list[tuple[Any, str, Any]] = []
-    try:
-        for name, value in env_overrides.items():
-            saved_env[name] = os.environ.get(name)
-            os.environ[name] = value
-        for module_name, attr, provider in _SCORER_KEY_MODULE_ATTRS:
-            value = scrapingdog if provider == "scrapingdog" else openrouter
-            if not value:
-                continue
-            try:
-                module = importlib.import_module(module_name)
-            except Exception:  # pragma: no cover - scorer stack absent in some envs
-                continue
-            if hasattr(module, attr):
-                saved_attrs.append((module, attr, getattr(module, attr)))
-                setattr(module, attr, value)
-        yield
-    finally:
-        for module, attr, previous in saved_attrs:
-            try:
-                setattr(module, attr, previous)
-            except Exception:  # pragma: no cover
-                logger.warning(
-                    "research_lab_benchmark_scorer_attr_restore_failed attr=%s", attr
-                )
-        for name, previous in saved_env.items():
-            if previous is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = previous
+
+    yield
 
 
 def _confirmation_lease_seconds() -> int:
@@ -1838,6 +1817,7 @@ class _TraceCapturingCompanyScorer:
         ticket_id: str | None = None,
         attested_epoch_id: int | None = None,
         attested_purpose: str = "",
+        attested_provider_profile: str = "default",
     ):
         self._inner = (
             inner
@@ -1845,6 +1825,7 @@ class _TraceCapturingCompanyScorer:
             else QualificationStyleCompanyScorer(
                 attested_epoch_id=attested_epoch_id,
                 attested_purpose=attested_purpose,
+                attested_provider_profile=attested_provider_profile,
             )
         )
         self._recorder = recorder
@@ -2917,7 +2898,6 @@ class ResearchLabGatewayScoringWorker:
         self._baseline_already_logged_date: str | None = None
         self._candidate_start_hold_logged_key: str | None = None
         self._last_candidate_start_gate: dict[str, Any] | None = None
-        self._private_scoring_env_not_ready_logged = False
         self._resolved_epoch_cache: tuple[int, float] | None = None
         self._scorer_trace_recorder = _ScorerTraceRecorder(config)
         self._confirmation_trace_scope: dict[str, Any] | None = None
@@ -3024,38 +3004,6 @@ class ResearchLabGatewayScoringWorker:
             # below, which auto-resumes once providers recover.
             return {"processed": False, "status": "maintenance_paused"}
 
-        missing_private_env = self._missing_private_scoring_env()
-        if missing_private_env:
-            if not self._private_scoring_env_not_ready_logged:
-                logger.warning(
-                    format_worker_block(
-                        "RESEARCH LAB SCORING WORKER PRIVATE MODEL ENV NOT READY",
-                        (
-                            ("Worker", self.worker_ref),
-                            ("Missing", ", ".join(missing_private_env)),
-                            ("Action", "leaving queued candidates untouched"),
-                        ),
-                    )
-                )
-                self._private_scoring_env_not_ready_logged = True
-            return {
-                "processed": False,
-                "status": "idle",
-                "private_model_env_ready": False,
-                "missing_private_model_env": list(missing_private_env),
-            }
-        if self._private_scoring_env_not_ready_logged:
-            logger.info(
-                format_worker_block(
-                    "RESEARCH LAB SCORING WORKER PRIVATE MODEL ENV READY",
-                    (
-                        ("Worker", self.worker_ref),
-                        ("Action", "candidate scoring enabled"),
-                    ),
-                )
-            )
-            self._private_scoring_env_not_ready_logged = False
-
         await self._recover_stale_candidate_claims()
         await self._alert_stuck_candidates()
 
@@ -3067,6 +3015,7 @@ class ResearchLabGatewayScoringWorker:
             actor_ref=self.worker_ref,
             is_paused=get_scoring_maintenance_state,
             set_paused=set_scoring_maintenance_paused,
+            worker_index=self.config.scoring_worker_index,
         )
         if not preflight.get("proceed"):
             return {
@@ -3310,8 +3259,9 @@ class ResearchLabGatewayScoringWorker:
             scoring_version="qualification-company-scorer:v1",
             hidden_plaintext_available=True,
         )
-        runner = DockerPrivateModelRunner(
-            DockerPrivateModelSpec(
+        runner = AttestedPrivateModelRunnerV2(
+            artifact=candidate_artifact,
+            spec=DockerPrivateModelSpec(
                 image_digest=candidate_artifact.image_digest,
                 timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
                 env_passthrough=self._private_model_env_passthrough(),
@@ -3326,7 +3276,15 @@ class ResearchLabGatewayScoringWorker:
                     evaluation_epoch=evaluation_epoch,
                     started_at=time.time(),
                 ),
-            )
+            ),
+            model_kind="candidate",
+            worker_index=self.config.scoring_worker_index,
+            epoch_id=evaluation_epoch,
+            parent_graphs=await _attested_model_parent_graphs(
+                model_kind="candidate",
+                artifact=candidate_artifact,
+                candidate_id=candidate_id,
+            ),
         )
         run_context = self._candidate_run_context(
             candidate, window_hash=window.window_hash, evaluation_epoch=evaluation_epoch
@@ -3398,7 +3356,10 @@ class ResearchLabGatewayScoringWorker:
             policy={},
             private_holdout_gate=gate_result,
             expected_score_bundle=score_bundle,
-            parent_receipts=ctx["scorer"].attested_receipts(),
+            parent_receipts=_attested_receipts_from(
+                ctx["runner"],
+                ctx["scorer"],
+            ),
         )
         scoring_health_gate = self._scoring_health_gate_result(score_bundle)
         signature_ref = await asyncio.to_thread(
@@ -4803,8 +4764,9 @@ class ResearchLabGatewayScoringWorker:
                 scoring_version="qualification-company-scorer:v1",
                 hidden_plaintext_available=True,
             )
-            candidate_runner = DockerPrivateModelRunner(
-                DockerPrivateModelSpec(
+            candidate_runner = AttestedPrivateModelRunnerV2(
+                artifact=candidate_artifact,
+                spec=DockerPrivateModelSpec(
                     image_digest=candidate_artifact.image_digest,
                     timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
                     env_passthrough=self._private_model_env_passthrough(),
@@ -4820,7 +4782,15 @@ class ResearchLabGatewayScoringWorker:
                         evaluation_epoch=evaluation_epoch,
                         started_at=start,
                     ),
-                )
+                ),
+                model_kind="candidate",
+                worker_index=self.config.scoring_worker_index,
+                epoch_id=evaluation_epoch,
+                parent_graphs=await _attested_model_parent_graphs(
+                    model_kind="candidate",
+                    artifact=candidate_artifact,
+                    candidate_id=candidate_id,
+                ),
             )
             run_context = self._candidate_run_context(
                 candidate,
@@ -5202,30 +5172,32 @@ class ResearchLabGatewayScoringWorker:
                     )
                     telemetry_completed_refs.add(result_ref)
             gate_result = score_bundle.get("private_holdout_gate")
-            if attested_scoring_mode() != "off":
-                aggregate_doc = score_bundle.get("aggregates")
-                per_icp_results = (
-                    aggregate_doc.get("per_icp_results")
-                    if isinstance(aggregate_doc, Mapping)
-                    else None
-                )
-                if not isinstance(per_icp_results, list):
-                    raise RuntimeError("score bundle is missing per_icp_results for attested comparison")
-                if not isinstance(gate_result, Mapping):
-                    raise RuntimeError("score bundle is missing private_holdout_gate for attested comparison")
-                await _compare_candidate_score_bundle_in_enclave(
-                    evaluation_epoch=evaluation_epoch,
-                    artifact=artifact,
-                    benchmark=benchmark,
-                    patch=patch,
-                    candidate_artifact=candidate_artifact,
-                    per_icp_results=per_icp_results,
-                    run_context=unsigned_run_context,
-                    policy=evaluation_policy,
-                    private_holdout_gate=gate_result,
-                    expected_score_bundle=score_bundle,
-                    parent_receipts=candidate_company_scorer.attested_receipts(),
-                )
+            aggregate_doc = score_bundle.get("aggregates")
+            per_icp_results = (
+                aggregate_doc.get("per_icp_results")
+                if isinstance(aggregate_doc, Mapping)
+                else None
+            )
+            if not isinstance(per_icp_results, list):
+                raise RuntimeError("score bundle is missing per_icp_results for V2 authority")
+            if not isinstance(gate_result, Mapping):
+                raise RuntimeError("score bundle is missing private_holdout_gate for V2 authority")
+            await _compare_candidate_score_bundle_in_enclave(
+                evaluation_epoch=evaluation_epoch,
+                artifact=artifact,
+                benchmark=benchmark,
+                patch=patch,
+                candidate_artifact=candidate_artifact,
+                per_icp_results=per_icp_results,
+                run_context=unsigned_run_context,
+                policy=evaluation_policy,
+                private_holdout_gate=gate_result,
+                expected_score_bundle=score_bundle,
+                parent_receipts=_attested_receipts_from(
+                    candidate_runner,
+                    candidate_company_scorer,
+                ),
+            )
             private_holdout_rejected = (
                 isinstance(gate_result, Mapping)
                 and str(gate_result.get("decision") or "") == "rejected_before_private_holdout"
@@ -7042,8 +7014,12 @@ class ResearchLabGatewayScoringWorker:
         telemetry_model_role = (
             "reference" if mode_label == "confirmation_baseline" else "candidate"
         )
-        runner = DockerPrivateModelRunner(
-            DockerPrivateModelSpec(
+        confirmation_model_kind = (
+            "private" if mode_label == "confirmation_baseline" else "candidate"
+        )
+        runner = AttestedPrivateModelRunnerV2(
+            artifact=artifact,
+            spec=DockerPrivateModelSpec(
                 image_digest=artifact.image_digest,
                 timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
                 env_passthrough=self._private_model_env_passthrough(),
@@ -7057,10 +7033,19 @@ class ResearchLabGatewayScoringWorker:
                     side=mode_label,
                     started_at=run_start,
                 ),
-            )
+            ),
+            model_kind=confirmation_model_kind,
+            worker_index=self.config.scoring_worker_index,
+            epoch_id=int(confirmation_scope.get("evaluation_epoch") or 0),
+            parent_graphs=await _attested_model_parent_graphs(
+                model_kind=confirmation_model_kind,
+                artifact=artifact,
+                candidate_id=confirmation_candidate_id,
+            ),
         )
-        retry_runner = DockerPrivateModelRunner(
-            DockerPrivateModelSpec(
+        retry_runner = AttestedPrivateModelRunnerV2(
+            artifact=artifact,
+            spec=DockerPrivateModelSpec(
                 image_digest=artifact.image_digest,
                 timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
                 env_passthrough=self._private_model_env_passthrough(),
@@ -7076,11 +7061,16 @@ class ResearchLabGatewayScoringWorker:
                 ),
                 # The first-pass runner already pulled this digest.
                 pull_before_run=False,
-            )
+            ),
+            model_kind=confirmation_model_kind,
+            worker_index=self.config.scoring_worker_index,
+            epoch_id=int(confirmation_scope.get("evaluation_epoch") or 0),
+            parent_graphs=runner.parent_graphs,
         )
         scorer = QualificationStyleCompanyScorer(
             attested_epoch_id=int(confirmation_scope.get("evaluation_epoch") or 0),
             attested_purpose="research_lab.rebenchmark.v1",
+            attested_provider_profile="benchmark_scorer",
         )
         summaries, stats = await self._run_baseline_batch(
             runner=runner,
@@ -7283,42 +7273,27 @@ class ResearchLabGatewayScoringWorker:
             }
 
         try:
-            draft = await asyncio.to_thread(self._draft_from_stale_candidate, candidate)
-            build = await asyncio.to_thread(
-                CodeEditCandidateBuilder(self.config).build,
-                draft=draft,
-                parent_artifact=active_artifact,
-                run_id=str(candidate["run_id"]),
-                candidate_index=await self._next_rebase_candidate_index(str(candidate["run_id"])),
+            draft = await asyncio.to_thread(
+                self._draft_from_stale_candidate,
+                candidate,
             )
-            repair_used = False
-        except CodeEditPatchApplyError as exc:
-            try:
-                draft, build = await self._repair_and_build_stale_candidate(
-                    candidate,
-                    active_artifact=active_artifact,
-                    original_error=exc,
-                    run_id=str(candidate["run_id"]),
+            candidate_manifest = candidate.get("candidate_model_manifest")
+            if not isinstance(candidate_manifest, Mapping):
+                raise CodeEditBuildError(
+                    "stale candidate is missing its model manifest"
                 )
-                repair_used = True
-            except Exception as repair_exc:
-                await self._reject_stale_parent_candidate(
-                    candidate,
-                    base_event_doc={
-                        **base_event_doc,
-                        "failure_class": "stale_parent_rebase_repair_failed",
-                        "error_diagnostics": _event_error_diagnostics(repair_exc),
-                        "error_hash": sha256_json({"error": str(repair_exc)}),
-                    },
-                    reason="stale_parent_rebase_failed",
-                    elapsed_seconds=elapsed_seconds,
+            candidate_artifact = PrivateModelArtifactManifest.from_mapping(
+                candidate_manifest
+            )
+            parent_graphs = await _attested_model_parent_graphs(
+                model_kind="candidate",
+                artifact=candidate_artifact,
+                candidate_id=candidate_id,
+            )
+            if len(parent_graphs) != 1:
+                raise CodeEditBuildError(
+                    "stale candidate has no unique measured ancestry"
                 )
-                recovery_result = await self._recover_stale_parent_rebase_failed_candidate(candidate)
-                return {
-                    "status": "stale_parent_rebase_failed",
-                    "error": str(repair_exc)[:300],
-                    "recovery_result": recovery_result,
-                }
         except Exception as exc:
             await self._reject_stale_parent_candidate(
                 candidate,
@@ -7335,6 +7310,53 @@ class ResearchLabGatewayScoringWorker:
             return {
                 "status": "stale_parent_rebase_failed",
                 "error": str(exc)[:300],
+                "recovery_result": recovery_result,
+            }
+
+        try:
+            rebase_authority = await attest_stale_parent_rebase_v2(
+                candidate=candidate,
+                original_draft=draft,
+                active_artifact=active_artifact,
+                candidate_receipt_graph=parent_graphs[0],
+                epoch_id=int(evaluation_epoch),
+                worker_index=int(self.config.scoring_worker_index or 0),
+                require_egress_proxy=bool(
+                    self.config.scoring_worker_require_proxy
+                ),
+                source_bundle_timeout_seconds=(
+                    self.config.code_edit_build_timeout_seconds
+                ),
+            )
+            draft = rebase_authority.draft
+            repair_used = rebase_authority.repair_used
+            build = await asyncio.to_thread(
+                CodeEditCandidateBuilder(self.config).build,
+                draft=draft,
+                parent_artifact=active_artifact,
+                run_id=str(candidate["run_id"]),
+                candidate_index=await self._next_rebase_candidate_index(
+                    str(candidate["run_id"])
+                ),
+            )
+        except Exception as repair_exc:
+            await self._reject_stale_parent_candidate(
+                candidate,
+                base_event_doc={
+                    **base_event_doc,
+                    "failure_class": "stale_parent_rebase_repair_failed",
+                    "error_diagnostics": _event_error_diagnostics(repair_exc),
+                    "error_hash": sha256_json({"error": str(repair_exc)}),
+                },
+                reason="stale_parent_rebase_failed",
+                elapsed_seconds=elapsed_seconds,
+            )
+            recovery_result = await self._recover_stale_parent_rebase_failed_candidate(
+                candidate
+            )
+            return {
+                "status": "stale_parent_rebase_failed",
+                "error": str(repair_exc)[:300],
                 "recovery_result": recovery_result,
             }
 
@@ -7377,6 +7399,38 @@ class ResearchLabGatewayScoringWorker:
         )
         derived_candidate, _event = await create_candidate_artifact(request)
         derived_candidate_id = str(derived_candidate["candidate_id"])
+        authority_receipt = (
+            rebase_authority.authority.get("execution_receipt")
+            or rebase_authority.authority.get("receipt")
+        )
+        if not isinstance(authority_receipt, Mapping):
+            raise CodeEditBuildError(
+                "stale-parent rebase receipt is unavailable after build"
+            )
+        from gateway.research_lab.attested_v2_store import (
+            persist_business_artifact_links_v2,
+        )
+
+        await persist_business_artifact_links_v2(
+            receipt_hash=str(authority_receipt.get("receipt_hash") or ""),
+            artifacts=(
+                {
+                    "artifact_kind": "candidate_model",
+                    "artifact_ref": derived_candidate_id,
+                    "artifact_hash": build.candidate_model_manifest.manifest_hash,
+                },
+                {
+                    "artifact_kind": "candidate_patch",
+                    "artifact_ref": derived_candidate_id,
+                    "artifact_hash": sha256_json(dict(build.code_edit_manifest)),
+                },
+                {
+                    "artifact_kind": "candidate_source",
+                    "artifact_ref": derived_candidate_id,
+                    "artifact_hash": build.source_diff_hash,
+                },
+            ),
+        )
         await create_candidate_promotion_event(
             candidate_id=candidate_id,
             derived_candidate_id=derived_candidate_id,
@@ -7530,84 +7584,6 @@ class ResearchLabGatewayScoringWorker:
             rollback_plan=str(patch_doc.get("rollback_plan") or "Discard the rebased candidate image.")[:1200],
             predicted_delta=float(hypothesis.get("predicted_delta") or 1.0),
         )
-
-    async def _repair_and_build_stale_candidate(
-        self,
-        candidate: Mapping[str, Any],
-        *,
-        active_artifact: PrivateModelArtifactManifest,
-        original_error: CodeEditPatchApplyError,
-        run_id: str,
-    ) -> tuple[CodeEditDraft, Any]:
-        if not self.config.stale_parent_rebase_repair_enabled:
-            raise original_error
-        api_key = os.getenv("RESEARCH_LAB_STALE_PARENT_REBASE_OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
-        if not api_key:
-            raise CodeEditBuildError("stale parent repair OpenRouter operator key is not configured")
-        model_id = str(self.config.stale_parent_rebase_repair_model or "").strip()
-        if not model_id:
-            raise CodeEditBuildError("stale parent repair model is not configured")
-
-        original_draft = await asyncio.to_thread(self._draft_from_stale_candidate, candidate)
-        builder = CodeEditCandidateBuilder(self.config)
-        with tempfile.TemporaryDirectory(prefix="research-lab-stale-rebase-") as tmp:
-            source_context = await asyncio.to_thread(
-                builder.prepare_parent_source_context,
-                parent_artifact=active_artifact,
-                workspace_dir=Path(tmp),
-            )
-            read_batch = resolve_source_inspection_requests(
-                source_context,
-                [
-                    CodeEditSourceInspectionRequest(
-                        operation="read_file",
-                        path=path,
-                        rationale="repair stale parent code-edit diff against current model source",
-                    )
-                    for path in original_draft.target_files
-                ],
-                already_read_paths=(),
-                max_files=max(len(original_draft.target_files), self.config.code_edit_source_inspection_max_files),
-                max_file_bytes=self.config.code_edit_source_inspection_file_bytes,
-                max_total_bytes=self.config.code_edit_source_inspection_total_bytes,
-                max_search_matches=self.config.code_edit_source_inspection_search_matches,
-            )
-            raw = await _call_operator_openrouter_json(
-                api_key=api_key,
-                model_id=model_id,
-                messages=build_code_edit_repair_messages(
-                    draft=original_draft,
-                    apply_error=str(original_error),
-                    source_inspection_context=read_batch.model_context,
-                    runtime_source_context=source_context.prompt_context(),
-                    budget_context={
-                        "repair_context": "stale_parent_rebase",
-                        "operator_funded": True,
-                    },
-                    repair_attempt=1,
-                    max_candidates=1,
-                ),
-                timeout_seconds=self.config.stale_parent_rebase_repair_timeout_seconds,
-            )
-            repaired = parse_code_edit_repair_response(raw, original_draft=original_draft)[0]
-            source_errors = builder.validate_draft_against_source_context(
-                repaired,
-                source_context,
-                read_paths=read_batch.read_paths,
-                require_read=True,
-            )
-            if source_errors:
-                raise CodeEditBuildError("; ".join(source_errors))
-            candidate_index = await self._next_rebase_candidate_index(run_id)
-            build = await asyncio.to_thread(
-                builder.build,
-                draft=repaired,
-                parent_artifact=active_artifact,
-                run_id=run_id,
-                candidate_index=candidate_index,
-                source_context=source_context,
-            )
-            return repaired, build
 
     async def _next_rebase_candidate_index(self, run_id: str) -> int:
         rows = await select_many(
@@ -8177,13 +8153,22 @@ class ResearchLabGatewayScoringWorker:
                     ("current.json SHA", str(repo_head_sync.get("current_json_git_sha") or "")[:12] or "-"),
                     ("Active is repo head", repo_head_sync.get("active_is_repo_head")),
                     ("Concurrency", self.config.private_baseline_concurrency),
-                    ("Benchmark Exa key", "dedicated" if self.config.benchmark_exa_api_key else "inherited"),
+                    (
+                        "Benchmark Exa key",
+                        "dedicated"
+                        if _provider_profile_has_override(
+                            BENCHMARK_MODEL_PROFILE,
+                            "exa",
+                        )
+                        else "inherited",
+                    ),
                     ("Exa RPS per container", self.config.benchmark_exa_max_rps or "inherited"),
                 ),
             )
         )
-        runner = DockerPrivateModelRunner(
-            DockerPrivateModelSpec(
+        runner = AttestedPrivateModelRunnerV2(
+            artifact=artifact,
+            spec=DockerPrivateModelSpec(
                 image_digest=artifact.image_digest,
                 timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
                 env_passthrough=self._private_model_env_passthrough(),
@@ -8197,11 +8182,15 @@ class ResearchLabGatewayScoringWorker:
                     evaluation_epoch=evaluation_epoch,
                     started_at=start,
                 ),
-            )
+            ),
+            model_kind="private",
+            worker_index=self.config.scoring_worker_index,
+            epoch_id=evaluation_epoch,
         )
         scorer = QualificationStyleCompanyScorer(
             attested_epoch_id=evaluation_epoch,
             attested_purpose="research_lab.rebenchmark.v1",
+            attested_provider_profile="benchmark_scorer",
         )
         # Trace scope (§5.4 + in-container capture): keyed per day, attempt,
         # and window so a deliberate same-day replacement never overwrites the
@@ -8380,6 +8369,7 @@ class ResearchLabGatewayScoringWorker:
         }
         baseline_telemetry_heartbeat_stop: asyncio.Event | None = None
         baseline_telemetry_heartbeat_task: asyncio.Task[Any] | None = None
+        retry_runner: AttestedPrivateModelRunnerV2 | None = None
 
         async def _stop_baseline_telemetry_heartbeat() -> None:
             if baseline_telemetry_heartbeat_stop is not None:
@@ -8472,8 +8462,9 @@ class ResearchLabGatewayScoringWorker:
             total_icps = len(window.benchmark_items)
             parallel_mode = self.config.private_baseline_concurrency > 1
             if parallel_mode:
-                retry_runner = DockerPrivateModelRunner(
-                    DockerPrivateModelSpec(
+                retry_runner = AttestedPrivateModelRunnerV2(
+                    artifact=artifact,
+                    spec=DockerPrivateModelSpec(
                         image_digest=artifact.image_digest,
                         timeout_seconds=self.config.scoring_worker_model_timeout_seconds,
                         env_passthrough=self._private_model_env_passthrough(),
@@ -8489,7 +8480,10 @@ class ResearchLabGatewayScoringWorker:
                         ),
                         # The first-pass runner already pulled this digest.
                         pull_before_run=False,
-                    )
+                    ),
+                    model_kind="private",
+                    worker_index=self.config.scoring_worker_index,
+                    epoch_id=evaluation_epoch,
                 )
                 batch_summaries, retry_stats = await self._run_baseline_batch(
                     runner=runner,
@@ -8903,7 +8897,11 @@ class ResearchLabGatewayScoringWorker:
             epoch_id=evaluation_epoch,
             build_payload=baseline_summary_payload,
             expected_result=baseline_summary_result,
-            parent_receipts=scorer.attested_receipts(),
+            parent_receipts=_attested_receipts_from(
+                runner,
+                retry_runner,
+                scorer,
+            ),
         )
         bundle_hash = canonical_hash(score_summary_doc)
         if self._active_baseline_context is not None:
@@ -9318,7 +9316,7 @@ class ResearchLabGatewayScoringWorker:
     async def _run_baseline_icp(
         self,
         *,
-        runner: DockerPrivateModelRunner,
+        runner: AttestedPrivateModelRunnerV2,
         scorer: QualificationStyleCompanyScorer,
         item: Mapping[str, Any],
         item_index: int,
@@ -9398,11 +9396,22 @@ class ResearchLabGatewayScoringWorker:
         if trace_context is not None and incontainer_trace_capture_enabled():
             trace_entries, trace_token = begin_incontainer_trace_collection()
         try:
-            runner_call: Any = functools.partial(runner, item["icp"], {"mode": mode_label})
-            if trace_token is not None:
-                runner_call = functools.partial(contextvars.copy_context().run, runner_call)
+            if inspect.iscoroutinefunction(getattr(runner, "__call__", None)):
+                raw_outputs = await runner(item["icp"], {"mode": mode_label})
+            else:
+                runner_call: Any = functools.partial(
+                    runner,
+                    item["icp"],
+                    {"mode": mode_label},
+                )
+                if trace_token is not None:
+                    runner_call = functools.partial(
+                        contextvars.copy_context().run,
+                        runner_call,
+                    )
+                raw_outputs = await loop.run_in_executor(executor, runner_call)
             outputs = ensure_private_model_outputs(
-                await loop.run_in_executor(executor, runner_call),
+                raw_outputs,
                 context_label=f"{mode_label} for {label}",
                 require_non_empty=False,
             )
@@ -9623,8 +9632,8 @@ class ResearchLabGatewayScoringWorker:
     async def _run_baseline_batch(
         self,
         *,
-        runner: DockerPrivateModelRunner,
-        retry_runner: DockerPrivateModelRunner,
+        runner: AttestedPrivateModelRunnerV2,
+        retry_runner: AttestedPrivateModelRunnerV2,
         scorer: QualificationStyleCompanyScorer,
         window: Any,
         run_start: float,
@@ -9664,8 +9673,8 @@ class ResearchLabGatewayScoringWorker:
     async def _run_baseline_batch_inner(
         self,
         *,
-        runner: DockerPrivateModelRunner,
-        retry_runner: DockerPrivateModelRunner,
+        runner: AttestedPrivateModelRunnerV2,
+        retry_runner: AttestedPrivateModelRunnerV2,
         scorer: QualificationStyleCompanyScorer,
         window: Any,
         run_start: float,
@@ -10479,17 +10488,7 @@ class ResearchLabGatewayScoringWorker:
     def _private_scoring_env(self) -> dict[str, str]:
         env: dict[str, str] = {}
         for name in (
-            "EXA_API_KEY",
             "EXA_MAX_RPS",
-            "SCRAPINGDOG_API_KEY",
-            "QUALIFICATION_SCRAPINGDOG_API_KEY",
-            "OPENROUTER_API_KEY",
-            "QUALIFICATION_OPENROUTER_API_KEY",
-            "OPENROUTER_KEY",
-            # Domain-keyed firmographics fallback for failed LinkedIn
-            # resolution/scrapes inside the model. Absent vars keep the
-            # fallback disabled and the model byte-identical to before.
-            "DEEPLINE_API_KEY",
             "SOURCING_DEEPLINE_FALLBACK",
             "SOURCING_DEEPLINE_TIMEOUT_S",
         ):
@@ -10607,8 +10606,7 @@ class ResearchLabGatewayScoringWorker:
         # providers only, so it never receives a cache to consume (recording
         # is inherited from the base scoring env).
         env.pop("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR", None)
-        if self.config.benchmark_exa_api_key:
-            env["EXA_API_KEY"] = self.config.benchmark_exa_api_key
+        env[V2_PROVIDER_PROFILE_ENV] = "benchmark_model"
         if self.config.benchmark_exa_max_rps > 0:
             env["EXA_MAX_RPS"] = str(self.config.benchmark_exa_max_rps)
         return env
@@ -10624,20 +10622,6 @@ class ResearchLabGatewayScoringWorker:
                 round(aggregate / max(1, self.config.private_baseline_retry_concurrency), 3)
             )
         return env
-
-    def _missing_private_scoring_env(self) -> tuple[str, ...]:
-        missing: list[str] = []
-        if not os.getenv("EXA_API_KEY"):
-            missing.append("EXA_API_KEY")
-        if not (os.getenv("SCRAPINGDOG_API_KEY") or os.getenv("QUALIFICATION_SCRAPINGDOG_API_KEY")):
-            missing.append("SCRAPINGDOG_API_KEY or QUALIFICATION_SCRAPINGDOG_API_KEY")
-        if not (
-            os.getenv("OPENROUTER_API_KEY")
-            or os.getenv("QUALIFICATION_OPENROUTER_API_KEY")
-            or os.getenv("OPENROUTER_KEY")
-        ):
-            missing.append("OPENROUTER_API_KEY or QUALIFICATION_OPENROUTER_API_KEY or OPENROUTER_KEY")
-        return tuple(missing)
 
     def _private_model_env_passthrough(self) -> tuple[str, ...]:
         return private_model_env_passthrough(

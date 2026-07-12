@@ -28,8 +28,8 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from .config import ResearchLabGatewayConfig
-from .key_vault import OpenRouterKeyVaultError, preflight_openrouter_key
 from .maintenance import (
+    _preflight_openrouter_key_for_run,
     _is_queue_capacity_conflict,
     autoresearch_queue_capacity_doc,
     default_actor_ref,
@@ -50,7 +50,6 @@ from .store import (
     select_many,
     select_one,
 )
-from .worker import OpenRouterKeyResolver
 from research_lab.eval import PrivateModelArtifactManifest
 
 logger = logging.getLogger(__name__)
@@ -133,21 +132,14 @@ async def _openrouter_credit_ready(
     (unmetered key); any resolution/preflight error is treated as not-ready so a
     credit-blocked run is not re-queued into the same wall.
     """
-    ticket = await select_one("research_loop_ticket_current", filters=(("ticket_id", ticket_id),))
-    if not ticket:
-        return False, "ticket_not_found"
-    miner_hotkey = str(ticket.get("miner_hotkey") or "")
-    key_ref = str(ticket.get("miner_openrouter_key_ref") or "")
-    if not miner_hotkey or not key_ref:
-        return False, "missing_miner_openrouter_key_ref"
     try:
-        env = await OpenRouterKeyResolver(config).resolve(key_ref, miner_hotkey=miner_hotkey)
-        raw_key = str(env.get("OPENROUTER_API_KEY") or "")
-        info = await asyncio.to_thread(preflight_openrouter_key, raw_key)
-    except OpenRouterKeyVaultError as exc:
-        return False, f"credit_preflight_failed:{str(exc)[:120]}"
+        result = await _preflight_openrouter_key_for_run(str(ticket_id))
     except Exception as exc:  # noqa: BLE001 - best-effort; any failure => not ready
         return False, f"credit_check_error:{str(exc)[:120]}"
+    if not result.get("ok"):
+        detail = str(result.get("detail") or result.get("error") or "failed")
+        return False, f"credit_preflight_failed:{detail[:120]}"
+    info = result
     remaining = info.get("limit_remaining")
     if remaining is None:
         return True, "limit_remaining_unmetered"

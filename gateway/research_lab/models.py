@@ -6,6 +6,7 @@ import re
 import hashlib
 import json
 import time
+import base64
 from typing import Any, Optional
 from uuid import UUID
 
@@ -42,6 +43,22 @@ class SignedResearchLabRequest(BaseModel):
 
     def signed_payload(self) -> dict[str, Any]:
         return self.model_dump(exclude={"signature"}, exclude_unset=True, mode="json")
+
+
+class AttestedCredentialCiphertextV2(BaseModel):
+    request_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    ciphertext_b64: str = Field(min_length=64, max_length=1024)
+
+    @field_validator("ciphertext_b64")
+    @classmethod
+    def valid_ciphertext(cls, value: str) -> str:
+        try:
+            decoded = base64.b64decode(value, validate=True)
+        except Exception as exc:
+            raise ValueError("credential ciphertext must be base64") from exc
+        if not decoded or len(decoded) > 768:
+            raise ValueError("credential ciphertext is outside limit")
+        return value
 
 
 class ResearchLabTicketCreateRequest(SignedResearchLabRequest):
@@ -103,6 +120,13 @@ class ResearchLabSourceAdapterSubmissionRequest(SignedResearchLabRequest):
     source_brief: Optional[str] = Field(default=None, max_length=2000)
     source_metadata: Optional[dict[str, Any]] = Field(default=None)
     adapter_credential: Optional[str] = Field(default=None, min_length=8, max_length=512)
+    adapter_credential_v2: Optional[AttestedCredentialCiphertextV2] = None
+
+    @model_validator(mode="after")
+    def one_credential_transport(self) -> "ResearchLabSourceAdapterSubmissionRequest":
+        if self.adapter_credential and self.adapter_credential_v2:
+            raise ValueError("SOURCE_ADD credential transports are mutually exclusive")
+        return self
 
     @field_validator("source_brief")
     @classmethod
@@ -122,6 +146,26 @@ class ResearchLabSourceAdapterSubmissionRequest(SignedResearchLabRequest):
         # The raw credential must never enter the signature payload path
         # (it would land in logs/refs); sign everything else.
         return self.model_dump(exclude={"signature", "adapter_credential"}, exclude_unset=True, mode="json")
+
+
+class ResearchLabSourceAddCredentialRecipientRequest(SignedResearchLabRequest):
+    adapter_id: str = Field(min_length=1, max_length=200)
+
+
+class ResearchLabCredentialRecipientResponse(BaseModel):
+    schema_version: str
+    purpose: str
+    request_id: str
+    boot_identity_hash: str
+    miner_hotkey_hash: str
+    adapter_ref_hash: str
+    credential_ref: str
+    key_ref_hash: str
+    recipient_public_key_hash: str
+    request_nonce: str
+    recipient_public_key_der_b64: str
+    attestation_document_b64: str
+    key_encryption_algorithm: str
 
 
 class ResearchLabSourceAdapterSubmissionResponse(BaseModel):
@@ -152,9 +196,16 @@ class ResearchLabSourceAdapterProvisionRequest(BaseModel):
     auth_name: Optional[str] = Field(default=None, max_length=120)
     credential_env_refs: list[str] = Field(default_factory=list, max_length=8)
     api_credential: Optional[str] = Field(default=None, min_length=8, max_length=512)
+    api_credential_v2: Optional[AttestedCredentialCiphertextV2] = None
     cost_model: dict[str, Any] = Field(default_factory=dict)
     probe_endpoints: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
     operator_notes: Optional[str] = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def one_credential_transport(self) -> "ResearchLabSourceAdapterProvisionRequest":
+        if self.api_credential and self.api_credential_v2:
+            raise ValueError("SOURCE_ADD credential transports are mutually exclusive")
+        return self
 
     @field_validator("registry_provider_id")
     @classmethod
@@ -189,9 +240,25 @@ class ResearchLabSourceAdapterProvisionResponse(BaseModel):
 
 
 class ResearchLabOpenRouterKeyRegisterRequest(SignedResearchLabRequest):
-    openrouter_api_key: str = Field(min_length=1, max_length=512)
-    openrouter_management_key: str = Field(min_length=1, max_length=512)
+    openrouter_api_key: Optional[str] = Field(default=None, min_length=1, max_length=512)
+    openrouter_management_key: Optional[str] = Field(default=None, min_length=1, max_length=512)
+    openrouter_api_key_v2: Optional[AttestedCredentialCiphertextV2] = None
+    openrouter_management_key_v2: Optional[AttestedCredentialCiphertextV2] = None
     key_label: Optional[str] = Field(default=None, max_length=120)
+
+    @model_validator(mode="after")
+    def complete_credential_pair(self) -> "ResearchLabOpenRouterKeyRegisterRequest":
+        raw = (self.openrouter_api_key, self.openrouter_management_key)
+        sealed = (self.openrouter_api_key_v2, self.openrouter_management_key_v2)
+        if any(raw) and not all(raw):
+            raise ValueError("OpenRouter plaintext credential pair is incomplete")
+        if any(sealed) and not all(sealed):
+            raise ValueError("OpenRouter attested credential pair is incomplete")
+        if all(raw) and all(sealed):
+            raise ValueError("OpenRouter credential transports are mutually exclusive")
+        if not all(raw) and not all(sealed):
+            raise ValueError("OpenRouter attested credential pair is required")
+        return self
 
     @field_validator("key_label")
     @classmethod
@@ -199,6 +266,41 @@ class ResearchLabOpenRouterKeyRegisterRequest(SignedResearchLabRequest):
         if value:
             reject_secret_material(value)
         return value
+
+    def signed_payload(self) -> dict[str, Any]:
+        return self.model_dump(
+            exclude={
+                "signature",
+                "openrouter_api_key",
+                "openrouter_management_key",
+            },
+            exclude_unset=True,
+            mode="json",
+        )
+
+
+class ResearchLabOpenRouterCredentialRecipientRequest(SignedResearchLabRequest):
+    pass
+
+
+class ResearchLabOpenRouterCredentialRecipientV2(BaseModel):
+    schema_version: str
+    purpose: str
+    request_id: str
+    boot_identity_hash: str
+    miner_hotkey_hash: str
+    credential_kind: str
+    credential_slot: str
+    recipient_public_key_hash: str
+    request_nonce: str
+    recipient_public_key_der_b64: str
+    attestation_document_b64: str
+    key_encryption_algorithm: str
+
+
+class ResearchLabOpenRouterCredentialRecipientsResponse(BaseModel):
+    runtime: ResearchLabOpenRouterCredentialRecipientV2
+    management: ResearchLabOpenRouterCredentialRecipientV2
 
 
 class ResearchLabResumeCreditBlockedRequest(SignedResearchLabRequest):

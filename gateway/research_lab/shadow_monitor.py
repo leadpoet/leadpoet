@@ -28,11 +28,9 @@ Do NOT run this monitor inside the gateway/worker environment. Launch it as its
 own process (cron/systemd) with:
 
 * required: Supabase read credentials (gateway DB client env), AWS credentials
-  (S3 reports + manifest loads, docker ECR pulls), docker, and the provider
-  budget envs a normal benchmark uses (``EXA_API_KEY``/
-  ``RESEARCH_LAB_BENCHMARK_EXA_API_KEY``, ``RESEARCH_LAB_BENCHMARK_EXA_MAX_RPS``,
-  ``SCRAPINGDOG_API_KEY``/``QUALIFICATION_SCRAPINGDOG_API_KEY``, an OpenRouter
-  key for the scorer path) plus ``RESEARCH_LAB_SHADOW_MONITOR_ENABLED=true``;
+  (S3 reports, manifest loads, and immutable model-source extraction), a ready
+  V2 enclave release, and the non-secret benchmark rate configuration used by
+  a normal benchmark plus ``RESEARCH_LAB_SHADOW_MONITOR_ENABLED=true``;
 * forbidden: EVERY name in ``LIVE_MUTATION_FLAG_ENV_NAMES`` must be unset or
   falsy. The monitor refuses to start otherwise (exit code 3) and re-checks
   before each shadow evaluation.
@@ -72,6 +70,7 @@ import argparse
 import asyncio
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+import inspect
 import json
 import logging
 import math
@@ -79,9 +78,12 @@ import os
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
 from gateway.research_lab.logging_utils import compact_ref, format_worker_line
+from gateway.research_lab.model_authority_v2 import (
+    AttestedPrivateModelRunnerV2,
+    V2_PROVIDER_PROFILE_ENV,
+)
 from research_lab.canonical import sha256_json
 from research_lab.eval import (
-    DockerPrivateModelRunner,
     DockerPrivateModelSpec,
     PrivateModelArtifactManifest,
     PrivateModelRuntimeError,
@@ -269,6 +271,10 @@ class ShadowReportStore(Protocol):
 
 SelectMany = Callable[..., Awaitable[list[dict[str, Any]]]]
 RunnerFactory = Callable[[PrivateModelArtifactManifest], Callable[..., Any]]
+AttestedRunnerFactory = Callable[
+    [PrivateModelArtifactManifest, int],
+    Callable[..., Any],
+]
 
 
 @dataclass(frozen=True)
@@ -281,6 +287,8 @@ class ShadowMonitorDeps:
     runner_factory: RunnerFactory
     scorer_factory: Callable[[], Any]
     report_store: ShadowReportStore
+    attested_runner_factory: AttestedRunnerFactory | None = None
+    attested_scorer_factory: Callable[[int], Any] | None = None
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
 
@@ -321,29 +329,13 @@ class S3ShadowReportStore:
 
 
 def _shadow_scoring_env() -> dict[str, str]:
-    """Provider budget env for the shadow container, like a normal benchmark.
+    """Non-secret provider budget settings for measured shadow execution.
 
-    Mirrors the daily baseline's env (host provider keys, with the dedicated
-    benchmark Exa budget overriding when configured) without importing
-    scoring_worker internals.
+    Credentials are provisioned directly to the coordinator enclave and must
+    never enter this process or a model-runner payload.
     """
 
-    env: dict[str, str] = {}
-    for name in (
-        "EXA_API_KEY",
-        "EXA_MAX_RPS",
-        "SCRAPINGDOG_API_KEY",
-        "QUALIFICATION_SCRAPINGDOG_API_KEY",
-        "OPENROUTER_API_KEY",
-        "QUALIFICATION_OPENROUTER_API_KEY",
-        "OPENROUTER_KEY",
-    ):
-        value = os.getenv(name)
-        if value:
-            env[name] = value
-    benchmark_exa_key = os.getenv("RESEARCH_LAB_BENCHMARK_EXA_API_KEY")
-    if benchmark_exa_key:
-        env["EXA_API_KEY"] = benchmark_exa_key
+    env: dict[str, str] = {V2_PROVIDER_PROFILE_ENV: "benchmark_model"}
     try:
         benchmark_exa_rps = float(os.getenv("RESEARCH_LAB_BENCHMARK_EXA_MAX_RPS", "0") or 0.0)
     except ValueError:
@@ -353,16 +345,28 @@ def _shadow_scoring_env() -> dict[str, str]:
     return env
 
 
-def _default_runner_factory(settings: ShadowMonitorSettings) -> RunnerFactory:
+def _default_runner_factory(
+    settings: ShadowMonitorSettings,
+    *,
+    epoch_id: int | None = None,
+) -> RunnerFactory:
     def _build(artifact: PrivateModelArtifactManifest) -> Callable[..., Any]:
         include_proxy = _truthy(os.getenv("RESEARCH_LAB_PRIVATE_MODEL_DOCKER_GLOBAL_PROXY_ENABLED"))
-        return DockerPrivateModelRunner(
-            DockerPrivateModelSpec(
+        try:
+            worker_index = int(os.getenv("RESEARCH_LAB_SCORING_WORKER_INDEX", "0") or 0)
+        except ValueError as exc:
+            raise ShadowWindowSetupError("shadow scoring worker index is invalid") from exc
+        return AttestedPrivateModelRunnerV2(
+            artifact=artifact,
+            model_kind="private",
+            worker_index=worker_index,
+            epoch_id=epoch_id,
+            spec=DockerPrivateModelSpec(
                 image_digest=artifact.image_digest,
                 timeout_seconds=settings.model_timeout_seconds,
                 env_passthrough=private_model_env_passthrough(include_proxy=include_proxy),
                 extra_env=_shadow_scoring_env(),
-            )
+            ),
         )
 
     return _build
@@ -377,6 +381,14 @@ def default_shadow_monitor_deps(settings: ShadowMonitorSettings) -> ShadowMonito
         runner_factory=_default_runner_factory(settings),
         scorer_factory=QualificationStyleCompanyScorer,
         report_store=S3ShadowReportStore(),
+        attested_runner_factory=lambda artifact, epoch_id: _default_runner_factory(
+            settings,
+            epoch_id=epoch_id,
+        )(artifact),
+        attested_scorer_factory=lambda epoch_id: QualificationStyleCompanyScorer(
+            attested_epoch_id=epoch_id,
+            attested_purpose="research_lab.rebenchmark.v1",
+        ),
         now=lambda: datetime.now(timezone.utc),
     )
 
@@ -736,8 +748,15 @@ async def _score_shadow_icp(
 ) -> dict[str, Any]:
     label = str(item.get("icp_ref") or "unknown_icp")
     try:
+        context = dict(SHADOW_RUN_CONTEXT)
+        if inspect.iscoroutinefunction(getattr(runner, "__call__", None)):
+            raw_outputs = await runner(item["icp"], context)
+        else:
+            raw_outputs = await asyncio.to_thread(runner, item["icp"], context)
+            if inspect.isawaitable(raw_outputs):
+                raw_outputs = await raw_outputs
         outputs = ensure_private_model_outputs(
-            await asyncio.to_thread(runner, item["icp"], dict(SHADOW_RUN_CONTEXT)),
+            raw_outputs,
             context_label=f"post-merge shadow for {label}",
             require_non_empty=False,
         )
@@ -786,13 +805,26 @@ async def run_shadow_day(
     live_rows = _per_icp_live_scores(benchmark_row)
     items, excluded = await _resolve_benchmark_icps(deps, live_rows)
 
-    runner = deps.runner_factory(shadow_artifact)
-    scorer = deps.scorer_factory()
+    evaluation_epoch = int(benchmark_row.get("evaluation_epoch") or 0)
+    runner = (
+        deps.attested_runner_factory(shadow_artifact, evaluation_epoch)
+        if deps.attested_runner_factory is not None
+        else deps.runner_factory(shadow_artifact)
+    )
+    scorer = (
+        deps.attested_scorer_factory(evaluation_epoch)
+        if deps.attested_scorer_factory is not None
+        else deps.scorer_factory()
+    )
     semaphore = asyncio.Semaphore(settings.concurrency)
 
     async def _bounded(item: Mapping[str, Any]) -> dict[str, Any]:
         async with semaphore:
-            return await _score_shadow_icp(runner=runner, scorer=scorer, item=item)
+            return await _score_shadow_icp(
+                runner=runner,
+                scorer=scorer,
+                item=item,
+            )
 
     results = await asyncio.gather(*(_bounded(item) for item in items))
 
@@ -814,6 +846,18 @@ async def run_shadow_day(
     live_aggregate = _average([live_scores[ref] for ref in shared_refs])
     shadow_aggregate = _average([shadow_scores[ref] for ref in shared_refs])
     diff_points = round(live_aggregate - shadow_aggregate, 6) if shared_refs else None
+    receipt_hashes = sorted(
+        {
+            str(receipt.get("receipt_hash") or "")
+            for source in (runner, scorer)
+            for receipt in (
+                source.attested_receipts()
+                if callable(getattr(source, "attested_receipts", None))
+                else ()
+            )
+            if str(receipt.get("receipt_hash") or "")
+        }
+    )
 
     # Reuse the dormant per-key diff API (its delta convention is shadow-live);
     # ICP refs are mapped to stable integer indexes because it sorts int keys.
@@ -837,6 +881,7 @@ async def run_shadow_day(
             "live_aggregate_score": round(live_aggregate, 6),
             "shadow_aggregate_score": round(shadow_aggregate, 6),
             "shadow_live_diff_points": diff_points,
+            "attested_v2_receipt_hashes": receipt_hashes,
             "compared_icp_count": len(shared_refs),
             "benchmark_icp_count": len(live_rows),
             "excluded_icps": excluded,

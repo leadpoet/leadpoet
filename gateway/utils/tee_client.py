@@ -272,6 +272,242 @@ class TEEClient:
             }
         """
         return await self._send_rpc("get_attestation", {})
+
+    async def role_health(self) -> Dict:
+        """Return the measured physical role and build identity for this CID."""
+        return await self._send_rpc("role_health", {})
+
+    async def v2_configure_runtime(
+        self,
+        *,
+        configuration: Dict,
+        configuration_hash: str,
+    ) -> Dict:
+        return await self._send_rpc(
+            "v2_configure_runtime",
+            {
+                "schema_version": "leadpoet.enclave_runtime_config.v2",
+                "configuration": configuration,
+                "configuration_hash": configuration_hash,
+            },
+        )
+
+    async def v2_get_boot_identity(self) -> Dict:
+        return await self._send_rpc("v2_get_boot_identity", {})
+
+    async def v2_get_transport_certificate(self) -> bytes:
+        result = await self._send_rpc("v2_get_transport_certificate", {})
+        try:
+            return base64.b64decode(
+                str(result["certificate_pem_b64"]),
+                validate=True,
+            )
+        except Exception as exc:
+            raise RuntimeError("enclave V2 transport certificate is invalid") from exc
+
+    async def v2_register_peer(
+        self,
+        *,
+        boot_identity: Dict,
+        certificate_pem: bytes,
+    ) -> Dict:
+        return await self._send_rpc(
+            "v2_register_peer",
+            {
+                "boot_identity": boot_identity,
+                "certificate_pem_b64": base64.b64encode(certificate_pem).decode(
+                    "ascii"
+                ),
+            },
+        )
+
+    async def v2_start_tls_service(self) -> Dict:
+        return await self._send_rpc("v2_start_tls_service", {})
+
+    async def v2_peer_status(self) -> Dict:
+        return await self._send_rpc("v2_peer_status", {})
+
+    async def v2_call_peer_health(self, physical_role: str) -> Dict:
+        return await self._send_rpc(
+            "v2_call_peer_health",
+            {"physical_role": physical_role},
+        )
+
+    async def v2_provider_broker_health(self) -> Dict:
+        return await self._send_rpc("v2_provider_broker_health", {})
+
+    async def v2_provider_semantics_health(self) -> Dict:
+        return await self._send_rpc("v2_provider_semantics_health", {})
+
+    async def v2_get_kms_recipient(self, credential_slot: str) -> Dict:
+        return await self._send_rpc(
+            "v2_get_kms_recipient",
+            {
+                "credential_slot": credential_slot,
+            },
+        )
+
+    async def v2_get_source_add_ingress_recipient(
+        self,
+        *,
+        miner_hotkey: str,
+        adapter_ref: str,
+        credential_ref: str,
+    ) -> Dict:
+        return await self._send_rpc(
+            "v2_get_source_add_ingress_recipient",
+            {
+                "miner_hotkey": miner_hotkey,
+                "adapter_ref": adapter_ref,
+                "credential_ref": credential_ref,
+            },
+        )
+
+    async def v2_seal_source_add_ingress_credential(
+        self,
+        *,
+        request_id: str,
+        ciphertext_b64: str,
+    ) -> Dict:
+        return await self._send_rpc(
+            "v2_seal_source_add_ingress_credential",
+            {
+                "request_id": request_id,
+                "ciphertext_b64": ciphertext_b64,
+            },
+        )
+
+    async def v2_get_openrouter_ingress_recipient(
+        self,
+        *,
+        miner_hotkey: str,
+        credential_kind: str,
+    ) -> Dict:
+        return await self._send_rpc(
+            "v2_get_openrouter_ingress_recipient",
+            {
+                "miner_hotkey": miner_hotkey,
+                "credential_kind": credential_kind,
+            },
+        )
+
+    async def v2_seal_openrouter_ingress_credential(
+        self,
+        *,
+        request_id: str,
+        ciphertext_b64: str,
+    ) -> Dict:
+        return await self._send_rpc(
+            "v2_seal_openrouter_ingress_credential",
+            {
+                "request_id": request_id,
+                "ciphertext_b64": ciphertext_b64,
+            },
+        )
+
+    async def v2_provision_encrypted_secret(
+        self,
+        *,
+        credential_slot: str,
+        ciphertext_for_recipient_b64: str,
+    ) -> Dict:
+        return await self._send_rpc(
+            "v2_provision_encrypted_secret",
+            {
+                "credential_slot": credential_slot,
+                "ciphertext_for_recipient_b64": ciphertext_for_recipient_b64,
+            },
+        )
+
+    async def v2_get_job_kms_recipient(
+        self,
+        *,
+        job_id: str,
+        credential_slot: str,
+        credential_value_hash: str,
+        key_ref_hash: str,
+    ) -> Dict:
+        return await self._send_rpc(
+            "v2_get_job_kms_recipient",
+            {
+                "job_id": job_id,
+                "credential_slot": credential_slot,
+                "credential_value_hash": credential_value_hash,
+                "key_ref_hash": key_ref_hash,
+            },
+        )
+
+    async def v2_provision_job_encrypted_secret(
+        self,
+        *,
+        request_id: str,
+        ciphertext_for_recipient_b64: str,
+    ) -> Dict:
+        return await self._send_rpc(
+            "v2_provision_job_encrypted_secret",
+            {
+                "request_id": request_id,
+                "ciphertext_for_recipient_b64": ciphertext_for_recipient_b64,
+            },
+        )
+
+    async def v2_provision_job_sealed_source_add_secret(
+        self,
+        *,
+        envelope: Dict,
+    ) -> Dict:
+        return await self._send_rpc(
+            "v2_provision_job_sealed_source_add_secret",
+            {"envelope": envelope},
+        )
+
+    async def v2_provision_job_sealed_openrouter_secret(
+        self,
+        *,
+        envelope: Dict,
+    ) -> Dict:
+        return await self._send_rpc(
+            "v2_provision_job_sealed_openrouter_secret",
+            {"envelope": envelope},
+        )
+
+    async def v2_release_job_credentials(self, job_id: str) -> Dict:
+        return await self._send_rpc(
+            "v2_release_job_credentials",
+            {"job_id": job_id},
+        )
+
+    async def v2_list_encrypted_artifacts(self, *, job_id: str, purpose: str) -> Dict:
+        return await self._send_rpc(
+            "v2_list_encrypted_artifacts",
+            {"job_id": job_id, "purpose": purpose},
+        )
+
+    async def v2_export_encrypted_artifact(self, artifact_id: str) -> Dict:
+        return await self._send_rpc(
+            "v2_export_encrypted_artifact",
+            {"artifact_id": artifact_id},
+        )
+
+    async def v2_verify_encrypted_artifact_persistence(
+        self,
+        *,
+        artifact_id: str,
+        attestation_job_id: str,
+        artifact_ref: str,
+        get_url: str,
+        head_url: str,
+    ) -> Dict:
+        return await self._send_rpc(
+            "v2_verify_encrypted_artifact_persistence",
+            {
+                "artifact_id": artifact_id,
+                "attestation_job_id": attestation_job_id,
+                "artifact_ref": artifact_ref,
+                "get_url": get_url,
+                "head_url": head_url,
+            },
+        )
     
     async def get_buffer_stats(self) -> Dict:
         """
@@ -364,6 +600,274 @@ class TEEClient:
 
     async def scoring_get_receipt(self, job_id: str) -> Dict:
         return await self._send_rpc("scoring_get_receipt", {"job_id": job_id})
+
+    async def scoring_v2_health(self) -> Dict:
+        return await self._send_rpc("scoring_v2_health", {})
+
+    async def scoring_v2_submit_job(self, manifest: Dict) -> Dict:
+        return await self._send_rpc("scoring_v2_submit_job", {"manifest": manifest})
+
+    async def scoring_v2_put_chunk(
+        self,
+        *,
+        job_id: str,
+        offset: int,
+        data: bytes,
+    ) -> Dict:
+        return await self._send_rpc(
+            "scoring_v2_put_chunk",
+            {
+                "job_id": job_id,
+                "offset": offset,
+                "data_b64": base64.b64encode(data).decode("ascii"),
+                "chunk_sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+            },
+        )
+
+    async def scoring_v2_seal_job(self, job_id: str) -> Dict:
+        return await self._send_rpc("scoring_v2_seal_job", {"job_id": job_id})
+
+    async def scoring_v2_get_status(self, job_id: str) -> Dict:
+        return await self._send_rpc("scoring_v2_get_status", {"job_id": job_id})
+
+    async def scoring_v2_cancel_job(self, job_id: str) -> Dict:
+        return await self._send_rpc("scoring_v2_cancel_job", {"job_id": job_id})
+
+    async def scoring_v2_get_result(
+        self,
+        job_id: str,
+        *,
+        offset: int = 0,
+        max_bytes: int = 512 * 1024,
+    ) -> Dict:
+        return await self._send_rpc(
+            "scoring_v2_get_result",
+            {"job_id": job_id, "offset": offset, "max_bytes": max_bytes},
+        )
+
+    async def scoring_v2_get_receipt(self, job_id: str) -> Dict:
+        return await self._send_rpc("scoring_v2_get_receipt", {"job_id": job_id})
+
+    async def scoring_v2_get_receipts(self, job_id: str) -> List[Dict]:
+        return await self._send_rpc("scoring_v2_get_receipts", {"job_id": job_id})
+
+    async def scoring_v2_get_transitions(self, job_id: str) -> List[Dict]:
+        return await self._send_rpc("scoring_v2_get_transitions", {"job_id": job_id})
+
+    async def scoring_v2_get_transport_attempts(self, job_id: str) -> List[Dict]:
+        return await self._send_rpc(
+            "scoring_v2_get_transport_attempts",
+            {"job_id": job_id},
+        )
+
+    async def scoring_v2_get_artifact_hashes(self, job_id: str) -> List[str]:
+        return await self._send_rpc(
+            "scoring_v2_get_artifact_hashes", {"job_id": job_id}
+        )
+
+    async def scoring_v2_get_host_operations(self, job_id: str) -> List[Dict]:
+        return await self._send_rpc(
+            "scoring_v2_get_host_operations", {"job_id": job_id}
+        )
+
+    async def coordinator_v2_health(self) -> Dict:
+        return await self._send_rpc("coordinator_v2_health", {})
+
+    async def coordinator_v2_submit_job(self, manifest: Dict) -> Dict:
+        return await self._send_rpc(
+            "coordinator_v2_submit_job", {"manifest": manifest}
+        )
+
+    async def coordinator_v2_put_chunk(
+        self,
+        *,
+        job_id: str,
+        offset: int,
+        data: bytes,
+    ) -> Dict:
+        return await self._send_rpc(
+            "coordinator_v2_put_chunk",
+            {
+                "job_id": job_id,
+                "offset": offset,
+                "data_b64": base64.b64encode(data).decode("ascii"),
+                "chunk_sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+            },
+        )
+
+    async def coordinator_v2_seal_job(self, job_id: str) -> Dict:
+        return await self._send_rpc("coordinator_v2_seal_job", {"job_id": job_id})
+
+    async def coordinator_v2_get_status(self, job_id: str) -> Dict:
+        return await self._send_rpc("coordinator_v2_get_status", {"job_id": job_id})
+
+    async def coordinator_v2_cancel_job(self, job_id: str) -> Dict:
+        return await self._send_rpc("coordinator_v2_cancel_job", {"job_id": job_id})
+
+    async def coordinator_v2_get_result(
+        self,
+        job_id: str,
+        *,
+        offset: int = 0,
+        max_bytes: int = 512 * 1024,
+    ) -> Dict:
+        return await self._send_rpc(
+            "coordinator_v2_get_result",
+            {"job_id": job_id, "offset": offset, "max_bytes": max_bytes},
+        )
+
+    async def coordinator_v2_get_receipt(self, job_id: str) -> Dict:
+        return await self._send_rpc("coordinator_v2_get_receipt", {"job_id": job_id})
+
+    async def coordinator_v2_get_receipts(self, job_id: str) -> List[Dict]:
+        return await self._send_rpc(
+            "coordinator_v2_get_receipts", {"job_id": job_id}
+        )
+
+    async def coordinator_v2_get_transitions(self, job_id: str) -> List[Dict]:
+        return await self._send_rpc(
+            "coordinator_v2_get_transitions", {"job_id": job_id}
+        )
+
+    async def coordinator_v2_get_transport_attempts(self, job_id: str) -> List[Dict]:
+        return await self._send_rpc(
+            "coordinator_v2_get_transport_attempts",
+            {"job_id": job_id},
+        )
+
+    async def coordinator_v2_get_artifact_hashes(self, job_id: str) -> List[str]:
+        return await self._send_rpc(
+            "coordinator_v2_get_artifact_hashes", {"job_id": job_id}
+        )
+
+    async def coordinator_v2_get_host_operations(self, job_id: str) -> List[Dict]:
+        return await self._send_rpc(
+            "coordinator_v2_get_host_operations", {"job_id": job_id}
+        )
+
+    async def autoresearch_v2_health(self) -> Dict:
+        return await self._send_rpc("autoresearch_v2_health", {})
+
+    async def autoresearch_v2_submit_job(self, manifest: Dict) -> Dict:
+        return await self._send_rpc(
+            "autoresearch_v2_submit_job", {"manifest": manifest}
+        )
+
+    async def autoresearch_v2_put_chunk(
+        self,
+        *,
+        job_id: str,
+        offset: int,
+        data: bytes,
+    ) -> Dict:
+        return await self._send_rpc(
+            "autoresearch_v2_put_chunk",
+            {
+                "job_id": job_id,
+                "offset": offset,
+                "data_b64": base64.b64encode(data).decode("ascii"),
+                "chunk_sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+            },
+        )
+
+    async def autoresearch_v2_seal_job(self, job_id: str) -> Dict:
+        return await self._send_rpc(
+            "autoresearch_v2_seal_job", {"job_id": job_id}
+        )
+
+    async def autoresearch_v2_get_status(self, job_id: str) -> Dict:
+        return await self._send_rpc(
+            "autoresearch_v2_get_status", {"job_id": job_id}
+        )
+
+    async def autoresearch_v2_cancel_job(self, job_id: str) -> Dict:
+        return await self._send_rpc(
+            "autoresearch_v2_cancel_job", {"job_id": job_id}
+        )
+
+    async def autoresearch_v2_get_result(
+        self,
+        job_id: str,
+        *,
+        offset: int = 0,
+        max_bytes: int = 512 * 1024,
+    ) -> Dict:
+        return await self._send_rpc(
+            "autoresearch_v2_get_result",
+            {"job_id": job_id, "offset": offset, "max_bytes": max_bytes},
+        )
+
+    async def autoresearch_v2_get_receipt(self, job_id: str) -> Dict:
+        return await self._send_rpc(
+            "autoresearch_v2_get_receipt", {"job_id": job_id}
+        )
+
+    async def autoresearch_v2_get_receipts(self, job_id: str) -> List[Dict]:
+        return await self._send_rpc(
+            "autoresearch_v2_get_receipts", {"job_id": job_id}
+        )
+
+    async def autoresearch_v2_get_transitions(self, job_id: str) -> List[Dict]:
+        return await self._send_rpc(
+            "autoresearch_v2_get_transitions", {"job_id": job_id}
+        )
+
+    async def autoresearch_v2_get_transport_attempts(
+        self, job_id: str
+    ) -> List[Dict]:
+        return await self._send_rpc(
+            "autoresearch_v2_get_transport_attempts", {"job_id": job_id}
+        )
+
+    async def autoresearch_v2_get_artifact_hashes(self, job_id: str) -> List[str]:
+        return await self._send_rpc(
+            "autoresearch_v2_get_artifact_hashes", {"job_id": job_id}
+        )
+
+    async def autoresearch_v2_next_host_operation(
+        self,
+        job_id: str,
+        *,
+        wait_ms: int = 0,
+    ) -> Optional[Dict]:
+        return await self._send_rpc(
+            "autoresearch_v2_next_host_operation",
+            {"job_id": job_id, "wait_ms": wait_ms},
+        )
+
+    async def autoresearch_v2_complete_host_operation(
+        self,
+        *,
+        job_id: str,
+        request_hash: str,
+        terminal_status: str,
+        response: Optional[Dict],
+        failure_code: Optional[str] = None,
+    ) -> Dict:
+        return await self._send_rpc(
+            "autoresearch_v2_complete_host_operation",
+            {
+                "job_id": job_id,
+                "request_hash": request_hash,
+                "terminal_status": terminal_status,
+                "response": response,
+                "failure_code": failure_code,
+            },
+        )
+
+    async def autoresearch_v2_get_host_operations(
+        self, job_id: str
+    ) -> List[Dict]:
+        return await self._send_rpc(
+            "autoresearch_v2_get_host_operations", {"job_id": job_id}
+        )
+
+    async def autoresearch_v2_get_external_receipt_graphs(
+        self, job_id: str
+    ) -> List[Dict]:
+        return await self._send_rpc(
+            "autoresearch_v2_get_external_receipt_graphs", {"job_id": job_id}
+        )
     
     def close(self):
         """Close vsock connection."""
@@ -372,5 +876,9 @@ class TEEClient:
             self._socket = None
 
 
-# Global TEE client instance
-tee_client = TEEClient()
+# Fixed CIDs are part of the measured V2 topology. Existing event/checkpoint
+# callers retain ``tee_client`` as a coordinator alias.
+coordinator_tee_client = TEEClient(cid=16)
+scoring_tee_clients = (TEEClient(cid=17), TEEClient(cid=18))
+autoresearch_tee_client = TEEClient(cid=19)
+tee_client = coordinator_tee_client

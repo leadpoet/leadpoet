@@ -1,0 +1,381 @@
+"""Hash and verify protected Research Lab business-logic ASTs.
+
+The manifest deliberately hashes selected function/class bodies rather than
+whole files. I/O adapters and imports can move around those bodies while CI
+continues to fail if scoring, autoresearch, promotion, accounting, allocation,
+or weight behavior changes unintentionally.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+from typing import Any, Dict, Iterable, Mapping, Sequence, Tuple
+
+
+SCHEMA_VERSION = "leadpoet.protected_workflows.v2"
+DEFAULT_MANIFEST = Path(__file__).with_name("protected_workflows.json")
+
+PROTECTED_SYMBOLS = {
+    "research_lab/code_editing.py": (
+        "build_loop_direction_planner_messages",
+        "build_loop_direction_reference_repair_messages",
+        "build_code_edit_source_inspection_messages",
+        "build_code_edit_auto_research_messages",
+        "build_code_edit_fallback_messages",
+        "build_plan_alignment_judge_messages",
+        "build_code_edit_repair_messages",
+        "parse_loop_direction_plan_response",
+        "parse_plan_alignment_judge_response",
+        "parse_code_edit_source_inspection_response",
+        "parse_code_edit_response",
+        "parse_code_edit_repair_response",
+        "validate_code_edit_draft",
+        "code_edit_candidate_manifest",
+    ),
+    "gateway/research_lab/loop_engine.py": (
+        "AutoResearchLoopEngine",
+        "_rank_candidates",
+        "_would_exceed_budget",
+    ),
+    "gateway/research_lab/code_loop_engine.py": (
+        "CodeEditLoopEngine",
+        "_bind_loop_direction_plan",
+        "_rank_selected_by_dev_score",
+    ),
+    "gateway/tee/autoresearch_executor_v2.py": (
+        "AutoresearchExecutorV2",
+    ),
+    "research_lab/eval/evaluator.py": (
+        "evaluate_private_model_pair",
+        "score_private_model_pair_items",
+        "_score_single_icp",
+        "_run_candidate_with_retries",
+        "build_holdout_gate_result",
+        "_score_with_private_holdout_gate",
+        "benchmark_icp_score_from_company_scores",
+        "_benchmark_icp_score",
+        "build_score_bundle_from_scored_icps",
+        "build_scoring_health_doc",
+        "prepare_autoresearch_scoring_payload",
+    ),
+    "research_lab/eval/baseline_summary.py": (
+        "build_baseline_health",
+        "daily_noise_budget_doc",
+        "build_baseline_score_summary",
+    ),
+    "research_lab/eval/promotion_metric.py": (
+        "promotion_improvement_metric",
+        "promotion_gate_decision",
+    ),
+    "research_lab/eval/provider_evidence_cache.py": (
+        "canonical_request_fingerprint",
+        "icp_evidence_cache_key",
+        "build_evidence_cache_from_trace_entries",
+        "merge_evidence_caches",
+    ),
+    "research_lab/eval/provider_costs.py": (
+        "estimate_provider_cost",
+        "ProviderCostLedger",
+        "summarize_provider_cost_events",
+        "summarize_provider_cost_trace_entries",
+    ),
+    "research_lab/source_add_rewards.py": (
+        "SourceAddRewardRecord",
+        "validate_source_add_reward_record",
+        "create_leg1_reward",
+        "create_leg2_reward",
+        "stop_reward_forward",
+    ),
+    "gateway/research_lab/source_add_provenance.py": (
+        "sanitize_source_add_precheck_doc",
+        "evaluate_source_add_provenance",
+    ),
+    "gateway/research_lab/source_add_llm_judge.py": (
+        "SourceAddJudgeVerdict",
+        "judge_source_add_implementation",
+        "_parse_verdict",
+    ),
+    "gateway/research_lab/allocations.py": (
+        "build_research_lab_allocation_bundle",
+        "_champion_paid_alpha_to_date_from_snapshots",
+        "_champion_replay_obligation",
+        "_epoch_active",
+    ),
+    "gateway/research_lab/promotion.py": (
+        "confirmation_min_delta",
+        "confirmation_attempt_budget",
+        "_baseline_aggregate_excluding_icps",
+        "ResearchLabPromotionController.process_scored_candidate",
+        "_candidate_icp_score",
+    ),
+    "leadpoet_canonical/weight_computation.py": (
+        "weight_config_document",
+        "normalize_to_u16_with_uids_pure",
+        "research_lab_uid_weights_from_allocation",
+        "compute_final_weights",
+    ),
+    "leadpoet_canonical/weight_authority_v2.py": (
+        "gateway_weight_input_value_documents_v2",
+        "weight_input_value_documents_v2",
+        "validate_weight_input_source_evidence_v2",
+        "build_weight_snapshot_v2",
+        "validate_published_weight_bundle_v2",
+        "validate_weight_finalization_submission_v2",
+    ),
+    "leadpoet_verifier/economics.py": (
+        "compute_reimbursement_award",
+        "build_reimbursement_schedule",
+        "build_champion_reward_obligation",
+        "allocate_research_lab_epoch",
+        "_allocate_research_lab_epoch_existing",
+        "cap_reimbursement_schedules_by_epoch",
+        "compose_final_weight_vector",
+        "_allocate_reimbursements_no_champions",
+        "_allocate_reimbursements_with_champions",
+        "_allocate_champions",
+        "_allocate_source_add",
+        "_allocate_capped_pro_rata",
+    ),
+    "gateway/tee/coordinator_reward_source_v2.py": (
+        "CoordinatorRewardSourceV2",
+    ),
+    "gateway/tee/coordinator_allocation_source_v2.py": (
+        "CoordinatorAllocationSourceV2",
+    ),
+    "gateway/tee/coordinator_source_add_v2.py": (
+        "CoordinatorSourceAddProvenanceV2",
+    ),
+    "gateway/tee/reward_executor_v2.py": (
+        "reward_receipt_projection_v2",
+        "champion_reward_row_projection_v2",
+        "source_add_reward_row_projection_v2",
+        "reimbursement_reward_row_projection_v2",
+        "execute_reward_decision_v2",
+    ),
+}
+
+
+class ProtectedWorkflowError(RuntimeError):
+    """A protected symbol is absent or has changed from the baseline."""
+
+
+class _StripDocstrings(ast.NodeTransformer):
+    def _strip(self, node: Any) -> Any:
+        self.generic_visit(node)
+        body = getattr(node, "body", None)
+        if (
+            isinstance(body, list)
+            and body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(getattr(body[0], "value", None), (ast.Str, ast.Constant))
+            and isinstance(getattr(body[0].value, "s", getattr(body[0].value, "value", None)), str)
+        ):
+            node.body = body[1:]
+        return node
+
+    def visit_Module(self, node: ast.Module) -> ast.Module:
+        return self._strip(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
+        return self._strip(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AsyncFunctionDef:
+        return self._strip(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:
+        return self._strip(node)
+
+
+def _symbol_index(tree: ast.Module) -> Dict[str, ast.AST]:
+    index = {}  # type: Dict[str, ast.AST]
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            index[node.name] = node
+        if isinstance(node, ast.ClassDef):
+            for child in node.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    index[node.name + "." + child.name] = child
+    return index
+
+
+def _symbol_hash(node: ast.AST) -> str:
+    normalized = _StripDocstrings().visit(ast.fix_missing_locations(node))
+    encoded = ast.dump(normalized, annotate_fields=True, include_attributes=False).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _manifest_hash(body: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        dict(body),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _source_path(root: Path, relative_path: str) -> Path:
+    direct = root / relative_path
+    if direct.is_file():
+        return direct
+    if relative_path.startswith("gateway/"):
+        gateway_relative = root / relative_path.split("/", 1)[1]
+        if gateway_relative.is_file():
+            return gateway_relative
+    staged = root / "_attested_runtime" / relative_path
+    if staged.is_file():
+        return staged
+    return direct
+
+
+def _git_commit(root: Path) -> str:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(root),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip().lower()
+    except Exception as exc:
+        raise ProtectedWorkflowError("cannot resolve baseline Git commit") from exc
+
+
+def build_manifest(
+    root: Path,
+    *,
+    baseline_commit: str = "",
+    protected_source_commit: str = "",
+) -> Dict[str, Any]:
+    root = root.resolve()
+    entries = []
+    for relative_path, symbols in sorted(PROTECTED_SYMBOLS.items()):
+        path = _source_path(root, relative_path)
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except Exception as exc:
+            raise ProtectedWorkflowError("cannot parse protected file %s" % relative_path) from exc
+        index = _symbol_index(tree)
+        for symbol in symbols:
+            if symbol not in index:
+                raise ProtectedWorkflowError(
+                    "protected symbol %s:%s is missing" % (relative_path, symbol)
+                )
+            entries.append(
+                {
+                    "path": relative_path,
+                    "symbol": symbol,
+                    "ast_sha256": _symbol_hash(index[symbol]),
+                }
+            )
+    entries.sort(key=lambda item: (item["path"], item["symbol"]))
+    body = {
+        "schema_version": SCHEMA_VERSION,
+        "baseline_commit": baseline_commit or _git_commit(root),
+        "protected_source_commit": protected_source_commit or _git_commit(root),
+        "entries": entries,
+    }
+    return {**body, "manifest_hash": _manifest_hash(body)}
+
+
+def write_manifest(manifest: Mapping[str, Any], path: Path) -> None:
+    encoded = json.dumps(
+        dict(manifest),
+        sort_keys=True,
+        indent=2,
+        ensure_ascii=True,
+    ) + "\n"
+    path.write_text(encoded, encoding="utf-8")
+
+
+def load_manifest(path: Path) -> Dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ProtectedWorkflowError("cannot read protected workflow manifest") from exc
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(value.get("entries"), list)
+        or set(value)
+        != {
+            "schema_version",
+            "baseline_commit",
+            "protected_source_commit",
+            "entries",
+            "manifest_hash",
+        }
+    ):
+        raise ProtectedWorkflowError("protected workflow manifest schema is invalid")
+    body = {
+        key: value[key]
+        for key in (
+            "schema_version",
+            "baseline_commit",
+            "protected_source_commit",
+            "entries",
+        )
+    }
+    if value.get("manifest_hash") != _manifest_hash(body):
+        raise ProtectedWorkflowError("protected workflow manifest hash is invalid")
+    return dict(value)
+
+
+def verify_manifest(root: Path, manifest: Mapping[str, Any]) -> None:
+    expected = build_manifest(
+        root,
+        baseline_commit=str(manifest.get("baseline_commit") or ""),
+        protected_source_commit=str(
+            manifest.get("protected_source_commit") or ""
+        ),
+    )
+    if dict(manifest) != expected:
+        expected_by_key = {
+            (item["path"], item["symbol"]): item["ast_sha256"]
+            for item in expected["entries"]
+        }
+        observed_by_key = {
+            (item.get("path"), item.get("symbol")): item.get("ast_sha256")
+            for item in manifest.get("entries", [])
+            if isinstance(item, dict)
+        }
+        changed = sorted(
+            "%s:%s" % key
+            for key in set(expected_by_key) | set(observed_by_key)
+            if expected_by_key.get(key) != observed_by_key.get(key)
+        )
+        raise ProtectedWorkflowError(
+            "protected workflow manifest mismatch: %s" % ", ".join(changed)
+        )
+
+
+def main(argv: Sequence[str] = ()) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--write", action="store_true")
+    parser.add_argument("--baseline-commit", default="")
+    parser.add_argument("--protected-source-commit", default="")
+    args = parser.parse_args(list(argv) if argv else None)
+    if args.write:
+        write_manifest(
+            build_manifest(
+                args.root,
+                baseline_commit=args.baseline_commit,
+                protected_source_commit=args.protected_source_commit,
+            ),
+            args.manifest,
+        )
+    else:
+        verify_manifest(args.root, load_manifest(args.manifest))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

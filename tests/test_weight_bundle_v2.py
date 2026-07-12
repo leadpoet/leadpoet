@@ -5,19 +5,23 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from leadpoet_canonical.attested_receipts import build_receipt_body, create_signed_receipt
-from leadpoet_canonical.auditor_v2 import (
-    IDENTITY_CACHE_SCHEMA_VERSION,
-    AuditorV2Error,
-    verify_attested_weight_bundle_v2,
+from leadpoet_canonical.attested_receipts import (
+    WEIGHT_PURPOSE,
+    WEIGHT_ROLE,
+    build_receipt_body,
+    create_signed_receipt,
 )
 from leadpoet_canonical.weight_bundle_v2 import (
     WEIGHT_BUNDLE_V2_SCHEMA_VERSION,
     WeightBundleV2Error,
     validate_weight_bundle_v2,
 )
-from leadpoet_canonical.weight_computation import WEIGHT_SNAPSHOT_SCHEMA_VERSION, weight_config_hash
-from validator_tee.enclave import tee_service
+from leadpoet_canonical.weight_computation import (
+    WEIGHT_SNAPSHOT_SCHEMA_VERSION,
+    compute_final_weights,
+    sha256_json,
+    weight_config_hash,
+)
 
 
 def _snapshot():
@@ -58,10 +62,58 @@ def _snapshot():
     return value
 
 
+def _historical_response(snapshot):
+    """Build a read-only historical V1 fixture without a live signing RPC."""
+
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    ).hex()
+    result = compute_final_weights(snapshot)
+    body = build_receipt_body(
+        role=WEIGHT_ROLE,
+        purpose=WEIGHT_PURPOSE,
+        job_id="historical-validator-weights:%s" % result["epoch_id"],
+        epoch_id=result["epoch_id"],
+        commit_sha=str(snapshot["commit_sha"]),
+        build_manifest_hash="sha256:" + "1" * 64,
+        config_hash=str(snapshot["config_hash"]),
+        input_root=result["snapshot_hash"],
+        output_root=sha256_json(result),
+        evidence_roots=(
+            {
+                "research_lab_allocation_receipt": snapshot[
+                    "research_lab_allocation_receipt_hash"
+                ]
+            }
+            if snapshot["research_lab_allocation_receipt_hash"]
+            else {}
+        ),
+        parent_receipt_hashes=snapshot["parent_receipt_hashes"],
+        status="succeeded",
+        issued_at="2026-07-10T00:00:00Z",
+    )
+    receipt = create_signed_receipt(
+        body=body,
+        enclave_pubkey=public_key,
+        attestation_document_b64=base64.b64encode(
+            b"historical-nitro-attestation"
+        ).decode(),
+        sign_digest=private_key.sign,
+    )
+    return {
+        "weight_result": result,
+        "weights_signature": private_key.sign(
+            bytes.fromhex(result["weights_hash"])
+        ).hex(),
+        "receipt": receipt,
+    }
+
+
 def _bundle():
     snapshot = _snapshot()
-    response = tee_service.handle_request({"command": "compute_weights_v2", "snapshot": snapshot})
-    assert response["status"] == "ok"
+    response = _historical_response(snapshot)
     return {
         "schema_version": WEIGHT_BUNDLE_V2_SCHEMA_VERSION,
         "validator_hotkey": "validator-hotkey",
@@ -116,8 +168,7 @@ def _bundle_with_allocation_lineage():
     snapshot["parent_receipt_hashes"] = [allocation_receipt["receipt_hash"]]
     snapshot["research_lab_allocation_receipt_hash"] = allocation_receipt["receipt_hash"]
     snapshot["config_hash"] = weight_config_hash(snapshot)
-    response = tee_service.handle_request({"command": "compute_weights_v2", "snapshot": snapshot})
-    assert response["status"] == "ok"
+    response = _historical_response(snapshot)
     return {
         "schema_version": WEIGHT_BUNDLE_V2_SCHEMA_VERSION,
         "validator_hotkey": "validator-hotkey",
@@ -194,7 +245,7 @@ def test_v2_bundle_rejects_snapshot_parent_that_is_not_the_allocation_receipt():
     snapshot["parent_receipt_hashes"] = [score_receipt["receipt_hash"]]
     snapshot["research_lab_allocation_receipt_hash"] = allocation_receipt["receipt_hash"]
     snapshot["config_hash"] = weight_config_hash(snapshot)
-    response = tee_service.handle_request({"command": "compute_weights_v2", "snapshot": snapshot})
+    response = _historical_response(snapshot)
     bundle = {
         "schema_version": WEIGHT_BUNDLE_V2_SCHEMA_VERSION,
         "validator_hotkey": "validator-hotkey",
@@ -208,53 +259,3 @@ def test_v2_bundle_rejects_snapshot_parent_that_is_not_the_allocation_receipt():
     }
     with pytest.raises(WeightBundleV2Error, match="not a direct weight parent"):
         validate_weight_bundle_v2(bundle, require_allocation_ancestry=True)
-
-
-def test_auditor_v2_requires_three_build_identity_for_every_receipt():
-    bundle = _bundle_with_allocation_lineage()
-    identities = {
-        "schema_version": IDENTITY_CACHE_SCHEMA_VERSION,
-        "entries": [
-            {
-                "role": "validator_weights",
-                "commit_sha": "a" * 40,
-                "pcr0": "1" * 96,
-                "verified_build_count": 3,
-            },
-            {
-                "role": "gateway_scoring",
-                "commit_sha": "b" * 40,
-                "pcr0": "2" * 96,
-                "verified_build_count": 3,
-            },
-        ],
-    }
-
-    def _nitro(**kwargs):
-        role = "validator_weights" if kwargs["role"] == "validator" else "gateway_scoring"
-        pcr0 = next(item["pcr0"] for item in identities["entries"] if item["role"] == role)
-        return True, {
-            "purpose": kwargs["expected_purpose"],
-            "epoch_id": kwargs["expected_epoch_id"],
-            "enclave_pubkey": kwargs["expected_pubkey"],
-            "pcr0": pcr0,
-        }
-
-    verified = verify_attested_weight_bundle_v2(
-        bundle,
-        identity_cache=identities,
-        nitro_verifier=_nitro,
-    )
-    assert len(verified["independent_receipt_identities"]) == 3
-    assert all(
-        item["verified_build_count"] == 3
-        for item in verified["independent_receipt_identities"]
-    )
-
-    identities["entries"][1]["verified_build_count"] = 2
-    with pytest.raises(AuditorV2Error, match="three"):
-        verify_attested_weight_bundle_v2(
-            bundle,
-            identity_cache=identities,
-            nitro_verifier=_nitro,
-        )

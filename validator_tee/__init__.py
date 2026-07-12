@@ -7,46 +7,26 @@ Provides TEE (Trusted Execution Environment) functionality for the primary valid
 This module provides the HOST-SIDE interface for validator TEE operations.
 All operations are delegated to the Nitro Enclave via vsock.
 
-SECURITY CONSTRAINTS:
-- The validator TEE does NOT expose a generic sign(bytes) API
-- Signing is constrained to internally computed weights
-- Attestation includes epoch_id to prevent replay attacks
-- NO MOCK MODE: Enclave MUST be running, otherwise operations FAIL
-
-Usage:
-    from validator_tee import (
-        initialize_enclave_keypair,
-        get_enclave_pubkey,
-        sign_weights,
-        get_attestation,
-        is_enclave_running,
-    )
+Only authoritative V2 wallet and chain contexts are public. Legacy blind
+weight signing, host-snapshot computation, and epoch-attestation helpers are
+permanently removed.
 """
-
-from validator_tee.host.enclave_signer import (
-    initialize_enclave_keypair,
-    get_enclave_public_key_hex,
-    get_enclave_pubkey,
-    sign_weights,
-    compute_weights_v2,
-    get_attestation_document_b64,
-    get_attestation,
-    get_code_hash,
-    is_keypair_initialized,
-    is_enclave_running,
-    get_signer_state,
+from validator_tee.host.enclave_hotkey_v2 import (
+    AuthoritativeSetWeightsContextV2,
+    AuthoritativeServeAxonContextV2,
+    EnclaveBackedKeypairV2,
+    EnclaveBackedWalletV2,
+    build_enclave_backed_wallet_v2,
+)
+from validator_tee.host.weight_authority_v2 import (
+    build_authoritative_weight_bundle_v2,
 )
 
 __all__ = [
-    "initialize_enclave_keypair",
-    "get_enclave_public_key_hex",
-    "get_enclave_pubkey",
-    "sign_weights",
-    "compute_weights_v2",
-    "get_attestation_document_b64",
-    "get_attestation",
-    "get_code_hash",
-    "is_keypair_initialized",
-    "is_enclave_running",
-    "get_signer_state",
+    "AuthoritativeSetWeightsContextV2",
+    "AuthoritativeServeAxonContextV2",
+    "EnclaveBackedKeypairV2",
+    "EnclaveBackedWalletV2",
+    "build_enclave_backed_wallet_v2",
+    "build_authoritative_weight_bundle_v2",
 ]

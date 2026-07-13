@@ -102,6 +102,9 @@ def _build_submission(hotkey_keypair: Keypair, enclave: FakeEnclaveSigner) -> di
 def _patch_gateway(monkeypatch, hotkey_ss58: str):
     import gateway.api.weights as weights_api
 
+    # The endpoint only accepts V1 in explicit compatibility mode — which is
+    # how production runs today, but the CI environment does not set it.
+    monkeypatch.setattr(weights_api, "legacy_v1_enabled", lambda: True)
     monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {hotkey_ss58})
     monkeypatch.setattr(weights_api, "EXPECTED_CHAIN", CHAIN)
     monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {NETUID})

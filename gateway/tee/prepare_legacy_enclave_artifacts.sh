@@ -79,7 +79,7 @@ python3 "$SCRIPT_DIR/scoring_wheelhouse.py" verify-wheelhouse \
   --input "$SCORING_INPUT" \
   --lock "$SCORING_LOCK" \
   --wheelhouse "$WHEELHOUSE"
-python3 "$SCRIPT_DIR/sandbox_runtime_artifact.py" verify \
+PYTHONPATH="$REPO_ROOT" python3 "$SCRIPT_DIR/sandbox_runtime_artifact.py" verify \
   --lock "$RUNSC_LOCK" \
   --artifact "$ARTIFACT_ROOT/$RUNSC_NAME"
 echo "Legacy gateway enclave artifacts are hash verified in $ARTIFACT_ROOT"

@@ -65,6 +65,10 @@ def test_legacy_gateway_builds_and_starts_one_current_commit_enclave() -> None:
     assert "Legacy gateway enclave RPC is healthy" in start
     assert "requirements-scoring-py39.lock" in artifacts
     assert "runsc-runtime.lock.json" in artifacts
+    assert artifacts.count(
+        'PYTHONPATH="$REPO_ROOT" python3 '
+        '"$SCRIPT_DIR/sandbox_runtime_artifact.py" verify'
+    ) == 3
     assert "validator" not in artifacts.lower()
     assert "release-manifest" not in artifacts
     assert "GATEWAY_DEPLOY_COMMIT" not in artifacts

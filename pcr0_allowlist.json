@@ -1,8 +1,15 @@
 {
   "_comment": "PCR0 allowlist for LeadPoet TEE verification. Updated by CI/CD on each enclave build.",
-  "_updated": "2026-07-12T12:05:00Z",
+  "_updated": "2026-07-13",
   "_repo": "https://github.com/leadpoet/leadpoet",
   "gateway_pcr0": [
+    {
+      "pcr0": "f6abeadc75df62e058a8a8736548890baad0695604f03aadff2dbbd77d6422356a888b048ed2c4afcac6d22b1aa1f6ea",
+      "version": "2026-07-13",
+      "deployed": "2026-07-13",
+      "commit_hash": "a9f7bbc6ff6dde336f33521b05ddb7ead6c40b8a",
+      "notes": "gateway enclave: weight-submission Python 3.9 annotation fix + legacy PCR0 warming gate deploy"
+    },
     {
       "pcr0": "76e4ae994da0f839862be12605117a84b11b4ad116db4443d8f7e2d34cb230153cffc8447bc4671d65eb33409406561f",
       "version": "2026-07-12e",

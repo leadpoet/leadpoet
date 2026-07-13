@@ -408,10 +408,22 @@ class TestDayCacheRecordability:
                 self._deepline_run_body(status),
             )
 
+    def test_deepline_play_start_never_recordable(self) -> None:
+        # The start response carries a one-time run id; replaying it from
+        # the day cache hands every later identical start request a stale
+        # id whose polls 404.
+        for status in ("running", "completed"):
+            assert not proxy_module._response_is_recordable(
+                "deepline",
+                "https://code.deepline.com/api/v2/plays/run",
+                200,
+                self._deepline_run_body(status),
+            )
+
     def test_deepline_non_poll_paths_recordable(self) -> None:
         assert proxy_module._response_is_recordable(
             "deepline",
-            "https://code.deepline.com/api/v2/plays/run",
+            "https://code.deepline.com/api/v2/models",
             200,
             self._deepline_run_body("running"),
         )

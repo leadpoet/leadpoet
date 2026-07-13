@@ -750,6 +750,12 @@ def _response_is_recordable(provider: str, upstream_url: str, status: int, body:
         agent_status = exa_agent_run_status(body)
         return agent_status not in _EXA_AGENT_NONTERMINAL_STATUSES
     if provider == "deepline":
+        # A play-start response mints a fresh one-time run id. Recording it
+        # replays that same id to every later identical start request for
+        # the rest of the day, and polling the expired id then 404s until
+        # the poller's whole budget burns. Start requests always go live.
+        if path.startswith("/api/v2/plays"):
+            return False
         if not path.startswith("/api/v2/runs/"):
             return True
         run_status = _deepline_status_from_response(body)

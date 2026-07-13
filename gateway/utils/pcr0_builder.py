@@ -876,7 +876,6 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
             logger.info("[PCR0] Legacy validator commit does not require V2 artifacts")
 
         # __pycache__ directories and .pyc files can differ between machines.
-        import shutil
         for rel_path in PCR0_COPY_PATHS:
             full_copy_path = os.path.join(repo_dir, rel_path)
             if os.path.isdir(full_copy_path):

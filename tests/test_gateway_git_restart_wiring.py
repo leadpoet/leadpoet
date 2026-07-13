@@ -117,6 +117,23 @@ def test_gateway_restart_has_fail_closed_lock_and_no_validator_deploy_gate() -> 
     assert 'independent_gateway_identity' not in script
 
 
+def test_gateway_restart_does_not_clone_restart_control_state_into_runtime() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    restart_only_keys = (
+        "GATEWAY_RESTART_PHASE",
+        "GATEWAY_RESTART_LOCK_HELD",
+        "GATEWAY_DEPLOY_PLAN_FILE",
+        "GATEWAY_DEPLOY_STAGE",
+        "GATEWAY_DEPLOY_COMPLETED",
+    )
+
+    # Both the Secrets Manager parser and the live-process environment clone
+    # must reject these values. Otherwise the relaunched gateway preserves a
+    # stale per-restart /tmp plan path and the next rollout cannot finalize.
+    for key in restart_only_keys:
+        assert script.count(f'"{key}",') >= 2
+
+
 def test_concurrent_restart_exits_before_checkout_or_process_changes(tmp_path: Path) -> None:
     lock_file = tmp_path / "gateway-restart.lock"
     bin_dir = tmp_path / "bin"

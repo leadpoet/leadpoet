@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 
 from gateway.utils import pcr0_builder
@@ -34,3 +35,21 @@ def test_validator_v2_wheel_keeps_a_valid_distribution_filename():
     )
     assert f"/tmp/{wheel}" in source
     assert "/tmp/sr25519.whl" not in source
+
+
+def test_pcr0_build_uses_module_shutil_without_shadowing_it_locally():
+    tree = ast.parse(
+        (ROOT / "gateway" / "utils" / "pcr0_builder.py").read_text(encoding="utf-8")
+    )
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "build_enclave_and_extract_pcr0"
+    )
+
+    assert not any(
+        isinstance(node, ast.Import)
+        and any(alias.name == "shutil" for alias in node.names)
+        for node in ast.walk(function)
+    )

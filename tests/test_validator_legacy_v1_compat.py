@@ -40,12 +40,8 @@ class _RawClient:
         raise AssertionError(command)
 
 
-def test_protocol_selection_is_explicit_and_defaults_to_legacy_v1():
-    assert normalize_weight_protocol(None) == LEGACY_V1_COMPAT_PROTOCOL
-    assert (
-        normalize_weight_protocol("AUTHORITATIVE_V2")
-        == AUTHORITATIVE_V2_PROTOCOL
-    )
+def test_protocol_selection_is_explicit_and_defaults_to_v2():
+    assert normalize_weight_protocol(None) == AUTHORITATIVE_V2_PROTOCOL
     assert (
         normalize_weight_protocol("LEGACY_V1_COMPAT")
         == LEGACY_V1_COMPAT_PROTOCOL

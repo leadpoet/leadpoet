@@ -51,7 +51,7 @@ def test_validator_restart_has_fail_closed_legacy_v1_compat_branch():
         ROOT / "validator_models" / "containerizing" / "deploy_dynamic.sh"
     ).read_text(encoding="utf-8")
 
-    assert 'VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-legacy_v1_compat}"' in script
+    assert 'VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-authoritative_v2}"' in script
     assert "authoritative_v2|legacy_v1_compat" in script
     assert 'EXPECTED_CHAIN="${EXPECTED_CHAIN:-wss://entrypoint-finney.opentensor.ai:443}"' in script
     assert "verify_legacy_v1_enclave" in script
@@ -59,7 +59,7 @@ def test_validator_restart_has_fail_closed_legacy_v1_compat_branch():
     assert "APPROVED_LEGACY_V1_PCR0=" in script
     assert "Preserving the approved running legacy V1 enclave" in script
     assert 'if [ "$VALIDATOR_WEIGHT_PROTOCOL" = "authoritative_v2" ]; then' in script
-    assert '-e VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-legacy_v1_compat}"' in deploy
+    assert '-e VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-authoritative_v2}"' in deploy
     assert 'VALIDATOR_DEPLOY_SHA="$(git -C "$REPO_DIR" rev-parse HEAD)"' in deploy
     assert '-e GIT_COMMIT_HASH="$VALIDATOR_DEPLOY_SHA"' in deploy
     assert '-e EXPECTED_CHAIN="$EXPECTED_CHAIN"' in deploy

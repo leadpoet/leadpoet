@@ -4,6 +4,13 @@
   "_repo": "https://github.com/leadpoet/leadpoet",
   "gateway_pcr0": [
     {
+      "pcr0": "f6dd7e9cde5ae12550051e892e24d558beb597e9dd4899a2cc2a8852d23b8813979f64e3468378087d01126a9e1b89e2",
+      "version": "2026-07-13e",
+      "deployed": "2026-07-13",
+      "commit_hash": "fdf08f392f9ac3357e5c4895f7424c5a1a08059a",
+      "notes": "gateway enclave: DeepLine start-cache fix + crypto preflight deploy"
+    },
+    {
       "pcr0": "de2f53543c59a190042993cd9fee3beb3a43483d2f89f393611d8a9f8e1aac4c95f7a118a7fddbbed9e09922c129a1be",
       "version": "2026-07-13d",
       "deployed": "2026-07-13",

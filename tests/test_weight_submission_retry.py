@@ -198,12 +198,15 @@ def test_all_active_submission_paths_use_epoch_bounded_helpers():
     primary_source = validator_module.Path(validator_module.__file__).read_text(encoding="utf-8")
     auditor_source = auditor_module.Path(auditor_module.__file__).read_text(encoding="utf-8")
 
-    assert primary_source.count("await self._authorize_and_set_weights_v2(") == 3
+    assert primary_source.count("await self._publish_and_set_weights(") == 3
+    assert primary_source.count("await self._authorize_and_set_weights_v2(") == 1
     assert primary_source.count("await self._set_weights_until_epoch_end(") == 2
+    assert primary_source.count("await self._set_legacy_weights_until_epoch_end(") == 1
     assert auditor_source.count("self._set_weights_until_epoch_end(") == 1
     assert "submit_burn_weights_to_uid0" not in auditor_source
-    assert primary_source.count("self.subtensor.set_weights(") == 1
+    assert primary_source.count("self.subtensor.set_weights(") == 2
     assert auditor_source.count("self.subtensor.set_weights(") == 1
     assert "_submit_weights_to_gateway" not in primary_source
     assert "_submit_weights_v2" not in primary_source
     assert "VALIDATOR_ATTESTED_WEIGHT_MODE" not in primary_source
+    assert "VALIDATOR_WEIGHT_PROTOCOL" in primary_source

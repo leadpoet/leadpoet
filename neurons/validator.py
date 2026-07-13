@@ -84,6 +84,8 @@ from math import isclose
 from pathlib import Path
 import warnings
 import subprocess
+import aiohttp
+from urllib.parse import urlparse
 from leadpoet_canonical.weight_computation import (
     WEIGHT_SNAPSHOT_SCHEMA_VERSION,
     compute_final_weights as compute_canonical_final_weights,
@@ -110,10 +112,19 @@ try:
         AuthoritativeWeightPublicationJournalV2,
     )
     from validator_tee.host.vsock_client import ValidatorEnclaveClient
-    TEE_AVAILABLE = True
+    V2_TEE_AVAILABLE = True
 except ImportError as e:
-    TEE_AVAILABLE = False
+    V2_TEE_AVAILABLE = False
     # Will log warning at runtime if TEE submission is attempted
+
+from validator_tee.host.legacy_v1_compat import (
+    AUTHORITATIVE_V2_PROTOCOL,
+    LEGACY_V1_COMPAT_PROTOCOL,
+    LegacyV1EnclaveClient,
+    build_legacy_v1_submission,
+    normalize_weight_protocol,
+    verify_existing_legacy_v1_bundle,
+)
 
 # ════════════════════════════════════════════════════════════════════════════
 # QUALIFICATION MODEL EVALUATION IMPORTS
@@ -470,6 +481,10 @@ def _research_lab_production_subnet_default() -> bool:
         or ""
     ).strip()
     return network == "finney" and netuid == "71"
+
+
+def _validator_weight_protocol() -> str:
+    return normalize_weight_protocol(os.environ.get("VALIDATOR_WEIGHT_PROTOCOL"))
 
 
 def _current_validator_commit_sha() -> str:
@@ -891,28 +906,38 @@ def _normalize_research_lab_sha256_ref(value: Any, *, fallback: Any = None, fiel
 
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
-        if not TEE_AVAILABLE:
-            raise RuntimeError("authoritative validator V2 modules are unavailable")
-        if config is None or not hasattr(config, "wallet"):
-            raise RuntimeError("authoritative validator V2 wallet configuration is missing")
-        self._validator_v2_client = ValidatorEnclaveClient()
-        enclave_wallet = build_enclave_backed_wallet_v2(
-            name=str(config.wallet.name),
-            hotkey_name=str(config.wallet.hotkey),
-            path=str(config.wallet.path),
-            client=self._validator_v2_client,
-        )
-        super().__init__(config=config, wallet=enclave_wallet)
-        journal_path = Path(
-            os.environ.get("VALIDATOR_V2_PUBLICATION_JOURNAL_PATH")
-            or (
-                Path(self.config.neuron.full_path)
-                / "authoritative_weight_publication_v2.json"
+        self._weight_protocol = _validator_weight_protocol()
+        if self._weight_protocol == LEGACY_V1_COMPAT_PROTOCOL:
+            super().__init__(config=config)
+            self._legacy_v1_client = LegacyV1EnclaveClient()
+            self._legacy_v1_client.health_check()
+            bt.logging.warning(
+                "validator_weight_protocol=legacy_v1_compat "
+                "using_host_wallet=true authoritative_v2=false"
             )
-        ).expanduser()
-        self._weight_publication_journal_v2 = (
-            AuthoritativeWeightPublicationJournalV2(journal_path)
-        )
+        else:
+            if not V2_TEE_AVAILABLE:
+                raise RuntimeError("authoritative validator V2 modules are unavailable")
+            if config is None or not hasattr(config, "wallet"):
+                raise RuntimeError("authoritative validator V2 wallet configuration is missing")
+            self._validator_v2_client = ValidatorEnclaveClient()
+            enclave_wallet = build_enclave_backed_wallet_v2(
+                name=str(config.wallet.name),
+                hotkey_name=str(config.wallet.hotkey),
+                path=str(config.wallet.path),
+                client=self._validator_v2_client,
+            )
+            super().__init__(config=config, wallet=enclave_wallet)
+            journal_path = Path(
+                os.environ.get("VALIDATOR_V2_PUBLICATION_JOURNAL_PATH")
+                or (
+                    Path(self.config.neuron.full_path)
+                    / "authoritative_weight_publication_v2.json"
+                )
+            ).expanduser()
+            self._weight_publication_journal_v2 = (
+                AuthoritativeWeightPublicationJournalV2(journal_path)
+            )
         
         # Add async subtensor (initialized later in run())
         # This eliminates memory leaks and HTTP 429 errors from repeated instance creation
@@ -3689,6 +3714,158 @@ class Validator(BaseValidatorNeuron):
                 )
             return {"abort_chain_submission": False, "verified": False, "errors": [str(exc)]}
 
+    async def _publish_and_set_weights(
+        self,
+        *,
+        snapshot: Dict[str, Any],
+        host_uids: List[int],
+        host_weights: List[float],
+        allocation_hash: str,
+        leaderboard_window_start: str,
+        leaderboard_window_end: str,
+    ) -> bool:
+        """Publish through the explicitly selected protocol, then set weights."""
+
+        if self._weight_protocol != LEGACY_V1_COMPAT_PROTOCOL:
+            return await self._authorize_and_set_weights_v2(
+                snapshot=snapshot,
+                host_uids=host_uids,
+                host_weights=host_weights,
+                allocation_hash=allocation_hash,
+                leaderboard_window_start=leaderboard_window_start,
+                leaderboard_window_end=leaderboard_window_end,
+            )
+
+        prepared = build_legacy_v1_submission(
+            client=self._legacy_v1_client,
+            netuid=int(self.config.netuid),
+            epoch_id=int(snapshot["epoch_id"]),
+            block=int(snapshot["block"]),
+            uids=host_uids,
+            weights=host_weights,
+            validator_hotkey=self.wallet.hotkey.ss58_address,
+            sign_binding_message=self.wallet.hotkey.sign,
+            expected_chain=str(
+                os.environ.get(
+                    "EXPECTED_CHAIN",
+                    "wss://entrypoint-finney.opentensor.ai:443",
+                )
+            ).strip(),
+            validator_version=_current_validator_commit_sha()[:7],
+        )
+        event_hash = await self._publish_legacy_v1_bundle(prepared["payload"])
+        if not event_hash:
+            bt.logging.error(
+                "validator_legacy_v1_gateway_publication_failed epoch=%s",
+                snapshot["epoch_id"],
+            )
+            return False
+        self._last_legacy_v1_weight_submission = {
+            **prepared,
+            "weight_submission_event_hash": event_hash,
+        }
+        print(
+            "   ✅ Legacy V1 gateway bundle persisted before chain submission: "
+            f"{event_hash[:20]}..."
+        )
+        return await self._set_legacy_weights_until_epoch_end(
+            epoch_id=int(snapshot["epoch_id"]),
+            uids=prepared["uids"],
+            weights=prepared["chain_weights"],
+        )
+
+    async def _publish_legacy_v1_bundle(
+        self, payload: Dict[str, Any]
+    ) -> Optional[str]:
+        gateway_url = str(os.environ.get("GATEWAY_URL") or "").strip().rstrip("/")
+        parsed = urlparse(gateway_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise RuntimeError(
+                "GATEWAY_URL must be an HTTP(S) origin in legacy_v1_compat mode"
+            )
+
+        timeout = aiohttp.ClientTimeout(total=60)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    f"{gateway_url}/weights/submit", json=payload
+                ) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        event_hash = str(
+                            result.get("weight_submission_event_hash") or ""
+                        )
+                        if not event_hash:
+                            raise RuntimeError(
+                                "legacy V1 gateway response omitted its event hash"
+                            )
+                        return event_hash
+                    if response.status != 409:
+                        error = await response.text()
+                        bt.logging.error(
+                            "validator_legacy_v1_gateway_rejected status=%s error=%s",
+                            response.status,
+                            error[:200],
+                        )
+                        return None
+
+                # A restart may encounter the bundle persisted by an earlier
+                # attempt. Proceed only if every signed vector field is exact.
+                async with session.get(
+                    f"{gateway_url}/weights/latest/"
+                    f"{payload['netuid']}/{payload['epoch_id']}"
+                ) as response:
+                    if response.status != 200:
+                        error = await response.text()
+                        bt.logging.error(
+                            "validator_legacy_v1_duplicate_lookup_failed "
+                            "status=%s error=%s",
+                            response.status,
+                            error[:200],
+                        )
+                        return None
+                    existing = await response.json()
+                return verify_existing_legacy_v1_bundle(existing, payload)
+        except aiohttp.ClientError as exc:
+            bt.logging.error(
+                "validator_legacy_v1_gateway_transport_failed error=%s", exc
+            )
+            return None
+
+    async def _set_legacy_weights_until_epoch_end(
+        self,
+        *,
+        epoch_id: int,
+        uids,
+        weights,
+    ) -> bool:
+        """Retry the exact published V1 vector only within its source epoch."""
+
+        attempt = 0
+        while True:
+            attempt += 1
+            success, message = self.subtensor.set_weights(
+                netuid=self.config.netuid,
+                wallet=self.wallet,
+                uids=uids,
+                weights=weights,
+                wait_for_finalization=True,
+            )
+            if success:
+                return True
+            print(
+                f"   ❌ Bittensor rejected weight submission attempt {attempt}: "
+                f"{message}"
+            )
+            await asyncio.sleep(12)
+            current_block = await self.get_current_block_async()
+            if current_block // 360 != epoch_id:
+                print(
+                    f"   ⏹️ Epoch {epoch_id} ended before the weight submission "
+                    "was accepted"
+                )
+                return False
+
     async def _authorize_and_set_weights_v2(
         self,
         *,
@@ -4231,7 +4408,7 @@ class Validator(BaseValidatorNeuron):
                     ):
                         return False
 
-                    result = await self._authorize_and_set_weights_v2(
+                    result = await self._publish_and_set_weights(
                         snapshot=_weight_snapshot(),
                         host_uids=[BURN_TARGET_UID],
                         host_weights=[1.0],
@@ -4367,7 +4544,7 @@ class Validator(BaseValidatorNeuron):
                 ):
                     return False
 
-                result = await self._authorize_and_set_weights_v2(
+                result = await self._publish_and_set_weights(
                     snapshot=_weight_snapshot(),
                     host_uids=[BURN_TARGET_UID],
                     host_weights=[1.0],
@@ -4706,7 +4883,7 @@ class Validator(BaseValidatorNeuron):
             )
 
             print(f"\n📡 Submitting weights to Bittensor chain...")
-            result = await self._authorize_and_set_weights_v2(
+            result = await self._publish_and_set_weights(
                 snapshot=authoritative_snapshot,
                 host_uids=list(uids),
                 host_weights=list(normalized_weights),
@@ -4747,9 +4924,8 @@ class Validator(BaseValidatorNeuron):
             bt.logging.error(traceback.format_exc())
             return False
     
-    # V1/off/shadow weight submission helpers were removed. The only chain
-    # path is `_authorize_and_set_weights_v2`, which persists the complete
-    # enclave receipt graph before entering the constrained SDK call.
+    # All active weight branches enter `_publish_and_set_weights`. Protocol
+    # selection is explicit; neither path silently downgrades after an error.
     def archive_weights_to_history(self, epoch_id: int, epoch_data: Dict):
         """
         [DEPRECATED] Archive submitted weights to validator_weights_history for record keeping.

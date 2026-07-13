@@ -13,7 +13,7 @@ def test_validator_restart_preserves_build_order_and_starts_chain_relay():
     artifact_prepare = script.index(
         "python3 -m validator_tee.scripts.stage_runtime_artifacts_v2"
     )
-    shutdown = script.index('echo "Stopping validator processes/containers/enclave"')
+    shutdown = script.index('echo "Stopping validator processes and containers"')
     build = script.index("bash validator_tee/scripts/build_enclave.sh")
     release_gate = script.index("python3 -m validator_tee.host.verify_release_gate_v2")
     release_archive = script.index("python3 -m validator_tee.host.release_archive_v2")
@@ -35,7 +35,7 @@ def test_validator_restart_preserves_build_order_and_starts_chain_relay():
     assert "usable validator hotkey material remains on the parent" in script
     assert 'HOST_HOTKEY_DIR="$VALIDATOR_WALLET_ROOT/$VALIDATOR_WALLET_NAME/hotkeys"' in script
     assert 'find "$HOST_HOTKEY_DIR" -mindepth 1 -maxdepth 1 -print -quit' in script
-    assert 'HOST_HOTKEY_FILE=' not in script
+    assert 'HOST_HOTKEY_FILE="$HOST_HOTKEY_DIR/$VALIDATOR_WALLET_HOTKEY"' in script
     assert "VALIDATOR_V2_GATEWAY_URL" in script
     assert "VALIDATOR_V2_RELEASE_MANIFEST" in script
     assert '--validator-release "$VALIDATOR_V2_RELEASE_MANIFEST"' in script
@@ -43,6 +43,36 @@ def test_validator_restart_preserves_build_order_and_starts_chain_relay():
     assert '--retain 3' in script
     assert "unset ENABLE_TEE_SUBMISSION VALIDATOR_ATTESTED_WEIGHT_MODE" in script
     subprocess.run(["bash", "-n", str(ROOT / "validator_restart.sh")], check=True)
+
+
+def test_validator_restart_has_fail_closed_legacy_v1_compat_branch():
+    script = (ROOT / "validator_restart.sh").read_text(encoding="utf-8")
+    deploy = (
+        ROOT / "validator_models" / "containerizing" / "deploy_dynamic.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-authoritative_v2}"' in script
+    assert "authoritative_v2|legacy_v1_compat" in script
+    assert "verify_legacy_v1_enclave" in script
+    assert "requires exactly one running enclave" in script
+    assert "APPROVED_LEGACY_V1_PCR0=" in script
+    assert "Preserving the approved running legacy V1 enclave" in script
+    assert 'if [ "$VALIDATOR_WEIGHT_PROTOCOL" = "authoritative_v2" ]; then' in script
+    assert '-e VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-authoritative_v2}"' in deploy
+    subprocess.run(["bash", "-n", str(ROOT / "validator_restart.sh")], check=True)
+    subprocess.run(
+        [
+            "bash",
+            "-n",
+            str(
+                ROOT
+                / "validator_models"
+                / "containerizing"
+                / "deploy_dynamic.sh"
+            ),
+        ],
+        check=True,
+    )
 
 
 def test_validator_eif_measures_chain_source_without_base_image_change():

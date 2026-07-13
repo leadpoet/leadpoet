@@ -472,3 +472,34 @@ def _sanitized_run_summary_from_terminal_event(
     if isinstance(estimated, (int, float)) and not isinstance(estimated, bool):
         doc["estimated_cost_usd"] = float(estimated)
     return doc
+
+
+# The owner-facing summary minus the miner's spend: dollar figures are the
+# miner's own business data and must not reach the anonymous public card.
+_RUN_SUMMARY_PUBLIC_FIELDS = (
+    "run_id",
+    "loop_status",
+    "stop_reason",
+    "failure_reason",
+    "public_label",
+    "last_completed_stage",
+    "stage_counts",
+    "failure_classes",
+    "wall_clock_seconds",
+    "openrouter_call_count",
+    "iterations_completed",
+    "selected_candidate_count",
+)
+
+
+def public_run_summary_from_terminal_event(
+    run_id: str,
+    loop_status: str,
+    event_doc: Mapping[str, Any],
+    failure_classes: list[str],
+) -> dict[str, Any]:
+    """Project the sanitized run summary for the anonymous public loop card."""
+    doc = _sanitized_run_summary_from_terminal_event(
+        run_id, loop_status, event_doc, failure_classes
+    )
+    return {key: doc[key] for key in _RUN_SUMMARY_PUBLIC_FIELDS if key in doc}

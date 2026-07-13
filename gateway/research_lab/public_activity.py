@@ -15,6 +15,7 @@ from .candidate_diagnostics import (
     NO_BUILDABLE_CANDIDATE_EVENT_TYPE,
     build_candidate_generation_failure_summary,
     public_candidate_generation_failure_summary,
+    public_run_summary_from_terminal_event,
 )
 from .config import ResearchLabGatewayConfig
 from .store import (
@@ -619,6 +620,44 @@ def _activity_promotion_rows(
     return [row for row in promotion_event_rows if not _is_stale_parent_promotion_tombstone(row)]
 
 
+def _public_run_summary(
+    auto_loop_event_rows: Sequence[Mapping[str, Any]],
+    run_id: str | None,
+) -> dict[str, Any]:
+    """Spend-free run summary from the loop's terminal event, if one exists.
+
+    Zero-candidate and failed loops otherwise surface no public explanation of
+    why the paid run stopped; the sanitized terminal projection (stop_reason,
+    last stage, stage counts, call/iteration counts) is enum-and-count only.
+    """
+    terminal_row = None
+    failure_classes: list[str] = []
+    for row in auto_loop_event_rows:
+        row_run_id = str(row.get("run_id") or "")
+        if run_id and row_run_id != str(run_id):
+            continue
+        event_doc = row.get("event_doc")
+        event_doc = event_doc if isinstance(event_doc, Mapping) else {}
+        failure_class = str(event_doc.get("failure_class") or "")
+        if failure_class and failure_class not in failure_classes:
+            failure_classes.append(failure_class)
+        if str(row.get("event_type") or "") in {"loop_completed", "loop_failed"}:
+            if terminal_row is None or int(row.get("seq") or 0) > int(
+                terminal_row.get("seq") or 0
+            ):
+                terminal_row = row
+    if terminal_row is None:
+        return {}
+    terminal_doc = terminal_row.get("event_doc")
+    terminal_doc = terminal_doc if isinstance(terminal_doc, Mapping) else {}
+    return public_run_summary_from_terminal_event(
+        str(terminal_row.get("run_id") or ""),
+        str(terminal_row.get("loop_status") or ""),
+        terminal_doc,
+        failure_classes,
+    )
+
+
 def derive_public_loop_outcome(
     *,
     ticket: Mapping[str, Any],
@@ -683,6 +722,9 @@ def derive_public_loop_outcome(
         "score_bundle_count": len(score_bundle_rows),
         "promotion_event_count": len(promotion_event_rows),
     }
+    run_summary = _public_run_summary(auto_loop_event_rows, run_id)
+    if run_summary:
+        event_doc["run_summary"] = run_summary
     candidate_generation_failure: dict[str, Any] = {}
     if (
         candidate_count == 0

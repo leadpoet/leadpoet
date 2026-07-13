@@ -260,5 +260,79 @@ async def test_reimbursement_authority_failure_prevents_business_writes(monkeypa
     assert writes == []
 
 
+@pytest.mark.asyncio
+async def test_legacy_reimbursement_preserves_host_award_and_schedule(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1")
+    order = []
+
+    async def persist_snapshot(**_kwargs):
+        order.append("snapshot")
+        return {"participation_snapshot_id": "snapshot-row-1"}
+
+    async def create_award(**kwargs):
+        order.append("award")
+        return dict(kwargs["award"]), {"event_type": "awarded"}
+
+    async def create_schedule(**kwargs):
+        order.append("schedule")
+        return {"schedule_id": kwargs["schedule"]["schedule_id"]}
+
+    async def forbidden_v2(**_kwargs):
+        raise AssertionError("legacy reimbursement must not call V2 authority")
+
+    monkeypatch.setattr(
+        reimbursement_awards,
+        "_build_participation_snapshot",
+        lambda *_args, **_kwargs: _async(_snapshot()),
+    )
+    monkeypatch.setattr(
+        reimbursement_awards,
+        "_reimbursement_cap_usage",
+        lambda *_args, **_kwargs: _async(
+            {
+                "hotkey_day_awarded_usd": 0.0,
+                "island_day_awarded_usd": 0.0,
+                "global_awarded_usd": 0.0,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        reimbursement_awards,
+        "_persist_participation_snapshot",
+        persist_snapshot,
+    )
+    monkeypatch.setattr(
+        reimbursement_awards,
+        "resolve_research_lab_evaluation_epoch",
+        lambda *_args, **_kwargs: _async((250, 90000, "test")),
+    )
+    monkeypatch.setattr(reimbursement_awards, "create_reimbursement_award", create_award)
+    monkeypatch.setattr(
+        reimbursement_awards,
+        "create_reimbursement_schedule",
+        create_schedule,
+    )
+    monkeypatch.setattr(v2_authority, "authorize_reward_decision_v2", forbidden_v2)
+
+    result = await reimbursement_awards.create_reimbursement_decision(
+        _config(),
+        run_id="run-legacy",
+        ticket_id="ticket-legacy",
+        ticket={"miner_hotkey": "hotkey-1", "island": "generalist"},
+        payment={"payment_id": "payment-1"},
+        receipt_id="receipt-1",
+        budget_context={"requested_compute_budget_usd": 20.0},
+        cost_evidence={
+            "trusted_cost_ledger": True,
+            "actual_openrouter_cost_usd": 10.0,
+            "cost_ledger": {"actual_openrouter_cost_usd": 10.0},
+        },
+        source="test",
+        miner_openrouter_key_ref="encrypted_ref:openrouter:test",
+    )
+    assert result["status"] == "awarded"
+    assert order == ["snapshot", "award", "schedule"]
+
+
 async def _async(value):
     return value

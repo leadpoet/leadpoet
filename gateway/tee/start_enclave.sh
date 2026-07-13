@@ -8,12 +8,76 @@ GATEWAY_ROOT="${GATEWAY_ROOT:-/home/ec2-user/gateway}"
 EIF_ROOT="${GATEWAY_TEE_EIF_ROOT:-/home/ec2-user/tee}"
 TOPOLOGY_MODE="${GATEWAY_TEE_TOPOLOGY_MODE:-full}"
 RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$EIF_ROOT/gateway-v2-release-manifest.json}"
+TEE_PROTOCOL="$(
+  printf '%s' "${RESEARCH_LAB_TEE_PROTOCOL:-v2}" \
+    | tr '[:upper:]' '[:lower:]'
+)"
+case "$TEE_PROTOCOL" in
+  legacy_v1|legacy_v1_compat) TEE_PROTOCOL="legacy_v1" ;;
+  v2|authoritative_v2) TEE_PROTOCOL="v2" ;;
+  *)
+    echo "ERROR: RESEARCH_LAB_TEE_PROTOCOL must be legacy_v1 or v2" >&2
+    exit 1
+    ;;
+esac
 ALL_ROLES=(
   gateway_coordinator
   gateway_scoring_a
   gateway_scoring_b
   gateway_autoresearch
 )
+
+if [ "$TEE_PROTOCOL" = "legacy_v1" ]; then
+  EIF_PATH="$EIF_ROOT/tee-enclave.eif"
+  test -s "$EIF_PATH" || {
+    echo "ERROR: legacy gateway EIF is unavailable: $EIF_PATH" >&2
+    exit 1
+  }
+  CPU_COUNT="${GATEWAY_ENCLAVE_CPU_COUNT:-2}"
+  MEMORY_MIB="${GATEWAY_ENCLAVE_MEMORY_MB:-8192}"
+  if ! [[ "$CPU_COUNT" =~ ^[0-9]+$ ]] || ! [[ "$MEMORY_MIB" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: legacy gateway enclave CPU and memory must be integers" >&2
+    exit 1
+  fi
+  if [ "$CPU_COUNT" -lt 2 ] || [ "$MEMORY_MIB" -lt 8192 ]; then
+    echo "ERROR: legacy gateway enclave requires at least 2 vCPUs and 8192 MiB" >&2
+    exit 1
+  fi
+  sudo nitro-cli terminate-enclave --all 2>/dev/null || true
+  sleep 2
+  echo "Starting legacy gateway enclave from the current deploy commit"
+  sudo nitro-cli run-enclave \
+    --cpu-count "$CPU_COUNT" \
+    --memory "$MEMORY_MIB" \
+    --eif-path "$EIF_PATH" \
+    --enclave-cid 16
+  sleep 15
+  sudo nitro-cli describe-enclaves
+  PYTHONPATH="${GATEWAY_ROOT%/gateway}" python3 - <<'PY'
+import asyncio
+
+from gateway.utils.tee_client import TEEClient
+
+
+async def main() -> None:
+    last_error = None
+    for _attempt in range(10):
+        try:
+            public_key = await TEEClient(cid=16)._send_rpc("get_public_key", {})
+            if not isinstance(public_key, str) or len(public_key) != 64:
+                raise RuntimeError("legacy gateway enclave returned an invalid public key")
+            return
+        except Exception as exc:
+            last_error = exc
+            await asyncio.sleep(2)
+    raise RuntimeError("legacy gateway enclave RPC is unavailable") from last_error
+
+
+asyncio.run(main())
+PY
+  echo "Legacy gateway enclave RPC is healthy"
+  exit 0
+fi
 
 python3 "$SCRIPT_DIR/topology.py" --verify "$SCRIPT_DIR/topology.json"
 

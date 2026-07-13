@@ -15,6 +15,7 @@ from typing import Any, Mapping, Sequence
 
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.logging_utils import compact_ref
+from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.research_lab.store import (
     create_participation_snapshot as store_create_participation_snapshot,
     create_reimbursement_award,
@@ -244,6 +245,29 @@ async def create_reimbursement_decision(
                 source=source,
             )
 
+    if legacy_v1_enabled():
+        return await _create_legacy_reimbursement_decision(
+            config,
+            run_id=run_id,
+            ticket=ticket,
+            payment=payment,
+            receipt_id=receipt_id,
+            budget_context=budget_context,
+            evidence=evidence,
+            actual_microusd=actual_microusd,
+            actual_usd=actual_usd,
+            key_present=key_present,
+            trusted_cost=trusted_cost,
+            source=source,
+            failed_run_reimbursement=failed_run_reimbursement,
+            failure_reason=failure_reason,
+            queue_terminal_status=queue_terminal_status,
+            actor_ref=actor_ref,
+            run_day=run_day,
+            preserved_loop_start_credit=preserved_loop_start_credit,
+            require_positive_cost=require_positive_cost,
+        )
+
     if not isinstance(autoresearch_result, Mapping):
         raise RuntimeError(
             "V2 reimbursement requires the exact signed autoresearch result"
@@ -359,6 +383,155 @@ async def create_reimbursement_decision(
     schedule_row = await create_reimbursement_schedule(schedule=schedule, schedule_doc=schedule_doc)
     logger.info(
         "research_lab_reimbursement_decision run_id=%s status=%s target_usd=%.6f openrouter_usd=%.6f source=%s failed_run=%s shadow_only=%s",
+        compact_ref(run_id),
+        award["status"],
+        float(award["target_reimbursement_usd"]),
+        actual_usd,
+        source,
+        bool(failed_run_reimbursement),
+        shadow_only,
+    )
+    return {
+        "status": award["status"],
+        "award_id": str(award_row["award_id"]),
+        "schedule_id": str(schedule_row["schedule_id"]),
+        "target_reimbursement_usd": award["target_reimbursement_usd"],
+        "rebate_rate": award["rebate_rate"],
+        "actual_openrouter_cost_usd": round(actual_usd, 6),
+        "shadow_only": shadow_only,
+        "failed_run_reimbursement": bool(failed_run_reimbursement),
+        "source": source,
+    }
+
+
+async def _create_legacy_reimbursement_decision(
+    config: Any,
+    *,
+    run_id: str,
+    ticket: Mapping[str, Any],
+    payment: Mapping[str, Any] | None,
+    receipt_id: str | None,
+    budget_context: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    actual_microusd: int,
+    actual_usd: float,
+    key_present: bool,
+    trusted_cost: bool,
+    source: str,
+    failed_run_reimbursement: bool,
+    failure_reason: str | None,
+    queue_terminal_status: str | None,
+    actor_ref: str | None,
+    run_day: str | None,
+    preserved_loop_start_credit: bool,
+    require_positive_cost: bool,
+) -> dict[str, Any]:
+    """Run the established host reimbursement kernel in legacy mode."""
+
+    resolved_run_day = str(run_day or _utc_day())
+    policy = config.reimbursement_policy_doc(
+        enabled=config.reimbursements_enabled or config.shadow_reimbursements_enabled
+    )
+    snapshot_doc = await _build_participation_snapshot(config, ticket, policy)
+    snapshot_row = await _persist_participation_snapshot(
+        snapshot_doc=snapshot_doc,
+        policy=policy,
+    )
+    cap_usage = await _reimbursement_cap_usage(
+        config,
+        ticket,
+        run_day=resolved_run_day,
+    )
+    run_cost = {
+        "run_id": run_id,
+        "miner_hotkey": str(ticket.get("miner_hotkey") or ""),
+        "island": str(ticket.get("island") or config.reimbursement_default_island),
+        "run_day": resolved_run_day,
+        "funded_compute_budget_usd": float(
+            budget_context.get("requested_compute_budget_usd") or 0.0
+        ),
+        "actual_openrouter_cost_usd": actual_usd,
+        "loop_start_tao_fee_usd": float(config.loop_start_fee_usd),
+        "paid_research_loop": True,
+        "valid_receipt": bool(receipt_id)
+        and (not require_positive_cost or actual_microusd > 0),
+        "verified_loop_start_payment": bool(payment),
+        "preserved_loop_start_credit": bool(preserved_loop_start_credit),
+        "miner_openrouter_key_present": key_present,
+        "trusted_cost_ledger": trusted_cost,
+        "passed_abuse_checks": True,
+        "refunded": False,
+        "voided": False,
+        "duplicate": False,
+        "novelty_rejected": False,
+        "self_cancelled_before_minimum_work": False,
+        "banned_hotkey": False,
+    }
+    award = compute_reimbursement_award(
+        run_cost,
+        snapshot_doc,
+        policy,
+        ReimbursementCapUsage.from_mapping(cap_usage),
+    ).to_dict()
+    evaluation_epoch, _block, _epoch_source = await resolve_research_lab_evaluation_epoch(
+        config.evaluation_epoch
+    )
+    schedule = build_reimbursement_schedule(
+        award,
+        start_epoch=max(0, int(evaluation_epoch) + 1),
+    ).to_dict()
+    shadow_only = not config.reimbursements_enabled
+    award_doc = {
+        "schema_version": "1.0",
+        "award": award,
+        "run_cost": _redacted_reimbursement_run_cost(run_cost),
+        "policy": policy,
+        "participation_snapshot": snapshot_doc,
+        "cap_usage": cap_usage,
+        "shadow_only": shadow_only,
+        "submission_allowed": config.reimbursements_enabled,
+        "source": source,
+        "evaluation_epoch": int(evaluation_epoch),
+        "failed_run_reimbursement": bool(failed_run_reimbursement),
+        "failure_reason": str(failure_reason or "")[:500],
+        "queue_terminal_status": queue_terminal_status,
+        "cost_evidence_event_seq": evidence.get("source_event_seq"),
+        "cost_evidence_event_hash": evidence.get("source_event_hash"),
+        "cost_evidence_event_type": evidence.get("source_event_type"),
+        "receipt_id": receipt_id,
+        "actual_openrouter_cost_usd": actual_usd,
+        "reimbursement_preserved": bool(failed_run_reimbursement),
+        "actor_ref": actor_ref,
+    }
+    schedule_doc = {
+        "schema_version": "1.0",
+        "schedule": schedule,
+        "shadow_only": shadow_only,
+        "submission_allowed": config.reimbursements_enabled,
+        "source": source,
+        "evaluation_epoch": int(evaluation_epoch),
+        "failed_run_reimbursement": bool(failed_run_reimbursement),
+    }
+    award_row, _award_event = await create_reimbursement_award(
+        award=award,
+        receipt_id=receipt_id,
+        participation_snapshot_id=str(snapshot_row["participation_snapshot_id"]),
+        policy_id=str(policy["policy_id"]),
+        award_doc=award_doc,
+    )
+    if str(award_row["award_id"]) != str(schedule["award_id"]):
+        schedule = build_reimbursement_schedule(
+            {**award, "award_id": str(award_row["award_id"])},
+            start_epoch=max(0, int(evaluation_epoch) + 1),
+        ).to_dict()
+        schedule_doc = {**schedule_doc, "schedule": schedule}
+    schedule_row = await create_reimbursement_schedule(
+        schedule=schedule,
+        schedule_doc=schedule_doc,
+    )
+    logger.info(
+        "research_lab_reimbursement_decision run_id=%s status=%s target_usd=%.6f "
+        "openrouter_usd=%.6f source=%s failed_run=%s shadow_only=%s",
         compact_ref(run_id),
         award["status"],
         float(award["target_reimbursement_usd"]),

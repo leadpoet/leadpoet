@@ -9,6 +9,11 @@ import logging
 import os
 from typing import Any, Mapping
 
+from gateway.research_lab.alpha_pricing import (
+    inject_alpha_price_valuation,
+    resolve_epoch_alpha_price_valuation,
+)
+from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.research_lab.v2_authority import build_allocation_v2
 from gateway.research_lab.bundles import contains_secret_material, sha256_json
 from gateway.research_lab.chain import resolve_hotkey_uids
@@ -33,43 +38,106 @@ async def build_research_lab_allocation_bundle(
     attestation_out: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a sanitized Research Lab allocation bundle for one epoch."""
-    attestation = await build_allocation_v2(
-        epoch_id=int(epoch),
-        netuid=int(netuid),
-        policy=config.reimbursement_policy_doc(enabled=True),
-    )
-    authority = attestation.get("result")
-    if not isinstance(authority, Mapping):
-        raise ValueError("Research Lab V2 allocation authority result is missing")
-    allocation = authority.get("allocation")
-    allocation_inputs = authority.get("allocation_inputs")
-    source_state = authority.get("source_state")
-    if (
-        not isinstance(allocation, Mapping)
-        or not isinstance(allocation_inputs, Mapping)
-        or not isinstance(source_state, Mapping)
-    ):
-        raise ValueError("Research Lab V2 allocation authority result is invalid")
-    allocation = dict(allocation)
-    allocation_inputs = dict(allocation_inputs)
-    source_state = dict(source_state)
-    policy = dict(allocation_inputs.get("policy") or {})
-    reimbursement_obligations = list(
-        allocation_inputs.get("active_reimbursement_obligations") or []
-    )
-    champion_obligations = list(
-        allocation_inputs.get("active_champion_obligations") or []
-    )
-    source_add_present = "active_source_add_obligations" in allocation_inputs
-    source_add_obligations = list(
-        allocation_inputs.get("active_source_add_obligations") or []
-    )
-    skipped = source_state.get("skipped")
-    if not isinstance(skipped, Mapping):
-        raise ValueError("Research Lab V2 allocation skipped-state is invalid")
-    reimbursement_skipped = list(skipped.get("reimbursements") or [])
-    champion_skipped = list(skipped.get("champions") or [])
-    source_add_skipped = list(skipped.get("source_add") or [])
+    if legacy_v1_enabled():
+        policy = config.reimbursement_policy_doc(enabled=True)
+        alpha_valuation = await resolve_epoch_alpha_price_valuation(
+            network=_bittensor_network(),
+            netuid=int(netuid),
+            epoch=int(epoch),
+            enabled=bool(config.reimbursement_dynamic_alpha_price_enabled),
+            require_live=bool(config.reimbursement_require_live_alpha_price),
+            miner_alpha_per_epoch=config.reimbursement_miner_alpha_per_epoch,
+            static_usd_per_0_1_percent_epoch=(
+                config.reimbursement_usd_per_0_1_percent_epoch
+            ),
+        )
+        policy = inject_alpha_price_valuation(policy, alpha_valuation)
+        reimbursement_obligations, reimbursement_skipped = (
+            await _active_reimbursement_obligations(int(epoch), policy=policy)
+        )
+        champion_obligations, champion_skipped = (
+            await _active_champion_obligations(int(epoch), netuid=int(netuid))
+        )
+        source_add_obligations, source_add_skipped = (
+            await _active_source_add_obligations(int(epoch), netuid=int(netuid))
+        )
+        source_add_present = bool(source_add_obligations or source_add_skipped)
+        allocation_inputs = {
+            "epoch": int(epoch),
+            "policy": policy,
+            "active_reimbursement_obligations": reimbursement_obligations,
+            "active_champion_obligations": champion_obligations,
+        }
+        if source_add_present:
+            allocation_inputs["active_source_add_obligations"] = source_add_obligations
+        allocation = allocate_research_lab_epoch(
+            allocation_inputs["epoch"],
+            allocation_inputs["policy"],
+            allocation_inputs["active_reimbursement_obligations"],
+            allocation_inputs["active_champion_obligations"],
+            active_source_add_obligations=allocation_inputs.get(
+                "active_source_add_obligations", []
+            ),
+        )
+        source_state = {
+            "epoch": int(epoch),
+            "netuid": int(netuid),
+            "policy_id": str(policy["policy_id"]),
+            "policy": policy,
+            "reimbursement_obligation_count": len(reimbursement_obligations),
+            "champion_obligation_count": len(champion_obligations),
+            "reimbursement_obligations": reimbursement_obligations,
+            "champion_obligations": champion_obligations,
+            "skipped": {
+                "reimbursements": reimbursement_skipped,
+                "champions": champion_skipped,
+            },
+        }
+        if source_add_present:
+            source_state["source_add_obligation_count"] = len(source_add_obligations)
+            source_state["source_add_obligations"] = source_add_obligations
+            source_state["skipped"]["source_add"] = source_add_skipped
+        source_state_hash = sha256_json(source_state)
+        attestation = {"status": "off", "protocol": "legacy_v1"}
+    else:
+        attestation = await build_allocation_v2(
+            epoch_id=int(epoch),
+            netuid=int(netuid),
+            policy=config.reimbursement_policy_doc(enabled=True),
+        )
+        authority = attestation.get("result")
+        if not isinstance(authority, Mapping):
+            raise ValueError("Research Lab V2 allocation authority result is missing")
+        allocation = authority.get("allocation")
+        allocation_inputs = authority.get("allocation_inputs")
+        source_state = authority.get("source_state")
+        if (
+            not isinstance(allocation, Mapping)
+            or not isinstance(allocation_inputs, Mapping)
+            or not isinstance(source_state, Mapping)
+        ):
+            raise ValueError("Research Lab V2 allocation authority result is invalid")
+        allocation = dict(allocation)
+        allocation_inputs = dict(allocation_inputs)
+        source_state = dict(source_state)
+        policy = dict(allocation_inputs.get("policy") or {})
+        reimbursement_obligations = list(
+            allocation_inputs.get("active_reimbursement_obligations") or []
+        )
+        champion_obligations = list(
+            allocation_inputs.get("active_champion_obligations") or []
+        )
+        source_add_present = "active_source_add_obligations" in allocation_inputs
+        source_add_obligations = list(
+            allocation_inputs.get("active_source_add_obligations") or []
+        )
+        skipped = source_state.get("skipped")
+        if not isinstance(skipped, Mapping):
+            raise ValueError("Research Lab V2 allocation skipped-state is invalid")
+        reimbursement_skipped = list(skipped.get("reimbursements") or [])
+        champion_skipped = list(skipped.get("champions") or [])
+        source_add_skipped = list(skipped.get("source_add") or [])
+        source_state_hash = str(authority.get("source_state_hash") or "")
     if attestation_out is not None:
         attestation_out.clear()
         attestation_out.update(attestation)
@@ -85,9 +153,8 @@ async def build_research_lab_allocation_bundle(
         )
     if contains_secret_material(source_state) or contains_secret_material(allocation):
         raise ValueError("Research Lab allocation bundle contains private or secret material")
-    source_state_hash = str(authority.get("source_state_hash") or "")
     if source_state_hash != sha256_json(source_state):
-        raise ValueError("Research Lab V2 allocation source-state hash differs")
+        raise ValueError("Research Lab allocation source-state hash differs")
     bundle_without_id = {
         "bundle_id": "",
         "schema_version": "1.0",

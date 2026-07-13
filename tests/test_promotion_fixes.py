@@ -1279,6 +1279,48 @@ async def test_reward_start_epoch_uses_live_epoch_not_bundle_epoch(store, monkey
     assert captured[0]["start_epoch"] == 151
 
 
+async def test_legacy_champion_reward_skips_v2_authority_but_still_persists(
+    store,
+    monkeypatch,
+):
+    captured = _capture_obligation(monkeypatch)
+    monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1")
+
+    async def _resolve(_hotkey: str) -> int | None:
+        return 5
+
+    async def _live_epoch(_configured: Any = None) -> tuple[int, int | None, str]:
+        return 150, None, "test"
+
+    async def _forbidden_v2(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("legacy champion reward must not call V2 authority")
+
+    monkeypatch.setattr(promotion, "_resolve_miner_uid", _resolve)
+    monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _live_epoch)
+    monkeypatch.setattr(
+        v2_authority,
+        "authorize_reward_decision_v2",
+        _forbidden_v2,
+    )
+    controller = ResearchLabPromotionController(_epoch_config(), worker_ref="test-worker")
+    result = await controller._maybe_create_champion_reward(
+        candidate={
+            "candidate_id": "cand-legacy",
+            "miner_hotkey": "hk-legacy",
+            "ticket_id": "ticket-legacy",
+            "run_id": "run-legacy",
+            "island": "generalist",
+        },
+        score_bundle_row={"score_bundle_id": "sb-legacy"},
+        score_bundle={"evaluation_epoch": 100, "aggregates": {"per_icp_results": []}},
+        improvement_points=2.5,
+        threshold=1.0,
+    )
+    assert result["champion_reward_status"] == "created"
+    assert len(captured) == 1
+    assert store.reward_obligation_writes
+
+
 async def test_reward_start_epoch_falls_back_to_bundle_epoch_when_chain_unreachable(store, monkeypatch):
     captured = _capture_obligation(monkeypatch)
 

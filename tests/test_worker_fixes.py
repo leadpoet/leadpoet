@@ -42,14 +42,31 @@ def hosted_worker():
     return worker_mod.ResearchLabHostedWorker(ResearchLabGatewayConfig(), worker_ref="worker-a")
 
 
-def test_live_autoresearch_run_never_resolves_plaintext_openrouter_keys_on_parent():
+def test_v2_autoresearch_never_resolves_plaintext_openrouter_keys_on_parent():
     source = inspect.getsource(worker_mod.ResearchLabHostedWorker._process_run)
-    assert "key_resolver.resolve(" not in source
-    assert "key_resolver.resolve_management_key(" not in source
-    assert "_preflight_openrouter_credit(" not in source
-    assert "verify_openrouter_guard_v2(" in source
-    assert "build_attested_code_edit_dev_evaluator_v2(" in source
-    assert "build_code_edit_dev_evaluator(" not in source
+    legacy_key_branch = source.index("if legacy_v1_enabled():")
+    v2_key_branch = source.index(
+        "# V2 leases both encrypted credentials directly into the"
+    )
+    for marker in (
+        "key_resolver.resolve(",
+        "key_resolver.resolve_management_key(",
+        "_preflight_openrouter_credit(",
+    ):
+        assert legacy_key_branch < source.index(marker) < v2_key_branch
+
+    evaluation_marker = source.index(
+        "evaluation_epoch, _evaluation_block, _epoch_source"
+    )
+    legacy_loop_branch = source.index("if legacy_v1_enabled():", evaluation_marker)
+    legacy_evaluator = source.index(
+        "build_code_edit_dev_evaluator()", legacy_loop_branch
+    )
+    v2_evaluator = source.index(
+        "build_attested_code_edit_dev_evaluator_v2(", legacy_evaluator
+    )
+    v2_guard = source.index("verify_openrouter_guard_v2(", v2_evaluator)
+    assert legacy_loop_branch < legacy_evaluator < v2_evaluator < v2_guard
 
 
 def test_dev_eval_candidate_width_is_separate_from_paid_finalist_count():

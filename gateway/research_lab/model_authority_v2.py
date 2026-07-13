@@ -21,6 +21,7 @@ from typing import Any, Mapping, Sequence
 from gateway.research_lab.attested_scoring_v2 import execute_scoring_v2
 from gateway.research_lab.code_build import _extract_parent_image_source
 from gateway.research_lab.v2_authority import load_source_add_catalog_snapshot_v2
+from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.tee.model_sandbox_v2 import (
     MODEL_SANDBOX_REQUEST_SCHEMA_VERSION,
     provider_evidence_tape_input_root,
@@ -42,6 +43,7 @@ from research_lab.eval import (
     validate_private_model_artifact_manifest,
 )
 from research_lab.eval.private_runtime import (
+    DockerPrivateModelRunner,
     PROVIDER_COST_EVALUATION_SCOPE_ENV,
     _redacted_context,
     canonicalize_private_model_icp,
@@ -85,6 +87,76 @@ _HOST_ONLY_ENV_NAMES = frozenset(
 
 class AttestedPrivateModelRunnerV2Error(PrivateModelRuntimeError):
     """The measured model result or one of its commitments is invalid."""
+
+
+class _LegacyPrivateModelRunnerAdapter:
+    """Current-commit host runner with the V2 runner's public interface."""
+
+    def __init__(
+        self,
+        *,
+        artifact: PrivateModelArtifactManifest | Mapping[str, Any],
+        spec: DockerPrivateModelSpec | Mapping[str, Any],
+        model_kind: str,
+        worker_index: int,
+        epoch_id: int | None = None,
+        parent_graphs: Sequence[Mapping[str, Any]] = (),
+        **_kwargs: Any,
+    ) -> None:
+        self.artifact = (
+            artifact
+            if isinstance(artifact, PrivateModelArtifactManifest)
+            else PrivateModelArtifactManifest.from_mapping(artifact)
+        )
+        errors = validate_private_model_artifact_manifest(self.artifact)
+        if errors:
+            raise AttestedPrivateModelRunnerV2Error(
+                "model artifact is invalid: " + "; ".join(errors)
+            )
+        self.spec = (
+            spec
+            if isinstance(spec, DockerPrivateModelSpec)
+            else DockerPrivateModelSpec.from_mapping(spec)
+        )
+        if self.spec.image_digest != self.artifact.image_digest:
+            raise AttestedPrivateModelRunnerV2Error(
+                "legacy model runner image differs from the signed artifact"
+            )
+        if model_kind not in {"private", "candidate"}:
+            raise AttestedPrivateModelRunnerV2Error(
+                "legacy model runner kind is invalid"
+            )
+        self.model_kind = model_kind
+        self.worker_index = int(worker_index)
+        self.epoch_id = int(epoch_id) if epoch_id is not None else None
+        self.parent_graphs = tuple(dict(item) for item in parent_graphs)
+        self._runner = DockerPrivateModelRunner(self.spec)
+
+    def with_spec(self, spec: DockerPrivateModelSpec) -> "_LegacyPrivateModelRunnerAdapter":
+        return _LegacyPrivateModelRunnerAdapter(
+            artifact=self.artifact,
+            spec=spec,
+            model_kind=self.model_kind,
+            worker_index=self.worker_index,
+            epoch_id=self.epoch_id,
+            parent_graphs=self.parent_graphs,
+        )
+
+    def attested_receipts(self) -> list[dict[str, Any]]:
+        return []
+
+    def attested_authorities(self) -> list[dict[str, Any]]:
+        return []
+
+    async def __call__(
+        self,
+        icp: Mapping[str, Any],
+        context: Mapping[str, Any],
+    ) -> list[Mapping[str, Any]]:
+        return list(await asyncio.to_thread(self._runner, icp, context))
+
+    def metadata(self) -> Mapping[str, Any]:
+        return self._runner.metadata()
 
 
 def _source_bundle_for_artifact(
@@ -315,6 +387,11 @@ def _measured_environment(
 
 class AttestedPrivateModelRunnerV2:
     """The existing model-runner interface with V2 enclave authority."""
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> Any:
+        if cls is AttestedPrivateModelRunnerV2 and legacy_v1_enabled():
+            return _LegacyPrivateModelRunnerAdapter(*args, **kwargs)
+        return super().__new__(cls)
 
     def __init__(
         self,

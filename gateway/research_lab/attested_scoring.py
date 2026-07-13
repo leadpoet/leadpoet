@@ -11,6 +11,8 @@ import hashlib
 import json
 from typing import Any, Mapping
 
+from gateway.research_lab.tee_protocol import legacy_v1_enabled
+
 
 class AttestedScoringError(RuntimeError):
     """An authoritative V2 result or its complete ancestry is unavailable."""
@@ -31,20 +33,22 @@ def sha256_bytes(value: bytes) -> str:
 
 
 def attested_scoring_mode() -> str:
-    """Compatibility accessor; V2 authority is unconditionally required."""
+    """Return the effective scoring authority mode for the selected protocol."""
 
-    return "required"
+    return "off" if legacy_v1_enabled() else "required"
 
 
 def attested_receipt_persistence_enabled() -> bool:
-    return True
+    return not legacy_v1_enabled()
 
 
 def attested_live_provider_enabled() -> bool:
-    return True
+    return not legacy_v1_enabled()
 
 
 def scoring_enclave_shard_for_worker(worker_index: int) -> int:
+    if legacy_v1_enabled():
+        return 0
     from gateway.research_lab.attested_scoring_v2 import (
         AttestedScoringV2Error,
         scoring_enclave_shard_for_worker as shard,
@@ -57,12 +61,16 @@ def scoring_enclave_shard_for_worker(worker_index: int) -> int:
 
 
 async def execute_attested_scoring_operation(**_kwargs: Any) -> dict[str, Any]:
+    if legacy_v1_enabled():
+        return {"status": "off", "protocol": "legacy_v1"}
     raise AttestedScoringError(
         "legacy attested scoring RPC is removed; use an exact V2 authority adapter"
     )
 
 
 async def compare_qualification_company_scores(**_kwargs: Any) -> dict[str, Any]:
+    if legacy_v1_enabled():
+        return {"status": "off", "protocol": "legacy_v1"}
     raise AttestedScoringError(
         "provider-tape comparison is not an authority path in V2"
     )
@@ -78,6 +86,10 @@ async def execute_required_qualification_company_scores(
     provider_credential_profile: str = "default",
     attestation_out: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    if legacy_v1_enabled():
+        raise AttestedScoringError(
+            "legacy V1 executes qualification providers on the gateway host"
+        )
     from gateway.research_lab.v2_authority import execute_company_scores_v2
 
     try:
@@ -106,6 +118,8 @@ async def compare_score_bundle(
     parent_receipts: list[Mapping[str, Any]] | None = None,
     direct_parent_receipt_hashes: list[str] | None = None,
 ) -> dict[str, Any]:
+    if legacy_v1_enabled():
+        return {"status": "off", "protocol": "legacy_v1"}
     del evidence_roots
     from gateway.research_lab.v2_authority import compare_score_bundle_v2
 
@@ -137,6 +151,8 @@ async def compare_baseline_score_summary(
     expected_result: Mapping[str, Any],
     parent_receipts: list[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if legacy_v1_enabled():
+        return {"status": "off", "protocol": "legacy_v1"}
     from gateway.research_lab.v2_authority import compare_baseline_summary_v2
 
     try:
@@ -162,6 +178,8 @@ async def compare_promotion_metric(
     expected_event_doc: Mapping[str, Any],
     parent_receipt_hashes: list[str] | None = None,
 ) -> dict[str, Any]:
+    if legacy_v1_enabled():
+        return {"status": "off", "protocol": "legacy_v1"}
     from gateway.research_lab.v2_authority import compare_promotion_metric_v2
 
     try:
@@ -184,6 +202,8 @@ async def compare_promotion_gate_decision(
     expected_decision: Mapping[str, Any],
     metric_outcome: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if legacy_v1_enabled():
+        return {"status": "off", "protocol": "legacy_v1"}
     from gateway.research_lab.v2_authority import compare_promotion_decision_v2
 
     try:
@@ -205,6 +225,8 @@ async def compare_allocation(
     payload: Mapping[str, Any],
     expected_allocation: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if legacy_v1_enabled():
+        return {"status": "off", "protocol": "legacy_v1"}
     from gateway.research_lab.v2_authority import compare_allocation_v2
 
     try:
@@ -224,6 +246,8 @@ async def resolve_attested_artifact_lineage(
     artifact_ref: str,
     artifact_hash: str | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    if legacy_v1_enabled():
+        return None, []
     if artifact_hash is None:
         raise AttestedScoringError("V2 artifact lineage requires an exact hash")
     try:
@@ -252,6 +276,8 @@ async def persist_attested_outcome_artifact_links(
     *,
     artifact_links: list[Mapping[str, Any]],
 ) -> str:
+    if legacy_v1_enabled():
+        return "off"
     if outcome.get("status") not in {"succeeded", "matched"}:
         raise AttestedScoringError("required V2 outcome is unavailable for linking")
     receipt = outcome.get("execution_receipt") or outcome.get("receipt")

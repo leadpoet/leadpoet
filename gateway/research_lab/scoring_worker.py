@@ -10,6 +10,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import functools
 import hashlib
+import importlib
 import inspect
 import json
 import logging
@@ -78,6 +79,7 @@ from gateway.research_lab.provider_profiles_v2 import (
     BENCHMARK_MODEL_PROFILE,
     load_provider_profile_v2,
 )
+from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabScoreBundleCreateRequest
 from gateway.research_lab.promotion import (
     CONFIRMATION_ATTEMPT_FAILED_REASON,
@@ -524,6 +526,8 @@ async def _attested_model_parent_graphs(
     artifact: PrivateModelArtifactManifest,
     candidate_id: str = "",
 ) -> tuple[dict[str, Any], ...]:
+    if legacy_v1_enabled():
+        return ()
     if model_kind == "private":
         return ()
     if model_kind != "candidate" or not candidate_id:
@@ -742,19 +746,84 @@ def _benchmark_scorer_max_concurrency() -> int:
 def _provider_profile_has_override(profile: str, provider_id: str) -> bool:
     """Report encrypted profile presence without reading plaintext credentials."""
 
+    if legacy_v1_enabled():
+        legacy_env_names = {
+            "exa": "RESEARCH_LAB_BENCHMARK_EXA_API_KEY",
+            "openrouter": "RESEARCH_LAB_BENCHMARK_OPENROUTER_API_KEY",
+            "scrapingdog": "RESEARCH_LAB_BENCHMARK_SCRAPINGDOG_API_KEY",
+        }
+        env_name = legacy_env_names.get(str(provider_id))
+        return bool(env_name and os.getenv(env_name, "").strip())
     document = load_provider_profile_v2(profile)
     return str(provider_id) in dict(document["credential_ref_hashes"])
 
 
+_SCORER_KEY_MODULE_ATTRS: tuple[tuple[str, str, str], ...] = (
+    ("gateway.qualification.utils.helpers", "OPENROUTER_API_KEY", "openrouter"),
+    ("qualification.scoring.verification_helpers", "OPENROUTER_API_KEY", "openrouter"),
+    ("qualification.scoring.verification_helpers", "SCRAPINGDOG_API_KEY", "scrapingdog"),
+)
+
+
 @contextlib.contextmanager
 def _benchmark_scorer_isolation():
-    """Retain the existing batch scope without exposing keys on the host.
+    """Select benchmark scorer credentials for the active protocol.
 
-    Dedicated benchmark credentials are now selected by the measured
-    ``benchmark_scorer`` profile and leased directly to the coordinator.
+    V2 leases its encrypted profile inside the measured runtime. Legacy mode
+    temporarily applies the already-supported benchmark-specific host keys to
+    the dedicated scoring worker and restores every value afterward.
     """
 
-    yield
+    if not legacy_v1_enabled():
+        yield
+        return
+    scrapingdog = os.getenv(
+        "RESEARCH_LAB_BENCHMARK_SCRAPINGDOG_API_KEY", ""
+    ).strip()
+    openrouter = os.getenv(
+        "RESEARCH_LAB_BENCHMARK_OPENROUTER_API_KEY", ""
+    ).strip()
+    if not scrapingdog and not openrouter:
+        yield
+        return
+    env_overrides: dict[str, str] = {}
+    if scrapingdog:
+        env_overrides["SCRAPINGDOG_API_KEY"] = scrapingdog
+        env_overrides["QUALIFICATION_SCRAPINGDOG_API_KEY"] = scrapingdog
+    if openrouter:
+        env_overrides["QUALIFICATION_OPENROUTER_API_KEY"] = openrouter
+    saved_env: dict[str, str | None] = {}
+    saved_attrs: list[tuple[Any, str, Any]] = []
+    try:
+        for name, value in env_overrides.items():
+            saved_env[name] = os.environ.get(name)
+            os.environ[name] = value
+        for module_name, attr, provider in _SCORER_KEY_MODULE_ATTRS:
+            value = scrapingdog if provider == "scrapingdog" else openrouter
+            if not value:
+                continue
+            try:
+                module = importlib.import_module(module_name)
+            except Exception:  # pragma: no cover - optional scorer stack
+                continue
+            if hasattr(module, attr):
+                saved_attrs.append((module, attr, getattr(module, attr)))
+                setattr(module, attr, value)
+        yield
+    finally:
+        for module, attr, previous in saved_attrs:
+            try:
+                setattr(module, attr, previous)
+            except Exception:  # pragma: no cover - best-effort restoration
+                logger.warning(
+                    "research_lab_benchmark_scorer_attr_restore_failed attr=%s",
+                    attr,
+                )
+        for name, previous in saved_env.items():
+            if previous is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous
 
 
 def _confirmation_lease_seconds() -> int:
@@ -7277,23 +7346,25 @@ class ResearchLabGatewayScoringWorker:
                 self._draft_from_stale_candidate,
                 candidate,
             )
-            candidate_manifest = candidate.get("candidate_model_manifest")
-            if not isinstance(candidate_manifest, Mapping):
-                raise CodeEditBuildError(
-                    "stale candidate is missing its model manifest"
+            parent_graphs: tuple[dict[str, Any], ...] = ()
+            if not legacy_v1_enabled():
+                candidate_manifest = candidate.get("candidate_model_manifest")
+                if not isinstance(candidate_manifest, Mapping):
+                    raise CodeEditBuildError(
+                        "stale candidate is missing its model manifest"
+                    )
+                candidate_artifact = PrivateModelArtifactManifest.from_mapping(
+                    candidate_manifest
                 )
-            candidate_artifact = PrivateModelArtifactManifest.from_mapping(
-                candidate_manifest
-            )
-            parent_graphs = await _attested_model_parent_graphs(
-                model_kind="candidate",
-                artifact=candidate_artifact,
-                candidate_id=candidate_id,
-            )
-            if len(parent_graphs) != 1:
-                raise CodeEditBuildError(
-                    "stale candidate has no unique measured ancestry"
+                parent_graphs = await _attested_model_parent_graphs(
+                    model_kind="candidate",
+                    artifact=candidate_artifact,
+                    candidate_id=candidate_id,
                 )
+                if len(parent_graphs) != 1:
+                    raise CodeEditBuildError(
+                        "stale candidate has no unique measured ancestry"
+                    )
         except Exception as exc:
             await self._reject_stale_parent_candidate(
                 candidate,
@@ -7314,31 +7385,53 @@ class ResearchLabGatewayScoringWorker:
             }
 
         try:
-            rebase_authority = await attest_stale_parent_rebase_v2(
-                candidate=candidate,
-                original_draft=draft,
-                active_artifact=active_artifact,
-                candidate_receipt_graph=parent_graphs[0],
-                epoch_id=int(evaluation_epoch),
-                worker_index=int(self.config.scoring_worker_index or 0),
-                require_egress_proxy=bool(
-                    self.config.scoring_worker_require_proxy
-                ),
-                source_bundle_timeout_seconds=(
-                    self.config.code_edit_build_timeout_seconds
-                ),
-            )
-            draft = rebase_authority.draft
-            repair_used = rebase_authority.repair_used
-            build = await asyncio.to_thread(
-                CodeEditCandidateBuilder(self.config).build,
-                draft=draft,
-                parent_artifact=active_artifact,
-                run_id=str(candidate["run_id"]),
-                candidate_index=await self._next_rebase_candidate_index(
-                    str(candidate["run_id"])
-                ),
-            )
+            if legacy_v1_enabled():
+                try:
+                    build = await asyncio.to_thread(
+                        CodeEditCandidateBuilder(self.config).build,
+                        draft=draft,
+                        parent_artifact=active_artifact,
+                        run_id=str(candidate["run_id"]),
+                        candidate_index=await self._next_rebase_candidate_index(
+                            str(candidate["run_id"])
+                        ),
+                    )
+                    repair_used = False
+                except CodeEditPatchApplyError as exc:
+                    draft, build = await self._repair_and_build_stale_candidate(
+                        candidate,
+                        active_artifact=active_artifact,
+                        original_error=exc,
+                        run_id=str(candidate["run_id"]),
+                    )
+                    repair_used = True
+                rebase_authority = None
+            else:
+                rebase_authority = await attest_stale_parent_rebase_v2(
+                    candidate=candidate,
+                    original_draft=draft,
+                    active_artifact=active_artifact,
+                    candidate_receipt_graph=parent_graphs[0],
+                    epoch_id=int(evaluation_epoch),
+                    worker_index=int(self.config.scoring_worker_index or 0),
+                    require_egress_proxy=bool(
+                        self.config.scoring_worker_require_proxy
+                    ),
+                    source_bundle_timeout_seconds=(
+                        self.config.code_edit_build_timeout_seconds
+                    ),
+                )
+                draft = rebase_authority.draft
+                repair_used = rebase_authority.repair_used
+                build = await asyncio.to_thread(
+                    CodeEditCandidateBuilder(self.config).build,
+                    draft=draft,
+                    parent_artifact=active_artifact,
+                    run_id=str(candidate["run_id"]),
+                    candidate_index=await self._next_rebase_candidate_index(
+                        str(candidate["run_id"])
+                    ),
+                )
         except Exception as repair_exc:
             await self._reject_stale_parent_candidate(
                 candidate,
@@ -7399,38 +7492,43 @@ class ResearchLabGatewayScoringWorker:
         )
         derived_candidate, _event = await create_candidate_artifact(request)
         derived_candidate_id = str(derived_candidate["candidate_id"])
-        authority_receipt = (
-            rebase_authority.authority.get("execution_receipt")
-            or rebase_authority.authority.get("receipt")
-        )
-        if not isinstance(authority_receipt, Mapping):
-            raise CodeEditBuildError(
-                "stale-parent rebase receipt is unavailable after build"
+        if not legacy_v1_enabled():
+            if rebase_authority is None:
+                raise CodeEditBuildError(
+                    "stale-parent rebase authority is unavailable after build"
+                )
+            authority_receipt = (
+                rebase_authority.authority.get("execution_receipt")
+                or rebase_authority.authority.get("receipt")
             )
-        from gateway.research_lab.attested_v2_store import (
-            persist_business_artifact_links_v2,
-        )
+            if not isinstance(authority_receipt, Mapping):
+                raise CodeEditBuildError(
+                    "stale-parent rebase receipt is unavailable after build"
+                )
+            from gateway.research_lab.attested_v2_store import (
+                persist_business_artifact_links_v2,
+            )
 
-        await persist_business_artifact_links_v2(
-            receipt_hash=str(authority_receipt.get("receipt_hash") or ""),
-            artifacts=(
-                {
-                    "artifact_kind": "candidate_model",
-                    "artifact_ref": derived_candidate_id,
-                    "artifact_hash": build.candidate_model_manifest.manifest_hash,
-                },
-                {
-                    "artifact_kind": "candidate_patch",
-                    "artifact_ref": derived_candidate_id,
-                    "artifact_hash": sha256_json(dict(build.code_edit_manifest)),
-                },
-                {
-                    "artifact_kind": "candidate_source",
-                    "artifact_ref": derived_candidate_id,
-                    "artifact_hash": build.source_diff_hash,
-                },
-            ),
-        )
+            await persist_business_artifact_links_v2(
+                receipt_hash=str(authority_receipt.get("receipt_hash") or ""),
+                artifacts=(
+                    {
+                        "artifact_kind": "candidate_model",
+                        "artifact_ref": derived_candidate_id,
+                        "artifact_hash": build.candidate_model_manifest.manifest_hash,
+                    },
+                    {
+                        "artifact_kind": "candidate_patch",
+                        "artifact_ref": derived_candidate_id,
+                        "artifact_hash": sha256_json(dict(build.code_edit_manifest)),
+                    },
+                    {
+                        "artifact_kind": "candidate_source",
+                        "artifact_ref": derived_candidate_id,
+                        "artifact_hash": build.source_diff_hash,
+                    },
+                ),
+            )
         await create_candidate_promotion_event(
             candidate_id=candidate_id,
             derived_candidate_id=derived_candidate_id,
@@ -10606,7 +10704,14 @@ class ResearchLabGatewayScoringWorker:
         # providers only, so it never receives a cache to consume (recording
         # is inherited from the base scoring env).
         env.pop("RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_DIR", None)
-        env[V2_PROVIDER_PROFILE_ENV] = "benchmark_model"
+        if legacy_v1_enabled():
+            benchmark_exa_key = os.getenv(
+                "RESEARCH_LAB_BENCHMARK_EXA_API_KEY", ""
+            ).strip()
+            if benchmark_exa_key:
+                env["EXA_API_KEY"] = benchmark_exa_key
+        else:
+            env[V2_PROVIDER_PROFILE_ENV] = "benchmark_model"
         if self.config.benchmark_exa_max_rps > 0:
             env["EXA_MAX_RPS"] = str(self.config.benchmark_exa_max_rps)
         return env

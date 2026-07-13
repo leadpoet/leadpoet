@@ -90,11 +90,18 @@ def test_gateway_restart_uses_one_canonical_checkout_for_host_processes() -> Non
     assert 'pkill -9 -f "python3 -u -m gateway.main"' in script
 
 
-def test_gateway_restart_removes_legacy_plaintext_provider_proxy() -> None:
+def test_gateway_restart_scopes_legacy_provider_proxy_to_compatibility_mode() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     assert 'pkill -9 -f "gateway.research_lab.provider_evidence_proxy"' in script
-    assert "python3 -m gateway.research_lab.provider_evidence_proxy" not in script
-    assert "--outcome-sidecar" not in script
+    legacy_branch = script.index(
+        'if [ "$RESEARCH_LAB_TEE_PROTOCOL" = "legacy_v1" ]; then',
+        script.index('echo "Relaunching gateway with cloned runtime env"'),
+    )
+    proxy_start = script.index(
+        "python3 -m gateway.research_lab.provider_evidence_proxy"
+    )
+    assert legacy_branch < proxy_start
+    assert "--outcome-sidecar" in script
     assert (
         "unset RESEARCH_LAB_EVIDENCE_PROXY_URL "
         "RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH"

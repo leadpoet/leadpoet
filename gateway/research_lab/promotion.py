@@ -23,6 +23,7 @@ from gateway.research_lab.attested_scoring import (
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.config import ResearchLabGatewayConfig
 from gateway.research_lab.public_benchmarks import build_public_benchmark_report
+from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.research_lab.store import (
     canonical_hash,
     create_candidate_evaluation_event,
@@ -2585,35 +2586,36 @@ class ResearchLabPromotionController:
             threshold_points=threshold,
             auto_promotion_enabled=True,
         ).to_dict()
-        from gateway.research_lab.attested_v2_store import (
-            load_business_artifact_graph_v2,
-        )
-        from gateway.research_lab.v2_authority import (
-            authorize_reward_decision_v2,
-        )
+        if not legacy_v1_enabled():
+            from gateway.research_lab.attested_v2_store import (
+                load_business_artifact_graph_v2,
+            )
+            from gateway.research_lab.v2_authority import (
+                authorize_reward_decision_v2,
+            )
 
-        bundle_hash = str(score_bundle.get("score_bundle_hash") or "").lower()
-        promotion_graph = await load_business_artifact_graph_v2(
-            artifact_kind="promotion_decision",
-            artifact_ref="score_bundle:" + bundle_hash.removeprefix("sha256:"),
-            artifact_hash=bundle_hash,
-        )
-        await authorize_reward_decision_v2(
-            epoch_id=max(int(current_epoch), int(evaluation_epoch)),
-            decision_kind="champion",
-            decision_payload={
-                "obligation_input": obligation_input,
-                "policy": policy,
-                "promotion_decision": promotion_decision,
-            },
-            expected_result={
-                "decision_kind": "champion",
-                "reward": obligation,
-            },
-            artifact_kind="champion_reward_decision",
-            artifact_ref=str(obligation["champion_reward_id"]),
-            parent_graphs=(promotion_graph,),
-        )
+            bundle_hash = str(score_bundle.get("score_bundle_hash") or "").lower()
+            promotion_graph = await load_business_artifact_graph_v2(
+                artifact_kind="promotion_decision",
+                artifact_ref="score_bundle:" + bundle_hash.removeprefix("sha256:"),
+                artifact_hash=bundle_hash,
+            )
+            await authorize_reward_decision_v2(
+                epoch_id=max(int(current_epoch), int(evaluation_epoch)),
+                decision_kind="champion",
+                decision_payload={
+                    "obligation_input": obligation_input,
+                    "policy": policy,
+                    "promotion_decision": promotion_decision,
+                },
+                expected_result={
+                    "decision_kind": "champion",
+                    "reward": obligation,
+                },
+                artifact_kind="champion_reward_decision",
+                artifact_ref=str(obligation["champion_reward_id"]),
+                parent_graphs=(promotion_graph,),
+            )
         row, _event = await create_champion_reward_obligation(
             obligation=obligation,
             ticket_id=str(candidate["ticket_id"]),

@@ -17,7 +17,7 @@
       "symbol": "_epoch_active"
     },
     {
-      "ast_sha256": "sha256:6f818d19ee69829a5951e980a14089571cc1113b8e59fc4da2e580387f2e71aa",
+      "ast_sha256": "sha256:4d3f9f651061ac09ac0bdda2485c08deea8b1f47169e975c34789feda5e27ec3",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "build_research_lab_allocation_bundle"
     },
@@ -472,7 +472,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:9170fa715c72f81fecef9254f913357426512aaa5d965c1c89300ff84a6da6a2",
+  "manifest_hash": "sha256:a6a08ecc5c741a3ca16035cca30fb65c22275ef797bf52202652022e3a53ffaa",
   "protected_source_commit": "07c81c7ff751714d838428effd6c987e4a9e9db0",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

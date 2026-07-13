@@ -75,6 +75,45 @@ async def _load_empty_catalog(*, epoch_id):
 
 
 @pytest.mark.asyncio
+async def test_legacy_protocol_selects_current_host_model_runner(tmp_path, monkeypatch):
+    artifact = _artifact(tmp_path)
+    calls = []
+
+    class HostRunner:
+        def __init__(self, spec):
+            self.spec = spec
+
+        def __call__(self, icp, context):
+            calls.append((dict(icp), dict(context)))
+            return [{"company_name": "Legacy Host Result"}]
+
+        def metadata(self):
+            return {"runtime": "host", "image_digest": self.spec.image_digest}
+
+    monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1")
+    monkeypatch.setattr(model_authority_v2, "DockerPrivateModelRunner", HostRunner)
+    runner = AttestedPrivateModelRunnerV2(
+        artifact=artifact,
+        spec=DockerPrivateModelSpec(image_digest=artifact["image_digest"]),
+        model_kind="candidate",
+        worker_index=4,
+        epoch_id=24001,
+    )
+
+    result = await runner(
+        {"industry": "Software"},
+        {"evaluation_epoch": 24000},
+    )
+    assert result == [{"company_name": "Legacy Host Result"}]
+    assert calls == [
+        ({"industry": "Software"}, {"evaluation_epoch": 24000})
+    ]
+    assert runner.attested_receipts() == []
+    assert runner.attested_authorities() == []
+    assert runner.metadata()["runtime"] == "host"
+
+
+@pytest.mark.asyncio
 async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_credentials(
     tmp_path, monkeypatch
 ):

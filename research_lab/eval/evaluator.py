@@ -2281,8 +2281,18 @@ class QualificationStyleCompanyScorer:
         icp: Mapping[str, Any],
         is_reference_model: bool,
     ) -> list[dict[str, Any]]:
+        # Gateway legacy compatibility keeps the established host scorer while
+        # current main is deployed before the multi-enclave V2 runtime is
+        # ready. Import lazily so this shared package remains gateway-optional.
+        try:
+            from gateway.research_lab.tee_protocol import legacy_v1_enabled
+        except ImportError:
+            legacy_protocol = False
+        else:
+            legacy_protocol = legacy_v1_enabled()
         if (
-            self._attested_epoch_id is None
+            legacy_protocol
+            or self._attested_epoch_id is None
             or self._attested_epoch_id <= 0
             or not self._attested_purpose
         ):

@@ -332,3 +332,32 @@ def test_gate_disabled_preflight_proceeds(monkeypatch):
     out = _gate(scope="scoring", actor_ref="w0", is_paused=is_paused, set_paused=set_paused)
     assert out["proceed"] is True
     assert out["reason"] == "preflight_disabled"
+
+
+def test_legacy_gate_uses_host_preflight_without_v2_authority(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1_compat")
+    calls = []
+
+    class LocalPreflight:
+        def check(self, *, force, settings):
+            calls.append((force, settings))
+            return {"healthy": True, "pause_worthy": False, "verdicts": []}
+
+    async def is_paused():
+        return {"paused": False, "reason": ""}
+
+    async def set_paused(**_kwargs):
+        raise AssertionError("healthy legacy preflight must not pause")
+
+    monkeypatch.setattr(pp, "shared_preflight", lambda: LocalPreflight())
+    result = asyncio.run(
+        pp.preflight_gate(
+            scope="scoring",
+            actor_ref="worker-1",
+            is_paused=is_paused,
+            set_paused=set_paused,
+        )
+    )
+    assert result["proceed"] is True
+    assert len(calls) == 1
+    assert calls[0][0] is False

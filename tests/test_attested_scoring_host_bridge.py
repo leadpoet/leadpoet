@@ -10,11 +10,28 @@ HASH_B = "sha256:" + "b" * 64
 
 
 def test_v2_authority_cannot_be_disabled_by_legacy_environment(monkeypatch):
+    monkeypatch.delenv("RESEARCH_LAB_TEE_PROTOCOL", raising=False)
     for value in ("off", "shadow", "required", "invalid"):
         monkeypatch.setenv("RESEARCH_LAB_ATTESTED_SCORING_MODE", value)
         assert attested_scoring.attested_scoring_mode() == "required"
         assert attested_scoring.attested_receipt_persistence_enabled() is True
         assert attested_scoring.attested_live_provider_enabled() is True
+
+
+@pytest.mark.asyncio
+async def test_explicit_legacy_protocol_disables_v2_scoring_facades(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1")
+    assert attested_scoring.attested_scoring_mode() == "off"
+    assert attested_scoring.attested_receipt_persistence_enabled() is False
+    assert attested_scoring.attested_live_provider_enabled() is False
+    assert await attested_scoring.execute_attested_scoring_operation() == {
+        "status": "off",
+        "protocol": "legacy_v1",
+    }
+    assert await attested_scoring.resolve_attested_artifact_lineage(
+        artifact_kind="score_bundle",
+        artifact_ref="score_bundle:legacy",
+    ) == (None, [])
 
 
 @pytest.mark.asyncio

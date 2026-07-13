@@ -20,6 +20,7 @@ provider answered, which is all the preflight needs to know.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -30,6 +31,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
+
+from gateway.research_lab.tee_protocol import legacy_v1_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -320,21 +323,28 @@ async def preflight_gate(
     a previous preflight (marker present), auto-resumes it. Operator pauses
     (no marker) are never resumed here.
     """
-    if authority_check is None:
-        from gateway.research_lab.v2_authority import (
-            execute_provider_preflight_v2,
+    if authority_check is None and legacy_v1_enabled():
+        result = await asyncio.to_thread(
+            shared_preflight().check,
+            force=False,
+            settings=provider_preflight_settings(),
         )
+    else:
+        if authority_check is None:
+            from gateway.research_lab.v2_authority import (
+                execute_provider_preflight_v2,
+            )
 
-        authority_check = execute_provider_preflight_v2
-    result = authority_check(
-        scope_key="%s:%s" % (str(scope), str(actor_ref)),
-        worker_index=int(worker_index),
-        settings=provider_preflight_settings(),
-        force=False,
-        provider_credential_profile="benchmark_model",
-    )
-    if hasattr(result, "__await__"):
-        result = await result
+            authority_check = execute_provider_preflight_v2
+        result = authority_check(
+            scope_key="%s:%s" % (str(scope), str(actor_ref)),
+            worker_index=int(worker_index),
+            settings=provider_preflight_settings(),
+            force=False,
+            provider_credential_profile="benchmark_model",
+        )
+        if hasattr(result, "__await__"):
+            result = await result
     if not isinstance(result, Mapping):
         raise RuntimeError("attested provider preflight result is invalid")
     if result.get("disabled"):

@@ -78,3 +78,28 @@ async def test_v2_scoring_failure_propagates_without_host_fallback(monkeypatch):
     )
     with pytest.raises(attested_scoring.AttestedScoringError, match="V2 unavailable"):
         await scorer.score_with_breakdowns([], {}, False)
+
+
+@pytest.mark.asyncio
+async def test_legacy_protocol_uses_host_scorer_even_with_attested_context(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1_compat")
+    scorer = QualificationStyleCompanyScorer(
+        attested_epoch_id=104,
+        attested_purpose="research_lab.candidate_score.v1",
+    )
+    expected = [{"final_score": 17.0}]
+
+    async def local(*_args, **_kwargs):
+        return expected
+
+    async def forbidden_v2(**_kwargs):
+        raise AssertionError("legacy compatibility must not call V2 scoring")
+
+    monkeypatch.setattr(scorer, "_score_with_breakdowns_impl", local)
+    monkeypatch.setattr(
+        attested_scoring,
+        "execute_required_qualification_company_scores",
+        forbidden_v2,
+    )
+    assert await scorer.score_with_breakdowns([], {}, False) is expected
+    assert scorer.attested_receipts() == []

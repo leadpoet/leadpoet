@@ -62,6 +62,7 @@ from leadpoet_canonical.weight_authority_v2 import (
 )
 from gateway.research_lab.arweave_audit import publish_research_lab_epoch_audit
 from gateway.research_lab.config import ResearchLabGatewayConfig
+from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.utils.signature import verify_wallet_signature
 
 logger = logging.getLogger(__name__)
@@ -949,11 +950,256 @@ async def get_attested_weights_v2(netuid: int, epoch_id: int) -> Dict[str, Any]:
 
 @router.post("/submit")
 async def submit_weights(submission: WeightSubmission) -> WeightSubmissionResponse:
-    """V1 writes are permanently retired; historical reads remain available."""
+    """Accept the established V1 bundle only in explicit compatibility mode."""
 
-    raise HTTPException(
-        status_code=410,
-        detail="V1 weight submission is retired; use /weights/submit/v2",
+    if not legacy_v1_enabled():
+        raise HTTPException(
+            status_code=410,
+            detail="V1 weight submission is retired; use /weights/submit/v2",
+        )
+    from gateway.db.client import get_read_client, get_write_client
+    from gateway.utils.logger import log_event
+
+    if len(submission.uids) != len(submission.weights_u16):
+        raise HTTPException(status_code=400, detail="uids/weights_u16 length mismatch")
+    if not submission.uids:
+        raise HTTPException(status_code=400, detail="weight submission is empty")
+    if submission.uids != sorted(submission.uids):
+        raise HTTPException(status_code=400, detail="uids must be sorted ascending")
+    if len(submission.uids) != len(set(submission.uids)):
+        raise HTTPException(status_code=400, detail="duplicate uids detected")
+    if any(not 1 <= int(weight) <= 65535 for weight in submission.weights_u16):
+        raise HTTPException(
+            status_code=400,
+            detail="sparse weights must all be in [1, 65535]",
+        )
+    if ALLOWED_NETUIDS and submission.netuid not in ALLOWED_NETUIDS:
+        raise HTTPException(status_code=400, detail="invalid netuid")
+    if (
+        PRIMARY_VALIDATOR_HOTKEYS
+        and submission.validator_hotkey not in PRIMARY_VALIDATOR_HOTKEYS
+    ):
+        raise HTTPException(status_code=403, detail="unauthorized validator hotkey")
+
+    def _existing_bundle() -> bool:
+        result = (
+            get_read_client()
+            .table("published_weight_bundles")
+            .select("id")
+            .eq("netuid", submission.netuid)
+            .eq("epoch_id", submission.epoch_id)
+            .eq("validator_hotkey", submission.validator_hotkey)
+            .limit(1)
+            .execute()
+        )
+        return bool(result.data)
+
+    if await asyncio.to_thread(_existing_bundle):
+        raise HTTPException(status_code=409, detail="duplicate submission for this epoch")
+
+    subtensor = await asyncio.to_thread(get_subtensor)
+    gateway_block = int(await asyncio.to_thread(subtensor.get_current_block))
+    gateway_epoch = gateway_block // EPOCH_LENGTH
+    if abs(gateway_block - submission.block) > MAX_BLOCK_DRIFT:
+        raise HTTPException(status_code=400, detail="block drift is too large")
+    valid_epochs = (
+        {gateway_epoch, gateway_epoch - 1}
+        if gateway_block % EPOCH_LENGTH < 30
+        else {gateway_epoch}
+    )
+    if submission.epoch_id not in valid_epochs:
+        raise HTTPException(status_code=400, detail="epoch is outside the valid range")
+    if submission.epoch_id != submission.block // EPOCH_LENGTH:
+        raise HTTPException(status_code=400, detail="epoch does not match block")
+    if submission.block % EPOCH_LENGTH < WEIGHT_SUBMISSION_BLOCK - 15:
+        raise HTTPException(status_code=400, detail="weight submission is too early")
+
+    attestation_valid, attestation_data = await asyncio.to_thread(
+        verify_validator_attestation,
+        submission.validator_attestation_b64,
+        submission.validator_enclave_pubkey,
+        submission.epoch_id,
+    )
+    if not attestation_valid:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "invalid validator attestation: "
+                + str(attestation_data.get("error") or "unknown")[:240]
+            ),
+        )
+    verified_pcr0 = str(attestation_data.get("pcr0") or "")
+    pcr0_commit_hash = str(attestation_data.get("pcr0_commit") or "").strip()
+    if not pcr0_commit_hash:
+        pcr0_commit_hash = str(
+            await asyncio.to_thread(
+                _lookup_pcr0_commit_hash_from_allowlist,
+                verified_pcr0,
+            )
+            or ""
+        )
+    if not pcr0_commit_hash:
+        raise HTTPException(
+            status_code=500,
+            detail="verified validator PCR0 has no auditable commit",
+        )
+
+    binding_valid = await asyncio.to_thread(
+        verify_binding_message,
+        submission.binding_message,
+        submission.validator_hotkey_signature,
+        submission.validator_hotkey,
+        expected_netuid=submission.netuid,
+        expected_chain=EXPECTED_CHAIN,
+        expected_enclave_pubkey=submission.validator_enclave_pubkey,
+        expected_code_hash=submission.validator_code_hash,
+    )
+    if not binding_valid:
+        raise HTTPException(status_code=403, detail="invalid hotkey binding")
+    try:
+        digest_bytes = bytes.fromhex(submission.weights_hash)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="weights_hash is not hex") from exc
+    signature_valid = await asyncio.to_thread(
+        verify_ed25519_signature,
+        digest_bytes,
+        submission.validator_signature,
+        submission.validator_enclave_pubkey,
+    )
+    if not signature_valid:
+        raise HTTPException(status_code=401, detail="invalid validator signature")
+    recomputed_hash = bundle_weights_hash(
+        submission.netuid,
+        submission.epoch_id,
+        submission.block,
+        list(zip(submission.uids, submission.weights_u16)),
+    )
+    if recomputed_hash != submission.weights_hash:
+        raise HTTPException(status_code=400, detail="weights_hash does not match payload")
+
+    def _chain_snapshot() -> tuple[int | None, str | None]:
+        try:
+            metagraph = subtensor.metagraph(netuid=submission.netuid)
+            primary_uid = next(
+                (
+                    uid
+                    for uid, hotkey in enumerate(metagraph.hotkeys)
+                    if hotkey == submission.validator_hotkey
+                ),
+                None,
+            )
+            if primary_uid is None:
+                return None, None
+            snapshot_block = int(subtensor.get_current_block())
+            primary_weights = next(
+                (
+                    weights
+                    for uid, weights in subtensor.weights(netuid=submission.netuid)
+                    if uid == primary_uid
+                ),
+                None,
+            )
+            if not primary_weights:
+                return snapshot_block, None
+            compare_hash = compare_weights_hash(
+                submission.netuid,
+                submission.epoch_id,
+                normalize_chain_weights(primary_weights),
+            )
+            return snapshot_block, compare_hash
+        except Exception as exc:  # snapshot is audit enrichment, not authority
+            logger.warning("legacy_v1_chain_snapshot_failed error=%s", str(exc)[:240])
+            return None, None
+
+    chain_snapshot_block, chain_snapshot_compare_hash = await asyncio.to_thread(
+        _chain_snapshot
+    )
+    submission_payload = {
+        "actor_hotkey": submission.validator_hotkey,
+        "validator_signature": submission.validator_signature,
+        "epoch_id": submission.epoch_id,
+        "netuid": submission.netuid,
+        "block": submission.block,
+        "weights_hash": submission.weights_hash,
+        "weights_count": len(submission.uids),
+        "chain_snapshot_block": chain_snapshot_block,
+        "chain_snapshot_compare_hash": chain_snapshot_compare_hash,
+    }
+    if BITTENSOR_NETWORK == "test":
+        weight_submission_event_hash = (
+            f"TESTNET_MOCK_{submission.epoch_id}_{submission.netuid}"
+        )
+    else:
+        log_entry = await log_event("WEIGHT_SUBMISSION", submission_payload)
+        weight_submission_event_hash = str(log_entry.get("event_hash") or "")
+        if not weight_submission_event_hash:
+            raise HTTPException(
+                status_code=500,
+                detail="weight submission transparency event was not persisted",
+            )
+
+    bundle_data = {
+        "netuid": submission.netuid,
+        "epoch_id": submission.epoch_id,
+        "block": submission.block,
+        "uids": submission.uids,
+        "weights_u16": submission.weights_u16,
+        "weights_hash": submission.weights_hash,
+        "validator_hotkey": submission.validator_hotkey,
+        "validator_enclave_pubkey": submission.validator_enclave_pubkey,
+        "validator_signature": submission.validator_signature,
+        "validator_attestation_b64": submission.validator_attestation_b64,
+        "validator_code_hash": submission.validator_code_hash,
+        "validator_pcr0": verified_pcr0,
+        "pcr0_commit_hash": pcr0_commit_hash,
+        "chain_snapshot_block": chain_snapshot_block,
+        "chain_snapshot_compare_hash": chain_snapshot_compare_hash,
+        "weight_submission_event_hash": weight_submission_event_hash,
+    }
+
+    def _insert_bundle() -> None:
+        get_write_client().table("published_weight_bundles").insert(
+            bundle_data
+        ).execute()
+
+    if BITTENSOR_NETWORK != "test":
+        try:
+            await asyncio.to_thread(_insert_bundle)
+        except Exception as exc:
+            if "duplicate" in str(exc).lower() or "unique" in str(exc).lower():
+                raise HTTPException(
+                    status_code=409,
+                    detail="duplicate submission (concurrent race)",
+                ) from exc
+            raise
+
+    research_lab_config = ResearchLabGatewayConfig.from_env()
+    audit_enabled = (
+        research_lab_config.arweave_audit_shadow_enabled
+        if BITTENSOR_NETWORK == "test"
+        else research_lab_config.arweave_audit_enabled
+    )
+    if audit_enabled:
+        try:
+            await publish_research_lab_epoch_audit(
+                epoch=submission.epoch_id,
+                netuid=submission.netuid,
+                audit_kind=("shadow" if BITTENSOR_NETWORK == "test" else "active"),
+                actor_hotkey=submission.validator_hotkey,
+                weight_bundle=bundle_data,
+                config=research_lab_config,
+            )
+        except Exception as exc:
+            logger.warning(
+                "legacy_v1_research_lab_arweave_publish_failed error=%s",
+                str(exc)[:240],
+            )
+    return WeightSubmissionResponse(
+        success=True,
+        epoch_id=submission.epoch_id,
+        weights_count=len(submission.uids),
+        message="Weights accepted and logged",
+        weight_submission_event_hash=weight_submission_event_hash,
     )
 
 

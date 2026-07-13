@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
@@ -9,6 +10,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from gateway.research_lab.attested_coordinator_v2 import execute_coordinator_v2
 from gateway.research_lab.attested_scoring_v2 import execute_scoring_v2
+from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.tee.source_add_runtime_v2 import (
     build_source_add_runtime_catalog_v2,
     validate_source_add_runtime_catalog_v2,
@@ -80,6 +82,32 @@ async def evaluate_source_add_provenance_v2(
     from gateway.research_lab.source_add_provenance import (
         SourceAddProvenanceResult,
     )
+
+    if legacy_v1_enabled():
+        from gateway.research_lab.source_add_provenance import (
+            evaluate_source_add_provenance,
+        )
+
+        provenance = await asyncio.to_thread(
+            evaluate_source_add_provenance,
+            source_name=source_name,
+            source_kind=source_kind,
+            declared_base_domains=declared_base_domains,
+            source_metadata=source_metadata,
+        )
+        result = {
+            "schema_version": SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
+            "submission_id": str(submission_id),
+            "precheck_status": provenance.precheck_status,
+            "reasons": list(provenance.reasons),
+            "precheck_doc": provenance.to_record_doc(),
+        }
+        return provenance, {
+            "status": "off",
+            "protocol": "legacy_v1",
+            "result": result,
+            "receipt_graph": {},
+        }
 
     outcome = await execute(
         operation=OP_SOURCE_ADD_PROVENANCE_V2,
@@ -173,6 +201,18 @@ async def authorize_reward_decision_v2(
     persist_links: Any = None,
 ) -> dict[str, Any]:
     """Require the existing reward kernel to produce one exact signed decision."""
+
+    if legacy_v1_enabled():
+        if not isinstance(expected_result, Mapping):
+            raise ResearchLabV2AuthorityError(
+                "legacy reward decisions without a host result must use the legacy kernel"
+            )
+        return {
+            "status": "off",
+            "protocol": "legacy_v1",
+            "result": dict(expected_result),
+            "artifact_link_status": {"status": "off"},
+        }
 
     allowed_failed = set()
     for graph in parent_graphs:
@@ -277,6 +317,26 @@ async def judge_source_add_implementation_v2(
     """Run the unchanged SOURCE_ADD Leg 2 judge as measured scoring authority."""
 
     from gateway.research_lab.source_add_llm_judge import SourceAddJudgeVerdict
+
+    if legacy_v1_enabled():
+        from gateway.research_lab.source_add_llm_judge import (
+            judge_source_add_implementation,
+            openrouter_key_for_source_add_judge,
+        )
+
+        verdict = await judge_source_add_implementation(
+            api_key=openrouter_key_for_source_add_judge(),
+            candidate=candidate,
+            score_bundle=score_bundle,
+            provisioned_sources=provisioned_sources,
+            timeout_seconds=timeout_seconds,
+        )
+        return verdict, {
+            "status": "off",
+            "protocol": "legacy_v1",
+            "result": {"verdict": verdict.to_doc()},
+            "receipt_graph": {},
+        }
 
     bundle_hash = str(score_bundle.get("score_bundle_hash") or "").lower()
     if not _HASH_RE.fullmatch(bundle_hash):
@@ -475,6 +535,8 @@ async def persist_source_add_judge_reward_link_v2(
     reward_ref: str,
     persist_links: Any = None,
 ) -> dict[str, Any]:
+    if legacy_v1_enabled():
+        return {"status": "off", "protocol": "legacy_v1"}
     receipt = outcome.get("execution_receipt") or outcome.get("receipt")
     result = outcome.get("result")
     if not isinstance(receipt, Mapping) or not isinstance(result, Mapping):

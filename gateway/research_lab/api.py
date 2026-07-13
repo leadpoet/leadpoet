@@ -38,6 +38,11 @@ from .candidate_generation_report import fetch_candidate_generation_failure_repo
 from .config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
 from .key_vault import (
     OpenRouterKeyVaultError,
+    encrypt_openrouter_key,
+    encrypt_source_add_credential,
+    openrouter_key_ref,
+    preflight_openrouter_key,
+    verify_openrouter_workspace_privacy,
 )
 from .v2_credential_envelopes import (
     persist_openrouter_credential_envelope_v2,
@@ -111,7 +116,9 @@ from .source_add_catalog import (
     reject_source_add_secret_text,
     sanitize_source_add_doc,
     source_add_encrypted_envelope_valid,
+    source_add_env_ref_resolves,
 )
+from .tee_protocol import legacy_v1_enabled
 from .store import (
     canonical_hash,
     create_candidate_evaluation_event,
@@ -609,7 +616,7 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
     await _verify_signed_miner(payload)
     await _enforce_research_lab_submission_rate_limit(payload.miner_hotkey, route="source_adapters")
 
-    if payload.adapter_credential:
+    if payload.adapter_credential and not legacy_v1_enabled():
         raise HTTPException(
             status_code=400,
             detail=(
@@ -627,7 +634,24 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
     )
 
     sealed_credential_envelope: dict[str, Any] = {}
-    if payload.adapter_credential_v2 is not None:
+    legacy_kms_key_id = ""
+    if legacy_v1_enabled():
+        if payload.adapter_credential_v2 is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="attested SOURCE_ADD credentials require V2 mode",
+            )
+        legacy_kms_key_id = str(
+            config.source_add_credential_kms_key_id
+            or config.openrouter_key_kms_key_id
+            or ""
+        )
+        if payload.adapter_credential and not legacy_kms_key_id:
+            raise HTTPException(
+                status_code=503,
+                detail="SOURCE_ADD credential KMS key is not configured",
+            )
+    elif payload.adapter_credential_v2 is not None:
         adapter_id = str(payload.manifest.get("adapter_id") or "")
         expected_ref = _source_add_intake_credential_ref(
             payload.miner_hotkey,
@@ -641,10 +665,17 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
         )
 
     def _kms_encrypt(
-        _credential_marker: str,
-        _miner_hotkey: str,
-        _adapter_ref: str,
+        credential_value: str,
+        miner_hotkey: str,
+        adapter_ref: str,
     ) -> dict[str, str]:
+        if legacy_v1_enabled():
+            return encrypt_source_add_credential(
+                raw_credential=credential_value,
+                kms_key_id=legacy_kms_key_id,
+                miner_hotkey=miner_hotkey,
+                adapter_ref=adapter_ref,
+            )
         if not sealed_credential_envelope:
             raise ValueError("attested SOURCE_ADD credential envelope is unavailable")
         return {
@@ -661,9 +692,13 @@ async def submit_research_lab_source_adapter(payload: ResearchLabSourceAdapterSu
             payload.manifest,
             miner_hotkey=payload.miner_hotkey,
             raw_credential=(
-                "attested-source-add-credential-v2"
-                if sealed_credential_envelope
-                else ""
+                payload.adapter_credential
+                if legacy_v1_enabled()
+                else (
+                    "attested-source-add-credential-v2"
+                    if sealed_credential_envelope
+                    else ""
+                )
             ),
             source_brief=payload.source_brief or "",
             submitted_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -983,14 +1018,17 @@ async def recheck_research_lab_source_adapter_provenance(
     if stage == PRECHECK_PASSED:
         precheck_status = PRECHECK_PASSED
         reasons = list((record.precheck_doc or {}).get("reasons") or [])
-        from gateway.research_lab.attested_v2_store import (
-            load_business_artifact_graph_by_ref_v2,
-        )
+        if legacy_v1_enabled():
+            provenance_graph = {}
+        else:
+            from gateway.research_lab.attested_v2_store import (
+                load_business_artifact_graph_by_ref_v2,
+            )
 
-        provenance_graph = await load_business_artifact_graph_by_ref_v2(
-            artifact_kind="source_add_provenance",
-            artifact_ref=record.submission_id,
-        )
+            provenance_graph = await load_business_artifact_graph_by_ref_v2(
+                artifact_kind="source_add_provenance",
+                artifact_ref=record.submission_id,
+            )
     else:
         from gateway.research_lab.v2_authority import (
             evaluate_source_add_provenance_v2,
@@ -1141,7 +1179,7 @@ async def provision_research_lab_source_adapter(
 
     credential_envelope: dict[str, Any] = {}
     credential_refs = [str(item).strip() for item in payload.credential_env_refs if str(item or "").strip()]
-    if payload.api_credential:
+    if payload.api_credential and not legacy_v1_enabled():
         raise HTTPException(
             status_code=400,
             detail=(
@@ -1149,7 +1187,53 @@ async def provision_research_lab_source_adapter(
                 "attested admin credential-recipient endpoint"
             ),
         )
-    if payload.api_credential_v2 is not None:
+    if legacy_v1_enabled() and payload.api_credential_v2 is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="attested SOURCE_ADD credentials require V2 mode",
+        )
+    if legacy_v1_enabled() and payload.api_credential:
+        kms_key_id = str(
+            config.source_add_credential_kms_key_id
+            or config.openrouter_key_kms_key_id
+            or ""
+        )
+        if not kms_key_id:
+            raise HTTPException(
+                status_code=503,
+                detail="SOURCE_ADD credential KMS key is not configured",
+            )
+        adapter_ref = f"source_add:{adapter_id}"
+        try:
+            envelope = await asyncio.to_thread(
+                encrypt_source_add_credential,
+                raw_credential=payload.api_credential,
+                kms_key_id=kms_key_id,
+                miner_hotkey=miner_hotkey,
+                adapter_ref=adapter_ref,
+            )
+        except OpenRouterKeyVaultError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        credential_envelope = {
+            "ciphertext_b64": str(envelope["ciphertext_b64"]),
+            "kms_key_id": str(envelope.get("kms_key_id") or ""),
+            "encryption_context_hash": str(
+                envelope.get("encryption_context_hash") or ""
+            ),
+            "credential_ref": (
+                "encrypted_ref:source_add:"
+                + canonical_hash(
+                    {"adapter_id": adapter_id, "miner": miner_hotkey}
+                )[-32:]
+            ),
+        }
+        if not source_add_encrypted_envelope_valid(credential_envelope):
+            raise HTTPException(
+                status_code=500,
+                detail="SOURCE_ADD credential encryption returned an invalid envelope",
+            )
+        credential_refs = [str(credential_envelope["credential_ref"])]
+    elif payload.api_credential_v2 is not None:
         credential_ref = _source_add_provision_credential_ref(
             miner_hotkey,
             adapter_id,
@@ -1169,6 +1253,12 @@ async def provision_research_lab_source_adapter(
         status == PROVISION_STATUS_ELIGIBLE
         and auth_kind != "none"
         and not credential_envelope
+        and (
+            not legacy_v1_enabled()
+            or not any(
+                source_add_env_ref_resolves(ref) for ref in credential_refs
+            )
+        )
     ):
         raise HTTPException(
             status_code=400,
@@ -1548,6 +1638,106 @@ async def create_openrouter_credential_recipients(
     )
 
 
+async def _register_openrouter_key_legacy(
+    payload: ResearchLabOpenRouterKeyRegisterRequest,
+    config: ResearchLabGatewayConfig,
+) -> ResearchLabOpenRouterKeyRegisterResponse:
+    if payload.openrouter_api_key_v2 or payload.openrouter_management_key_v2:
+        raise HTTPException(
+            status_code=400,
+            detail="attested OpenRouter credentials require V2 mode",
+        )
+    runtime_key = str(payload.openrouter_api_key or "")
+    management_key = str(payload.openrouter_management_key or "")
+    if not runtime_key or not management_key:
+        raise HTTPException(
+            status_code=400,
+            detail="plaintext OpenRouter credential pair is required in legacy mode",
+        )
+    if not config.openrouter_key_kms_key_id:
+        raise HTTPException(
+            status_code=503,
+            detail="Research Lab OpenRouter key vault KMS key is not configured",
+        )
+    try:
+        preflight_doc = await asyncio.to_thread(preflight_openrouter_key, runtime_key)
+        key_hash = str(preflight_doc["key_hash"])
+        privacy_proof_doc = await asyncio.to_thread(
+            verify_openrouter_workspace_privacy,
+            runtime_key=runtime_key,
+            management_key=management_key,
+            stage="key_registration",
+        )
+        management_key_hash = str(privacy_proof_doc["management_key_hash"])
+        key_ref = openrouter_key_ref(
+            miner_hotkey=payload.miner_hotkey,
+            key_hash=key_hash,
+            management_key_hash=management_key_hash,
+        )
+        encrypted = await asyncio.to_thread(
+            encrypt_openrouter_key,
+            raw_key=runtime_key,
+            kms_key_id=config.openrouter_key_kms_key_id,
+            miner_hotkey=payload.miner_hotkey,
+            key_ref=key_ref,
+        )
+        encrypted_management = await asyncio.to_thread(
+            encrypt_openrouter_key,
+            raw_key=management_key,
+            kms_key_id=config.openrouter_key_kms_key_id,
+            miner_hotkey=payload.miner_hotkey,
+            key_ref=key_ref,
+        )
+        await create_openrouter_key_ref(
+            key_ref=key_ref,
+            miner_hotkey=payload.miner_hotkey,
+            key_hash=key_hash,
+            encrypted_key_ciphertext=encrypted["ciphertext_b64"],
+            kms_key_id=encrypted["kms_key_id"],
+            encryption_context_hash=encrypted["encryption_context_hash"],
+            encrypted_management_key_ciphertext=(
+                encrypted_management["ciphertext_b64"]
+            ),
+            management_key_hash=management_key_hash,
+            management_kms_key_id=encrypted_management["kms_key_id"],
+            management_encryption_context_hash=(
+                encrypted_management["encryption_context_hash"]
+            ),
+            openrouter_workspace_hash=str(
+                privacy_proof_doc["workspace_id_hash"]
+            ),
+            privacy_status="verified",
+            privacy_verified_at=str(privacy_proof_doc["verified_at"]),
+            privacy_proof_doc=privacy_proof_doc,
+            preflight_doc={
+                "source": "openrouter_current_key",
+                "limit": preflight_doc.get("limit"),
+                "limit_remaining": preflight_doc.get("limit_remaining"),
+                "limit_reset": preflight_doc.get("limit_reset"),
+                "usage": preflight_doc.get("usage"),
+                "is_free_tier": preflight_doc.get("is_free_tier"),
+                "is_management_key": preflight_doc.get("is_management_key"),
+                "expires_at": preflight_doc.get("expires_at"),
+                "key_label_hash": preflight_doc.get("key_label_hash"),
+                "creator_user_id_hash": preflight_doc.get(
+                    "creator_user_id_hash"
+                ),
+                "key_label": payload.key_label,
+            },
+        )
+    except OpenRouterKeyVaultError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        _raise_storage_error(exc)
+    return ResearchLabOpenRouterKeyRegisterResponse(
+        key_ref=key_ref,
+        preflight_status="passed",
+        key_hash=key_hash,
+        limit_remaining=preflight_doc.get("limit_remaining"),
+        limit_reset=preflight_doc.get("limit_reset"),
+    )
+
+
 @router.post("/openrouter-keys", response_model=ResearchLabOpenRouterKeyRegisterResponse)
 async def register_research_lab_openrouter_key(payload: ResearchLabOpenRouterKeyRegisterRequest):
     config = ResearchLabGatewayConfig.from_env()
@@ -1556,6 +1746,9 @@ async def register_research_lab_openrouter_key(payload: ResearchLabOpenRouterKey
     _require_enabled(config.miner_submissions_enabled, "Research Lab miner submissions are disabled")
     await _verify_signed_miner(payload)
     _enforce_openrouter_key_registration_rate_limit(payload.miner_hotkey)
+
+    if legacy_v1_enabled():
+        return await _register_openrouter_key_legacy(payload, config)
 
     if payload.openrouter_api_key or payload.openrouter_management_key:
         raise HTTPException(

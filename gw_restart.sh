@@ -8,6 +8,10 @@ GATEWAY_LOG_ROOT="${GATEWAY_LOG_ROOT:-/home/ec2-user/gateway}"
 GATEWAY_LOG_FILE="${GATEWAY_LOG_FILE:-$GATEWAY_LOG_ROOT/gateway.log}"
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
 LEADPOET_GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-leadpoet/prod/gateway/env}"
+# Interpreter for the long-lived gateway processes (main, evidence proxy,
+# inter-enclave relay). Overridable via the hydrated env file so the runtime
+# can be cut over (and rolled back) without editing this script.
+GATEWAY_PYTHON_BIN="${GATEWAY_PYTHON_BIN:-python3}"
 ENV_CLONE="/tmp/gw_env_clone.sh"
 ENV_SECRET="/tmp/gw_env_secret.sh"
 MIN_FREE_KB=$((10 * 1024 * 1024))
@@ -825,7 +829,7 @@ if [ "$RESEARCH_LAB_TEE_PROTOCOL" = "v2" ]; then
 
   echo "Starting opaque inter-enclave TLS relay"
   cd "$LEADPOET_REPO_ROOT"
-  PYTHONPATH="$LEADPOET_REPO_ROOT" setsid python3 -m gateway.utils.tee_inter_enclave_relay \
+  PYTHONPATH="$LEADPOET_REPO_ROOT" setsid "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_inter_enclave_relay \
     >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null &
   INTER_ENCLAVE_RELAY_PID="$!"
   sleep 2
@@ -952,7 +956,7 @@ if [ "$RESEARCH_LAB_TEE_PROTOCOL" = "legacy_v1" ]; then
   echo "Starting legacy Research Lab provider evidence proxy"
   mkdir -p /home/ec2-user/research_lab_evidence "$GATEWAY_LOG_ROOT"
   cd "$LEADPOET_REPO_ROOT"
-  setsid python3 -m gateway.research_lab.provider_evidence_proxy \
+  setsid "$GATEWAY_PYTHON_BIN" -m gateway.research_lab.provider_evidence_proxy \
     --host 172.17.0.1 \
     --port 8791 \
     --day-cache /home/ec2-user/research_lab_evidence/day_cache.json \
@@ -975,7 +979,7 @@ if [ "$RESEARCH_LAB_TEE_PROTOCOL" = "legacy_v1" ]; then
 fi
 
 cd "$LEADPOET_REPO_ROOT"
-setsid python3 -u -m gateway.main > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null 9>&- &
+setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null 9>&- &
 
 GATEWAY_PID="$!"
 echo "relaunched main pid: $GATEWAY_PID"

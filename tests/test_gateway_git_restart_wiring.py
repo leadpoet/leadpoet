@@ -40,7 +40,7 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
             'echo "Installing Python dependencies"',
             'echo "Relaunching gateway with cloned runtime env"',
             'unset RESEARCH_LAB_EVIDENCE_PROXY_URL RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH',
-            'setsid python3 -u -m gateway.main',
+            'setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main',
             'sleep 240',
             'curl -fsS http://localhost:8000/health',
             'GATEWAY_DEPLOY_STAGE="host_restart_script_install"',
@@ -86,7 +86,7 @@ def test_gateway_restart_uses_one_canonical_checkout_for_host_processes() -> Non
     assert 'GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"' in script
     assert 'chmod +x "$GATEWAY_ROOT"/tee/*.sh' not in script
     assert 'bash ./start_enclave.sh' in script
-    assert 'setsid python3 -u -m gateway.main' in script
+    assert 'setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main' in script
     assert 'pkill -9 -f "python3 -u -m gateway.main"' in script
 
 
@@ -98,7 +98,7 @@ def test_gateway_restart_scopes_legacy_provider_proxy_to_compatibility_mode() ->
         script.index('echo "Relaunching gateway with cloned runtime env"'),
     )
     proxy_start = script.index(
-        "python3 -m gateway.research_lab.provider_evidence_proxy"
+        '"$GATEWAY_PYTHON_BIN" -m gateway.research_lab.provider_evidence_proxy'
     )
     assert legacy_branch < proxy_start
     assert "--outcome-sidecar" in script

@@ -36,7 +36,9 @@ APPROVED_LEGACY_V1_PCR0 = (
 
 
 def normalize_weight_protocol(value: Optional[str]) -> str:
-    protocol = str(value or AUTHORITATIVE_V2_PROTOCOL).strip().lower()
+    # V2 remains an explicit release action until both independent builders,
+    # manifests, KMS envelopes, and production rollout evidence are ready.
+    protocol = str(value or LEGACY_V1_COMPAT_PROTOCOL).strip().lower()
     if protocol not in SUPPORTED_WEIGHT_PROTOCOLS:
         allowed = ", ".join(sorted(SUPPORTED_WEIGHT_PROTOCOLS))
         raise RuntimeError(

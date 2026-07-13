@@ -22,6 +22,12 @@ GATEWAY_DEPLOYMENT_MANIFEST="${GATEWAY_DEPLOYMENT_MANIFEST:-$GATEWAY_DEPLOYMENT_
 GATEWAY_LAST_GOOD_MANIFEST="${GATEWAY_LAST_GOOD_MANIFEST:-$GATEWAY_DEPLOYMENT_DIR/gateway-last-good.json}"
 GATEWAY_HOST_RESTART_SCRIPT="${GATEWAY_HOST_RESTART_SCRIPT:-/home/ec2-user/gw_restart.sh}"
 GATEWAY_TEE_EIF_ROOT="${GATEWAY_TEE_EIF_ROOT:-/home/ec2-user/tee}"
+GATEWAY_TEE_PROTOCOL="${GATEWAY_TEE_PROTOCOL:-legacy_v1_compat}"
+# Keep production on the last approved single-enclave gateway until the
+# independently reproduced V2 release artifacts are complete.  V2 activation
+# must be explicit; merely merging V2 development code to main is not a deploy
+# authorization.
+LEGACY_V1_GATEWAY_DEPLOY_COMMIT="${LEGACY_V1_GATEWAY_DEPLOY_COMMIT:-07c81c7ff751714d838428effd6c987e4a9e9db0}"
 GATEWAY_V2_CONFIG_DIR="${GATEWAY_V2_CONFIG_DIR:-/home/ec2-user/.config/leadpoet/v2}"
 GATEWAY_V2_RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-manifest.json}"
 GATEWAY_V2_ARTIFACT_POLICY="${GATEWAY_V2_ARTIFACT_POLICY:-$GATEWAY_V2_CONFIG_DIR/encrypted-artifact-policy.json}"
@@ -92,6 +98,7 @@ enforce_deployment_environment() {
   unset BUILD_ID BUILD_TIME_UTC BUILD_TIMESTAMP GITHUB_TAG GIT_TAG
   export LEADPOET_REPO_ROOT GATEWAY_ROOT GATEWAY_LOG_ROOT GATEWAY_LOG_FILE
   export GATEWAY_TEE_EIF_ROOT
+  export GATEWAY_TEE_PROTOCOL LEGACY_V1_GATEWAY_DEPLOY_COMMIT
   export GATEWAY_V2_CONFIG_DIR GATEWAY_V2_RELEASE_MANIFEST GATEWAY_V2_ARTIFACT_POLICY
   export GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"
   export PYTHONPATH="$LEADPOET_REPO_ROOT"
@@ -436,6 +443,34 @@ grep -q "SUPABASE_SERVICE_ROLE_KEY" "$ENV_CLONE" || {
   exit 1
 }
 
+# Resolve the protocol only after Secrets Manager and the previous live
+# process environment have been merged.  Defaulting to compatibility mode
+# prevents development-only V2 code on main from requiring unpublished
+# six-build release artifacts during an ordinary production restart.
+GATEWAY_TEE_PROTOCOL="$(
+  set -a
+  . "$ENV_CLONE"
+  set +a
+  printf '%s' "${GATEWAY_TEE_PROTOCOL:-legacy_v1_compat}"
+)"
+GATEWAY_TEE_PROTOCOL="$(printf '%s' "$GATEWAY_TEE_PROTOCOL" | tr '[:upper:]' '[:lower:]')"
+case "$GATEWAY_TEE_PROTOCOL" in
+  legacy_v1_compat)
+    # Compatibility mode is meaningful only for the approved pre-V2 runtime.
+    # Do not let a stale generic deploy pin select V2 code while bypassing the
+    # V2 release preflight.
+    export GATEWAY_DEPLOY_COMMIT="$LEGACY_V1_GATEWAY_DEPLOY_COMMIT"
+    ;;
+  authoritative_v2)
+    ;;
+  *)
+    echo "ERROR: GATEWAY_TEE_PROTOCOL must be authoritative_v2 or legacy_v1_compat" >&2
+    exit 1
+    ;;
+esac
+export GATEWAY_TEE_PROTOCOL
+echo "Gateway TEE protocol: $GATEWAY_TEE_PROTOCOL"
+
 echo "Validating absolute gateway secret paths for canonical Git checkout"
 (
   set -a
@@ -462,43 +497,47 @@ PREPARED_GATEWAY_SHA="$(
 )"
 echo "Prepared gateway commit: $PREPARED_GATEWAY_SHA"
 
-echo "Validating the prepared V2 release before production shutdown"
-GATEWAY_DEPLOY_STAGE="v2_pre_shutdown_preflight"
-export GATEWAY_DEPLOY_STAGE
-GATEWAY_PREFLIGHT_TREE="$(mktemp -d /tmp/gateway-v2-preflight.XXXXXX)"
-if ! git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA" \
-    | tar -xf - -C "$GATEWAY_PREFLIGHT_TREE"; then
+if [ "$GATEWAY_TEE_PROTOCOL" = "authoritative_v2" ]; then
+  echo "Validating the prepared V2 release before production shutdown"
+  GATEWAY_DEPLOY_STAGE="v2_pre_shutdown_preflight"
+  export GATEWAY_DEPLOY_STAGE
+  GATEWAY_PREFLIGHT_TREE="$(mktemp -d /tmp/gateway-v2-preflight.XXXXXX)"
+  if ! git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA" \
+      | tar -xf - -C "$GATEWAY_PREFLIGHT_TREE"; then
+    rm -rf "$GATEWAY_PREFLIGHT_TREE"
+    echo "ERROR: unable to materialize the prepared commit for V2 preflight" >&2
+    exit 1
+  fi
+  V2_PREFLIGHT_CREDENTIAL_ARGS=()
+  for envelope in "${V2_CREDENTIAL_ENVELOPES[@]}"; do
+    V2_PREFLIGHT_CREDENTIAL_ARGS+=(--credential-envelope "$envelope")
+  done
+  if ! PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" python3 -m gateway.tee.restart_preflight_v2 \
+      --deploy-commit "$PREPARED_GATEWAY_SHA" \
+      --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+      --topology-manifest "$GATEWAY_PREFLIGHT_TREE/gateway/tee/topology.json" \
+      --artifact-policy "$GATEWAY_V2_ARTIFACT_POLICY" \
+      --config-dir "$GATEWAY_V2_CONFIG_DIR" \
+      --parent-env-file "$ENV_CLONE" \
+      --topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}" \
+      "${V2_PREFLIGHT_CREDENTIAL_ARGS[@]}"; then
+    rm -rf "$GATEWAY_PREFLIGHT_TREE"
+    echo "ERROR: prepared V2 release failed before-shutdown validation" >&2
+    exit 1
+  fi
+  echo "Preparing exact hash-locked V2 build artifacts before production shutdown"
+  GATEWAY_DEPLOY_STAGE="v2_offline_artifact_prepare"
+  export GATEWAY_DEPLOY_STAGE
+  if ! GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
+      bash "$GATEWAY_PREFLIGHT_TREE/gateway/tee/prepare_offline_artifacts_v2.sh"; then
+    rm -rf "$GATEWAY_PREFLIGHT_TREE"
+    echo "ERROR: V2 offline artifact preparation failed before shutdown" >&2
+    exit 1
+  fi
   rm -rf "$GATEWAY_PREFLIGHT_TREE"
-  echo "ERROR: unable to materialize the prepared commit for V2 preflight" >&2
-  exit 1
+else
+  echo "Legacy V1 compatibility selected; skipping development-only V2 release preflight"
 fi
-V2_PREFLIGHT_CREDENTIAL_ARGS=()
-for envelope in "${V2_CREDENTIAL_ENVELOPES[@]}"; do
-  V2_PREFLIGHT_CREDENTIAL_ARGS+=(--credential-envelope "$envelope")
-done
-if ! PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" python3 -m gateway.tee.restart_preflight_v2 \
-    --deploy-commit "$PREPARED_GATEWAY_SHA" \
-    --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
-    --topology-manifest "$GATEWAY_PREFLIGHT_TREE/gateway/tee/topology.json" \
-    --artifact-policy "$GATEWAY_V2_ARTIFACT_POLICY" \
-    --config-dir "$GATEWAY_V2_CONFIG_DIR" \
-    --parent-env-file "$ENV_CLONE" \
-    --topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}" \
-    "${V2_PREFLIGHT_CREDENTIAL_ARGS[@]}"; then
-  rm -rf "$GATEWAY_PREFLIGHT_TREE"
-  echo "ERROR: prepared V2 release failed before-shutdown validation" >&2
-  exit 1
-fi
-echo "Preparing exact hash-locked V2 build artifacts before production shutdown"
-GATEWAY_DEPLOY_STAGE="v2_offline_artifact_prepare"
-export GATEWAY_DEPLOY_STAGE
-if ! GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
-    bash "$GATEWAY_PREFLIGHT_TREE/gateway/tee/prepare_offline_artifacts_v2.sh"; then
-  rm -rf "$GATEWAY_PREFLIGHT_TREE"
-  echo "ERROR: V2 offline artifact preparation failed before shutdown" >&2
-  exit 1
-fi
-rm -rf "$GATEWAY_PREFLIGHT_TREE"
 
 echo "Stopping existing gateway and Research Lab worker processes"
 pkill -9 -f "python3 main.py" 2>/dev/null || true
@@ -560,6 +599,9 @@ exec env \
   GATEWAY_LAST_GOOD_MANIFEST="$GATEWAY_LAST_GOOD_MANIFEST" \
   GATEWAY_HOST_RESTART_SCRIPT="$GATEWAY_HOST_RESTART_SCRIPT" \
   GATEWAY_TEE_EIF_ROOT="$GATEWAY_TEE_EIF_ROOT" \
+  GATEWAY_TEE_PROTOCOL="$GATEWAY_TEE_PROTOCOL" \
+  LEGACY_V1_GATEWAY_DEPLOY_COMMIT="$LEGACY_V1_GATEWAY_DEPLOY_COMMIT" \
+  GATEWAY_DEPLOY_COMMIT="${GATEWAY_DEPLOY_COMMIT:-}" \
   GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
   GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
   GATEWAY_V2_ARTIFACT_POLICY="$GATEWAY_V2_ARTIFACT_POLICY" \

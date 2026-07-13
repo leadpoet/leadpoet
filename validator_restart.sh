@@ -159,7 +159,7 @@ set -a
 . "$VALIDATOR_ENV_EXPORT"
 set +a
 
-VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-authoritative_v2}"
+VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-legacy_v1_compat}"
 case "$VALIDATOR_WEIGHT_PROTOCOL" in
   authoritative_v2|legacy_v1_compat)
     ;;

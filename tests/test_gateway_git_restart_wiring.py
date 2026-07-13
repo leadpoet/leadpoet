@@ -70,6 +70,23 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     assert script.index('--topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}"') < shutdown
     assert script.index("prepare_offline_artifacts_v2.sh") < shutdown
     assert script.index('pkill -9 -f "python3 -u -m gateway.main"') > shutdown
+    assert 'if [ "$GATEWAY_TEE_PROTOCOL" = "authoritative_v2" ]; then' in script
+
+
+def test_gateway_restart_defaults_to_approved_legacy_v1_commit() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    assert 'GATEWAY_TEE_PROTOCOL="${GATEWAY_TEE_PROTOCOL:-legacy_v1_compat}"' in script
+    assert (
+        'LEGACY_V1_GATEWAY_DEPLOY_COMMIT="${LEGACY_V1_GATEWAY_DEPLOY_COMMIT:-'
+        '07c81c7ff751714d838428effd6c987e4a9e9db0}"'
+    ) in script
+    assert (
+        'export GATEWAY_DEPLOY_COMMIT="$LEGACY_V1_GATEWAY_DEPLOY_COMMIT"'
+    ) in script
+    assert (
+        "Legacy V1 compatibility selected; skipping development-only V2 release preflight"
+        in script
+    )
 
 
 def test_gateway_restart_uses_one_canonical_checkout_for_host_processes() -> None:
@@ -105,7 +122,7 @@ def test_gateway_restart_has_fail_closed_lock_and_no_validator_deploy_gate() -> 
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     assert 'flock -n 9' in script
     assert 'another gateway restart is already running' in script
-    assert 'GATEWAY_DEPLOY_COMMIT' not in script  # The helper consumes the optional env safely.
+    assert 'GATEWAY_DEPLOY_COMMIT="${GATEWAY_DEPLOY_COMMIT:-}"' in script
     assert 'VALIDATOR_GATEWAY_PCR0_CACHE_FILE' not in script
     assert 'independent_gateway_identity' not in script
 

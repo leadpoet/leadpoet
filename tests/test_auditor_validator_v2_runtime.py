@@ -13,6 +13,21 @@ from leadpoet_canonical.weights import bundle_weights_hash
 
 
 @pytest.mark.parametrize(
+    ("environ", "expected"),
+    (
+        ({}, "http://52.91.135.79:8000"),
+        ({"GATEWAY_URL": ""}, "http://52.91.135.79:8000"),
+        (
+            {"GATEWAY_URL": " https://gateway.example.com/ "},
+            "https://gateway.example.com/",
+        ),
+    ),
+)
+def test_auditor_gateway_default_and_override(environ, expected):
+    assert auditor_module._default_gateway_url(environ) == expected
+
+
+@pytest.mark.parametrize(
     ("value", "expected"),
     (
         ("http://52.91.135.79:8000/", "http://52.91.135.79:8000"),

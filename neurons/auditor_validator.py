@@ -198,8 +198,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# default gateway URL
-DEFAULT_GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
+# Public gateway used when operators do not provide an override.
+PUBLIC_GATEWAY_URL = "http://52.91.135.79:8000"
+
+
+def _default_gateway_url(environ=None) -> str:
+    source = os.environ if environ is None else environ
+    return str(source.get("GATEWAY_URL", "") or "").strip() or PUBLIC_GATEWAY_URL
+
+
+DEFAULT_GATEWAY_URL = _default_gateway_url()
 
 
 def _normalize_gateway_url(value: str) -> str:

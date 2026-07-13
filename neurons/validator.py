@@ -2102,9 +2102,24 @@ class Validator(BaseValidatorNeuron):
                             # ONLY external signal that the thread has wedged.
                             try:
                                 _ff_heartbeat.parent.mkdir(parents=True, exist_ok=True)
-                                _ff_heartbeat.write_text(str(int(time.time())))
+                                # Replace instead of rewriting in place: the
+                                # heartbeat file can be owned by another
+                                # container user on the shared mount, and
+                                # os.replace only needs directory write
+                                # permission. It is also atomic, so the
+                                # watchdog never reads a partial value.
+                                _ff_heartbeat_tmp = _ff_heartbeat.with_name(
+                                    f".{_ff_heartbeat.name}.{os.getpid()}.tmp"
+                                )
+                                _ff_heartbeat_tmp.write_text(str(int(time.time())))
+                                os.replace(_ff_heartbeat_tmp, _ff_heartbeat)
                             except Exception as e:
                                 print(f"⚠️  Fulfillment heartbeat write failed (non-fatal): {e}")
+                                try:
+                                    if _ff_heartbeat_tmp.exists():
+                                        _ff_heartbeat_tmp.unlink()
+                                except Exception:
+                                    pass
 
                             try:
                                 await asyncio.sleep(30)

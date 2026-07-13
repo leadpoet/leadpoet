@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any, Mapping, Sequence
@@ -1518,7 +1519,7 @@ def _py_compile_changed_files(repo_dir: Path, changed_files: list[str]) -> None:
     py_files = [str(repo_dir / path) for path in changed_files if path.endswith(".py")]
     if not py_files:
         return
-    _run(["python3", "-m", "py_compile", *py_files], cwd=repo_dir, timeout_seconds=240)
+    _run([sys.executable, "-m", "py_compile", *py_files], cwd=repo_dir, timeout_seconds=240)
 
 
 def _write_private_code_edit_diff_artifact(

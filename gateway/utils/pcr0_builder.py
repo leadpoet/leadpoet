@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import tarfile
 import tempfile
 import time
@@ -852,7 +853,7 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
                 )
                 return None
             proc = await asyncio.create_subprocess_exec(
-                "python3",
+                sys.executable,
                 artifact_script,
                 "--lock",
                 artifact_lock,

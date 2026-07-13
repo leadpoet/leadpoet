@@ -171,6 +171,12 @@ esac
 export VALIDATOR_WEIGHT_PROTOCOL
 echo "Validator weight protocol: $VALIDATOR_WEIGHT_PROTOCOL"
 
+# This is the same canonical Finney endpoint used by both validator protocol
+# implementations. Keep the env override for non-production networks, but do
+# not require production operators to duplicate the canonical value in the
+# validator secret.
+export EXPECTED_CHAIN="${EXPECTED_CHAIN:-wss://entrypoint-finney.opentensor.ai:443}"
+
 required_keys=(
   ENABLE_FULFILLMENT
   ENABLE_QUALIFICATION_EVALUATION

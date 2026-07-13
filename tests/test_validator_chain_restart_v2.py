@@ -53,6 +53,7 @@ def test_validator_restart_has_fail_closed_legacy_v1_compat_branch():
 
     assert 'VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-authoritative_v2}"' in script
     assert "authoritative_v2|legacy_v1_compat" in script
+    assert 'EXPECTED_CHAIN="${EXPECTED_CHAIN:-wss://entrypoint-finney.opentensor.ai:443}"' in script
     assert "verify_legacy_v1_enclave" in script
     assert "requires exactly one running enclave" in script
     assert "APPROVED_LEGACY_V1_PCR0=" in script

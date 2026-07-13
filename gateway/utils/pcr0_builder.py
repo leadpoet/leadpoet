@@ -169,6 +169,13 @@ PCR0_COPY_PATHS: List[str] = [
 ]
 
 
+def validator_v2_artifacts_required(repo_dir: str) -> bool:
+    """Return whether the checked-out validator Dockerfile uses V2 artifacts."""
+    dockerfile_path = os.path.join(repo_dir, "validator_tee", "Dockerfile.enclave")
+    with open(dockerfile_path, "r", encoding="utf-8") as handle:
+        return ".validator-tee-artifacts/" in handle.read()
+
+
 # =============================================================================
 # Cache
 # =============================================================================
@@ -820,26 +827,53 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
         await proc.communicate()
 
         artifact_dir = os.path.join(repo_dir, ".validator-tee-artifacts")
-        proc = await asyncio.create_subprocess_exec(
-            "python3",
-            "validator_tee/scripts/stage_runtime_artifacts_v2.py",
-            "--lock",
-            "validator_tee/runtime-artifacts-v2.lock.json",
-            "--output-dir",
-            artifact_dir,
-            "--offline-artifact-root",
-            VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT,
-            cwd=repo_dir,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _artifact_stdout, artifact_stderr = await proc.communicate()
-        if proc.returncode != 0:
-            logger.error(
-                "[PCR0] Failed to stage validator V2 artifacts: %s",
-                artifact_stderr.decode()[-500:],
-            )
+        try:
+            requires_v2_artifacts = validator_v2_artifacts_required(repo_dir)
+        except OSError as exc:
+            logger.error("[PCR0] Cannot inspect validator enclave Dockerfile: %s", exc)
             return None
+
+        # The historical cache intentionally rebuilds commits from before the
+        # V2 runtime-artifact contract existed. Those Dockerfiles neither copy
+        # nor need `.validator-tee-artifacts`; requiring the newer staging
+        # script while an old commit is checked out makes every legacy PCR0
+        # rebuild fail before Docker starts.
+        if requires_v2_artifacts:
+            artifact_script = os.path.join(
+                repo_dir, "validator_tee", "scripts", "stage_runtime_artifacts_v2.py"
+            )
+            artifact_lock = os.path.join(
+                repo_dir, "validator_tee", "runtime-artifacts-v2.lock.json"
+            )
+            if not os.path.isfile(artifact_script) or not os.path.isfile(artifact_lock):
+                logger.error(
+                    "[PCR0] Validator Dockerfile requires V2 artifacts but its "
+                    "staging contract is incomplete"
+                )
+                return None
+            proc = await asyncio.create_subprocess_exec(
+                "python3",
+                artifact_script,
+                "--lock",
+                artifact_lock,
+                "--output-dir",
+                artifact_dir,
+                "--offline-artifact-root",
+                VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT,
+                cwd=repo_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _artifact_stdout, artifact_stderr = await proc.communicate()
+            if proc.returncode != 0:
+                logger.error(
+                    "[PCR0] Failed to stage validator V2 artifacts: %s",
+                    artifact_stderr.decode()[-500:],
+                )
+                return None
+        else:
+            shutil.rmtree(artifact_dir, ignore_errors=True)
+            logger.info("[PCR0] Legacy validator commit does not require V2 artifacts")
 
         # __pycache__ directories and .pyc files can differ between machines.
         import shutil

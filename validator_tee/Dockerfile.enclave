@@ -40,9 +40,10 @@ RUN python3 -m pip install --no-cache-dir --no-compile -r /tmp/requirements.txt
 # V2 hotkey signing uses the last sr25519 wheel published for the enclave's
 # pinned CPython 3.7 ABI. The parent build stages this exact hash from
 # runtime-artifacts-v2.lock.json before Docker sees the context.
-COPY .validator-tee-artifacts/py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl /tmp/sr25519.whl
-RUN python3 -m pip install --no-cache-dir --no-compile --no-deps /tmp/sr25519.whl \
-    && rm -f /tmp/sr25519.whl
+COPY .validator-tee-artifacts/py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl /tmp/py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+RUN python3 -m pip install --no-cache-dir --no-compile --no-deps \
+      /tmp/py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl \
+    && rm -f /tmp/py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 
 # =============================================================================
 # CRITICAL: Delete ALL .pyc files and __pycache__ directories

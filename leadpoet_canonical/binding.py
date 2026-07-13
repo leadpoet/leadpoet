@@ -13,9 +13,12 @@ Security Model:
 FAIL-CLOSED: All parsing errors result in rejection. Unknown keys are rejected.
 """
 
+import logging
 from typing import Optional, Tuple
 
 from leadpoet_canonical.constants import BINDING_MESSAGE_PREFIX, BINDING_MESSAGE_VERSION
+
+logger = logging.getLogger(__name__)
 
 
 def create_binding_message(
@@ -149,7 +152,18 @@ def verify_binding_message(
         from substrateinterface import Keypair
         keypair = Keypair(ss58_address=hotkey)
         return keypair.verify(binding_msg.encode(), bytes.fromhex(signature_hex))
-        
+
+    except ImportError as exc:
+        # Still fail closed, but a missing crypto dependency is an
+        # environment defect, not a bad signature — say so loudly instead
+        # of letting it masquerade as "invalid hotkey binding" (epoch
+        # 23929 was rejected this way after a runtime cutover).
+        logger.error(
+            "binding_verify_dependency_missing error=%s — verification "
+            "environment is broken; all submissions will be rejected",
+            exc,
+        )
+        return False
     except Exception:
         # Fail-closed on any parsing error
         return False

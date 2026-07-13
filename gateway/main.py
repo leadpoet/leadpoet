@@ -202,6 +202,25 @@ async def lifespan(app: FastAPI):
                 print(f"❌ FATAL: Failed to initialize AsyncSubtensor: {e}")
                 raise
     
+    # ════════════════════════════════════════════════════════════════
+    # CRYPTO PREFLIGHT: prove the lazily-imported verification stack
+    # works in THIS runtime before serving. The binding verifier fails
+    # closed on ImportError, so a missing dependency otherwise surfaces
+    # only as 403 "invalid hotkey binding" at the weight-submission
+    # window (epoch 23929). Fail startup loudly instead.
+    # ════════════════════════════════════════════════════════════════
+    try:
+        from substrateinterface import Keypair as _PreflightKeypair
+        _probe_kp = _PreflightKeypair.create_from_uri("//gateway-startup-preflight")
+        if not _probe_kp.verify(b"preflight", _probe_kp.sign(b"preflight")):
+            raise RuntimeError("sr25519 sign/verify round-trip returned False")
+        from leadpoet_canonical.nitro import verify_nitro_attestation_full as _preflight_nitro  # noqa: F401
+        print("✅ Crypto preflight passed (sr25519 + nitro verifier importable)")
+    except Exception as exc:
+        print(f"❌ FATAL: crypto verification preflight failed: {exc}")
+        print("   Weight submissions would be silently rejected — refusing to start.")
+        raise
+
     # Initialize all task handles before try block to prevent NameError in finally
     epoch_monitor_task = None
     reveal_task = None

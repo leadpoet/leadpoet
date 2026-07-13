@@ -122,6 +122,19 @@ if [ -f ".env.docker" ]; then
     echo "✅ Overrides loaded from .env.docker"
 fi
 
+# Bind runtime metadata to the exact checkout that this script builds. The
+# Docker image intentionally excludes .git, so the coordinator must receive
+# the full commit SHA explicitly for signed weight binding messages.
+VALIDATOR_DEPLOY_SHA="$(git -C "$REPO_DIR" rev-parse HEAD)"
+if ! [[ "$VALIDATOR_DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "❌ ERROR: validator deploy commit is unavailable" >&2
+    exit 1
+fi
+VALIDATOR_NETUID="${VALIDATOR_NETUID:-71}"
+VALIDATOR_SUBTENSOR_NETWORK="${VALIDATOR_SUBTENSOR_NETWORK:-finney}"
+EXPECTED_CHAIN="${EXPECTED_CHAIN:-wss://entrypoint-finney.opentensor.ai:443}"
+export VALIDATOR_DEPLOY_SHA VALIDATOR_NETUID VALIDATOR_SUBTENSOR_NETWORK EXPECTED_CHAIN
+
 RESEARCH_LAB_INTERNAL_API_KEY="${RESEARCH_LAB_INTERNAL_API_KEY:-${LEADPOET_INTERNAL_SECRET:-}}"
 
 is_truthy() {
@@ -348,10 +361,12 @@ start_container() {
       -e APIFY_API_TOKEN="${APIFY_API_TOKEN:-}" \
       -e FULFILLMENT_USE_APIFY="${FULFILLMENT_USE_APIFY:-false}" \
       -e COMPANIES_HOUSE_API_KEY="$COMPANIES_HOUSE_API_KEY" \
-      -e BITTENSOR_NETWORK="${BITTENSOR_NETWORK:-finney}" \
-      -e SUBTENSOR_NETWORK="${SUBTENSOR_NETWORK:-finney}" \
-      -e BITTENSOR_NETUID="${BITTENSOR_NETUID:-71}" \
-      -e NETUID="${NETUID:-71}" \
+      -e BITTENSOR_NETWORK="$VALIDATOR_SUBTENSOR_NETWORK" \
+      -e SUBTENSOR_NETWORK="$VALIDATOR_SUBTENSOR_NETWORK" \
+      -e BITTENSOR_NETUID="$VALIDATOR_NETUID" \
+      -e NETUID="$VALIDATOR_NETUID" \
+      -e GIT_COMMIT_HASH="$VALIDATOR_DEPLOY_SHA" \
+      -e EXPECTED_CHAIN="$EXPECTED_CHAIN" \
       -e VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-authoritative_v2}" \
       -e ENABLE_TEE_SUBMISSION="${ENABLE_TEE_SUBMISSION:-false}" \
       -e VALIDATOR_REQUIRE_GATEWAY_WEIGHT_SUBMISSION="${VALIDATOR_REQUIRE_GATEWAY_WEIGHT_SUBMISSION:-true}" \
@@ -406,8 +421,8 @@ start_container() {
       $VSOCK_ARG \
       $PROXY_ARGS \
       leadpoet-validator:latest \
-      --netuid 71 \
-      --subtensor_network finney \
+      --netuid "$VALIDATOR_NETUID" \
+      --subtensor_network "$VALIDATOR_SUBTENSOR_NETWORK" \
       --wallet_name validator_72 \
       --wallet_hotkey default \
       --container-id "$CONTAINER_ID" \

@@ -50,6 +50,17 @@ def test_protocol_selection_is_explicit_and_defaults_to_v2():
         normalize_weight_protocol("automatic")
 
 
+def test_container_commit_env_supplies_binding_version_without_git(
+    monkeypatch, tmp_path
+):
+    commit = "a" * 40
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GITHUB_SHA", raising=False)
+    monkeypatch.setenv("GIT_COMMIT_HASH", commit)
+    monkeypatch.delenv("GIT_COMMIT", raising=False)
+    assert validator_module._current_validator_commit_sha() == commit
+
+
 def test_legacy_bundle_uses_one_sparse_vector_for_gateway_and_chain():
     raw_client = _RawClient()
     client = LegacyV1EnclaveClient(raw_client)

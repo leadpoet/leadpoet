@@ -60,6 +60,11 @@ def test_validator_restart_has_fail_closed_legacy_v1_compat_branch():
     assert "Preserving the approved running legacy V1 enclave" in script
     assert 'if [ "$VALIDATOR_WEIGHT_PROTOCOL" = "authoritative_v2" ]; then' in script
     assert '-e VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-authoritative_v2}"' in deploy
+    assert 'VALIDATOR_DEPLOY_SHA="$(git -C "$REPO_DIR" rev-parse HEAD)"' in deploy
+    assert '-e GIT_COMMIT_HASH="$VALIDATOR_DEPLOY_SHA"' in deploy
+    assert '-e EXPECTED_CHAIN="$EXPECTED_CHAIN"' in deploy
+    assert '-e BITTENSOR_NETUID="$VALIDATOR_NETUID"' in deploy
+    assert '--netuid "$VALIDATOR_NETUID"' in deploy
     subprocess.run(["bash", "-n", str(ROOT / "validator_restart.sh")], check=True)
     subprocess.run(
         [

@@ -913,21 +913,25 @@ async def build_enclave_and_extract_pcr0(repo_dir: str) -> Optional[str]:
                 os.chmod(full_path, 0o644)
                 copied_files.append(rel_path)
 
-        if not os.path.isdir(artifact_dir):
-            logger.error("[PCR0] Validator V2 artifact directory is missing")
-            return None
-        for root, dirs, files in os.walk(artifact_dir):
-            for dirname in dirs:
-                directory = os.path.join(root, dirname)
-                os.chmod(directory, 0o755)
-                os.utime(directory, (0, 0))
-            os.chmod(root, 0o755)
-            os.utime(root, (0, 0))
-            for fname in files:
-                fpath = os.path.join(root, fname)
-                os.chmod(fpath, 0o644)
-                os.utime(fpath, (0, 0))
-                copied_files.append(os.path.relpath(fpath, repo_dir))
+        # Legacy commits deliberately build without `.validator-tee-artifacts`
+        # (their Dockerfile never copies it), so only V2 commits may require
+        # the staged directory here.
+        if requires_v2_artifacts:
+            if not os.path.isdir(artifact_dir):
+                logger.error("[PCR0] Validator V2 artifact directory is missing")
+                return None
+            for root, dirs, files in os.walk(artifact_dir):
+                for dirname in dirs:
+                    directory = os.path.join(root, dirname)
+                    os.chmod(directory, 0o755)
+                    os.utime(directory, (0, 0))
+                os.chmod(root, 0o755)
+                os.utime(root, (0, 0))
+                for fname in files:
+                    fpath = os.path.join(root, fname)
+                    os.chmod(fpath, 0o644)
+                    os.utime(fpath, (0, 0))
+                    copied_files.append(os.path.relpath(fpath, repo_dir))
 
         manifest_hash = hashlib.sha256()
         for rel_path in sorted(set(copied_files)):

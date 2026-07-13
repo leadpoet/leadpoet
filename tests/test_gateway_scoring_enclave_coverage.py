@@ -189,6 +189,27 @@ def test_gateway_eif_build_enforces_scoring_manifest():
     assert 'verify_topology.py' in start_script
 
 
+def test_scoring_utility_import_does_not_require_bittensor():
+    script = """
+import builtins
+
+original_import = builtins.__import__
+
+def guarded_import(name, *args, **kwargs):
+    if name == "bittensor" or name.startswith("bittensor."):
+        raise ModuleNotFoundError("bittensor intentionally unavailable")
+    return original_import(name, *args, **kwargs)
+
+builtins.__import__ = guarded_import
+import Leadpoet.utils.utils_lead_extraction
+"""
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 def test_existing_restart_scripts_preserve_attested_build_paths():
     gateway_restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     validator_restart = (ROOT / "validator_restart.sh").read_text(encoding="utf-8")

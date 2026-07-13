@@ -27,7 +27,7 @@ __spec_version__ = (
     + (1 * int(version_split[2]))
 )
 
-# Import all submodules.
-from . import protocol
-from . import base
-from . import validator
+# Keep package initialization dependency-free. Runtime consumers such as the
+# scoring enclave import ``Leadpoet.utils`` but do not need Bittensor. The
+# validator and miner import ``Leadpoet.protocol`` explicitly, which continues
+# to load that submodule (and Bittensor) only in those runtimes.

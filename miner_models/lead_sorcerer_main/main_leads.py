@@ -12,7 +12,7 @@ import sys
 import tempfile
 import shutil
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
 from dotenv import load_dotenv
 
@@ -102,7 +102,7 @@ else:
             f"at {ICP_TEMPLATE_PATH}. Error: {e}") from e
 
     def create_industry_specific_config(
-            industry: str | None = None) -> Dict[str, Any]:
+            industry: Optional[str] = None) -> Dict[str, Any]:
         """
         Clone the canonical icp_config.json and (optionally) tweak `icp_text`
         and `queries` if the caller requested a specific industry.

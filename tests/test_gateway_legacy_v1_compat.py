@@ -146,7 +146,7 @@ async def test_legacy_allocation_preserves_host_reward_kernel(monkeypatch) -> No
     ]
 
 
-def test_gateway_annotations_evaluate_on_python_39():
+def test_runtime_annotations_evaluate_on_python_39():
     """PEP 604 unions in runtime-evaluated annotations crash Python 3.9.
 
     Module-level def annotations evaluate at import; nested-def annotations
@@ -155,11 +155,26 @@ def test_gateway_annotations_evaluate_on_python_39():
     Files opting into `from __future__ import annotations` are exempt.
     """
     import ast
+    import itertools
     from pathlib import Path
 
-    gateway_root = Path(__file__).resolve().parents[1] / "gateway"
+    repo_root = Path(__file__).resolve().parents[1]
+    scanned_trees = (
+        "gateway",
+        "research_lab",
+        "qualification",
+        "validator_models",
+        "neurons",
+        "leadpoet_verifier",
+        "Leadpoet",
+        "miner_models",
+        "leadpoet_canonical",
+        "leadpoet_audit",
+    )
     offenders = []
-    for path in gateway_root.rglob("*.py"):
+    for path in itertools.chain.from_iterable(
+        sorted((repo_root / tree).rglob("*.py")) for tree in scanned_trees
+    ):
         if "__pycache__" in path.parts:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))

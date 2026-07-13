@@ -2394,7 +2394,7 @@ def _post_research_lab_json(path: str, payload: dict, *, timeout: int = 60) -> d
     return response.json()
 
 
-def _get_research_lab_status(gateway_url: str) -> dict | None:
+def _get_research_lab_status(gateway_url: str) -> Optional[dict]:
     try:
         response = requests.get(f"{gateway_url.rstrip('/')}/research-lab/status", timeout=10)
         if response.status_code != 200:
@@ -2407,7 +2407,7 @@ def _get_research_lab_status(gateway_url: str) -> dict | None:
         return None
 
 
-def _register_research_lab_openrouter_key(wallet, status: dict) -> tuple[str, str] | None:
+def _register_research_lab_openrouter_key(wallet, status: dict) -> Optional[Tuple[str, str]]:
     if status.get("openrouter_key_registration_enabled"):
         if not _research_lab_raw_key_gateway_allowed(QUALIFICATION_GATEWAY_URL):
             print("❌ Refusing to send raw OpenRouter API key over an insecure gateway URL.")
@@ -2469,7 +2469,7 @@ def _brief_sanitized_ref_from_input(value: str) -> str:
     return f"brief_sanitized:sha256:{digest}"
 
 
-def _brief_public_summary_from_input(value: str) -> str | None:
+def _brief_public_summary_from_input(value: str) -> Optional[str]:
     value = value.strip()
     if value.startswith("brief_sanitized:"):
         return None
@@ -2715,7 +2715,7 @@ def _execute_research_lab_payment(
     usd_amount: float,
     payment_label: str,
     confirm_transfer: bool = True,
-) -> tuple[str, int] | None:
+) -> Optional[Tuple[str, int]]:
     """Submit a TAO payment and return the on-chain proof for gateway verification."""
     dest_coldkey = get_leadpoet_coldkey(netuid)
     print("")

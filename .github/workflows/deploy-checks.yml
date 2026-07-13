@@ -43,6 +43,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 matches the production gateway host runtime; 3.10 matches the
+        # containerized runtimes. Both must pass.
+        python-version: ["3.9", "3.10"]
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -53,7 +60,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: |
             requirements.txt
@@ -95,7 +102,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-report
+          name: coverage-report-py${{ matrix.python-version }}
           path: coverage.xml
           if-no-files-found: ignore
 

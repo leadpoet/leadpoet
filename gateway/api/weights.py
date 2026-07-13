@@ -1077,7 +1077,9 @@ async def submit_weights(submission: WeightSubmission) -> WeightSubmissionRespon
     if recomputed_hash != submission.weights_hash:
         raise HTTPException(status_code=400, detail="weights_hash does not match payload")
 
-    def _chain_snapshot() -> tuple[int | None, str | None]:
+    # Annotation must stay 3.9-compatible: nested-def annotations are
+    # evaluated on every call, and `int | None` needs Python 3.10.
+    def _chain_snapshot() -> tuple[Optional[int], Optional[str]]:
         try:
             metagraph = subtensor.metagraph(netuid=submission.netuid)
             primary_uid = next(

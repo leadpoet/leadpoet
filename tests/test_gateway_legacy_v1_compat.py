@@ -144,3 +144,48 @@ async def test_legacy_allocation_preserves_host_reward_kernel(monkeypatch) -> No
         ("source_add", 71),
         ("allocate", 300),
     ]
+
+
+def test_gateway_annotations_evaluate_on_python_39():
+    """PEP 604 unions in runtime-evaluated annotations crash Python 3.9.
+
+    Module-level def annotations evaluate at import; nested-def annotations
+    evaluate on every call of the enclosing function (weights.py's
+    _chain_snapshot 500'd every /weights/submit during epoch 23918).
+    Files opting into `from __future__ import annotations` are exempt.
+    """
+    import ast
+    from pathlib import Path
+
+    gateway_root = Path(__file__).resolve().parents[1] / "gateway"
+    offenders = []
+    for path in gateway_root.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        has_future = any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "__future__"
+            and any(alias.name == "annotations" for alias in node.names)
+            for node in tree.body
+        )
+        if has_future:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            annotations = [
+                arg.annotation
+                for arg in list(node.args.args) + list(node.args.kwonlyargs)
+                if arg.annotation
+            ]
+            if node.returns:
+                annotations.append(node.returns)
+            for annotation in annotations:
+                if any(
+                    isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.BitOr)
+                    for sub in ast.walk(annotation)
+                ):
+                    offenders.append(f"{path}:{node.lineno} {node.name}")
+                    break
+    assert offenders == []

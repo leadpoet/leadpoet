@@ -4,6 +4,13 @@
   "_repo": "https://github.com/leadpoet/leadpoet",
   "gateway_pcr0": [
     {
+      "pcr0": "de2f53543c59a190042993cd9fee3beb3a43483d2f89f393611d8a9f8e1aac4c95f7a118a7fddbbed9e09922c129a1be",
+      "version": "2026-07-13d",
+      "deployed": "2026-07-13",
+      "commit_hash": "53651cab694fb9e732a49ccaca5dd3d1703abcb8",
+      "notes": "gateway enclave: python 3.11 runtime cutover restart (allowlist rebound)"
+    },
+    {
       "pcr0": "880a08f709e1932a4b31b644c500ed4c7c4035f995d6f207edd9962d84a099dd3a0194bf815f411e7d28d3ca699ab43b",
       "version": "2026-07-13c",
       "deployed": "2026-07-13",

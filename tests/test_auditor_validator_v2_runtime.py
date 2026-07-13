@@ -95,7 +95,7 @@ def test_v2_404_uses_verified_v1_fallback(monkeypatch, capsys):
     auditor = _auditor_for_one_verification(None)
 
     async def missing_v2(_epoch):
-        auditor._last_v2_route_was_missing = True
+        auditor._last_v2_authority_was_absent = True
         return None
 
     async def fetch_v1(_epoch):
@@ -128,7 +128,7 @@ def test_v2_transport_failure_does_not_use_v1():
     auditor = _auditor_for_one_verification(None)
 
     async def unavailable_v2(_epoch):
-        auditor._last_v2_route_was_missing = False
+        auditor._last_v2_authority_was_absent = False
         return None
 
     async def forbidden_v1_fetch(_epoch):
@@ -144,16 +144,18 @@ def test_v2_transport_failure_does_not_use_v1():
 
 
 @pytest.mark.parametrize(
-    ("detail", "route_missing"),
+    ("detail", "authority_absent"),
     (
         ("Not Found", True),
+        ("v2 weight bundle not found", True),
+        ("finalized v2 weight authority not found", True),
         ("Authoritative V2 weights not found", False),
     ),
 )
-def test_v2_fetch_distinguishes_missing_route_from_pending_bundle(
+def test_v2_fetch_recognizes_only_known_absent_authority_responses(
     monkeypatch,
     detail,
-    route_missing,
+    authority_absent,
 ):
     auditor = auditor_module.AuditorValidator.__new__(
         auditor_module.AuditorValidator
@@ -189,14 +191,14 @@ def test_v2_fetch_distinguishes_missing_route_from_pending_bundle(
     monkeypatch.setattr(auditor_module.aiohttp, "ClientSession", Session)
 
     assert asyncio.run(auditor.fetch_attested_weights_v2(23912)) is None
-    assert auditor._last_v2_route_was_missing is route_missing
+    assert auditor._last_v2_authority_was_absent is authority_absent
 
 
 def test_pending_v2_bundle_does_not_use_v1():
     auditor = _auditor_for_one_verification(None)
 
     async def pending_v2(_epoch):
-        auditor._last_v2_route_was_missing = False
+        auditor._last_v2_authority_was_absent = False
         return None
 
     async def forbidden_v1_fetch(_epoch):

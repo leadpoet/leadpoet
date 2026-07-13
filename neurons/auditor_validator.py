@@ -4,7 +4,8 @@ LeadPoet Auditor Validator
 
 A lightweight validator that copies authoritative V2 weights after independently
 verifying their complete attested receipt graph. During the V2 rollout, it can
-copy a fully verified V1 bundle only when the gateway has no V2 route.
+copy a fully verified V1 bundle only when the gateway reports that no V2
+authority exists for the requested epoch.
 
 Verification failure is fail-closed: the auditor never substitutes a locally
 computed or burn vector, and an invalid or pending V2 authority never downgrades.
@@ -642,7 +643,7 @@ class AuditorValidator:
     async def fetch_attested_weights_v2(self, epoch_id: int) -> Optional[Dict]:
         """Fetch the sole authoritative V2 bundle."""
 
-        self._last_v2_route_was_missing = False
+        self._last_v2_authority_was_absent = False
         try:
             async with aiohttp.ClientSession(trust_env=False) as session:
                 url = f"{self.gateway_url}/weights/v2/latest/{self.config.netuid}/{int(epoch_id)}"
@@ -652,10 +653,16 @@ class AuditorValidator:
                             not_found = await response.json()
                         except Exception:
                             not_found = None
-                        self._last_v2_route_was_missing = (
-                            isinstance(not_found, dict)
-                            and not_found.get("detail") == "Not Found"
+                        detail = (
+                            str(not_found.get("detail") or "").strip()
+                            if isinstance(not_found, dict)
+                            else ""
                         )
+                        self._last_v2_authority_was_absent = detail in {
+                            "Not Found",
+                            "v2 weight bundle not found",
+                            "finalized v2 weight authority not found",
+                        }
                         return None
                     if response.status != 200:
                         logger.warning(
@@ -851,13 +858,13 @@ class AuditorValidator:
         self,
         epoch_id: int,
     ) -> Tuple[Optional[Dict], str]:
-        """Prefer V2 and permit V1 only when the V2 route is absent."""
+        """Prefer V2 and permit V1 only when V2 authority is absent."""
 
         v2_bundle = await self.fetch_attested_weights_v2(epoch_id)
         if isinstance(v2_bundle, dict):
             verified = self.verify_attested_weights_v2(v2_bundle)
             return verified, "v2_verified" if verified else "v2_invalid"
-        if not getattr(self, "_last_v2_route_was_missing", False):
+        if not getattr(self, "_last_v2_authority_was_absent", False):
             return None, "v2_unavailable"
 
         v1_bundle = await self.fetch_attested_weights_v1(epoch_id)

@@ -16,6 +16,12 @@ bittensor>=9.10,<10.0.0
 # Remove the cap once upstream bittensor releases a substrate-interface
 # bump that's compatible with whatever they shipped in 1.7+.
 async-substrate-interface>=1.6.1,<1.7
+# The legacy (sync) substrate-interface package provides the Keypair used
+# by leadpoet_canonical.binding.verify_binding_message via a lazy,
+# fail-closed import. It was only ever present on the gateway host as an
+# ad-hoc install, so a fresh environment silently rejected every weight
+# submission with "invalid hotkey binding" (epoch 23929).
+substrate-interface==1.7.11
 
 # HTTP and networking
 requests>=2.31.0

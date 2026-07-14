@@ -1318,7 +1318,7 @@ class Miner(BaseMinerNeuron):
 # QUALIFICATION MODEL SUBMISSION
 # =============================================================================
 
-QUALIFICATION_GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
+QUALIFICATION_GATEWAY_URL = os.environ.get("GATEWAY_URL", "https://gateway.leadpoet.com")
 QUALIFICATION_SUBMISSION_COST_USD = float(os.environ.get("QUALIFICATION_SUBMISSION_COST_USD", "10.0"))  # $10 submission cost
 
 # =============================================================================

@@ -505,9 +505,19 @@ def _normalize_linkedin_employee_bucket(value) -> str:
 
 
 def _normalize_icp_employee_buckets(value) -> set:
+    # The stored ICP carries the allowed bands as a list; the scoring payload
+    # joins it with "|". Accept both directly.
+    if isinstance(value, (list, tuple, set)):
+        buckets = {_normalize_linkedin_employee_bucket(item) for item in value}
+        return {bucket for bucket in buckets if bucket}
     raw = str(value or "").strip()
     if not raw or raw.lower() in {"any", "all", "unknown", "n/a", "na"}:
         return set()
+    # LinkedIn bands use thousands separators ("1,001-5,000"); drop commas
+    # BETWEEN digits before splitting, or the comma delimiter shreds every
+    # large band into garbage, the set comes back empty, and the size gate
+    # silently disables for exactly the ICPs that carry large bands.
+    raw = re.sub(r"(?<=\d),(?=\d)", "", raw)
     pieces = [
         item.strip()
         for item in re.split(r"\s*(?:\||;|,|\bor\b)\s*", raw, flags=re.I)

@@ -1078,6 +1078,44 @@ def generate_single_icp(
     return canonicalize_generated_icp(icp, industry=industry, sub_industry=sub_industry)
 
 
+COMPANY_GOAL_MIN = 1
+COMPANY_GOAL_MAX = 25
+COMPANY_GOAL_AVERAGE = 5
+
+
+def allocate_company_goals(
+    count: int,
+    *,
+    total: Optional[int] = None,
+    goal_min: int = COMPANY_GOAL_MIN,
+    goal_max: int = COMPANY_GOAL_MAX,
+) -> List[int]:
+    """Per-ICP company goals in [goal_min, goal_max] summing exactly to
+    ``total`` (default: COMPANY_GOAL_AVERAGE per ICP, i.e. 100 for a 20-ICP
+    set). Draws from the caller's current ``random`` stream so seeded sets
+    stay reproducible.
+
+    Everyone starts at the floor, then the remainder is dealt one unit at a
+    time to a random ICP that still has headroom — an unbiased composition
+    that cannot violate either bound or the total.
+    """
+    if count <= 0:
+        return []
+    if total is None:
+        total = COMPANY_GOAL_AVERAGE * count
+    total = max(goal_min * count, min(total, goal_max * count))
+    goals = [goal_min] * count
+    remaining = total - goal_min * count
+    open_indices = list(range(count))
+    while remaining > 0 and open_indices:
+        pick = random.choice(open_indices)
+        goals[pick] += 1
+        remaining -= 1
+        if goals[pick] >= goal_max:
+            open_indices.remove(pick)
+    return goals
+
+
 def generate_icp_set(
     set_id: int,
     total_icps: int = 20,
@@ -1119,6 +1157,14 @@ def generate_icp_set(
     if base_seed is not None:
         random.seed(base_seed)
     random.shuffle(icps)
+
+    # Per-ICP company goal: uniform 5 for every ICP for now, so benchmark
+    # volume and per-company cost stay exactly as the flat design costs
+    # (5 x 20 = 100 companies per set). allocate_company_goals() is the
+    # ready-made varied allocation (1-25 summing to the same total) for when
+    # operators decide to switch.
+    for icp in icps:
+        icp["max_companies"] = COMPANY_GOAL_AVERAGE
 
     icp_set_hash = compute_icp_set_hash(icps)
 

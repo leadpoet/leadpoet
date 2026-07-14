@@ -48,3 +48,35 @@ def test_all_stage_size_pairs_possible_are_coherent():
         for bucket in icp["employee_count"]:
             assert bucket in STAGE_EMPLOYEE_BUCKETS[icp["company_stage"]]
     assert seen_stages == set(COMPANY_STAGES)  # every stage still generated
+
+
+def test_company_goal_allocation_invariants():
+    import random as _random
+    from gateway.tasks.icp_generator import (
+        COMPANY_GOAL_MAX,
+        COMPANY_GOAL_MIN,
+        allocate_company_goals,
+    )
+    for seed in range(50):
+        _random.seed(seed)
+        goals = allocate_company_goals(20)
+        assert len(goals) == 20
+        assert sum(goals) == 100  # 5-per-ICP average -> benchmark volume unchanged
+        assert all(COMPANY_GOAL_MIN <= g <= COMPANY_GOAL_MAX for g in goals)
+    # reproducible under the same seed
+    _random.seed(7); a = allocate_company_goals(20)
+    _random.seed(7); b = allocate_company_goals(20)
+    assert a == b
+
+
+def test_icp_set_pins_uniform_goal_of_five():
+    from gateway.tasks.icp_generator import generate_icp_set
+    icps, _dist, _h = generate_icp_set(20260715, base_seed=42)
+    goals = [icp["max_companies"] for icp in icps]
+    # Uniform 5 per ICP for now: benchmark volume/cost unchanged (100 total).
+    assert goals == [5] * len(icps)
+    assert sum(goals) == 5 * len(icps)
+    # reproducible: same base_seed -> same hash
+    _icps1, _d1, h1 = generate_icp_set(20260715, base_seed=42)
+    _icps2, _d2, h2 = generate_icp_set(20260715, base_seed=42)
+    assert h1 == h2

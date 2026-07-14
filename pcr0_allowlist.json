@@ -4,6 +4,13 @@
   "_repo": "https://github.com/leadpoet/leadpoet",
   "gateway_pcr0": [
     {
+      "pcr0": "61c548d8aba4c1e5d0bd033aee199e1e57012c04836ad77eb724669d8502543622aa034547dc61b3383a3b5b0989b705",
+      "version": "2026-07-14",
+      "deployed": "2026-07-14",
+      "commit_hash": "061a19c472d7d28e13942324254acc3b7cee5d4a",
+      "notes": "gateway enclave: symbol-slice shadow deploy + governance re-pin"
+    },
+    {
       "pcr0": "f6dd7e9cde5ae12550051e892e24d558beb597e9dd4899a2cc2a8852d23b8813979f64e3468378087d01126a9e1b89e2",
       "version": "2026-07-13e",
       "deployed": "2026-07-13",

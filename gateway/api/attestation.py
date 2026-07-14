@@ -27,6 +27,7 @@ SECURITY NOTES:
 - The returned code_hash is informational; trust comes from PCR0 in attestation
 """
 
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -269,7 +270,13 @@ async def deploy_readiness(
     """
     from gateway.deploy_readiness import build_deploy_readiness
 
-    return build_deploy_readiness(
+    # The readiness builder shells out to git (and optionally docker). Under
+    # post-restart PCR0 cache warming the box is saturated with enclave
+    # builds, and running those subprocesses inline stalled the entire event
+    # loop for minutes — dashboards saw readiness timeouts while every other
+    # request queued behind them. Keep the loop free.
+    return await asyncio.to_thread(
+        build_deploy_readiness,
         gateway_commit=gateway_commit,
         validator_commit=validator_commit,
         gateway_pcr0=gateway_pcr0,

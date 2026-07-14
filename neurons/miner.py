@@ -2358,6 +2358,35 @@ def _research_lab_source_add_signed_payload(wallet, payload: dict) -> dict:
     return signed
 
 
+_RESEARCH_LAB_OPENROUTER_RAW_KEY_FIELDS = (
+    "openrouter_api_key",
+    "openrouter_management_key",
+)
+
+
+def _research_lab_openrouter_key_signed_payload(wallet, payload: dict) -> dict:
+    """Sign OpenRouter key registration without binding the raw credential pair.
+
+    The gateway excludes the raw ``openrouter_api_key`` and
+    ``openrouter_management_key`` from signature verification so the keys can be
+    submitted for KMS encryption without binding raw secret material into the
+    signed/audited payload. The signed message must therefore omit those fields
+    for the signature to match the gateway's reconstruction.
+    """
+
+    excluded = {"signature", *_RESEARCH_LAB_OPENROUTER_RAW_KEY_FIELDS}
+    sign_payload = {
+        key: value for key, value in payload.items() if key not in excluded
+    }
+    message = json.dumps(sign_payload, sort_keys=True)
+    signature = wallet.hotkey.sign(message.encode()).hex()
+    signed = {**sign_payload, "signature": signature}
+    for field in _RESEARCH_LAB_OPENROUTER_RAW_KEY_FIELDS:
+        if payload.get(field) is not None:
+            signed[field] = payload[field]
+    return signed
+
+
 def _research_lab_insecure_gateway_allowed(url: str) -> bool:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
@@ -2431,7 +2460,7 @@ def _register_research_lab_openrouter_key(wallet, status: dict) -> Optional[Tupl
         key_fingerprint = hashlib.sha256(
             f"{raw_key}:{raw_management_key}".encode("utf-8")
         ).hexdigest()[:24]
-        payload = _research_lab_signed_payload(
+        payload = _research_lab_openrouter_key_signed_payload(
             wallet,
             {
                 "miner_hotkey": wallet.hotkey.ss58_address,

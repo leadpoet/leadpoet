@@ -19,7 +19,7 @@ def test_committed_protected_workflow_manifest_matches_source():
     manifest = load_manifest(MANIFEST_PATH)
     verify_manifest(ROOT, manifest)
     assert manifest["baseline_commit"] == "7c9766b71d4c08b0059f6e3230dbe742b1d58e79"
-    assert manifest["protected_source_commit"] == "07c81c7ff751714d838428effd6c987e4a9e9db0"
+    assert manifest["protected_source_commit"] == "322f9f653e44fc291710fc754d69c79ed23f9fa1"
     assert len(manifest["entries"]) == sum(len(items) for items in PROTECTED_SYMBOLS.values())
 
 

@@ -218,14 +218,25 @@ class TestSupabaseSendRetry:
             session.send(_request())
         assert session.calls == 1
 
-    def test_sync_second_failure_propagates(self):
+    def test_sync_second_failure_gets_final_attempt(self):
         from gateway.db.client import _install_sync_send_retry
 
         session = _FakeSession([httpx.ReadError("dead"), httpx.ReadError("dead again")])
         _install_sync_send_retry(_FakeClient(session))
+        result = session.send(_request())
+        assert result == "response"
+        assert session.calls == 3
+
+    def test_sync_third_failure_propagates(self):
+        from gateway.db.client import _install_sync_send_retry
+
+        session = _FakeSession(
+            [httpx.ReadError("dead"), httpx.ReadError("dead again"), httpx.ReadError("dead thrice")]
+        )
+        _install_sync_send_retry(_FakeClient(session))
         with pytest.raises(httpx.ReadError):
             session.send(_request())
-        assert session.calls == 2
+        assert session.calls == 3
 
     def test_async_retries_once_on_protocol_termination(self):
         from gateway.db.client import _install_async_send_retry

@@ -17,6 +17,7 @@ ASYNC CLIENTS:
 """
 
 import asyncio
+import time
 import logging
 import os
 from typing import Optional
@@ -85,14 +86,27 @@ def _install_sync_send_retry(client: Client) -> Client:
         original_send = session.send
 
         def send_with_retry(request, **kwargs):
+            # Pooled keepalive connections routinely die at the pooler's idle
+            # timeout; the first retry replaces the dead connection and is
+            # expected churn (INFO). A second failure in a row is unusual and
+            # worth a WARNING before the final attempt.
             try:
                 return original_send(request, **kwargs)
             except _POOL_TERMINATION_ERRORS as exc:
-                logger.warning(
+                logger.info(
                     "supabase_http_send_retry transport=sync error=%s path=%s",
                     type(exc).__name__,
                     request.url.path,
                 )
+            try:
+                return original_send(request, **kwargs)
+            except _POOL_TERMINATION_ERRORS as exc:
+                logger.warning(
+                    "supabase_http_send_second_retry transport=sync error=%s path=%s",
+                    type(exc).__name__,
+                    request.url.path,
+                )
+                time.sleep(0.1)
                 return original_send(request, **kwargs)
 
         session.send = send_with_retry
@@ -111,11 +125,20 @@ def _install_async_send_retry(client: AsyncClient) -> AsyncClient:
             try:
                 return await original_send(request, **kwargs)
             except _POOL_TERMINATION_ERRORS as exc:
-                logger.warning(
+                logger.info(
                     "supabase_http_send_retry transport=async error=%s path=%s",
                     type(exc).__name__,
                     request.url.path,
                 )
+            try:
+                return await original_send(request, **kwargs)
+            except _POOL_TERMINATION_ERRORS as exc:
+                logger.warning(
+                    "supabase_http_send_second_retry transport=async error=%s path=%s",
+                    type(exc).__name__,
+                    request.url.path,
+                )
+                await asyncio.sleep(0.1)
                 return await original_send(request, **kwargs)
 
         session.send = send_with_retry

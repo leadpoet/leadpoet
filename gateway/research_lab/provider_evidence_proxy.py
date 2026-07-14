@@ -1042,6 +1042,17 @@ class _CapabilityAwareHTTPServer(ThreadingHTTPServer):
     registry_state: ProviderRegistryState
     usage_ledger: ProviderUsageLedger
 
+    def handle_error(self, request, client_address) -> None:
+        # Recycled/timing-out worker clients drop their sockets mid-request;
+        # that is routine churn, not a proxy fault, and the default handler
+        # prints a full traceback for each one.
+        import sys
+
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
     def server_close(self) -> None:
         self.registry_state.stop()
         try:

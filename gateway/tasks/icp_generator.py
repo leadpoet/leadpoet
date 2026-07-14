@@ -204,6 +204,21 @@ COMPANY_STAGES = [
     "Seed", "Series A", "Series B", "Series C+", "Private Equity", "Public"
 ]
 
+# Stage -> employee-size coherence: the single authority for which exact
+# LinkedIn bands each funding/ownership stage can plausibly carry. Stage and
+# size were previously drawn independently, which produced impossible ICPs
+# (a Seed company with 5,001-10,000 employees) that zero out at the size gate
+# no matter how good sourcing is. A stage-pinned ICP now carries this FULL
+# band list so the stage never pincers the ICP into one arbitrary band.
+STAGE_EMPLOYEE_BUCKETS: Dict[str, tuple] = {
+    "Seed": ("2-10", "11-50"),
+    "Series A": ("11-50", "51-200"),
+    "Series B": ("51-200", "201-500"),
+    "Series C+": ("201-500", "501-1,000", "1,001-5,000"),
+    "Private Equity": ("201-500", "501-1,000", "1,001-5,000", "5,001-10,000"),
+    "Public": ("1,001-5,000", "5,001-10,000", "10,001+"),
+}
+
 # Geographies - ALL 51 US states/territories + Dubai & Abu Dhabi (UAE)
 # US states from gateway/utils/geo_lookup_fast.json (source of truth)
 GEOGRAPHIES = [
@@ -995,8 +1010,12 @@ def generate_single_icp(
     products = PRODUCTS_BY_INDUSTRY.get(industry, ["Software solution"])
 
     sub_industry = random.choice(sub_industries)
-    employee_count_range = random.choice(COMPANY_SIZES)
+    # Stage first, then size FROM the stage's coherent band list — never an
+    # independent draw. The ICP carries the stage's full band list so a pinned
+    # stage can't pincer the ICP into one arbitrary band.
     company_stage = random.choice(COMPANY_STAGES)
+    stage_buckets = list(STAGE_EMPLOYEE_BUCKETS[company_stage])
+    employee_count_range = random.choice(stage_buckets)
     geography = random.choice(GEOGRAPHIES)
     product = random.choice(products)
     intent_signals = random.sample(INTENT_SIGNALS, random.randint(1, 2))
@@ -1046,6 +1065,9 @@ def generate_single_icp(
         "target_roles": [],
         "target_seniority": "",
         "employee_count": employee_count_range,
+        # Full coherent band list for the pinned stage; canonicalization takes
+        # an explicit multi-band list verbatim (no radius expansion beyond it).
+        "employee_count_buckets": stage_buckets,
         "company_stage": company_stage,
         "geography": geography,
         "country": country,

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import hashlib
 import json
 import logging
 import os
@@ -107,6 +108,42 @@ class CodeEditBuildResult:
     code_edit_manifest: dict[str, Any]
     source_diff_hash: str
     build_doc: dict[str, Any]
+
+
+def attach_sequential_lineage(
+    *,
+    build: CodeEditBuildResult,
+    draft: CodeEditDraft,
+    root_artifact_hash: str,
+    lineage: Mapping[str, Any],
+) -> CodeEditBuildResult:
+    """Bind measured sequential lineage into an already validated build."""
+
+    build_doc = {
+        key: value
+        for key, value in dict(build.build_doc).items()
+        if key != "build_doc_hash"
+    }
+    build_doc["sequential_chain"] = dict(lineage)
+    build_doc_hash = sha256_json(build_doc)
+    code_manifest = code_edit_candidate_manifest(
+        draft=draft,
+        parent_artifact_hash=str(root_artifact_hash),
+        candidate_artifact_hash=(
+            build.candidate_model_manifest.model_artifact_hash
+        ),
+        candidate_model_manifest_hash=(
+            build.candidate_model_manifest.manifest_hash
+        ),
+        source_diff_hash=build.source_diff_hash,
+        build_doc_hash=build_doc_hash,
+    )
+    return CodeEditBuildResult(
+        candidate_model_manifest=build.candidate_model_manifest,
+        code_edit_manifest=code_manifest,
+        source_diff_hash=build.source_diff_hash,
+        build_doc={**build_doc, "build_doc_hash": build_doc_hash},
+    )
 
 
 @dataclass(frozen=True)
@@ -311,6 +348,151 @@ class CodeEditCandidateBuilder:
                     stdout=exc.stdout,
                     exit_code=exc.exit_code,
                 ) from exc
+
+    def compose_cumulative_draft(
+        self,
+        *,
+        root_source_context: ParentImageSourceContext,
+        parent_source_context: ParentImageSourceContext,
+        incremental_draft: CodeEditDraft,
+    ) -> tuple[CodeEditDraft, dict[str, Any]]:
+        """Rebase one child edit into a complete root-to-child source diff.
+
+        Sequential candidates are generated against the best prior candidate,
+        but scoring and promotion require one patch that applies to the active
+        model at run start. This method proves both representations produce the
+        same editable source bytes before the candidate image is built.
+        """
+
+        parent_errors = self.validate_draft_against_source_context(
+            incremental_draft,
+            parent_source_context,
+        )
+        if parent_errors:
+            raise CodeEditPatchApplyError("; ".join(parent_errors))
+        validate_code_edit_draft(
+            incremental_draft,
+            allowed_prefixes=self.config.code_edit_allowed_path_prefixes(),
+            allowed_exact_paths=self.config.code_edit_allowed_exact_paths(),
+            allowed_suffixes=self.config.code_edit_allowed_suffixes(),
+        )
+
+        with tempfile.TemporaryDirectory(
+            prefix="research-lab-sequential-compose-"
+        ) as tmp:
+            tmp_dir = Path(tmp)
+            child_dir = tmp_dir / "child"
+            root_dir = tmp_dir / "root"
+            verify_dir = tmp_dir / "verify"
+            _copy_source_tree(parent_source_context.source_root, child_dir)
+            _copy_source_tree(root_source_context.source_root, root_dir)
+            _copy_source_tree(root_source_context.source_root, verify_dir)
+            _initialize_temporary_git_repo(child_dir)
+            _initialize_temporary_git_repo(root_dir)
+            _initialize_temporary_git_repo(verify_dir)
+
+            incremental_path = tmp_dir / "incremental.diff"
+            incremental_path.write_text(
+                incremental_draft.unified_diff,
+                encoding="utf-8",
+            )
+            _run_git_apply(
+                incremental_path,
+                cwd=child_dir,
+                timeout_seconds=120,
+                check=True,
+            )
+            _run_git_apply(
+                incremental_path,
+                cwd=child_dir,
+                timeout_seconds=120,
+                check=False,
+            )
+
+            root_editable = set(root_source_context.editable_files)
+            child_editable = set(parent_source_context.editable_files)
+            all_editable = sorted(root_editable | child_editable)
+            for relative_path in all_editable:
+                child_path = child_dir / relative_path
+                root_path = root_dir / relative_path
+                if child_path.is_file():
+                    root_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(child_path, root_path)
+                elif root_path.exists():
+                    root_path.unlink()
+
+            changed_files = _changed_files(root_dir)
+            if not changed_files:
+                raise CodeEditEmptyOrNoopPatchError(
+                    "sequential code edit produced no cumulative repository changes"
+                )
+            disallowed_changes = sorted(set(changed_files) - set(all_editable))
+            if disallowed_changes:
+                raise CodeEditPatchApplyError(
+                    "sequential cumulative diff changed non-editable paths: "
+                    + ", ".join(disallowed_changes)
+                )
+            cumulative_diff = _run(
+                ["git", "diff", "--binary", "--full-index"],
+                cwd=root_dir,
+                timeout_seconds=120,
+            )
+            if not cumulative_diff.startswith("diff --git "):
+                raise CodeEditPatchApplyError(
+                    "sequential cumulative diff is not a git unified diff"
+                )
+            cumulative_draft = replace(
+                incremental_draft,
+                target_files=tuple(changed_files),
+                unified_diff=cumulative_diff.rstrip() + "\n",
+            )
+            validate_code_edit_draft(
+                cumulative_draft,
+                allowed_prefixes=self.config.code_edit_allowed_path_prefixes(),
+                allowed_exact_paths=self.config.code_edit_allowed_exact_paths(),
+                allowed_suffixes=self.config.code_edit_allowed_suffixes(),
+            )
+
+            cumulative_path = tmp_dir / "cumulative.diff"
+            cumulative_path.write_text(
+                cumulative_draft.unified_diff,
+                encoding="utf-8",
+            )
+            _run_git_apply(
+                cumulative_path,
+                cwd=verify_dir,
+                timeout_seconds=120,
+                check=True,
+            )
+            _run_git_apply(
+                cumulative_path,
+                cwd=verify_dir,
+                timeout_seconds=120,
+                check=False,
+            )
+            expected_hash = _editable_source_content_hash(child_dir, all_editable)
+            actual_hash = _editable_source_content_hash(verify_dir, all_editable)
+            if actual_hash != expected_hash:
+                raise CodeEditPatchApplyError(
+                    "sequential cumulative diff did not reproduce child source"
+                )
+
+        incremental_hash = sha256_json(
+            {"unified_diff": incremental_draft.unified_diff}
+        )
+        cumulative_hash = sha256_json(
+            {"unified_diff": cumulative_draft.unified_diff}
+        )
+        return cumulative_draft, {
+            "schema_version": "research_lab.sequential_composition.v1",
+            "root_source_tree_hash": root_source_context.source_tree_hash,
+            "parent_source_tree_hash": parent_source_context.source_tree_hash,
+            "incremental_source_diff_hash": incremental_hash,
+            "cumulative_source_diff_hash": cumulative_hash,
+            "cumulative_changed_files": list(cumulative_draft.target_files),
+            "editable_source_content_hash": expected_hash,
+            "cumulative_apply_verified": True,
+        }
 
     def build(
         self,
@@ -693,6 +875,38 @@ def _prepare_parent_image_workspace(
     _write_research_lab_build_scaffold(repo_dir, base_image_ref=image_digest)
     _initialize_temporary_git_repo(repo_dir)
     return extracted_source_tree_hash_before_patch, extracted_top_level_paths
+
+
+def _copy_source_tree(source_root: Path, destination: Path) -> None:
+    if not source_root.is_dir():
+        raise CodeEditBuildError("prepared source context is missing its source root")
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(source_root, destination)
+    git_dir = destination / ".git"
+    if git_dir.exists():
+        shutil.rmtree(git_dir)
+
+
+def _editable_source_content_hash(
+    source_root: Path,
+    relative_paths: Sequence[str],
+) -> str:
+    digest = hashlib.sha256()
+    for relative_path in sorted(set(relative_paths)):
+        path = source_root / relative_path
+        encoded_path = relative_path.encode("utf-8")
+        digest.update(len(encoded_path).to_bytes(8, "big"))
+        digest.update(encoded_path)
+        if not path.is_file():
+            digest.update(b"\x00missing")
+            continue
+        content = path.read_bytes()
+        digest.update(b"\x01file")
+        digest.update((path.stat().st_mode & 0o777).to_bytes(4, "big"))
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return "sha256:" + digest.hexdigest()
 
 
 def _extract_parent_image_source(

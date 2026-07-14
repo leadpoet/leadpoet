@@ -16,14 +16,17 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sys
 import types
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from gateway.research_lab import code_loop_engine as engine
+from gateway.research_lab import code_build as code_build_module
 from gateway.research_lab.code_build import (
     CodeEditBuildResult,
     ParentImageSourceContext,
@@ -214,6 +217,147 @@ class _FakeBuilder:
         )
 
 
+def _candidate_manifest(index: int) -> PrivateModelArtifactManifest:
+    suffix = f"{index + 1:064x}"
+    return PrivateModelArtifactManifest(
+        model_artifact_hash="sha256:" + suffix,
+        git_commit_sha=f"{index + 1:040x}",
+        image_digest="sha256:" + f"{index + 101:064x}",
+        config_hash="sha256:" + "d" * 64,
+        component_registry_version="1.0",
+        scoring_adapter_version="1.0",
+        manifest_uri=f"s3://test-bucket/candidates/{index}/manifest.json",
+        manifest_hash="sha256:" + f"{index + 201:064x}",
+        signature_ref="kms://sig",
+        build_id=f"candidate-{index}",
+    )
+
+
+class _SequentialFakeBuilder:
+    """Runs real Git composition while keeping Docker/ECR out of unit tests."""
+
+    def __init__(self, root_context: ParentImageSourceContext, workspace: Path):
+        self.config = types.SimpleNamespace(
+            loop_planner_enabled=False,
+            loop_planner_max_tokens=2000,
+            loop_alignment_judge_enabled=False,
+            loop_alignment_judge_max_tokens=800,
+            loop_novelty_strict=False,
+            code_edit_source_inspection_rounds=1,
+            code_edit_source_inspection_max_files=4,
+            code_edit_source_inspection_file_bytes=4000,
+            code_edit_source_inspection_total_bytes=16000,
+            code_edit_source_inspection_search_matches=5,
+            code_edit_patch_repair_attempts=0,
+            code_edit_build_timeout_seconds=10,
+            code_edit_allowed_path_prefixes=lambda: ("sourcing_model/",),
+            code_edit_allowed_exact_paths=lambda: (),
+            code_edit_allowed_suffixes=lambda: (".py",),
+        )
+        self._composer = object.__new__(code_build_module.CodeEditCandidateBuilder)
+        self._composer.config = self.config
+        self._workspace = workspace
+        self._contexts = {PARENT_HASH: root_context}
+        self.prepare_calls: list[str] = []
+        self.compose_calls: list[dict[str, str]] = []
+        self.build_calls: list[dict[str, Any]] = []
+
+    def prepare_parent_source_context(self, *, parent_artifact, workspace_dir):
+        del workspace_dir
+        artifact_hash = parent_artifact.model_artifact_hash
+        self.prepare_calls.append(artifact_hash)
+        return self._contexts[artifact_hash]
+
+    def validate_draft_against_source_context(
+        self, draft, source_context, *, read_paths=None, require_read=False
+    ):
+        return self._composer.validate_draft_against_source_context(
+            draft,
+            source_context,
+            read_paths=read_paths,
+            require_read=require_read,
+        )
+
+    def check_patch_applies(self, *, draft, parent_artifact, source_context):
+        del parent_artifact
+        self._composer.compose_cumulative_draft(
+            root_source_context=source_context,
+            parent_source_context=source_context,
+            incremental_draft=draft,
+        )
+
+    def compose_cumulative_draft(
+        self, *, root_source_context, parent_source_context, incremental_draft
+    ):
+        self.compose_calls.append(
+            {
+                "root_source_tree_hash": root_source_context.source_tree_hash,
+                "parent_source_tree_hash": parent_source_context.source_tree_hash,
+                "incremental_diff_hash": sha256_json(
+                    {"unified_diff": incremental_draft.unified_diff}
+                ),
+            }
+        )
+        return self._composer.compose_cumulative_draft(
+            root_source_context=root_source_context,
+            parent_source_context=parent_source_context,
+            incremental_draft=incremental_draft,
+        )
+
+    def build(self, *, draft, parent_artifact, run_id, candidate_index, source_context):
+        assert parent_artifact.model_artifact_hash == PARENT_HASH
+        assert source_context.source_tree_hash == PARENT_HASH
+        candidate_dir = self._workspace / f"candidate-source-{candidate_index}"
+        if candidate_dir.exists():
+            shutil.rmtree(candidate_dir)
+        shutil.copytree(source_context.source_root, candidate_dir)
+        code_build_module._initialize_temporary_git_repo(candidate_dir)
+        diff_path = self._workspace / f"candidate-{candidate_index}.diff"
+        diff_path.write_text(draft.unified_diff, encoding="utf-8")
+        code_build_module._run_git_apply(
+            diff_path, cwd=candidate_dir, timeout_seconds=10, check=True
+        )
+        code_build_module._run_git_apply(
+            diff_path, cwd=candidate_dir, timeout_seconds=10, check=False
+        )
+        manifest = _candidate_manifest(candidate_index)
+        self._contexts[manifest.model_artifact_hash] = ParentImageSourceContext(
+            source_root=candidate_dir,
+            source_mode="parent_image_extract",
+            parent_image_digest_hash="sha256:" + "9" * 64,
+            source_tree_hash=manifest.model_artifact_hash,
+            top_level_paths=("sourcing_model",),
+            editable_files=("sourcing_model/pipeline.py",),
+            file_previews=(),
+        )
+        source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
+        build_doc = {
+            "schema_version": "1.1",
+            "parent_artifact_hash": PARENT_HASH,
+            "source_diff_hash": source_diff_hash,
+        }
+        build_doc_hash = sha256_json(build_doc)
+        self.build_calls.append(
+            {
+                "run_id": run_id,
+                "candidate_index": candidate_index,
+                "parent_artifact_hash": parent_artifact.model_artifact_hash,
+                "source_context_hash": source_context.source_tree_hash,
+                "unified_diff": draft.unified_diff,
+            }
+        )
+        return CodeEditBuildResult(
+            candidate_model_manifest=manifest,
+            code_edit_manifest={
+                "kind": "code_edit",
+                "parent_artifact_hash": PARENT_HASH,
+                "target_files": list(draft.target_files),
+            },
+            source_diff_hash=source_diff_hash,
+            build_doc={**build_doc, "build_doc_hash": build_doc_hash},
+        )
+
+
 class _ScriptedDevEvaluator:
     """Returns one scripted outcome per call: float score, Exception, or garbage."""
 
@@ -250,6 +394,15 @@ class _ScriptedDevEvaluator:
             "true_miss_count": 0,
             "failure_count": 0,
             "zero_output_count": 0,
+            "per_icp": [
+                {
+                    "dev_score": float(outcome),
+                    "company_count": 5,
+                    "scored_company_count": 5,
+                    "zero_output": False,
+                }
+                for _index in range(8)
+            ],
             "score_commitment": sha256_json(commitment_payload),
             "ranking_only": True,
         }
@@ -266,10 +419,16 @@ class _AttestedScriptedDevEvaluator(_ScriptedDevEvaluator):
         }
 
 
-def _inner_loop_policy(*, phase: str = "rank", candidate_width: int = 3) -> dict[str, Any]:
+def _inner_loop_policy(
+    *,
+    phase: str = "rank",
+    candidate_width: int = 3,
+    sequential_chain_enabled: bool = False,
+) -> dict[str, Any]:
     evaluator_payload = {
-        "schema_version": "research_lab.inner_loop_evaluator_commitment.v1",
+        "schema_version": "research_lab.inner_loop_evaluator_commitment.v2",
         "effective_phase": phase,
+        "sequential_chain_enabled": sequential_chain_enabled,
         "snapshot_manifest_hash": DEV_MANIFEST_HASH,
         "dev_set_hash": DEV_SET_HASH,
         "dev_set_size": 8,
@@ -281,11 +440,12 @@ def _inner_loop_policy(*, phase: str = "rank", candidate_width: int = 3) -> dict
         "commitment_hash": sha256_json(evaluator_payload),
     }
     return {
-        "schema_version": "research_lab.inner_loop_policy.v1",
+        "schema_version": "research_lab.inner_loop_policy.v2",
         "effective_phase": phase,
         "evaluator_enabled": True,
         "ranking_enabled": phase == "rank",
         "shadow_enabled": phase == "shadow",
+        "sequential_chain_enabled": sequential_chain_enabled,
         "candidate_width": candidate_width,
         "paid_finalist_count": 1,
         "strict_fallback": True,
@@ -393,6 +553,97 @@ def _run_engine(
         )
     )
     return result, events, caller, builder
+
+
+def _sequential_diff(before: int, after: int) -> str:
+    return (
+        "diff --git a/sourcing_model/pipeline.py b/sourcing_model/pipeline.py\n"
+        "--- a/sourcing_model/pipeline.py\n"
+        "+++ b/sourcing_model/pipeline.py\n"
+        "@@ -1,3 +1,3 @@\n"
+        " def source_limit():\n"
+        f"-    limit = {before}\n"
+        f"+    limit = {after}\n"
+        "     return limit\n"
+    )
+
+
+def _run_sequential_engine(
+    tmp_path: Path,
+    *,
+    draft_diffs: list[str],
+    dev_outcomes: list[Any],
+):
+    source_root = tmp_path / "sequential-root"
+    pipeline = source_root / "sourcing_model" / "pipeline.py"
+    pipeline.parent.mkdir(parents=True)
+    pipeline.write_text(
+        "def source_limit():\n    limit = 1\n    return limit\n",
+        encoding="utf-8",
+    )
+    root_context = ParentImageSourceContext(
+        source_root=source_root,
+        source_mode="parent_image_extract",
+        parent_image_digest_hash="sha256:" + "9" * 64,
+        source_tree_hash=PARENT_HASH,
+        top_level_paths=("sourcing_model",),
+        editable_files=("sourcing_model/pipeline.py",),
+        file_previews=(),
+    )
+    builder = _SequentialFakeBuilder(root_context, tmp_path)
+    responses = [
+        _draft_response([_candidate_doc(index, diff=diff)])
+        for index, diff in enumerate(draft_diffs)
+    ]
+    caller = _FakeCaller(responses)
+    evaluator = _ScriptedDevEvaluator(dev_outcomes)
+    events: list[Any] = []
+
+    async def _sink(event):
+        events.append(event)
+
+    loop_engine = engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=300,
+            min_iterations=1,
+            max_iterations=3,
+            draft_timeout_seconds=30,
+            reflection_timeout_seconds=30,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=3,
+        ),
+        call_openrouter=caller,
+        event_sink=_sink,
+        builder=builder,
+        dev_evaluator=evaluator,
+    )
+    result = asyncio.run(
+        loop_engine.run(
+            run_id="run-sequential-1",
+            ticket={
+                "ticket_id": "ticket-sequential-1",
+                "island": "generalist",
+                "miner_hotkey": "hotkey-1",
+                "brief_sanitized_ref": "brief:sequential",
+                "ticket_doc": {"brief_public_summary": "improve sourcing recall"},
+            },
+            artifact=_manifest(),
+            component_registry=_registry_doc(),
+            benchmark_public_summary={"aggregate": 12.0},
+            model_id="test-model",
+            budget_context={
+                "requested_compute_budget_usd": 5.0,
+                "inner_loop_policy": _inner_loop_policy(
+                    phase="rank",
+                    candidate_width=3,
+                    sequential_chain_enabled=True,
+                ),
+            },
+            requested_loop_count=1,
+        )
+    )
+    return result, events, caller, builder, evaluator
 
 
 def _events_of(events, event_type):
@@ -900,6 +1151,148 @@ def test_run_partial_evaluation_preserves_build_order(tmp_path, monkeypatch):
     ]
 
 
+def test_sequential_chain_builds_on_best_valid_source_and_submits_cumulative_patch(
+    tmp_path, monkeypatch
+):
+    _enable_dev_eval(monkeypatch)
+    monkeypatch.setenv("RESEARCH_LAB_LOOP_WITHIN_RUN_MEMORY", "false")
+    result, events, caller, builder, evaluator = _run_sequential_engine(
+        tmp_path,
+        draft_diffs=[
+            _sequential_diff(1, 2),
+            _sequential_diff(2, 3),
+            # Candidate 2 scores worse, so Candidate 3 must branch from the
+            # best-so-far Candidate 1 source (limit=2), not Candidate 2.
+            _sequential_diff(2, 4),
+        ],
+        dev_outcomes=[50.0, 10.0, 60.0],
+    )
+
+    assert result.status == "completed"
+    assert [candidate.dev_score for candidate in result.selected_candidates] == [
+        60.0,
+        50.0,
+        10.0,
+    ]
+    paid = result.selected_candidates[0]
+    assert paid.chain_step == 3
+    assert paid.chain_parent_node_id == result.selected_candidates[1].node_id
+    assert paid.chain_parent_dev_score == 50.0
+    assert paid.chain_feedback_hash == result.selected_candidates[1].dev_feedback_hash
+    assert "-    limit = 1" in paid.draft.unified_diff
+    assert "+    limit = 4" in paid.draft.unified_diff
+    assert "limit = 2" not in paid.draft.unified_diff
+    assert paid.build.code_edit_manifest["parent_artifact_hash"] == PARENT_HASH
+    assert paid.build.build_doc["sequential_chain"][
+        "immediate_parent_artifact_hash"
+    ] == result.selected_candidates[1].build.candidate_model_manifest.model_artifact_hash
+
+    assert [call["parent_artifact_hash"] for call in builder.build_calls] == [
+        PARENT_HASH,
+        PARENT_HASH,
+        PARENT_HASH,
+    ]
+    assert [call["source_context_hash"] for call in builder.build_calls] == [
+        PARENT_HASH,
+        PARENT_HASH,
+        PARENT_HASH,
+    ]
+    assert [call["parent_source_tree_hash"] for call in builder.compose_calls] == [
+        _candidate_manifest(0).model_artifact_hash,
+        _candidate_manifest(0).model_artifact_hash,
+    ]
+    assert len(evaluator.calls) == 3
+
+    draft_messages = caller.draft_message_texts()
+    assert "within_run_memory" not in draft_messages[0]
+    assert '"aggregate_score":50.0' in draft_messages[1]
+    assert '"aggregate_score":50.0' in draft_messages[2]
+    assert '"example_number":8' in draft_messages[2]
+    assert "icp_ref" not in draft_messages[2]
+    assert "provider_output" not in draft_messages[2]
+
+    selected_events = _events_of(events, "candidate_selected")
+    assert sum(
+        int(bool(event.event_doc.get("paid_scoring_candidate")))
+        for event in selected_events
+    ) == 1
+    selection = selected_events[0].event_doc["inner_loop_selection"]
+    assert selection["sequential_chain_complete"] is True
+    assert selection["ranking_applied"] is True
+    assert selection["paid_finalist_count"] == 1
+
+    build_order = sorted(result.selected_candidates, key=lambda candidate: candidate.iteration)
+    tampered = [
+        *build_order[:2],
+        replace(
+            build_order[2],
+            chain_composition={
+                **dict(build_order[2].chain_composition),
+                "cumulative_apply_verified": False,
+            },
+        ),
+    ]
+    fallback, fallback_decision = engine.select_inner_loop_candidates(
+        tampered,
+        _inner_loop_policy(
+            phase="rank",
+            candidate_width=3,
+            sequential_chain_enabled=True,
+        ),
+    )
+    assert [candidate.node_id for candidate in fallback] == [
+        candidate.node_id for candidate in tampered
+    ]
+    assert fallback_decision["fallback_reason"] == "incomplete_sequential_chain"
+
+
+def test_sequential_chain_falls_back_to_root_after_invalid_parent_and_strictly_keeps_first(
+    tmp_path, monkeypatch
+):
+    _enable_dev_eval(monkeypatch)
+    result, events, _caller, builder, _evaluator = _run_sequential_engine(
+        tmp_path,
+        draft_diffs=[
+            _sequential_diff(1, 2),
+            # Candidate 1 evaluation fails, so Candidate 2 must start from root.
+            _sequential_diff(1, 3),
+            _sequential_diff(3, 4),
+        ],
+        dev_outcomes=[RuntimeError("dev harness unavailable"), 20.0, 30.0],
+    )
+
+    assert result.status == "completed"
+    # One incomplete private evaluation invalidates ranking for the whole run.
+    assert [candidate.dev_score for candidate in result.selected_candidates] == [
+        None,
+        20.0,
+        30.0,
+    ]
+    assert result.selected_candidates[0].draft.unified_diff == _sequential_diff(1, 2)
+    second = result.selected_candidates[1]
+    assert second.chain_parent_artifact_hash == PARENT_HASH
+    assert second.chain_parent_node_id == ""
+    assert second.chain_feedback_hash == ""
+    third = result.selected_candidates[2]
+    assert third.chain_parent_node_id == second.node_id
+    assert len(builder.compose_calls) == 1
+    assert builder.compose_calls[0]["parent_source_tree_hash"] == (
+        second.build.candidate_model_manifest.model_artifact_hash
+    )
+
+    selection = _events_of(events, "candidate_selected")[0].event_doc[
+        "inner_loop_selection"
+    ]
+    assert selection["ranking_applied"] is False
+    assert selection["strict_fallback_applied"] is True
+    assert selection["fallback_reason"] == (
+        "incomplete_or_mismatched_candidate_evaluations"
+    )
+    assert selection["actual_paid_candidate_node_id"] == (
+        result.selected_candidates[0].node_id
+    )
+
+
 def test_run_cap_one_lone_score_cannot_displace_first_build(tmp_path, monkeypatch):
     # This deliberately exercises the non-production build-and-discard shape.
     # Strict fallback still keeps the ordinary first candidate when one of the
@@ -967,6 +1360,31 @@ def _round_trip_build() -> CodeEditBuildResult:
 
 
 def test_rehydration_round_trip_with_dev_fields(fake_boto3):
+    feedback_payload = {
+        "schema_version": "research_lab.sequential_dev_feedback.v1",
+        "aggregate_score": 41.5,
+        "example_count": 8,
+        "examples": [
+            {"example_number": index, "status": "completed"}
+            for index in range(1, 9)
+        ],
+    }
+    feedback = {
+        **feedback_payload,
+        "feedback_hash": sha256_json(feedback_payload),
+    }
+    chain = {
+        "schema_version": "research_lab.sequential_chain.v1",
+        "chain_step": 2,
+        "chain_root_artifact_hash": PARENT_HASH,
+        "immediate_parent_artifact_hash": "sha256:" + "2" * 64,
+        "immediate_parent_node_id": "node-parent",
+        "parent_dev_score": 37.25,
+        "parent_dev_feedback_hash": "sha256:" + "3" * 64,
+        "incremental_source_diff_hash": "sha256:" + "4" * 64,
+        "cumulative_source_diff_hash": "sha256:" + "5" * 64,
+        "composition": {"cumulative_apply_verified": True},
+    }
     doc = asyncio.run(
         engine._write_private_loop_candidate_artifact(
             artifact=_manifest(S3_MANIFEST_URI),
@@ -978,16 +1396,32 @@ def test_rehydration_round_trip_with_dev_fields(fake_boto3):
             dev_score=41.5,
             dev_score_version=DEV_SCORE_VERSION,
             dev_evaluation=_eligible_dev_evaluation(),
+            dev_feedback=feedback,
+            dev_feedback_hash=feedback["feedback_hash"],
+            sequential_chain=chain,
         )
     )
     (_ref, body) = next(iter(fake_boto3.items()))
     payload = json.loads(body.decode("utf-8"))
     assert payload["dev_score"] == 41.5
     assert payload["dev_score_version"] == DEV_SCORE_VERSION
+    assert payload["dev_feedback"] == feedback
+    assert payload["sequential_chain"] == chain
     candidate = engine._rehydrated_candidate_from_artifact_payload(payload)
     assert candidate.dev_score == 41.5
     assert candidate.dev_score_version == DEV_SCORE_VERSION
     assert candidate.dev_evaluation["eligible"] is True
+    assert candidate.dev_feedback == feedback
+    assert candidate.dev_feedback_hash == feedback["feedback_hash"]
+    assert candidate.chain_step == 2
+    assert candidate.chain_root_artifact_hash == PARENT_HASH
+    assert candidate.chain_parent_artifact_hash == "sha256:" + "2" * 64
+    assert candidate.chain_parent_node_id == "node-parent"
+    assert candidate.chain_parent_dev_score == 37.25
+    assert candidate.chain_feedback_hash == "sha256:" + "3" * 64
+    assert candidate.chain_incremental_source_diff_hash == "sha256:" + "4" * 64
+    assert candidate.chain_cumulative_source_diff_hash == "sha256:" + "5" * 64
+    assert candidate.chain_composition["cumulative_apply_verified"] is True
     assert doc["loop_candidate_artifact_hash"]
 
 
@@ -1105,6 +1539,84 @@ def test_restore_selected_from_resume_restores_dev_fields(fake_boto3):
     assert by_node["node-dev"].dev_score == 41.5
     assert by_node["node-dev"].dev_score_version == DEV_SCORE_VERSION
     assert by_node["node-plain"].dev_score is None
+
+
+def test_resume_registers_rehydrated_sequential_source_before_continuing(fake_boto3):
+    chain = {
+        "schema_version": "research_lab.sequential_chain.v1",
+        "chain_step": 1,
+        "chain_root_artifact_hash": PARENT_HASH,
+        "immediate_parent_artifact_hash": PARENT_HASH,
+        "immediate_parent_node_id": "",
+        "parent_dev_score": None,
+        "parent_dev_feedback_hash": "",
+        "incremental_source_diff_hash": _round_trip_build().source_diff_hash,
+        "cumulative_source_diff_hash": _round_trip_build().source_diff_hash,
+        "composition": {"cumulative_apply_verified": True},
+    }
+    stored_doc = asyncio.run(
+        engine._write_private_loop_candidate_artifact(
+            artifact=_manifest(S3_MANIFEST_URI),
+            run_id="run-resume-chain",
+            node_id="node-chain",
+            iteration=1,
+            draft=_round_trip_draft(),
+            build=_round_trip_build(),
+            sequential_chain=chain,
+        )
+    )
+
+    class _RestoreAwareBuilder:
+        def __init__(self):
+            self.calls = []
+
+        def restore_rehydrated_candidate_source_context(self, *, candidate):
+            self.calls.append(candidate)
+
+    builder = _RestoreAwareBuilder()
+    loop_engine = engine.CodeEditLoopEngine(
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=300,
+            min_iterations=1,
+            max_iterations=1,
+            draft_timeout_seconds=30,
+            reflection_timeout_seconds=30,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=1,
+        ),
+        call_openrouter=None,
+        event_sink=None,
+        builder=builder,
+    )
+    loop_engine._inner_loop_policy = _inner_loop_policy(phase="off")
+    restored = asyncio.run(
+        loop_engine._restore_selected_from_resume(
+            resume={
+                "selected_candidates": [
+                    {
+                        "node_id": "node-chain",
+                        "rehydration_artifact_uri": stored_doc[
+                            "loop_candidate_artifact_uri"
+                        ],
+                        "rehydration_artifact_hash": stored_doc[
+                            "loop_candidate_artifact_hash"
+                        ],
+                    }
+                ]
+            },
+            run_id="run-resume-chain",
+            artifact=_manifest(S3_MANIFEST_URI),
+            elapsed=lambda: 0.0,
+            openrouter_calls=0,
+            estimated_cost=0.0,
+            actual_cost_microusd=0,
+        )
+    )
+
+    assert len(restored) == 1
+    assert restored[0].chain_step == 1
+    assert [candidate.node_id for candidate in builder.calls] == ["node-chain"]
 
 
 def test_resume_seeds_dev_scores_into_memory_and_ranking(tmp_path, fake_boto3, monkeypatch):

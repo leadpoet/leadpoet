@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from gateway.research_lab.code_loop_engine import CodeEditLoopResult
+from gateway.research_lab.code_loop_engine import (
+    BuiltCodeEditCandidate,
+    CodeEditLoopResult,
+)
 from gateway.research_lab.code_build import (
+    CodeEditBuildResult,
     CodeEditCandidateBuilder,
     CodeEditPatchApplyError,
 )
@@ -27,6 +32,8 @@ from gateway.tee.autoresearch_executor_v2 import (
     STALE_PARENT_REPAIR_RESULT_SCHEMA_VERSION,
     AutoresearchExecutorV2,
     AutoresearchExecutorV2Error,
+    _HostCandidateBuilder,
+    _source_context,
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.provider_outcome_v2 import ProviderOutcomeLedgerV2
@@ -45,7 +52,10 @@ from leadpoet_canonical.attested_v2 import (
     sha256_bytes,
     sha256_json,
 )
-from research_lab.eval import build_local_private_artifact_manifest
+from research_lab.eval import (
+    PrivateModelArtifactManifest,
+    build_local_private_artifact_manifest,
+)
 from research_lab.code_editing import CodeEditDraft
 
 
@@ -556,6 +566,113 @@ def test_autoresearch_executor_runs_existing_engine_and_commits_events(tmp_path)
     assert _artifact_seal.records[1][0] == canonical_json(result.output).encode(
         "utf-8"
     )
+
+
+def test_v2_builder_restores_sequential_parent_from_cumulative_patch(tmp_path):
+    source_bundle, root_artifact_doc = _source_and_artifact(tmp_path)
+    root_artifact = PrivateModelArtifactManifest.from_mapping(root_artifact_doc)
+    source_root = tmp_path / "private-source"
+    child_root = tmp_path / "child-source"
+    shutil.copytree(source_root, child_root)
+    child_file = child_root / "sourcing_model" / "runtime.py"
+    child_file.write_text("VALUE = 2\n", encoding="utf-8")
+    child_artifact = PrivateModelArtifactManifest.from_mapping(
+        build_local_private_artifact_manifest(
+            source_path=child_root,
+            git_commit_sha="c" * 40,
+            image_digest=(
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com/private@sha256:"
+                + "d" * 64
+            ),
+            manifest_uri="s3://private/manifests/child.json",
+            signature_ref="kms:child-signature",
+            component_registry_version="1",
+            scoring_adapter_version="1",
+        )
+    )
+    draft = CodeEditDraft(
+        failure_mode="bounded recall",
+        mechanism="increase the source runtime value",
+        expected_improvement="recover more valid companies",
+        risk="bounded runtime increase",
+        lane="query_construction",
+        target_files=("sourcing_model/runtime.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/runtime.py b/sourcing_model/runtime.py\n"
+            "--- a/sourcing_model/runtime.py\n"
+            "+++ b/sourcing_model/runtime.py\n"
+            "@@ -1 +1 @@\n"
+            "-VALUE = 1\n"
+            "+VALUE = 2\n"
+        ),
+        redacted_summary="increase a bounded sourcing runtime value",
+        test_plan="run private tests",
+        rollback_plan="revert the patch",
+    )
+    source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
+    candidate = BuiltCodeEditCandidate(
+        draft=draft,
+        build=CodeEditBuildResult(
+            candidate_model_manifest=child_artifact,
+            code_edit_manifest={
+                "parent_artifact_hash": root_artifact.model_artifact_hash
+            },
+            source_diff_hash=source_diff_hash,
+            build_doc={},
+        ),
+        node_id="node-restored-v2",
+        iteration=1,
+        chain_step=1,
+        chain_root_artifact_hash=root_artifact.model_artifact_hash,
+        chain_parent_artifact_hash=root_artifact.model_artifact_hash,
+        chain_incremental_source_diff_hash=source_diff_hash,
+        chain_cumulative_source_diff_hash=source_diff_hash,
+    )
+    config = _config()
+    builder = _HostCandidateBuilder(
+        config=config,
+        source_context=_source_context(
+            source_root=source_root,
+            artifact=root_artifact,
+            config=config,
+        ),
+        source_bundle_hash=source_bundle["archive_sha256"],
+        execution_context=object(),
+    )
+
+    restored = builder.restore_rehydrated_candidate_source_context(
+        candidate=candidate
+    )
+
+    assert restored.source_tree_hash == child_artifact.model_artifact_hash
+    assert (restored.source_root / "sourcing_model" / "runtime.py").read_text(
+        encoding="utf-8"
+    ) == "VALUE = 2\n"
+    assert builder.prepare_parent_source_context(
+        parent_artifact=child_artifact,
+        workspace_dir=tmp_path / "unused",
+    ) is restored
+
+    tampered_builder = _HostCandidateBuilder(
+        config=config,
+        source_context=_source_context(
+            source_root=source_root,
+            artifact=root_artifact,
+            config=config,
+        ),
+        source_bundle_hash=source_bundle["archive_sha256"],
+        execution_context=object(),
+    )
+    with pytest.raises(
+        AutoresearchExecutorV2Error,
+        match="rehydrated sequential candidate commitment differs",
+    ):
+        tampered_builder.restore_rehydrated_candidate_source_context(
+            candidate=replace(
+                candidate,
+                chain_cumulative_source_diff_hash="sha256:" + "0" * 64,
+            )
+        )
 
 
 def test_autoresearch_executor_rejects_tampered_provider_catalog(tmp_path):

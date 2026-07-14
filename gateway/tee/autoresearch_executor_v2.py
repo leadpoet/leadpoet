@@ -24,7 +24,10 @@ from gateway.research_lab.code_build import (
     CodeEditPatchApplyError,
     CodeEditCandidateBuilder,
     ParentImageSourceContext,
+    _copy_source_tree,
     _editable_runtime_files,
+    _initialize_temporary_git_repo,
+    _run_git_apply,
     _source_file_previews,
     _top_level_paths,
     _prepare_parent_image_workspace,
@@ -332,6 +335,18 @@ def _candidate_document(candidate: BuiltCodeEditCandidate) -> Dict[str, Any]:
         "rehydration_artifact_hash": candidate.rehydration_artifact_hash,
         "dev_score": candidate.dev_score,
         "dev_score_version": candidate.dev_score_version,
+        "dev_evaluation": dict(candidate.dev_evaluation),
+        "dev_feedback": dict(candidate.dev_feedback),
+        "dev_feedback_hash": candidate.dev_feedback_hash,
+        "chain_step": candidate.chain_step,
+        "chain_root_artifact_hash": candidate.chain_root_artifact_hash,
+        "chain_parent_artifact_hash": candidate.chain_parent_artifact_hash,
+        "chain_parent_node_id": candidate.chain_parent_node_id,
+        "chain_parent_dev_score": candidate.chain_parent_dev_score,
+        "chain_feedback_hash": candidate.chain_feedback_hash,
+        "chain_incremental_source_diff_hash": candidate.chain_incremental_source_diff_hash,
+        "chain_cumulative_source_diff_hash": candidate.chain_cumulative_source_diff_hash,
+        "chain_composition": dict(candidate.chain_composition),
     }
 
 
@@ -513,6 +528,12 @@ class _HostCandidateBuilder:
         self.config = config
         self._local = CodeEditCandidateBuilder(config)
         self._source_context = source_context
+        self._source_contexts = {
+            source_context.source_tree_hash: source_context,
+        }
+        self._source_context_lock = threading.RLock()
+        self._derived_source_root = source_context.source_root.parent / "sequential-candidates"
+        self._derived_source_root.mkdir(parents=True, exist_ok=True)
         self._source_bundle_hash = source_bundle_hash
         self._context = execution_context
 
@@ -526,15 +547,109 @@ class _HostCandidateBuilder:
         workspace_dir: Path,
     ) -> ParentImageSourceContext:
         del workspace_dir
-        if parent_artifact.model_artifact_hash != self._source_context.source_tree_hash:
-            raise AutoresearchExecutorV2Error("source context differs from parent artifact")
-        return self._source_context
+        with self._source_context_lock:
+            context = self._source_contexts.get(parent_artifact.model_artifact_hash)
+        if context is None:
+            raise AutoresearchExecutorV2Error(
+                "source context differs from known sequential parent artifacts"
+            )
+        return context
 
     def validate_draft_against_source_context(self, *args: Any, **kwargs: Any):
         return self._local.validate_draft_against_source_context(*args, **kwargs)
 
     def check_patch_applies(self, *args: Any, **kwargs: Any) -> None:
         self._local.check_patch_applies(*args, **kwargs)
+
+    def compose_cumulative_draft(self, *args: Any, **kwargs: Any):
+        return self._local.compose_cumulative_draft(*args, **kwargs)
+
+    def restore_rehydrated_candidate_source_context(
+        self,
+        *,
+        candidate: BuiltCodeEditCandidate,
+    ) -> ParentImageSourceContext:
+        """Rebuild a measured sequential parent from its committed root patch."""
+
+        artifact = candidate.build.candidate_model_manifest
+        artifact_hash = artifact.model_artifact_hash
+        with self._source_context_lock:
+            existing = self._source_contexts.get(artifact_hash)
+            if existing is not None:
+                return existing
+
+            root_hash = self._source_context.source_tree_hash
+            draft_hash = sha256_json(
+                {"unified_diff": candidate.draft.unified_diff}
+            )
+            if (
+                candidate.chain_step <= 0
+                or candidate.chain_root_artifact_hash != root_hash
+                or candidate.chain_cumulative_source_diff_hash != draft_hash
+                or candidate.build.source_diff_hash != draft_hash
+                or str(
+                    candidate.build.code_edit_manifest.get("parent_artifact_hash")
+                    or ""
+                )
+                != root_hash
+            ):
+                raise AutoresearchExecutorV2Error(
+                    "rehydrated sequential candidate commitment differs"
+                )
+            source_errors = self._local.validate_draft_against_source_context(
+                candidate.draft,
+                self._source_context,
+            )
+            if source_errors:
+                raise AutoresearchExecutorV2Error(
+                    "rehydrated sequential candidate source binding differs"
+                )
+
+            destination = (
+                self._derived_source_root / artifact_hash.split(":", 1)[-1]
+            )
+            with tempfile.TemporaryDirectory(
+                prefix="restore-",
+                dir=self._derived_source_root,
+            ) as tmp:
+                staging = Path(tmp) / "source"
+                _copy_source_tree(self._source_context.source_root, staging)
+                _initialize_temporary_git_repo(staging)
+                diff_path = Path(tmp) / "candidate.diff"
+                diff_path.write_text(
+                    candidate.draft.unified_diff,
+                    encoding="utf-8",
+                )
+                _run_git_apply(
+                    diff_path,
+                    cwd=staging,
+                    timeout_seconds=120,
+                    check=True,
+                )
+                _run_git_apply(
+                    diff_path,
+                    cwd=staging,
+                    timeout_seconds=120,
+                    check=False,
+                )
+                measured_hash = compute_private_source_tree_hash(staging)
+                if measured_hash != artifact_hash:
+                    raise AutoresearchExecutorV2Error(
+                        "rehydrated sequential candidate source hash differs"
+                    )
+                _copy_source_tree(staging, destination)
+
+            context = _source_context(
+                source_root=destination,
+                artifact=artifact,
+                config=self.config,
+            )
+            if context.source_tree_hash != artifact_hash:
+                raise AutoresearchExecutorV2Error(
+                    "rehydrated candidate source context commitment differs"
+                )
+            self._source_contexts[artifact_hash] = context
+            return context
 
     def build(
         self,
@@ -572,6 +687,13 @@ class _HostCandidateBuilder:
             expected_candidate_artifact_hash = compute_private_source_tree_hash(
                 measured_repo
             )
+            derived_source_root = (
+                self._derived_source_root
+                / expected_candidate_artifact_hash.split(":", 1)[-1]
+            )
+            with self._source_context_lock:
+                if not derived_source_root.is_dir():
+                    _copy_source_tree(measured_repo, derived_source_root)
         expected_state_hash = sha256_json(
             {
                 "run_id": str(run_id),
@@ -614,12 +736,26 @@ class _HostCandidateBuilder:
             timeout_seconds=max(120, int(self.config.code_edit_build_timeout_seconds) + 120),
             response_validator=validate,
         )
-        return _validate_build_result(
+        build_result = _validate_build_result(
             response["build_result"],
             draft=draft,
             parent_artifact=parent_artifact,
             expected_candidate_artifact_hash=expected_candidate_artifact_hash,
         )
+        candidate_source_context = _source_context(
+            source_root=derived_source_root,
+            artifact=build_result.candidate_model_manifest,
+            config=self.config,
+        )
+        if candidate_source_context.source_tree_hash != expected_candidate_artifact_hash:
+            raise AutoresearchExecutorV2Error(
+                "derived candidate source context commitment differs"
+            )
+        with self._source_context_lock:
+            self._source_contexts[expected_candidate_artifact_hash] = (
+                candidate_source_context
+            )
+        return build_result
 
 
 def _source_context(

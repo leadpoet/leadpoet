@@ -52,6 +52,7 @@ class InnerLoopEvidence:
     unclassified_error_count: int = 0
     silent_miss_count: int = 0
     candidate_width_invariant_violations: int = 0
+    sequential_chain_invariant_violations: int = 0
     paid_finalist_invariant_violations: int = 0
     protected_workflow_invariant_violations: int = 0
     evidence_error: str = ""
@@ -72,6 +73,7 @@ class InnerLoopEvidence:
             "unclassified_error_count": self.unclassified_error_count,
             "silent_miss_count": self.silent_miss_count,
             "candidate_width_invariant_violations": self.candidate_width_invariant_violations,
+            "sequential_chain_invariant_violations": self.sequential_chain_invariant_violations,
             "paid_finalist_invariant_violations": self.paid_finalist_invariant_violations,
             "protected_workflow_invariant_violations": self.protected_workflow_invariant_violations,
             "evidence_error": self.evidence_error,
@@ -85,6 +87,7 @@ class InnerLoopPolicy:
     evaluator_enabled: bool
     ranking_enabled: bool
     shadow_enabled: bool
+    sequential_chain_enabled: bool
     candidate_width: int
     paid_finalist_count: int
     strict_fallback: bool
@@ -101,8 +104,9 @@ class InnerLoopPolicy:
     @property
     def evaluator_commitment(self) -> dict[str, Any]:
         payload = {
-            "schema_version": "research_lab.inner_loop_evaluator_commitment.v1",
+            "schema_version": "research_lab.inner_loop_evaluator_commitment.v2",
             "effective_phase": self.effective_phase,
+            "sequential_chain_enabled": self.sequential_chain_enabled,
             "snapshot_manifest_hash": self.snapshot_manifest_hash,
             "dev_set_hash": self.dev_set_hash,
             "dev_set_size": self.dev_set_size,
@@ -113,12 +117,13 @@ class InnerLoopPolicy:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "research_lab.inner_loop_policy.v1",
+            "schema_version": "research_lab.inner_loop_policy.v2",
             "requested_mode": self.requested_mode,
             "effective_phase": self.effective_phase,
             "evaluator_enabled": self.evaluator_enabled,
             "ranking_enabled": self.ranking_enabled,
             "shadow_enabled": self.shadow_enabled,
+            "sequential_chain_enabled": self.sequential_chain_enabled,
             "candidate_width": self.candidate_width,
             "paid_finalist_count": self.paid_finalist_count,
             "strict_fallback": self.strict_fallback,
@@ -198,6 +203,7 @@ def decide_inner_loop_policy(
     )
     ranking_enabled = evaluator_enabled and phase == "rank"
     shadow_enabled = evaluator_enabled and phase == "shadow"
+    sequential_chain_enabled = evaluator_enabled and phase in {"shadow", "rank"}
 
     return InnerLoopPolicy(
         requested_mode=mode,
@@ -205,6 +211,7 @@ def decide_inner_loop_policy(
         evaluator_enabled=evaluator_enabled,
         ranking_enabled=ranking_enabled,
         shadow_enabled=shadow_enabled,
+        sequential_chain_enabled=sequential_chain_enabled,
         candidate_width=candidate_width,
         paid_finalist_count=DEFAULT_PAID_FINALIST_COUNT,
         strict_fallback=True,
@@ -265,6 +272,7 @@ async def resolve_inner_loop_policy(
             effective_phase="observe",
             ranking_enabled=False,
             shadow_enabled=False,
+            sequential_chain_enabled=False,
             candidate_width=1,
             fallback_reason=evidence.evidence_error,
         )
@@ -293,6 +301,7 @@ async def resolve_inner_loop_policy(
                 effective_phase="observe",
                 ranking_enabled=False,
                 shadow_enabled=False,
+                sequential_chain_enabled=False,
                 candidate_width=1,
                 fallback_reason=f"activation_transition_error:{type(exc).__name__}",
             )
@@ -314,6 +323,7 @@ async def resolve_inner_loop_policy(
             evaluator_enabled=(policy.evaluator_enabled and safe_phase == "observe"),
             ranking_enabled=False,
             shadow_enabled=False,
+            sequential_chain_enabled=False,
             candidate_width=1,
             fallback_reason=(
                 "activation_transition_uncommitted:"
@@ -329,6 +339,8 @@ def _automatic_phase(evidence: InnerLoopEvidence) -> str:
     if evidence.paid_finalist_invariant_violations > 0:
         return "observe"
     if evidence.candidate_width_invariant_violations > 0:
+        return "observe"
+    if evidence.sequential_chain_invariant_violations > 0:
         return "observe"
     if current == "rank" and (
         evidence.unclassified_error_count > 0
@@ -362,6 +374,7 @@ def _rank_gate_passes(evidence: InnerLoopEvidence) -> bool:
         and evidence.unclassified_error_count == 0
         and evidence.silent_miss_count == 0
         and evidence.candidate_width_invariant_violations == 0
+        and evidence.sequential_chain_invariant_violations == 0
         and evidence.paid_finalist_invariant_violations == 0
         and evidence.protected_workflow_invariant_violations == 0
     )
@@ -443,6 +456,10 @@ def build_inner_loop_evidence(
         _doc_int(row, "paid_finalist_invariant_violations")
         for row in recent_phase_rows
     )
+    sequential_chain_violations = sum(
+        _doc_int(row, "sequential_chain_invariant_violations")
+        for row in recent_phase_rows
+    )
     protected_violations = sum(
         _doc_int(row, "protected_workflow_invariant_violations")
         for row in recent_phase_rows
@@ -464,6 +481,7 @@ def build_inner_loop_evidence(
         unclassified_error_count=unclassified_errors,
         silent_miss_count=silent_misses,
         candidate_width_invariant_violations=width_violations,
+        sequential_chain_invariant_violations=sequential_chain_violations,
         paid_finalist_invariant_violations=paid_violations,
         protected_workflow_invariant_violations=protected_violations,
     )

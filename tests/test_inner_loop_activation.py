@@ -153,6 +153,7 @@ def test_observe_gate_requires_ten_consecutive_runs_over_24_hours():
     assert policy.candidate_width == 3
     assert policy.shadow_enabled
     assert not policy.ranking_enabled
+    assert policy.sequential_chain_enabled
 
 
 def test_rank_gate_requires_full_health_and_positive_historical_lift():
@@ -169,6 +170,7 @@ def test_rank_gate_requires_full_health_and_positive_historical_lift():
     assert policy.effective_phase == "rank"
     assert policy.ranking_enabled
     assert policy.candidate_width == 3
+    assert policy.sequential_chain_enabled
 
 
 def test_rank_downgrades_on_silent_miss_and_protected_failures_stop_it():
@@ -193,6 +195,16 @@ def test_rank_downgrades_on_silent_miss_and_protected_failures_stop_it():
     )
     assert protected.effective_phase == "off"
     assert protected.candidate_width == 1
+
+    broken_chain = _policy(
+        "auto",
+        InnerLoopEvidence(
+            **{**healthy.__dict__, "sequential_chain_invariant_violations": 1}
+        ),
+    )
+    assert broken_chain.effective_phase == "observe"
+    assert broken_chain.candidate_width == 1
+    assert not broken_chain.sequential_chain_enabled
 
 
 def test_retried_run_observation_counts_once():
@@ -352,3 +364,4 @@ def test_ten_concurrent_workers_create_one_restart_stable_transition():
     assert transitions[0]["phase"] == "shadow"
     assert all(policy.effective_phase == "shadow" for policy in policies)
     assert all(policy.candidate_width == 3 for policy in policies)
+    assert all(policy.sequential_chain_enabled for policy in policies)

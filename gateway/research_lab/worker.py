@@ -2115,13 +2115,14 @@ class ResearchLabHostedWorker:
         logger.info(
             "research_lab_inner_loop_policy run_id=%s requested_mode=%s phase=%s "
             "candidate_width=%s paid_finalists=%s evaluator_enabled=%s "
-            "fallback_reason=%s snapshot_hash=%s",
+            "sequential_chain=%s fallback_reason=%s snapshot_hash=%s",
             context.run_id,
             requested_inner_loop_mode,
             inner_loop_policy.effective_phase,
             max_candidates,
             paid_finalist_count,
             inner_loop_policy.evaluator_enabled,
+            inner_loop_policy.sequential_chain_enabled,
             inner_loop_policy.fallback_reason or "none",
             inner_loop_policy.snapshot_manifest_hash[:24],
         )
@@ -2601,6 +2602,16 @@ class ResearchLabHostedWorker:
                 inner_loop_policy.effective_phase in {"shadow", "rank"}
                 and candidate_count != inner_loop_policy.candidate_width
             )
+            sequential_chain_enabled = bool(
+                inner_loop_selection.get("sequential_chain_enabled")
+                or inner_loop_policy.sequential_chain_enabled
+            )
+            sequential_chain_complete = bool(
+                inner_loop_selection.get("sequential_chain_complete")
+            )
+            sequential_chain_invariant_violations = int(
+                sequential_chain_enabled and not sequential_chain_complete
+            )
             run_eligible = bool(
                 inner_loop_policy.evaluator_enabled
                 and candidate_count == inner_loop_policy.candidate_width
@@ -2609,6 +2620,7 @@ class ResearchLabHostedWorker:
                 and paid_count == 1
                 and unclassified_error_count == 0
                 and silent_miss_count == 0
+                and sequential_chain_invariant_violations == 0
             )
             activation_evidence = {
                 "run_eligible": run_eligible,
@@ -2628,6 +2640,11 @@ class ResearchLabHostedWorker:
                 "evaluation_failure_count": evaluation_failure_count,
                 "zero_output_count": zero_output_count,
                 "candidate_width_mismatch": width_mismatch,
+                "sequential_chain_enabled": sequential_chain_enabled,
+                "sequential_chain_complete": sequential_chain_complete,
+                "sequential_chain_invariant_violations": (
+                    sequential_chain_invariant_violations
+                ),
                 "paid_finalist_invariant_violations": int(
                     bool(loop_result.selected_candidates) and paid_count != 1
                 ),

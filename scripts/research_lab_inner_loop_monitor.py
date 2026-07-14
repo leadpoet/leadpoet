@@ -212,6 +212,7 @@ async def _collect(days: int) -> dict[str, Any]:
         "silent_miss_count": "silent_evaluation_misses",
         "paid_finalist_invariant_violations": "paid_finalist_invariant_violation",
         "protected_workflow_invariant_violations": "protected_workflow_invariant_violation",
+        "sequential_chain_invariant_violations": "sequential_chain_invariant_violation",
     }
     for field, label in alert_fields.items():
         if sum(int(doc.get(field) or 0) for doc in evidence_docs) > 0:
@@ -254,12 +255,30 @@ async def _collect(days: int) -> dict[str, Any]:
                 int(doc.get("zero_output_count") or 0) for doc in evidence_docs
             ),
             "fallback_reasons": dict(sorted(fallback_reasons.items())),
+            "sequential_chain_enabled_runs": sum(
+                int(bool(doc.get("sequential_chain_enabled")))
+                for doc in evidence_docs
+            ),
+            "sequential_chain_complete_runs": sum(
+                int(bool(doc.get("sequential_chain_complete")))
+                for doc in evidence_docs
+            ),
+            "sequential_chain_invariant_violations": sum(
+                int(doc.get("sequential_chain_invariant_violations") or 0)
+                for doc in evidence_docs
+            ),
         },
         "latest_selection": {
             "run_id": latest_observation.get("run_id"),
             "shadow_winner": latest_doc.get("hypothetical_winner_node_id"),
             "actual_paid_candidate": latest_doc.get("actual_paid_candidate_node_id"),
             "ranking_applied": bool(latest_doc.get("ranking_applied")),
+            "sequential_chain_enabled": bool(
+                latest_doc.get("sequential_chain_enabled")
+            ),
+            "sequential_chain_complete": bool(
+                latest_doc.get("sequential_chain_complete")
+            ),
         },
         "runtime_seconds": {
             "sample_count": len(runtimes),

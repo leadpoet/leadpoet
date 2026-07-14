@@ -698,6 +698,26 @@ def build_code_edit_auto_research_messages(
         context["provider_outcome_digest"] = _redacted_mapping(provider_outcome_digest)
     if provider_capability_summary:
         context["approved_provider_capabilities"] = _redacted_mapping(provider_capability_summary)
+    raw_within_run_memory = (
+        budget_context.get("within_run_memory")
+        if isinstance(budget_context, Mapping)
+        else None
+    )
+    sequential_context = (
+        raw_within_run_memory.get("sequential_chain")
+        if isinstance(raw_within_run_memory, Mapping)
+        else None
+    )
+    sequential_rules = ""
+    if isinstance(sequential_context, Mapping):
+        sequential_rules = (
+            "Best-so-far sequential chain:\n"
+            "- The extracted runtime source in this prompt is the exact selected parent candidate, not the run-start source.\n"
+            "- Produce exactly one incremental edit directly on this parent source. Do not recreate an independent sibling from the original model.\n"
+            "- Use Context JSON budget_context.within_run_memory.sequential_chain.parent_feedback to preserve strong anonymized examples and address weak or empty examples.\n"
+            "- Feedback example numbers are intentionally anonymous. Never infer identities, hidden inputs, or hard-code example-specific values.\n"
+            "- Do not merely restate or optimize the aggregate score; change the parent code through a general mechanism supported by the detailed feedback.\n\n"
+        )
     system = (
         "You are Leadpoet Research Lab's code-editing auto-research engine. "
         "Your task is to improve the private sourcing model so it finds more "
@@ -753,6 +773,8 @@ def build_code_edit_auto_research_messages(
         "- Do not remove ICP constraints unless replacing them with a more faithful constraint or adding a compensating downstream validation/filter.\n"
         "- If relaxing a brittle query constraint, preserve the semantic constraint elsewhere.\n"
         "- Provider fallback changes must classify, retry, timeout, log, or route provider/runtime failures; pure query wording changes are not provider fallback.\n\n"
+        + sequential_rules
+        +
         "LoopDirectionPlan binding:\n"
         "- If loop_direction_plan is present, it is binding.\n"
         "- Only emit candidates that directly implement loop_direction_plan.required_lane, required_mechanism, and selected_path_id.\n"

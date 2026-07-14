@@ -517,6 +517,18 @@ def _candidate(value: Mapping[str, Any]) -> BuiltCodeEditCandidate:
         "rehydration_artifact_hash",
         "dev_score",
         "dev_score_version",
+        "dev_evaluation",
+        "dev_feedback",
+        "dev_feedback_hash",
+        "chain_step",
+        "chain_root_artifact_hash",
+        "chain_parent_artifact_hash",
+        "chain_parent_node_id",
+        "chain_parent_dev_score",
+        "chain_feedback_hash",
+        "chain_incremental_source_diff_hash",
+        "chain_cumulative_source_diff_hash",
+        "chain_composition",
     }
     if set(value) != required:
         raise AutoresearchAuthorityV2Error("V2 selected candidate fields are invalid")
@@ -531,6 +543,30 @@ def _candidate(value: Mapping[str, Any]) -> BuiltCodeEditCandidate:
             float(value["dev_score"]) if value["dev_score"] is not None else None
         ),
         dev_score_version=str(value["dev_score_version"] or ""),
+        dev_evaluation=_mapping(value["dev_evaluation"], "dev_evaluation"),
+        dev_feedback=_mapping(value["dev_feedback"], "dev_feedback"),
+        dev_feedback_hash=str(value["dev_feedback_hash"] or ""),
+        chain_step=max(0, int(value["chain_step"] or 0)),
+        chain_root_artifact_hash=str(value["chain_root_artifact_hash"] or ""),
+        chain_parent_artifact_hash=str(
+            value["chain_parent_artifact_hash"] or ""
+        ),
+        chain_parent_node_id=str(value["chain_parent_node_id"] or ""),
+        chain_parent_dev_score=(
+            float(value["chain_parent_dev_score"])
+            if value["chain_parent_dev_score"] is not None
+            else None
+        ),
+        chain_feedback_hash=str(value["chain_feedback_hash"] or ""),
+        chain_incremental_source_diff_hash=str(
+            value["chain_incremental_source_diff_hash"] or ""
+        ),
+        chain_cumulative_source_diff_hash=str(
+            value["chain_cumulative_source_diff_hash"] or ""
+        ),
+        chain_composition=_mapping(
+            value["chain_composition"], "chain_composition"
+        ),
     )
 
 

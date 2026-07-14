@@ -9,6 +9,8 @@ head sha recorded), bug #30 (infra-vs-candidate build failure classification).
 from __future__ import annotations
 
 import json
+import shutil
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +18,28 @@ import pytest
 from gateway.research_lab import code_build
 from research_lab import code_editing
 from research_lab.code_editing import CodeEditDraft
+
+
+def _sequential_builder():
+    builder = object.__new__(code_build.CodeEditCandidateBuilder)
+    builder.config = SimpleNamespace(
+        code_edit_allowed_path_prefixes=lambda: ("sourcing_model/",),
+        code_edit_allowed_exact_paths=lambda: (),
+        code_edit_allowed_suffixes=lambda: (".py",),
+    )
+    return builder
+
+
+def _source_context(root, *, tree_hash):
+    return code_build.ParentImageSourceContext(
+        source_root=root,
+        source_mode="parent_image_extract",
+        parent_image_digest_hash="sha256:" + "9" * 64,
+        source_tree_hash=tree_hash,
+        top_level_paths=("sourcing_model",),
+        editable_files=("sourcing_model/pipeline.py",),
+        file_previews=(),
+    )
 
 
 def _draft(**overrides):
@@ -228,6 +252,162 @@ def test_git_apply_accepts_exact_replacement_hunk_without_trailing_context(tmp_p
     assert "return ['strict', 'companion']" in source_path.read_text(encoding="utf-8")
 
 
+def test_sequential_composition_reproduces_parent_plus_incremental_bytes(tmp_path):
+    root_dir = tmp_path / "root"
+    parent_dir = tmp_path / "parent"
+    for directory, value in ((root_dir, 1), (parent_dir, 2)):
+        path = directory / "sourcing_model" / "pipeline.py"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "def source_limit():\n"
+            f"    limit = {value}\n"
+            "    return limit\n",
+            encoding="utf-8",
+        )
+    incremental = CodeEditDraft(
+        failure_mode="insufficient recall",
+        mechanism="raise the bounded source limit",
+        expected_improvement="recover qualified companies",
+        risk="slower execution",
+        lane="query_construction",
+        target_files=("sourcing_model/pipeline.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/pipeline.py b/sourcing_model/pipeline.py\n"
+            "--- a/sourcing_model/pipeline.py\n"
+            "+++ b/sourcing_model/pipeline.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            " def source_limit():\n"
+            "-    limit = 2\n"
+            "+    limit = 3\n"
+            "     return limit\n"
+        ),
+        redacted_summary="raise bounded source limit",
+        test_plan="run runtime checks",
+        rollback_plan="revert the patch",
+    )
+    builder = _sequential_builder()
+    cumulative, evidence = builder.compose_cumulative_draft(
+        root_source_context=_source_context(
+            root_dir, tree_hash="sha256:" + "1" * 64
+        ),
+        parent_source_context=_source_context(
+            parent_dir, tree_hash="sha256:" + "2" * 64
+        ),
+        incremental_draft=incremental,
+    )
+
+    assert "-    limit = 1" in cumulative.unified_diff
+    assert "+    limit = 3" in cumulative.unified_diff
+    assert "limit = 2" not in cumulative.unified_diff
+    assert evidence["cumulative_apply_verified"] is True
+    assert evidence["incremental_source_diff_hash"] != evidence[
+        "cumulative_source_diff_hash"
+    ]
+
+    verify_dir = tmp_path / "verify"
+    shutil.copytree(root_dir, verify_dir)
+    code_build._initialize_temporary_git_repo(verify_dir)
+    diff_path = tmp_path / "cumulative.diff"
+    diff_path.write_text(cumulative.unified_diff, encoding="utf-8")
+    code_build._run_git_apply(
+        diff_path, cwd=verify_dir, timeout_seconds=10, check=True
+    )
+    code_build._run_git_apply(
+        diff_path, cwd=verify_dir, timeout_seconds=10, check=False
+    )
+    assert (verify_dir / "sourcing_model" / "pipeline.py").read_bytes() == (
+        parent_dir / "sourcing_model" / "pipeline.py"
+    ).read_bytes().replace(b"limit = 2", b"limit = 3")
+
+
+def test_sequential_composition_rejects_incremental_patch_for_wrong_parent(tmp_path):
+    root_dir = tmp_path / "root"
+    parent_dir = tmp_path / "parent"
+    for directory in (root_dir, parent_dir):
+        path = directory / "sourcing_model" / "pipeline.py"
+        path.parent.mkdir(parents=True)
+        path.write_text("before = 1\nvalue = 2\nafter = 3\n", encoding="utf-8")
+    wrong_parent_draft = _draft(
+        target_files=("sourcing_model/pipeline.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/pipeline.py b/sourcing_model/pipeline.py\n"
+            "--- a/sourcing_model/pipeline.py\n"
+            "+++ b/sourcing_model/pipeline.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            " before = 1\n"
+            "-value = 999\n"
+            "+value = 4\n"
+            " after = 3\n"
+        ),
+    )
+    with pytest.raises(code_build.CodeEditBuildError):
+        _sequential_builder().compose_cumulative_draft(
+            root_source_context=_source_context(
+                root_dir, tree_hash="sha256:" + "1" * 64
+            ),
+            parent_source_context=_source_context(
+                parent_dir, tree_hash="sha256:" + "2" * 64
+            ),
+            incremental_draft=wrong_parent_draft,
+        )
+
+
+def test_sequential_composition_is_deterministic_for_ten_concurrent_workers(tmp_path):
+    root_dir = tmp_path / "concurrent-root"
+    parent_dir = tmp_path / "concurrent-parent"
+    for directory, value in ((root_dir, 1), (parent_dir, 2)):
+        path = directory / "sourcing_model" / "pipeline.py"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "def source_limit():\n"
+            f"    limit = {value}\n"
+            "    return limit\n",
+            encoding="utf-8",
+        )
+    root_context = _source_context(root_dir, tree_hash="sha256:" + "1" * 64)
+    parent_context = _source_context(parent_dir, tree_hash="sha256:" + "2" * 64)
+    incremental = _draft(
+        target_files=("sourcing_model/pipeline.py",),
+        unified_diff=(
+            "diff --git a/sourcing_model/pipeline.py b/sourcing_model/pipeline.py\n"
+            "--- a/sourcing_model/pipeline.py\n"
+            "+++ b/sourcing_model/pipeline.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            " def source_limit():\n"
+            "-    limit = 2\n"
+            "+    limit = 3\n"
+            "     return limit\n"
+        ),
+    )
+    root_before = (root_dir / "sourcing_model" / "pipeline.py").read_bytes()
+    parent_before = (parent_dir / "sourcing_model" / "pipeline.py").read_bytes()
+    builder = _sequential_builder()
+
+    def _compose(_worker_index):
+        return builder.compose_cumulative_draft(
+            root_source_context=root_context,
+            parent_source_context=parent_context,
+            incremental_draft=incremental,
+        )
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        results = list(pool.map(_compose, range(10)))
+
+    assert len({draft.unified_diff for draft, _evidence in results}) == 1
+    assert len(
+        {
+            evidence["cumulative_source_diff_hash"]
+            for _draft, evidence in results
+        }
+    ) == 1
+    assert all(
+        evidence["cumulative_apply_verified"] is True
+        for _draft, evidence in results
+    )
+    assert (root_dir / "sourcing_model" / "pipeline.py").read_bytes() == root_before
+    assert (parent_dir / "sourcing_model" / "pipeline.py").read_bytes() == parent_before
+
+
 def test_git_apply_context_fallback_rejects_addition_only_hunks():
     addition_only = (
         "diff --git a/sourcing_model/discovery.py b/sourcing_model/discovery.py\n"
@@ -419,6 +599,45 @@ def test_code_edit_prompt_names_source_routing_lane():
 
     assert "source_routing" in context["allowed_lanes"]
     assert "source routing" in content
+
+
+def test_code_edit_prompt_requires_real_sequential_parent_and_safe_feedback():
+    feedback = {
+        "schema_version": "research_lab.sequential_dev_feedback.v1",
+        "aggregate_score": 42.0,
+        "example_count": 8,
+        "examples": [
+            {
+                "example_number": index,
+                "quality_band": "weak" if index == 3 else "adequate",
+                "result_count": index,
+            }
+            for index in range(1, 9)
+        ],
+        "feedback_hash": "sha256:" + "f" * 64,
+    }
+    messages = code_editing.build_code_edit_auto_research_messages(
+        ticket={"ticket_id": "ticket-sequential"},
+        artifact_manifest={"model_artifact_hash": "sha256:" + "a" * 64},
+        component_registry={},
+        benchmark_public_summary={},
+        runtime_source_context={"editable_files": ["sourcing_model/discovery.py"]},
+        source_inspection_context={"read_files": ["sourcing_model/discovery.py"]},
+        budget_context={
+            "within_run_memory": {
+                "sequential_chain": {"parent_feedback": feedback}
+            }
+        },
+        max_candidates=1,
+    )
+    content = messages[-1]["content"]
+    assert "exact selected parent candidate" in content
+    assert "Do not recreate an independent sibling" in content
+    assert "Do not merely restate or optimize the aggregate score" in content
+    assert '"example_number":3' in content
+    assert "icp_ref" not in content
+    assert "company_name" not in content
+    assert "provider_output" not in content
 
 
 def _v1_1_plan(**overrides):

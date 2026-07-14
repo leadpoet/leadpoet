@@ -23,6 +23,7 @@ from gateway.research_lab.code_build import (
     CodeEditPrivateTestError,
     CodeEditBuildResult,
     CodeEditCandidateBuilder,
+    attach_sequential_lineage,
     resolve_source_inspection_requests,
 )
 from gateway.research_lab.loop_engine import (
@@ -578,6 +579,22 @@ class BuiltCodeEditCandidate:
     # per-ICP outputs; checkpoints need the commitment and coverage facts, not
     # hidden development examples or provider payloads.
     dev_evaluation: Mapping[str, Any] = field(default_factory=dict)
+    # Private, anonymized test feedback for the next sequential edit. It never
+    # contains ICP refs, hashes, company payloads, provider output, or prompts.
+    dev_feedback: Mapping[str, Any] = field(default_factory=dict)
+    dev_feedback_hash: str = ""
+    # Sequential lineage is separate from the promotion parent. Every built
+    # image remains rooted at the approved model, while these fields prove
+    # which best-so-far candidate supplied the source and feedback for the edit.
+    chain_step: int = 0
+    chain_root_artifact_hash: str = ""
+    chain_parent_artifact_hash: str = ""
+    chain_parent_node_id: str = ""
+    chain_parent_dev_score: float | None = None
+    chain_feedback_hash: str = ""
+    chain_incremental_source_diff_hash: str = ""
+    chain_cumulative_source_diff_hash: str = ""
+    chain_composition: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _candidate_dev_evaluation_matches_policy(
@@ -597,6 +614,225 @@ def _candidate_dev_evaluation_matches_policy(
         and isinstance(actual, Mapping)
         and dict(actual) == dict(expected)
     )
+
+
+def _sequential_chain_enabled(policy: Mapping[str, Any] | None) -> bool:
+    policy_doc = dict(policy or {})
+    return bool(
+        policy_doc.get("sequential_chain_enabled")
+        and str(policy_doc.get("effective_phase") or "") in {"shadow", "rank"}
+    )
+
+
+def _best_eligible_chain_parent(
+    candidates: Sequence[BuiltCodeEditCandidate],
+    policy: Mapping[str, Any],
+) -> BuiltCodeEditCandidate | None:
+    eligible = [
+        candidate
+        for candidate in candidates
+        if _candidate_dev_evaluation_matches_policy(candidate, policy)
+    ]
+    if not eligible:
+        return None
+    # max() is stable for ties, so the earliest built candidate remains the
+    # parent when scores are equal.
+    return max(eligible, key=lambda candidate: float(candidate.dev_score or 0.0))
+
+
+def _sequential_chain_is_complete(
+    candidates: Sequence[BuiltCodeEditCandidate],
+    policy: Mapping[str, Any],
+) -> bool:
+    if not _sequential_chain_enabled(policy):
+        return True
+    items = list(candidates)
+    expected_width = max(1, int(policy.get("candidate_width") or 1))
+    if len(items) != expected_width or not items:
+        return False
+    root_hash = str(items[0].chain_root_artifact_hash or "")
+    if not root_hash:
+        return False
+    prior: list[BuiltCodeEditCandidate] = []
+    for index, candidate in enumerate(items):
+        composition = candidate.chain_composition
+        if candidate.chain_step != index + 1:
+            return False
+        if candidate.chain_root_artifact_hash != root_hash:
+            return False
+        if not isinstance(composition, Mapping):
+            return False
+        if composition.get("cumulative_apply_verified") is not True:
+            return False
+        if str(composition.get("root_source_tree_hash") or "") != root_hash:
+            return False
+        if (
+            str(composition.get("parent_source_tree_hash") or "")
+            != candidate.chain_parent_artifact_hash
+        ):
+            return False
+        if (
+            str(composition.get("incremental_source_diff_hash") or "")
+            != candidate.chain_incremental_source_diff_hash
+        ):
+            return False
+        if (
+            str(composition.get("cumulative_source_diff_hash") or "")
+            != candidate.chain_cumulative_source_diff_hash
+        ):
+            return False
+        if candidate.chain_cumulative_source_diff_hash != candidate.build.source_diff_hash:
+            return False
+        if str(candidate.build.code_edit_manifest.get("parent_artifact_hash") or "") != root_hash:
+            return False
+        if index == 0:
+            if candidate.chain_parent_artifact_hash != root_hash:
+                return False
+            if candidate.chain_parent_node_id or candidate.chain_feedback_hash:
+                return False
+            if candidate.chain_parent_dev_score is not None:
+                return False
+            if (
+                candidate.chain_incremental_source_diff_hash
+                != candidate.chain_cumulative_source_diff_hash
+            ):
+                return False
+        else:
+            expected_parent = _best_eligible_chain_parent(prior, policy)
+            if expected_parent is None:
+                if candidate.chain_parent_artifact_hash != root_hash:
+                    return False
+                if candidate.chain_parent_node_id or candidate.chain_feedback_hash:
+                    return False
+                if candidate.chain_parent_dev_score is not None:
+                    return False
+            else:
+                if candidate.chain_parent_node_id != expected_parent.node_id:
+                    return False
+                if (
+                    candidate.chain_parent_artifact_hash
+                    != expected_parent.build.candidate_model_manifest.model_artifact_hash
+                ):
+                    return False
+                if candidate.chain_feedback_hash != expected_parent.dev_feedback_hash:
+                    return False
+                if not candidate.chain_feedback_hash:
+                    return False
+                if (
+                    candidate.chain_parent_dev_score is None
+                    or candidate.chain_parent_dev_score != expected_parent.dev_score
+                ):
+                    return False
+        prior.append(candidate)
+    return True
+
+
+def _finite_feedback_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _score_band(score: float | None) -> str:
+    if score is None:
+        return "unavailable"
+    if score >= 80:
+        return "strong"
+    if score >= 60:
+        return "adequate"
+    if score > 0:
+        return "weak"
+    return "zero"
+
+
+def _build_sequential_dev_feedback(
+    *,
+    result: Mapping[str, Any],
+    candidate: BuiltCodeEditCandidate,
+    score: float,
+) -> dict[str, Any]:
+    """Create bounded feedback without hidden example identities or payloads."""
+
+    raw_rows = result.get("per_icp")
+    rows = (
+        list(raw_rows)
+        if isinstance(raw_rows, Sequence)
+        and not isinstance(raw_rows, (str, bytes, bytearray))
+        else []
+    )
+    examples: list[dict[str, Any]] = []
+    for index, raw_row in enumerate(rows[:8], start=1):
+        row = dict(raw_row) if isinstance(raw_row, Mapping) else {}
+        example_score = _finite_feedback_number(
+            row.get("dev_score", row.get("score"))
+        )
+        failure = bool(row.get("failure_reason") or row.get("failure_class"))
+        snapshot_miss = bool(row.get("snapshot_miss"))
+        zero_output = bool(row.get("zero_output"))
+        status = (
+            "snapshot_miss"
+            if snapshot_miss
+            else "failed"
+            if failure
+            else "zero_output"
+            if zero_output
+            else "completed"
+        )
+        examples.append(
+            {
+                "example_number": index,
+                "status": status,
+                "quality_score": (
+                    round(example_score, 6) if example_score is not None else None
+                ),
+                "quality_band": _score_band(example_score),
+                "result_count": max(0, int(row.get("company_count") or 0)),
+                "scored_result_count": max(
+                    0, int(row.get("scored_company_count") or 0)
+                ),
+            }
+        )
+    weak_count = sum(
+        1 for item in examples if item["quality_band"] in {"weak", "zero"}
+    )
+    zero_count = sum(1 for item in examples if item["status"] == "zero_output")
+    guidance = [
+        "Preserve behavior that produced adequate or strong examples.",
+        "Improve the weakest anonymized examples without hard-coding example-specific values.",
+    ]
+    if zero_count:
+        guidance.append(
+            "Address empty-result behavior while preserving fit and intent constraints."
+        )
+    if weak_count and not zero_count:
+        guidance.append(
+            "Improve result quality and ranking before broadening result volume."
+        )
+    parent_score = _finite_feedback_number(candidate.chain_parent_dev_score)
+    payload = {
+        "schema_version": "research_lab.sequential_dev_feedback.v1",
+        "candidate_node_id": str(candidate.node_id)[:80],
+        "chain_step": max(0, int(candidate.chain_step)),
+        "aggregate_score": round(float(score), 6),
+        "parent_score": round(parent_score, 6) if parent_score is not None else None,
+        "score_change_from_parent": (
+            round(float(score) - parent_score, 6)
+            if parent_score is not None
+            else None
+        ),
+        "example_count": len(examples),
+        "weak_example_count": weak_count,
+        "zero_output_example_count": zero_count,
+        "examples": examples,
+        "guidance": guidance,
+        "rules": [
+            "Use this only for the next edit in this run.",
+            "Do not infer hidden example identities or add example-specific branches.",
+            "The approved scoring and promotion workflow remains authoritative.",
+        ],
+    }
+    return {**payload, "feedback_hash": sha256_json(payload)}
 
 
 def select_inner_loop_candidates(
@@ -619,7 +855,14 @@ def select_inner_loop_candidates(
         for candidate in items
         if _candidate_dev_evaluation_matches_policy(candidate, policy_doc)
     ]
-    complete = len(items) >= 2 and len(eligible) == len(items)
+    expected_width = max(1, int(policy_doc.get("candidate_width") or 1))
+    chain_complete = _sequential_chain_is_complete(items, policy_doc)
+    complete = (
+        len(items) == expected_width
+        and len(items) >= 2
+        and len(eligible) == len(items)
+        and chain_complete
+    )
     score_order = sorted(
         items,
         key=lambda candidate: -float(candidate.dev_score or 0.0),
@@ -629,10 +872,14 @@ def select_inner_loop_candidates(
 
     if phase not in {"shadow", "rank"}:
         fallback_reason = str(policy_doc.get("fallback_reason") or "phase_does_not_rank")
-    elif len(items) < 2:
-        fallback_reason = "fewer_than_two_built_candidates"
+    elif len(items) != expected_width:
+        fallback_reason = "incomplete_candidate_width"
     elif not complete:
-        fallback_reason = "incomplete_or_mismatched_candidate_evaluations"
+        fallback_reason = (
+            "incomplete_sequential_chain"
+            if len(eligible) == len(items) and not chain_complete
+            else "incomplete_or_mismatched_candidate_evaluations"
+        )
     elif phase == "shadow":
         fallback_reason = "shadow_preserves_ordinary_candidate"
     else:
@@ -649,7 +896,13 @@ def select_inner_loop_candidates(
             and bool(candidate.dev_evaluation)
         ),
         "eligible_candidate_count": len(eligible),
-        "all_candidate_evaluations_eligible": complete,
+        "all_candidate_evaluations_eligible": bool(
+            len(items) == expected_width
+            and len(items) >= 2
+            and len(eligible) == len(items)
+        ),
+        "sequential_chain_enabled": _sequential_chain_enabled(policy_doc),
+        "sequential_chain_complete": chain_complete,
         "ranking_applied": ranking_applied,
         "strict_fallback_applied": bool(
             (phase == "rank" and not ranking_applied)
@@ -808,6 +1061,8 @@ class CodeEditLoopEngine:
                 dev_score=None,
                 dev_score_version="",
                 dev_evaluation=evidence,
+                dev_feedback={},
+                dev_feedback_hash="",
             )
 
         try:
@@ -870,6 +1125,11 @@ class CodeEditLoopEngine:
                     "miss_policy": str(result.get("miss_policy") or ""),
                 }
             )
+            dev_feedback = _build_sequential_dev_feedback(
+                result=result,
+                candidate=candidate,
+                score=score,
+            )
             checks = {
                 "evaluator_reported_eligible": bool(result.get("eligible")),
                 "dev_set_size_is_eight": int(result.get("icp_count") or 0) == 8,
@@ -887,6 +1147,9 @@ class CodeEditLoopEngine:
                 "score_commitment_matches": str(
                     result.get("score_commitment") or ""
                 ) == expected_score_commitment,
+                "eight_anonymized_feedback_examples": int(
+                    dev_feedback.get("example_count") or 0
+                ) == 8,
             }
             evaluation_doc = {
                 "schema_version": "research_lab.inner_loop_candidate_evaluation.v1",
@@ -923,6 +1186,8 @@ class CodeEditLoopEngine:
                     dev_score=None,
                     dev_score_version=version,
                     dev_evaluation=evaluation_doc,
+                    dev_feedback={},
+                    dev_feedback_hash="",
                 )
             logger.info(
                 "research_lab_loop_dev_eval_scored run_id=%s node_id=%s dev_score=%s dev_score_version=%s",
@@ -936,6 +1201,8 @@ class CodeEditLoopEngine:
                 dev_score=score,
                 dev_score_version=version,
                 dev_evaluation=evaluation_doc,
+                dev_feedback=dev_feedback,
+                dev_feedback_hash=str(dev_feedback.get("feedback_hash") or ""),
             )
         except asyncio.CancelledError:
             raise
@@ -1026,6 +1293,28 @@ class CodeEditLoopEngine:
                     rehydration_artifact_uri=uri,
                     rehydration_artifact_hash=expected_hash or stored_hash,
                 )
+                restore_source_context = getattr(
+                    self.builder,
+                    "restore_rehydrated_candidate_source_context",
+                    None,
+                )
+                if candidate.chain_step and callable(restore_source_context):
+                    try:
+                        await asyncio.to_thread(
+                            restore_source_context,
+                            candidate=candidate,
+                        )
+                    except Exception as exc:
+                        # Keep the already-built finalist. If this candidate is
+                        # later needed as a parent, normal resolution emits the
+                        # typed strict-fallback event and uses the approved root.
+                        logger.warning(
+                            "research_lab_sequential_resume_source_restore_failed "
+                            "run_id=%s node_id=%s error=%s",
+                            run_id,
+                            candidate.node_id[:80],
+                            type(exc).__name__,
+                        )
                 if not _candidate_dev_evaluation_matches_policy(
                     candidate, self._inner_loop_policy
                 ):
@@ -1034,6 +1323,8 @@ class CodeEditLoopEngine:
                         dev_score=None,
                         dev_score_version="",
                         dev_evaluation={},
+                        dev_feedback={},
+                        dev_feedback_hash="",
                     )
                     if bool(self._inner_loop_policy.get("evaluator_enabled")):
                         candidate = await self._maybe_dev_eval_candidate(
@@ -1421,16 +1712,18 @@ class CodeEditLoopEngine:
     ) -> CodeEditLoopResult:
         start = time.monotonic()
         settings = self.settings.normalized()
+        root_artifact = artifact
         raw_inner_loop_policy = budget_context.get("inner_loop_policy")
         self._inner_loop_policy = (
             dict(raw_inner_loop_policy)
             if isinstance(raw_inner_loop_policy, Mapping)
             else {
-                "schema_version": "research_lab.inner_loop_policy.v1",
+                "schema_version": "research_lab.inner_loop_policy.v2",
                 "effective_phase": "off",
                 "evaluator_enabled": False,
                 "ranking_enabled": False,
                 "shadow_enabled": False,
+                "sequential_chain_enabled": False,
                 "candidate_width": 1,
                 "paid_finalist_count": 1,
                 "strict_fallback": True,
@@ -1557,7 +1850,13 @@ class CodeEditLoopEngine:
                 }
             except Exception as exc:
                 logger.warning("research_lab_probe_registry_load_failed error=%s", str(exc)[:200])
-        within_run_memory_active = _within_run_memory_enabled()
+        # Sequential generation cannot satisfy its contract without carrying
+        # the prior candidate's anonymized development feedback. The legacy
+        # memory flag may still disable sibling-run rejection memory, but an
+        # activated sequential phase always retains the bounded parent feedback.
+        within_run_memory_active = _within_run_memory_enabled() or _sequential_chain_enabled(
+            self._inner_loop_policy
+        )
         rejected_diff_hashes: set[str] = set()
         within_run_rejections: list[dict[str, Any]] = []
         # §9.5 / §9.4 cross-run context (both flag-gated OFF by default; filled
@@ -1602,6 +1901,7 @@ class CodeEditLoopEngine:
         dev_score_records: list[dict[str, Any]] = []
         dev_best_score: float | None = None
         dev_scores_since_improvement = 0
+        sequential_parent_feedback_doc: dict[str, Any] | None = None
 
         def _record_dev_score(
             *, iteration_index: int, node_id: str, score: float, version: str
@@ -1626,7 +1926,11 @@ class CodeEditLoopEngine:
         def _within_run_memory_doc() -> dict[str, Any] | None:
             if not within_run_memory_active:
                 return None
-            if not within_run_rejections and not dev_score_records:
+            if (
+                not within_run_rejections
+                and not dev_score_records
+                and sequential_parent_feedback_doc is None
+            ):
                 return None
             memory_doc = {
                 "schema_version": "1.0",
@@ -1651,6 +1955,16 @@ class CodeEditLoopEngine:
                         round(float(dev_best_score), 6) if dev_best_score is not None else None
                     ),
                     "recent_scores": [dict(item) for item in dev_score_records[-10:]],
+                }
+            if sequential_parent_feedback_doc is not None:
+                memory_doc["sequential_chain"] = {
+                    "schema_version": "research_lab.sequential_prompt_context.v1",
+                    "instruction": (
+                        "The extracted source is the exact best-so-far parent. Build one "
+                        "incremental improvement on this source using the anonymized test "
+                        "feedback; do not recreate a sibling from the run-start model."
+                    ),
+                    "parent_feedback": dict(sequential_parent_feedback_doc),
                 }
             return memory_doc
 
@@ -1692,6 +2006,94 @@ class CodeEditLoopEngine:
             config=self.builder.config,
             dev_evaluator_configured=self.dev_evaluator is not None,
         )
+        root_source_context = source_context
+        sequential_chain_enabled = _sequential_chain_enabled(
+            self._inner_loop_policy
+        )
+        sequential_source_contexts: dict[str, Any] = {
+            root_artifact.model_artifact_hash: root_source_context
+        }
+        sequential_context_failures: set[str] = set()
+
+        async def _resolve_sequential_parent() -> tuple[
+            BuiltCodeEditCandidate | None,
+            PrivateModelArtifactManifest,
+            Any,
+        ]:
+            nonlocal sequential_parent_feedback_doc
+            if not sequential_chain_enabled:
+                sequential_parent_feedback_doc = None
+                return None, root_artifact, root_source_context
+            best = _best_eligible_chain_parent(selected, self._inner_loop_policy)
+            if best is None:
+                sequential_parent_feedback_doc = None
+                return None, root_artifact, root_source_context
+            parent_artifact = best.build.candidate_model_manifest
+            parent_hash = parent_artifact.model_artifact_hash
+            parent_context = sequential_source_contexts.get(parent_hash)
+            if parent_context is None and parent_hash not in sequential_context_failures:
+                try:
+                    parent_context = (
+                        await self._prepare_parent_source_context_with_heartbeat(
+                            run_id=run_id,
+                            artifact=parent_artifact,
+                            workspace_dir=(
+                                Path(source_tmp.name)
+                                / (
+                                    "sequential-parent-"
+                                    + re.sub(r"[^0-9a-zA-Z]", "", parent_hash)[-24:]
+                                )
+                            ),
+                            elapsed=elapsed,
+                            openrouter_calls=openrouter_calls,
+                            estimated_cost=estimated_cost,
+                            actual_cost_microusd=actual_cost_microusd,
+                        )
+                    )
+                    sequential_source_contexts[parent_hash] = parent_context
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    sequential_context_failures.add(parent_hash)
+                    logger.warning(
+                        "research_lab_sequential_parent_context_failed "
+                        "run_id=%s node_id=%s error=%s",
+                        run_id,
+                        best.node_id[:80],
+                        type(exc).__name__,
+                    )
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="code_edit_validation_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            node_id=best.node_id,
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "sequential_parent_context_failed",
+                            ),
+                            event_doc={
+                                "stage": "sequential_parent_context_failed",
+                                "error_class": type(exc).__name__,
+                                "error_hash": sha256_json(
+                                    {
+                                        "error_type": type(exc).__name__,
+                                        "error": str(exc),
+                                    }
+                                ),
+                                "chain_parent_node_id": best.node_id,
+                                "chain_parent_artifact_hash": parent_hash,
+                                "fallback": "run_start_approved_model",
+                            },
+                        )
+                    )
+            if parent_context is None:
+                sequential_parent_feedback_doc = None
+                return None, root_artifact, root_source_context
+            sequential_parent_feedback_doc = dict(best.dev_feedback)
+            return best, parent_artifact, parent_context
 
         # Bug 5: resume used to discard already-built candidates, so a paused/requeued run
         # that had built+pushed an image resumed empty-handed and failed with "no finalists".
@@ -2354,7 +2756,7 @@ class CodeEditLoopEngine:
                                 "requested_loop_count": requested_loop_count,
                                 "focus_signature_hash": _focus_signature_hash(ticket),
                             },
-                            artifact_manifest=artifact.to_dict(),
+                            artifact_manifest=root_artifact.to_dict(),
                             component_registry=dict(component_registry),
                             benchmark_public_summary=benchmark_public_summary,
                             runtime_source_index=source_context.planner_index(),
@@ -2673,6 +3075,62 @@ class CodeEditLoopEngine:
                     checkpoint=last_checkpoint,
                 )
 
+            (
+                chain_parent_candidate,
+                chain_parent_artifact,
+                source_context,
+            ) = await _resolve_sequential_parent()
+            candidate_edit_constraints = _candidate_edit_constraints(
+                source_context,
+                config=self.builder.config,
+                dev_evaluator_configured=self.dev_evaluator is not None,
+            )
+            if sequential_chain_enabled and isinstance(
+                loop_direction_plan_doc, Mapping
+            ):
+                sequential_binding = _bind_loop_direction_plan(
+                    loop_direction_plan_doc,
+                    source_context=source_context,
+                    candidate_edit_constraints=candidate_edit_constraints,
+                )
+                if sequential_binding.errors and chain_parent_candidate is not None:
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="code_edit_validation_failed",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            node_id=chain_parent_candidate.node_id,
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "sequential_parent_plan_binding_failed",
+                            ),
+                            event_doc={
+                                "stage": "sequential_parent_plan_binding_failed",
+                                "error_count": len(sequential_binding.errors),
+                                "error_hash": sha256_json(
+                                    {"errors": list(sequential_binding.errors)}
+                                ),
+                                "chain_parent_node_id": chain_parent_candidate.node_id,
+                                "fallback": "run_start_approved_model",
+                            },
+                        )
+                    )
+                    chain_parent_candidate = None
+                    chain_parent_artifact = root_artifact
+                    source_context = root_source_context
+                    sequential_parent_feedback_doc = None
+                    candidate_edit_constraints = _candidate_edit_constraints(
+                        source_context,
+                        config=self.builder.config,
+                        dev_evaluator_configured=self.dev_evaluator is not None,
+                    )
+                else:
+                    loop_direction_plan_doc = dict(
+                        sequential_binding.plan_doc or loop_direction_plan_doc
+                    )
+
             iteration += 1
             remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
             source_inspection_context: dict[str, Any] = {
@@ -2843,7 +3301,7 @@ class CodeEditLoopEngine:
                                 "loop_iteration": iteration,
                                 "inspection_round": inspection_round,
                             },
-                            artifact_manifest=artifact.to_dict(),
+                            artifact_manifest=chain_parent_artifact.to_dict(),
                             component_registry=dict(component_registry),
                             benchmark_public_summary=benchmark_public_summary,
                             runtime_source_index=source_context.inspection_index(),
@@ -3166,7 +3624,11 @@ class CodeEditLoopEngine:
                 # so a single call can fill several slots but never yields drafts past the
                 # bug-20 cap (never build-and-discard). The call still counts once in
                 # iteration/cost accounting; each build counts per built candidate.
-                if _multi_candidate_drafts_enabled():
+                if sequential_chain_enabled:
+                    # Each candidate must be generated only after the prior
+                    # candidate has been built and development-tested.
+                    draft_parse_limit = 1
+                elif _multi_candidate_drafts_enabled():
                     remaining_candidate_slots = max(1, settings.max_candidates - len(selected))
                     draft_parse_limit = min(remaining_candidate_slots, _drafts_per_call_limit())
                 else:
@@ -3228,7 +3690,7 @@ class CodeEditLoopEngine:
                                 "requested_loop_count": requested_loop_count,
                                 "loop_iteration": iteration,
                             },
-                            artifact_manifest=artifact.to_dict(),
+                            artifact_manifest=chain_parent_artifact.to_dict(),
                             component_registry=dict(component_registry),
                             benchmark_public_summary=benchmark_public_summary,
                             runtime_source_context=source_context.prompt_context(),
@@ -3391,7 +3853,7 @@ class CodeEditLoopEngine:
                             "requested_loop_count": requested_loop_count,
                             "loop_iteration": iteration,
                         },
-                        artifact_manifest=artifact.to_dict(),
+                        artifact_manifest=chain_parent_artifact.to_dict(),
                         component_registry=dict(component_registry),
                         benchmark_public_summary=benchmark_public_summary,
                         runtime_source_context=source_context.prompt_context(),
@@ -3721,7 +4183,7 @@ class CodeEditLoopEngine:
                         draft=draft,
                         outcome="source_context_validation",
                         detail="; ".join(source_errors),
-                        artifact=artifact,
+                        artifact=chain_parent_artifact,
                         component_registry=component_registry,
                         elapsed=elapsed,
                         openrouter_calls=openrouter_calls,
@@ -3770,7 +4232,7 @@ class CodeEditLoopEngine:
                     node_id=node_id,
                     iteration=iteration,
                     settings=settings,
-                    artifact=artifact,
+                    artifact=chain_parent_artifact,
                     source_context=source_context,
                     source_inspection_context=source_inspection_context,
                     read_paths=tuple(sorted(read_paths)),
@@ -3801,7 +4263,7 @@ class CodeEditLoopEngine:
                         draft=draft,
                         outcome="patch_apply_repair_exhausted",
                         detail="patch did not apply after repair attempts",
-                        artifact=artifact,
+                        artifact=chain_parent_artifact,
                         component_registry=component_registry,
                         elapsed=elapsed,
                         openrouter_calls=openrouter_calls,
@@ -3851,7 +4313,7 @@ class CodeEditLoopEngine:
                         draft=candidate_draft,
                         outcome="plan_alignment_rejected",
                         detail=alignment_reason,
-                        artifact=artifact,
+                        artifact=chain_parent_artifact,
                         component_registry=component_registry,
                         elapsed=elapsed,
                         openrouter_calls=openrouter_calls,
@@ -3876,6 +4338,59 @@ class CodeEditLoopEngine:
                     finalization_reserve_reached = True
                     break
                 try:
+                    incremental_draft = candidate_draft
+                    submission_draft = incremental_draft
+                    incremental_source_diff_hash = sha256_json(
+                        {"unified_diff": incremental_draft.unified_diff}
+                    )
+                    composition_doc: dict[str, Any] = {
+                        "schema_version": "research_lab.sequential_composition.v1",
+                        "mode": "direct_approved_root",
+                        "root_source_tree_hash": root_source_context.source_tree_hash,
+                        "parent_source_tree_hash": source_context.source_tree_hash,
+                        "incremental_source_diff_hash": incremental_source_diff_hash,
+                        "cumulative_source_diff_hash": incremental_source_diff_hash,
+                        "cumulative_changed_files": list(
+                            incremental_draft.target_files
+                        ),
+                        "cumulative_apply_verified": True,
+                    }
+                    if sequential_chain_enabled and chain_parent_candidate is not None:
+                        submission_draft, composition_doc = await asyncio.to_thread(
+                            self.builder.compose_cumulative_draft,
+                            root_source_context=root_source_context,
+                            parent_source_context=source_context,
+                            incremental_draft=incremental_draft,
+                        )
+                    cumulative_source_diff_hash = sha256_json(
+                        {"unified_diff": submission_draft.unified_diff}
+                    )
+                    if (
+                        str(
+                            composition_doc.get("cumulative_source_diff_hash")
+                            or ""
+                        )
+                        != cumulative_source_diff_hash
+                    ):
+                        raise CodeEditPatchApplyError(
+                            "sequential cumulative source diff commitment mismatch"
+                        )
+                    chain_step = len(selected) + 1
+                    chain_parent_node_id = (
+                        chain_parent_candidate.node_id
+                        if chain_parent_candidate is not None
+                        else ""
+                    )
+                    chain_parent_dev_score = (
+                        chain_parent_candidate.dev_score
+                        if chain_parent_candidate is not None
+                        else None
+                    )
+                    chain_feedback_hash = (
+                        chain_parent_candidate.dev_feedback_hash
+                        if chain_parent_candidate is not None
+                        else ""
+                    )
                     await self.event_sink(
                         AutoResearchLoopEvent(
                             event_type="candidate_build_started",
@@ -3885,7 +4400,20 @@ class CodeEditLoopEngine:
                             cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "candidate_build_started"),
                             event_doc={
                                 "iteration": iteration,
-                                "source_diff_hash": sha256_json({"unified_diff": candidate_draft.unified_diff}),
+                                "source_diff_hash": cumulative_source_diff_hash,
+                                **(
+                                    {
+                                        "sequential_chain_step": chain_step,
+                                        "chain_root_artifact_hash": root_artifact.model_artifact_hash,
+                                        "chain_parent_artifact_hash": chain_parent_artifact.model_artifact_hash,
+                                        "chain_parent_node_id": chain_parent_node_id,
+                                        "chain_feedback_hash": chain_feedback_hash,
+                                        "incremental_source_diff_hash": incremental_source_diff_hash,
+                                        "cumulative_source_diff_hash": cumulative_source_diff_hash,
+                                    }
+                                    if sequential_chain_enabled
+                                    else {}
+                                ),
                                 "loop_direction_plan_hash": (
                                     (loop_direction_plan_doc or {}).get("plan_hash")
                                     if isinstance(loop_direction_plan_doc, Mapping)
@@ -3899,11 +4427,11 @@ class CodeEditLoopEngine:
                     # (previously len(selected), which repeats after the post-cap truncation and
                     # overwrote the persisted S3 source-diff artifact key each iteration).
                     build = await self._build_candidate_with_heartbeat(
-                        draft=candidate_draft,
-                        artifact=artifact,
+                        draft=submission_draft,
+                        artifact=root_artifact,
                         run_id=run_id,
                         candidate_index=built_candidate_total,
-                        source_context=source_context,
+                        source_context=root_source_context,
                         node_id=node_id,
                         iteration=iteration,
                         elapsed=elapsed,
@@ -3913,11 +4441,65 @@ class CodeEditLoopEngine:
                     )
                     built_candidate_total += 1
                     build_completed = True
+                    if sequential_chain_enabled:
+                        lineage = {
+                            "schema_version": "research_lab.sequential_chain.v1",
+                            "chain_step": chain_step,
+                            "chain_root_artifact_hash": root_artifact.model_artifact_hash,
+                            "immediate_parent_artifact_hash": chain_parent_artifact.model_artifact_hash,
+                            "immediate_parent_node_id": chain_parent_node_id,
+                            "parent_dev_score": chain_parent_dev_score,
+                            "parent_dev_feedback_hash": chain_feedback_hash,
+                            "incremental_source_diff_hash": incremental_source_diff_hash,
+                            "cumulative_source_diff_hash": build.source_diff_hash,
+                            "composition": dict(composition_doc),
+                        }
+                        build = attach_sequential_lineage(
+                            build=build,
+                            draft=submission_draft,
+                            root_artifact_hash=root_artifact.model_artifact_hash,
+                            lineage=lineage,
+                        )
                     built_candidate = BuiltCodeEditCandidate(
-                        draft=candidate_draft,
+                        draft=submission_draft,
                         build=build,
                         node_id=node_id,
                         iteration=iteration,
+                        chain_step=chain_step if sequential_chain_enabled else 0,
+                        chain_root_artifact_hash=(
+                            root_artifact.model_artifact_hash
+                            if sequential_chain_enabled
+                            else ""
+                        ),
+                        chain_parent_artifact_hash=(
+                            chain_parent_artifact.model_artifact_hash
+                            if sequential_chain_enabled
+                            else ""
+                        ),
+                        chain_parent_node_id=(
+                            chain_parent_node_id if sequential_chain_enabled else ""
+                        ),
+                        chain_parent_dev_score=(
+                            chain_parent_dev_score
+                            if sequential_chain_enabled
+                            else None
+                        ),
+                        chain_feedback_hash=(
+                            chain_feedback_hash if sequential_chain_enabled else ""
+                        ),
+                        chain_incremental_source_diff_hash=(
+                            incremental_source_diff_hash
+                            if sequential_chain_enabled
+                            else ""
+                        ),
+                        chain_cumulative_source_diff_hash=(
+                            build.source_diff_hash
+                            if sequential_chain_enabled
+                            else ""
+                        ),
+                        chain_composition=(
+                            composition_doc if sequential_chain_enabled else {}
+                        ),
                     )
                     # §6.3-1 L1 dev-eval rung (flag default OFF): attach a ranking-only
                     # dev score through the dev_evaluator seam. Best-effort — a dev-eval
@@ -3937,15 +4519,22 @@ class CodeEditLoopEngine:
                     # Bug 5: persist a full rehydration doc so a paused/requeued run can restore
                     # this candidate on resume. Best-effort: failure only loses restorability.
                     rehydration_doc = await _write_private_loop_candidate_artifact(
-                        artifact=artifact,
+                        artifact=root_artifact,
                         run_id=run_id,
                         node_id=node_id,
                         iteration=iteration,
-                        draft=candidate_draft,
+                        draft=submission_draft,
                         build=build,
                         dev_score=built_candidate.dev_score,
                         dev_score_version=built_candidate.dev_score_version,
                         dev_evaluation=built_candidate.dev_evaluation,
+                        dev_feedback=built_candidate.dev_feedback,
+                        dev_feedback_hash=built_candidate.dev_feedback_hash,
+                        sequential_chain=(
+                            dict(build.build_doc.get("sequential_chain") or {})
+                            if sequential_chain_enabled
+                            else None
+                        ),
                         artifact_io=self.artifact_io,
                     )
                     built_candidate = replace(
@@ -3975,6 +4564,16 @@ class CodeEditLoopEngine:
                                     else None
                                 ),
                                 "plan_alignment": dict(candidate_draft.plan_alignment or {}),
+                                **(
+                                    {
+                                        "sequential_chain": dict(
+                                            build.build_doc.get("sequential_chain") or {}
+                                        ),
+                                        "dev_feedback_hash": built_candidate.dev_feedback_hash,
+                                    }
+                                    if sequential_chain_enabled
+                                    else {}
+                                ),
                                 # §6.3-1: emitted only when a dev score was attached, so
                                 # dev-eval-off runs keep the exact pre-dev-eval doc shape.
                                 **(
@@ -4302,6 +4901,19 @@ class CodeEditLoopEngine:
                         "redacted_summary": candidate.draft.redacted_summary,
                         "inner_loop_selection": dict(inner_loop_selection),
                         "paid_scoring_candidate": index == 0,
+                        **(
+                            {
+                                "sequential_chain_step": candidate.chain_step,
+                                "chain_root_artifact_hash": candidate.chain_root_artifact_hash,
+                                "chain_parent_artifact_hash": candidate.chain_parent_artifact_hash,
+                                "chain_parent_node_id": candidate.chain_parent_node_id,
+                                "chain_feedback_hash": candidate.chain_feedback_hash,
+                                "incremental_source_diff_hash": candidate.chain_incremental_source_diff_hash,
+                                "cumulative_source_diff_hash": candidate.chain_cumulative_source_diff_hash,
+                            }
+                            if candidate.chain_step
+                            else {}
+                        ),
                         # P18: dev-eval ranking scores become queryable from
                         # the event stream (previously only in the S3
                         # rehydration artifact) — the dev-vs-live divergence
@@ -4433,6 +5045,9 @@ class CodeEditLoopEngine:
             "inner_loop_evaluator_commitment": dict(
                 self._inner_loop_policy.get("evaluator_commitment") or {}
             ),
+            "inner_loop_sequential_chain_enabled": bool(
+                self._inner_loop_policy.get("sequential_chain_enabled")
+            ),
             "iterations_completed": int(iterations_completed),
             "next_iteration": int(iterations_completed) + 1,
             "elapsed_seconds": round(float(elapsed_seconds), 3),
@@ -4461,6 +5076,21 @@ class CodeEditLoopEngine:
                             "dev_evaluation": dict(candidate.dev_evaluation),
                         }
                         if candidate.dev_evaluation
+                        else {}
+                    ),
+                    **(
+                        {
+                            "sequential_chain_step": candidate.chain_step,
+                            "chain_root_artifact_hash": candidate.chain_root_artifact_hash,
+                            "chain_parent_artifact_hash": candidate.chain_parent_artifact_hash,
+                            "chain_parent_node_id": candidate.chain_parent_node_id,
+                            "chain_parent_dev_score": candidate.chain_parent_dev_score,
+                            "chain_feedback_hash": candidate.chain_feedback_hash,
+                            "dev_feedback_hash": candidate.dev_feedback_hash,
+                            "incremental_source_diff_hash": candidate.chain_incremental_source_diff_hash,
+                            "cumulative_source_diff_hash": candidate.chain_cumulative_source_diff_hash,
+                        }
+                        if candidate.chain_step
                         else {}
                     ),
                 }
@@ -5559,6 +6189,9 @@ async def _write_private_loop_candidate_artifact(
     dev_score: float | None = None,
     dev_score_version: str = "",
     dev_evaluation: Mapping[str, Any] | None = None,
+    dev_feedback: Mapping[str, Any] | None = None,
+    dev_feedback_hash: str = "",
+    sequential_chain: Mapping[str, Any] | None = None,
     artifact_io: Any | None = None,
 ) -> dict[str, Any]:
     """Persist a full rehydration doc for a built candidate (bug #5).
@@ -5596,6 +6229,11 @@ async def _write_private_loop_candidate_artifact(
         payload["dev_score_version"] = str(dev_score_version or "")
     if dev_evaluation:
         payload["dev_evaluation"] = dict(dev_evaluation)
+    if dev_feedback:
+        payload["dev_feedback"] = dict(dev_feedback)
+        payload["dev_feedback_hash"] = str(dev_feedback_hash or "")
+    if sequential_chain:
+        payload["sequential_chain"] = dict(sequential_chain)
     payload_hash = sha256_json(payload)
 
     try:
@@ -5703,6 +6341,29 @@ def _rehydrated_candidate_from_artifact_payload(
         if isinstance(raw_dev_score, (int, float)) and not isinstance(raw_dev_score, bool)
         else None
     )
+    dev_feedback = (
+        dict(stored.get("dev_feedback") or {})
+        if isinstance(stored.get("dev_feedback"), Mapping)
+        else {}
+    )
+    dev_feedback_hash = str(stored.get("dev_feedback_hash") or "")
+    if dev_feedback:
+        embedded_feedback_hash = str(dev_feedback.get("feedback_hash") or "")
+        if not dev_feedback_hash or embedded_feedback_hash != dev_feedback_hash:
+            raise ValueError("loop_candidate_dev_feedback_hash_mismatch")
+    chain_doc = (
+        dict(stored.get("sequential_chain") or {})
+        if isinstance(stored.get("sequential_chain"), Mapping)
+        else {}
+    )
+    raw_parent_score = chain_doc.get("parent_dev_score")
+    chain_parent_dev_score = (
+        float(raw_parent_score)
+        if isinstance(raw_parent_score, (int, float))
+        and not isinstance(raw_parent_score, bool)
+        and math.isfinite(float(raw_parent_score))
+        else None
+    )
     return BuiltCodeEditCandidate(
         draft=draft,
         build=build,
@@ -5713,6 +6374,33 @@ def _rehydrated_candidate_from_artifact_payload(
         dev_evaluation=(
             dict(stored.get("dev_evaluation") or {})
             if isinstance(stored.get("dev_evaluation"), Mapping)
+            else {}
+        ),
+        dev_feedback=dev_feedback,
+        dev_feedback_hash=dev_feedback_hash,
+        chain_step=max(0, int(chain_doc.get("chain_step") or 0)),
+        chain_root_artifact_hash=str(
+            chain_doc.get("chain_root_artifact_hash") or ""
+        ),
+        chain_parent_artifact_hash=str(
+            chain_doc.get("immediate_parent_artifact_hash") or ""
+        ),
+        chain_parent_node_id=str(
+            chain_doc.get("immediate_parent_node_id") or ""
+        ),
+        chain_parent_dev_score=chain_parent_dev_score,
+        chain_feedback_hash=str(
+            chain_doc.get("parent_dev_feedback_hash") or ""
+        ),
+        chain_incremental_source_diff_hash=str(
+            chain_doc.get("incremental_source_diff_hash") or ""
+        ),
+        chain_cumulative_source_diff_hash=str(
+            chain_doc.get("cumulative_source_diff_hash") or ""
+        ),
+        chain_composition=(
+            dict(chain_doc.get("composition") or {})
+            if isinstance(chain_doc.get("composition"), Mapping)
             else {}
         ),
     )

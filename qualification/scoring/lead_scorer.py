@@ -860,7 +860,32 @@ async def score_company_autoresearch_intent_signal(
     avg_decay = sum(decays) / len(decays) if decays else 0.0
     max_confidence = max(confidences) if confidences else 0
     all_fabricated = all(r["raw"] == 0.0 for r in signal_results)
+    if icp_signals and not required_intent_satisfied(signal_results):
+        # The ICP's PRIMARY intent (index 0) is a hard requirement: a company
+        # whose required intent failed cannot be carried into a positive score
+        # by verified bonus intents — bonus evidence only adds on top of a
+        # verified primary, never substitutes for it.
+        logger.warning(
+            "  ✗ Required intent unverified for %r — intent score zeroed "
+            "(verified bonus intents cannot qualify the company)",
+            company.company_name,
+        )
+        final_total = 0.0
     return raw_total, final_total, avg_decay, max_confidence, all_fabricated, signal_results
+
+
+def required_intent_satisfied(signal_results: List[dict]) -> bool:
+    """True when a verified (positively scored, post-decay) signal matches the
+    ICP's PRIMARY intent — index 0 of ``icp.intent_signals``. Bonus intents
+    occupy later indices and never satisfy this."""
+    for r in signal_results:
+        try:
+            idx = int(r.get("matched_icp_signal", -1))
+        except (TypeError, ValueError):
+            continue
+        if idx == 0 and float(r.get("after_decay") or 0.0) > 0.0:
+            return True
+    return False
 
 
 def aggregate_autoresearch_intent_scores(signal_scores: List[float]) -> float:

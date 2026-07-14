@@ -81,6 +81,28 @@ def test_validator_restart_has_fail_closed_legacy_v1_compat_branch():
     )
 
 
+def test_validator_deploy_preserves_secret_manager_gateway_routing():
+    deploy = (
+        ROOT / "validator_models" / "containerizing" / "deploy_dynamic.sh"
+    ).read_text(encoding="utf-8")
+
+    capture = deploy.index('INHERITED_GATEWAY_URL_SET="${GATEWAY_URL+x}"')
+    main_env = deploy.index('source "$MAIN_ENV_PATH"')
+    docker_env = deploy.index("source .env.docker")
+    restore = deploy.index('GATEWAY_URL="$INHERITED_GATEWAY_URL"')
+    first_container = deploy.index("docker run -d")
+
+    assert capture < main_env < docker_env < restore < first_container
+    assert deploy.count(
+        '-e GATEWAY_URL="${GATEWAY_URL:-https://gateway.subnet71.com}"'
+    ) == 3
+    assert (
+        '-e VALIDATOR_V2_GATEWAY_URL="${VALIDATOR_V2_GATEWAY_URL:-}"'
+        in deploy
+    )
+    assert "http://52.91.135.79:8000" not in deploy
+
+
 def test_validator_eif_measures_chain_source_without_base_image_change():
     dockerfile = (ROOT / "validator_tee" / "Dockerfile.enclave").read_text(
         encoding="utf-8"

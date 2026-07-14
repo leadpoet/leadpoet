@@ -99,6 +99,15 @@ echo ""
 # Validators just add WEBSHARE_PROXY_1 and WEBSHARE_PROXY_2 to their existing .env
 MAIN_ENV_PATH="../../.env"
 
+# validator_restart.sh loads the production runtime environment from AWS
+# Secrets Manager before invoking the validator. Preserve its gateway routing
+# values across the legacy .env/.env.docker loads below so stale host files
+# cannot silently redirect the coordinator or workers to an older endpoint.
+INHERITED_GATEWAY_URL_SET="${GATEWAY_URL+x}"
+INHERITED_GATEWAY_URL="${GATEWAY_URL:-}"
+INHERITED_VALIDATOR_V2_GATEWAY_URL_SET="${VALIDATOR_V2_GATEWAY_URL+x}"
+INHERITED_VALIDATOR_V2_GATEWAY_URL="${VALIDATOR_V2_GATEWAY_URL:-}"
+
 if [ -f "$MAIN_ENV_PATH" ]; then
     echo "📋 Loading configuration from main .env file..."
     source "$MAIN_ENV_PATH"
@@ -121,6 +130,15 @@ if [ -f ".env.docker" ]; then
     source .env.docker
     echo "✅ Overrides loaded from .env.docker"
 fi
+
+if [ "$INHERITED_GATEWAY_URL_SET" = "x" ]; then
+    GATEWAY_URL="$INHERITED_GATEWAY_URL"
+fi
+if [ "$INHERITED_VALIDATOR_V2_GATEWAY_URL_SET" = "x" ]; then
+    VALIDATOR_V2_GATEWAY_URL="$INHERITED_VALIDATOR_V2_GATEWAY_URL"
+fi
+unset INHERITED_GATEWAY_URL_SET INHERITED_GATEWAY_URL
+unset INHERITED_VALIDATOR_V2_GATEWAY_URL_SET INHERITED_VALIDATOR_V2_GATEWAY_URL
 
 # Bind runtime metadata to the exact checkout that this script builds. The
 # Docker image intentionally excludes .git, so the coordinator must receive
@@ -384,7 +402,8 @@ start_container() {
       -e FULFILLMENT_WEBSHARE_PROXY_8="${FULFILLMENT_WEBSHARE_PROXY_8:-}" \
       -e FULFILLMENT_WEBSHARE_PROXY_9="${FULFILLMENT_WEBSHARE_PROXY_9:-}" \
       -e FULFILLMENT_WEBSHARE_PROXY_10="${FULFILLMENT_WEBSHARE_PROXY_10:-}" \
-      -e GATEWAY_URL="${GATEWAY_URL:-http://52.91.135.79:8000}" \
+      -e GATEWAY_URL="${GATEWAY_URL:-https://gateway.subnet71.com}" \
+      -e VALIDATOR_V2_GATEWAY_URL="${VALIDATOR_V2_GATEWAY_URL:-}" \
       -e LEADPOET_INTERNAL_SECRET="${LEADPOET_INTERNAL_SECRET:-}" \
       -e RESEARCH_LAB_INTERNAL_API_KEY="${RESEARCH_LAB_INTERNAL_API_KEY:-}" \
       -e RESEARCH_LAB_VALIDATOR_FETCH_ENABLED="${RESEARCH_LAB_VALIDATOR_FETCH_ENABLED:-true}" \
@@ -498,7 +517,7 @@ if [ $QUAL_PROXY_COUNT -gt 0 ]; then
           -e PYTHONUNBUFFERED=1 \
           -e LEADPOET_CONTAINER_MODE=1 \
           -e LEADPOET_WRAPPER_ACTIVE=1 \
-          -e GATEWAY_URL="${GATEWAY_URL:-http://52.91.135.79:8000}" \
+          -e GATEWAY_URL="${GATEWAY_URL:-https://gateway.subnet71.com}" \
       -e LEADPOET_INTERNAL_SECRET="${LEADPOET_INTERNAL_SECRET:-}" \
           -e RESEARCH_LAB_INTERNAL_API_KEY="${RESEARCH_LAB_INTERNAL_API_KEY:-}" \
           -e QUALIFICATION_WEBSHARE_PROXY_1="${QUALIFICATION_WEBSHARE_PROXY_1:-}" \
@@ -596,7 +615,7 @@ if [ $FF_PROXY_COUNT -gt 0 ]; then
           -e LEADPOET_CONTAINER_MODE=1 \
           -e LEADPOET_WRAPPER_ACTIVE=1 \
           -e ENABLE_FULFILLMENT=true \
-          -e GATEWAY_URL="${GATEWAY_URL:-http://52.91.135.79:8000}" \
+          -e GATEWAY_URL="${GATEWAY_URL:-https://gateway.subnet71.com}" \
       -e LEADPOET_INTERNAL_SECRET="${LEADPOET_INTERNAL_SECRET:-}" \
           -e RESEARCH_LAB_INTERNAL_API_KEY="${RESEARCH_LAB_INTERNAL_API_KEY:-}" \
           -e FULFILLMENT_WEBSHARE_PROXY_1="${FULFILLMENT_WEBSHARE_PROXY_1:-}" \

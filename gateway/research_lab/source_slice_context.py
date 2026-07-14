@@ -283,3 +283,142 @@ def slice_results_for_inspection_context(context: SliceContext) -> list[dict[str
             }
         )
     return results
+
+@dataclass
+class SliceReadRequest:
+    """A planned pre-read, shaped for the production inspection resolver."""
+
+    path: str
+    start_line: int
+    max_lines: int
+    reason: str
+    qualified_name: str
+
+
+def plan_read_requests(
+    *,
+    source_root: Path,
+    index_doc: Mapping[str, Any],
+    normalized_references: Sequence[str],
+) -> tuple[list[SliceReadRequest], list[str]]:
+    """Plan seeded reads for canonical ``path::qualified_name`` references.
+
+    Returns (requests, unplannable_references). Content extraction and all
+    byte/range caps stay with ``resolve_source_inspection_requests`` — this
+    only chooses spans, so the seeded reads inherit the production
+    resolver's schema, budgets, and redaction exactly.
+    """
+
+    files_by_path: dict[str, Mapping[str, Any]] = {
+        str(item.get("path") or ""): item
+        for item in index_doc.get("files", [])
+        if isinstance(item, Mapping)
+    }
+    requests: list[SliceReadRequest] = []
+    unplannable: list[str] = []
+    seen: set[tuple[str, int, int]] = set()
+    parsed_cache: dict[str, tuple[int, ast.AST] | None] = {}
+
+    def _load(path: str) -> tuple[int, ast.AST] | None:
+        if path in parsed_cache:
+            return parsed_cache[path]
+        try:
+            resolved = (source_root / path).resolve()
+            resolved.relative_to(source_root.resolve())
+            text = resolved.read_text(encoding="utf-8", errors="replace")
+            parsed_cache[path] = (len(text.splitlines()), ast.parse(text, filename=path))
+        except (OSError, ValueError, SyntaxError):
+            parsed_cache[path] = None
+        return parsed_cache[path]
+
+    def _admit(path: str, start: int, end: int, reason: str, qualified: str) -> None:
+        start = max(1, int(start))
+        end = max(start, int(end))
+        key = (path, start, end)
+        if key in seen:
+            return
+        seen.add(key)
+        requests.append(
+            SliceReadRequest(
+                path=path,
+                start_line=start,
+                max_lines=end - start + 1,
+                reason=reason,
+                qualified_name=qualified,
+            )
+        )
+
+    for raw in normalized_references:
+        reference = str(raw or "").strip()
+        if not reference:
+            continue
+        if "::" in reference:
+            path, qualified = reference.split("::", 1)
+        else:
+            path, qualified = reference, ""
+        loaded = _load(path)
+        file_doc = files_by_path.get(path)
+        if loaded is None:
+            unplannable.append(reference)
+            continue
+        line_count, tree = loaded
+
+        if line_count <= WHOLE_FILE_LINE_THRESHOLD:
+            _admit(path, 1, line_count, "whole_file", path)
+            continue
+
+        top_end = _module_top_end(tree, line_count)
+        if top_end > 0:
+            _admit(path, 1, top_end, "module_top", f"{path}:module_top")
+
+        if not qualified:
+            # File-only reference: top region seeded; interactive reads
+            # cover the rest of the file on demand.
+            continue
+
+        symbols = file_doc.get("symbols", []) if isinstance(file_doc, Mapping) else []
+        record = next(
+            (
+                s
+                for s in symbols
+                if isinstance(s, Mapping)
+                and str(s.get("qualified_name") or "") == qualified
+            ),
+            None,
+        )
+        if record is None:
+            unplannable.append(reference)
+            continue
+        start_line = int(record.get("start_line") or 0)
+        end_line = int(record.get("end_line") or 0)
+        if start_line <= 0 or end_line < start_line:
+            unplannable.append(reference)
+            continue
+        _admit(
+            path,
+            _decorator_adjusted_start(tree, start_line),
+            end_line,
+            "referenced_symbol",
+            qualified,
+        )
+        class_span = _enclosing_class_span(symbols, qualified)
+        if class_span:
+            class_start, class_end = class_span
+            init_end = class_start
+            class_qualified = qualified.rsplit(".", 1)[0]
+            for symbol in symbols:
+                if str(symbol.get("qualified_name") or "") == f"{class_qualified}.__init__":
+                    init_end = int(symbol.get("end_line") or class_start)
+                    break
+            header_end = min(max(class_start, init_end), class_end)
+            if header_end >= class_start:
+                _admit(
+                    path,
+                    _decorator_adjusted_start(tree, class_start),
+                    header_end,
+                    "enclosing_class",
+                    class_qualified,
+                )
+
+    return requests, unplannable
+

@@ -536,6 +536,13 @@ class ResearchLabGatewayConfig:
     code_edit_source_inspection_file_bytes: int = 24_000
     code_edit_source_inspection_total_bytes: int = 120_000
     code_edit_source_inspection_search_matches: int = 30
+    # Symbol-slice seeding of the code-edit inspection context:
+    # "off" (no compute), "shadow" (plan + log, prompt unchanged), or "on"
+    # (seed slices as pre-read ranges through the production resolver).
+    code_edit_symbol_slice_mode: str = "off"
+    # Share of code_edit_source_inspection_total_bytes that seeded slices
+    # may consume; the remainder stays reserved for interactive reads.
+    code_edit_symbol_slice_budget_share: float = 0.4
     code_edit_patch_repair_attempts: int = 2
     # W4 probe_provider: metered generation-time provider probes through the
     # evidence proxy. Enabled by default with strict launch caps.
@@ -1118,6 +1125,16 @@ class ResearchLabGatewayConfig:
             code_edit_source_inspection_total_bytes=max(
                 4096,
                 _int("RESEARCH_LAB_CODE_EDIT_SOURCE_INSPECTION_TOTAL_BYTES", 120_000),
+            ),
+            code_edit_symbol_slice_mode=(
+                str(os.environ.get("RESEARCH_LAB_SYMBOL_SLICE_MODE", "off")).strip().lower()
+                if str(os.environ.get("RESEARCH_LAB_SYMBOL_SLICE_MODE", "off")).strip().lower()
+                in {"off", "shadow", "on"}
+                else "off"
+            ),
+            code_edit_symbol_slice_budget_share=min(
+                0.8,
+                max(0.05, _float("RESEARCH_LAB_SYMBOL_SLICE_BUDGET_SHARE", 0.4)),
             ),
             code_edit_source_inspection_search_matches=max(
                 1,

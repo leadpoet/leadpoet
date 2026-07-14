@@ -44,6 +44,7 @@ from research_lab.canonical import sha256_json
 from research_lab.code_editing import (
     FORBIDDEN_CODE_EDIT_TERMS,
     CodeEditDraft,
+    CodeEditSourceInspectionRequest,
     build_code_edit_auto_research_messages,
     build_code_edit_fallback_messages,
     build_code_edit_repair_messages,
@@ -61,6 +62,7 @@ from research_lab.code_editing import (
     parse_code_edit_response,
     parse_code_edit_source_inspection_response,
 )
+from gateway.research_lab.source_slice_context import plan_read_requests
 from gateway.research_lab.source_symbol_index import (
     bind_source_references_exact,
     resolve_source_references,
@@ -2432,6 +2434,120 @@ class CodeEditLoopEngine:
             read_ranges: dict[str, tuple[tuple[int, int], ...]] = {}
             source_access_v2 = bool(getattr(self.builder.config, "code_edit_source_access_v2", True))
             source_bytes_returned = 0
+            # Symbol-slice seeding: the accepted plan's must_inspect carries
+            # canonical path::symbol references whose spans the index already
+            # knows. Seed those spans as pre-read ranges through the
+            # PRODUCTION resolver (same schema, caps, and redaction as the
+            # model's own reads) so round one starts sighted. Interactive
+            # search/ranged reads stay untouched as the fallback; the seeded
+            # share of the byte budget is capped so it can never starve them.
+            slice_mode = str(
+                getattr(self.builder.config, "code_edit_symbol_slice_mode", "off") or "off"
+            ).lower()
+            if slice_mode in {"shadow", "on"} and source_access_v2:
+                try:
+                    plan_references = tuple(
+                        str(item)
+                        for item in (
+                            (loop_direction_plan_doc or {}).get("must_inspect", [])
+                            if isinstance(loop_direction_plan_doc, Mapping)
+                            else []
+                        )
+                        if item
+                    )
+                    slice_requests, slice_unplannable = plan_read_requests(
+                        source_root=source_context.source_root,
+                        index_doc=source_context.planner_index(),
+                        normalized_references=plan_references,
+                    )
+                    slice_budget_bytes = max(
+                        0,
+                        int(
+                            self.builder.config.code_edit_source_inspection_total_bytes
+                            * float(
+                                getattr(
+                                    self.builder.config,
+                                    "code_edit_symbol_slice_budget_share",
+                                    0.4,
+                                )
+                            )
+                        ),
+                    )
+                    seeded_bytes = 0
+                    seeded_ranges = 0
+                    if slice_mode == "on" and slice_requests:
+                        seed_batch = resolve_source_inspection_requests(
+                            source_context,
+                            [
+                                CodeEditSourceInspectionRequest(
+                                    operation="read_file",
+                                    path=request.path,
+                                    start_line=request.start_line,
+                                    max_lines=request.max_lines,
+                                    rationale=f"seeded_symbol_slice:{request.reason}",
+                                )
+                                for request in slice_requests
+                            ],
+                            already_read_paths=(),
+                            max_files=self.builder.config.code_edit_source_inspection_max_files,
+                            max_file_bytes=self.builder.config.code_edit_source_inspection_file_bytes,
+                            max_total_bytes=slice_budget_bytes,
+                            max_search_matches=self.builder.config.code_edit_source_inspection_search_matches,
+                            source_access_v2=True,
+                            already_read_ranges={},
+                            max_ranges_per_path=max(
+                                int(
+                                    getattr(
+                                        self.builder.config,
+                                        "code_edit_source_inspection_max_ranges_per_path",
+                                        3,
+                                    )
+                                ),
+                                len(slice_requests),
+                            ),
+                        )
+                        source_bytes_returned += seed_batch.bytes_returned
+                        seeded_bytes = seed_batch.bytes_returned
+                        read_paths = set(seed_batch.read_paths)
+                        read_ranges = dict(seed_batch.read_ranges)
+                        seeded_ranges = sum(len(spans) for spans in read_ranges.values())
+                        source_inspection_context = _merge_source_inspection_context(
+                            source_inspection_context,
+                            seed_batch.model_context,
+                            total_bytes=source_bytes_returned,
+                            read_paths=read_paths,
+                        )
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type="source_inspection_seeded",
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "source_inspection_seeded",
+                            ),
+                            event_doc={
+                                "iteration": iteration,
+                                "mode": slice_mode,
+                                "planned_requests": len(slice_requests),
+                                "unplannable_references": list(slice_unplannable)[:8],
+                                "seeded_bytes": seeded_bytes,
+                                "seeded_ranges": seeded_ranges,
+                                "slice_budget_bytes": slice_budget_bytes,
+                                "source_tree_hash": source_context.source_tree_hash,
+                            },
+                        )
+                    )
+                except Exception as exc:
+                    # Fail open to today's behavior: seeding is an
+                    # optimization and must never abort a paid run.
+                    logger.warning(
+                        "research_lab_symbol_slice_seed_failed mode=%s error=%s",
+                        slice_mode,
+                        str(exc)[:200],
+                    )
             budget_exhausted_after_source_inspection = False
             retry_iteration_after_reference_repair = False
             max_inspection_rounds = max(

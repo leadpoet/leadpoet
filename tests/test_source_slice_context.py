@@ -247,3 +247,93 @@ def test_determinism(tmp_path):
         (s.path, s.start_line, s.end_line, s.reason) for s in first.slices
     ] == [(s.path, s.start_line, s.end_line, s.reason) for s in second.slices]
     assert first.total_bytes == second.total_bytes
+
+
+def test_plan_read_requests_canonical_references(tmp_path):
+    from gateway.research_lab.source_slice_context import plan_read_requests
+
+    root = _make_tree(tmp_path)
+    index = _index(root)
+    requests, unplannable = plan_read_requests(
+        source_root=root,
+        index_doc=index,
+        normalized_references=[
+            "example_pkg/pipeline.py::_event_terms",
+            "example_pkg/pipeline.py::Classifier.is_third_party",
+            "example_pkg/tiny.py",
+            "example_pkg/ghost.py::nope",
+        ],
+    )
+    assert unplannable == ["example_pkg/ghost.py::nope"]
+    reasons = {(r.path, r.reason) for r in requests}
+    assert ("example_pkg/pipeline.py", "referenced_symbol") in reasons
+    assert ("example_pkg/pipeline.py", "module_top") in reasons
+    assert ("example_pkg/pipeline.py", "enclosing_class") in reasons
+    assert ("example_pkg/tiny.py", "whole_file") in reasons
+    symbol_req = next(r for r in requests if r.qualified_name == "_event_terms")
+    assert symbol_req.start_line >= 1 and symbol_req.max_lines >= 2
+
+
+def test_plan_read_requests_decorator_adjusted(tmp_path):
+    from gateway.research_lab.source_slice_context import plan_read_requests
+
+    root = _make_tree(tmp_path)
+    index = _index(root)
+    requests, _ = plan_read_requests(
+        source_root=root,
+        index_doc=index,
+        normalized_references=["example_pkg/pipeline.py::_press_release_url_classifier"],
+    )
+    symbol_req = next(r for r in requests if r.reason == "referenced_symbol")
+    # The @staticmethod decorator line sits one above the def line.
+    lines = (root / "example_pkg" / "pipeline.py").read_text().splitlines()
+    assert lines[symbol_req.start_line - 1].strip() == "@staticmethod"
+
+
+def test_plan_read_requests_deterministic_and_deduped(tmp_path):
+    from gateway.research_lab.source_slice_context import plan_read_requests
+
+    root = _make_tree(tmp_path)
+    index = _index(root)
+    refs = [
+        "example_pkg/pipeline.py::_event_terms",
+        "example_pkg/pipeline.py::_event_terms",
+    ]
+    first, _ = plan_read_requests(
+        source_root=root, index_doc=index, normalized_references=refs
+    )
+    second, _ = plan_read_requests(
+        source_root=root, index_doc=index, normalized_references=refs
+    )
+    as_tuples = lambda rs: [(r.path, r.start_line, r.max_lines, r.reason) for r in rs]
+    assert as_tuples(first) == as_tuples(second)
+    symbol_reads = [r for r in first if r.reason == "referenced_symbol"]
+    assert len(symbol_reads) == 1
+
+
+def test_engine_wiring_seeds_through_production_resolver():
+    """The seeding block must exist, fail open, and use the real resolver."""
+    from pathlib import Path as _P
+
+    engine_src = (_P(__file__).resolve().parents[1] / "gateway" / "research_lab" / "code_loop_engine.py").read_text()
+    assert "code_edit_symbol_slice_mode" in engine_src
+    assert "plan_read_requests(" in engine_src
+    assert 'rationale=f"seeded_symbol_slice:' in engine_src
+    assert "research_lab_symbol_slice_seed_failed" in engine_src
+    seed_pos = engine_src.index("source_inspection_seeded")
+    loop_pos = engine_src.index("for inspection_round in range(")
+    assert seed_pos < loop_pos, "seeding must run before the interactive rounds"
+
+
+def test_config_mode_parsing(monkeypatch):
+    from gateway.research_lab.config import ResearchLabGatewayConfig
+
+    monkeypatch.setenv("RESEARCH_LAB_SYMBOL_SLICE_MODE", "SHADOW")
+    monkeypatch.setenv("RESEARCH_LAB_SYMBOL_SLICE_BUDGET_SHARE", "0.99")
+    config = ResearchLabGatewayConfig.from_env()
+    assert config.code_edit_symbol_slice_mode == "shadow"
+    assert config.code_edit_symbol_slice_budget_share == 0.8  # clamped
+
+    monkeypatch.setenv("RESEARCH_LAB_SYMBOL_SLICE_MODE", "bogus")
+    config = ResearchLabGatewayConfig.from_env()
+    assert config.code_edit_symbol_slice_mode == "off"

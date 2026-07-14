@@ -39,7 +39,7 @@ from research_lab.eval.snapshot_store import (
 
 SCHEMA_VERSION = "leadpoet.research_lab_execution_config.v2"
 _CONFIG_FIELD_NAMES_HASH = (
-    "sha256:90dcb764df69b7220e40160485cc249620ea9a02a3f8d7363fdf1fa938a83986"
+    "sha256:52ab012151efebe7bd034f4473b8f920599102e836be5f076fef7c24668dca2d"
 )
 
 # These values are either credentials or credential-bearing relay URLs.  Their

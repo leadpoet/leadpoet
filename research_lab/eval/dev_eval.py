@@ -8,8 +8,7 @@ and scores the output with a deterministic mechanical scorer — no live
 providers, no LLM calls, plan target <=$1/iteration, wall-clock
 seconds-to-minutes.
 
-Engine integration contract (a LATER wave wires this; do not import from the
-engine yet):
+Engine integration contract:
 
 * ``code_loop_engine`` calls ``await evaluate_dev(candidate_runner=...,
   dev_items=..., snapshot_store=...)`` once per built candidate, per
@@ -18,9 +17,10 @@ engine yet):
   a container runner launched with :func:`snapshot_store.dev_replay_bootstrap`
   prepended to its adapter bootstrap plus
   :func:`snapshot_store.container_replay_env` in its extra env.
-* The engine ranks ``selected`` by ``DevEvalResult.aggregate_dev_score``
-  (argmax instead of "first that builds") and feeds per-iteration dev scores
-  into the within-run memory context (§6.2-5).
+* The engine ranks ``selected`` by ``DevEvalResult.aggregate_dev_score`` only
+  when every built candidate is eligible for the exact same evaluator
+  commitment. Otherwise it ignores all development scores and preserves
+  ordinary build order.
 * Iteration continuation / plateau-stop (§6.3-4) keys off dev-score deltas.
 
 Dev-score discipline (leak-cluster guard, plan §8.2):
@@ -42,8 +42,8 @@ arithmetic ``_benchmark_style_score`` uses with
 over dev ICPs. Dev deltas are therefore comparable in spirit to live-gate
 deltas without sharing their evidence weight.
 
-This module is dormant: nothing in the live pipeline imports it yet, and it
-is deterministic by construction (no wall clocks, no unseeded randomness).
+The module is deterministic by construction (no wall clocks or unseeded
+randomness) and is fail-closed at the terminal candidate selector.
 """
 
 from __future__ import annotations
@@ -190,7 +190,8 @@ def build_dev_icp_set(
             {"dev_selection_seed": seed_text, "icp_hash": row["icp_hash"]}
         ),
     )
-    selected = sorted(ranked[:size], key=lambda row: row["icp_hash"])
+    selected = _select_diverse_dev_items(ranked, size=size)
+    selected = sorted(selected, key=lambda row: row["icp_hash"])
 
     # Defense in depth: the guard above must make this unreachable.
     leaked = [item for item in selected if _exclusion_matches(item, exclusions)]
@@ -214,6 +215,11 @@ def build_dev_icp_set(
             {"icp_ref": item["icp_ref"], "icp_hash": item["icp_hash"]}
             for item in selected
         ],
+        "selection_policy": "seeded_greedy_diversity_v1",
+        "diversity_proof": _dev_set_diversity_proof(
+            eligible=eligible,
+            selected=selected,
+        ),
         "exclusion_proof": {
             "exclusion_entry_count": len(exclusions),
             "exclusion_set_hash": sha256_json(sorted(exclusions)),
@@ -230,6 +236,73 @@ def build_dev_icp_set(
         manifest=manifest,
         dev_set_hash=dev_set_hash,
     )
+
+
+_DEV_DIVERSITY_FIELDS = (
+    "industry",
+    "sub_industry",
+    "country_or_geography",
+    "employee_count",
+)
+
+
+def _dev_diversity_values(item: Mapping[str, Any]) -> tuple[str, ...]:
+    icp = item.get("icp") if isinstance(item.get("icp"), Mapping) else item
+    country = str(icp.get("country") or icp.get("geography") or "")
+    values = (
+        str(icp.get("industry") or ""),
+        str(icp.get("sub_industry") or ""),
+        country,
+        str(icp.get("employee_count") or ""),
+    )
+    return tuple(" ".join(value.strip().lower().split()) for value in values)
+
+
+def _select_diverse_dev_items(
+    seeded_items: Sequence[Mapping[str, Any]], *, size: int
+) -> list[dict[str, Any]]:
+    """Greedily maximize field novelty, using seeded order for every tie."""
+    remaining = [dict(item) for item in seeded_items]
+    selected: list[dict[str, Any]] = []
+    covered = [set() for _field in _DEV_DIVERSITY_FIELDS]
+    while remaining and len(selected) < size:
+        best_index = max(
+            range(len(remaining)),
+            key=lambda index: (
+                sum(
+                    bool(value) and value not in covered[field_index]
+                    for field_index, value in enumerate(
+                        _dev_diversity_values(remaining[index])
+                    )
+                ),
+                -index,
+            ),
+        )
+        chosen = remaining.pop(best_index)
+        selected.append(chosen)
+        for field_index, value in enumerate(_dev_diversity_values(chosen)):
+            if value:
+                covered[field_index].add(value)
+    return selected
+
+
+def _dev_set_diversity_proof(
+    *,
+    eligible: Sequence[Mapping[str, Any]],
+    selected: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    def _counts(items: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+        values = [_dev_diversity_values(item) for item in items]
+        return {
+            field: len({row[index] for row in values if row[index]})
+            for index, field in enumerate(_DEV_DIVERSITY_FIELDS)
+        }
+
+    return {
+        "fields": list(_DEV_DIVERSITY_FIELDS),
+        "eligible_unique_counts": _counts(eligible),
+        "selected_unique_counts": _counts(selected),
+    }
 
 
 def compute_dev_set_hash(items: Sequence[Mapping[str, Any]]) -> str:
@@ -526,6 +599,14 @@ class DevEvalResult:
     failure_count: int
     dev_set_hash: str
     snapshot_manifest_hash: str
+    eligible: bool
+    eligibility_reason: str
+    execution_coverage: float
+    true_miss_count: int
+    zero_output_count: int
+    miss_policy: str
+    score_commitment: str
+    receipt_root: str = ""
     run_label: str = ""
     ranking_only: bool = True
 
@@ -540,6 +621,14 @@ class DevEvalResult:
             "failure_count": self.failure_count,
             "dev_set_hash": self.dev_set_hash,
             "snapshot_manifest_hash": self.snapshot_manifest_hash,
+            "eligible": self.eligible,
+            "eligibility_reason": self.eligibility_reason,
+            "execution_coverage": self.execution_coverage,
+            "true_miss_count": self.true_miss_count,
+            "zero_output_count": self.zero_output_count,
+            "miss_policy": self.miss_policy,
+            "score_commitment": self.score_commitment,
+            "receipt_root": self.receipt_root,
             "run_label": self.run_label,
             "ranking_only": self.ranking_only,
         }
@@ -567,10 +656,11 @@ async def evaluate_dev(
     :func:`snapshot_store.container_replay_env` (the engine wiring wave).
 
     Per-ICP failures (snapshot misses under the strict policy, runner or
-    scorer errors) never abort the evaluation: the ICP books a dev score of 0
-    with a ``dev_``-prefixed failure token, keeping a broken candidate
-    rankable below working ones. ICPs run serially in dev-set order, so the
-    result is deterministic for a given candidate + snapshot set.
+    scorer errors) never abort the paid run: the result is marked ineligible,
+    causing the terminal selector to discard all development scores for that
+    run. ICPs run serially in dev-set order, so the result is deterministic
+    for a given candidate + snapshot set. A legitimate empty result is a
+    successful zero score, not an infrastructure failure.
     """
     if candidate_runner is None:
         raise DevEvalError("candidate_runner is required")
@@ -621,16 +711,49 @@ async def evaluate_dev(
 
     dev_scores = [float(row["dev_score"]) for row in rows]
     aggregate = round(sum(dev_scores) / len(dev_scores), 6) if dev_scores else 0.0
+    failure_count = sum(1 for row in rows if row["failure_reason"])
+    miss_count = sum(1 for row in rows if row["snapshot_miss"])
+    successful_count = len(rows) - failure_count
+    eligible = bool(
+        len(rows) == 8
+        and failure_count == 0
+        and miss_count == 0
+        and snapshot_store.miss_policy == "strict"
+    )
+    if len(rows) != 8:
+        eligibility_reason = "dev_set_size_must_equal_eight"
+    elif snapshot_store.miss_policy != "strict":
+        eligibility_reason = "snapshot_miss_policy_not_strict"
+    elif miss_count:
+        eligibility_reason = "snapshot_miss"
+    elif failure_count:
+        eligibility_reason = "evaluation_failure"
+    else:
+        eligibility_reason = "eligible"
+    commitment_payload = {
+        "schema_version": "research_lab.dev_score_commitment.v1",
+        "dev_score_version": DEV_SCORE_VERSION,
+        "dev_set_hash": dev_set_hash,
+        "snapshot_manifest_hash": snapshot_manifest_hash,
+        "miss_policy": snapshot_store.miss_policy,
+    }
     return DevEvalResult(
         dev_score_version=DEV_SCORE_VERSION,
         aggregate_dev_score=aggregate,
         per_icp=tuple(rows),
         icp_count=len(rows),
-        scored_icp_count=sum(1 for row in rows if not row["failure_reason"]),
-        snapshot_miss_count=sum(1 for row in rows if row["snapshot_miss"]),
-        failure_count=sum(1 for row in rows if row["failure_reason"]),
+        scored_icp_count=successful_count,
+        snapshot_miss_count=miss_count,
+        failure_count=failure_count,
         dev_set_hash=dev_set_hash,
         snapshot_manifest_hash=snapshot_manifest_hash,
+        eligible=eligible,
+        eligibility_reason=eligibility_reason,
+        execution_coverage=round(successful_count / len(rows), 6) if rows else 0.0,
+        true_miss_count=miss_count,
+        zero_output_count=sum(1 for row in rows if row["zero_output"]),
+        miss_policy=snapshot_store.miss_policy,
+        score_commitment=sha256_json(commitment_payload),
         run_label=str(run_label or ""),
     )
 
@@ -677,8 +800,7 @@ async def _score_dev_items(
             except Exception as exc:  # noqa: BLE001 - scorer bugs must not abort the run
                 failure_reason = f"dev_scorer_error:{type(exc).__name__}: {exc}"
                 scores = []
-        elif not outputs and not failure_reason:
-            failure_reason = "dev_zero_companies"
+        zero_output = not outputs and not failure_reason
 
         top_scores = sorted(scores, reverse=True)[:DEV_LEADS_PER_ICP]
         dev_score = float(per_icp_normalized_score(top_scores, max_leads=DEV_LEADS_PER_ICP))
@@ -692,6 +814,7 @@ async def _score_dev_items(
                 "company_scores": [round(score, 6) for score in scores],
                 "failure_reason": failure_reason,
                 "snapshot_miss": snapshot_miss,
+                "zero_output": zero_output,
             }
         )
     return rows

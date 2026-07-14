@@ -92,6 +92,19 @@ def test_dev_eval_candidate_width_is_separate_from_paid_finalist_count():
     assert paid_finalists == 1
 
 
+def test_inner_loop_submits_exactly_the_first_paid_finalist():
+    candidates = (object(), object(), object())
+
+    finalists = worker_mod._single_paid_finalist_candidates(candidates, 1)
+
+    assert finalists == candidates[:1]
+    with pytest.raises(
+        worker_mod.HostedResearchLabWorkerError,
+        match="exactly one candidate",
+    ):
+        worker_mod._single_paid_finalist_candidates(candidates, 2)
+
+
 def _make_context(queue_events=(), receipt_id=None):
     queue_row = {
         "run_id": RUN_ID,

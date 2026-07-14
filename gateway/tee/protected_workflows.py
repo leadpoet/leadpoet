@@ -45,7 +45,25 @@ PROTECTED_SYMBOLS = {
     "gateway/research_lab/code_loop_engine.py": (
         "CodeEditLoopEngine",
         "_bind_loop_direction_plan",
-        "_rank_selected_by_dev_score",
+        "select_inner_loop_candidates",
+    ),
+    "gateway/research_lab/dev_eval_runner.py": (
+        "snapshot_readiness",
+        "DockerReplayDevEvaluator",
+        "AttestedReplayDevEvaluatorV2",
+    ),
+    "gateway/research_lab/inner_loop_activation.py": (
+        "InnerLoopEvidence",
+        "InnerLoopPolicy",
+        "decide_inner_loop_policy",
+        "resolve_inner_loop_policy",
+        "_automatic_phase",
+        "_rank_gate_passes",
+        "build_inner_loop_evidence",
+        "record_inner_loop_event",
+    ),
+    "gateway/research_lab/snapshot_refresh.py": (
+        "maybe_refresh_dev_snapshot",
     ),
     "gateway/tee/autoresearch_executor_v2.py": (
         "AutoresearchExecutorV2",
@@ -62,6 +80,17 @@ PROTECTED_SYMBOLS = {
         "build_score_bundle_from_scored_icps",
         "build_scoring_health_doc",
         "prepare_autoresearch_scoring_payload",
+    ),
+    "research_lab/eval/dev_eval.py": (
+        "build_dev_icp_set",
+        "DevEvalResult",
+        "evaluate_dev",
+        "_score_dev_items",
+    ),
+    "research_lab/eval/snapshot_store.py": (
+        "build_snapshot_pointer_document",
+        "verify_snapshot_pointer_document",
+        "ProviderSnapshotStore",
     ),
     "research_lab/eval/baseline_summary.py": (
         "build_baseline_health",
@@ -149,6 +178,9 @@ PROTECTED_SYMBOLS = {
     ),
     "gateway/tee/coordinator_source_add_v2.py": (
         "CoordinatorSourceAddProvenanceV2",
+    ),
+    "gateway/tee/model_sandbox_v2.py": (
+        "RunscModelSandboxV2",
     ),
     "gateway/tee/reward_executor_v2.py": (
         "reward_receipt_projection_v2",

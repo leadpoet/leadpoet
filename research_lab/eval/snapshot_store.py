@@ -27,8 +27,8 @@ where ``provider`` is inferred from the host (``exa`` / ``scrapingdog`` /
 (``api_key`` and friends) stripped so replay matches regardless of which key
 recorded the traffic. Snapshot files are named by the sha256 of the key.
 
-Storage is a local directory or an S3 prefix (``RESEARCH_LAB_DEV_SNAPSHOT_URI``)
-with the layout::
+Storage is a local directory, an immutable S3 prefix, or a signed S3
+``current.json`` pointer (``RESEARCH_LAB_DEV_SNAPSHOT_URI``) with the layout::
 
     <root>/manifest.json
     <root>/snapshots/<sha256-hex>.json
@@ -45,18 +45,20 @@ snapshot directory. In-process runners (tests, future engine fast path) use
 :meth:`ProviderSnapshotStore.replay_installed` or call
 :meth:`ProviderSnapshotStore.replay` directly.
 
-This module is dormant: nothing in the live pipeline imports it yet. It is
-deterministic by construction — no wall clocks, no unseeded randomness; the
-optional manifest ``recorded_at`` is caller-supplied by the recording CLI.
+The live inner-loop runner imports this module. Snapshot records and manifests
+remain deterministic by construction: no wall clocks or unseeded randomness;
+the optional manifest ``recorded_at`` is caller-supplied by the recording CLI.
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import base64
 import json
 import os
 from pathlib import Path
+import tempfile
 from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib.parse import parse_qsl, urlsplit
 
@@ -67,6 +69,8 @@ from .private_runtime import SECRET_MARKERS
 SNAPSHOT_SCHEMA_VERSION = "1.0"
 SNAPSHOT_RECORD_TYPE = "research_lab_dev_provider_snapshot"
 SNAPSHOT_MANIFEST_TYPE = "research_lab_dev_snapshot_set"
+SNAPSHOT_READY_TYPE = "research_lab_dev_snapshot_ready"
+SNAPSHOT_POINTER_TYPE = "research_lab_dev_snapshot_pointer"
 SNAPSHOT_URI_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_URI"
 SNAPSHOT_MISS_POLICY_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_MISS_POLICY"
 SNAPSHOT_DIR_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_DIR"
@@ -78,6 +82,145 @@ MODE_REPLAY = "replay"
 SNAPSHOT_SUBDIR = "snapshots"
 MANIFEST_NAME = "manifest.json"
 DEV_ICPS_NAME = "dev_icps.json"
+READY_NAME = "READY.json"
+POINTER_NAME = "current.json"
+RECORD_FAILURES_NAME = "record_failures.jsonl"
+EXPECTED_DEV_ICP_COUNT = 8
+
+
+def build_snapshot_pointer_document(
+    *,
+    snapshot_uri: str,
+    manifest_hash: str,
+    ready_hash: str,
+    recorded_at: str,
+) -> dict[str, Any]:
+    """Build an unsigned pointer to one already-published immutable snapshot."""
+    payload = {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "pointer_type": SNAPSHOT_POINTER_TYPE,
+        "snapshot_uri": str(snapshot_uri).rstrip("/"),
+        "manifest_hash": str(manifest_hash),
+        "ready_hash": str(ready_hash),
+        "recorded_at": str(recorded_at),
+    }
+    return {**payload, "pointer_hash": sha256_json(payload)}
+
+
+def load_snapshot_pointer_document(pointer_uri: str) -> dict[str, Any]:
+    """Load a local or S3 pointer object without resolving its target."""
+    uri = str(pointer_uri or "").strip()
+    if uri.startswith("s3://"):
+        bucket, key = _parse_s3_object_uri(uri)
+        try:
+            response = _s3_client().get_object(Bucket=bucket, Key=key)
+        except Exception as exc:
+            raise DevSnapshotStoreError(
+                f"snapshot pointer could not be loaded: {type(exc).__name__}"
+            ) from exc
+        raw = response["Body"].read().decode("utf-8")
+    else:
+        path = Path(uri).expanduser()
+        if not path.is_file():
+            raise DevSnapshotStoreError(f"snapshot pointer does not exist: {path}")
+        raw = path.read_text(encoding="utf-8")
+    decoded = json.loads(raw)
+    if not isinstance(decoded, Mapping):
+        raise DevSnapshotStoreError("snapshot pointer must be a JSON object")
+    return dict(decoded)
+
+
+def verify_snapshot_pointer_document(
+    pointer_uri: str,
+    pointer: Mapping[str, Any] | None = None,
+    *,
+    require_signature: bool | None = None,
+) -> dict[str, Any]:
+    """Verify pointer integrity, signature, and same-base target containment."""
+    errors: list[str] = []
+    try:
+        doc = dict(pointer) if pointer is not None else load_snapshot_pointer_document(pointer_uri)
+    except Exception as exc:
+        return {
+            "passed": False,
+            "errors": [f"pointer_load_error:{type(exc).__name__}"],
+            "snapshot_uri": "",
+        }
+    signature_fields = {"signature_b64", "kms_key_id", "signing_algorithm"}
+    payload = {
+        key: value
+        for key, value in doc.items()
+        if key not in signature_fields and key != "pointer_hash"
+    }
+    pointer_hash = sha256_json(payload)
+    if str(doc.get("pointer_hash") or "") != pointer_hash:
+        errors.append("pointer_hash_mismatch")
+    if str(doc.get("pointer_type") or "") != SNAPSHOT_POINTER_TYPE:
+        errors.append("pointer_type_mismatch")
+    target = str(doc.get("snapshot_uri") or "").rstrip("/")
+    manifest_hash = str(doc.get("manifest_hash") or "")
+    ready_hash = str(doc.get("ready_hash") or "")
+    if not manifest_hash.startswith("sha256:"):
+        errors.append("pointer_manifest_hash_invalid")
+    if not ready_hash.startswith("sha256:"):
+        errors.append("pointer_ready_hash_invalid")
+    try:
+        _validate_pointer_target(str(pointer_uri), target)
+    except DevSnapshotStoreError as exc:
+        errors.append(str(exc))
+
+    require_sig = str(pointer_uri).startswith("s3://") if require_signature is None else bool(require_signature)
+    signature = str(doc.get("signature_b64") or "")
+    key_id = str(doc.get("kms_key_id") or "")
+    algorithm = str(doc.get("signing_algorithm") or "")
+    if require_sig and not (signature and key_id and algorithm):
+        errors.append("pointer_signature_missing")
+    elif signature and key_id and algorithm:
+        try:
+            response = _s3_client_for("kms").verify(
+                KeyId=key_id,
+                Message=pointer_hash.encode("utf-8"),
+                MessageType="RAW",
+                Signature=base64.b64decode(signature, validate=True),
+                SigningAlgorithm=algorithm,
+            )
+            if not bool(response.get("SignatureValid")):
+                errors.append("pointer_signature_invalid")
+        except Exception as exc:
+            errors.append(f"pointer_signature_error:{type(exc).__name__}")
+    return {
+        "passed": not errors,
+        "errors": list(dict.fromkeys(errors)),
+        "snapshot_uri": target,
+        "manifest_hash": manifest_hash,
+        "ready_hash": ready_hash,
+        "recorded_at": str(doc.get("recorded_at") or ""),
+        "pointer_hash": str(doc.get("pointer_hash") or ""),
+    }
+
+
+def resolve_snapshot_uri(root_uri: str) -> dict[str, Any]:
+    """Resolve a signed ``current.json`` pointer or return an immutable root."""
+    uri = str(root_uri or "").strip()
+    if not uri:
+        raise DevSnapshotStoreError("snapshot root URI is required")
+    is_pointer = uri.rstrip("/").endswith(f"/{POINTER_NAME}") or (
+        not uri.startswith("s3://") and Path(uri).name == POINTER_NAME
+    )
+    if not is_pointer:
+        return {
+            "snapshot_uri": uri.rstrip("/"),
+            "manifest_hash": "",
+            "ready_hash": "",
+            "pointer_hash": "",
+        }
+    verification = verify_snapshot_pointer_document(uri)
+    if not verification.get("passed"):
+        raise DevSnapshotStoreError(
+            "snapshot pointer verification failed: "
+            + "; ".join(verification.get("errors") or ())
+        )
+    return verification
 
 # Auth-shaped query/body parameter names stripped from significant params so
 # the request key is independent of which credential recorded the traffic.
@@ -100,6 +243,7 @@ _EMPTY_MISS_BODIES = {
     "openrouter": "{}",
 }
 SYNTHESIZED_EMPTY_MARKER = "research_lab_dev_snapshot_synthesized_empty"
+SNAPSHOT_MISS_SENTINEL = "RESEARCH_LAB_DEV_SNAPSHOT_MISS:"
 
 
 class DevSnapshotStoreError(RuntimeError):
@@ -401,7 +545,7 @@ class ProviderSnapshotStore:
     def _install_requests_replay(self, restore: list[Callable[[], None]]) -> None:
         try:
             import requests
-        except Exception:
+        except (ImportError, ModuleNotFoundError):
             return
         original_send = requests.Session.send
         store = self
@@ -427,7 +571,7 @@ class ProviderSnapshotStore:
     def _install_httpx_replay(self, restore: list[Callable[[], None]]) -> None:
         try:
             import httpx
-        except Exception:
+        except (ImportError, ModuleNotFoundError):
             return
         original_send = httpx.Client.send
         store = self
@@ -459,7 +603,7 @@ class ProviderSnapshotStore:
     def _install_aiohttp_guard(self, restore: list[Callable[[], None]]) -> None:
         try:
             import aiohttp
-        except Exception:
+        except (ImportError, ModuleNotFoundError):
             return
         original_request = aiohttp.ClientSession._request  # noqa: SLF001
 
@@ -509,6 +653,7 @@ class ProviderSnapshotStore:
         icp_set_hash: str = "",
         dev_set_manifest: Mapping[str, Any] | None = None,
         recorded_at: str = "",
+        provenance: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build the snapshot-set manifest binding traffic to the dev ICP set.
 
@@ -516,6 +661,7 @@ class ProviderSnapshotStore:
         clock) so this library stays wall-clock-free and deterministic.
         """
         dev_manifest = dict(dev_set_manifest or {})
+        dev_icps_hash = self.dev_icp_items_hash()
         payload = {
             "schema_version": SNAPSHOT_SCHEMA_VERSION,
             "manifest_type": SNAPSHOT_MANIFEST_TYPE,
@@ -525,6 +671,9 @@ class ProviderSnapshotStore:
             "icp_set_hash": str(icp_set_hash or dev_manifest.get("dev_set_hash") or ""),
             "dev_set_manifest": dev_manifest,
             "dev_set_manifest_hash": sha256_json(dev_manifest) if dev_manifest else "",
+            "dev_icps_hash": dev_icps_hash,
+            "dev_set_size": len(self.load_dev_icp_items() or ()),
+            "provenance": dict(provenance or {}),
             "recorded_at": str(recorded_at or ""),
         }
         return {**payload, "manifest_hash": sha256_json(payload)}
@@ -560,13 +709,35 @@ class ProviderSnapshotStore:
             errors.append("manifest_hash_mismatch")
         if str(doc.get("manifest_type") or "") != SNAPSHOT_MANIFEST_TYPE:
             errors.append("manifest_type_mismatch")
-        stored_content_hash = self.content_hash()
+        try:
+            stored_content_hash = self.content_hash()
+            request_keys = self.request_keys()
+        except Exception as exc:
+            stored_content_hash = ""
+            request_keys = []
+            errors.append(f"snapshot_record_invalid:{type(exc).__name__}")
         if str(doc.get("content_hash") or "") != stored_content_hash:
             errors.append("content_hash_mismatch")
         if int(doc.get("snapshot_count") or 0) != self.snapshot_count():
             errors.append("snapshot_count_mismatch")
         if expected_icp_set_hash and str(doc.get("icp_set_hash") or "") != expected_icp_set_hash:
             errors.append("icp_set_hash_mismatch")
+        if list(doc.get("request_keys") or ()) != request_keys:
+            errors.append("request_keys_mismatch")
+        dev_manifest = doc.get("dev_set_manifest")
+        if isinstance(dev_manifest, Mapping):
+            if dev_manifest and str(doc.get("dev_set_manifest_hash") or "") != sha256_json(dict(dev_manifest)):
+                errors.append("dev_set_manifest_hash_mismatch")
+        elif doc.get("dev_set_manifest_hash"):
+            errors.append("dev_set_manifest_invalid")
+        items = self.load_dev_icp_items()
+        if not items:
+            errors.append("dev_icps_missing")
+        else:
+            if str(doc.get("dev_icps_hash") or "") != self.dev_icp_items_hash(items):
+                errors.append("dev_icps_hash_mismatch")
+            if int(doc.get("dev_set_size") or 0) != len(items):
+                errors.append("dev_set_size_mismatch")
         return {
             "passed": not errors,
             "errors": errors,
@@ -574,6 +745,113 @@ class ProviderSnapshotStore:
             "content_hash": stored_content_hash,
             "icp_set_hash": str(doc.get("icp_set_hash") or ""),
             "snapshot_count": self.snapshot_count(),
+        }
+
+    def build_ready_document(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        """Build the unsigned publication marker written only after validation."""
+        items = self.load_dev_icp_items() or []
+        payload = {
+            "schema_version": SNAPSHOT_SCHEMA_VERSION,
+            "ready_type": SNAPSHOT_READY_TYPE,
+            "manifest_hash": str(manifest.get("manifest_hash") or ""),
+            "content_hash": str(manifest.get("content_hash") or ""),
+            "icp_set_hash": str(manifest.get("icp_set_hash") or ""),
+            "dev_icps_hash": self.dev_icp_items_hash(items),
+            "dev_set_size": len(items),
+            "recorded_at": str(manifest.get("recorded_at") or ""),
+            "replay_validation": "passed",
+        }
+        return {**payload, "ready_hash": sha256_json(payload)}
+
+    def write_ready_document(self, ready: Mapping[str, Any]) -> None:
+        self._write_text(
+            READY_NAME,
+            json.dumps(dict(ready), sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+        )
+
+    def load_ready_document(self) -> dict[str, Any] | None:
+        raw = self._read_text(READY_NAME)
+        if raw is None:
+            return None
+        decoded = json.loads(raw)
+        if not isinstance(decoded, Mapping):
+            raise DevSnapshotStoreError("snapshot READY document must be a JSON object")
+        return dict(decoded)
+
+    def verify_ready_document(
+        self,
+        ready: Mapping[str, Any] | None = None,
+        *,
+        require_signature: bool | None = None,
+    ) -> dict[str, Any]:
+        """Verify publication completeness, exact eight-item binding, and signature."""
+        errors: list[str] = []
+        doc = dict(ready) if ready is not None else self.load_ready_document()
+        if doc is None:
+            return {"passed": False, "errors": ["ready_missing"], "ready_hash": ""}
+        signature_fields = {"signature_b64", "kms_key_id", "signing_algorithm"}
+        payload = {
+            key: value
+            for key, value in doc.items()
+            if key not in signature_fields and key != "ready_hash"
+        }
+        ready_hash = sha256_json(payload)
+        if str(doc.get("ready_hash") or "") != ready_hash:
+            errors.append("ready_hash_mismatch")
+        if str(doc.get("ready_type") or "") != SNAPSHOT_READY_TYPE:
+            errors.append("ready_type_mismatch")
+        manifest = self.load_manifest()
+        verification = self.verify_manifest(manifest)
+        errors.extend(str(item) for item in verification.get("errors") or ())
+        if not isinstance(manifest, Mapping):
+            errors.append("manifest_missing")
+        else:
+            for key in ("manifest_hash", "content_hash", "icp_set_hash", "dev_icps_hash"):
+                if str(doc.get(key) or "") != str(manifest.get(key) or ""):
+                    errors.append(f"ready_{key}_mismatch")
+        items = self.load_dev_icp_items() or []
+        if len(items) != EXPECTED_DEV_ICP_COUNT:
+            errors.append("dev_set_size_must_equal_eight")
+        if int(doc.get("dev_set_size") or 0) != len(items):
+            errors.append("ready_dev_set_size_mismatch")
+        provenance = manifest.get("provenance") if isinstance(manifest, Mapping) else {}
+        provenance = provenance if isinstance(provenance, Mapping) else {}
+        for key in (
+            "champion_image_digest",
+            "source_commit",
+            "model_config_hash",
+            "provider_model_ids",
+            "replay_output_hashes",
+        ):
+            value = provenance.get(key)
+            if value in (None, "", [], {}):
+                errors.append(f"snapshot_provenance_missing:{key}")
+        require_sig = self._is_s3 if require_signature is None else bool(require_signature)
+        signature = str(doc.get("signature_b64") or "")
+        key_id = str(doc.get("kms_key_id") or "")
+        algorithm = str(doc.get("signing_algorithm") or "")
+        if require_sig and not (signature and key_id and algorithm):
+            errors.append("ready_signature_missing")
+        elif signature and key_id and algorithm:
+            try:
+                response = _s3_client_for("kms").verify(
+                    KeyId=key_id,
+                    Message=ready_hash.encode("utf-8"),
+                    MessageType="RAW",
+                    Signature=base64.b64decode(signature, validate=True),
+                    SigningAlgorithm=algorithm,
+                )
+                if not bool(response.get("SignatureValid")):
+                    errors.append("ready_signature_invalid")
+            except Exception as exc:
+                errors.append(f"ready_signature_error:{type(exc).__name__}")
+        return {
+            "passed": not errors,
+            "errors": list(dict.fromkeys(errors)),
+            "ready_hash": str(doc.get("ready_hash") or ""),
+            "manifest_hash": str(doc.get("manifest_hash") or ""),
+            "dev_set_size": len(items),
+            "recorded_at": str(doc.get("recorded_at") or ""),
         }
 
     def write_dev_icp_items(self, items: Sequence[Mapping[str, Any]]) -> None:
@@ -606,6 +884,12 @@ class ProviderSnapshotStore:
         ):
             raise DevSnapshotStoreError("dev ICP items must be a JSON array of objects")
         return [dict(item) for item in decoded]
+
+    def dev_icp_items_hash(
+        self, items: Sequence[Mapping[str, Any]] | None = None
+    ) -> str:
+        rows = [dict(item) for item in (items if items is not None else self.load_dev_icp_items() or ())]
+        return sha256_json(rows) if rows else ""
 
     # -- storage backends ----------------------------------------------------
 
@@ -656,7 +940,16 @@ class ProviderSnapshotStore:
             return
         path = self._root_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
 
 class _FakeUrllibResponse:
@@ -732,11 +1025,15 @@ def _contains_secret_material(value: Any) -> bool:
 
 
 def _s3_client() -> Any:
+    return _s3_client_for("s3")
+
+
+def _s3_client_for(service_name: str) -> Any:
     try:
         import boto3
     except Exception as exc:  # pragma: no cover - depends on env
         raise DevSnapshotStoreError("boto3 is required for S3 snapshot stores") from exc
-    return boto3.client("s3")
+    return boto3.client(service_name)
 
 
 def _parse_s3_root(uri: str) -> tuple[str, str]:
@@ -748,6 +1045,38 @@ def _parse_s3_root(uri: str) -> tuple[str, str]:
         raise DevSnapshotStoreError(f"invalid s3 URI: {uri}")
     prefix = prefix.strip("/")
     return bucket, f"{prefix}/" if prefix else ""
+
+
+def _parse_s3_object_uri(uri: str) -> tuple[str, str]:
+    if not uri.startswith("s3://"):
+        raise DevSnapshotStoreError(f"expected s3:// object URI, got {uri}")
+    without_scheme = uri[5:]
+    bucket, separator, key = without_scheme.partition("/")
+    if not bucket or not separator or not key.strip("/"):
+        raise DevSnapshotStoreError(f"invalid S3 object URI: {uri}")
+    return bucket, key.strip("/")
+
+
+def _validate_pointer_target(pointer_uri: str, target_uri: str) -> None:
+    if not target_uri:
+        raise DevSnapshotStoreError("pointer_target_missing")
+    if pointer_uri.startswith("s3://"):
+        pointer_bucket, pointer_key = _parse_s3_object_uri(pointer_uri)
+        target_bucket, target_prefix = _parse_s3_root(target_uri)
+        pointer_parent = pointer_key.rsplit("/", 1)[0] + "/" if "/" in pointer_key else ""
+        if target_bucket != pointer_bucket or not target_prefix.startswith(pointer_parent):
+            raise DevSnapshotStoreError("pointer_target_outside_base")
+        if target_prefix.rstrip("/") == pointer_key:
+            raise DevSnapshotStoreError("pointer_target_recursive")
+        return
+    pointer_path = Path(pointer_uri).expanduser().resolve()
+    target_path = Path(target_uri).expanduser().resolve()
+    try:
+        target_path.relative_to(pointer_path.parent)
+    except ValueError as exc:
+        raise DevSnapshotStoreError("pointer_target_outside_base") from exc
+    if target_path == pointer_path:
+        raise DevSnapshotStoreError("pointer_target_recursive")
 
 
 # ---------------------------------------------------------------------------
@@ -766,10 +1095,12 @@ from urllib.parse import parse_qsl, urlsplit
 
 _RL_DEV_SNAPSHOT_DIR = os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_DIR", "").strip()
 _RL_DEV_MISS_POLICY = (os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_MISS_POLICY", "").strip().lower() or "strict")
+_RL_DEV_RECORD_ICP_REF = os.environ.get("RESEARCH_LAB_DEV_RECORD_ICP_REF", "").strip()
 _RL_DEV_AUTH_PARAMS = ("api_key", "apikey", "x-api-key", "authorization", "token", "access_token", "bearer")
 _RL_DEV_EMPTY_BODIES = {"exa": '{"results": []}', "scrapingdog": "{}", "openrouter": "{}"}
 # Keep in sync with research_lab.eval.private_runtime.SECRET_MARKERS.
 _RL_DEV_SECRET_MARKERS = ("sk-or-", "sb_secret_", "aws_secret_access_key", "openrouter_api_key", "scrapingdog_api_key", "exa_api_key", "raw_secret", "service_role")
+_RL_DEV_RECORD_FAILURES_PATH = os.path.join(_RL_DEV_SNAPSHOT_DIR, "record_failures.jsonl")
 
 
 def _rl_dev_canonical_json(data):
@@ -861,7 +1192,7 @@ def _rl_dev_lookup(method, url, body):
             "body_text": _RL_DEV_EMPTY_BODIES.get(provider, "{}"),
             "synthesized": "research_lab_dev_snapshot_synthesized_empty",
         }
-    raise _RlDevSnapshotMiss("no recorded provider snapshot for request: " + request_key)
+    raise _RlDevSnapshotMiss("RESEARCH_LAB_DEV_SNAPSHOT_MISS:" + request_key)
 
 
 class _RlDevFakeResponse(object):
@@ -932,8 +1263,12 @@ def _rl_dev_install_replay():
             return response
 
         _rl_requests.Session.send = _rl_dev_replay_requests_send
-    except Exception:
+    except (ImportError, ModuleNotFoundError):
         pass
+    except Exception as exc:
+        raise RuntimeError(
+            "requests replay hook installation failed: " + type(exc).__name__
+        ) from exc
 
     try:
         import httpx as _rl_httpx
@@ -957,8 +1292,12 @@ def _rl_dev_install_replay():
             return _rl_dev_replay_httpx_send(client, request, *args, **kwargs)
 
         _rl_httpx.AsyncClient.send = _rl_dev_replay_httpx_async_send
-    except Exception:
+    except (ImportError, ModuleNotFoundError):
         pass
+    except Exception as exc:
+        raise RuntimeError(
+            "httpx replay hook installation failed: " + type(exc).__name__
+        ) from exc
 
     try:
         import aiohttp as _rl_aiohttp
@@ -969,8 +1308,12 @@ def _rl_dev_install_replay():
             )
 
         _rl_aiohttp.ClientSession._request = _rl_dev_replay_aiohttp_unsupported
-    except Exception:
+    except (ImportError, ModuleNotFoundError):
         pass
+    except Exception as exc:
+        raise RuntimeError(
+            "aiohttp replay guard installation failed: " + type(exc).__name__
+        ) from exc
 
 
 _rl_dev_install_replay()
@@ -978,7 +1321,29 @@ _rl_dev_install_replay()
 
 
 _RECORD_BOOTSTRAP_BODY = r"""
+def _rl_dev_record_failure(reason, request_key=""):
+    try:
+        os.makedirs(_RL_DEV_SNAPSHOT_DIR, exist_ok=True)
+        row = {
+            "reason": str(reason or "record_failure")[:240],
+            "request_key": str(request_key or "")[:1000],
+            "icp_ref": _RL_DEV_RECORD_ICP_REF[:500],
+        }
+        with open(_RL_DEV_RECORD_FAILURES_PATH, "a", encoding="utf-8") as handle:
+            handle.write(_rl_dev_canonical_json(row) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception as failure_exc:
+        import sys
+        sys.stderr.write(
+            "research_lab_dev_snapshot_failure_telemetry_error="
+            + type(failure_exc).__name__
+            + "\n"
+        )
+
+
 def _rl_dev_record(method, url, body, status, headers, body_text):
+    request_key = ""
     try:
         provider, request_key, storage_name = _rl_dev_request_identity(method, url, body)
         content_type = ""
@@ -1002,19 +1367,20 @@ def _rl_dev_record(method, url, body, status, headers, body_text):
         }
         payload_text = _rl_dev_canonical_json(record).lower()
         if any(marker in payload_text for marker in _RL_DEV_SECRET_MARKERS):
-            import sys
-            sys.stderr.write(
-                "research_lab_dev_snapshot_secret_material_skipped request_key="
-                + request_key
-                + "\n"
-            )
-            return
+            _rl_dev_record_failure("secret_material_rejected", request_key)
+            return False
         path = _rl_dev_snapshot_path(storage_name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
+        temporary = path + "." + str(os.getpid()) + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
             handle.write(_rl_dev_canonical_json(record))
-    except Exception:
-        pass
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        return True
+    except Exception as exc:
+        _rl_dev_record_failure("record_write_error:" + type(exc).__name__, request_key)
+        return False
 
 
 def _rl_dev_install_record():
@@ -1059,13 +1425,18 @@ def _rl_dev_install_record():
                     dict(response.headers or {}),
                     response.text,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                _rl_dev_record_failure(
+                    "requests_record_hook_error:" + type(exc).__name__
+                )
             return response
 
         _rl_requests.Session.send = _rl_dev_record_requests_send
-    except Exception:
-        pass
+    except Exception as exc:
+        if type(exc).__name__ not in ("ImportError", "ModuleNotFoundError"):
+            _rl_dev_record_failure(
+                "requests_record_hook_install_error:" + type(exc).__name__
+            )
 
     try:
         import httpx as _rl_httpx
@@ -1083,13 +1454,58 @@ def _rl_dev_install_record():
                     dict(response.headers or {}),
                     response.text,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                _rl_dev_record_failure(
+                    "httpx_record_hook_error:" + type(exc).__name__
+                )
             return response
 
         _rl_httpx.Client.send = _rl_dev_record_httpx_send
-    except Exception:
-        pass
+
+        _rl_dev_original_httpx_async_send = _rl_httpx.AsyncClient.send
+
+        async def _rl_dev_record_httpx_async_send(client, request, *args, **kwargs):
+            response = await _rl_dev_original_httpx_async_send(client, request, *args, **kwargs)
+            _rl_dev_record(
+                str(request.method or "GET"),
+                str(request.url or ""),
+                bytes(getattr(request, "content", b"") or b""),
+                response.status_code,
+                dict(response.headers or {}),
+                response.text,
+            )
+            return response
+
+        _rl_httpx.AsyncClient.send = _rl_dev_record_httpx_async_send
+    except Exception as exc:
+        if type(exc).__name__ not in ("ImportError", "ModuleNotFoundError"):
+            _rl_dev_record_failure("httpx_record_hook_error:" + type(exc).__name__)
+
+    try:
+        import aiohttp as _rl_aiohttp
+
+        _rl_dev_original_aiohttp_request = _rl_aiohttp.ClientSession._request
+
+        async def _rl_dev_record_aiohttp_request(session, method, str_or_url, *args, **kwargs):
+            response = await _rl_dev_original_aiohttp_request(
+                session, method, str_or_url, *args, **kwargs
+            )
+            body = await response.read()
+            charset = getattr(response, "charset", None) or "utf-8"
+            _rl_dev_record(
+                str(method or "GET"),
+                str(str_or_url or ""),
+                kwargs.get("data") if kwargs.get("data") is not None else kwargs.get("json"),
+                response.status,
+                dict(response.headers or {}),
+                body.decode(charset, "replace"),
+            )
+            return response
+
+        _rl_aiohttp.ClientSession._request = _rl_dev_record_aiohttp_request
+    except Exception as exc:
+        if type(exc).__name__ not in ("ImportError", "ModuleNotFoundError"):
+            _rl_dev_record_failure("aiohttp_record_hook_error:" + type(exc).__name__)
 
 
 _rl_dev_install_record()

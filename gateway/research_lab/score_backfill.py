@@ -28,6 +28,7 @@ gracefully to score-blind memory.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import Any, Mapping, Sequence
 
@@ -70,6 +71,27 @@ class GatewayCalibrationStore:
 
         return await store.insert_row(table, row)
 
+    async def select_all(
+        self,
+        table: str,
+        *,
+        columns: str = "*",
+        filters: Any,
+        order_by: Any = (),
+        batch_size: int = 500,
+        max_rows: int = 10000,
+    ):
+        from gateway.research_lab import store
+
+        return await store.select_all(
+            table,
+            columns=columns,
+            filters=filters,
+            order_by=order_by,
+            batch_size=batch_size,
+            max_rows=max_rows,
+        )
+
 
 def _float_or_none(value: Any) -> float | None:
     if isinstance(value, bool):
@@ -78,15 +100,23 @@ def _float_or_none(value: Any) -> float | None:
         result = float(value)
     except (TypeError, ValueError):
         return None
-    return result if result == result else None  # NaN guard
+    return result if math.isfinite(result) else None
 
 
 def _candidate_code_edit_doc(candidate: Mapping[str, Any]) -> Mapping[str, Any]:
+    direct = candidate.get("patch_doc")
+    if isinstance(direct, Mapping):
+        nested = direct.get("code_edit")
+        return dict(nested) if isinstance(nested, Mapping) else dict(direct)
     manifest = candidate.get("candidate_patch_manifest")
     manifest = manifest if isinstance(manifest, Mapping) else {}
-    patch_doc = manifest.get("patch_doc") if isinstance(manifest.get("patch_doc"), Mapping) else {}
-    code_edit = patch_doc.get("code_edit") if isinstance(patch_doc.get("code_edit"), Mapping) else {}
-    return code_edit
+    patch_doc = (
+        manifest.get("patch_doc")
+        if isinstance(manifest.get("patch_doc"), Mapping)
+        else {}
+    )
+    nested = patch_doc.get("code_edit")
+    return dict(nested) if isinstance(nested, Mapping) else dict(patch_doc)
 
 
 def build_calibration_row(
@@ -167,7 +197,17 @@ async def record_score_backfill(
         outcome=outcome,
         created_by=created_by,
     )
-    await store.insert_row(SCORE_CALIBRATION_TABLE, row)
+    try:
+        await store.insert_row(SCORE_CALIBRATION_TABLE, row)
+    except Exception as exc:
+        message = str(exc).lower()
+        if not any(token in message for token in ("23505", "duplicate", "unique")):
+            raise
+        return {
+            "status": "already_recorded",
+            "candidate_id": candidate_id,
+            "score_bundle_id": score_bundle_id,
+        }
     return {
         "status": "recorded",
         "candidate_id": candidate_id,
@@ -192,28 +232,44 @@ async def fetch_score_enrichments_by_node(
     if not wanted:
         return {}
     store = store or GatewayCalibrationStore()
-    enrichments: dict[str, dict[str, Any]] = {}
-    for node_id in dict.fromkeys(wanted):  # preserve order, dedupe
+    unique_node_ids = list(dict.fromkeys(wanted))
+    columns = (
+        "node_id,candidate_id,lane,plan_path_id,predicted_delta,dev_score,"
+        "realized_mean_delta,realized_delta_lcb,outcome,created_at"
+    )
+    filters = [("node_id", "in", unique_node_ids)]
+    if hasattr(store, "select_all"):
+        rows = await store.select_all(
+            SCORE_CALIBRATION_TABLE,
+            columns=columns,
+            filters=filters,
+            order_by=[("created_at", True)],
+            batch_size=500,
+            max_rows=max(1000, len(unique_node_ids) * 100),
+        )
+    else:
         rows = await store.select_many(
             SCORE_CALIBRATION_TABLE,
-            columns=(
-                "node_id,candidate_id,lane,plan_path_id,predicted_delta,dev_score,"
-                "realized_mean_delta,realized_delta_lcb,outcome,created_at"
-            ),
-            filters=[("node_id", node_id)],
+            columns=columns,
+            filters=filters,
             order_by=[("created_at", True)],
-            limit=1,
+            limit=max(1000, len(unique_node_ids) * 100),
         )
-        for row in rows or []:
-            if not isinstance(row, Mapping):
-                continue
-            enrichments[node_id] = {
-                "realized_delta": _float_or_none(row.get("realized_mean_delta")),
-                "realized_delta_lcb": _float_or_none(row.get("realized_delta_lcb")),
-                "predicted_delta": _float_or_none(row.get("predicted_delta")),
-                "dev_score": _float_or_none(row.get("dev_score")),
-                "scored_outcome": str(row.get("outcome") or "")[:80],
-            }
+    enrichments: dict[str, dict[str, Any]] = {}
+    wanted_set = set(unique_node_ids)
+    for row in rows or []:
+        if not isinstance(row, Mapping):
+            continue
+        node_id = str(row.get("node_id") or "")
+        if not node_id or node_id not in wanted_set or node_id in enrichments:
+            continue
+        enrichments[node_id] = {
+            "realized_delta": _float_or_none(row.get("realized_mean_delta")),
+            "realized_delta_lcb": _float_or_none(row.get("realized_delta_lcb")),
+            "predicted_delta": _float_or_none(row.get("predicted_delta")),
+            "dev_score": _float_or_none(row.get("dev_score")),
+            "scored_outcome": str(row.get("outcome") or "")[:80],
+        }
         if len(enrichments) >= max(1, int(limit)):
             break
     return enrichments

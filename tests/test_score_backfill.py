@@ -45,7 +45,11 @@ class _FakeStore:
         rows = [dict(row) for row in self.rows_by_table.get(table, [])]
         for spec in filters:
             field, value = spec[0], spec[-1]
-            rows = [row for row in rows if str(row.get(field)) == str(value)]
+            if len(spec) == 3 and spec[1] == "in":
+                allowed = {str(item) for item in value}
+                rows = [row for row in rows if str(row.get(field)) in allowed]
+            else:
+                rows = [row for row in rows if str(row.get(field)) == str(value)]
         for field, desc in reversed(list(order_by or ())):
             rows.sort(key=lambda row: str(row.get(field) or ""), reverse=bool(desc))
         return rows[:limit]
@@ -113,6 +117,30 @@ def test_build_calibration_row_projects_all_three_score_sources():
     assert row["score_bundle_id"] == "bundle-1"
 
 
+def test_calibration_prefers_live_patch_shape_and_rejects_non_finite_scores():
+    candidate = {
+        **_scored_candidate(),
+        "patch_doc": {"lane": "direct-lane", "plan_path_id": "direct-path"},
+        "hypothesis_doc": {"predicted_delta": float("inf")},
+        "candidate_build_doc": {
+            "loop_node_id": "node-direct",
+            "loop_dev_score": float("nan"),
+        },
+    }
+    bundle = {"aggregates": {"mean_delta": "nan", "delta_lcb": "inf"}}
+    row = build_calibration_row(
+        candidate=candidate,
+        score_bundle=bundle,
+        score_bundle_id="bundle-direct",
+    )
+    assert row["lane"] == "direct-lane"
+    assert row["plan_path_id"] == "direct-path"
+    assert row["predicted_delta"] is None
+    assert row["dev_score"] is None
+    assert row["realized_mean_delta"] is None
+    assert row["realized_delta_lcb"] is None
+
+
 def test_record_score_backfill_is_flag_gated(monkeypatch):
     monkeypatch.delenv(SCORE_BACKFILL_ENABLED_ENV, raising=False)
     store = _FakeStore()
@@ -158,6 +186,37 @@ def test_record_score_backfill_persists_once(monkeypatch):
     assert row["outcome"] == "promotion_approved"
 
 
+def test_record_score_backfill_treats_uniqueness_race_as_success(monkeypatch):
+    monkeypatch.setenv(SCORE_BACKFILL_ENABLED_ENV, "true")
+
+    class _RaceStore(_FakeStore):
+        async def insert_row(self, table, row):
+            await asyncio.sleep(0)
+            if self.inserted:
+                raise RuntimeError("23505 duplicate key violates unique constraint")
+            self.inserted.append((table, dict(row)))
+            return dict(row)
+
+    store = _RaceStore()
+
+    async def _run():
+        return await asyncio.gather(
+            *(
+                record_score_backfill(
+                    candidate=_scored_candidate(),
+                    score_bundle_row={"score_bundle_id": "bundle-1"},
+                    score_bundle=_score_bundle(),
+                    store=store,
+                )
+                for _index in range(2)
+            )
+        )
+
+    results = asyncio.run(_run())
+    assert {row["status"] for row in results} == {"recorded", "already_recorded"}
+    assert len(store.inserted) == 1
+
+
 def test_fetch_score_enrichments_returns_newest_row_per_node(monkeypatch):
     store = _FakeStore(
         {
@@ -189,6 +248,35 @@ def test_fetch_score_enrichments_returns_newest_row_per_node(monkeypatch):
     assert set(enrichments) == {"node-1"}
     assert enrichments["node-1"]["realized_delta"] == 0.25
     assert enrichments["node-1"]["scored_outcome"] == "promotion_approved"
+
+
+def test_fetch_score_enrichments_bulk_loads_all_nodes_in_one_query():
+    class _BulkStore:
+        def __init__(self):
+            self.calls = []
+
+        async def select_all(self, table, **kwargs):
+            self.calls.append((table, kwargs))
+            return [
+                {
+                    "node_id": f"node-{index}",
+                    "realized_mean_delta": index / 100,
+                    "realized_delta_lcb": 0.0,
+                    "created_at": "2026-07-06T00:00:00Z",
+                }
+                for index in range(40)
+            ]
+
+    store = _BulkStore()
+    node_ids = [f"node-{index}" for index in range(40)]
+    enrichments = asyncio.run(
+        fetch_score_enrichments_by_node(node_ids, store=store, limit=50)
+    )
+    assert len(enrichments) == 40
+    assert len(store.calls) == 1
+    table, kwargs = store.calls[0]
+    assert table == SCORE_CALIBRATION_TABLE
+    assert kwargs["filters"] == [("node_id", "in", node_ids)]
 
 
 def _reflection_event_row(*, node_id: str, created_at: str) -> dict[str, Any]:

@@ -561,42 +561,29 @@ async def test_v2_dev_replay_is_byte_identical_to_existing_dev_calculation(tmp_p
     dev_items = [
         {
             "icp": {
-                "icp_id": "dev-1",
+                "icp_id": f"dev-{index}",
                 "industry": "Software Development",
-                "sub_industry": "DevOps Tooling",
+                "sub_industry": f"DevOps Tooling {index}",
                 "product_service": "CI/CD platform",
                 "geography": "United States",
                 "country": "United States",
                 "employee_count": "51-200",
-                "intent_signals": ["Hiring a DevOps engineer"],
+                "intent_signals": [f"Hiring platform engineer {index}"],
             },
-            "icp_ref": "dev_set:1",
-            "icp_hash": "sha256:" + "1" * 64,
-        },
-        {
-            "icp": {
-                "icp_id": "dev-2",
-                "industry": "Software Development",
-                "sub_industry": "DevOps Tooling",
-                "product_service": "CI/CD platform",
-                "geography": "United States",
-                "country": "United States",
-                "employee_count": "51-200",
-                "intent_signals": ["Hiring a platform engineer"],
-            },
-            "icp_ref": "dev_set:2",
-            "icp_hash": "sha256:" + "2" * 64,
-        },
+            "icp_ref": f"dev_set:{index}",
+            "icp_hash": "sha256:" + str(index) * 64,
+        }
+        for index in range(1, 9)
     ]
     snapshot_root = tmp_path / "snapshot-set"
     record_store = ProviderSnapshotStore(str(snapshot_root), mode=MODE_RECORD)
+    record_store.write_dev_icp_items(dev_items)
     manifest = record_store.build_manifest(
         icp_set_hash=compute_dev_set_hash(dev_items),
         dev_set_manifest={"manifest_type": "research_lab_dev_icp_set"},
         recorded_at="2026-07-10T00:00:00Z",
     )
     record_store.write_manifest(manifest)
-    record_store.write_dev_icp_items(dev_items)
     snapshot_bundle = build_source_bundle_v2(snapshot_root)
     source_bundle = build_source_bundle_v2(source)
 

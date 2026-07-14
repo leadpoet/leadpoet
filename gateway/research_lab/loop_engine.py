@@ -997,6 +997,7 @@ def _safe_budget_doc(value: Mapping[str, Any]) -> dict[str, Any]:
         "continue_from_run_id",
         "continuation_context",
         "topup_reason",
+        "inner_loop_policy",
     }
     return {key: value[key] for key in allowed if key in value}
 

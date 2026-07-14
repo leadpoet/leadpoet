@@ -338,7 +338,7 @@ def test_replay_bootstrap_strict_miss_fails_loudly(tmp_path):
         check=False,
     )
     assert completed.returncode != 0
-    assert "no recorded provider snapshot for request" in completed.stderr
+    assert "RESEARCH_LAB_DEV_SNAPSHOT_MISS:" in completed.stderr
 
 
 def test_record_bootstrap_persists_response_and_skips_secret_material(tmp_path):
@@ -372,7 +372,16 @@ def test_record_bootstrap_persists_response_and_skips_secret_material(tmp_path):
     # The clean response persisted; the one carrying secret material did not.
     assert decoded["count"] == 1
     assert decoded["bodies"] == ['{"results": [1]}']
-    assert "research_lab_dev_snapshot_secret_material_skipped" in completed.stderr
+    failures = [
+        json.loads(line)
+        for line in (snapshot_dir / "record_failures.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    assert len(failures) == 1
+    assert failures[0]["reason"] == "secret_material_rejected"
+    assert failures[0]["request_key"].startswith("exa|GET|api.exa.ai/search|")
 
 
 def test_replay_bootstrap_inert_without_snapshot_dir_env():
@@ -582,7 +591,8 @@ async def test_evaluate_dev_empty_policy_yields_zero_companies_not_miss(tmp_path
     )
     row = result.per_icp[0]
     assert row["snapshot_miss"] is False
-    assert row["failure_reason"] == "dev_zero_companies"
+    assert row["failure_reason"] == ""
+    assert row["zero_output"] is True
     assert row["dev_score"] == 0.0
 
 
@@ -635,6 +645,7 @@ async def test_evaluate_dev_manifest_verification(tmp_path):
             require_manifest=True,
         )
 
+    recorder.write_dev_icp_items(items)
     manifest = recorder.build_manifest(icp_set_hash=compute_dev_set_hash(items))
     recorder.write_manifest(manifest)
     result = await evaluate_dev(
@@ -711,6 +722,52 @@ def test_build_dev_icp_set_is_deterministic_per_seed():
     assert first.manifest["manifest_hash"] == sha256_json(payload)
 
 
+def test_build_dev_icp_set_deterministically_maximizes_available_diversity():
+    dimensions = [
+        ("Software Development", "DevOps", "United States", "51-200"),
+        ("Financial Services", "Payments", "United Kingdom", "201-500"),
+        ("Hospitals and Health Care", "Telehealth", "Canada", "11-50"),
+        ("Manufacturing", "Industrial Automation", "Germany", "501-1,000"),
+    ]
+    rows = []
+    for index in range(12):
+        industry, sub_industry, country, employee_count = dimensions[
+            0 if index < 9 else index - 8
+        ]
+        icp = {
+            **_dev_icp(index),
+            "industry": industry,
+            "sub_industry": sub_industry,
+            "country": country,
+            "geography": country,
+            "employee_count": employee_count,
+        }
+        rows.append(
+            {
+                "icp": icp,
+                "icp_ref": f"diverse:{index}",
+                "icp_hash": sha256_json({"icp": icp}),
+            }
+        )
+
+    selected = build_dev_icp_set(
+        rows,
+        exclude_window_hashes=[],
+        size=4,
+        seed="diversity-proof",
+    )
+    assert len({row["icp"]["industry"] for row in selected.items}) == 4
+    assert len({row["icp"]["country"] for row in selected.items}) == 4
+    assert len({row["icp"]["employee_count"] for row in selected.items}) == 4
+    assert selected.manifest["selection_policy"] == "seeded_greedy_diversity_v1"
+    assert selected.manifest["diversity_proof"]["selected_unique_counts"] == {
+        "industry": 4,
+        "sub_industry": 4,
+        "country_or_geography": 4,
+        "employee_count": 4,
+    }
+
+
 def test_build_dev_icp_set_fails_when_exclusions_starve_the_pool():
     source = _dev_items(4)
     exclusions = [item["icp_hash"] for item in source[:3]]
@@ -728,6 +785,7 @@ def test_manifest_round_trip_and_tamper_detection(tmp_path):
     _record_companies_response(recorder, "acme", [_rich_company()])
     _record_companies_response(recorder, "globex", [_medium_company()])
     dev_set = build_dev_icp_set(_dev_items(4), exclude_window_hashes=[], size=2, seed="dev-v1")
+    recorder.write_dev_icp_items(dev_set.items)
     manifest = recorder.build_manifest(
         icp_set_hash=dev_set.dev_set_hash,
         dev_set_manifest=dev_set.manifest,

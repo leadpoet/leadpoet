@@ -18,6 +18,7 @@ def test_execution_config_round_trips_every_non_secret_behavior_field():
     source = replace(
         ResearchLabGatewayConfig(),
         improvement_threshold_points=3.25,
+        inner_loop_mode="rank",
         loop_planner_model="openai/test-model",
         loop_planner_fallback_models=("model/a", "model/b"),
         reimbursement_epochs=37,
@@ -41,6 +42,7 @@ def test_execution_config_round_trips_every_non_secret_behavior_field():
     assert "must-not-cross-boundary" not in str(document)
     assert "https://user:password@proxy.invalid" not in str(document)
     assert document["deployment"] == {"network": "finney", "netuid": 71}
+    assert document["fields"]["inner_loop_mode"] == "rank"
 
 
 def test_execution_config_rejects_tampering_and_secret_material():

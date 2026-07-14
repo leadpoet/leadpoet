@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -36,6 +37,8 @@ from research_lab.eval import PrivateModelArtifactManifest
 PARENT_HASH = "sha256:" + "a" * 64
 S3_MANIFEST_URI = "s3://test-bucket/research-lab/sourcing-model/manifest.json"
 DEV_SCORE_VERSION = "research-lab-dev-eval-mechanical-v1"
+DEV_MANIFEST_HASH = "sha256:" + "6" * 64
+DEV_SET_HASH = "sha256:" + "7" * 64
 
 _DEV_ENVS = (
     "RESEARCH_LAB_LOOP_MULTI_CANDIDATE_DRAFTS",
@@ -229,11 +232,82 @@ class _ScriptedDevEvaluator:
             return "not-a-mapping"
         if outcome is None:
             return {"note": "result without a score"}
-        return {
+        commitment_payload = {
+            "schema_version": "research_lab.dev_score_commitment.v1",
             "dev_score_version": DEV_SCORE_VERSION,
+            "dev_set_hash": DEV_SET_HASH,
+            "snapshot_manifest_hash": DEV_MANIFEST_HASH,
+            "miss_policy": "strict",
+        }
+        return {
+            **commitment_payload,
             "aggregate_dev_score": float(outcome),
+            "eligible": True,
+            "icp_count": 8,
+            "scored_icp_count": 8,
+            "execution_coverage": 1.0,
+            "snapshot_miss_count": 0,
+            "true_miss_count": 0,
+            "failure_count": 0,
+            "zero_output_count": 0,
+            "score_commitment": sha256_json(commitment_payload),
             "ranking_only": True,
         }
+
+
+class _AttestedScriptedDevEvaluator(_ScriptedDevEvaluator):
+    async def __call__(self, candidate):
+        result = await super().__call__(candidate)
+        return {
+            "result": result,
+            "receipt_graph": {
+                "root_receipt_hash": "sha256:" + "8" * 64,
+            },
+        }
+
+
+def _inner_loop_policy(*, phase: str = "rank", candidate_width: int = 3) -> dict[str, Any]:
+    evaluator_payload = {
+        "schema_version": "research_lab.inner_loop_evaluator_commitment.v1",
+        "effective_phase": phase,
+        "snapshot_manifest_hash": DEV_MANIFEST_HASH,
+        "dev_set_hash": DEV_SET_HASH,
+        "dev_set_size": 8,
+        "miss_policy": "strict",
+        "strict_fallback": True,
+    }
+    evaluator_commitment = {
+        **evaluator_payload,
+        "commitment_hash": sha256_json(evaluator_payload),
+    }
+    return {
+        "schema_version": "research_lab.inner_loop_policy.v1",
+        "effective_phase": phase,
+        "evaluator_enabled": True,
+        "ranking_enabled": phase == "rank",
+        "shadow_enabled": phase == "shadow",
+        "candidate_width": candidate_width,
+        "paid_finalist_count": 1,
+        "strict_fallback": True,
+        "snapshot_manifest_hash": DEV_MANIFEST_HASH,
+        "dev_set_hash": DEV_SET_HASH,
+        "dev_set_size": 8,
+        "evaluation_timeout_seconds": 300,
+        "finalization_reserve_seconds": 120,
+        "evaluator_commitment": evaluator_commitment,
+        "evidence": {"rank_healthy_runs": 50},
+    }
+
+
+def _eligible_dev_evaluation(*, phase: str = "rank") -> dict[str, Any]:
+    return {
+        "schema_version": "research_lab.inner_loop_candidate_evaluation.v1",
+        "eligible": True,
+        "eligibility_reason": "eligible",
+        "evaluator_commitment": _inner_loop_policy(phase=phase)[
+            "evaluator_commitment"
+        ],
+    }
 
 
 def _source_context(tmp_path: Path) -> ParentImageSourceContext:
@@ -262,6 +336,7 @@ def _run_engine(
     manifest_uri: str = "file:///local/manifest.json",
     validate_reject_marker: str | None = None,
     resume_state=None,
+    inner_loop_phase: str = "rank",
 ):
     caller = _FakeCaller(draft_responses)
     events: list[Any] = []
@@ -300,7 +375,19 @@ def _run_engine(
             component_registry=_registry_doc(),
             benchmark_public_summary={"aggregate": 12.0},
             model_id="test-model",
-            budget_context={"requested_compute_budget_usd": 5.0},
+            budget_context={
+                "requested_compute_budget_usd": 5.0,
+                **(
+                    {
+                        "inner_loop_policy": _inner_loop_policy(
+                            phase=inner_loop_phase,
+                            candidate_width=max_candidates,
+                        )
+                    }
+                    if os.getenv("RESEARCH_LAB_DEV_SNAPSHOT_URI")
+                    else {}
+                ),
+            },
             requested_loop_count=1,
             resume_state=resume_state,
         )
@@ -595,6 +682,22 @@ def test_dev_score_feeds_within_run_memory(tmp_path, monkeypatch):
     assert "33.25" in draft_texts[1]
 
 
+def test_attested_dev_receipt_root_survives_events_and_checkpoint(tmp_path, monkeypatch):
+    _enable_dev_eval(monkeypatch)
+    result, events, _caller, _builder = _run_engine(
+        tmp_path,
+        draft_responses=[_draft_response([_candidate_doc(0)])],
+        dev_evaluator=_AttestedScriptedDevEvaluator([41.5]),
+    )
+
+    expected_root = "sha256:" + "8" * 64
+    assert result.selected_candidates[0].dev_evaluation["receipt_root"] == expected_root
+    build_event = _events_of(events, "candidate_build_passed")[0]
+    assert build_event.event_doc["dev_evaluation"]["receipt_root"] == expected_root
+    checkpoint = _events_of(events, "checkpoint_saved")[-1].event_doc["checkpoint"]
+    assert checkpoint["selected_candidates"][0]["dev_evaluation"]["receipt_root"] == expected_root
+
+
 def test_dev_eval_off_keeps_docs_dev_free(tmp_path):
     result, events, _caller, _builder = _run_engine(
         tmp_path,
@@ -622,7 +725,7 @@ def test_dev_eval_skipped_without_snapshot_uri(tmp_path, monkeypatch):
     assert evaluator.calls == []
 
 
-def test_dev_eval_unwired_seam_skips_silently(tmp_path, monkeypatch):
+def test_dev_eval_unwired_seam_is_visible_and_preserves_candidate(tmp_path, monkeypatch):
     _enable_dev_eval(monkeypatch)
     result, events, _caller, _builder = _run_engine(
         tmp_path,
@@ -631,17 +734,24 @@ def test_dev_eval_unwired_seam_skips_silently(tmp_path, monkeypatch):
     )
     assert result.status == "completed"
     assert result.selected_candidates[0].dev_score is None
-    assert "dev_score" not in json.dumps(
-        _events_of(events, "candidate_build_passed")[0].event_doc, default=str
-    )
+    build_event = _events_of(events, "candidate_build_passed")[0].event_doc
+    assert build_event["dev_score"] is None
+    assert build_event["dev_evaluation"]["eligible"] is False
+    assert build_event["dev_evaluation"]["eligibility_reason"] == "dev_evaluator_unwired"
 
 
 # ---------------------------------------------------------------------------
-# §6.3-1 ranking (scored beat unscored; desc; tie stability)
+# §6.3-1 strict terminal ranking
 # ---------------------------------------------------------------------------
 
 
-def _built_candidate(index: int, dev_score: float | None = None) -> engine.BuiltCodeEditCandidate:
+def _built_candidate(
+    index: int,
+    dev_score: float | None = None,
+    *,
+    phase: str = "rank",
+    eligible: bool = True,
+) -> engine.BuiltCodeEditCandidate:
     draft = CodeEditDraft(
         failure_mode="weak sourcing recall",
         mechanism=f"mechanism {index}",
@@ -670,51 +780,78 @@ def _built_candidate(index: int, dev_score: float | None = None) -> engine.Built
         iteration=index + 1,
         dev_score=dev_score,
         dev_score_version=DEV_SCORE_VERSION if dev_score is not None else "",
+        dev_evaluation=(
+            _eligible_dev_evaluation(phase=phase)
+            if dev_score is not None and eligible
+            else {}
+        ),
     )
 
 
-def test_rank_orders_scored_desc_then_unscored_in_build_order():
+def test_rank_incomplete_evaluations_preserve_build_order():
     unscored_a = _built_candidate(0)
     low = _built_candidate(1, dev_score=5.0)
     unscored_b = _built_candidate(2)
     high = _built_candidate(3, dev_score=9.0)
-    ranked = engine._rank_selected_by_dev_score([unscored_a, low, unscored_b, high])
+    ranked, decision = engine.select_inner_loop_candidates(
+        [unscored_a, low, unscored_b, high], _inner_loop_policy()
+    )
     assert [c.node_id for c in ranked] == [
-        high.node_id,
-        low.node_id,
         unscored_a.node_id,
+        low.node_id,
         unscored_b.node_id,
+        high.node_id,
     ]
+    assert decision["ranking_applied"] is False
+    assert decision["strict_fallback_applied"] is True
 
 
 def test_rank_is_stable_for_ties():
     tie_first = _built_candidate(0, dev_score=7.0)
     top = _built_candidate(1, dev_score=9.0)
     tie_second = _built_candidate(2, dev_score=7.0)
-    ranked = engine._rank_selected_by_dev_score([tie_first, top, tie_second])
+    ranked, decision = engine.select_inner_loop_candidates(
+        [tie_first, top, tie_second], _inner_loop_policy()
+    )
     assert [c.node_id for c in ranked] == [top.node_id, tie_first.node_id, tie_second.node_id]
+    assert decision["ranking_applied"] is True
 
 
-def test_rank_noop_with_zero_scores():
+def test_rank_noop_without_two_fully_evaluated_candidates():
     unscored = _built_candidate(0)
     trailing = _built_candidate(2)
-    assert engine._rank_selected_by_dev_score([]) == []
-    assert engine._rank_selected_by_dev_score([unscored, trailing]) == [unscored, trailing]
+    assert engine.select_inner_loop_candidates([], _inner_loop_policy())[0] == []
+    assert engine.select_inner_loop_candidates(
+        [unscored, trailing], _inner_loop_policy()
+    )[0] == [unscored, trailing]
 
 
-def test_rank_single_scored_outranks_unscored():
-    # The per-iteration cap truncation keeps only the head of this list, so a
-    # lone scored candidate must move ahead of earlier unscored builds — an
-    # unscored build must never displace the only build with evidence.
+def test_rank_never_uses_a_lone_score():
     unscored = _built_candidate(0)
     scored = _built_candidate(1, dev_score=7.0)
     trailing = _built_candidate(2)
-    ranked = engine._rank_selected_by_dev_score([unscored, scored, trailing])
+    ranked, decision = engine.select_inner_loop_candidates(
+        [unscored, scored, trailing], _inner_loop_policy()
+    )
     assert [c.node_id for c in ranked] == [
-        scored.node_id,
         unscored.node_id,
+        scored.node_id,
         trailing.node_id,
     ]
+    assert decision["fallback_reason"] == "incomplete_or_mismatched_candidate_evaluations"
+
+
+def test_shadow_records_hypothetical_winner_but_keeps_first():
+    first = _built_candidate(0, dev_score=5.0, phase="shadow")
+    best = _built_candidate(1, dev_score=9.0, phase="shadow")
+    ordered, decision = engine.select_inner_loop_candidates(
+        [first, best], _inner_loop_policy(phase="shadow", candidate_width=2)
+    )
+    assert ordered == [first, best]
+    assert decision["hypothetical_winner_node_id"] == best.node_id
+    assert decision["actual_paid_candidate_node_id"] == first.node_id
+    assert decision["ranking_applied"] is False
+    assert decision["strict_fallback_applied"] is False
 
 
 def test_run_ranks_selected_by_dev_score_desc(tmp_path, monkeypatch):
@@ -739,7 +876,7 @@ def test_run_ranks_selected_by_dev_score_desc(tmp_path, monkeypatch):
     assert selected_events[0].node_id == result.selected_candidates[0].node_id
 
 
-def test_run_scored_candidates_rank_ahead_of_unscored(tmp_path, monkeypatch):
+def test_run_partial_evaluation_preserves_build_order(tmp_path, monkeypatch):
     _enable_dev_eval(monkeypatch)
     # Second build's evaluation crashes → unscored; two other builds carry scores.
     evaluator = _ScriptedDevEvaluator([5.0, RuntimeError("dev harness down"), 7.0])
@@ -755,16 +892,18 @@ def test_run_scored_candidates_rank_ahead_of_unscored(tmp_path, monkeypatch):
         dev_evaluator=evaluator,
     )
     assert result.status == "completed"
-    assert [candidate.dev_score for candidate in result.selected_candidates] == [7.0, 5.0, None]
-    assert result.selected_candidates[2].draft.unified_diff == _diff(1)
+    assert [candidate.dev_score for candidate in result.selected_candidates] == [5.0, None, 7.0]
+    assert [candidate.draft.unified_diff for candidate in result.selected_candidates] == [
+        _diff(0),
+        _diff(1),
+        _diff(2),
+    ]
 
 
-def test_run_cap_one_lone_scored_build_survives_truncation(tmp_path, monkeypatch):
-    # Build-and-discard shape (cap=1, stop-at-cap off, min-runtime gates keep
-    # the loop searching): the first build's evaluation fails (unscored), the
-    # second scores. The per-iteration cap truncation must keep the scored
-    # build — the run's only candidate with evidence — not the earlier
-    # unscored one.
+def test_run_cap_one_lone_score_cannot_displace_first_build(tmp_path, monkeypatch):
+    # This deliberately exercises the non-production build-and-discard shape.
+    # Strict fallback still keeps the ordinary first candidate when one of the
+    # two evaluations is incomplete.
     _enable_dev_eval(monkeypatch)
     monkeypatch.setenv("RESEARCH_LAB_LOOP_STOP_AT_CANDIDATE_CAP", "false")
     evaluator = _ScriptedDevEvaluator([RuntimeError("dev harness down"), 90.0])
@@ -784,8 +923,8 @@ def test_run_cap_one_lone_scored_build_survives_truncation(tmp_path, monkeypatch
     assert len(_events_of(events, "candidate_build_passed")) == 2
     assert len(result.selected_candidates) == 1
     finalist = result.selected_candidates[0]
-    assert finalist.dev_score == 90.0
-    assert finalist.draft.unified_diff == _diff(1)
+    assert finalist.dev_score is None
+    assert finalist.draft.unified_diff == _diff(0)
 
 
 def test_run_cap_one_all_unscored_keeps_build_order(tmp_path, monkeypatch):
@@ -838,6 +977,7 @@ def test_rehydration_round_trip_with_dev_fields(fake_boto3):
             build=_round_trip_build(),
             dev_score=41.5,
             dev_score_version=DEV_SCORE_VERSION,
+            dev_evaluation=_eligible_dev_evaluation(),
         )
     )
     (_ref, body) = next(iter(fake_boto3.items()))
@@ -847,6 +987,7 @@ def test_rehydration_round_trip_with_dev_fields(fake_boto3):
     candidate = engine._rehydrated_candidate_from_artifact_payload(payload)
     assert candidate.dev_score == 41.5
     assert candidate.dev_score_version == DEV_SCORE_VERSION
+    assert candidate.dev_evaluation["eligible"] is True
     assert doc["loop_candidate_artifact_hash"]
 
 
@@ -882,6 +1023,7 @@ def test_rehydration_hash_guard_covers_dev_fields(fake_boto3):
             build=_round_trip_build(),
             dev_score=41.5,
             dev_score_version=DEV_SCORE_VERSION,
+            dev_evaluation=_eligible_dev_evaluation(),
         )
     )
     (_ref, body) = next(iter(fake_boto3.items()))
@@ -902,6 +1044,7 @@ def test_restore_selected_from_resume_restores_dev_fields(fake_boto3):
             build=_round_trip_build(),
             dev_score=41.5,
             dev_score_version=DEV_SCORE_VERSION,
+            dev_evaluation=_eligible_dev_evaluation(),
         )
     )
     plain_doc = asyncio.run(
@@ -915,8 +1058,21 @@ def test_restore_selected_from_resume_restores_dev_fields(fake_boto3):
         )
     )
     loop_engine = engine.CodeEditLoopEngine(
-        settings=object(), call_openrouter=None, event_sink=None, builder=None
+        settings=AutoResearchLoopSettings(
+            min_seconds=0,
+            max_seconds=300,
+            min_iterations=1,
+            max_iterations=1,
+            draft_timeout_seconds=30,
+            reflection_timeout_seconds=30,
+            estimated_iteration_cost_usd=0.01,
+            max_candidates=3,
+        ),
+        call_openrouter=None,
+        event_sink=None,
+        builder=None,
     )
+    loop_engine._inner_loop_policy = _inner_loop_policy()
     restored = asyncio.run(
         loop_engine._restore_selected_from_resume(
             resume={
@@ -963,6 +1119,7 @@ def test_resume_seeds_dev_scores_into_memory_and_ranking(tmp_path, fake_boto3, m
             build=_round_trip_build(),
             dev_score=41.5,
             dev_score_version=DEV_SCORE_VERSION,
+            dev_evaluation=_eligible_dev_evaluation(),
         )
     )
     scored_b = asyncio.run(
@@ -975,6 +1132,7 @@ def test_resume_seeds_dev_scores_into_memory_and_ranking(tmp_path, fake_boto3, m
             build=_built_candidate(1).build,
             dev_score=40.0,
             dev_score_version=DEV_SCORE_VERSION,
+            dev_evaluation=_eligible_dev_evaluation(),
         )
     )
     resume_state = {
@@ -1167,9 +1325,10 @@ def test_dev_eval_exception_never_fails_the_run(tmp_path, monkeypatch):
     assert len(result.selected_candidates) == 1
     assert result.selected_candidates[0].dev_score is None
     assert len(_events_of(events, "candidate_build_passed")) == 1
-    assert "dev_score" not in json.dumps(
-        _events_of(events, "candidate_build_passed")[0].event_doc, default=str
-    )
+    build_event = _events_of(events, "candidate_build_passed")[0].event_doc
+    assert build_event["dev_score"] is None
+    assert build_event["dev_evaluation"]["eligible"] is False
+    assert build_event["dev_evaluation"]["unclassified_error"] is True
 
 
 @pytest.mark.parametrize("outcome", ["garbage", None, float("nan")])

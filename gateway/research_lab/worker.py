@@ -39,6 +39,14 @@ from gateway.research_lab.config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS,
 from gateway.research_lab.dev_eval_runner import (
     build_attested_code_edit_dev_evaluator_v2,
     build_code_edit_dev_evaluator,
+    dev_eval_runner_enabled,
+    dev_eval_total_timeout_seconds,
+    snapshot_readiness,
+)
+from gateway.research_lab.inner_loop_activation import (
+    configured_inner_loop_mode,
+    record_inner_loop_event,
+    resolve_inner_loop_policy,
 )
 from gateway.research_lab.key_vault import (
     OpenRouterKeyVaultError,
@@ -78,6 +86,7 @@ from gateway.research_lab.public_activity import (
     reproject_stale_public_cards,
     safe_project_public_loop_activity,
 )
+from gateway.research_lab.snapshot_refresh import maybe_refresh_dev_snapshot
 from gateway.research_lab.reimbursement_awards import (
     cost_evidence_actual_microusd,
     cost_evidence_cost_ledger,
@@ -347,6 +356,16 @@ def _env_int(name: str, default: int) -> int:
 
 class HostedResearchLabWorkerError(RuntimeError):
     """Raised when a hosted Research Lab run cannot complete safely."""
+
+
+def _single_paid_finalist_candidates(
+    candidates: Sequence[Any], paid_finalist_count: int
+) -> tuple[Any, ...]:
+    if int(paid_finalist_count) != 1:
+        raise HostedResearchLabWorkerError(
+            "inner-loop paid finalist invariant requires exactly one candidate"
+        )
+    return tuple(candidates[:1])
 
 
 class RetryableHostedResearchLabWorkerError(HostedResearchLabWorkerError):
@@ -1566,6 +1585,18 @@ class ResearchLabHostedWorker:
                 str(exc)[:200],
             )
         try:
+            await maybe_refresh_dev_snapshot(
+                self.config,
+                worker_index=int(self.config.hosted_worker_index or 0),
+            )
+        except Exception as exc:
+            logger.warning(
+                "research_lab_periodic_dev_snapshot_refresh_failed "
+                "worker_ref=%s error=%s",
+                self.worker_ref,
+                str(exc)[:200],
+            )
+        try:
             await reconcile_pending_champion_rewards(
                 self.config, worker_ref=self.worker_ref, dry_run=False
             )
@@ -2033,12 +2064,67 @@ class ResearchLabHostedWorker:
         _tier, model_id, model_doc = self.config.resolve_auto_research_model(
             str(budget_context.get("research_model_tier") or "")
         )
-        max_candidates = self._max_candidates_for_run(budget_context, model_doc)
-        paid_finalist_count = self._paid_finalist_count_for_run(model_doc, max_candidates)
+        configured_max_candidates = self._max_candidates_for_run(
+            budget_context, model_doc
+        )
+        configured_paid_finalist_count = self._paid_finalist_count_for_run(
+            model_doc, configured_max_candidates
+        )
         resume_state = await latest_auto_research_checkpoint(context.run_id)
 
         active_start = await load_active_private_model(self.config, register_bootstrap=True)
         artifact = active_start.artifact
+        requested_inner_loop_mode = configured_inner_loop_mode(
+            self.config.inner_loop_mode
+        )
+        readiness: dict[str, Any] = {
+            "ready": False,
+            "reason": "inner_loop_mode_off",
+        }
+        if requested_inner_loop_mode != "off":
+            readiness = await asyncio.to_thread(
+                snapshot_readiness,
+                str(os.getenv("RESEARCH_LAB_DEV_SNAPSHOT_URI") or ""),
+            )
+            if readiness.get("ready") and str(
+                readiness.get("champion_image_digest") or ""
+            ) != str(artifact.image_digest or ""):
+                readiness = {
+                    **readiness,
+                    "ready": False,
+                    "reason": "snapshot_champion_image_differs_from_active_model",
+                }
+        inner_loop_policy = await resolve_inner_loop_policy(
+            requested_mode=requested_inner_loop_mode,
+            snapshot_readiness=readiness,
+            dev_eval_kill_switch_enabled=dev_eval_runner_enabled(),
+            configured_candidate_width=configured_max_candidates,
+            configured_paid_finalist_count=configured_paid_finalist_count,
+            stop_at_candidate_cap_enabled=(
+                str(
+                    os.getenv("RESEARCH_LAB_LOOP_STOP_AT_CANDIDATE_CAP")
+                    or "true"
+                ).strip().lower()
+                in {"1", "true", "yes", "on"}
+            ),
+            evaluation_timeout_seconds=dev_eval_total_timeout_seconds(),
+        )
+        max_candidates = int(inner_loop_policy.candidate_width)
+        paid_finalist_count = int(inner_loop_policy.paid_finalist_count)
+        budget_context["inner_loop_policy"] = inner_loop_policy.to_dict()
+        logger.info(
+            "research_lab_inner_loop_policy run_id=%s requested_mode=%s phase=%s "
+            "candidate_width=%s paid_finalists=%s evaluator_enabled=%s "
+            "fallback_reason=%s snapshot_hash=%s",
+            context.run_id,
+            requested_inner_loop_mode,
+            inner_loop_policy.effective_phase,
+            max_candidates,
+            paid_finalist_count,
+            inner_loop_policy.evaluator_enabled,
+            inner_loop_policy.fallback_reason or "none",
+            inner_loop_policy.snapshot_manifest_hash[:24],
+        )
         # If the active model changed since this run was paused, the checkpoint is stale;
         # restart from scratch against the current model rather than resuming a stale parent.
         resume_state = self._validate_resume_state_freshness(resume_state, artifact, context.run_id)
@@ -2326,7 +2412,11 @@ class ResearchLabHostedWorker:
                 await resolve_research_lab_evaluation_epoch()
             )
             if legacy_v1_enabled():
-                dev_evaluator = build_code_edit_dev_evaluator()
+                dev_evaluator = (
+                    build_code_edit_dev_evaluator()
+                    if inner_loop_policy.evaluator_enabled
+                    else None
+                )
                 loop_result = await CodeEditLoopEngine(
                     settings=loop_settings,
                     call_openrouter=_call_legacy_loop_model,
@@ -2353,9 +2443,13 @@ class ResearchLabHostedWorker:
                 )
                 autoresearch_authority: dict[str, Any] = {}
             else:
-                dev_evaluator = build_attested_code_edit_dev_evaluator_v2(
-                    epoch_id=evaluation_epoch,
-                    worker_index=int(self.config.hosted_worker_index or 0),
+                dev_evaluator = (
+                    build_attested_code_edit_dev_evaluator_v2(
+                        epoch_id=evaluation_epoch,
+                        worker_index=int(self.config.hosted_worker_index or 0),
+                    )
+                    if inner_loop_policy.evaluator_enabled
+                    else None
                 )
                 openrouter_guard = await verify_openrouter_guard_v2(
                     key_ref=context.openrouter_key_ref,
@@ -2450,6 +2544,128 @@ class ResearchLabHostedWorker:
                     checkpoint_doc=loop_result.checkpoint_doc or latest_checkpoint,
                     reason="maintenance_pause_checkpointed",
                 )
+            inner_loop_selection: dict[str, Any] = {}
+            candidate_eval_docs: list[dict[str, Any]] = []
+            for recorded in reversed(recorded_loop_events):
+                event_doc = (
+                    dict(recorded.get("event_doc") or {})
+                    if isinstance(recorded.get("event_doc"), Mapping)
+                    else {}
+                )
+                if not inner_loop_selection and isinstance(
+                    event_doc.get("inner_loop_selection"), Mapping
+                ):
+                    inner_loop_selection = dict(event_doc["inner_loop_selection"])
+                if (
+                    recorded.get("event_type") == "candidate_build_passed"
+                    and isinstance(event_doc.get("dev_evaluation"), Mapping)
+                ):
+                    candidate_eval_docs.append(dict(event_doc["dev_evaluation"]))
+
+            candidate_count = int(
+                inner_loop_selection.get("candidate_count")
+                or len(loop_result.selected_candidates)
+            )
+            eligible_candidate_count = int(
+                inner_loop_selection.get("eligible_candidate_count") or 0
+            )
+            unclassified_error_count = sum(
+                1 for doc in candidate_eval_docs if doc.get("unclassified_error")
+            )
+            snapshot_miss_count = sum(
+                int(doc.get("snapshot_miss_count") or 0)
+                for doc in candidate_eval_docs
+            )
+            true_miss_count = sum(
+                int(doc.get("true_miss_count") or 0)
+                for doc in candidate_eval_docs
+            )
+            evaluation_failure_count = sum(
+                int(doc.get("failure_count") or 0)
+                for doc in candidate_eval_docs
+            )
+            zero_output_count = sum(
+                int(doc.get("zero_output_count") or 0)
+                for doc in candidate_eval_docs
+            )
+            silent_miss_count = (
+                max(0, candidate_count - len(candidate_eval_docs))
+                if inner_loop_policy.evaluator_enabled
+                else 0
+            )
+            paid_count = int(
+                inner_loop_selection.get("paid_finalist_count")
+                or (1 if loop_result.selected_candidates else 0)
+            )
+            width_mismatch = bool(
+                inner_loop_policy.effective_phase in {"shadow", "rank"}
+                and candidate_count != inner_loop_policy.candidate_width
+            )
+            run_eligible = bool(
+                inner_loop_policy.evaluator_enabled
+                and candidate_count == inner_loop_policy.candidate_width
+                and eligible_candidate_count == candidate_count
+                and candidate_count > 0
+                and paid_count == 1
+                and unclassified_error_count == 0
+                and silent_miss_count == 0
+            )
+            activation_evidence = {
+                "run_eligible": run_eligible,
+                "candidate_count": candidate_count,
+                "configured_candidate_width": inner_loop_policy.candidate_width,
+                "evaluated_candidate_count": len(candidate_eval_docs),
+                "eligible_candidate_count": eligible_candidate_count,
+                "candidate_eligibility_rate": (
+                    round(eligible_candidate_count / candidate_count, 6)
+                    if candidate_count
+                    else 0.0
+                ),
+                "unclassified_error_count": unclassified_error_count,
+                "silent_miss_count": silent_miss_count,
+                "snapshot_miss_count": snapshot_miss_count,
+                "true_miss_count": true_miss_count,
+                "evaluation_failure_count": evaluation_failure_count,
+                "zero_output_count": zero_output_count,
+                "candidate_width_mismatch": width_mismatch,
+                "paid_finalist_invariant_violations": int(
+                    bool(loop_result.selected_candidates) and paid_count != 1
+                ),
+                "protected_workflow_invariant_violations": 0,
+                "fallback_reason": str(
+                    inner_loop_selection.get("fallback_reason")
+                    or inner_loop_policy.fallback_reason
+                    or ""
+                ),
+                "ranking_applied": bool(
+                    inner_loop_selection.get("ranking_applied")
+                ),
+                "hypothetical_winner_node_id": inner_loop_selection.get(
+                    "hypothetical_winner_node_id"
+                ),
+                "actual_paid_candidate_node_id": inner_loop_selection.get(
+                    "actual_paid_candidate_node_id"
+                ),
+                "snapshot_manifest_hash": inner_loop_policy.snapshot_manifest_hash,
+                "dev_set_hash": inner_loop_policy.dev_set_hash,
+                "snapshot_age_seconds": inner_loop_policy.snapshot_age_seconds,
+                "runtime_seconds": round(float(loop_result.elapsed_seconds), 3),
+            }
+            try:
+                await record_inner_loop_event(
+                    event_type="run_observed",
+                    phase=inner_loop_policy.effective_phase,
+                    run_id=context.run_id,
+                    evidence_doc=activation_evidence,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_inner_loop_observation_write_failed "
+                    "run_id=%s phase=%s error=%s",
+                    context.run_id,
+                    inner_loop_policy.effective_phase,
+                    str(exc)[:240],
+                )
             if not legacy_v1_enabled():
                 terminal_authority_receipt = (
                     autoresearch_authority.get("execution_receipt")
@@ -2499,7 +2715,10 @@ class ResearchLabHostedWorker:
                     },
                 )
             final_artifact = artifact
-            paid_finalist_candidates = tuple(loop_result.selected_candidates[:paid_finalist_count])
+            paid_finalist_candidates = _single_paid_finalist_candidates(
+                loop_result.selected_candidates,
+                paid_finalist_count,
+            )
             finalists = [
                 {
                     "candidate_kind": "image_build",
@@ -2710,6 +2929,9 @@ class ResearchLabHostedWorker:
                 "paid_finalist_count": int(paid_finalist_count),
                 "selected_candidate_count": len(loop_result.selected_candidates),
                 "submitted_finalist_count": len(candidate_ids),
+                "inner_loop_policy": inner_loop_policy.to_dict(),
+                "inner_loop_selection": dict(inner_loop_selection),
+                "activation_evidence": dict(activation_evidence),
             },
         }
 
@@ -2725,6 +2947,8 @@ class ResearchLabHostedWorker:
                 "openrouter_call_count": loop_result.openrouter_call_count,
                 "estimated_cost_usd": round(loop_result.estimated_cost_usd, 6),
                 "actual_openrouter_cost_usd": round(loop_result.actual_openrouter_cost_usd, 6),
+                "inner_loop_policy": inner_loop_policy.to_dict(),
+                "inner_loop_selection": dict(inner_loop_selection),
             },
             "reimbursement": reimbursement_decision or {"status": "not_written"},
             "next_stage": "gateway_qualification_worker_evaluation",
@@ -5155,6 +5379,7 @@ def _redacted_budget_context(value: Mapping[str, Any]) -> dict[str, Any]:
         "continue_from_run_id",
         "continuation_context",
         "topup_reason",
+        "inner_loop_policy",
     }
     return {key: value[key] for key in allowed if key in value}
 

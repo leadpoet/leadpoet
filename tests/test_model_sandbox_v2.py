@@ -29,6 +29,7 @@ from research_lab.eval.provider_evidence_cache import (
     build_evidence_cache_from_trace_entries,
     icp_evidence_cache_key,
 )
+from research_lab.eval.snapshot_store import SNAPSHOT_MISS_SENTINEL, SnapshotMiss
 
 
 def _runtime(tmp_path: Path):
@@ -322,6 +323,83 @@ def test_runsc_dev_replay_has_snapshot_mount_and_no_live_provider_channel(tmp_pa
     )
     assert "dev_snapshot" in config["process"]["args"][2]
     assert json.loads(observed["stdin"])["context"] == {"dev_eval": True}
+
+
+def test_runsc_dev_replay_propagates_typed_snapshot_miss(tmp_path):
+    def runner(command, **_kwargs):
+        if "run" in command:
+            return SimpleNamespace(
+                returncode=2,
+                stdout="",
+                stderr=SNAPSHOT_MISS_SENTINEL + "exa|GET|api.exa.ai/search|abc\n",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    request = _request(tmp_path)
+    snapshots = tmp_path / "snapshots"
+    snapshots.mkdir()
+    transport = BrokeredProviderTransportV2(lambda _request: {})
+    sandbox = RunscModelSandboxV2(
+        config=_runtime(tmp_path),
+        transport=transport,
+        process_runner=runner,
+    )
+    try:
+        with pytest.raises(SnapshotMiss, match="api.exa.ai/search"):
+            sandbox.execute_dev_replay(
+                artifact_doc=request["artifact"],
+                source_bundle=request["source_bundle"],
+                snapshot_root=snapshots,
+                module_name="research_lab_adapter",
+                callable_name="run_icp",
+                icp={"industry": "Software", "intent_signal": "Hiring"},
+                context={"dev_eval": True},
+                environment={},
+                credential_env_names=[],
+                miss_policy="strict",
+                timeout_seconds=30,
+                job_id="dev-replay-miss",
+            )
+    finally:
+        transport.restore()
+
+
+def test_runsc_dev_replay_logs_cleanup_failure(tmp_path, caplog):
+    def runner(command, **_kwargs):
+        if "run" in command:
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        raise RuntimeError("delete failed")
+
+    request = _request(tmp_path)
+    snapshots = tmp_path / "snapshots"
+    snapshots.mkdir()
+    transport = BrokeredProviderTransportV2(lambda _request: {})
+    sandbox = RunscModelSandboxV2(
+        config=_runtime(tmp_path),
+        transport=transport,
+        process_runner=runner,
+    )
+    try:
+        with caplog.at_level("WARNING"):
+            result = sandbox.execute_dev_replay(
+                artifact_doc=request["artifact"],
+                source_bundle=request["source_bundle"],
+                snapshot_root=snapshots,
+                module_name="research_lab_adapter",
+                callable_name="run_icp",
+                icp={"industry": "Software", "intent_signal": "Hiring"},
+                context={"dev_eval": True},
+                environment={},
+                credential_env_names=[],
+                miss_policy="strict",
+                timeout_seconds=30,
+                job_id="dev-replay-cleanup",
+            )
+    finally:
+        transport.restore()
+
+    assert result == []
+    assert "research_lab_dev_replay_runsc_cleanup_failed" in caplog.text
 
 
 def test_runsc_model_sandbox_rejects_runtime_binary_drift(tmp_path):

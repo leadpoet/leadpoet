@@ -2007,7 +2007,12 @@ class AutoresearchExecutorV2:
                 timeout_seconds=1800,
                 response_validator=validate,
             )
-            return dict(response["result"])
+            return {
+                **dict(response["result"]),
+                "receipt_root": str(
+                    response["receipt_graph"].get("root_receipt_hash") or ""
+                ),
+            }
 
         return evaluate
 

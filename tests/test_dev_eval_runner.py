@@ -33,8 +33,10 @@ from research_lab.eval.dev_eval import DEV_SCORE_VERSION, compute_dev_set_hash
 from research_lab.eval.snapshot_store import (
     MODE_RECORD,
     MODE_REPLAY,
+    POINTER_NAME,
     SNAPSHOT_URI_ENV,
     ProviderSnapshotStore,
+    build_snapshot_pointer_document,
     build_snapshot_request,
 )
 
@@ -101,6 +103,7 @@ def _rich_company(index: int = 0) -> dict:
 
 def _write_snapshot_set(tmp_path, items: list[dict]) -> str:
     """Record a complete snapshot set (snapshots + manifest + dev ICPs)."""
+    assert len(items) == 8
     root = str(tmp_path / "snapshot_set")
     store = ProviderSnapshotStore(root, mode=MODE_RECORD)
     for item in items:
@@ -109,13 +112,24 @@ def _write_snapshot_set(tmp_path, items: list[dict]) -> str:
             "GET", SCRAPINGDOG_URL.format(link_id=item["icp"]["icp_id"], key="RECORDKEY")
         )
         store.record_response(request, status=200, body_text=body)
+    store.write_dev_icp_items(items)
     manifest = store.build_manifest(
         icp_set_hash=compute_dev_set_hash(items),
         dev_set_manifest={"manifest_type": "research_lab_dev_icp_set"},
         recorded_at="2026-07-06T00:00:00Z",
+        provenance={
+            "champion_image_digest": IMAGE_DIGEST,
+            "source_commit": "a" * 40,
+            "model_config_hash": "sha256:" + "b" * 64,
+            "provider_model_ids": ["test/provider-model"],
+            "replay_output_hashes": [
+                {"icp_hash": item["icp_hash"], "output_hash": "sha256:" + "c" * 64}
+                for item in items
+            ],
+        },
     )
     store.write_manifest(manifest)
-    store.write_dev_icp_items(items)
+    store.write_ready_document(store.build_ready_document(manifest))
     return root
 
 
@@ -175,7 +189,7 @@ def test_factory_returns_evaluator_when_configured(monkeypatch, tmp_path):
 
 
 def test_ensure_local_snapshot_set_uses_local_dir_in_place(tmp_path):
-    items = _dev_items(2)
+    items = _dev_items(8)
     root = _write_snapshot_set(tmp_path, items)
     assert ensure_local_snapshot_set(root) == __import__("pathlib").Path(root)
 
@@ -183,25 +197,75 @@ def test_ensure_local_snapshot_set_uses_local_dir_in_place(tmp_path):
 def test_ensure_local_snapshot_set_requires_manifest(tmp_path):
     empty = tmp_path / "empty_set"
     empty.mkdir()
-    with pytest.raises(DevEvalRunnerError, match="manifest missing"):
+    with pytest.raises(DevEvalRunnerError, match="not READY|ready_missing"):
         ensure_local_snapshot_set(str(empty))
 
 
+def _write_local_pointer(base, target: str, *, manifest_hash: str = "", ready_hash: str = ""):
+    target_store = ProviderSnapshotStore(target, mode=MODE_REPLAY)
+    manifest = target_store.load_manifest() or {}
+    ready = target_store.load_ready_document() or {}
+    pointer = build_snapshot_pointer_document(
+        snapshot_uri=target,
+        manifest_hash=manifest_hash or str(manifest.get("manifest_hash") or ""),
+        ready_hash=ready_hash or str(ready.get("ready_hash") or ""),
+        recorded_at=str(manifest.get("recorded_at") or ""),
+    )
+    path = base / POINTER_NAME
+    path.write_text(json.dumps(pointer), encoding="utf-8")
+    return path
+
+
+def test_local_current_pointer_resolves_verified_immutable_snapshot(tmp_path):
+    base = tmp_path / "published"
+    base.mkdir()
+    target = _write_snapshot_set(base, _dev_items(8))
+    pointer = _write_local_pointer(base, target)
+    assert ensure_local_snapshot_set(str(pointer)) == __import__("pathlib").Path(target)
+
+
+def test_snapshot_pointer_rejects_tampering_outside_target_and_mixed_vintages(tmp_path):
+    base = tmp_path / "published"
+    base.mkdir()
+    target = _write_snapshot_set(base, _dev_items(8))
+
+    pointer = _write_local_pointer(base, target)
+    tampered = json.loads(pointer.read_text(encoding="utf-8"))
+    tampered["recorded_at"] = "tampered"
+    pointer.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(DevEvalRunnerError, match="pointer_hash_mismatch"):
+        ensure_local_snapshot_set(str(pointer))
+
+    outside = tmp_path / "outside"
+    outside_target = _write_snapshot_set(outside, _dev_items(8))
+    pointer = _write_local_pointer(base, outside_target)
+    with pytest.raises(DevEvalRunnerError, match="pointer_target_outside_base"):
+        ensure_local_snapshot_set(str(pointer))
+
+    pointer = _write_local_pointer(
+        base,
+        target,
+        manifest_hash="sha256:" + "f" * 64,
+    )
+    with pytest.raises(DevEvalRunnerError, match="manifest hash does not match"):
+        ensure_local_snapshot_set(str(pointer))
+
+
 def test_load_verified_dev_items_round_trip_and_tamper_guard(tmp_path):
-    items = _dev_items(2)
+    items = _dev_items(8)
     root = _write_snapshot_set(tmp_path, items)
     replay = ProviderSnapshotStore(root, mode=MODE_REPLAY)
     assert load_verified_dev_items(replay) == [dict(item) for item in items]
 
     # Swap in a different ICP set without re-recording the manifest.
     tampered = ProviderSnapshotStore(root, mode=MODE_RECORD)
-    tampered.write_dev_icp_items(_dev_items(3))
+    tampered.write_dev_icp_items(_dev_items(7))
     with pytest.raises(DevEvalRunnerError, match="icp_set_hash"):
         load_verified_dev_items(replay)
 
 
 def test_load_verified_dev_items_requires_payloads(tmp_path):
-    items = _dev_items(2)
+    items = _dev_items(8)
     root = _write_snapshot_set(tmp_path, items)
     (__import__("pathlib").Path(root) / "dev_icps.json").unlink()
     replay = ProviderSnapshotStore(root, mode=MODE_REPLAY)
@@ -215,7 +279,7 @@ def test_load_verified_dev_items_requires_payloads(tmp_path):
 
 
 async def test_evaluator_scores_candidate_and_is_deterministic(tmp_path):
-    items = _dev_items(3)
+    items = _dev_items(8)
     root = _write_snapshot_set(tmp_path, items)
     companies = {
         "dev-0": [_rich_company(0), _rich_company(1)],
@@ -233,11 +297,13 @@ async def test_evaluator_scores_candidate_and_is_deterministic(tmp_path):
     assert first == second
     assert first["dev_score_version"] == DEV_SCORE_VERSION
     assert first["ranking_only"] is True
-    assert first["icp_count"] == 3
-    assert len(first["per_icp"]) == 3
+    assert first["icp_count"] == 8
+    assert len(first["per_icp"]) == 8
     assert first["aggregate_dev_score"] > 0.0
-    # dev-2 returned zero companies: booked as a failure, not an abort.
-    assert first["failure_count"] == 1
+    # Empty company sets are legitimate zero scores, not infrastructure failures.
+    assert first["failure_count"] == 0
+    assert first["zero_output_count"] == 6
+    assert first["eligible"] is True
     # The fake docker seam received the candidate image and the local dir.
     assert all(call["image_digest"] == IMAGE_DIGEST for call in fake_docker.calls)
     assert all(call["snapshot_dir"] == root for call in fake_docker.calls)
@@ -248,7 +314,7 @@ async def test_evaluator_scores_candidate_and_is_deterministic(tmp_path):
 async def test_attested_evaluator_preserves_legacy_result_and_requests_candidate_test(
     monkeypatch, tmp_path
 ):
-    items = _dev_items(2)
+    items = _dev_items(8)
     root = _write_snapshot_set(tmp_path, items)
     source = tmp_path / "candidate-source"
     source.mkdir()
@@ -321,6 +387,10 @@ async def test_attested_evaluator_preserves_legacy_result_and_requests_candidate
     result = await evaluator(candidate)
 
     assert result["result"] == expected
+    assert result["result"]["score_commitment"] == expected["score_commitment"]
+    assert result["result"]["aggregate_dev_score"] == expected[
+        "aggregate_dev_score"
+    ]
     assert observed["operation"] == "run_dev_replay_v2"
     assert observed["purpose"] == "research_lab.candidate_test.v2"
     assert observed["epoch_id"] == 24000
@@ -333,7 +403,7 @@ async def test_attested_evaluator_preserves_legacy_result_and_requests_candidate
 
 
 async def test_evaluator_rejects_mutable_image_reference(tmp_path):
-    items = _dev_items(2)
+    items = _dev_items(8)
     root = _write_snapshot_set(tmp_path, items)
     evaluator = DockerReplayDevEvaluator(
         snapshot_uri=root, run_icp_in_docker=_fake_docker_runner({})
@@ -343,7 +413,7 @@ async def test_evaluator_rejects_mutable_image_reference(tmp_path):
 
 
 async def test_evaluator_books_docker_failures_per_icp_without_aborting(tmp_path):
-    items = _dev_items(2)
+    items = _dev_items(8)
     root = _write_snapshot_set(tmp_path, items)
 
     def _crashing(*, image_digest, icp, context, snapshot_dir, timeout_seconds):
@@ -352,8 +422,9 @@ async def test_evaluator_books_docker_failures_per_icp_without_aborting(tmp_path
     evaluator = DockerReplayDevEvaluator(snapshot_uri=root, run_icp_in_docker=_crashing)
     result = await evaluator(_candidate())
     assert result["aggregate_dev_score"] == 0.0
-    assert result["failure_count"] == 2
-    assert result["icp_count"] == 2
+    assert result["failure_count"] == 8
+    assert result["icp_count"] == 8
+    assert result["eligible"] is False
 
 
 # ---------------------------------------------------------------------------

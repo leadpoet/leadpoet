@@ -82,6 +82,7 @@ from gateway.research_lab.provider_probe import (
 )
 from research_lab.engine_v1 import ReflectionRecord
 from research_lab.eval import PrivateModelArtifactManifest
+from research_lab.eval.snapshot_store import SnapshotMiss
 from research_lab.probe_catalog import ProviderProbeEndpoint, load_probe_catalog, validate_probe_catalog
 from research_lab.observability.langfuse_client import (
     observation as langfuse_observation,
@@ -573,30 +574,94 @@ class BuiltCodeEditCandidate:
     # defaults keep pre-dev-eval checkpoints/rehydration artifacts loadable.
     dev_score: float | None = None
     dev_score_version: str = ""
+    # Compact, ranking-only evaluator evidence. This deliberately excludes
+    # per-ICP outputs; checkpoints need the commitment and coverage facts, not
+    # hidden development examples or provider payloads.
+    dev_evaluation: Mapping[str, Any] = field(default_factory=dict)
 
 
-def _rank_selected_by_dev_score(
+def _candidate_dev_evaluation_matches_policy(
+    candidate: BuiltCodeEditCandidate,
+    policy: Mapping[str, Any],
+) -> bool:
+    evidence = candidate.dev_evaluation
+    if not isinstance(evidence, Mapping) or not bool(evidence.get("eligible")):
+        return False
+    score = candidate.dev_score
+    if score is None or not math.isfinite(float(score)):
+        return False
+    expected = policy.get("evaluator_commitment")
+    actual = evidence.get("evaluator_commitment")
+    return bool(
+        isinstance(expected, Mapping)
+        and isinstance(actual, Mapping)
+        and dict(actual) == dict(expected)
+    )
+
+
+def select_inner_loop_candidates(
     candidates: Sequence[BuiltCodeEditCandidate],
-) -> list[BuiltCodeEditCandidate]:
-    """Intra-run keep-best ordering (§6.3-1).
+    policy: Mapping[str, Any] | None,
+) -> tuple[list[BuiltCodeEditCandidate], dict[str, Any]]:
+    """Apply one fail-closed terminal inner-loop selection decision.
 
-    Whenever at least one candidate carries a dev score: scored candidates
-    come first, ordered by ``dev_score`` desc (stable, so ties keep build
-    order), and unscored candidates keep build order after the scored ones.
-    A single scored candidate must outrank every unscored one — the per-
-    iteration cap truncation keeps only the head of this list, so an
-    unscored-first ordering would discard the only build with evidence.
-    With zero scored candidates the input order is preserved byte-for-byte
-    (dev-eval-off runs keep build order). Dev scores never affect anything
-    beyond this intra-run ranking."""
+    Build order is authoritative unless the effective phase is ``rank``, at
+    least two candidates exist, and every built candidate has eligible
+    evidence for the exact current evaluator commitment. ``shadow`` computes
+    the hypothetical winner but intentionally retains ordinary build order.
+    """
 
     items = list(candidates)
-    scored = [candidate for candidate in items if candidate.dev_score is not None]
-    if not scored:
-        return items
-    unscored = [candidate for candidate in items if candidate.dev_score is None]
-    scored.sort(key=lambda candidate: -float(candidate.dev_score or 0.0))
-    return scored + unscored
+    policy_doc = dict(policy or {})
+    phase = str(policy_doc.get("effective_phase") or "off")
+    eligible = [
+        candidate
+        for candidate in items
+        if _candidate_dev_evaluation_matches_policy(candidate, policy_doc)
+    ]
+    complete = len(items) >= 2 and len(eligible) == len(items)
+    score_order = sorted(
+        items,
+        key=lambda candidate: -float(candidate.dev_score or 0.0),
+    ) if complete else list(items)
+    ranking_applied = bool(phase == "rank" and complete)
+    ordered = score_order if ranking_applied else list(items)
+
+    if phase not in {"shadow", "rank"}:
+        fallback_reason = str(policy_doc.get("fallback_reason") or "phase_does_not_rank")
+    elif len(items) < 2:
+        fallback_reason = "fewer_than_two_built_candidates"
+    elif not complete:
+        fallback_reason = "incomplete_or_mismatched_candidate_evaluations"
+    elif phase == "shadow":
+        fallback_reason = "shadow_preserves_ordinary_candidate"
+    else:
+        fallback_reason = ""
+
+    hypothetical = score_order[0] if complete and score_order else None
+    paid = ordered[0] if ordered else None
+    decision = {
+        "schema_version": "research_lab.inner_loop_selection.v1",
+        "effective_phase": phase,
+        "candidate_count": len(items),
+        "evaluated_candidate_count": sum(
+            1 for candidate in items if isinstance(candidate.dev_evaluation, Mapping)
+            and bool(candidate.dev_evaluation)
+        ),
+        "eligible_candidate_count": len(eligible),
+        "all_candidate_evaluations_eligible": complete,
+        "ranking_applied": ranking_applied,
+        "strict_fallback_applied": bool(
+            (phase == "rank" and not ranking_applied)
+            or (phase == "shadow" and not complete)
+        ),
+        "fallback_reason": fallback_reason,
+        "hypothetical_winner_node_id": hypothetical.node_id if hypothetical else None,
+        "actual_paid_candidate_node_id": paid.node_id if paid else None,
+        "paid_finalist_count": 1 if paid else 0,
+        "evaluator_commitment": dict(policy_doc.get("evaluator_commitment") or {}),
+    }
+    return ordered, decision
 
 
 class ContainedStageFailure(str):
@@ -708,12 +773,14 @@ class CodeEditLoopEngine:
     # Langfuse trace (run_trace_id(run_id)) without threading run_id through
     # every stage-call signature. One engine instance serves one run at a time.
     _langfuse_run_id: str = field(default="", init=False, repr=False)
+    _inner_loop_policy: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     async def _maybe_dev_eval_candidate(
         self,
         candidate: BuiltCodeEditCandidate,
         *,
         run_id: str,
+        remaining_seconds: float | None = None,
     ) -> BuiltCodeEditCandidate:
         """§6.3-1: attach a ranking-only dev score to a just-built candidate.
 
@@ -725,22 +792,64 @@ class CodeEditLoopEngine:
         returns the candidate unscored — dev-eval must never fail a run that
         already built an image.
         """
+        policy = dict(self._inner_loop_policy or {})
+        commitment = dict(policy.get("evaluator_commitment") or {})
+
+        def _ineligible(reason: str, **details: Any) -> BuiltCodeEditCandidate:
+            evidence = {
+                "schema_version": "research_lab.inner_loop_candidate_evaluation.v1",
+                "eligible": False,
+                "eligibility_reason": str(reason)[:160],
+                "evaluator_commitment": commitment,
+                **details,
+            }
+            return replace(
+                candidate,
+                dev_score=None,
+                dev_score_version="",
+                dev_evaluation=evidence,
+            )
+
         try:
+            if not bool(policy.get("evaluator_enabled")):
+                return candidate
             if not _dev_eval_enabled():
-                return candidate
+                return _ineligible("dev_eval_kill_switch_disabled")
             if not _dev_snapshot_uri():
-                return candidate
+                return _ineligible("snapshot_uri_missing")
             if self.dev_evaluator is None:
-                logger.info(
-                    "research_lab_loop_dev_eval_unwired run_id=%s node_id=%s "
-                    "(RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED is on but no dev_evaluator seam is wired)",
+                logger.warning(
+                    "research_lab_loop_dev_eval_unwired run_id=%s node_id=%s",
                     run_id,
                     str(candidate.node_id)[:80],
                 )
-                return candidate
-            result = await self.dev_evaluator(candidate)
-            if not isinstance(result, Mapping):
+                return _ineligible("dev_evaluator_unwired")
+
+            reserve = max(0, int(policy.get("finalization_reserve_seconds") or 120))
+            configured_timeout = max(1, int(policy.get("evaluation_timeout_seconds") or 300))
+            timeout = configured_timeout
+            if remaining_seconds is not None:
+                available = float(remaining_seconds) - reserve
+                if available <= 0:
+                    return _ineligible(
+                        "insufficient_deadline_for_evaluation",
+                        remaining_seconds=round(float(remaining_seconds), 3),
+                        finalization_reserve_seconds=reserve,
+                    )
+                timeout = max(1, min(configured_timeout, int(available)))
+
+            response = await asyncio.wait_for(self.dev_evaluator(candidate), timeout=timeout)
+            if not isinstance(response, Mapping):
                 raise ValueError("dev_evaluator returned a non-mapping result")
+            envelope = dict(response)
+            result = envelope.get("result") if isinstance(envelope.get("result"), Mapping) else envelope
+            result = dict(result)
+            graph = envelope.get("receipt_graph")
+            receipt_root = (
+                str(graph.get("root_receipt_hash") or "")
+                if isinstance(graph, Mapping)
+                else str(result.get("receipt_root") or "")
+            )
             raw_score = result.get("aggregate_dev_score", result.get("dev_score"))
             if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
                 raise ValueError("dev_evaluator result carried no numeric aggregate_dev_score")
@@ -748,6 +857,73 @@ class CodeEditLoopEngine:
             if not math.isfinite(score):
                 raise ValueError("dev_evaluator returned a non-finite aggregate_dev_score")
             version = str(result.get("dev_score_version") or "")
+            result_manifest_hash = str(result.get("snapshot_manifest_hash") or "")
+            result_dev_set_hash = str(result.get("dev_set_hash") or "")
+            expected_manifest_hash = str(policy.get("snapshot_manifest_hash") or "")
+            expected_dev_set_hash = str(policy.get("dev_set_hash") or "")
+            expected_score_commitment = sha256_json(
+                {
+                    "schema_version": "research_lab.dev_score_commitment.v1",
+                    "dev_score_version": version,
+                    "dev_set_hash": result_dev_set_hash,
+                    "snapshot_manifest_hash": result_manifest_hash,
+                    "miss_policy": str(result.get("miss_policy") or ""),
+                }
+            )
+            checks = {
+                "evaluator_reported_eligible": bool(result.get("eligible")),
+                "dev_set_size_is_eight": int(result.get("icp_count") or 0) == 8,
+                "full_execution_coverage": float(result.get("execution_coverage") or 0.0) == 1.0,
+                "all_icps_scored": int(result.get("scored_icp_count") or 0) == 8,
+                "no_snapshot_misses": int(result.get("snapshot_miss_count") or 0) == 0,
+                "no_true_misses": int(result.get("true_miss_count") or 0) == 0,
+                "no_failures": int(result.get("failure_count") or 0) == 0,
+                "strict_miss_policy": str(result.get("miss_policy") or "") == "strict",
+                "snapshot_manifest_matches": bool(expected_manifest_hash)
+                and result_manifest_hash == expected_manifest_hash,
+                "dev_set_matches": bool(expected_dev_set_hash)
+                and result_dev_set_hash == expected_dev_set_hash,
+                "score_version_present": bool(version),
+                "score_commitment_matches": str(
+                    result.get("score_commitment") or ""
+                ) == expected_score_commitment,
+            }
+            evaluation_doc = {
+                "schema_version": "research_lab.inner_loop_candidate_evaluation.v1",
+                "eligible": all(checks.values()),
+                "eligibility_reason": (
+                    "eligible"
+                    if all(checks.values())
+                    else next(name for name, passed in checks.items() if not passed)
+                ),
+                "execution_coverage": float(result.get("execution_coverage") or 0.0),
+                "icp_count": int(result.get("icp_count") or 0),
+                "scored_icp_count": int(result.get("scored_icp_count") or 0),
+                "snapshot_miss_count": int(result.get("snapshot_miss_count") or 0),
+                "true_miss_count": int(result.get("true_miss_count") or 0),
+                "failure_count": int(result.get("failure_count") or 0),
+                "zero_output_count": int(result.get("zero_output_count") or 0),
+                "miss_policy": str(result.get("miss_policy") or ""),
+                "snapshot_manifest_hash": result_manifest_hash,
+                "dev_set_hash": result_dev_set_hash,
+                "score_commitment": str(result.get("score_commitment") or ""),
+                "receipt_root": receipt_root,
+                "evaluator_commitment": commitment,
+                "checks": checks,
+            }
+            if not evaluation_doc["eligible"]:
+                logger.warning(
+                    "research_lab_loop_dev_eval_ineligible run_id=%s node_id=%s reason=%s",
+                    run_id,
+                    str(candidate.node_id)[:80],
+                    evaluation_doc["eligibility_reason"],
+                )
+                return replace(
+                    candidate,
+                    dev_score=None,
+                    dev_score_version=version,
+                    dev_evaluation=evaluation_doc,
+                )
             logger.info(
                 "research_lab_loop_dev_eval_scored run_id=%s node_id=%s dev_score=%s dev_score_version=%s",
                 run_id,
@@ -755,17 +931,42 @@ class CodeEditLoopEngine:
                 round(score, 6),
                 version[:80],
             )
-            return replace(candidate, dev_score=score, dev_score_version=version)
+            return replace(
+                candidate,
+                dev_score=score,
+                dev_score_version=version,
+                dev_evaluation=evaluation_doc,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if isinstance(exc, SnapshotMiss):
+                reason = "snapshot_miss"
+                unclassified = False
+            elif isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                reason = "evaluation_timeout"
+                unclassified = False
+            elif type(exc).__name__ in {
+                "DevEvalRunnerError",
+                "DevEvalError",
+                "DevSnapshotStoreError",
+            }:
+                reason = f"evaluator_failure:{type(exc).__name__}"
+                unclassified = False
+            else:
+                reason = f"evaluator_error:{type(exc).__name__}"
+                unclassified = True
             logger.warning(
                 "research_lab_loop_dev_eval_failed run_id=%s node_id=%s error=%s",
                 run_id,
                 str(candidate.node_id)[:80],
                 str(exc)[:200],
             )
-            return candidate
+            return _ineligible(
+                reason,
+                unclassified_error=unclassified,
+                error_hash=sha256_json({"error_type": type(exc).__name__, "error": str(exc)}),
+            )
 
     async def _restore_selected_from_resume(
         self,
@@ -785,7 +986,7 @@ class CodeEditLoopEngine:
         logged and skipped; the caller degrades to the legacy empty ``selected``
         on total failure. The ``loop_resumed`` event reports the restored count.
         """
-        del elapsed, openrouter_calls, estimated_cost, actual_cost_microusd  # event-free restore
+        del openrouter_calls, estimated_cost, actual_cost_microusd  # event-free restore
         summaries = resume.get("selected_candidates")
         if not isinstance(summaries, Sequence):
             return []
@@ -820,13 +1021,30 @@ class CodeEditLoopEngine:
                 if expected_hash and stored_hash and stored_hash != expected_hash:
                     raise ValueError("rehydration_artifact_hash_mismatch")
                 candidate = _rehydrated_candidate_from_artifact_payload(payload)
-                restored.append(
-                    replace(
-                        candidate,
-                        rehydration_artifact_uri=uri,
-                        rehydration_artifact_hash=expected_hash or stored_hash,
-                    )
+                candidate = replace(
+                    candidate,
+                    rehydration_artifact_uri=uri,
+                    rehydration_artifact_hash=expected_hash or stored_hash,
                 )
+                if not _candidate_dev_evaluation_matches_policy(
+                    candidate, self._inner_loop_policy
+                ):
+                    candidate = replace(
+                        candidate,
+                        dev_score=None,
+                        dev_score_version="",
+                        dev_evaluation={},
+                    )
+                    if bool(self._inner_loop_policy.get("evaluator_enabled")):
+                        candidate = await self._maybe_dev_eval_candidate(
+                            candidate,
+                            run_id=run_id,
+                            remaining_seconds=max(
+                                0.0,
+                                float(self.settings.normalized().max_seconds) - elapsed(),
+                            ),
+                        )
+                restored.append(candidate)
             except Exception as exc:
                 logger.warning(
                     "research_lab_loop_candidate_restore_failed run_id=%s node_id=%s error=%s",
@@ -1203,6 +1421,23 @@ class CodeEditLoopEngine:
     ) -> CodeEditLoopResult:
         start = time.monotonic()
         settings = self.settings.normalized()
+        raw_inner_loop_policy = budget_context.get("inner_loop_policy")
+        self._inner_loop_policy = (
+            dict(raw_inner_loop_policy)
+            if isinstance(raw_inner_loop_policy, Mapping)
+            else {
+                "schema_version": "research_lab.inner_loop_policy.v1",
+                "effective_phase": "off",
+                "evaluator_enabled": False,
+                "ranking_enabled": False,
+                "shadow_enabled": False,
+                "candidate_width": 1,
+                "paid_finalist_count": 1,
+                "strict_fallback": True,
+                "fallback_reason": "inner_loop_policy_missing",
+                "evaluator_commitment": {},
+            }
+        )
         selected: list[BuiltCodeEditCandidate] = []
         resume = dict(resume_state or {})
         iteration = max(0, int(resume.get("iterations_completed") or 0))
@@ -1234,6 +1469,7 @@ class CodeEditLoopEngine:
         elapsed = lambda: elapsed_offset + (time.monotonic() - start)
         budget_limit_microusd = _budget_limit_microusd(budget_context)
         built_candidate_total = max(0, int(resume.get("built_candidate_count") or 0))
+        finalization_reserve_reached = False
         provider_capabilities = None
         provider_capability_summary: dict[str, Any] | None = None
         effective_provider_entries: list[Any] = []
@@ -1508,6 +1744,7 @@ class CodeEditLoopEngine:
                     "requested_loop_count": int(requested_loop_count),
                     "settings": _settings_doc(settings),
                     "budget_context": _safe_budget_doc(budget_context),
+                    "inner_loop_policy": dict(self._inner_loop_policy),
                     "resumed_from_checkpoint": bool(resume),
                     "restored_selected_candidate_count": restored_candidate_count,
                     "checkpoint_hash": resume.get("checkpoint_hash"),
@@ -2365,6 +2602,21 @@ class CodeEditLoopEngine:
                 break
             if elapsed() >= settings.max_seconds:
                 stop_reason = "max_seconds"
+                break
+            if (
+                str(self._inner_loop_policy.get("effective_phase") or "off") != "off"
+                and settings.max_seconds - elapsed()
+                <= max(
+                    0,
+                    int(
+                        self._inner_loop_policy.get(
+                            "finalization_reserve_seconds", 120
+                        )
+                        or 120
+                    ),
+                )
+            ):
+                stop_reason = "inner_loop_finalization_reserve"
                 break
             # Bug 20: iterations past the candidate cap used to build docker images and then
             # discard them (selected is truncated to max_candidates every iteration). Once the
@@ -3608,6 +3860,21 @@ class CodeEditLoopEngine:
                     )
                     continue
                 build_completed = False
+                if (
+                    str(self._inner_loop_policy.get("effective_phase") or "off") != "off"
+                    and settings.max_seconds - elapsed()
+                    <= max(
+                        0,
+                        int(
+                            self._inner_loop_policy.get(
+                                "finalization_reserve_seconds", 120
+                            )
+                            or 120
+                        ),
+                    )
+                ):
+                    finalization_reserve_reached = True
+                    break
                 try:
                     await self.event_sink(
                         AutoResearchLoopEvent(
@@ -3656,7 +3923,9 @@ class CodeEditLoopEngine:
                     # dev score through the dev_evaluator seam. Best-effort — a dev-eval
                     # failure leaves the candidate unscored and the run untouched.
                     built_candidate = await self._maybe_dev_eval_candidate(
-                        built_candidate, run_id=run_id
+                        built_candidate,
+                        run_id=run_id,
+                        remaining_seconds=max(0.0, settings.max_seconds - elapsed()),
                     )
                     if built_candidate.dev_score is not None:
                         _record_dev_score(
@@ -3676,6 +3945,7 @@ class CodeEditLoopEngine:
                         build=build,
                         dev_score=built_candidate.dev_score,
                         dev_score_version=built_candidate.dev_score_version,
+                        dev_evaluation=built_candidate.dev_evaluation,
                         artifact_io=self.artifact_io,
                     )
                     built_candidate = replace(
@@ -3712,8 +3982,9 @@ class CodeEditLoopEngine:
                                         "dev_score": built_candidate.dev_score,
                                         "dev_score_version": built_candidate.dev_score_version,
                                         "dev_score_ranking_only": True,
+                                        "dev_evaluation": dict(built_candidate.dev_evaluation),
                                     }
-                                    if built_candidate.dev_score is not None
+                                    if built_candidate.dev_evaluation
                                     else {}
                                 ),
                                 **{
@@ -3885,10 +4156,10 @@ class CodeEditLoopEngine:
                             estimated_cost=estimated_cost,
                             actual_cost_microusd=actual_cost_microusd,
                         )
-            # §6.3-1 keep-best (bug-20 plumbing): rank by dev score before the cap
-            # truncation so the best-scoring builds survive; without 2+ dev scores
-            # this preserves build order byte-for-byte.
-            selected = _rank_selected_by_dev_score(selected)[: settings.max_candidates]
+            # Candidate selection is terminal and atomic. Keeping build order
+            # here prevents one partial evaluation from evicting the ordinary
+            # first candidate before strict eligibility can be checked.
+            selected = selected[: settings.max_candidates]
             try:
                 last_checkpoint = await self._emit_checkpoint(
                     run_id=run_id,
@@ -3929,12 +4200,22 @@ class CodeEditLoopEngine:
                     provider_usage=provider_usage,
                     checkpoint=last_checkpoint,
                 )
+            if finalization_reserve_reached:
+                stop_reason = "inner_loop_finalization_reserve"
+                break
             if budget_exhausted_after_call:
                 stop_reason = "compute_budget_exhausted_after_code_edit"
                 break
             if (
                 _dev_eval_enabled()
                 and _dev_plateau_stop_enabled()
+                and str(self._inner_loop_policy.get("effective_phase") or "") == "rank"
+                and isinstance(self._inner_loop_policy.get("evidence"), Mapping)
+                and int(
+                    self._inner_loop_policy["evidence"].get(
+                        "rank_healthy_runs", 0
+                    )
+                ) >= 50
                 and dev_scores_since_improvement >= _dev_plateau_window()
             ):
                 # §6.3-4 lite: the last N dev-scored builds failed to improve the
@@ -3998,10 +4279,10 @@ class CodeEditLoopEngine:
         }:
             stop_reason = "no_valid_image_build_candidates"
 
-        # §6.3-1: final intra-run ranking — candidate_selected order and the
-        # result's selected_candidates agree, with dev-scored builds first
-        # (desc). A no-op unless 2+ candidates carry dev scores.
-        selected = _rank_selected_by_dev_score(selected)
+        selected, inner_loop_selection = select_inner_loop_candidates(
+            selected,
+            self._inner_loop_policy,
+        )
         for index, candidate in enumerate(selected):
             await self.event_sink(
                 AutoResearchLoopEvent(
@@ -4019,6 +4300,8 @@ class CodeEditLoopEngine:
                         "candidate_model_manifest_hash": candidate.build.candidate_model_manifest.manifest_hash,
                         "candidate_source_diff_hash": candidate.build.source_diff_hash,
                         "redacted_summary": candidate.draft.redacted_summary,
+                        "inner_loop_selection": dict(inner_loop_selection),
+                        "paid_scoring_candidate": index == 0,
                         # P18: dev-eval ranking scores become queryable from
                         # the event stream (previously only in the S3
                         # rehydration artifact) — the dev-vs-live divergence
@@ -4079,6 +4362,8 @@ class CodeEditLoopEngine:
                     "iterations_completed": result.iterations_completed,
                     "selected_candidate_count": len(selected),
                     "stop_reason": result.stop_reason,
+                    "inner_loop_policy": dict(self._inner_loop_policy),
+                    "inner_loop_selection": dict(inner_loop_selection),
                     "loop_direction_plan_hash": (
                         (loop_direction_plan_doc or {}).get("plan_hash")
                         if isinstance(loop_direction_plan_doc, Mapping)
@@ -4142,6 +4427,12 @@ class CodeEditLoopEngine:
             "manifest_hash": artifact.manifest_hash,
             "settings": _settings_doc(settings),
             "budget_context": _safe_budget_doc(budget_context),
+            "inner_loop_phase": str(
+                self._inner_loop_policy.get("effective_phase") or "off"
+            ),
+            "inner_loop_evaluator_commitment": dict(
+                self._inner_loop_policy.get("evaluator_commitment") or {}
+            ),
             "iterations_completed": int(iterations_completed),
             "next_iteration": int(iterations_completed) + 1,
             "elapsed_seconds": round(float(elapsed_seconds), 3),
@@ -4167,8 +4458,9 @@ class CodeEditLoopEngine:
                         {
                             "dev_score": candidate.dev_score,
                             "dev_score_version": candidate.dev_score_version,
+                            "dev_evaluation": dict(candidate.dev_evaluation),
                         }
-                        if candidate.dev_score is not None
+                        if candidate.dev_evaluation
                         else {}
                     ),
                 }
@@ -4250,10 +4542,8 @@ class CodeEditLoopEngine:
         ):
             pass
         return CodeEditLoopResult(
-            # §6.3-1: rank-then-truncate so the kept candidates are the best
-            # dev-scored builds; unchanged ordering without 2+ dev scores.
             selected_candidates=tuple(
-                _rank_selected_by_dev_score(selected)[: self.settings.normalized().max_candidates]
+                list(selected)[: self.settings.normalized().max_candidates]
             ),
             iterations_completed=int(iterations_completed),
             stop_reason=stop_reason,
@@ -5268,6 +5558,7 @@ async def _write_private_loop_candidate_artifact(
     build: CodeEditBuildResult,
     dev_score: float | None = None,
     dev_score_version: str = "",
+    dev_evaluation: Mapping[str, Any] | None = None,
     artifact_io: Any | None = None,
 ) -> dict[str, Any]:
     """Persist a full rehydration doc for a built candidate (bug #5).
@@ -5303,6 +5594,8 @@ async def _write_private_loop_candidate_artifact(
     if dev_score is not None:
         payload["dev_score"] = float(dev_score)
         payload["dev_score_version"] = str(dev_score_version or "")
+    if dev_evaluation:
+        payload["dev_evaluation"] = dict(dev_evaluation)
     payload_hash = sha256_json(payload)
 
     try:
@@ -5417,6 +5710,11 @@ def _rehydrated_candidate_from_artifact_payload(
         iteration=int(stored.get("iteration") or 0),
         dev_score=dev_score,
         dev_score_version=str(stored.get("dev_score_version") or ""),
+        dev_evaluation=(
+            dict(stored.get("dev_evaluation") or {})
+            if isinstance(stored.get("dev_evaluation"), Mapping)
+            else {}
+        ),
     )
 
 

@@ -77,6 +77,15 @@ async def insert_row(table: str, row: dict[str, Any]) -> dict[str, Any]:
     return dict(data[0])
 
 
+async def call_rpc(function_name: str, params: Mapping[str, Any]) -> Any:
+    """Call one service-role PostgREST function without blocking the event loop."""
+    def _call() -> Any:
+        return get_write_client().rpc(function_name, dict(params)).execute()
+
+    response = await asyncio.to_thread(_call)
+    return getattr(response, "data", None)
+
+
 def insert_row_sync(table: str, row: dict[str, Any]) -> dict[str, Any]:
     response = get_write_client().table(table).insert(row).execute()
     data = getattr(response, "data", None) or []

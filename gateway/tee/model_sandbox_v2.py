@@ -6,6 +6,7 @@ import base64
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import platform
@@ -44,9 +45,14 @@ from research_lab.eval.provider_evidence_cache import (
     icp_evidence_cache_key,
 )
 from research_lab.eval.snapshot_store import (
+    SNAPSHOT_MISS_SENTINEL,
+    SnapshotMiss,
     container_replay_env,
     dev_replay_bootstrap,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 MODEL_SANDBOX_REQUEST_SCHEMA_VERSION = "leadpoet.model_sandbox_request.v2"
@@ -831,12 +837,20 @@ class RunscModelSandboxV2:
                     env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
                     check=False,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_dev_replay_runsc_cleanup_failed sandbox_id=%s error=%s",
+                    sandbox_id,
+                    str(exc)[:240],
+                )
         if int(completed.returncode) != 0:
+            stderr = str(completed.stderr or "")
+            if SNAPSHOT_MISS_SENTINEL in stderr:
+                request_key = stderr.rsplit(SNAPSHOT_MISS_SENTINEL, 1)[-1].splitlines()[0]
+                raise SnapshotMiss(request_key.strip())
             raise ModelSandboxV2Error(
                 "dev replay adapter failed with code %s: %s"
-                % (completed.returncode, str(completed.stderr or "")[-1200:])
+                % (completed.returncode, stderr[-1200:])
             )
         if len(str(completed.stdout).encode("utf-8")) > MAX_MODEL_OUTPUT_BYTES:
             raise ModelSandboxV2Error("dev replay adapter output exceeds limit")

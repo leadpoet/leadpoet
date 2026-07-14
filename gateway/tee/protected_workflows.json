@@ -22,7 +22,7 @@
       "symbol": "build_research_lab_allocation_bundle"
     },
     {
-      "ast_sha256": "sha256:c6ce362a64efe0b8b98020695641fa32ee85b16fde8ef97069fc5a2d8a4afc93",
+      "ast_sha256": "sha256:a629a125ef2f50dfe5b315c2148bc27898a670d449751386ec0de372ae729f06",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "CodeEditLoopEngine"
     },
@@ -32,9 +32,64 @@
       "symbol": "_bind_loop_direction_plan"
     },
     {
-      "ast_sha256": "sha256:3a09e36d1b7dc0b17a238d0bd3da1081a1c848507efa573154be70515482ec98",
+      "ast_sha256": "sha256:2b81765f18fb63400419f8fd8c05d65040cfe2270a5e9f3ab164710315740203",
       "path": "gateway/research_lab/code_loop_engine.py",
-      "symbol": "_rank_selected_by_dev_score"
+      "symbol": "select_inner_loop_candidates"
+    },
+    {
+      "ast_sha256": "sha256:1f58d38cf5a9c9f26798c65e06d5d2cdc2b2fc33a0376330a04006ae77933d41",
+      "path": "gateway/research_lab/dev_eval_runner.py",
+      "symbol": "AttestedReplayDevEvaluatorV2"
+    },
+    {
+      "ast_sha256": "sha256:db2aa8d7c7421a6a8eceb398dece0b30f79023553bd1c73a2f4d260cd52bbdde",
+      "path": "gateway/research_lab/dev_eval_runner.py",
+      "symbol": "DockerReplayDevEvaluator"
+    },
+    {
+      "ast_sha256": "sha256:e2853f42dffc09a01fec0357bb18d027131bfa8b6514045f06fb0492c44c326a",
+      "path": "gateway/research_lab/dev_eval_runner.py",
+      "symbol": "snapshot_readiness"
+    },
+    {
+      "ast_sha256": "sha256:1dfbd73a742fce1e79e86ab56b9117cb5bdcf89e5522120575c2f472d5f0acc1",
+      "path": "gateway/research_lab/inner_loop_activation.py",
+      "symbol": "InnerLoopEvidence"
+    },
+    {
+      "ast_sha256": "sha256:0e01417c703f300306be148c3cb2c1a68e156f5f46fd817b0c6a045ce318cc5d",
+      "path": "gateway/research_lab/inner_loop_activation.py",
+      "symbol": "InnerLoopPolicy"
+    },
+    {
+      "ast_sha256": "sha256:81d6de0fa7286299dfce9068af5e6d60d79e94783a19225a011996cb8e954e1f",
+      "path": "gateway/research_lab/inner_loop_activation.py",
+      "symbol": "_automatic_phase"
+    },
+    {
+      "ast_sha256": "sha256:33461237f001e1093e053d3141845b9d6adbecca7bf91abf58ece63223b4a1f9",
+      "path": "gateway/research_lab/inner_loop_activation.py",
+      "symbol": "_rank_gate_passes"
+    },
+    {
+      "ast_sha256": "sha256:b483213f4ad421baf094c7248a2f63a0693ddf3677f91380e80dacdf21c1371d",
+      "path": "gateway/research_lab/inner_loop_activation.py",
+      "symbol": "build_inner_loop_evidence"
+    },
+    {
+      "ast_sha256": "sha256:2f292a96e06f3a73b0f51aac38caaa11066d438c71b98b77850c32e1ce069f05",
+      "path": "gateway/research_lab/inner_loop_activation.py",
+      "symbol": "decide_inner_loop_policy"
+    },
+    {
+      "ast_sha256": "sha256:0d2c0ac8b5eafe2c55c1a5131a0d5b943f253caf2a76fb929bd7741b821b6ca3",
+      "path": "gateway/research_lab/inner_loop_activation.py",
+      "symbol": "record_inner_loop_event"
+    },
+    {
+      "ast_sha256": "sha256:425309cae2bc22ee65787beda0980c79a103d85e4e9b4ca19dce4b920662f475",
+      "path": "gateway/research_lab/inner_loop_activation.py",
+      "symbol": "resolve_inner_loop_policy"
     },
     {
       "ast_sha256": "sha256:a96d39f5f4dcf4a1245bf0f0dd14596e554100a16c1edf4cf48f2ff6934c3892",
@@ -77,6 +132,11 @@
       "symbol": "confirmation_min_delta"
     },
     {
+      "ast_sha256": "sha256:5540ba51e7f6d20ed327552963fa1325a37f0d994d5de5c0af5f1fd186a6bad2",
+      "path": "gateway/research_lab/snapshot_refresh.py",
+      "symbol": "maybe_refresh_dev_snapshot"
+    },
+    {
       "ast_sha256": "sha256:f47d7993b66d81502d858fe78db4df1b1ff1075df7dfd2a4e047043eb64c9056",
       "path": "gateway/research_lab/source_add_llm_judge.py",
       "symbol": "SourceAddJudgeVerdict"
@@ -102,7 +162,7 @@
       "symbol": "sanitize_source_add_precheck_doc"
     },
     {
-      "ast_sha256": "sha256:726033186df1af23d65dbbfa85b5a66a37ef56f93e4e08bc07ee374d21eed766",
+      "ast_sha256": "sha256:cfbb879671d28d03aedb65f897fb93428aea8650938c475f88169f608667bbc7",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "AutoresearchExecutorV2"
     },
@@ -120,6 +180,11 @@
       "ast_sha256": "sha256:2fd9bc00e2071a23ddab1f5e6dc44821ebaf46fb8dcd361c4f7e5419f075fe4c",
       "path": "gateway/tee/coordinator_source_add_v2.py",
       "symbol": "CoordinatorSourceAddProvenanceV2"
+    },
+    {
+      "ast_sha256": "sha256:01cfdc6c0af03bc605e2fef09f2c41e937d7bab4584c186196ea5bf0e705a641",
+      "path": "gateway/tee/model_sandbox_v2.py",
+      "symbol": "RunscModelSandboxV2"
     },
     {
       "ast_sha256": "sha256:347668b0c700895c77f650e2a3e286bcb7f6b52ae746ce1a55d3bacb2be3f258",
@@ -342,6 +407,26 @@
       "symbol": "daily_noise_budget_doc"
     },
     {
+      "ast_sha256": "sha256:cbe819ff8a25765cfe63813f6ea178cfcb99e96a113e4c6bfcd01c26da69cf5c",
+      "path": "research_lab/eval/dev_eval.py",
+      "symbol": "DevEvalResult"
+    },
+    {
+      "ast_sha256": "sha256:2552500fb43f7402372d15ae254a614af2b6e97df29ad9d73737721a15e3329e",
+      "path": "research_lab/eval/dev_eval.py",
+      "symbol": "_score_dev_items"
+    },
+    {
+      "ast_sha256": "sha256:5b731639426830d06b33219f737fc27cff5ab6915101e8cb773e08e17665aff4",
+      "path": "research_lab/eval/dev_eval.py",
+      "symbol": "build_dev_icp_set"
+    },
+    {
+      "ast_sha256": "sha256:536a16515b1f742506f48cc36dfef6b4d68663d7d08e3ae262a07ab285b1a11d",
+      "path": "research_lab/eval/dev_eval.py",
+      "symbol": "evaluate_dev"
+    },
+    {
       "ast_sha256": "sha256:093bcc1944fe4a804c2232c6c162728212b2f6aeb8ad330cbe3af540829748de",
       "path": "research_lab/eval/evaluator.py",
       "symbol": "_benchmark_icp_score"
@@ -447,6 +532,21 @@
       "symbol": "merge_evidence_caches"
     },
     {
+      "ast_sha256": "sha256:55471b86c63ca39b002ee7283b33609a37e8a214bd4c6c3a5cc63b58d7d4fa57",
+      "path": "research_lab/eval/snapshot_store.py",
+      "symbol": "ProviderSnapshotStore"
+    },
+    {
+      "ast_sha256": "sha256:be221d24e7d36c6bd9b87ded2f61d700e0af5b226e8a1b18f2d807c1ec1af433",
+      "path": "research_lab/eval/snapshot_store.py",
+      "symbol": "build_snapshot_pointer_document"
+    },
+    {
+      "ast_sha256": "sha256:0c154783bc6f11ac4169c7c538d2e1066fa72262b385103bbbb1c51e3b245955",
+      "path": "research_lab/eval/snapshot_store.py",
+      "symbol": "verify_snapshot_pointer_document"
+    },
+    {
       "ast_sha256": "sha256:119f3deac9b6d085a998f2bae38a3e5465bcfcd576ec2ba5c48dc81c3de093b0",
       "path": "research_lab/source_add_rewards.py",
       "symbol": "SourceAddRewardRecord"
@@ -472,7 +572,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:07d89e83b92b4ad6ed1af1909217d86d9b2b24720ee0fd30aad3846272270c94",
+  "manifest_hash": "sha256:40d1635162790c10e7f657408dee045eb82f37da341d43851cbc9abc8aba55f8",
   "protected_source_commit": "322f9f653e44fc291710fc754d69c79ed23f9fa1",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

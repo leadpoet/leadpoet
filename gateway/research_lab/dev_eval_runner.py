@@ -23,22 +23,25 @@ out). This module supplies the production implementation:
 Guardrails (plan §3, non-negotiable):
 - Dev scores are RANKING-ONLY. They order candidates within a run and inform
   later drafts in the same run; they are never promotion evidence.
-- Strictly best-effort: any failure here logs and yields an unscored
-  candidate — dev-eval must never fail a run that already built an image.
-  (The engine's ``_maybe_dev_eval_candidate`` enforces the same contract; the
-  wall-clock cap below additionally keeps a wedged replay from eating the
-  loop's ``RESEARCH_LAB_AUTO_RESEARCH_MAX_SECONDS`` envelope.)
+- Any evaluation failure produces an explicitly ineligible candidate. The
+  selector then ignores every development score for that run and preserves
+  ordinary build order; dev-eval never fails a run that built an image.
+  The wall-clock cap below also keeps a wedged replay from consuming the
+  loop's ``RESEARCH_LAB_AUTO_RESEARCH_MAX_SECONDS`` envelope.
 """
 
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+import fcntl
 import json
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -46,13 +49,19 @@ from research_lab.eval.dev_eval import compute_dev_set_hash, evaluate_dev
 from research_lab.eval.snapshot_store import (
     DEV_ICPS_NAME,
     MANIFEST_NAME,
+    READY_NAME,
+    EXPECTED_DEV_ICP_COUNT,
+    MISS_POLICY_STRICT,
     MODE_REPLAY,
     SNAPSHOT_SUBDIR,
     SNAPSHOT_URI_ENV,
+    SNAPSHOT_MISS_SENTINEL,
+    SnapshotMiss,
     ProviderSnapshotStore,
     container_replay_env,
     default_miss_policy,
     dev_replay_bootstrap,
+    resolve_snapshot_uri,
 )
 
 logger = logging.getLogger(__name__)
@@ -123,16 +132,44 @@ def ensure_local_snapshot_set(root_uri: str, *, cache_root: Path | None = None) 
     reuse the same download. The ``.complete`` marker makes a partially
     synced directory invisible to readers.
     """
-    uri = str(root_uri or "").strip()
-    if not uri:
+    configured_uri = str(root_uri or "").strip()
+    if not configured_uri:
         raise DevEvalRunnerError(f"snapshot root URI is required ({SNAPSHOT_URI_ENV})")
+    try:
+        resolution = resolve_snapshot_uri(configured_uri)
+    except Exception as exc:
+        raise DevEvalRunnerError(str(exc)) from exc
+    uri = str(resolution.get("snapshot_uri") or "").strip()
+    expected_manifest_hash = str(resolution.get("manifest_hash") or "")
+    expected_ready_hash = str(resolution.get("ready_hash") or "")
     if not uri.startswith("s3://"):
         local = Path(uri).expanduser()
-        if not (local / MANIFEST_NAME).is_file():
-            raise DevEvalRunnerError(f"snapshot manifest missing under {local}")
+        verification = ProviderSnapshotStore(str(local), mode=MODE_REPLAY).verify_ready_document(
+            require_signature=False
+        )
+        if not verification.get("passed"):
+            raise DevEvalRunnerError(
+                "snapshot set is not READY: " + "; ".join(verification.get("errors") or ())
+            )
+        _verify_pointer_bindings(
+            verification,
+            expected_manifest_hash=expected_manifest_hash,
+            expected_ready_hash=expected_ready_hash,
+        )
         return local
 
     remote = ProviderSnapshotStore(uri, mode=MODE_REPLAY)
+    ready_verification = remote.verify_ready_document(require_signature=True)
+    if not ready_verification.get("passed"):
+        raise DevEvalRunnerError(
+            "remote snapshot set is not READY: "
+            + "; ".join(ready_verification.get("errors") or ())
+        )
+    _verify_pointer_bindings(
+        ready_verification,
+        expected_manifest_hash=expected_manifest_hash,
+        expected_ready_hash=expected_ready_hash,
+    )
     manifest = remote.load_manifest()
     if manifest is None:
         raise DevEvalRunnerError(f"snapshot manifest missing under {uri}")
@@ -141,36 +178,143 @@ def ensure_local_snapshot_set(root_uri: str, *, cache_root: Path | None = None) 
         raise DevEvalRunnerError("snapshot manifest carries no manifest_hash")
 
     root = cache_root if cache_root is not None else _default_cache_root()
-    target = root / manifest_hash.replace("sha256:", "")[:32]
-    marker = target / ".complete"
-    if marker.is_file():
-        return target
-
-    staging = target.with_name(target.name + ".staging")
-    if staging.exists():
-        shutil.rmtree(staging)
-    (staging / SNAPSHOT_SUBDIR).mkdir(parents=True, exist_ok=True)
-    for relative in (MANIFEST_NAME, DEV_ICPS_NAME):
-        raw = remote._read_text(relative)  # noqa: SLF001 - same-package storage seam
-        if raw is None:
-            if relative == DEV_ICPS_NAME:
-                raise DevEvalRunnerError(
-                    "snapshot set has no dev_icps.json — re-record with the "
-                    "current scripts/record_research_lab_dev_snapshots.py"
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / manifest_hash.replace("sha256:", "")
+    lock_path = root / f".{target.name}.lock"
+    with lock_path.open("a+") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        marker = target / ".complete"
+        if marker.is_file():
+            cached = ProviderSnapshotStore(str(target), mode=MODE_REPLAY)
+            verification = cached.verify_ready_document(require_signature=True)
+            if verification.get("passed"):
+                _verify_pointer_bindings(
+                    verification,
+                    expected_manifest_hash=expected_manifest_hash,
+                    expected_ready_hash=expected_ready_hash,
                 )
-            raise DevEvalRunnerError(f"snapshot set is missing {relative}")
-        (staging / relative).write_text(raw, encoding="utf-8")
-    for name in remote._list_snapshot_names():  # noqa: SLF001
-        raw = remote._read_text(f"{SNAPSHOT_SUBDIR}/{name}")  # noqa: SLF001
-        if raw is None:
-            raise DevEvalRunnerError(f"snapshot object vanished during sync: {name}")
-        (staging / SNAPSHOT_SUBDIR / name).write_text(raw, encoding="utf-8")
-    (staging / ".complete").write_text("", encoding="utf-8")
-    if target.exists():
-        shutil.rmtree(staging)
-        return target
-    staging.rename(target)
-    return target
+                return target
+            shutil.rmtree(target, ignore_errors=True)
+
+        staging = root / f".{target.name}.staging.{os.getpid()}.{uuid.uuid4().hex}"
+        (staging / SNAPSHOT_SUBDIR).mkdir(parents=True, exist_ok=False)
+        try:
+            for relative in (MANIFEST_NAME, DEV_ICPS_NAME):
+                raw = remote._read_text(relative)  # noqa: SLF001 - storage seam
+                if raw is None:
+                    raise DevEvalRunnerError(f"snapshot set is missing {relative}")
+                (staging / relative).write_text(raw, encoding="utf-8")
+            for name in remote._list_snapshot_names():  # noqa: SLF001
+                raw = remote._read_text(f"{SNAPSHOT_SUBDIR}/{name}")  # noqa: SLF001
+                if raw is None:
+                    raise DevEvalRunnerError(f"snapshot object vanished during sync: {name}")
+                (staging / SNAPSHOT_SUBDIR / name).write_text(raw, encoding="utf-8")
+            ready_raw = remote._read_text(READY_NAME)  # noqa: SLF001
+            if ready_raw is None:
+                raise DevEvalRunnerError("snapshot READY document vanished during sync")
+            (staging / READY_NAME).write_text(ready_raw, encoding="utf-8")
+            staged = ProviderSnapshotStore(str(staging), mode=MODE_REPLAY)
+            verification = staged.verify_ready_document(require_signature=True)
+            if not verification.get("passed"):
+                raise DevEvalRunnerError(
+                    "downloaded snapshot verification failed: "
+                    + "; ".join(verification.get("errors") or ())
+                )
+            _verify_pointer_bindings(
+                verification,
+                expected_manifest_hash=expected_manifest_hash,
+                expected_ready_hash=expected_ready_hash,
+            )
+            (staging / ".complete").write_text(manifest_hash + "\n", encoding="utf-8")
+            os.replace(staging, target)
+            return target
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+
+
+def _verify_pointer_bindings(
+    verification: Mapping[str, Any],
+    *,
+    expected_manifest_hash: str,
+    expected_ready_hash: str,
+) -> None:
+    if expected_manifest_hash and str(verification.get("manifest_hash") or "") != expected_manifest_hash:
+        raise DevEvalRunnerError("snapshot pointer manifest hash does not match immutable target")
+    if expected_ready_hash and str(verification.get("ready_hash") or "") != expected_ready_hash:
+        raise DevEvalRunnerError("snapshot pointer READY hash does not match immutable target")
+
+
+def snapshot_readiness(
+    root_uri: str,
+    *,
+    cache_root: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Return fail-closed snapshot preflight evidence for activation policy."""
+    if default_miss_policy() != MISS_POLICY_STRICT:
+        return {"ready": False, "reason": "snapshot_miss_policy_must_be_strict"}
+    try:
+        resolution = resolve_snapshot_uri(root_uri)
+        local = ensure_local_snapshot_set(root_uri, cache_root=cache_root)
+        store = ProviderSnapshotStore(str(local), mode=MODE_REPLAY, miss_policy=MISS_POLICY_STRICT)
+        verification = store.verify_ready_document(
+            require_signature=str(root_uri or "").startswith("s3://")
+        )
+        if not verification.get("passed"):
+            return {
+                "ready": False,
+                "reason": "snapshot_ready_verification_failed",
+                "errors": list(verification.get("errors") or ()),
+            }
+        manifest = store.load_manifest() or {}
+        provenance = (
+            dict(manifest.get("provenance") or {})
+            if isinstance(manifest.get("provenance"), Mapping)
+            else {}
+        )
+        items = load_verified_dev_items(store)
+        recorded_at = str(manifest.get("recorded_at") or "")
+        recorded = datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
+        if recorded.tzinfo is None:
+            recorded = recorded.replace(tzinfo=timezone.utc)
+        age = max(
+            0.0,
+            ((now or datetime.now(timezone.utc)) - recorded.astimezone(timezone.utc)).total_seconds(),
+        )
+        raw_provider_ids = provenance.get("provider_model_ids") or ()
+        provider_ids = (
+            [str(item) for item in raw_provider_ids if str(item).strip()]
+            if isinstance(raw_provider_ids, (list, tuple, set))
+            else []
+        )
+        return {
+            "ready": len(items) == EXPECTED_DEV_ICP_COUNT,
+            "reason": "ready" if len(items) == EXPECTED_DEV_ICP_COUNT else "dev_set_size_must_equal_eight",
+            "manifest_hash": str(manifest.get("manifest_hash") or ""),
+            "dev_set_hash": str(manifest.get("icp_set_hash") or ""),
+            "recorded_at": recorded_at,
+            "snapshot_age_seconds": age,
+            "dev_set_size": len(items),
+            "ready_hash": str(verification.get("ready_hash") or ""),
+            "configured_snapshot_uri": str(root_uri or ""),
+            "resolved_snapshot_uri": str(resolution.get("snapshot_uri") or ""),
+            "pointer_hash": str(resolution.get("pointer_hash") or ""),
+            "champion_image_digest": str(
+                provenance.get("champion_image_digest") or ""
+            ),
+            "source_commit": str(provenance.get("source_commit") or ""),
+            "model_config_hash": str(
+                provenance.get("model_config_hash") or ""
+            ),
+            "provider_model_ids": provider_ids,
+        }
+    except Exception as exc:
+        return {
+            "ready": False,
+            "reason": f"snapshot_preflight_error:{type(exc).__name__}",
+            "error": str(exc)[:240],
+        }
 
 
 def load_verified_dev_items(store: ProviderSnapshotStore) -> list[dict[str, Any]]:
@@ -206,19 +350,21 @@ class DockerReplayDevEvaluator:
         self._docker_executable = docker_executable
         # Test seam: replaces the docker invocation, everything else is real.
         self._run_icp_in_docker = run_icp_in_docker or self._run_icp_in_docker_default
-        self._prepare_lock = asyncio.Lock()
+        self._prepare_lock: asyncio.Lock | None = None
         self._local_dir: Path | None = None
         self._replay_store: ProviderSnapshotStore | None = None
         self._dev_items: list[dict[str, Any]] | None = None
 
     async def _ensure_prepared(self) -> tuple[Path, ProviderSnapshotStore, list[dict[str, Any]]]:
+        if self._prepare_lock is None:
+            self._prepare_lock = asyncio.Lock()
         async with self._prepare_lock:
             if self._local_dir is None or self._replay_store is None or self._dev_items is None:
                 local_dir = await asyncio.to_thread(
                     ensure_local_snapshot_set, self._snapshot_uri, cache_root=self._cache_root
                 )
                 replay_store = ProviderSnapshotStore(
-                    str(local_dir), mode=MODE_REPLAY, miss_policy=default_miss_policy()
+                    str(local_dir), mode=MODE_REPLAY, miss_policy=MISS_POLICY_STRICT
                 )
                 dev_items = await asyncio.to_thread(load_verified_dev_items, replay_store)
                 self._local_dir = local_dir
@@ -308,7 +454,7 @@ class DockerReplayDevEvaluator:
             if name in os.environ:
                 env_args.extend(["-e", name])
         for name, value in container_replay_env(
-            CONTAINER_SNAPSHOT_DIR, miss_policy=default_miss_policy()
+            CONTAINER_SNAPSHOT_DIR, miss_policy=MISS_POLICY_STRICT
         ).items():
             env_args.extend(["-e", f"{name}={value}"])
         platform = str(getattr(private_runtime, "_default_docker_platform")() or "").strip()
@@ -345,9 +491,13 @@ class DockerReplayDevEvaluator:
             check=False,
         )
         if completed.returncode != 0:
+            stderr = str(completed.stderr or "")
+            if SNAPSHOT_MISS_SENTINEL in stderr:
+                request_key = stderr.rsplit(SNAPSHOT_MISS_SENTINEL, 1)[-1].splitlines()[0]
+                raise SnapshotMiss(request_key.strip())
             raise DevEvalRunnerError(
                 f"dev replay adapter failed with code {completed.returncode}: "
-                f"{completed.stderr[-1200:]}"
+                f"{stderr[-1200:]}"
             )
         decoded = json.loads(completed.stdout)
         if not isinstance(decoded, list):
@@ -374,7 +524,7 @@ class AttestedReplayDevEvaluatorV2:
         ).strip()
         self._cache_root = cache_root
         self._execute = execute
-        self._prepare_lock = asyncio.Lock()
+        self._prepare_lock: asyncio.Lock | None = None
         self._local_dir: Path | None = None
         self._replay_store: ProviderSnapshotStore | None = None
         self._snapshot_bundle: dict[str, Any] | None = None
@@ -382,6 +532,8 @@ class AttestedReplayDevEvaluatorV2:
     async def _ensure_prepared(
         self,
     ) -> tuple[Path, ProviderSnapshotStore, dict[str, Any]]:
+        if self._prepare_lock is None:
+            self._prepare_lock = asyncio.Lock()
         async with self._prepare_lock:
             if (
                 self._local_dir is None
@@ -398,7 +550,7 @@ class AttestedReplayDevEvaluatorV2:
                 replay_store = ProviderSnapshotStore(
                     str(local_dir),
                     mode=MODE_REPLAY,
-                    miss_policy=default_miss_policy(),
+                    miss_policy=MISS_POLICY_STRICT,
                 )
                 await asyncio.to_thread(load_verified_dev_items, replay_store)
                 verification = await asyncio.to_thread(replay_store.verify_manifest)

@@ -349,6 +349,7 @@ class ResearchLabGatewayConfig:
     hosted_worker_poll_seconds: int = 15
     hosted_worker_max_runs: int = 0
     hosted_worker_max_candidates: int = 1
+    inner_loop_mode: str = "off"
     hosted_worker_dev_eval_candidate_width: int = 3
     hosted_worker_paid_finalist_count: int = 1
     hosted_worker_dry_run: bool = False
@@ -674,6 +675,12 @@ class ResearchLabGatewayConfig:
             hosted_worker_poll_seconds=_int("RESEARCH_LAB_HOSTED_WORKER_POLL_SECONDS", 15),
             hosted_worker_max_runs=_int("RESEARCH_LAB_HOSTED_WORKER_MAX_RUNS", 0),
             hosted_worker_max_candidates=max(1, _int("RESEARCH_LAB_HOSTED_WORKER_MAX_CANDIDATES", 1)),
+            inner_loop_mode=(
+                os.getenv("RESEARCH_LAB_INNER_LOOP_MODE", "off").strip().lower()
+                if os.getenv("RESEARCH_LAB_INNER_LOOP_MODE", "off").strip().lower()
+                in {"off", "auto", "observe", "shadow", "rank"}
+                else "off"
+            ),
             hosted_worker_dev_eval_candidate_width=max(
                 1,
                 _int("RESEARCH_LAB_LOOP_DEV_EVAL_CANDIDATE_WIDTH", 3),
@@ -1248,6 +1255,7 @@ class ResearchLabGatewayConfig:
         default_doc = {
             "model": self.auto_research_model,
             "max_candidates": self.hosted_worker_max_candidates,
+            "inner_loop_mode": self.inner_loop_mode,
             "dev_eval_candidate_width": self.hosted_worker_dev_eval_candidate_width,
             "paid_finalist_count": self.hosted_worker_paid_finalist_count,
             "max_tokens": self.auto_research_max_tokens,
@@ -1267,6 +1275,7 @@ class ResearchLabGatewayConfig:
                 return self.default_auto_research_model_tier, self.auto_research_model, {
                     "model": self.auto_research_model,
                     "max_candidates": self.hosted_worker_max_candidates,
+                    "inner_loop_mode": self.inner_loop_mode,
                     "dev_eval_candidate_width": self.hosted_worker_dev_eval_candidate_width,
                     "paid_finalist_count": self.hosted_worker_paid_finalist_count,
                     "max_tokens": self.auto_research_max_tokens,
@@ -1549,6 +1558,7 @@ class ResearchLabGatewayConfig:
                 "dry_run": self.hosted_worker_dry_run,
                 "poll_seconds": self.hosted_worker_poll_seconds,
                 "max_candidates": self.hosted_worker_max_candidates,
+                "inner_loop_mode": self.inner_loop_mode,
                 "dev_eval_candidate_width": self.hosted_worker_dev_eval_candidate_width,
                 "paid_finalist_count": self.hosted_worker_paid_finalist_count,
                 "worker_id": self.hosted_worker_id,

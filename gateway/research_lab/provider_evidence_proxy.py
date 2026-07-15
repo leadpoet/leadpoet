@@ -578,6 +578,109 @@ def resolve_provider_credential(
     return "", ""
 
 
+class ExaConcurrencyGate:
+    """Account-wide Exa concurrency limits, enforced at the one place every
+    scoring/hosted container's provider traffic converges: this proxy.
+
+    Exa allows a fixed number of ACTIVE Agent runs (one fifth of account QPS;
+    operator-confirmed 5 for our account) and ~25 concurrent search/other
+    requests. Exceeding the agent limit fails runs outright, which scored
+    candidates as bad for provider reasons rather than merit and capped
+    benchmark concurrency. Callers beyond the limit now QUEUE here instead of
+    erroring; a queue-wait timeout returns 429 so the model's transient-retry
+    ladder takes over.
+
+    Agent-run slots are held from run creation until a poll reports a terminal
+    status, with a TTL reaper so a lost poller can never leak a slot forever.
+    """
+
+    _TERMINAL = {"completed", "failed", "cancelled"}
+
+    def __init__(self) -> None:
+        self.agent_limit = max(1, int(os.getenv("EXA_AGENT_MAX_CONCURRENCY", "5")))
+        self.search_limit = max(1, int(os.getenv("EXA_SEARCH_MAX_CONCURRENCY", "25")))
+        self._agent_sem = threading.BoundedSemaphore(self.agent_limit)
+        self._search_sem = threading.BoundedSemaphore(self.search_limit)
+        self._active_runs: dict[str, float] = {}
+        self._lock = threading.Lock()
+        self._run_ttl = float(os.getenv("EXA_AGENT_RUN_TTL_SECONDS", "960"))
+        self._wait_seconds = float(os.getenv("EXA_GATE_WAIT_SECONDS", "240"))
+
+    def _reap_expired_runs(self) -> None:
+        now = time.time()
+        with self._lock:
+            stale = [rid for rid, started in self._active_runs.items()
+                     if now - started > self._run_ttl]
+            for rid in stale:
+                self._active_runs.pop(rid, None)
+        for rid in stale:
+            logger_msg = f"exa_gate_agent_run_ttl_release run={rid[:24]}"
+            print(logger_msg, flush=True)
+            try:
+                self._agent_sem.release()
+            except ValueError:
+                pass
+
+    def acquire(self, provider: str, method: str, path: str) -> tuple[str, bool]:
+        """Returns (kind, acquired). kind '' means this request is not gated."""
+        if provider != "exa":
+            return "", True
+        self._reap_expired_runs()
+        clean = (path or "").split("?")[0].rstrip("/")
+        if method.upper() == "POST" and clean == "/agent/runs":
+            return "agent_run", self._agent_sem.acquire(timeout=self._wait_seconds)
+        if clean.startswith("/agent/runs/"):
+            return "", True  # status polls are cheap and must never queue
+        return "search", self._search_sem.acquire(timeout=self._wait_seconds)
+
+    def release_on_failure(self, kind: str) -> None:
+        if kind == "search":
+            self._search_sem.release()
+        elif kind == "agent_run":
+            try:
+                self._agent_sem.release()
+            except ValueError:
+                pass
+
+    def finish(self, kind: str, *, path: str, status: int, body: bytes) -> None:
+        """Post-response accounting: searches release immediately; a created
+        agent run keeps its slot bound to the run id until terminal/TTL."""
+        if kind == "search":
+            self._search_sem.release()
+            return
+        if kind == "agent_run":
+            run_id = ""
+            if 200 <= int(status or 0) < 300:
+                try:
+                    run_id = str((json.loads(body.decode("utf-8") or "{}") or {}).get("id") or "")
+                except Exception:
+                    run_id = ""
+            if run_id:
+                with self._lock:
+                    self._active_runs[run_id] = time.time()
+            else:
+                self.release_on_failure("agent_run")
+
+    def observe_agent_poll(self, path: str, body: bytes) -> None:
+        clean = (path or "").split("?")[0]
+        if "/agent/runs/" not in clean:
+            return
+        run_id = clean.split("/agent/runs/", 1)[1].split("/")[0]
+        if not run_id:
+            return
+        if exa_agent_run_status(body) in self._TERMINAL:
+            with self._lock:
+                held = self._active_runs.pop(run_id, None)
+            if held is not None:
+                try:
+                    self._agent_sem.release()
+                except ValueError:
+                    pass
+
+
+_EXA_GATE = ExaConcurrencyGate()
+
+
 class ProviderUsageLedger:
     """Per-call usage ledger + per-day live-call counters.
 
@@ -1361,6 +1464,18 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             method=self.command,
         )
         response_headers: dict[str, str] = {}
+        gate_kind, gate_ok = _EXA_GATE.acquire(entry.id, self.command, rest)
+        if not gate_ok:
+            # Queue-wait timed out: surface a transient 429 so the model's
+            # bounded retry ladder backs off — never a fake bad score.
+            if is_leader:
+                self.store.release_lead(fingerprint)
+            self._respond(
+                429,
+                json.dumps({"error": "exa concurrency gate wait timeout",
+                            "transient": True}).encode("utf-8"),
+            )
+            return
         try:
             with urllib.request.urlopen(request, timeout=180) as response:
                 status = int(getattr(response, "status", None) or getattr(response, "code", 0) or 0)
@@ -1377,6 +1492,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         except Exception:
             # No recordable result (transport failure): release leadership so a
             # waiting caller can retry rather than block on us.
+            _EXA_GATE.release_on_failure(gate_kind)
             if is_leader:
                 self.store.release_lead(fingerprint)
             event = cost_ledger.record_live_event(
@@ -1404,6 +1520,11 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             return
         # Nonterminal Exa agent polls are real spend but not replayable
         # evidence: never cache them (a later identical poll must go live).
+        # Exa gate accounting: searches release their slot now; a created
+        # agent run keeps its slot until a poll reports terminal (or TTL).
+        _EXA_GATE.finish(gate_kind, path=rest, status=status, body=body)
+        _EXA_GATE.observe_agent_poll(rest, body)
+
         recordable = _response_is_recordable(entry.id, upstream_url, status, body)
         evidence_label = "recorded" if recordable else "live_unrecorded"
         if recordable:

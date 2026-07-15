@@ -84,17 +84,28 @@ def _imds_instance_type(timeout_seconds: float = 2.0) -> str:
         ) from exc
 
 
+def _configured_processor_count() -> int:
+    """Return physical/configured CPUs, including CPUs reserved by Nitro."""
+
+    import os
+
+    try:
+        cpus = int(os.sysconf("SC_NPROCESSORS_CONF"))
+    except (AttributeError, OSError, TypeError, ValueError):
+        cpus = 0
+    if cpus > 0:
+        return cpus
+    cpus = sum(
+        1
+        for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines()
+        if line.partition(":")[0].strip() == "processor"
+    )
+    return cpus if cpus > 0 else int(os.cpu_count() or 0)
+
+
 def _observed_capacity() -> tuple[int, int]:
     try:
-        cpus = sum(
-            1
-            for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines()
-            if line.partition(":")[0].strip() == "processor"
-        )
-        if cpus <= 0:
-            import os
-
-            cpus = int(os.cpu_count() or 0)
+        cpus = _configured_processor_count()
         memory_kib = next(
             int(line.split()[1])
             for line in Path("/proc/meminfo").read_text().splitlines()

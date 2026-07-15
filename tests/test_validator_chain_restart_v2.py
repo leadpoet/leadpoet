@@ -31,7 +31,8 @@ def test_validator_restart_preserves_build_order_and_starts_chain_relay():
     assert "--allow-download" not in build_script
     assert 'pkill -TERM -f "validator_tee.host.chain_relay_v2"' in script
     assert 'pkill -KILL -f "validator_tee.host.chain_relay_v2"' in script
-    assert 'python3 neurons/validator.py' in script
+    assert 'VALIDATOR_PYTHON_BIN="${VALIDATOR_PYTHON_BIN:-python3}"' in script
+    assert '"$VALIDATOR_PYTHON_BIN" neurons/validator.py' in script
     assert "usable validator hotkey material remains on the parent" in script
     assert 'HOST_HOTKEY_DIR="$VALIDATOR_WALLET_ROOT/$VALIDATOR_WALLET_NAME/hotkeys"' in script
     assert 'find "$HOST_HOTKEY_DIR" -mindepth 1 -maxdepth 1 -print -quit' in script

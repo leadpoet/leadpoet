@@ -6,6 +6,9 @@ VALIDATOR_ENV_FILE="${VALIDATOR_ENV_FILE:-/home/ec2-user/.config/leadpoet/valida
 LEADPOET_VALIDATOR_ENV_SECRET_ID="${LEADPOET_VALIDATOR_ENV_SECRET_ID:-leadpoet/prod/validator/env}"
 VALIDATOR_ENV_BACKUP_DIR="${VALIDATOR_ENV_BACKUP_DIR:-/home/ec2-user/.config/leadpoet/env-backups}"
 EXPECTED_AWS_ACCOUNT="${EXPECTED_AWS_ACCOUNT:-493765492819}"
+# Interpreter for the long-lived validator process. The hydrated environment
+# can select the existing production venv without changing restart behavior.
+VALIDATOR_PYTHON_BIN="${VALIDATOR_PYTHON_BIN:-python3}"
 VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST="${VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/gateway-v2-release-manifest.json}"
 VALIDATOR_V2_RELEASE_MANIFEST="${VALIDATOR_V2_RELEASE_MANIFEST:-/home/ec2-user/.config/leadpoet/validator-v2-release-manifest.json}"
 VALIDATOR_V2_RELEASE_ARCHIVE_ROOT="${VALIDATOR_V2_RELEASE_ARCHIVE_ROOT:-/home/ec2-user/.config/leadpoet/validator-releases-v2}"
@@ -352,7 +355,7 @@ echo "Starting validator"
 export PATH="$HOME/.local/bin:$PATH"
 export PYTHONPATH="${PYTHONPATH:-$VALIDATOR_ROOT}"
 
-python3 neurons/validator.py \
+"$VALIDATOR_PYTHON_BIN" neurons/validator.py \
   --netuid "${VALIDATOR_NETUID:-71}" \
   --subtensor_network "${VALIDATOR_SUBTENSOR_NETWORK:-finney}" \
   --wallet_name "$VALIDATOR_WALLET_NAME" \

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -168,6 +169,13 @@ def test_full_restart_preflight_accepts_only_complete_approved_release(
     assert result["parent_plaintext_provider_slot_count"] == 0
     assert result["worker_proxy_profile_count"] == 35
     assert result["acceptance_corpus_manifest_hash"] == "sha256:" + "e" * 64
+
+
+def test_capacity_detection_counts_cpus_reserved_by_nitro(monkeypatch) -> None:
+    monkeypatch.setattr(os, "sysconf", lambda name: 16)
+    monkeypatch.setattr(os, "cpu_count", lambda: 14)
+
+    assert preflight._configured_processor_count() == 16
 
 
 def test_full_restart_preflight_rejects_current_undersized_gateway(

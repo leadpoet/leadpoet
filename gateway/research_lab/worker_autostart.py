@@ -15,8 +15,6 @@ from typing import Mapping
 
 
 TRUTHY = {"1", "true", "yes", "on"}
-EXPECTED_HOSTED_WORKERS = 10
-EXPECTED_SCORING_WORKERS = 25
 WORKER_READY_FD_ENV = "RESEARCH_LAB_WORKER_READY_FD"
 
 
@@ -232,15 +230,14 @@ class ResearchLabWorkerSupervisor:
             raise ResearchLabWorkerStartupError(
                 "authoritative V2 worker autostart cannot be disabled"
             )
-        expected = {
-            "hosted": (self.plan.hosted, EXPECTED_HOSTED_WORKERS),
-            "scoring": (self.plan.scoring, EXPECTED_SCORING_WORKERS),
-        }
-        for kind, (fleet, count) in expected.items():
-            if not fleet.enabled or fleet.worker_count != count:
+        for kind, fleet in {
+            "hosted": self.plan.hosted,
+            "scoring": self.plan.scoring,
+        }.items():
+            if not fleet.enabled or fleet.worker_count <= 0:
                 raise ResearchLabWorkerStartupError(
-                    "%s worker fleet must contain exactly %d enabled workers; got %d (%s)"
-                    % (kind, count, fleet.worker_count, fleet.reason or "enabled")
+                    "%s worker fleet must contain configured enabled workers; got %d (%s)"
+                    % (kind, fleet.worker_count, fleet.reason or "enabled")
                 )
 
     def start(self) -> None:
@@ -349,8 +346,8 @@ class ResearchLabWorkerSupervisor:
                 % (dead, missing_ready)
             )
         if self._full_topology_required() and (
-            hosted_running != EXPECTED_HOSTED_WORKERS
-            or scoring_running != EXPECTED_SCORING_WORKERS
+            hosted_running != self.plan.hosted.worker_count
+            or scoring_running != self.plan.scoring.worker_count
         ):
             raise ResearchLabWorkerStartupError(
                 "authoritative V2 worker count differs: hosted=%d scoring=%d"

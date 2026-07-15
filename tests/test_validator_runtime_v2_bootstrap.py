@@ -109,7 +109,7 @@ def test_runtime_configuration_binds_six_build_gateway_release():
     )
     assert config["gateway_release_hash"] == gateway["release_hash"]
     assert set(config["gateway_role_expectations"]) == set(ROLE_SPECS)
-    assert config["gateway_role_expectations"]["gateway_scoring_a"]["pcr0"] == (
+    assert config["gateway_role_expectations"]["gateway_scoring"]["pcr0"] == (
         "4" * 96
     )
 

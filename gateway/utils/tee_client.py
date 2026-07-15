@@ -845,6 +845,7 @@ class TEEClient:
 # Fixed CIDs are part of the measured V2 topology. Existing event/checkpoint
 # callers retain ``tee_client`` as a coordinator alias.
 coordinator_tee_client = TEEClient(cid=16)
-scoring_tee_clients = (TEEClient(cid=17), TEEClient(cid=18))
-autoresearch_tee_client = TEEClient(cid=19)
+scoring_tee_client = TEEClient(cid=17)
+scoring_tee_clients = (scoring_tee_client,)
+autoresearch_tee_client = TEEClient(cid=18)
 tee_client = coordinator_tee_client

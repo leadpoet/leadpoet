@@ -118,10 +118,10 @@ def test_local_role_artifacts_must_match_approved_six_build_release(tmp_path):
 
 def test_local_role_artifact_tampering_fails_closed(tmp_path):
     gateway_root, eif_root, release, _observed = _fixture(tmp_path)
-    (eif_root / "tee-enclave-gateway_scoring_a.eif").write_bytes(b"tampered")
+    (eif_root / "tee-enclave-gateway_scoring.eif").write_bytes(b"tampered")
     with pytest.raises(
         ReleaseArtifactVerificationError,
-        match="gateway_scoring_a.*eif_hash",
+        match="gateway_scoring.*eif_hash",
     ):
         verify_release_artifacts(
             release_manifest=release,

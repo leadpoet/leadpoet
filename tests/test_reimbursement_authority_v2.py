@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.research_lab import attested_v2_store, reimbursement_awards, v2_authority
+from gateway.research_lab.tee_protocol import ResearchLabTeeProtocolError
 
 
 def _policy():
@@ -261,7 +262,7 @@ async def test_reimbursement_authority_failure_prevents_business_writes(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_legacy_reimbursement_preserves_host_award_and_schedule(monkeypatch):
+async def test_legacy_reimbursement_is_rejected_before_any_write(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1")
     order = []
 
@@ -276,9 +277,6 @@ async def test_legacy_reimbursement_preserves_host_award_and_schedule(monkeypatc
     async def create_schedule(**kwargs):
         order.append("schedule")
         return {"schedule_id": kwargs["schedule"]["schedule_id"]}
-
-    async def forbidden_v2(**_kwargs):
-        raise AssertionError("legacy reimbursement must not call V2 authority")
 
     monkeypatch.setattr(
         reimbursement_awards,
@@ -312,26 +310,24 @@ async def test_legacy_reimbursement_preserves_host_award_and_schedule(monkeypatc
         "create_reimbursement_schedule",
         create_schedule,
     )
-    monkeypatch.setattr(v2_authority, "authorize_reward_decision_v2", forbidden_v2)
-
-    result = await reimbursement_awards.create_reimbursement_decision(
-        _config(),
-        run_id="run-legacy",
-        ticket_id="ticket-legacy",
-        ticket={"miner_hotkey": "hotkey-1", "island": "generalist"},
-        payment={"payment_id": "payment-1"},
-        receipt_id="receipt-1",
-        budget_context={"requested_compute_budget_usd": 20.0},
-        cost_evidence={
-            "trusted_cost_ledger": True,
-            "actual_openrouter_cost_usd": 10.0,
-            "cost_ledger": {"actual_openrouter_cost_usd": 10.0},
-        },
-        source="test",
-        miner_openrouter_key_ref="encrypted_ref:openrouter:test",
-    )
-    assert result["status"] == "awarded"
-    assert order == ["snapshot", "award", "schedule"]
+    with pytest.raises(ResearchLabTeeProtocolError, match="V1 authority is retired"):
+        await reimbursement_awards.create_reimbursement_decision(
+            _config(),
+            run_id="run-legacy",
+            ticket_id="ticket-legacy",
+            ticket={"miner_hotkey": "hotkey-1", "island": "generalist"},
+            payment={"payment_id": "payment-1"},
+            receipt_id="receipt-1",
+            budget_context={"requested_compute_budget_usd": 20.0},
+            cost_evidence={
+                "trusted_cost_ledger": True,
+                "actual_openrouter_cost_usd": 10.0,
+                "cost_ledger": {"actual_openrouter_cost_usd": 10.0},
+            },
+            source="test",
+            miner_openrouter_key_ref="encrypted_ref:openrouter:test",
+        )
+    assert order == []
 
 
 async def _async(value):

@@ -44,55 +44,51 @@ terminate_stale_validator_builds() {
 
 docker_build_validator_image() {
     local timeout_seconds="${VALIDATOR_DOCKER_BUILD_TIMEOUT_SECONDS:-1800}"
+    local build_context build_status
+    build_context="$(mktemp -d /tmp/leadpoet-validator-build.XXXXXX)"
+    git -C "$REPO_ROOT" archive "$VALIDATOR_V2_DEPLOY_COMMIT" \
+        | tar -x -C "$build_context"
 
     if command -v timeout >/dev/null 2>&1; then
-        timeout "$timeout_seconds" docker build -f "$SCRIPT_DIR/Dockerfile" -t leadpoet-validator:latest "$REPO_ROOT"
+        timeout "$timeout_seconds" docker build \
+            --build-arg "LEADPOET_BUILD_COMMIT=$VALIDATOR_V2_DEPLOY_COMMIT" \
+            -f "$build_context/validator_models/containerizing/Dockerfile" \
+            -t leadpoet-validator:latest \
+            "$build_context" && build_status=0 || build_status=$?
     else
         echo "⚠️  timeout command unavailable; running Docker build without timeout"
-        docker build -f "$SCRIPT_DIR/Dockerfile" -t leadpoet-validator:latest "$REPO_ROOT"
+        docker build \
+            --build-arg "LEADPOET_BUILD_COMMIT=$VALIDATOR_V2_DEPLOY_COMMIT" \
+            -f "$build_context/validator_models/containerizing/Dockerfile" \
+            -t leadpoet-validator:latest \
+            "$build_context" && build_status=0 || build_status=$?
     fi
+    rm -rf "$build_context"
+    return "$build_status"
 }
 
 # ============================================================
-# SAFEGUARD: pull latest from GitHub origin/main before deploy
+# EXACT-COMMIT GATE: the restart wrapper already selected and verified HEAD.
 # ============================================================
-# Background: the validator host was twice silently overwritten with
-# an older snapshot (2026-05-11 and 2026-05-13), each time wiping
-# important fixes.  This step makes every deploy idempotently pull
-# the canonical code from GitHub before building the image, so a
-# rogue rsync cannot keep production on a stale commit.
-#
-# The host directory must be initialised as a git repo once.  Run:
-#   cd /home/ec2-user/leadpoet/leadpoet
-#   git init && git remote add origin https://github.com/leadpoet/leadpoet.git
-#   git fetch origin main && git reset --hard origin/main
-# After that, every deploy_dynamic.sh invocation self-heals.
+# This script must never fetch or reset after the validator EIF build. Doing so
+# could launch host code from a different commit than the measured enclave.
 # ============================================================
 REPO_DIR="/home/ec2-user/leadpoet/leadpoet"
-if [ -d "$REPO_DIR/.git" ]; then
-    echo "🔄 SAFEGUARD: pulling latest from GitHub origin/main..."
-    (
-        cd "$REPO_DIR"
-        if git fetch --quiet origin main 2>&1; then
-            ORIGIN_SHA=$(git rev-parse origin/main)
-            HEAD_SHA=$(git rev-parse HEAD)
-            if [ "$ORIGIN_SHA" != "$HEAD_SHA" ]; then
-                echo "   📥 HEAD=$HEAD_SHA  origin=$ORIGIN_SHA  → resetting to origin/main"
-                git reset --hard "$ORIGIN_SHA" 2>&1 | head -3
-                echo "   ✅ Reset complete (image will build from GitHub HEAD)"
-            else
-                echo "   ✅ Already at origin/main HEAD ($HEAD_SHA)"
-            fi
-        else
-            echo "   ⚠️  git fetch failed; continuing with on-disk code (deploy is NOT self-healing this run)"
-        fi
-    ) || echo "   ⚠️  safeguard subshell failed; continuing with on-disk code"
-else
-    echo "⚠️  SAFEGUARD SKIPPED: $REPO_DIR is not a git repo."
-    echo "   To enable auto-pull from GitHub on every deploy, run once:"
-    echo "     cd $REPO_DIR && git init && git remote add origin https://github.com/leadpoet/leadpoet.git"
-    echo "     git fetch origin main && git reset --hard origin/main"
+if ! [[ "${VALIDATOR_V2_DEPLOY_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "❌ ERROR: VALIDATOR_V2_DEPLOY_COMMIT must be the approved full Git commit" >&2
+    exit 1
 fi
+if [ ! -d "$REPO_DIR/.git" ]; then
+    echo "❌ ERROR: validator repository is not a Git checkout: $REPO_DIR" >&2
+    exit 1
+fi
+HEAD_SHA="$(git -C "$REPO_DIR" rev-parse HEAD)"
+if [ "$HEAD_SHA" != "$VALIDATOR_V2_DEPLOY_COMMIT" ]; then
+    echo "❌ ERROR: validator checkout moved after EIF approval" >&2
+    echo "   approved=$VALIDATOR_V2_DEPLOY_COMMIT observed=$HEAD_SHA" >&2
+    exit 1
+fi
+echo "✅ Exact validator commit remains active: $HEAD_SHA"
 echo ""
 
 # SIMPLIFIED CONFIGURATION: Read from main .env file
@@ -293,6 +289,15 @@ else
     echo "   docker build -f validator_models/containerizing/Dockerfile -t leadpoet-validator:latest ."
     exit 1
 fi
+IMAGE_COMMIT="$(
+    docker image inspect leadpoet-validator:latest \
+        --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+)"
+if [ "$IMAGE_COMMIT" != "$VALIDATOR_V2_DEPLOY_COMMIT" ]; then
+    echo "❌ ERROR: validator Docker image commit label differs from approved commit" >&2
+    exit 1
+fi
+echo "✅ Validator Docker image commit verified: $IMAGE_COMMIT"
 echo ""
 
 # Stop and remove existing containers (sourcing + qualification + fulfillment)
@@ -371,6 +376,11 @@ start_container() {
       -e PYTHONUNBUFFERED=1 \
       -e LEADPOET_CONTAINER_MODE=1 \
       -e LEADPOET_WRAPPER_ACTIVE=1 \
+      -e VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT" \
+      -e GITHUB_SHA="$VALIDATOR_V2_DEPLOY_COMMIT" \
+      -e GIT_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT" \
+      -e VALIDATOR_V2_GATEWAY_URL="${VALIDATOR_V2_GATEWAY_URL:-}" \
+      -e EXPECTED_CHAIN="${EXPECTED_CHAIN:-}" \
       -e MEV_API_KEY="$MEV_API_KEY" \
       -e TRUELIST_API_KEY="$TRUELIST_API_KEY" \
       -e ZEROBOUNCE_API_KEY="${ZEROBOUNCE_API_KEY:-}" \
@@ -385,9 +395,7 @@ start_container() {
       -e NETUID="$VALIDATOR_NETUID" \
       -e GIT_COMMIT_HASH="$VALIDATOR_DEPLOY_SHA" \
       -e EXPECTED_CHAIN="$EXPECTED_CHAIN" \
-      -e VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-authoritative_v2}" \
-      -e ENABLE_TEE_SUBMISSION="${ENABLE_TEE_SUBMISSION:-false}" \
-      -e VALIDATOR_REQUIRE_GATEWAY_WEIGHT_SUBMISSION="${VALIDATOR_REQUIRE_GATEWAY_WEIGHT_SUBMISSION:-true}" \
+      -e VALIDATOR_WEIGHT_PROTOCOL=authoritative_v2 \
       -e ENABLE_QUALIFICATION_EVALUATION="${ENABLE_QUALIFICATION_EVALUATION:-false}" \
       -e ENABLE_QUALIFICATION_WORKERS="${ENABLE_QUALIFICATION_WORKERS:-false}" \
       -e ENABLE_FULFILLMENT="${ENABLE_FULFILLMENT:-false}" \

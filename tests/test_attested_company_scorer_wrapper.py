@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from gateway.research_lab import attested_scoring
+from gateway.research_lab.tee_protocol import ResearchLabTeeProtocolError
 from research_lab.eval.evaluator import QualificationStyleCompanyScorer
 
 
@@ -81,19 +82,21 @@ async def test_v2_scoring_failure_propagates_without_host_fallback(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_legacy_protocol_uses_host_scorer_even_with_attested_context(monkeypatch):
+async def test_legacy_protocol_cannot_fall_back_to_host_scorer(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1_compat")
     scorer = QualificationStyleCompanyScorer(
         attested_epoch_id=104,
         attested_purpose="research_lab.candidate_score.v1",
     )
-    expected = [{"final_score": 17.0}]
+    calls = []
 
     async def local(*_args, **_kwargs):
-        return expected
+        calls.append("host")
+        return [{"final_score": 17.0}]
 
     async def forbidden_v2(**_kwargs):
-        raise AssertionError("legacy compatibility must not call V2 scoring")
+        calls.append("v2")
+        raise AssertionError("invalid protocol must fail before V2 scoring")
 
     monkeypatch.setattr(scorer, "_score_with_breakdowns_impl", local)
     monkeypatch.setattr(
@@ -101,5 +104,7 @@ async def test_legacy_protocol_uses_host_scorer_even_with_attested_context(monke
         "execute_required_qualification_company_scores",
         forbidden_v2,
     )
-    assert await scorer.score_with_breakdowns([], {}, False) is expected
+    with pytest.raises(ResearchLabTeeProtocolError, match="V1 authority is retired"):
+        await scorer.score_with_breakdowns([], {}, False)
+    assert calls == []
     assert scorer.attested_receipts() == []

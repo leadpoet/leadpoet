@@ -9,8 +9,6 @@ PROTOCOL_ENV = "RESEARCH_LAB_TEE_PROTOCOL"
 LEGACY_V1_PROTOCOL = "legacy_v1"
 V2_PROTOCOL = "v2"
 _ALIASES = {
-    LEGACY_V1_PROTOCOL: LEGACY_V1_PROTOCOL,
-    "legacy_v1_compat": LEGACY_V1_PROTOCOL,
     V2_PROTOCOL: V2_PROTOCOL,
     "authoritative_v2": V2_PROTOCOL,
 }
@@ -21,14 +19,14 @@ class ResearchLabTeeProtocolError(RuntimeError):
 
 
 def normalize_tee_protocol(value: str | None) -> str:
-    """Normalize the explicit protocol while keeping V2 as the safe default."""
+    """Normalize the sole production protocol and reject retired V1 modes."""
 
     normalized = str(value or V2_PROTOCOL).strip().lower()
     try:
         return _ALIASES[normalized]
     except KeyError as exc:
         raise ResearchLabTeeProtocolError(
-            f"{PROTOCOL_ENV} must be {LEGACY_V1_PROTOCOL} or {V2_PROTOCOL}"
+            f"{PROTOCOL_ENV} must be {V2_PROTOCOL}; V1 authority is retired"
         ) from exc
 
 
@@ -37,7 +35,8 @@ def research_lab_tee_protocol() -> str:
 
 
 def legacy_v1_enabled() -> bool:
-    return research_lab_tee_protocol() == LEGACY_V1_PROTOCOL
+    research_lab_tee_protocol()
+    return False
 
 
 def v2_enabled() -> bool:

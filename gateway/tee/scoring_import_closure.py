@@ -138,23 +138,7 @@ ROLE_ENTRYPOINT_MODULES = {
         "leadpoet_canonical.weight_authority_v2",
         "gateway.research_lab.attested_v2_store",
     ),
-    "gateway_scoring_a": ENTRYPOINT_MODULES
-    + DYNAMIC_IMPORT_MODULES
-    + (
-        "gateway.tee.execution_job_manager_v2",
-        "gateway.tee.inter_enclave_artifact_v2",
-        "gateway.tee.model_sandbox_v2",
-        "gateway.tee.mtls_identity",
-        "gateway.tee.provider_client_v2",
-        "gateway.tee.rpc_authority",
-        "gateway.tee.runtime_identity_v2",
-        "gateway.tee.sandbox_http_shim_v2",
-        "gateway.tee.sandbox_provider_socket_v2",
-        "gateway.tee.scoring_executor_v2",
-        "gateway.tee.source_bundle_v2",
-        "validator_models.automated_checks",
-    ),
-    "gateway_scoring_b": ENTRYPOINT_MODULES
+    "gateway_scoring": ENTRYPOINT_MODULES
     + DYNAMIC_IMPORT_MODULES
     + (
         "gateway.tee.execution_job_manager_v2",

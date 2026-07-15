@@ -252,6 +252,102 @@ def test_guard_bridge_releases_partial_lease_when_provisioning_fails(monkeypatch
     assert len(client.released) == 1
 
 
+def test_stale_parent_repair_preserves_dynamic_worker_proxy_index(
+    tmp_path, monkeypatch
+):
+    worker_indexes = []
+    client = _CoordinatorClient()
+    artifact = _artifact(tmp_path)
+    draft = authority.CodeEditDraft(
+        failure_mode="fixture",
+        mechanism="fixture",
+        expected_improvement="fixture",
+        risk="fixture",
+        lane="code_edit",
+        target_files=("research_lab_adapter.py",),
+        unified_diff=(
+            "--- a/research_lab_adapter.py\n"
+            "+++ b/research_lab_adapter.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            " def run():\n"
+            "-    return 1\n"
+            "+    return 2\n"
+        ),
+        redacted_summary="fixture",
+        test_plan="fixture",
+        rollback_plan="fixture",
+    )
+    candidate_graph, _receipt = _coordinator_graph(
+        {"candidate_id": "candidate-1"}
+    )
+    source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
+
+    monkeypatch.setattr(
+        authority,
+        "_load_release",
+        lambda _path: {"release_hash": "sha256:" + "9" * 64},
+    )
+
+    async def source_bundle(*_args, **_kwargs):
+        return {"archive_sha256": "sha256:" + "8" * 64}
+
+    def load_profile(_profile, *, worker_index, **_kwargs):
+        worker_indexes.append(worker_index)
+        return {
+            "credential_ref_hashes": {"openrouter": "sha256:" + "7" * 64}
+        }
+
+    async def provision(*_args, **_kwargs):
+        return {"status": "ready"}
+
+    async def execute(**kwargs):
+        assert kwargs["provider_credential_profile"] == (
+            authority.STALE_PARENT_REPAIR_PROFILE
+        )
+        return {
+            "result": {
+                "schema_version": authority.STALE_PARENT_REPAIR_RESULT_SCHEMA_VERSION,
+                "run_id": "run-1",
+                "candidate_id": "candidate-1",
+                "draft": draft.to_dict(),
+                "repair_used": False,
+                "original_source_diff_hash": source_diff_hash,
+                "result_source_diff_hash": source_diff_hash,
+                "active_artifact_hash": artifact.model_artifact_hash,
+                "source_bundle_hash": "sha256:" + "8" * 64,
+            },
+            "receipt": {"receipt_hash": "sha256:" + "6" * 64},
+            "receipt_graph": {"root_receipt_hash": "sha256:" + "6" * 64},
+        }
+
+    monkeypatch.setattr(authority, "source_bundle_for_artifact_v2", source_bundle)
+    monkeypatch.setattr(authority, "load_provider_profile_v2", load_profile)
+    monkeypatch.setattr(authority, "provision_provider_profile_v2", provision)
+
+    result = asyncio.run(
+        authority.attest_stale_parent_rebase_v2(
+            candidate={
+                "candidate_id": "candidate-1",
+                "run_id": "run-1",
+                "candidate_source_diff_hash": source_diff_hash,
+            },
+            original_draft=draft,
+            active_artifact=artifact,
+            candidate_receipt_graph=candidate_graph,
+            epoch_id=10,
+            worker_index=12,
+            require_egress_proxy=True,
+            source_bundle_timeout_seconds=120,
+            execute=execute,
+            coordinator_client=client,
+        )
+    )
+
+    assert worker_indexes == [12]
+    assert result.draft == draft
+    assert client.released
+
+
 def test_authoritative_loop_binds_measured_provider_outcome_parent(
     tmp_path,
     monkeypatch,

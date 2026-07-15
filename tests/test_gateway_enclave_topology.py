@@ -10,8 +10,7 @@ from gateway.tee.topology import (
     HOST_RESERVED_MEMORY_MIB,
     HOST_RESERVED_VCPUS,
     ROLE_SPECS,
-    SCORING_A_ROLE,
-    SCORING_B_ROLE,
+    SCORING_ROLE,
     TopologyError,
     manifest_document,
     validate_manifest,
@@ -28,30 +27,28 @@ from gateway.tee import verify_topology
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_approved_four_enclave_topology_is_exact():
+def test_approved_three_enclave_topology_is_exact():
     validate_worker_partition()
     assert ROLE_SPECS[COORDINATOR_ROLE]["cid"] == 16
-    assert ROLE_SPECS[SCORING_A_ROLE]["cid"] == 17
-    assert ROLE_SPECS[SCORING_B_ROLE]["cid"] == 18
-    assert ROLE_SPECS[AUTORESEARCH_ROLE]["cid"] == 19
-    assert ROLE_SPECS[SCORING_A_ROLE]["worker_ids"] == list(range(13))
-    assert ROLE_SPECS[SCORING_B_ROLE]["worker_ids"] == list(range(13, 25))
-    assert ROLE_SPECS[AUTORESEARCH_ROLE]["worker_ids"] == list(range(10))
-    assert HOST_RESERVED_VCPUS == 6
-    assert HOST_RESERVED_MEMORY_MIB == 128 * 1024
+    assert ROLE_SPECS[SCORING_ROLE]["cid"] == 17
+    assert ROLE_SPECS[AUTORESEARCH_ROLE]["cid"] == 18
+    assert ROLE_SPECS[SCORING_ROLE]["worker_assignment"] == "all_configured"
+    assert ROLE_SPECS[AUTORESEARCH_ROLE]["worker_assignment"] == "all_configured"
+    assert HOST_RESERVED_VCPUS == 4
+    assert HOST_RESERVED_MEMORY_MIB == 40 * 1024
 
 
-def test_full_topology_requires_r7i_8xlarge_capacity_floor():
-    with pytest.raises(TopologyError, match="32 vCPUs"):
+def test_full_topology_requires_r7i_4xlarge_capacity_floor():
+    with pytest.raises(TopologyError, match="16 vCPUs"):
         validate_production_capacity(parent_vcpus=8, parent_memory_mib=65536)
-    with pytest.raises(TopologyError, match="262144 MiB"):
-        validate_production_capacity(parent_vcpus=32, parent_memory_mib=131072)
+    with pytest.raises(TopologyError, match="131072 MiB"):
+        validate_production_capacity(parent_vcpus=16, parent_memory_mib=65536)
     capacity = validate_production_capacity(
-        parent_vcpus=32,
-        parent_memory_mib=256 * 1024,
+        parent_vcpus=16,
+        parent_memory_mib=128 * 1024,
     )
-    assert capacity["host_vcpus"] == 6
-    assert capacity["host_memory_mib"] == 128 * 1024
+    assert capacity["host_vcpus"] == 4
+    assert capacity["host_memory_mib"] == 40 * 1024
 
 
 def test_checked_in_topology_manifest_matches_code():
@@ -63,7 +60,7 @@ def test_checked_in_topology_manifest_matches_code():
 
 def test_topology_manifest_rejects_resource_drift():
     manifest = manifest_document()
-    manifest["roles"][SCORING_A_ROLE]["memory_mib"] -= 1
+    manifest["roles"][SCORING_ROLE]["memory_mib"] -= 1
     with pytest.raises(TopologyError, match="not canonical"):
         validate_manifest(manifest)
 
@@ -73,8 +70,8 @@ def test_restart_allocator_matches_exact_full_topology():
         encoding="utf-8"
     )
     restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    assert 'REQUIRED_CPUS" -ne 26' in allocator
-    assert 'REQUIRED_MEMORY_MIB" -ne 131072' in allocator
+    assert 'REQUIRED_CPUS" -ne 12' in allocator
+    assert 'REQUIRED_MEMORY_MIB" -ne 90112' in allocator
     assert "nitro-enclaves-allocator.service" in allocator
     assert 'sudo nitro-cli terminate-enclave --all' in allocator
     assert 'sudo systemctl restart "$ALLOCATOR_SERVICE"' in allocator
@@ -180,7 +177,7 @@ def test_startup_proves_coordinator_release_before_starting_runners():
     coordinator = script.index("start_role gateway_coordinator")
     coordinator_health = script.index("verify_roles gateway_coordinator")
     runners = script.index(
-        "for role in gateway_scoring_a gateway_scoring_b gateway_autoresearch"
+        "for role in gateway_scoring gateway_autoresearch"
     )
     final_health = script.index('verify_roles "${ROLES[@]}"')
     assert coordinator < coordinator_health < runners < final_health

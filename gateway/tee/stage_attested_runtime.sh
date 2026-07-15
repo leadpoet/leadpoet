@@ -128,7 +128,7 @@ python3 "$SOURCE_GATEWAY_ROOT/tee/topology.py" --verify "$TOPOLOGY_MANIFEST"
 cp "$TOPOLOGY_MANIFEST" "$TMP_ROOT/topology.json"
 
 mkdir -p "$TMP_ROOT/gateway_enclave_build_identities"
-for role in gateway_coordinator gateway_scoring_a gateway_scoring_b gateway_autoresearch; do
+for role in gateway_coordinator gateway_scoring gateway_autoresearch; do
   python3 "$SOURCE_GATEWAY_ROOT/tee/build_identity.py" build \
     --gateway-root "$SOURCE_GATEWAY_ROOT" \
     --source-root "$SOURCE_ROOT" \

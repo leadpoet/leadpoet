@@ -13,6 +13,9 @@ from urllib.request import Request, urlopen
 from gateway.research_lab.provider_profiles_v2 import (
     verify_required_worker_proxy_profiles_v2,
 )
+from gateway.research_lab.worker_autostart import (
+    build_research_lab_worker_autostart_plan,
+)
 from gateway.tee.acceptance_corpus_v2 import (
     load_and_validate_acceptance_corpus_v2,
 )
@@ -26,9 +29,7 @@ from gateway.tee.topology import ROLE_SPECS, validate_manifest
 from gateway.utils.tee_kms_provision_v2 import load_provider_envelopes
 
 
-ALLOWED_FULL_TOPOLOGY_INSTANCE_TYPES = frozenset(
-    {"r7i.8xlarge", "r7i.12xlarge"}
-)
+FULL_TOPOLOGY_INSTANCE_TYPE = "r7i.4xlarge"
 REQUIRED_BOOT_ENVELOPE_FILES = (
     "artifact_master_key.json",
     "openrouter.json",
@@ -194,11 +195,11 @@ def verify_gateway_restart_preflight_v2(
             "GATEWAY_TEE_TOPOLOGY_MODE must be full or component"
         )
     if mode == "full":
-        if instance_type not in ALLOWED_FULL_TOPOLOGY_INSTANCE_TYPES:
+        if instance_type != FULL_TOPOLOGY_INSTANCE_TYPE:
             raise GatewayRestartPreflightV2Error(
-                "full V2 deployment requires r7i.8xlarge or approved r7i.12xlarge"
+                "full V2 deployment requires r7i.4xlarge"
             )
-        if int(parent_vcpus) < 32 or int(parent_memory_mib) < 250000:
+        if int(parent_vcpus) < 16 or int(parent_memory_mib) < 125000:
             raise GatewayRestartPreflightV2Error(
                 "full V2 deployment has insufficient parent capacity"
             )
@@ -253,6 +254,22 @@ def verify_gateway_restart_preflight_v2(
             "profile_count": 0,
         }
     )
+    if mode == "full":
+        worker_plan = build_research_lab_worker_autostart_plan(parent_environment)
+        if not worker_plan.hosted.enabled or not worker_plan.scoring.enabled:
+            raise GatewayRestartPreflightV2Error(
+                "full V2 deployment requires both configured worker fleets"
+            )
+        expected_worker_counts = {
+            "gateway_autoresearch": int(worker_plan.hosted.worker_count),
+            "gateway_scoring": int(worker_plan.scoring.worker_count),
+        }
+        if dict(profile_result.get("worker_counts") or {}) != expected_worker_counts:
+            raise GatewayRestartPreflightV2Error(
+                "encrypted worker profiles differ from configured proxy counts"
+            )
+    else:
+        expected_worker_counts = {}
     return {
         "schema_version": "leadpoet.gateway_restart_preflight.v2",
         "status": "ready",
@@ -268,6 +285,7 @@ def verify_gateway_restart_preflight_v2(
         "parent_plaintext_provider_slot_count": 0,
         "artifact_bucket_host": normalized_policy["bucket_host"],
         "worker_proxy_profile_count": int(profile_result["profile_count"]),
+        "worker_counts": expected_worker_counts,
         "acceptance_corpus_manifest_hash": (
             str(acceptance_corpus["manifest_hash"])
             if acceptance_corpus is not None

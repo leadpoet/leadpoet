@@ -33,7 +33,7 @@ class _Vault:
         }
 
 
-def _peer(role="gateway_scoring", physical_role="gateway_scoring_a"):
+def _peer(role="gateway_scoring", physical_role="gateway_scoring"):
     return {
         "physical_role": physical_role,
         "service_role": role,
@@ -120,7 +120,7 @@ def test_artifact_ingest_rejects_modified_chunk_and_different_peer():
                 "data_b64": base64.b64encode(b"expected").decode(),
                 "chunk_sha256": sha256_bytes(b"expected"),
             },
-            peer=_peer(physical_role="gateway_scoring_b"),
+            peer=_peer(physical_role="gateway_autoresearch"),
         )
 
 

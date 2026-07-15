@@ -124,7 +124,7 @@ def test_verified_gateway_release_is_archived_as_complete_immutable_set(tmp_path
     )
     archived = verify_archive_directory(Path(result["archive_path"]))
     assert archived["release_hash"] == release["release_hash"]
-    assert len(archived["files"]) == 18
+    assert len(archived["files"]) == 14
     assert result["retained_release_count"] == 1
 
 
@@ -139,7 +139,7 @@ def test_gateway_archive_rejects_artifact_tampering(tmp_path):
         archive_root=tmp_path / "archive",
     )
     archive = Path(result["archive_path"])
-    (archive / "tee-enclave-gateway_scoring_a.eif").write_bytes(b"tampered")
+    (archive / "tee-enclave-gateway_scoring.eif").write_bytes(b"tampered")
     with pytest.raises(ReleaseArchiveV2Error, match="size mismatch|hash mismatch"):
         verify_archive_directory(archive)
 

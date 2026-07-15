@@ -54,7 +54,7 @@ def _keypair():
 def _boot(role: str, private_key, public_key: str):
     physical_role = {
         COORDINATOR_ROLE: "gateway_coordinator",
-        SCORING_ROLE: "gateway_scoring_a",
+        SCORING_ROLE: "gateway_scoring",
         AUTORESEARCH_ROLE: "gateway_autoresearch",
         WEIGHT_ROLE: "validator_weights",
     }[role]

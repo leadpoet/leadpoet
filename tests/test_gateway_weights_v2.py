@@ -1,6 +1,5 @@
 import pytest
 from fastapi import HTTPException
-from types import SimpleNamespace
 
 from gateway.api import weights as weights_api
 from leadpoet_canonical.attested_v2 import sha256_json
@@ -48,122 +47,12 @@ async def test_v1_weight_endpoint_is_retired_by_default(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_v1_weight_endpoint_is_enabled_only_in_legacy_mode(monkeypatch):
+async def test_v1_weight_endpoint_remains_retired_for_legacy_env(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1_compat")
     with pytest.raises(HTTPException) as exc:
         await weights_api.submit_weights(_legacy_submission())
-    assert exc.value.status_code == 400
-    assert "empty" in str(exc.value.detail)
+    assert exc.value.status_code == 410
 
-
-@pytest.mark.asyncio
-async def test_legacy_v1_weight_submission_verifies_and_persists(monkeypatch):
-    from gateway.db import client as db_client
-    from gateway.utils import logger as gateway_logger
-
-    writes = []
-
-    class Query:
-        def __init__(self, *, result=None):
-            self.result = [] if result is None else result
-
-        def select(self, *_args, **_kwargs):
-            return self
-
-        def eq(self, *_args, **_kwargs):
-            return self
-
-        def limit(self, *_args, **_kwargs):
-            return self
-
-        def insert(self, value):
-            writes.append(dict(value))
-            return self
-
-        def execute(self):
-            return SimpleNamespace(data=list(self.result))
-
-    class Client:
-        def table(self, _name):
-            return Query()
-
-    class LegacySubtensor:
-        def get_current_block(self):
-            return 108350
-
-        def metagraph(self, *, netuid):
-            assert netuid == 71
-            return SimpleNamespace(hotkeys=["validator-hotkey"])
-
-        def weights(self, *, netuid):
-            assert netuid == 71
-            return [(0, [(1, 65535)])]
-
-    block = 108350
-    epoch = 300
-    weights_hash = weights_api.bundle_weights_hash(
-        71,
-        epoch,
-        block,
-        [(1, 65535)],
-    )
-    submission = weights_api.WeightSubmission(
-        netuid=71,
-        epoch_id=epoch,
-        block=block,
-        uids=[1],
-        weights_u16=[65535],
-        weights_hash=weights_hash,
-        validator_hotkey="validator-hotkey",
-        validator_enclave_pubkey="1" * 64,
-        validator_signature="2" * 128,
-        validator_attestation_b64="attestation",
-        validator_code_hash="3" * 64,
-        binding_message="binding",
-        validator_hotkey_signature="4" * 128,
-    )
-
-    async def log_event(event_type, payload):
-        assert event_type == "WEIGHT_SUBMISSION"
-        assert payload["weights_hash"] == weights_hash
-        return {"event_hash": EVENT_HASH}
-
-    client = Client()
-    monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1")
-    monkeypatch.setattr(weights_api, "BITTENSOR_NETWORK", "finney")
-    monkeypatch.setattr(weights_api, "PRIMARY_VALIDATOR_HOTKEYS", {"validator-hotkey"})
-    monkeypatch.setattr(weights_api, "ALLOWED_NETUIDS", {71})
-    monkeypatch.setattr(weights_api, "get_subtensor", lambda: LegacySubtensor())
-    monkeypatch.setattr(
-        weights_api,
-        "verify_validator_attestation",
-        lambda *_args: (
-            True,
-            {"pcr0": "a" * 96, "pcr0_commit": COMMIT},
-        ),
-    )
-    monkeypatch.setattr(weights_api, "verify_binding_message", lambda *_a, **_k: True)
-    monkeypatch.setattr(weights_api, "verify_ed25519_signature", lambda *_a: True)
-    monkeypatch.setattr(db_client, "get_read_client", lambda: client)
-    monkeypatch.setattr(db_client, "get_write_client", lambda: client)
-    monkeypatch.setattr(gateway_logger, "log_event", log_event)
-    monkeypatch.setattr(
-        weights_api.ResearchLabGatewayConfig,
-        "from_env",
-        classmethod(
-            lambda _cls: SimpleNamespace(
-                arweave_audit_enabled=False,
-                arweave_audit_shadow_enabled=False,
-            )
-        ),
-    )
-
-    response = await weights_api.submit_weights(submission)
-    assert response.success is True
-    assert response.weight_submission_event_hash == EVENT_HASH
-    assert len(writes) == 1
-    assert writes[0]["weights_hash"] == weights_hash
-    assert writes[0]["pcr0_commit_hash"] == COMMIT
 
 
 def _submission():

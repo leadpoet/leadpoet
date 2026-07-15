@@ -76,6 +76,15 @@ for path in "${PCR0_COPY_PATHS[@]}"; do
 done
 echo "   ✓ PCR0 Docker context cleaned"
 
+# This gate is metadata-only and does not alter the existing image build or
+# normalization procedure. It prevents protected weight/signing logic from
+# changing without an explicitly regenerated, reviewable manifest.
+echo "🔒 Step 0a.1: Verifying protected validator V2 workflows..."
+python3 -m validator_tee.host.protected_workflows_v2 \
+    --root "$REPO_ROOT" \
+    --manifest "$VALIDATOR_TEE_DIR/enclave/protected_workflows_v2.json"
+echo "   ✓ Protected validator V2 workflows match the measured manifest"
+
 # Step 0b: Stage exact, hash-locked V2 binary dependencies. The generated
 # directory is staged after git clean so local leftovers cannot select code.
 echo "📥 Step 0b: Staging hash-locked validator V2 runtime artifacts..."

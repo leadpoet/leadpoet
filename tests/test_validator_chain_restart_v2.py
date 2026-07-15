@@ -35,31 +35,50 @@ def test_validator_restart_preserves_build_order_and_starts_chain_relay():
     assert "usable validator hotkey material remains on the parent" in script
     assert 'HOST_HOTKEY_DIR="$VALIDATOR_WALLET_ROOT/$VALIDATOR_WALLET_NAME/hotkeys"' in script
     assert 'find "$HOST_HOTKEY_DIR" -mindepth 1 -maxdepth 1 -print -quit' in script
-    assert 'HOST_HOTKEY_FILE="$HOST_HOTKEY_DIR/$VALIDATOR_WALLET_HOTKEY"' in script
+    assert "legacy_v1_compat" not in script
     assert "VALIDATOR_V2_GATEWAY_URL" in script
     assert "VALIDATOR_V2_RELEASE_MANIFEST" in script
     assert '--validator-release "$VALIDATOR_V2_RELEASE_MANIFEST"' in script
     assert '--host-hotkey-directory "$HOST_HOTKEY_DIR"' in script
     assert '--retain 3' in script
     assert "unset ENABLE_TEE_SUBMISSION VALIDATOR_ATTESTED_WEIGHT_MODE" in script
+    assert 'export VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_DEPLOY_SHA"' in script
+    assert 'export LEADPOET_WRAPPER_ACTIVE=1' in script
+    deploy = (
+        ROOT / "validator_models" / "containerizing" / "deploy_dynamic.sh"
+    ).read_text(encoding="utf-8")
+    assert 'git -C "$REPO_ROOT" archive "$VALIDATOR_V2_DEPLOY_COMMIT"' in deploy
+    assert '--build-arg "LEADPOET_BUILD_COMMIT=$VALIDATOR_V2_DEPLOY_COMMIT"' in deploy
+    assert "org.opencontainers.image.revision" in deploy
+    assert "git fetch" not in deploy
+    assert "git reset --hard" not in deploy
+    assert '-e VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_V2_DEPLOY_COMMIT"' in deploy
+    assert "ENABLE_TEE_SUBMISSION" not in deploy
+    assert "VALIDATOR_REQUIRE_GATEWAY_WEIGHT_SUBMISSION" not in deploy
     subprocess.run(["bash", "-n", str(ROOT / "validator_restart.sh")], check=True)
+    subprocess.run(
+        [
+            "bash",
+            "-n",
+            str(ROOT / "validator_models" / "containerizing" / "deploy_dynamic.sh"),
+        ],
+        check=True,
+    )
 
 
-def test_validator_restart_has_fail_closed_legacy_v1_compat_branch():
+def test_validator_restart_and_container_are_v2_only():
     script = (ROOT / "validator_restart.sh").read_text(encoding="utf-8")
     deploy = (
         ROOT / "validator_models" / "containerizing" / "deploy_dynamic.sh"
     ).read_text(encoding="utf-8")
 
     assert 'VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-authoritative_v2}"' in script
-    assert "authoritative_v2|legacy_v1_compat" in script
+    assert 'authoritative_v2)' in script
     assert 'EXPECTED_CHAIN="${EXPECTED_CHAIN:-wss://entrypoint-finney.opentensor.ai:443}"' in script
-    assert "verify_legacy_v1_enclave" in script
-    assert "requires exactly one running enclave" in script
-    assert "APPROVED_LEGACY_V1_PCR0=" in script
-    assert "Preserving the approved running legacy V1 enclave" in script
-    assert 'if [ "$VALIDATOR_WEIGHT_PROTOCOL" = "authoritative_v2" ]; then' in script
-    assert '-e VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-authoritative_v2}"' in deploy
+    assert "legacy_v1_compat" not in script
+    assert "verify_legacy_v1_enclave" not in script
+    assert "APPROVED_LEGACY_V1_PCR0=" not in script
+    assert '-e VALIDATOR_WEIGHT_PROTOCOL=authoritative_v2' in deploy
     assert 'VALIDATOR_DEPLOY_SHA="$(git -C "$REPO_DIR" rev-parse HEAD)"' in deploy
     assert '-e GIT_COMMIT_HASH="$VALIDATOR_DEPLOY_SHA"' in deploy
     assert '-e EXPECTED_CHAIN="$EXPECTED_CHAIN"' in deploy

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from gateway.research_lab import attested_scoring, attested_v2_store, v2_authority
+from gateway.research_lab.tee_protocol import ResearchLabTeeProtocolError
 
 
 HASH_A = "sha256:" + "a" * 64
@@ -19,19 +20,21 @@ def test_v2_authority_cannot_be_disabled_by_legacy_environment(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_explicit_legacy_protocol_disables_v2_scoring_facades(monkeypatch):
+async def test_explicit_legacy_protocol_is_rejected_by_scoring_facades(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1")
-    assert attested_scoring.attested_scoring_mode() == "off"
-    assert attested_scoring.attested_receipt_persistence_enabled() is False
-    assert attested_scoring.attested_live_provider_enabled() is False
-    assert await attested_scoring.execute_attested_scoring_operation() == {
-        "status": "off",
-        "protocol": "legacy_v1",
-    }
-    assert await attested_scoring.resolve_attested_artifact_lineage(
-        artifact_kind="score_bundle",
-        artifact_ref="score_bundle:legacy",
-    ) == (None, [])
+    with pytest.raises(ResearchLabTeeProtocolError, match="V1 authority is retired"):
+        attested_scoring.attested_scoring_mode()
+    with pytest.raises(ResearchLabTeeProtocolError, match="V1 authority is retired"):
+        attested_scoring.attested_receipt_persistence_enabled()
+    with pytest.raises(ResearchLabTeeProtocolError, match="V1 authority is retired"):
+        attested_scoring.attested_live_provider_enabled()
+    with pytest.raises(ResearchLabTeeProtocolError, match="V1 authority is retired"):
+        await attested_scoring.execute_attested_scoring_operation()
+    with pytest.raises(ResearchLabTeeProtocolError, match="V1 authority is retired"):
+        await attested_scoring.resolve_attested_artifact_lineage(
+            artifact_kind="score_bundle",
+            artifact_ref="score_bundle:legacy",
+        )
 
 
 @pytest.mark.asyncio
@@ -136,10 +139,10 @@ async def test_v2_artifact_lineage_returns_root_and_complete_graph(monkeypatch):
     assert receipts == [ancestor, root]
 
 
-def test_scoring_worker_partition_routes_exact_13_12_shards():
+def test_all_configured_scoring_workers_route_to_shared_enclave():
     assert [
         attested_scoring.scoring_enclave_shard_for_worker(index)
-        for index in range(25)
-    ] == [0] * 13 + [1] * 12
+        for index in range(37)
+    ] == [0] * 37
     with pytest.raises(attested_scoring.AttestedScoringError):
-        attested_scoring.scoring_enclave_shard_for_worker(25)
+        attested_scoring.scoring_enclave_shard_for_worker(500)

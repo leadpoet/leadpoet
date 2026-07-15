@@ -2,79 +2,36 @@
   "benchmark_concurrency": 5,
   "candidate_concurrency": 5,
   "global_scoring_pool_size": 10,
-  "host_reserved_memory_mib": 131072,
-  "host_reserved_vcpus": 6,
-  "production_instance_type": "r7i.8xlarge",
-  "production_parent_memory_mib": 262144,
-  "production_parent_vcpus": 32,
+  "host_reserved_memory_mib": 40960,
+  "host_reserved_vcpus": 4,
+  "production_instance_type": "r7i.4xlarge",
+  "production_parent_memory_mib": 131072,
+  "production_parent_vcpus": 16,
   "roles": {
     "gateway_autoresearch": {
-      "cid": 19,
-      "memory_mib": 32768,
+      "cid": 18,
+      "configured_worker_source": "encrypted_proxy_profiles",
+      "memory_mib": 24576,
       "service_role": "gateway_autoresearch",
-      "vcpus": 6,
-      "worker_ids": [
-        0,
-        1,
-        2,
-        3,
-        4,
-        5,
-        6,
-        7,
-        8,
-        9
-      ]
+      "vcpus": 4,
+      "worker_assignment": "all_configured"
     },
     "gateway_coordinator": {
       "cid": 16,
-      "memory_mib": 16384,
+      "memory_mib": 8192,
       "service_role": "gateway_coordinator",
-      "vcpus": 4,
-      "worker_ids": []
+      "vcpus": 2,
+      "worker_assignment": "none"
     },
-    "gateway_scoring_a": {
+    "gateway_scoring": {
       "cid": 17,
-      "memory_mib": 40960,
+      "configured_worker_source": "encrypted_proxy_profiles",
+      "memory_mib": 57344,
       "service_role": "gateway_scoring",
-      "vcpus": 8,
-      "worker_ids": [
-        0,
-        1,
-        2,
-        3,
-        4,
-        5,
-        6,
-        7,
-        8,
-        9,
-        10,
-        11,
-        12
-      ]
-    },
-    "gateway_scoring_b": {
-      "cid": 18,
-      "memory_mib": 40960,
-      "service_role": "gateway_scoring",
-      "vcpus": 8,
-      "worker_ids": [
-        13,
-        14,
-        15,
-        16,
-        17,
-        18,
-        19,
-        20,
-        21,
-        22,
-        23,
-        24
-      ]
+      "vcpus": 6,
+      "worker_assignment": "all_configured"
     }
   },
   "schema_version": "leadpoet.gateway_enclave_topology.v2",
-  "topology_hash": "sha256:76993437c6558c45b8fefbbf99533b6205e0a54cc93a7cb3a4380c033307a5b8"
+  "topology_hash": "sha256:a13a1b16fb1501f953b2396aba88b87d7e5e0d3cfac4079b9230ea6165a88f34"
 }

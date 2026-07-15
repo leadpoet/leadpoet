@@ -33,8 +33,7 @@ def _configuration():
             }
             for role, character in (
                 ("gateway_coordinator", "1"),
-                ("gateway_scoring_a", "2"),
-                ("gateway_scoring_b", "3"),
+                ("gateway_scoring", "2"),
                 ("gateway_autoresearch", "4"),
             )
         },
@@ -78,7 +77,7 @@ def test_validator_boot_binds_hardware_release_and_gateway_roles():
     assert boot["physical_role"] == "validator_weights"
     assert boot["signing_pubkey"] == pubkey
     assert observed["public_key"] == bytes.fromhex(pubkey)
-    assert runtime.gateway_expectations()["gateway_scoring_b"]["pcr0"] == "3" * 96
+    assert runtime.gateway_expectations()["gateway_scoring"]["pcr0"] == "2" * 96
 
 
 def test_validator_runtime_rejects_zero_pcr_and_manifest_drift():

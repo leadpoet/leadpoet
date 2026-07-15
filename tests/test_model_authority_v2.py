@@ -9,6 +9,7 @@ from gateway.research_lab.model_authority_v2 import (
     AttestedPrivateModelRunnerV2,
     V2_PROVIDER_PROFILE_ENV,
 )
+from gateway.research_lab.tee_protocol import ResearchLabTeeProtocolError
 from gateway.tee.model_sandbox_v2 import provider_evidence_tape_input_root
 from gateway.tee.source_add_runtime_v2 import build_source_add_runtime_catalog_v2
 from leadpoet_canonical.attested_v2 import sha256_json
@@ -75,7 +76,7 @@ async def _load_empty_catalog(*, epoch_id):
 
 
 @pytest.mark.asyncio
-async def test_legacy_protocol_selects_current_host_model_runner(tmp_path, monkeypatch):
+async def test_legacy_protocol_cannot_select_host_model_runner(tmp_path, monkeypatch):
     artifact = _artifact(tmp_path)
     calls = []
 
@@ -92,25 +93,15 @@ async def test_legacy_protocol_selects_current_host_model_runner(tmp_path, monke
 
     monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1")
     monkeypatch.setattr(model_authority_v2, "DockerPrivateModelRunner", HostRunner)
-    runner = AttestedPrivateModelRunnerV2(
-        artifact=artifact,
-        spec=DockerPrivateModelSpec(image_digest=artifact["image_digest"]),
-        model_kind="candidate",
-        worker_index=4,
-        epoch_id=24001,
-    )
-
-    result = await runner(
-        {"industry": "Software"},
-        {"evaluation_epoch": 24000},
-    )
-    assert result == [{"company_name": "Legacy Host Result"}]
-    assert calls == [
-        ({"industry": "Software"}, {"evaluation_epoch": 24000})
-    ]
-    assert runner.attested_receipts() == []
-    assert runner.attested_authorities() == []
-    assert runner.metadata()["runtime"] == "host"
+    with pytest.raises(ResearchLabTeeProtocolError, match="V1 authority is retired"):
+        AttestedPrivateModelRunnerV2(
+            artifact=artifact,
+            spec=DockerPrivateModelSpec(image_digest=artifact["image_digest"]),
+            model_kind="candidate",
+            worker_index=4,
+            epoch_id=24001,
+        )
+    assert calls == []
 
 
 @pytest.mark.asyncio

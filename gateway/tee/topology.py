@@ -1,4 +1,4 @@
-"""Canonical four-enclave topology for the two-host V2 gateway deployment."""
+"""Canonical three-enclave topology for the two-host V2 gateway deployment."""
 
 from __future__ import annotations
 
@@ -10,42 +10,36 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 
 TOPOLOGY_SCHEMA_VERSION = "leadpoet.gateway_enclave_topology.v2"
-PRODUCTION_INSTANCE_TYPE = "r7i.8xlarge"
-PRODUCTION_PARENT_VCPUS = 32
-PRODUCTION_PARENT_MEMORY_MIB = 256 * 1024
+PRODUCTION_INSTANCE_TYPE = "r7i.4xlarge"
+PRODUCTION_PARENT_VCPUS = 16
+PRODUCTION_PARENT_MEMORY_MIB = 128 * 1024
 
 COORDINATOR_ROLE = "gateway_coordinator"
-SCORING_A_ROLE = "gateway_scoring_a"
-SCORING_B_ROLE = "gateway_scoring_b"
+SCORING_ROLE = "gateway_scoring"
 AUTORESEARCH_ROLE = "gateway_autoresearch"
 
 ROLE_SPECS = {
     COORDINATOR_ROLE: {
         "cid": 16,
-        "vcpus": 4,
-        "memory_mib": 16 * 1024,
-        "worker_ids": [],
+        "vcpus": 2,
+        "memory_mib": 8 * 1024,
+        "worker_assignment": "none",
         "service_role": "gateway_coordinator",
     },
-    SCORING_A_ROLE: {
+    SCORING_ROLE: {
         "cid": 17,
-        "vcpus": 8,
-        "memory_mib": 40 * 1024,
-        "worker_ids": list(range(0, 13)),
-        "service_role": "gateway_scoring",
-    },
-    SCORING_B_ROLE: {
-        "cid": 18,
-        "vcpus": 8,
-        "memory_mib": 40 * 1024,
-        "worker_ids": list(range(13, 25)),
+        "vcpus": 6,
+        "memory_mib": 56 * 1024,
+        "worker_assignment": "all_configured",
+        "configured_worker_source": "encrypted_proxy_profiles",
         "service_role": "gateway_scoring",
     },
     AUTORESEARCH_ROLE: {
-        "cid": 19,
-        "vcpus": 6,
-        "memory_mib": 32 * 1024,
-        "worker_ids": list(range(0, 10)),
+        "cid": 18,
+        "vcpus": 4,
+        "memory_mib": 24 * 1024,
+        "worker_assignment": "all_configured",
+        "configured_worker_source": "encrypted_proxy_profiles",
         "service_role": "gateway_autoresearch",
     },
 }
@@ -131,19 +125,22 @@ def validate_production_capacity(*, parent_vcpus: int, parent_memory_mib: int) -
     }
 
 
-def validate_worker_partition() -> None:
-    scoring_workers = list(ROLE_SPECS[SCORING_A_ROLE]["worker_ids"]) + list(
-        ROLE_SPECS[SCORING_B_ROLE]["worker_ids"]
-    )
-    if scoring_workers != list(range(25)) or len(set(scoring_workers)) != 25:
-        raise TopologyError("scoring worker partition must cover exactly IDs 0-24")
-    if list(ROLE_SPECS[AUTORESEARCH_ROLE]["worker_ids"]) != list(range(10)):
-        raise TopologyError("autoresearch worker partition must cover exactly IDs 0-9")
+def validate_topology() -> None:
+    if ROLE_SPECS[SCORING_ROLE].get("worker_assignment") != "all_configured":
+        raise TopologyError("scoring enclave must own all configured workers")
+    if ROLE_SPECS[AUTORESEARCH_ROLE].get("worker_assignment") != "all_configured":
+        raise TopologyError("autoresearch enclave must own all configured workers")
     cids = [int(spec["cid"]) for spec in ROLE_SPECS.values()]
-    if len(cids) != 4 or len(set(cids)) != 4:
-        raise TopologyError("gateway topology must use four unique enclave CIDs")
-    if HOST_RESERVED_VCPUS != 6 or HOST_RESERVED_MEMORY_MIB != 128 * 1024:
+    if len(cids) != 3 or len(set(cids)) != 3:
+        raise TopologyError("gateway topology must use three unique enclave CIDs")
+    if HOST_RESERVED_VCPUS != 4 or HOST_RESERVED_MEMORY_MIB != 40 * 1024:
         raise TopologyError("gateway host reservation differs from approved topology")
+
+
+def validate_worker_partition() -> None:
+    """Backward-compatible entry point for callers validating the topology."""
+
+    validate_topology()
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -151,7 +148,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--write", type=Path)
     parser.add_argument("--verify", type=Path)
     args = parser.parse_args(argv)
-    validate_worker_partition()
+    validate_topology()
     if args.verify:
         validate_manifest(json.loads(args.verify.read_text(encoding="utf-8")))
     if args.write:

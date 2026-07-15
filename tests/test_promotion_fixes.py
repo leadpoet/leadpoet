@@ -30,6 +30,7 @@ import pytest
 
 import gateway.research_lab.promotion as promotion
 from gateway.research_lab import attested_v2_store, v2_authority
+from gateway.research_lab.tee_protocol import ResearchLabTeeProtocolError
 import gateway.research_lab.store as store_module
 from gateway.research_lab.promotion import (
     ActiveManifestHashMismatchError,
@@ -1279,7 +1280,7 @@ async def test_reward_start_epoch_uses_live_epoch_not_bundle_epoch(store, monkey
     assert captured[0]["start_epoch"] == 151
 
 
-async def test_legacy_champion_reward_skips_v2_authority_but_still_persists(
+async def test_legacy_champion_reward_is_rejected_before_persistence(
     store,
     monkeypatch,
 ):
@@ -1292,33 +1293,27 @@ async def test_legacy_champion_reward_skips_v2_authority_but_still_persists(
     async def _live_epoch(_configured: Any = None) -> tuple[int, int | None, str]:
         return 150, None, "test"
 
-    async def _forbidden_v2(**_kwargs: Any) -> dict[str, Any]:
-        raise AssertionError("legacy champion reward must not call V2 authority")
-
     monkeypatch.setattr(promotion, "_resolve_miner_uid", _resolve)
     monkeypatch.setattr(promotion, "resolve_research_lab_evaluation_epoch", _live_epoch)
-    monkeypatch.setattr(
-        v2_authority,
-        "authorize_reward_decision_v2",
-        _forbidden_v2,
-    )
     controller = ResearchLabPromotionController(_epoch_config(), worker_ref="test-worker")
-    result = await controller._maybe_create_champion_reward(
-        candidate={
-            "candidate_id": "cand-legacy",
-            "miner_hotkey": "hk-legacy",
-            "ticket_id": "ticket-legacy",
-            "run_id": "run-legacy",
-            "island": "generalist",
-        },
-        score_bundle_row={"score_bundle_id": "sb-legacy"},
-        score_bundle={"evaluation_epoch": 100, "aggregates": {"per_icp_results": []}},
-        improvement_points=2.5,
-        threshold=1.0,
-    )
-    assert result["champion_reward_status"] == "created"
+    with pytest.raises(ResearchLabTeeProtocolError, match="V1 authority is retired"):
+        await controller._maybe_create_champion_reward(
+            candidate={
+                "candidate_id": "cand-legacy",
+                "miner_hotkey": "hk-legacy",
+                "ticket_id": "ticket-legacy",
+                "run_id": "run-legacy",
+                "island": "generalist",
+            },
+            score_bundle_row={"score_bundle_id": "sb-legacy"},
+            score_bundle={"evaluation_epoch": 100, "aggregates": {"per_icp_results": []}},
+            improvement_points=2.5,
+            threshold=1.0,
+        )
+    # The existing pure obligation calculation may run before protocol
+    # validation, but no authoritative write is allowed.
     assert len(captured) == 1
-    assert store.reward_obligation_writes
+    assert store.reward_obligation_writes == []
 
 
 async def test_reward_start_epoch_falls_back_to_bundle_epoch_when_chain_unreachable(store, monkeypatch):

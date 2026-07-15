@@ -345,11 +345,16 @@ async def execute_autoresearch_v2(
     )
     verifier = boot_verifier or _release_boot_verifier(release)
     health = await client.autoresearch_v2_health()
+    worker_count = health.get("worker_count")
+    configured_worker_count = health.get("configured_worker_count")
     if (
         health.get("authority") != "v2_only"
         or health.get("role") != "gateway_autoresearch"
         or health.get("physical_role") != "gateway_autoresearch"
-        or health.get("worker_count") != 10
+        or type(worker_count) is not int
+        or type(configured_worker_count) is not int
+        or worker_count <= 0
+        or worker_count != configured_worker_count
         or not health.get("workers_alive")
     ):
         raise AttestedAutoresearchV2Error("autoresearch enclave health is invalid")

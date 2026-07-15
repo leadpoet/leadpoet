@@ -11,8 +11,7 @@ RELEASE_ARCHIVE_ROOT="${GATEWAY_V2_RELEASE_ARCHIVE_ROOT:-$EIF_ROOT/releases-v2}"
 TOPOLOGY_MODE="${GATEWAY_TEE_TOPOLOGY_MODE:-full}"
 ROLES=(
   gateway_coordinator
-  gateway_scoring_a
-  gateway_scoring_b
+  gateway_scoring
   gateway_autoresearch
 )
 

@@ -348,6 +348,7 @@ class ExecutionJobManagerV2:
         operations: Mapping[str, Iterable[str]],
         executor: Callable[[str, Mapping[str, Any], ExecutionContextV2], Any],
         worker_count: int,
+        configured_worker_count: Optional[int] = None,
         host_operation_channel_factory: Optional[
             Callable[[str, str], Any]
         ] = None,
@@ -380,6 +381,13 @@ class ExecutionJobManagerV2:
         self._queue = queue.Queue(maxsize=MAX_QUEUED_JOBS)
         self._active = set()
         self._workers = []
+        self._configured_worker_count = (
+            int(worker_count)
+            if configured_worker_count is None
+            else int(configured_worker_count)
+        )
+        if not 0 <= self._configured_worker_count <= 500:
+            raise ValueError("configured worker count is invalid")
         for index in range(max(1, int(worker_count))):
             worker = threading.Thread(
                 target=self._worker_loop,
@@ -402,6 +410,7 @@ class ExecutionJobManagerV2:
             "physical_role": self.boot_identity["physical_role"],
             "boot_identity_hash": self.boot_identity["boot_identity_hash"],
             "worker_count": len(self._workers),
+            "configured_worker_count": self._configured_worker_count,
             "workers_alive": all(worker.is_alive() for worker in self._workers),
             "queue_depth": self._queue.qsize(),
             "active_job_ids": sorted(self._active),

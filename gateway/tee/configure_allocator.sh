@@ -1,5 +1,5 @@
 #!/bin/bash
-# Configure Nitro's parent allocator for the measured four-enclave topology.
+# Configure Nitro's parent allocator for the measured three-enclave topology.
 
 set -euo pipefail
 
@@ -26,8 +26,8 @@ import sys
 
 document = json.load(open(sys.argv[1], encoding="utf-8"))
 roles = document.get("roles")
-if not isinstance(roles, dict) or len(roles) != 4:
-    raise SystemExit("full V2 topology must define exactly four roles")
+if not isinstance(roles, dict) or len(roles) != 3:
+    raise SystemExit("full V2 topology must define exactly three roles")
 print(
     sum(int(spec["vcpus"]) for spec in roles.values()),
     sum(int(spec["memory_mib"]) for spec in roles.values()),
@@ -37,21 +37,21 @@ PY
 
 TOTAL_CPUS="$(getconf _NPROCESSORS_CONF)"
 TOTAL_MEMORY_MIB="$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)"
-if [ "$TOTAL_CPUS" -lt 32 ] || [ "$TOTAL_MEMORY_MIB" -lt 250000 ]; then
-  echo "ERROR: full V2 allocator requires an r7i.8xlarge-class parent" >&2
+if [ "$TOTAL_CPUS" -lt 16 ] || [ "$TOTAL_MEMORY_MIB" -lt 125000 ]; then
+  echo "ERROR: full V2 allocator requires an r7i.4xlarge parent" >&2
   echo "Observed CPUs=${TOTAL_CPUS} memory_mib=${TOTAL_MEMORY_MIB}" >&2
   exit 1
 fi
-if [ "$REQUIRED_CPUS" -ne 26 ] || [ "$REQUIRED_MEMORY_MIB" -ne 131072 ]; then
+if [ "$REQUIRED_CPUS" -ne 12 ] || [ "$REQUIRED_MEMORY_MIB" -ne 90112 ]; then
   echo "ERROR: measured V2 allocator totals changed without restart review" >&2
   echo "Observed enclave CPUs=${REQUIRED_CPUS} memory_mib=${REQUIRED_MEMORY_MIB}" >&2
   exit 1
 fi
-if [ $((TOTAL_CPUS - REQUIRED_CPUS)) -lt 6 ]; then
-  echo "ERROR: V2 allocator would leave fewer than six host vCPUs" >&2
+if [ $((TOTAL_CPUS - REQUIRED_CPUS)) -lt 4 ]; then
+  echo "ERROR: V2 allocator would leave fewer than four host vCPUs" >&2
   exit 1
 fi
-if [ $((TOTAL_MEMORY_MIB - REQUIRED_MEMORY_MIB)) -lt 120000 ]; then
+if [ $((TOTAL_MEMORY_MIB - REQUIRED_MEMORY_MIB)) -lt 32000 ]; then
   echo "ERROR: V2 allocator would leave insufficient gateway parent memory" >&2
   exit 1
 fi

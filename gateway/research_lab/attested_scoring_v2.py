@@ -1,8 +1,8 @@
 """Strict host bridge to authoritative V2 Research Lab scoring enclaves.
 
-This module contains transport and verification only.  Scoring formulas remain
+This module contains transport and verification only. Scoring formulas remain
 in their existing modules and execute through ``gateway.tee.scoring_executor``
-inside one of the two measured scoring roles.  A result is returned only after
+inside the shared measured scoring role. A result is returned only after
 its complete graph is independently verified and durably persisted.
 """
 
@@ -28,7 +28,7 @@ from gateway.tee.release_manifest_v2 import (
     validate_release_manifest,
 )
 from gateway.tee.scoring_executor_v2 import SCORING_OPERATIONS_V2
-from gateway.utils.tee_client import coordinator_tee_client, scoring_tee_clients
+from gateway.utils.tee_client import coordinator_tee_client, scoring_tee_client
 from leadpoet_canonical.attested_v2 import (
     build_receipt_graph,
     canonical_json,
@@ -83,9 +83,9 @@ def scoring_enclave_shard_for_worker(worker_index: int) -> int:
         normalized = int(worker_index)
     except (TypeError, ValueError) as exc:
         raise AttestedScoringV2Error("scoring worker index is invalid") from exc
-    if normalized < 0 or normalized >= 25:
-        raise AttestedScoringV2Error("scoring worker index is outside 0-24")
-    return 0 if normalized <= 12 else 1
+    if normalized < 0 or normalized >= 500:
+        raise AttestedScoringV2Error("scoring worker index is outside 0-499")
+    return 0
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -288,11 +288,13 @@ async def execute_scoring_v2(
         raise AttestedScoringV2Error("sequence is invalid")
     release = validate_release_manifest(release_manifest) if release_manifest else _load_release(release_manifest_path)
     if physical_role_override is None:
-        shard = scoring_enclave_shard_for_worker(worker_index)
-        scoring_client = client or scoring_tee_clients[shard]
-        physical_role = "gateway_scoring_a" if shard == 0 else "gateway_scoring_b"
+        scoring_enclave_shard_for_worker(worker_index)
+        normalized_worker_index = int(worker_index)
+        scoring_client = client or scoring_tee_client
+        physical_role = "gateway_scoring"
     else:
         physical_role = str(physical_role_override)
+        normalized_worker_index = int(worker_index)
         scoring_client = client
         if scoring_client is None:
             raise AttestedScoringV2Error("V2 role client is required")
@@ -306,10 +308,17 @@ async def execute_scoring_v2(
         return method
 
     health = await rpc_method("health")()
+    execution_worker_count = health.get("worker_count")
+    configured_worker_count = health.get("configured_worker_count")
     if (
         health.get("authority") != "v2_only"
         or health.get("role") != expected_service_role
         or health.get("physical_role") != physical_role
+        or type(execution_worker_count) is not int
+        or not 1 <= execution_worker_count <= 10
+        or type(configured_worker_count) is not int
+        or not 1 <= configured_worker_count <= 500
+        or normalized_worker_index >= configured_worker_count
         or not health.get("workers_alive")
     ):
         raise AttestedScoringV2Error("V2 scoring enclave health is invalid")
@@ -339,7 +348,7 @@ async def execute_scoring_v2(
     profile_document = provider_profile_loader(
         normalized_profile,
         execution_role="gateway_scoring",
-        worker_index=int(worker_index),
+        worker_index=normalized_worker_index,
         require_egress_proxy=(
             _scoring_proxy_required()
             if require_egress_proxy is None

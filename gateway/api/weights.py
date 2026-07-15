@@ -62,7 +62,6 @@ from leadpoet_canonical.weight_authority_v2 import (
 )
 from gateway.research_lab.arweave_audit import publish_research_lab_epoch_audit
 from gateway.research_lab.config import ResearchLabGatewayConfig
-from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.utils.signature import verify_wallet_signature
 
 logger = logging.getLogger(__name__)
@@ -950,13 +949,16 @@ async def get_attested_weights_v2(netuid: int, epoch_id: int) -> Dict[str, Any]:
 
 @router.post("/submit")
 async def submit_weights(submission: WeightSubmission) -> WeightSubmissionResponse:
-    """Accept the established V1 bundle only in explicit compatibility mode."""
+    """Reject retired V1 writes while preserving historical read endpoints."""
 
-    if not legacy_v1_enabled():
-        raise HTTPException(
-            status_code=410,
-            detail="V1 weight submission is retired; use /weights/submit/v2",
-        )
+    raise HTTPException(
+        status_code=410,
+        detail="V1 weight submission is retired; use /weights/submit/v2",
+    )
+
+    # Retained temporarily as unreachable historical decoding code so existing
+    # V1 rows remain explainable during the V2 migration audit. No runtime
+    # configuration can enter this block.
     from gateway.db.client import get_read_client, get_write_client
     from gateway.utils.logger import log_event
 

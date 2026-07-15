@@ -74,7 +74,10 @@ from gateway.research_lab.provider_preflight import (
     PREFLIGHT_REASON_PREFIX,
     preflight_gate,
 )
-from gateway.research_lab.tee_protocol import v2_enabled
+from gateway.research_lab.tee_protocol import (
+    ResearchLabTeeProtocolError,
+    v2_enabled,
+)
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabReceiptCreateRequest
 from gateway.research_lab.promotion import (
     PromotionPausedError,
@@ -1355,12 +1358,15 @@ class ResearchLabHostedWorker:
     def __init__(self, config: ResearchLabGatewayConfig | None = None, *, worker_ref: str | None = None):
         self.config = config or ResearchLabGatewayConfig.from_env()
         self.tree_policy = TreePolicy.from_env()
+        try:
+            protocol_is_v2 = v2_enabled()
+        except ResearchLabTeeProtocolError as exc:
+            raise HostedResearchLabWorkerError(str(exc)) from exc
+        if not protocol_is_v2:
+            raise HostedResearchLabWorkerError(
+                "Research Lab workers require RESEARCH_LAB_TEE_PROTOCOL=v2"
+            )
         if self.tree_policy.mode == "active":
-            if not v2_enabled():
-                raise HostedResearchLabWorkerError(
-                    "active Git-tree autoresearch requires "
-                    "RESEARCH_LAB_TEE_PROTOCOL=v2"
-                )
             required_final_context_seconds = (
                 self.tree_policy.required_final_context_seconds(
                     dev_eval_total_timeout_seconds()

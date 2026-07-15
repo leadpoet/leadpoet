@@ -660,11 +660,10 @@ async def attest_stale_parent_rebase_v2(
     }
     release = _load_release(release_manifest_path)
     payload_hash = sha256_bytes(canonical_json(payload).encode("utf-8"))
-    normalized_worker_index = int(worker_index) % 10
     provider_profile = load_provider_profile_v2(
         STALE_PARENT_REPAIR_PROFILE,
         execution_role="gateway_autoresearch",
-        worker_index=normalized_worker_index,
+        worker_index=int(worker_index),
         require_egress_proxy=bool(require_egress_proxy),
     )
     provider_refs = dict(provider_profile["credential_ref_hashes"])

@@ -111,7 +111,11 @@ ROLE_PURPOSES = {
 
 PHYSICAL_ROLES_BY_SERVICE_ROLE = {
     COORDINATOR_ROLE: frozenset({"gateway_coordinator"}),
-    SCORING_ROLE: frozenset({"gateway_scoring_a", "gateway_scoring_b"}),
+    # The A/B roles remain valid only for already-persisted V2 history. New
+    # releases use the single shared gateway_scoring role.
+    SCORING_ROLE: frozenset(
+        {"gateway_scoring", "gateway_scoring_a", "gateway_scoring_b"}
+    ),
     AUTORESEARCH_ROLE: frozenset({"gateway_autoresearch"}),
     WEIGHT_ROLE: frozenset({"validator_weights"}),
 }

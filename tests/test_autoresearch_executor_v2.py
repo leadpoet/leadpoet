@@ -377,7 +377,7 @@ def _component_registry_graph(component_result):
     boot = create_boot_identity(
         body=build_boot_identity_body(
             role="gateway_scoring",
-            physical_role="gateway_scoring_a",
+            physical_role="gateway_scoring",
             commit_sha="a" * 40,
             pcr0="b" * 96,
             build_manifest_hash="sha256:" + "c" * 64,

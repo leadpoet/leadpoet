@@ -61,24 +61,43 @@ async def verify_v2_runtime_ready(
 
     calls = {
         "gateway_coordinator": "coordinator_v2_health",
-        "gateway_scoring_a": "scoring_v2_health",
-        "gateway_scoring_b": "scoring_v2_health",
+        "gateway_scoring": "scoring_v2_health",
         "gateway_autoresearch": "autoresearch_v2_health",
     }
     expected_workers = {
         "gateway_coordinator": 1,
-        "gateway_scoring_a": 5,
-        "gateway_scoring_b": 5,
-        "gateway_autoresearch": 10,
+        "gateway_scoring": 10,
     }
     health_rows = []
     for role in sorted(ROLE_SPECS):
         health = await getattr(role_clients[role], calls[role])()
+        configured_worker_count = health.get("configured_worker_count")
+        expected_worker_count = expected_workers.get(role)
         if (
             health.get("authority") != "v2_only"
             or health.get("physical_role") != role
             or health.get("role") != ROLE_SPECS[role]["service_role"]
-            or health.get("worker_count") != expected_workers[role]
+            or (
+                expected_worker_count is not None
+                and health.get("worker_count") != expected_worker_count
+            )
+            or not isinstance(configured_worker_count, int)
+            or configured_worker_count < 0
+            or (
+                role == "gateway_coordinator"
+                and configured_worker_count != 0
+            )
+            or (
+                role == "gateway_scoring"
+                and configured_worker_count <= 0
+            )
+            or (
+                role == "gateway_autoresearch"
+                and (
+                    configured_worker_count <= 0
+                    or health.get("worker_count") != configured_worker_count
+                )
+            )
             or health.get("workers_alive") is not True
         ):
             raise V2RuntimeReadinessError("%s execution manager is not ready" % role)
@@ -87,6 +106,7 @@ async def verify_v2_runtime_ready(
                 "physical_role": role,
                 "role": health["role"],
                 "worker_count": health["worker_count"],
+                "configured_worker_count": configured_worker_count,
                 "boot_identity_hash": health["boot_identity_hash"],
             }
         )

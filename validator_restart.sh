@@ -15,7 +15,6 @@ export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:
 VALIDATOR_WALLET_ROOT="${VALIDATOR_WALLET_ROOT:-$HOME/.bittensor/wallets}"
 VALIDATOR_WALLET_NAME="${VALIDATOR_WALLET_NAME:-validator_72}"
 VALIDATOR_WALLET_HOTKEY="${VALIDATOR_WALLET_HOTKEY:-default}"
-APPROVED_LEGACY_V1_PCR0="8b56c0be4cfc55131ce299a6c7f9f2dde56d0cc2e75ffcef5558af5efc60ee3bd0c5e8b3db822659b50c175ed906a009"
 VALIDATOR_ENV_EXPORT="$(mktemp /tmp/validator_env_export.XXXXXX)"
 SECRET_TMP="$(mktemp /tmp/validator_secret_env.XXXXXX)"
 
@@ -23,36 +22,6 @@ cleanup() {
   rm -f "$VALIDATOR_ENV_EXPORT" "$SECRET_TMP"
 }
 trap cleanup EXIT
-
-verify_legacy_v1_enclave() {
-  python3 - "$APPROVED_LEGACY_V1_PCR0" <<'PY'
-import json
-import subprocess
-import sys
-
-expected = sys.argv[1]
-result = subprocess.run(
-    ["sudo", "nitro-cli", "describe-enclaves"],
-    check=True,
-    capture_output=True,
-    text=True,
-)
-running = [row for row in json.loads(result.stdout) if row.get("State") == "RUNNING"]
-if len(running) != 1:
-    raise SystemExit(
-        f"ERROR: legacy_v1_compat requires exactly one running enclave; found {len(running)}"
-    )
-observed = str((running[0].get("Measurements") or {}).get("PCR0") or "").lower()
-if observed != expected:
-    raise SystemExit(
-        "ERROR: running legacy enclave PCR0 is not the approved compatibility measurement"
-    )
-print(
-    "Verified existing legacy validator enclave: "
-    f"cid={running[0].get('EnclaveCID')} pcr0={observed}"
-)
-PY
-}
 
 cd "$VALIDATOR_ROOT"
 
@@ -161,10 +130,10 @@ set +a
 
 VALIDATOR_WEIGHT_PROTOCOL="${VALIDATOR_WEIGHT_PROTOCOL:-authoritative_v2}"
 case "$VALIDATOR_WEIGHT_PROTOCOL" in
-  authoritative_v2|legacy_v1_compat)
+  authoritative_v2)
     ;;
   *)
-    echo "ERROR: VALIDATOR_WEIGHT_PROTOCOL must be authoritative_v2 or legacy_v1_compat" >&2
+    echo "ERROR: VALIDATOR_WEIGHT_PROTOCOL must be authoritative_v2; V1 authority is retired" >&2
     exit 1
     ;;
 esac
@@ -207,9 +176,7 @@ required_keys=(
   NO_PROXY
 )
 
-if [ "$VALIDATOR_WEIGHT_PROTOCOL" = "authoritative_v2" ]; then
-  required_keys+=(VALIDATOR_V2_GATEWAY_URL)
-fi
+required_keys+=(VALIDATOR_V2_GATEWAY_URL)
 
 missing=()
 for key in "${required_keys[@]}"; do
@@ -238,50 +205,46 @@ if [ ! -r "$VALIDATOR_WALLET_ROOT/$VALIDATOR_WALLET_NAME/coldkeypub.txt" ]; then
 fi
 
 VALIDATOR_DEPLOY_SHA="$(git rev-parse HEAD)"
-if [ "$VALIDATOR_WEIGHT_PROTOCOL" = "authoritative_v2" ]; then
-  for required_file in \
-    "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
-    "$VALIDATOR_V2_RELEASE_MANIFEST" \
-    "$VALIDATOR_V2_HOTKEY_CONFIG" \
-    "$VALIDATOR_V2_HOTKEY_ENVELOPE"; do
-    if [ ! -r "$required_file" ]; then
-      echo "ERROR: authoritative V2 input is unavailable: $required_file" >&2
-      exit 1
-    fi
-  done
-
-  HOST_HOTKEY_ENTRY=""
-  if [ -d "$HOST_HOTKEY_DIR" ]; then
-    HOST_HOTKEY_ENTRY="$(find "$HOST_HOTKEY_DIR" -mindepth 1 -maxdepth 1 -print -quit)"
-  fi
-  if [ -n "$HOST_HOTKEY_ENTRY" ]; then
-    echo "ERROR: usable validator hotkey material remains on the parent: $HOST_HOTKEY_ENTRY" >&2
-    echo "Create and verify the KMS envelope, move the host hotkey to approved offline custody, then restart." >&2
+export VALIDATOR_DEPLOY_SHA
+export VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_DEPLOY_SHA"
+export GITHUB_SHA="$VALIDATOR_DEPLOY_SHA"
+export GIT_COMMIT="$VALIDATOR_DEPLOY_SHA"
+export LEADPOET_WRAPPER_ACTIVE=1
+for required_file in \
+  "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+  "$VALIDATOR_V2_RELEASE_MANIFEST" \
+  "$VALIDATOR_V2_HOTKEY_CONFIG" \
+  "$VALIDATOR_V2_HOTKEY_ENVELOPE"; do
+  if [ ! -r "$required_file" ]; then
+    echo "ERROR: authoritative V2 input is unavailable: $required_file" >&2
     exit 1
   fi
+done
 
-  echo "Preparing exact hash-locked validator artifacts before production shutdown"
-  python3 -m validator_tee.scripts.stage_runtime_artifacts_v2 \
-    --lock "$VALIDATOR_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
-    --output-dir "$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
-    --allow-download >/dev/null
-  echo "Validating the exact validator V2 release before production shutdown"
-  python3 -m validator_tee.host.restart_preflight_v2 \
-    --deploy-commit "$VALIDATOR_DEPLOY_SHA" \
-    --validator-release "$VALIDATOR_V2_RELEASE_MANIFEST" \
-    --gateway-release "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
-    --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG" \
-    --hotkey-envelope "$VALIDATOR_V2_HOTKEY_ENVELOPE" \
-    --runtime-artifact-lock "$VALIDATOR_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
-    --host-hotkey-directory "$HOST_HOTKEY_DIR"
-else
-  HOST_HOTKEY_FILE="$HOST_HOTKEY_DIR/$VALIDATOR_WALLET_HOTKEY"
-  if [ ! -r "$HOST_HOTKEY_FILE" ]; then
-    echo "ERROR: legacy_v1_compat requires the existing host hotkey: $HOST_HOTKEY_FILE" >&2
-    exit 1
-  fi
-  verify_legacy_v1_enclave
+HOST_HOTKEY_ENTRY=""
+if [ -d "$HOST_HOTKEY_DIR" ]; then
+  HOST_HOTKEY_ENTRY="$(find "$HOST_HOTKEY_DIR" -mindepth 1 -maxdepth 1 -print -quit)"
 fi
+if [ -n "$HOST_HOTKEY_ENTRY" ]; then
+  echo "ERROR: usable validator hotkey material remains on the parent: $HOST_HOTKEY_ENTRY" >&2
+  echo "Create and verify the KMS envelope, move the host hotkey to approved offline custody, then restart." >&2
+  exit 1
+fi
+
+echo "Preparing exact hash-locked validator artifacts before production shutdown"
+python3 -m validator_tee.scripts.stage_runtime_artifacts_v2 \
+  --lock "$VALIDATOR_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
+  --output-dir "$VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT" \
+  --allow-download >/dev/null
+echo "Validating the exact validator V2 release before production shutdown"
+python3 -m validator_tee.host.restart_preflight_v2 \
+  --deploy-commit "$VALIDATOR_DEPLOY_SHA" \
+  --validator-release "$VALIDATOR_V2_RELEASE_MANIFEST" \
+  --gateway-release "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+  --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG" \
+  --hotkey-envelope "$VALIDATOR_V2_HOTKEY_ENVELOPE" \
+  --runtime-artifact-lock "$VALIDATOR_ROOT/validator_tee/runtime-artifacts-v2.lock.json" \
+  --host-hotkey-directory "$HOST_HOTKEY_DIR"
 
 actual_aws_account="$(aws sts get-caller-identity --query Account --output text)"
 if [ "$actual_aws_account" != "$EXPECTED_AWS_ACCOUNT" ]; then
@@ -314,8 +277,7 @@ docker ps -aq \
   --filter "name=leadpoet-ff-worker" \
   | xargs -r docker rm
 
-if [ "$VALIDATOR_WEIGHT_PROTOCOL" = "authoritative_v2" ]; then
-  echo "Terminating existing validator Nitro enclaves"
+echo "Terminating existing validator Nitro enclaves"
   sudo nitro-cli terminate-enclave --all 2>/dev/null || true
   for attempt in $(seq 1 10); do
     enclave_count="$(
@@ -382,13 +344,9 @@ if [ "$VALIDATOR_WEIGHT_PROTOCOL" = "authoritative_v2" ]; then
     --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG"
 
   echo "Provisioning the validator hotkey directly into Nitro with KMS"
-  python3 -m validator_tee.host.hotkey_bootstrap_v2 \
-    --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG" \
-    --hotkey-envelope "$VALIDATOR_V2_HOTKEY_ENVELOPE"
-else
-  echo "Preserving the approved running legacy V1 enclave; no EIF build or PCR0 change"
-  verify_legacy_v1_enclave
-fi
+python3 -m validator_tee.host.hotkey_bootstrap_v2 \
+  --hotkey-config "$VALIDATOR_V2_HOTKEY_CONFIG" \
+  --hotkey-envelope "$VALIDATOR_V2_HOTKEY_ENVELOPE"
 
 echo "Starting validator"
 export PATH="$HOME/.local/bin:$PATH"

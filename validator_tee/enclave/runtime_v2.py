@@ -29,8 +29,7 @@ _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
 _GATEWAY_ROLES = frozenset(
     {
         "gateway_coordinator",
-        "gateway_scoring_a",
-        "gateway_scoring_b",
+        "gateway_scoring",
         "gateway_autoresearch",
     }
 )

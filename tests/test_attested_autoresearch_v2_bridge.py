@@ -79,7 +79,7 @@ def _nested_scoring_graph():
     boot = create_boot_identity(
         body=build_boot_identity_body(
             role="gateway_scoring",
-            physical_role="gateway_scoring_a",
+            physical_role="gateway_scoring",
             commit_sha="7" * 40,
             pcr0="8" * 96,
             build_manifest_hash=_hash("7"),
@@ -130,7 +130,7 @@ def _nested_scoring_graph():
 
 
 class _Client:
-    def __init__(self, release, *, external_graph=None):
+    def __init__(self, release, *, external_graph=None, worker_count=10):
         role = "gateway_autoresearch"
         summary = release["roles"][role]
         self.key = Ed25519PrivateKey.generate()
@@ -179,7 +179,7 @@ class _Client:
             sign_digest=self.key.sign,
             operations=AUTORESEARCH_OPERATIONS_V2,
             executor=executor,
-            worker_count=10,
+            worker_count=worker_count,
             host_operation_channel_factory=lambda job_id, purpose: HostOperationChannelV2(
                 job_id=job_id,
                 purpose=purpose,
@@ -251,7 +251,7 @@ class _Client:
 @pytest.mark.asyncio
 async def test_autoresearch_bridge_dispatches_signed_host_op_and_persists_full_chain():
     release = _release()
-    client = _Client(release)
+    client = _Client(release, worker_count=13)
     persisted = []
 
     async def persist(graph):

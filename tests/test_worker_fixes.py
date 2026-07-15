@@ -75,28 +75,30 @@ def test_active_tree_rejects_legacy_v1_before_worker_readiness(monkeypatch):
 
     with pytest.raises(
         worker_mod.HostedResearchLabWorkerError,
-        match="requires RESEARCH_LAB_TEE_PROTOCOL=v2",
+        match="V1 authority is retired",
     ):
         worker_mod.ResearchLabHostedWorker(
             ResearchLabGatewayConfig(), worker_ref="worker-a"
         )
 
 
-def test_tree_mode_off_accepts_legacy_v1_without_claiming_work(monkeypatch):
+def test_tree_mode_off_still_rejects_legacy_v1(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_TREE_MODE", "off")
     monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1")
 
-    worker = worker_mod.ResearchLabHostedWorker(
-        ResearchLabGatewayConfig(), worker_ref="worker-a"
-    )
-
-    assert worker.tree_policy.mode == "off"
+    with pytest.raises(
+        worker_mod.HostedResearchLabWorkerError,
+        match="V1 authority is retired",
+    ):
+        worker_mod.ResearchLabHostedWorker(
+            ResearchLabGatewayConfig(), worker_ref="worker-a"
+        )
 
 
 @pytest.mark.asyncio
 async def test_tree_mode_off_returns_before_queue_lookup(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_TREE_MODE", "off")
-    monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1")
+    monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "v2")
     worker = worker_mod.ResearchLabHostedWorker(
         ResearchLabGatewayConfig(hosted_worker_dry_run=True),
         worker_ref="worker-a",

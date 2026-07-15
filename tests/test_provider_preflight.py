@@ -11,6 +11,7 @@ from unittest import mock
 import pytest
 
 from gateway.research_lab import provider_preflight as pp
+from gateway.research_lab.tee_protocol import ResearchLabTeeProtocolError
 
 
 def _http_error(code: int, body: bytes = b"", reason: str = "err") -> urllib.error.HTTPError:
@@ -334,7 +335,7 @@ def test_gate_disabled_preflight_proceeds(monkeypatch):
     assert out["reason"] == "preflight_disabled"
 
 
-def test_legacy_gate_uses_host_preflight_without_v2_authority(monkeypatch):
+def test_legacy_gate_is_rejected_before_host_preflight(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_TEE_PROTOCOL", "legacy_v1_compat")
     calls = []
 
@@ -350,14 +351,13 @@ def test_legacy_gate_uses_host_preflight_without_v2_authority(monkeypatch):
         raise AssertionError("healthy legacy preflight must not pause")
 
     monkeypatch.setattr(pp, "shared_preflight", lambda: LocalPreflight())
-    result = asyncio.run(
-        pp.preflight_gate(
-            scope="scoring",
-            actor_ref="worker-1",
-            is_paused=is_paused,
-            set_paused=set_paused,
+    with pytest.raises(ResearchLabTeeProtocolError, match="V1 authority is retired"):
+        asyncio.run(
+            pp.preflight_gate(
+                scope="scoring",
+                actor_ref="worker-1",
+                is_paused=is_paused,
+                set_paused=set_paused,
+            )
         )
-    )
-    assert result["proceed"] is True
-    assert len(calls) == 1
-    assert calls[0][0] is False
+    assert calls == []

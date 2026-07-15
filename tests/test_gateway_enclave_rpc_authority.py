@@ -9,7 +9,7 @@ from gateway.tee.rpc_authority import (
 )
 
 
-@pytest.mark.parametrize("role", ["gateway_scoring_a", "gateway_scoring_b"])
+@pytest.mark.parametrize("role", ["gateway_scoring"])
 def test_scoring_roles_cannot_use_coordinator_or_autoresearch_authority(role):
     assert rpc_method_allowed(role, "scoring_v2_submit_job")
     assert rpc_method_allowed(role, "role_health")
@@ -49,7 +49,7 @@ def test_coordinator_is_the_only_v2_event_and_provider_authority():
 
 
 @pytest.mark.parametrize(
-    "role", ["gateway_scoring_a", "gateway_scoring_b", AUTORESEARCH_ROLE]
+    "role", ["gateway_scoring", AUTORESEARCH_ROLE]
 )
 def test_non_coordinator_roles_cannot_sign_transparency_events(role):
     assert not rpc_method_allowed(role, "initialize_event_signer")

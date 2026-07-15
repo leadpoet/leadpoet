@@ -387,7 +387,9 @@ def test_runsc_dev_replay_logs_cleanup_failure(tmp_path, caplog):
         process_runner=runner,
     )
     try:
-        with caplog.at_level("WARNING"):
+        with caplog.at_level(
+            "WARNING", logger="gateway.tee.model_sandbox_v2"
+        ):
             result = sandbox.execute_dev_replay(
                 artifact_doc=request["artifact"],
                 source_bundle=request["source_bundle"],

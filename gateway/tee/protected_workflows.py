@@ -21,6 +21,16 @@ SCHEMA_VERSION = "leadpoet.protected_workflows.v2"
 DEFAULT_MANIFEST = Path(__file__).with_name("protected_workflows.json")
 
 PROTECTED_SYMBOLS = {
+    "gateway/research_lab/tee_protocol.py": (
+        "normalize_tee_protocol",
+    ),
+    "gateway/api/weights.py": (
+        "get_weight_inputs_v2",
+        "submit_weights_v2",
+        "finalize_weights_v2",
+        "get_attested_weights_v2",
+        "submit_weights",
+    ),
     "research_lab/code_editing.py": (
         "build_loop_direction_planner_messages",
         "build_loop_direction_reference_repair_messages",

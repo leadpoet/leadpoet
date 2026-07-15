@@ -1,5 +1,8 @@
 FROM python:3.11-slim
 
+ARG LEADPOET_BUILD_COMMIT
+LABEL org.opencontainers.image.revision="$LEADPOET_BUILD_COMMIT"
+
 # Set working directory
 WORKDIR /app
 
@@ -26,4 +29,3 @@ EXPOSE 8093 8094
 # Entry point: Run validator
 # Use exec form to properly handle signals
 ENTRYPOINT ["python3", "neurons/validator.py"]
-

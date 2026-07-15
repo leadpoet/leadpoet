@@ -136,11 +136,15 @@ def _documents(release):
         research_lab_execution_config=build_research_lab_execution_config(
             environment={}
         ),
+        configured_worker_counts={
+            "gateway_scoring": 25,
+            "gateway_autoresearch": 10,
+        },
     )
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_configures_and_checks_all_six_tls_directions():
+async def test_bootstrap_configures_and_checks_all_four_tls_directions():
     release = _release()
     clients = {role: _Client(role, release) for role in ROLE_SPECS}
     result = await bootstrap_gateway_enclaves_v2(
@@ -151,7 +155,7 @@ async def test_bootstrap_configures_and_checks_all_six_tls_directions():
     )
     assert result["status"] == "ready"
     assert result["release_hash"] == release["release_hash"]
-    assert len(result["channels"]) == 6
+    assert len(result["channels"]) == 4
     assert sorted(clients["gateway_coordinator"].registered) == sorted(
         role for role in ROLE_SPECS if role != "gateway_coordinator"
     )
@@ -163,10 +167,12 @@ async def test_bootstrap_configures_and_checks_all_six_tls_directions():
 def test_runtime_documents_bind_release_and_preserve_10_worker_pool():
     release = _release()
     documents = _documents(release)
-    assert documents["gateway_scoring_a"]["configuration"]["execution_worker_count"] == 5
-    assert documents["gateway_scoring_b"]["configuration"]["execution_worker_count"] == 5
+    assert documents["gateway_scoring"]["configuration"]["execution_worker_count"] == 10
+    assert documents["gateway_scoring"]["configuration"]["configured_worker_count"] == 25
     assert documents["gateway_autoresearch"]["configuration"]["execution_worker_count"] == 10
+    assert documents["gateway_autoresearch"]["configuration"]["configured_worker_count"] == 10
     assert documents["gateway_coordinator"]["configuration"]["execution_worker_count"] == 0
+    assert documents["gateway_coordinator"]["configuration"]["configured_worker_count"] == 0
     assert all(
         document["configuration"]["release_hash"] == release["release_hash"]
         for document in documents.values()
@@ -186,14 +192,14 @@ def test_runtime_documents_bind_release_and_preserve_10_worker_pool():
 async def test_bootstrap_rejects_boot_commit_not_in_release():
     release = _release()
     clients = {role: _Client(role, release) for role in ROLE_SPECS}
-    original = clients["gateway_scoring_a"].v2_get_boot_identity
+    original = clients["gateway_scoring"].v2_get_boot_identity
 
     async def wrong_boot():
         value = await original()
         value["commit_sha"] = "f" * 40
         return value
 
-    clients["gateway_scoring_a"].v2_get_boot_identity = wrong_boot
+    clients["gateway_scoring"].v2_get_boot_identity = wrong_boot
     with pytest.raises(TEEV2BootstrapError, match="boot commit"):
         await bootstrap_gateway_enclaves_v2(
             release_manifest=release,

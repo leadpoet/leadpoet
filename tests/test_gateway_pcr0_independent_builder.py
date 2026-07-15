@@ -155,7 +155,7 @@ def test_cache_retains_twenty_commits_per_physical_role(tmp_path):
                 },
             )
     document = json.loads(cache.read_text())
-    assert len(document["entries"]) == 80
+    assert len(document["entries"]) == 60
     for role in gateway_pcr0_builder.GATEWAY_ROLES:
         assert len([row for row in document["entries"] if row["role"] == role]) == 20
 
@@ -163,7 +163,7 @@ def test_cache_retains_twenty_commits_per_physical_role(tmp_path):
 def test_same_commit_requires_explicit_role_when_cache_has_multiple_eifs(tmp_path):
     cache = tmp_path / "cache.json"
     commit = "9" * 40
-    for role in ("gateway_coordinator", "gateway_scoring_a"):
+    for role in ("gateway_coordinator", "gateway_scoring"):
         gateway_pcr0_builder.write_cache_entry(
             cache_path=cache,
             entry={
@@ -175,8 +175,8 @@ def test_same_commit_requires_explicit_role_when_cache_has_multiple_eifs(tmp_pat
     assert gateway_pcr0_builder.load_cached_gateway_identity(
         cache,
         commit,
-        role="gateway_scoring_a",
-    )["role"] == "gateway_scoring_a"
+        role="gateway_scoring",
+    )["role"] == "gateway_scoring"
 
 
 def test_git_archive_rejects_symlinks(tmp_path):

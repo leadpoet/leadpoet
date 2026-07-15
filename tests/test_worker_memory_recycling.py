@@ -23,8 +23,6 @@ from gateway.research_lab.scoring_worker import (
     _worker_recycle_rss_mb,
 )
 from gateway.research_lab.worker_autostart import (
-    EXPECTED_HOSTED_WORKERS,
-    EXPECTED_SCORING_WORKERS,
     ResearchLabWorkerAutoStartPlan,
     ResearchLabWorkerFleetPlan,
     ResearchLabWorkerStartupError,
@@ -168,32 +166,34 @@ def _fleet(kind: str, count: int) -> ResearchLabWorkerFleetPlan:
     )
 
 
-def test_full_topology_worker_health_requires_exact_unchanged_counts(monkeypatch):
+def test_full_topology_worker_health_uses_configured_counts(monkeypatch):
     monkeypatch.setenv("GATEWAY_TEE_TOPOLOGY_MODE", "full")
+    hosted_workers = 3
+    scoring_workers = 7
     plan = ResearchLabWorkerAutoStartPlan(
         auto_start_enabled=True,
-        hosted=_fleet("hosted", EXPECTED_HOSTED_WORKERS),
-        scoring=_fleet("scoring", EXPECTED_SCORING_WORKERS),
+        hosted=_fleet("hosted", hosted_workers),
+        scoring=_fleet("scoring", scoring_workers),
     )
     supervisor = ResearchLabWorkerSupervisor(plan)
     supervisor.children = {
-        **{"hosted:%d" % index: _StubChild(1000 + index) for index in range(EXPECTED_HOSTED_WORKERS)},
-        **{"scoring:%d" % index: _StubChild(2000 + index) for index in range(EXPECTED_SCORING_WORKERS)},
+        **{"hosted:%d" % index: _StubChild(1000 + index) for index in range(hosted_workers)},
+        **{"scoring:%d" % index: _StubChild(2000 + index) for index in range(scoring_workers)},
     }
     supervisor._ready_children = set(supervisor.children)
     health = supervisor.health()
-    assert health["hosted_running"] == 10
-    assert health["scoring_running"] == 25
+    assert health["hosted_running"] == hosted_workers
+    assert health["scoring_running"] == scoring_workers
 
 
-def test_full_topology_worker_health_rejects_reduced_fleet(monkeypatch):
+def test_full_topology_worker_health_rejects_empty_fleet(monkeypatch):
     monkeypatch.setenv("GATEWAY_TEE_TOPOLOGY_MODE", "full")
     plan = ResearchLabWorkerAutoStartPlan(
         auto_start_enabled=True,
-        hosted=_fleet("hosted", EXPECTED_HOSTED_WORKERS - 1),
-        scoring=_fleet("scoring", EXPECTED_SCORING_WORKERS),
+        hosted=_fleet("hosted", 0),
+        scoring=_fleet("scoring", 7),
     )
-    with pytest.raises(ResearchLabWorkerStartupError, match="exactly 10"):
+    with pytest.raises(ResearchLabWorkerStartupError, match="configured enabled"):
         ResearchLabWorkerSupervisor(plan).health()
 
 

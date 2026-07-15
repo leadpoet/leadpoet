@@ -103,6 +103,10 @@ def _verify(tmp_path: Path, monkeypatch, **overrides):
             "schema_version": "leadpoet.worker_proxy_profile_set.v2",
             "status": "ready",
             "profile_count": 35,
+            "worker_counts": {
+                "gateway_autoresearch": 10,
+                "gateway_scoring": 25,
+            },
         },
     )
     monkeypatch.setattr(
@@ -116,6 +120,22 @@ def _verify(tmp_path: Path, monkeypatch, **overrides):
         "credential_envelope_paths",
         None,
     ) or _credential_envelopes(tmp_path)
+    worker_environment = {
+        "RESEARCH_LAB_HOSTED_RUNS_ENABLED": "true",
+        "RESEARCH_LAB_EVALUATION_BUNDLES_ENABLED": "true",
+        **{
+            "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY_%d" % (index + 1): (
+                "https://autoresearch-%d.example" % index
+            )
+            for index in range(10)
+        },
+        **{
+            "RESEARCH_LAB_QUALIFICATION_WEBSHARE_PROXY_%d" % (index + 1): (
+                "https://scoring-%d.example" % index
+            )
+            for index in range(25)
+        },
+    }
     values = {
         "deploy_commit": COMMIT,
         "release_manifest": _release(),
@@ -124,10 +144,10 @@ def _verify(tmp_path: Path, monkeypatch, **overrides):
         "credential_envelope_paths": credential_envelopes,
         "config_dir": tmp_path,
         "topology_mode": "full",
-        "instance_type": "r7i.8xlarge",
-        "parent_vcpus": 32,
-        "parent_memory_mib": 250000,
-        "parent_environment": {},
+        "instance_type": "r7i.4xlarge",
+        "parent_vcpus": 16,
+        "parent_memory_mib": 125000,
+        "parent_environment": worker_environment,
         "acceptance_corpus_manifest_path": tmp_path / "acceptance.json",
         "acceptance_corpus_root": tmp_path / "acceptance",
     }
@@ -142,8 +162,8 @@ def test_full_restart_preflight_accepts_only_complete_approved_release(
     result = _verify(tmp_path, monkeypatch)
     assert result["status"] == "ready"
     assert result["deploy_commit"] == COMMIT
-    assert result["instance_type"] == "r7i.8xlarge"
-    assert result["role_count"] == 4
+    assert result["instance_type"] == "r7i.4xlarge"
+    assert result["role_count"] == 3
     assert result["boot_credential_slot_count"] == 7
     assert result["parent_plaintext_provider_slot_count"] == 0
     assert result["worker_proxy_profile_count"] == 35
@@ -156,7 +176,7 @@ def test_full_restart_preflight_rejects_current_undersized_gateway(
 ) -> None:
     with pytest.raises(
         preflight.GatewayRestartPreflightV2Error,
-        match="requires r7i.8xlarge",
+        match="requires r7i.4xlarge",
     ):
         _verify(tmp_path, monkeypatch, instance_type="r7i.2xlarge", parent_vcpus=8)
 

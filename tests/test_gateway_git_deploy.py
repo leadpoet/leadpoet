@@ -114,7 +114,7 @@ def test_noop_deployment_records_exact_commit_and_last_good(
     eif_root = tmp_path / "tee"
     eif_root.mkdir()
     pcr0 = "a" * 96
-    (eif_root / "enclave-build-gateway_scoring_a.json").write_text(
+    (eif_root / "enclave-build-gateway_scoring.json").write_text(
         json.dumps({"Measurements": {"PCR0": pcr0}}),
         encoding="utf-8",
     )
@@ -124,7 +124,7 @@ def test_noop_deployment_records_exact_commit_and_last_good(
         stage="health_verified",
         eif_root=eif_root,
     )
-    assert completed["role_pcr0s"] == {"gateway_scoring_a": pcr0}
+    assert completed["role_pcr0s"] == {"gateway_scoring": pcr0}
     assert json.loads(manifest.read_text(encoding="utf-8"))["status"] == "succeeded"
     assert json.loads(last_good.read_text(encoding="utf-8"))["target_sha"] == git_fixture.initial_sha
 

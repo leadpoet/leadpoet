@@ -32,7 +32,7 @@ HASH = "sha256:" + "a" * 64
 def _manager(tmp_path: Path, *, pcr0: str = "b" * 96):
     gateway_root = tmp_path / "gateway"
     identity = build_identity(
-        role="gateway_scoring_a",
+        role="gateway_scoring",
         service_role="gateway_scoring",
         commit_sha="c" * 40,
         execution_manifest_hash=HASH,
@@ -59,7 +59,7 @@ def _manager(tmp_path: Path, *, pcr0: str = "b" * 96):
     return (
         RuntimeIdentityV2(
             gateway_root=gateway_root,
-            physical_role="gateway_scoring_a",
+            physical_role="gateway_scoring",
             signing_pubkey_supplier=lambda: signing_pubkey,
             pcr0_supplier=lambda: pcr0,
             attestation_supplier=_attest,
@@ -78,8 +78,7 @@ def _configuration():
     }
     role_pcr0s = {
         "gateway_coordinator": "1" * 96,
-        "gateway_scoring_a": "b" * 96,
-        "gateway_scoring_b": "3" * 96,
+        "gateway_scoring": "b" * 96,
         "gateway_autoresearch": "4" * 96,
     }
     release_roles = {
@@ -91,8 +90,7 @@ def _configuration():
         }
         for role in (
             "gateway_coordinator",
-            "gateway_scoring_a",
-            "gateway_scoring_b",
+            "gateway_scoring",
             "gateway_autoresearch",
         )
     }
@@ -102,7 +100,7 @@ def _configuration():
         "release_hash": HASH,
         "release_commit_sha": "c" * 40,
         "own_build_identity_hash": build_identity(
-            role="gateway_scoring_a",
+            role="gateway_scoring",
             service_role="gateway_scoring",
             commit_sha="c" * 40,
             execution_manifest_hash=HASH,
@@ -134,7 +132,8 @@ def _configuration():
         "research_lab_execution_config_hash": (
             research_lab_execution_config_hash(research_lab_config)
         ),
-        "execution_worker_count": 5,
+        "execution_worker_count": 10,
+        "configured_worker_count": 25,
     }
 
 
@@ -142,7 +141,7 @@ def _configuration_hash(configuration):
     return sha256_json(
         {
             "schema_version": RUNTIME_CONFIG_SCHEMA_VERSION,
-            "physical_role": "gateway_scoring_a",
+            "physical_role": "gateway_scoring",
             "service_role": "gateway_scoring",
             "configuration": configuration,
         }
@@ -159,7 +158,7 @@ def test_runtime_boot_identity_binds_role_build_config_tls_and_nitro(tmp_path: P
     assert status["status"] == "ready"
     boot = manager.boot_identity()
     validate_boot_identity(boot)
-    assert boot["physical_role"] == "gateway_scoring_a"
+    assert boot["physical_role"] == "gateway_scoring"
     assert boot["role"] == "gateway_scoring"
     assert boot["signing_pubkey"] == signing_pubkey
     assert boot["dependency_lock_hash"] == "sha256:" + "d" * 64

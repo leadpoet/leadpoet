@@ -7,7 +7,7 @@ from pathlib import Path
 def _tee_service(monkeypatch):
     tee_dir = Path(__file__).resolve().parents[1] / "gateway" / "tee"
     monkeypatch.syspath_prepend(str(tee_dir))
-    monkeypatch.setenv("LEADPOET_ENCLAVE_ROLE", "gateway_scoring_a")
+    monkeypatch.setenv("LEADPOET_ENCLAVE_ROLE", "gateway_scoring")
     return importlib.import_module("gateway.tee.tee_service")
 
 
@@ -22,10 +22,10 @@ def test_v1_scoring_rpc_is_not_authorized_for_v2_role(monkeypatch):
     ):
         response = service.handle_rpc(method, {})
         assert response == {
-            "error": "RPC method is not authorized for enclave role gateway_scoring_a"
+            "error": "RPC method is not authorized for enclave role gateway_scoring"
         }
     assert service.handle_rpc("unknown", {}) == {
-        "error": "RPC method is not authorized for enclave role gateway_scoring_a"
+        "error": "RPC method is not authorized for enclave role gateway_scoring"
     }
 
 

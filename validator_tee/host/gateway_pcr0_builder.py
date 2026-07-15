@@ -28,8 +28,7 @@ CACHE_SCHEMA_VERSION = "leadpoet.gateway_pcr0_cache.v2"
 DEFAULT_CACHE_SIZE = 20
 GATEWAY_ROLES = (
     "gateway_coordinator",
-    "gateway_scoring_a",
-    "gateway_scoring_b",
+    "gateway_scoring",
     "gateway_autoresearch",
 )
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")

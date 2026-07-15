@@ -34,7 +34,7 @@ def _boot(role, transport_pubkey, certificate_hash):
         body=build_boot_identity_body(
             role=role,
             physical_role=(
-                "gateway_scoring_a"
+                "gateway_scoring"
                 if role == SCORING_ROLE
                 else "gateway_coordinator"
             ),

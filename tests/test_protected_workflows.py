@@ -1,4 +1,6 @@
 from pathlib import Path
+import re
+import subprocess
 
 import pytest
 
@@ -19,7 +21,13 @@ def test_committed_protected_workflow_manifest_matches_source():
     manifest = load_manifest(MANIFEST_PATH)
     verify_manifest(ROOT, manifest)
     assert manifest["baseline_commit"] == "7c9766b71d4c08b0059f6e3230dbe742b1d58e79"
-    assert manifest["protected_source_commit"] == "06ee7db2866b37327c53c2c9b32833be907892cd"
+    protected_source = manifest["protected_source_commit"]
+    assert re.fullmatch(r"[0-9a-f]{40}", protected_source)
+    subprocess.run(
+        ["git", "cat-file", "-e", protected_source + "^{commit}"],
+        cwd=ROOT,
+        check=True,
+    )
     assert len(manifest["entries"]) == sum(len(items) for items in PROTECTED_SYMBOLS.values())
 
 

@@ -1828,8 +1828,13 @@ def get_v2_scoring_job_manager():
         if not isinstance(retry_hashes, dict):
             raise RuntimeError("V2 scoring retry policy configuration is missing")
         worker_count = int(configuration.get("execution_worker_count") or 0)
+        configured_worker_count = int(
+            configuration.get("configured_worker_count") or 0
+        )
         if not 1 <= worker_count <= 10:
             raise RuntimeError("V2 scoring execution worker count is invalid")
+        if not 1 <= configured_worker_count <= 500:
+            raise RuntimeError("V2 scoring configured worker count is invalid")
         sandbox_transport = BrokeredProviderTransportV2(
             execute_v2_provider_request
         )
@@ -1850,6 +1855,7 @@ def get_v2_scoring_job_manager():
             operations=SCORING_OPERATIONS_V2,
             executor=executor,
             worker_count=worker_count,
+            configured_worker_count=configured_worker_count,
         )
         return v2_scoring_job_manager
 
@@ -2008,6 +2014,7 @@ def get_v2_coordinator_job_manager():
                 config_supplier=runtime.research_lab_config,
             ),
             worker_count=1,
+            configured_worker_count=0,
             failed_parent_graph_policy=coordinator_failed_parent_graph_policy_v2,
         )
         return v2_coordinator_job_manager
@@ -2037,7 +2044,13 @@ def get_v2_autoresearch_job_manager():
         if not isinstance(retry_hashes, dict):
             raise RuntimeError("V2 autoresearch retry policy configuration is missing")
         worker_count = int(configuration.get("execution_worker_count") or 0)
-        if worker_count != 10:
+        configured_worker_count = int(
+            configuration.get("configured_worker_count") or 0
+        )
+        if (
+            worker_count != configured_worker_count
+            or not 1 <= worker_count <= 500
+        ):
             raise RuntimeError("V2 autoresearch execution worker count is invalid")
 
         def channel_factory(job_id: str, purpose: str):
@@ -2053,7 +2066,7 @@ def get_v2_autoresearch_job_manager():
             from leadpoet_canonical.attested_v2 import verify_boot_identity_nitro
 
             physical_role = str(identity.get("physical_role") or "")
-            if physical_role not in {"gateway_scoring_a", "gateway_scoring_b"}:
+            if physical_role != "gateway_scoring":
                 raise RuntimeError("autoresearch dev-eval boot role is invalid")
             expectation = runtime.release_role_expectation(physical_role)
             for field in (
@@ -2106,6 +2119,7 @@ def get_v2_autoresearch_job_manager():
                 artifact_seal=seal_v2_inter_enclave_artifact,
             ),
             worker_count=worker_count,
+            configured_worker_count=configured_worker_count,
             host_operation_channel_factory=channel_factory,
         )
         return v2_autoresearch_job_manager
@@ -2242,8 +2256,7 @@ def handle_inter_enclave_rpc(
         if active_enclave_role() != "gateway_coordinator":
             raise ValueError("provider execution is coordinator-only")
         if peer["physical_role"] not in {
-            "gateway_scoring_a",
-            "gateway_scoring_b",
+            "gateway_scoring",
             "gateway_autoresearch",
         }:
             raise ValueError("provider caller role is not authorized")

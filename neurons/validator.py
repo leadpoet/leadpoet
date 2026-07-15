@@ -117,13 +117,9 @@ except ImportError as e:
     V2_TEE_AVAILABLE = False
     # Will log warning at runtime if TEE submission is attempted
 
-from validator_tee.host.legacy_v1_compat import (
+from validator_tee.host.weight_protocol_v2 import (
     AUTHORITATIVE_V2_PROTOCOL,
-    LEGACY_V1_COMPAT_PROTOCOL,
-    LegacyV1EnclaveClient,
-    build_legacy_v1_submission,
     normalize_weight_protocol,
-    verify_existing_legacy_v1_bundle,
 )
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -145,147 +141,13 @@ except ImportError as e:
 # Additional warning suppression
 warnings.filterwarnings("ignore", message=".*leaked semaphore objects.*")
 
-# ════════════════════════════════════════════════════════════════════════════
-# AUTO-UPDATER: Automatically updates entire repo from GitHub for validators
-# ════════════════════════════════════════════════════════════════════════════
-
+# The validator restart wrapper owns Git synchronization and rebuilds the
+# measured enclave before launching this process. Runtime self-updates are
+# forbidden because they could move host code away from the approved EIF commit.
 if __name__ == "__main__" and os.environ.get("LEADPOET_WRAPPER_ACTIVE") != "1":
-    print("🔄 Leadpoet Validator: Activating auto-update wrapper...")
-    print("   Your validator will automatically stay up-to-date with the latest code")
-    print("")
-    
-    # Create wrapper script path (hidden file with dot prefix)
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    repo_root = os.path.dirname(script_dir)
-    wrapper_path = os.path.join(repo_root, ".auto_update_wrapper.sh") 
-    
-    # Inline wrapper script - simple and clean
-    wrapper_content = '''#!/bin/bash
-# Auto-generated wrapper for Leadpoet validator auto-updates
-set -e
-
-REPO_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-cd "$REPO_ROOT"
-
-echo "════════════════════════════════════════════════════════════════"
-echo "🚀 Leadpoet Auto-Updating Validator"
-echo "   Repository updates every 5 minutes"
-echo "   GitHub: github.com/leadpoet/leadpoet"
-echo "════════════════════════════════════════════════════════════════"
-echo ""
-
-RESTART_COUNT=0
-MAX_RESTARTS=5
-
-while true; do
-    echo "────────────────────────────────────────────────────────────────"
-    echo "🔍 Checking for updates from GitHub..."
-    
-    # Stash any local changes and pull latest
-    if git stash 2>/dev/null; then
-        echo "   💾 Stashed local changes"
-    fi
-    
-    if git pull origin main 2>/dev/null; then
-        CURRENT_COMMIT=$(git rev-parse --short HEAD)
-        echo "✅ Repository updated"
-        echo "   Current commit: $CURRENT_COMMIT"
-        
-        # Auto-install new/updated Python packages if requirements.txt changed
-        if git diff HEAD@{1} HEAD --name-only | grep -q "requirements.txt"; then
-            echo "📦 requirements.txt changed - updating packages..."
-            pip3 install -r requirements.txt --quiet || echo "   ⚠️  Package install failed (continuing anyway)"
-        fi
-    else
-        echo "⏭️  Could not update (offline or not a git repo)"
-        echo "   Continuing with current version..."
-    fi
-    
-    echo "────────────────────────────────────────────────────────────────"
-    echo "🟢 Starting validator (attempt $(($RESTART_COUNT + 1)))..."
-    echo ""
-    
-    # Run validator with environment flag to prevent wrapper re-execution
-    # Suppress multiprocessing semaphore warnings by setting PYTHONWARNINGS
-    export LEADPOET_WRAPPER_ACTIVE=1
-    export PYTHONWARNINGS="ignore::UserWarning"
-    python3 neurons/validator.py "$@"
-    
-    EXIT_CODE=$?
-    
-    echo ""
-    echo "────────────────────────────────────────────────────────────────"
-    
-    if [ $EXIT_CODE -eq 0 ]; then
-        echo "✅ Validator exited cleanly (exit code: 0)"
-        echo "   Shutting down auto-updater..."
-        break
-    elif [ $EXIT_CODE -eq 137 ] || [ $EXIT_CODE -eq 9 ]; then
-        echo "⚠️  Validator was killed (exit code: $EXIT_CODE) - likely Out of Memory"
-        echo "   Cleaning up resources before restart..."
-        
-        # Clean up any leaked resources
-        pkill -f "python3 neurons/validator.py" 2>/dev/null || true
-        sleep 5  # Give system time to clean up
-        
-        RESTART_COUNT=$((RESTART_COUNT + 1))
-        if [ $RESTART_COUNT -ge $MAX_RESTARTS ]; then
-            echo "❌ Maximum restart attempts ($MAX_RESTARTS) reached"
-            echo "   Your system may not have enough RAM. Consider:"
-            echo "   1. Increasing server RAM"
-            echo "   2. Reducing batch sizes in validator config"
-            echo "   3. Monitoring memory usage with 'htop'"
-            exit 1
-        fi
-        
-        echo "   Restarting in 30 seconds... (attempt $RESTART_COUNT/$MAX_RESTARTS)"
-        sleep 30
-    else
-        RESTART_COUNT=$((RESTART_COUNT + 1))
-        echo "⚠️  Validator exited with error (exit code: $EXIT_CODE)"
-        
-        if [ $RESTART_COUNT -ge $MAX_RESTARTS ]; then
-            echo "❌ Maximum restart attempts ($MAX_RESTARTS) reached"
-            echo "   Please check logs and restart manually"
-            exit 1
-        fi
-        
-        echo "   Restarting in 10 seconds... (attempt $RESTART_COUNT/$MAX_RESTARTS)"
-        sleep 10
-    fi
-    
-    echo ""
-    echo "⏰ Next update check in 5 minutes..."
-    sleep 300
-    
-    # Reset restart counter after successful check
-    RESTART_COUNT=0
-done
-
-echo "════════════════════════════════════════════════════════════════"
-echo "🛑 Auto-updater stopped"
-'''
-    
-    # Write wrapper script
-    try:
-        with open(wrapper_path, 'w') as f:
-            f.write(wrapper_content)
-        os.chmod(wrapper_path, 0o755)
-        print(f"✅ Created auto-update wrapper: {wrapper_path}")
-    except Exception as e:
-        print(f"❌ Failed to create wrapper: {e}")
-        print("   Continuing without auto-updates...")
-        # Fall through to normal execution
-    else:
-        # Execute wrapper and replace current process
-        print("🚀 Launching auto-update wrapper...\n")
-        try:
-            env = os.environ.copy()
-            env["LEADPOET_WRAPPER_ACTIVE"] = "1"
-            os.execve(wrapper_path, [wrapper_path] + sys.argv[1:], env)
-        except Exception as e:
-            print(f"❌ Failed to execute wrapper: {e}")
-            print("   Continuing without auto-updates...")
+    raise RuntimeError(
+        "validator must be launched through validator_restart.sh with exact-commit V2 authority"
+    )
 
 # normal validator code starts below
 
@@ -505,6 +367,22 @@ def _current_validator_commit_sha() -> str:
     if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", value):
         raise RuntimeError("validator full commit SHA is unavailable")
     return value
+
+
+def _verify_validator_v2_commit_alignment(
+    client: Any, *, required: bool
+) -> Dict[str, Any]:
+    """Prove the host checkout and validator enclave use one approved commit."""
+    from validator_tee.host.commit_alignment_v2 import (
+        verify_validator_v2_commit_alignment,
+    )
+
+    return verify_validator_v2_commit_alignment(
+        client,
+        expected_commit=os.environ.get("VALIDATOR_V2_DEPLOY_COMMIT", ""),
+        host_commit=_current_validator_commit_sha(),
+        required=required,
+    )
 
 
 def _finalize_attested_weight_snapshot(values: Dict[str, Any]) -> Dict[str, Any]:
@@ -905,39 +783,46 @@ def _normalize_research_lab_sha256_ref(value: Any, *, fallback: Any = None, fiel
 
 
 class Validator(BaseValidatorNeuron):
+    def set_weights(self):
+        """Reject the inherited host-authoritative weight path."""
+
+        raise RuntimeError(
+            "direct set_weights is disabled; use authoritative V2 epoch publication"
+        )
+
     def __init__(self, config=None):
         self._weight_protocol = _validator_weight_protocol()
-        if self._weight_protocol == LEGACY_V1_COMPAT_PROTOCOL:
-            super().__init__(config=config)
-            self._legacy_v1_client = LegacyV1EnclaveClient()
-            self._legacy_v1_client.health_check()
-            bt.logging.warning(
-                "validator_weight_protocol=legacy_v1_compat "
-                "using_host_wallet=true authoritative_v2=false"
+        if self._weight_protocol != AUTHORITATIVE_V2_PROTOCOL:
+            raise RuntimeError("validator weight authority must be authoritative_v2")
+        if not V2_TEE_AVAILABLE:
+            raise RuntimeError("authoritative validator V2 modules are unavailable")
+        if config is None or not hasattr(config, "wallet"):
+            raise RuntimeError("authoritative validator V2 wallet configuration is missing")
+        self._validator_v2_client = ValidatorEnclaveClient()
+        self._validator_v2_commit_alignment = _verify_validator_v2_commit_alignment(
+            self._validator_v2_client,
+            required=(
+                int(config.netuid) == 71
+                and str(config.subtensor.network).lower() == "finney"
+            ),
+        )
+        enclave_wallet = build_enclave_backed_wallet_v2(
+            name=str(config.wallet.name),
+            hotkey_name=str(config.wallet.hotkey),
+            path=str(config.wallet.path),
+            client=self._validator_v2_client,
+        )
+        super().__init__(config=config, wallet=enclave_wallet)
+        journal_path = Path(
+            os.environ.get("VALIDATOR_V2_PUBLICATION_JOURNAL_PATH")
+            or (
+                Path(self.config.neuron.full_path)
+                / "authoritative_weight_publication_v2.json"
             )
-        else:
-            if not V2_TEE_AVAILABLE:
-                raise RuntimeError("authoritative validator V2 modules are unavailable")
-            if config is None or not hasattr(config, "wallet"):
-                raise RuntimeError("authoritative validator V2 wallet configuration is missing")
-            self._validator_v2_client = ValidatorEnclaveClient()
-            enclave_wallet = build_enclave_backed_wallet_v2(
-                name=str(config.wallet.name),
-                hotkey_name=str(config.wallet.hotkey),
-                path=str(config.wallet.path),
-                client=self._validator_v2_client,
-            )
-            super().__init__(config=config, wallet=enclave_wallet)
-            journal_path = Path(
-                os.environ.get("VALIDATOR_V2_PUBLICATION_JOURNAL_PATH")
-                or (
-                    Path(self.config.neuron.full_path)
-                    / "authoritative_weight_publication_v2.json"
-                )
-            ).expanduser()
-            self._weight_publication_journal_v2 = (
-                AuthoritativeWeightPublicationJournalV2(journal_path)
-            )
+        ).expanduser()
+        self._weight_publication_journal_v2 = (
+            AuthoritativeWeightPublicationJournalV2(journal_path)
+        )
         
         # Add async subtensor (initialized later in run())
         # This eliminates memory leaks and HTTP 429 errors from repeated instance creation
@@ -3494,240 +3379,84 @@ class Validator(BaseValidatorNeuron):
             return result if include_status else result[:2]
 
     async def _research_lab_pre_weight_submission_guard(self, current_epoch: int) -> dict:
-        """Fetch and verify Research Lab shadow output before any set_weights call.
+        """Fetch the sole V2 allocation authority before final-weight computation."""
 
-        Default behavior is read-only. Research Lab failures fail closed for the
-        Research Lab allocation only: the reserved Lab share burns while
-        fulfillment, leaderboard, and global weight safety checks continue.
-        """
-        def _research_lab_failed_closed(reason: str, *, errors: Optional[list] = None) -> dict:
+        try:
+            from leadpoet_canonical.allocation_handoff_v2 import (
+                validate_allocation_handoff_v2,
+            )
+            from research_lab.validator_integration import (
+                ResearchLabValidatorFlags,
+                build_research_lab_allocation_component,
+                fetch_research_lab_attested_allocation_bundle,
+                verify_research_lab_allocation_bundle,
+            )
+            from validator_tee.host.gateway_weight_inputs_v2 import _gateway_endpoint
+
+            gateway_url = _gateway_endpoint(
+                str(os.environ.get("VALIDATOR_V2_GATEWAY_URL") or "")
+            )
+            print("\n🔬 Fetching authoritative V2 Research Lab allocation")
+            handoff = await asyncio.to_thread(
+                fetch_research_lab_attested_allocation_bundle,
+                gateway_url,
+                current_epoch,
+            )
+            normalized = validate_allocation_handoff_v2(
+                handoff,
+                expected_epoch_id=int(current_epoch),
+                expected_netuid=int(self.config.netuid),
+            )
+            bundle = normalized["bundle"]
+            flags = ResearchLabValidatorFlags.from_mapping(os.environ)
+            verification = verify_research_lab_allocation_bundle(bundle, flags=flags)
+            if not verification.get("passed"):
+                raise RuntimeError(
+                    "Research Lab allocation arithmetic or policy verification failed: %s"
+                    % list(verification.get("errors") or [])
+                )
+            component = build_research_lab_allocation_component(bundle, flags=flags)
+            allocation_doc = component.get("allocation_doc", {})
             print(
-                "   ⚠️ Research Lab failed closed; continuing weight submission "
-                "with Research Lab allocation burned"
+                "   ✅ Authoritative V2 Research Lab allocation verified: "
+                f"{component.get('allocation_hash')} "
+                f"(source_add={float(allocation_doc.get('source_add_alpha_percent') or 0):.4f}%, "
+                f"reimbursements={float(allocation_doc.get('reimbursement_alpha_percent') or 0):.4f}%, "
+                f"champions={float(allocation_doc.get('champion_alpha_percent') or 0):.4f}%, "
+                f"queued={float(allocation_doc.get('queued_champion_alpha_percent') or 0):.4f}%)"
             )
             return {
                 "abort_chain_submission": False,
+                "verified": True,
+                "allocation_component": component,
+                "allocation_verification": verification,
+                "attested_allocation_verification": {
+                    "passed": True,
+                    "required_ready": True,
+                    "verification_mode": "authoritative_v2_weight_input_handoff",
+                    "allocation_hash": component.get("allocation_hash"),
+                    "root_receipt_hash": normalized["root_receipt_hash"],
+                },
+                "attested_allocation_receipt_graph": normalized["receipt_graph"],
+                "evaluation_verification": {
+                    "verification_mode": "complete_v2_receipt_ancestry",
+                    "passed": True,
+                },
+            }
+        except Exception as exc:
+            bt.logging.error(
+                "Authoritative V2 Research Lab allocation failed closed: %s",
+                exc,
+            )
+            return {
+                "abort_chain_submission": True,
                 "verified": False,
-                "research_lab_failed_closed": True,
-                "reason": reason,
-                "errors": errors or [],
+                "reason": "authoritative_v2_allocation_unavailable",
+                "errors": [str(exc)],
                 "allocation_component": None,
                 "allocation_verification": None,
                 "evaluation_verification": None,
             }
-
-        try:
-            from research_lab.validator_integration import (
-                ResearchLabValidatorFlags,
-                allocation_can_proceed_without_score_bundles,
-                allocation_referenced_score_bundle_ids,
-                build_research_lab_allocation_component,
-                fetch_research_lab_evaluation_bundle_page,
-                fetch_research_lab_score_bundle,
-                build_research_lab_weight_component,
-                fetch_research_lab_allocation_bundle,
-                fetch_research_lab_shadow_bundle,
-                merge_research_lab_evaluation_bundle_page,
-                verify_research_lab_allocation_bundle,
-                verify_research_lab_evaluation_bundle_page,
-                verify_research_lab_shadow_bundle,
-                write_research_lab_validator_artifact,
-            )
-        except Exception as exc:
-            mutation_enabled = _env_flag(
-                "RESEARCH_LAB_WEIGHT_MUTATION_ENABLED",
-                _research_lab_production_subnet_default(),
-            )
-            if mutation_enabled:
-                print(f"   ⚠️ Research Lab verifier import failed while mutation is enabled: {exc}")
-                return _research_lab_failed_closed(
-                    "research_lab_verifier_import_failed",
-                    errors=[str(exc)],
-                )
-            return {"abort_chain_submission": False, "skipped": True, "reason": f"import_failed:{exc}"}
-
-        flags = ResearchLabValidatorFlags.from_mapping(os.environ)
-        if not flags.fetch_enabled:
-            return {"abort_chain_submission": False, "skipped": True, "reason": "fetch_disabled"}
-
-        gateway_url = os.environ.get("GATEWAY_URL", "http://52.91.135.79:8000")
-        print("\n🔬 Research Lab validator guard enabled")
-        print(f"   Fetching shadow bundle for epoch {current_epoch} from {gateway_url}")
-
-        try:
-            bundle = await asyncio.to_thread(fetch_research_lab_shadow_bundle, gateway_url, current_epoch)
-            shadow_verify_flags = {
-                **flags.to_dict(),
-                "weight_mutation_enabled": False,
-                "production_writes_enabled": False,
-                "submit_on_chain_enabled": False,
-                "fulfillment_mutation_enabled": False,
-            }
-            verification = verify_research_lab_shadow_bundle(bundle, flags=shadow_verify_flags)
-            component = None
-            if verification.get("passed"):
-                component = build_research_lab_weight_component(bundle, flags=shadow_verify_flags)
-
-            artifact_path = write_research_lab_validator_artifact(
-                output_dir=Path("validator_weights"),
-                epoch=current_epoch,
-                bundle=bundle,
-                verification=verification,
-                component=component,
-            )
-            print(f"   Research Lab artifact written: {artifact_path}")
-
-            if not verification.get("passed"):
-                print(f"   ⚠️ Research Lab verification failed: {verification.get('errors')}")
-                if (
-                    flags.weight_mutation_enabled
-                    or flags.submit_on_chain_enabled
-                    or flags.require_shadow_verification_before_submit
-                ):
-                    return _research_lab_failed_closed(
-                        "research_lab_verification_failed",
-                        errors=list(verification.get("errors") or []),
-                    )
-                return {"abort_chain_submission": False, "verified": False, "errors": verification.get("errors", [])}
-
-            print(f"   ✅ Research Lab shadow bundle verified: {verification.get('weight_vector_hash')}")
-            allocation_component = None
-            allocation_bundle = None
-            allocation_verification = None
-            attested_allocation_verification = None
-            attested_allocation_receipt = None
-            attested_allocation_parent_receipts = []
-            if flags.live_allocation_enabled():
-                print(f"   Fetching Research Lab live allocation for epoch {current_epoch}")
-                allocation_bundle = await asyncio.to_thread(fetch_research_lab_allocation_bundle, gateway_url, current_epoch)
-                allocation_verification = verify_research_lab_allocation_bundle(allocation_bundle, flags=flags)
-                allocation_component = (
-                    build_research_lab_allocation_component(allocation_bundle, flags=flags)
-                    if allocation_verification.get("passed")
-                    else None
-                )
-                allocation_artifact_path = write_research_lab_validator_artifact(
-                    output_dir=Path("validator_weights"),
-                    epoch=current_epoch,
-                    bundle=allocation_bundle,
-                    verification=allocation_verification,
-                    component=allocation_component,
-                    artifact_kind="allocation",
-                )
-                print(f"   Research Lab allocation artifact written: {allocation_artifact_path}")
-                if not allocation_verification.get("passed"):
-                    print(f"   ❌ Research Lab live allocation verification failed: {allocation_verification.get('errors')}")
-                    return _research_lab_failed_closed(
-                        "research_lab_allocation_verification_failed",
-                        errors=list(allocation_verification.get("errors") or []),
-                    )
-                allocation_doc = allocation_component.get("allocation_doc", {})
-                print(
-                    "   ✅ Research Lab live allocation verified: "
-                    f"{allocation_component.get('allocation_hash')} "
-                    f"(source_add={float(allocation_doc.get('source_add_alpha_percent') or 0):.4f}%, "
-                    f"reimbursements={float(allocation_doc.get('reimbursement_alpha_percent') or 0):.4f}%, "
-                    f"champions={float(allocation_doc.get('champion_alpha_percent') or 0):.4f}%, "
-                    f"queued={float(allocation_doc.get('queued_champion_alpha_percent') or 0):.4f}%)"
-                )
-                attested_allocation_verification = {
-                    "passed": True,
-                    "required_ready": True,
-                    "verification_mode": "authoritative_v2_weight_input_handoff",
-                    "allocation_hash": allocation_component.get("allocation_hash"),
-                }
-
-            evaluation_verification = None
-            if flags.evaluation_verify_enabled:
-                print(f"   Fetching Research Lab evaluation bundles for epoch {current_epoch}")
-                evaluation_page = await asyncio.to_thread(fetch_research_lab_evaluation_bundle_page, gateway_url, current_epoch)
-                required_score_bundle_ids = allocation_referenced_score_bundle_ids(allocation_bundle)
-                if required_score_bundle_ids:
-                    print(
-                        "   Fetching Research Lab allocation-referenced score bundles: "
-                        f"{len(required_score_bundle_ids)}"
-                    )
-                    referenced_rows = []
-                    for score_bundle_id in required_score_bundle_ids:
-                        try:
-                            referenced_rows.append(
-                                await asyncio.to_thread(
-                                    fetch_research_lab_score_bundle,
-                                    gateway_url,
-                                    score_bundle_id,
-                                )
-                            )
-                        except Exception as exc:
-                            print(
-                                "   ⚠️ Research Lab referenced score bundle fetch failed "
-                                f"({score_bundle_id}): {str(exc)[:160]}"
-                            )
-                    evaluation_page = merge_research_lab_evaluation_bundle_page(
-                        evaluation_page,
-                        referenced_rows,
-                    )
-                evaluation_verification = verify_research_lab_evaluation_bundle_page(
-                    evaluation_page,
-                    flags=shadow_verify_flags,
-                    required_score_bundle_ids=required_score_bundle_ids,
-                )
-                eval_artifact_path = write_research_lab_validator_artifact(
-                    output_dir=Path("validator_weights"),
-                    epoch=current_epoch,
-                    bundle=evaluation_page,
-                    verification=evaluation_verification,
-                    component={"verified_weight_inputs": evaluation_verification.get("verified_weight_inputs", [])},
-                    artifact_kind="evaluation",
-                )
-                print(f"   Research Lab evaluation artifact written: {eval_artifact_path}")
-                if not evaluation_verification.get("passed"):
-                    print(f"   ⚠️ Research Lab evaluation verification failed: {evaluation_verification.get('errors')}")
-                    if allocation_can_proceed_without_score_bundles(
-                        allocation_component.get("allocation_doc", {})
-                        if isinstance(allocation_component, dict)
-                        else {},
-                        evaluation_verification.get("errors") or [],
-                    ):
-                        print(
-                            "   ⚠️ No scored evaluation bundles yet; proceeding because "
-                            "the live allocation contains only SOURCE_ADD and/or "
-                            "reimbursement rewards"
-                        )
-                    elif (
-                        flags.weight_mutation_enabled
-                        or flags.submit_on_chain_enabled
-                        or flags.require_evaluation_verification_before_submit
-                    ):
-                        return _research_lab_failed_closed(
-                            "research_lab_evaluation_verification_failed",
-                            errors=list(evaluation_verification.get("errors") or []),
-                        )
-                else:
-                    print(
-                        "   ✅ Research Lab evaluation bundles verified: "
-                        f"{evaluation_verification.get('verified_bundle_count')} bundle(s)"
-                    )
-
-            return {
-                "abort_chain_submission": False,
-                "verified": True,
-                "component": component,
-                "allocation_component": allocation_component,
-                "allocation_verification": allocation_verification,
-                "attested_allocation_verification": attested_allocation_verification,
-                "attested_allocation_receipt": attested_allocation_receipt,
-                "attested_allocation_parent_receipts": attested_allocation_parent_receipts,
-                "weight_vector_hash": verification.get("weight_vector_hash"),
-                "evaluation_verification": evaluation_verification,
-            }
-        except Exception as exc:
-            print(f"   ⚠️ Research Lab validator guard error: {exc}")
-            if flags.weight_mutation_enabled or flags.submit_on_chain_enabled or flags.require_shadow_verification_before_submit:
-                return _research_lab_failed_closed(
-                    "research_lab_guard_error",
-                    errors=[str(exc)],
-                )
-            return {"abort_chain_submission": False, "verified": False, "errors": [str(exc)]}
 
     async def _publish_and_set_weights(
         self,
@@ -3739,147 +3468,16 @@ class Validator(BaseValidatorNeuron):
         leaderboard_window_start: str,
         leaderboard_window_end: str,
     ) -> bool:
-        """Publish through the explicitly selected protocol, then set weights."""
+        """Persist V2 authority, then submit its enclave-computed vector."""
 
-        if self._weight_protocol != LEGACY_V1_COMPAT_PROTOCOL:
-            return await self._authorize_and_set_weights_v2(
-                snapshot=snapshot,
-                host_uids=host_uids,
-                host_weights=host_weights,
-                allocation_hash=allocation_hash,
-                leaderboard_window_start=leaderboard_window_start,
-                leaderboard_window_end=leaderboard_window_end,
-            )
-
-        prepared = build_legacy_v1_submission(
-            client=self._legacy_v1_client,
-            netuid=int(self.config.netuid),
-            epoch_id=int(snapshot["epoch_id"]),
-            block=int(snapshot["block"]),
-            uids=host_uids,
-            weights=host_weights,
-            validator_hotkey=self.wallet.hotkey.ss58_address,
-            sign_binding_message=self.wallet.hotkey.sign,
-            expected_chain=str(
-                os.environ.get(
-                    "EXPECTED_CHAIN",
-                    "wss://entrypoint-finney.opentensor.ai:443",
-                )
-            ).strip(),
-            validator_version=_current_validator_commit_sha()[:7],
+        return await self._authorize_and_set_weights_v2(
+            snapshot=snapshot,
+            host_uids=host_uids,
+            host_weights=host_weights,
+            allocation_hash=allocation_hash,
+            leaderboard_window_start=leaderboard_window_start,
+            leaderboard_window_end=leaderboard_window_end,
         )
-        event_hash = await self._publish_legacy_v1_bundle(prepared["payload"])
-        if not event_hash:
-            bt.logging.error(
-                "validator_legacy_v1_gateway_publication_failed epoch=%s",
-                snapshot["epoch_id"],
-            )
-            return False
-        self._last_legacy_v1_weight_submission = {
-            **prepared,
-            "weight_submission_event_hash": event_hash,
-        }
-        print(
-            "   ✅ Legacy V1 gateway bundle persisted before chain submission: "
-            f"{event_hash[:20]}..."
-        )
-        return await self._set_legacy_weights_until_epoch_end(
-            epoch_id=int(snapshot["epoch_id"]),
-            uids=prepared["uids"],
-            weights=prepared["chain_weights"],
-        )
-
-    async def _publish_legacy_v1_bundle(
-        self, payload: Dict[str, Any]
-    ) -> Optional[str]:
-        gateway_url = str(os.environ.get("GATEWAY_URL") or "").strip().rstrip("/")
-        parsed = urlparse(gateway_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise RuntimeError(
-                "GATEWAY_URL must be an HTTP(S) origin in legacy_v1_compat mode"
-            )
-
-        timeout = aiohttp.ClientTimeout(total=60)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    f"{gateway_url}/weights/submit", json=payload
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        event_hash = str(
-                            result.get("weight_submission_event_hash") or ""
-                        )
-                        if not event_hash:
-                            raise RuntimeError(
-                                "legacy V1 gateway response omitted its event hash"
-                            )
-                        return event_hash
-                    if response.status != 409:
-                        error = await response.text()
-                        bt.logging.error(
-                            "validator_legacy_v1_gateway_rejected status=%s error=%s",
-                            response.status,
-                            error[:200],
-                        )
-                        return None
-
-                # A restart may encounter the bundle persisted by an earlier
-                # attempt. Proceed only if every signed vector field is exact.
-                async with session.get(
-                    f"{gateway_url}/weights/latest/"
-                    f"{payload['netuid']}/{payload['epoch_id']}"
-                ) as response:
-                    if response.status != 200:
-                        error = await response.text()
-                        bt.logging.error(
-                            "validator_legacy_v1_duplicate_lookup_failed "
-                            "status=%s error=%s",
-                            response.status,
-                            error[:200],
-                        )
-                        return None
-                    existing = await response.json()
-                return verify_existing_legacy_v1_bundle(existing, payload)
-        except aiohttp.ClientError as exc:
-            bt.logging.error(
-                "validator_legacy_v1_gateway_transport_failed error=%s", exc
-            )
-            return None
-
-    async def _set_legacy_weights_until_epoch_end(
-        self,
-        *,
-        epoch_id: int,
-        uids,
-        weights,
-    ) -> bool:
-        """Retry the exact published V1 vector only within its source epoch."""
-
-        attempt = 0
-        while True:
-            attempt += 1
-            success, message = self.subtensor.set_weights(
-                netuid=self.config.netuid,
-                wallet=self.wallet,
-                uids=uids,
-                weights=weights,
-                wait_for_finalization=True,
-            )
-            if success:
-                return True
-            print(
-                f"   ❌ Bittensor rejected weight submission attempt {attempt}: "
-                f"{message}"
-            )
-            await asyncio.sleep(12)
-            current_block = await self.get_current_block_async()
-            if current_block // 360 != epoch_id:
-                print(
-                    f"   ⏹️ Epoch {epoch_id} ended before the weight submission "
-                    "was accepted"
-                )
-                return False
 
     async def _authorize_and_set_weights_v2(
         self,

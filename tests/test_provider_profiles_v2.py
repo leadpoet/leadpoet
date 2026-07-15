@@ -140,7 +140,7 @@ def test_worker_proxy_profile_is_encrypted_scoped_and_required(tmp_path):
 
 def test_release_verifier_requires_all_worker_and_provider_profiles(tmp_path):
     proxy_url = "https://worker:password@proxy.example.com:443"
-    for prefix, count in (("scoring", 25), ("autoresearch", 10)):
+    for prefix, count in (("scoring", 7), ("autoresearch", 3)):
         for worker_index in range(count):
             (tmp_path / f"{prefix}_proxy_{worker_index:02d}.json").write_text(
                 json.dumps(_envelope("egress_proxy", proxy_url)),
@@ -161,4 +161,24 @@ def test_release_verifier_requires_all_worker_and_provider_profiles(tmp_path):
     result = verify_required_worker_proxy_profiles_v2(config_dir=tmp_path)
 
     assert result["status"] == "ready"
-    assert result["profile_count"] == 35
+    assert result["profile_count"] == 10
+    assert result["worker_counts"] == {
+        "gateway_autoresearch": 3,
+        "gateway_scoring": 7,
+    }
+
+
+def test_release_verifier_rejects_noncontiguous_worker_profiles(tmp_path):
+    proxy_url = "https://worker:password@proxy.example.com:443"
+    for filename in (
+        "scoring_proxy_00.json",
+        "scoring_proxy_02.json",
+        "autoresearch_proxy_00.json",
+    ):
+        (tmp_path / filename).write_text(
+            json.dumps(_envelope("egress_proxy", proxy_url)),
+            encoding="utf-8",
+        )
+
+    with pytest.raises(Exception, match="must be contiguous"):
+        verify_required_worker_proxy_profiles_v2(config_dir=tmp_path)

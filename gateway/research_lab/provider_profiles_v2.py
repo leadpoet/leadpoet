@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from gateway.utils.tee_kms_provision_v2 import (
@@ -38,9 +39,10 @@ _PROFILE_FILES = {
     ),
 }
 _EXECUTION_PROXY_FILES = {
-    "gateway_scoring": (25, "scoring_proxy_{worker_index:02d}.json"),
-    "gateway_autoresearch": (10, "autoresearch_proxy_{worker_index:02d}.json"),
+    "gateway_scoring": "scoring_proxy_{worker_index:02d}.json",
+    "gateway_autoresearch": "autoresearch_proxy_{worker_index:02d}.json",
 }
+_MAX_CONFIGURED_WORKERS = 500
 
 
 class ProviderProfileV2Error(RuntimeError):
@@ -64,9 +66,9 @@ def load_provider_profile_v2(
         proxy_spec = _EXECUTION_PROXY_FILES.get(normalized_role)
         if proxy_spec is None or worker_index is None:
             raise ProviderProfileV2Error("provider profile execution scope is invalid")
-        worker_count, filename_template = proxy_spec
+        filename_template = proxy_spec
         normalized_worker_index = int(worker_index)
-        if not 0 <= normalized_worker_index < worker_count:
+        if not 0 <= normalized_worker_index < _MAX_CONFIGURED_WORKERS:
             raise ProviderProfileV2Error("provider profile worker index is invalid")
         entries = tuple(entries) + (
             (
@@ -220,10 +222,39 @@ def verify_required_worker_proxy_profiles_v2(
     config_dir: Path = DEFAULT_CONFIG_DIR,
 ) -> Dict[str, Any]:
     refs = {}
-    for execution_role, (worker_count, _template) in sorted(
-        _EXECUTION_PROXY_FILES.items()
-    ):
-        for worker_index in range(worker_count):
+    worker_counts = {}
+    for execution_role, filename_template in sorted(_EXECUTION_PROXY_FILES.items()):
+        filename_prefix = filename_template.partition("{")[0]
+        pattern = re.compile(r"^%s([0-9]+)\.json$" % re.escape(filename_prefix))
+        worker_indexes = []
+        for path in Path(config_dir).glob("%s*.json" % filename_prefix):
+            match = pattern.fullmatch(path.name)
+            if match is None:
+                raise ProviderProfileV2Error(
+                    "worker TLS proxy profile filename is invalid"
+                )
+            worker_index = int(match.group(1))
+            if path.name != filename_template.format(worker_index=worker_index):
+                raise ProviderProfileV2Error(
+                    "worker TLS proxy profile filename is not canonical"
+                )
+            worker_indexes.append(worker_index)
+        worker_indexes.sort()
+        if not worker_indexes:
+            raise ProviderProfileV2Error(
+                "%s worker TLS proxy profiles are unavailable" % execution_role
+            )
+        if worker_indexes != list(range(len(worker_indexes))):
+            raise ProviderProfileV2Error(
+                "%s worker TLS proxy profiles must be contiguous" % execution_role
+            )
+        if len(worker_indexes) > _MAX_CONFIGURED_WORKERS:
+            raise ProviderProfileV2Error(
+                "%s worker TLS proxy profile count exceeds the limit"
+                % execution_role
+            )
+        worker_counts[execution_role] = len(worker_indexes)
+        for worker_index in worker_indexes:
             document = load_provider_profile_v2(
                 DEFAULT_PROFILE,
                 config_dir=config_dir,
@@ -256,6 +287,7 @@ def verify_required_worker_proxy_profiles_v2(
         "schema_version": "leadpoet.worker_proxy_profile_set.v2",
         "status": "ready",
         "profile_count": len(refs),
+        "worker_counts": dict(sorted(worker_counts.items())),
         "profile_ref_hash": sha256_json(dict(sorted(refs.items()))),
     }
 

@@ -39,11 +39,17 @@ class _Client:
         }
 
     def _health(self, workers):
+        configured_workers = {
+            "gateway_coordinator": 0,
+            "gateway_scoring": 25,
+            "gateway_autoresearch": 10,
+        }[self.role]
         return {
             "authority": "v2_only",
             "physical_role": self.role,
             "role": ROLE_SPECS[self.role]["service_role"],
             "worker_count": workers,
+            "configured_worker_count": configured_workers,
             "workers_alive": True,
             "boot_identity_hash": "sha256:" + "a" * 64,
         }
@@ -52,7 +58,7 @@ class _Client:
         return self._health(1)
 
     async def scoring_v2_health(self):
-        return self._health(5)
+        return self._health(10)
 
     async def autoresearch_v2_health(self):
         return self._health(10)
@@ -63,20 +69,20 @@ async def test_runtime_ready_requires_every_manager_and_provider_slot():
     clients = {role: _Client(role) for role in ROLE_SPECS}
     result = await verify_v2_runtime_ready(clients)
     assert result["status"] == "ready"
-    assert len(result["roles"]) == 4
+    assert len(result["roles"]) == 3
 
 
 @pytest.mark.asyncio
-async def test_runtime_ready_fails_when_one_scoring_shard_is_dead():
+async def test_runtime_ready_fails_when_shared_scoring_runner_is_dead():
     clients = {role: _Client(role) for role in ROLE_SPECS}
 
     async def dead():
-        value = clients["gateway_scoring_b"]._health(5)
+        value = clients["gateway_scoring"]._health(10)
         value["workers_alive"] = False
         return value
 
-    clients["gateway_scoring_b"].scoring_v2_health = dead
-    with pytest.raises(V2RuntimeReadinessError, match="gateway_scoring_b"):
+    clients["gateway_scoring"].scoring_v2_health = dead
+    with pytest.raises(V2RuntimeReadinessError, match="gateway_scoring"):
         await verify_v2_runtime_ready(clients)
 
 

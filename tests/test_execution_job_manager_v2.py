@@ -46,7 +46,7 @@ def _manager(executor):
     boot = create_boot_identity(
         body=build_boot_identity_body(
             role="gateway_scoring",
-            physical_role="gateway_scoring_a",
+            physical_role="gateway_scoring",
             commit_sha="c" * 40,
             pcr0="d" * 96,
             build_manifest_hash=HASH,
@@ -279,7 +279,7 @@ def test_nested_receipt_graph_is_bound_to_root_and_retained_for_graph_merge():
     nested_boot = create_boot_identity(
         body=build_boot_identity_body(
             role="gateway_scoring",
-            physical_role="gateway_scoring_a",
+            physical_role="gateway_scoring",
             commit_sha="1" * 40,
             pcr0="2" * 96,
             build_manifest_hash=HASH,

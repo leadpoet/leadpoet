@@ -72,8 +72,8 @@ def _release():
 
 
 class _Client:
-    def __init__(self, release, *, executor=None):
-        role = "gateway_scoring_a"
+    def __init__(self, release, *, executor=None, configured_worker_count=1):
+        role = "gateway_scoring"
         summary = release["roles"][role]
         self.key = Ed25519PrivateKey.generate()
         pubkey = self.key.public_key().public_bytes(
@@ -111,6 +111,7 @@ class _Client:
                 }
             ),
             worker_count=1,
+            configured_worker_count=configured_worker_count,
         )
 
     async def scoring_v2_health(self):
@@ -163,8 +164,25 @@ class _Client:
 @pytest.mark.asyncio
 async def test_v2_bridge_returns_only_durable_release_verified_result():
     release = _release()
-    client = _Client(release)
+    client = _Client(release, configured_worker_count=13)
     persisted = []
+
+    def load_profile(
+        profile,
+        *,
+        execution_role,
+        worker_index,
+        require_egress_proxy,
+    ):
+        assert profile == "default"
+        assert execution_role == "gateway_scoring"
+        assert worker_index == 12
+        assert require_egress_proxy is False
+        return {
+            "profile": profile,
+            "credential_ref_hashes": {},
+            "envelopes": [],
+        }
 
     async def persist(graph):
         validate_receipt_graph(graph)
@@ -177,7 +195,8 @@ async def test_v2_bridge_returns_only_durable_release_verified_result():
         epoch_id=12,
         sequence=0,
         payload={"scores": [1.0, 2.0]},
-        worker_index=0,
+        worker_index=12,
+        provider_profile_loader=load_profile,
         release_manifest=release,
         client=client,
         persist_graph=persist,
@@ -189,7 +208,7 @@ async def test_v2_bridge_returns_only_durable_release_verified_result():
         "echo": {"scores": [1.0, 2.0]},
     }
     assert result["status"] == "succeeded"
-    assert result["physical_role"] == "gateway_scoring_a"
+    assert result["physical_role"] == "gateway_scoring"
     assert persisted[0]["root_receipt_hash"] == result["receipt"]["receipt_hash"]
 
 

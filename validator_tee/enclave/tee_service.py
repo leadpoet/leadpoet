@@ -308,7 +308,7 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
             "status": "error",
             "error": "Legacy validator V1 RPC is permanently removed",
         }
-    
+
     try:
         if command == "configure_authoritative_v2":
             configuration = request.get("configuration")

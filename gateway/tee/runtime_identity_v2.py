@@ -101,6 +101,7 @@ def _validate_release_configuration(
         "research_lab_execution_config",
         "research_lab_execution_config_hash",
         "execution_worker_count",
+        "configured_worker_count",
     }
     if set(configuration) != expected_fields:
         raise RuntimeIdentityV2Error("V2 runtime release fields are incomplete")
@@ -192,8 +193,7 @@ def _validate_release_configuration(
     release_roles = configuration.get("release_roles")
     expected_release_roles = {
         "gateway_coordinator",
-        "gateway_scoring_a",
-        "gateway_scoring_b",
+        "gateway_scoring",
         "gateway_autoresearch",
     }
     if not isinstance(release_roles, Mapping) or set(release_roles) != expected_release_roles:
@@ -235,8 +235,7 @@ def _validate_release_configuration(
 
     expected_peers = (
         {
-            "gateway_scoring_a",
-            "gateway_scoring_b",
+            "gateway_scoring",
             "gateway_autoresearch",
         }
         if physical_role == "gateway_coordinator"
@@ -266,12 +265,25 @@ def _validate_release_configuration(
             "peer build_manifest_hash",
         )
 
-    expected_worker_count = 0
-    if physical_role in {"gateway_scoring_a", "gateway_scoring_b"}:
-        expected_worker_count = 5
-    elif physical_role == "gateway_autoresearch":
-        expected_worker_count = 10
-    if configuration.get("execution_worker_count") != expected_worker_count:
+    execution_worker_count = configuration.get("execution_worker_count")
+    configured_worker_count = configuration.get("configured_worker_count")
+    if physical_role == "gateway_coordinator":
+        valid_worker_counts = (
+            execution_worker_count == 0 and configured_worker_count == 0
+        )
+    elif physical_role == "gateway_scoring":
+        valid_worker_counts = (
+            execution_worker_count == 10
+            and isinstance(configured_worker_count, int)
+            and 0 < configured_worker_count <= 500
+        )
+    else:
+        valid_worker_counts = (
+            isinstance(configured_worker_count, int)
+            and 0 < configured_worker_count <= 500
+            and execution_worker_count == configured_worker_count
+        )
+    if not valid_worker_counts:
         raise RuntimeIdentityV2Error("V2 worker count differs from approved topology")
 
 

@@ -468,7 +468,7 @@ grep -q "SUPABASE_SERVICE_ROLE_KEY" "$ENV_CLONE" || {
 }
 
 # Read the protocol only after the live environment and Secrets Manager have
-# been merged. V2 stays the fail-closed default; legacy mode must be explicit.
+# been merged. Authoritative V2 is the sole production protocol.
 RESEARCH_LAB_TEE_PROTOCOL="$(
   set -a
   . "$ENV_CLONE"
@@ -479,20 +479,16 @@ RESEARCH_LAB_TEE_PROTOCOL="$(
   printf '%s' "$RESEARCH_LAB_TEE_PROTOCOL" | tr '[:upper:]' '[:lower:]'
 )"
 case "$RESEARCH_LAB_TEE_PROTOCOL" in
-  legacy_v1|legacy_v1_compat)
-    RESEARCH_LAB_TEE_PROTOCOL="legacy_v1"
-    ;;
   v2|authoritative_v2)
     RESEARCH_LAB_TEE_PROTOCOL="v2"
     ;;
   *)
-    echo "ERROR: RESEARCH_LAB_TEE_PROTOCOL must be legacy_v1 or v2" >&2
+    echo "ERROR: RESEARCH_LAB_TEE_PROTOCOL must be v2; V1 authority is retired" >&2
     exit 1
     ;;
 esac
 export RESEARCH_LAB_TEE_PROTOCOL
-# Keep every later environment reload on the normalized value, even when the
-# secret used an accepted alias such as legacy_v1_compat.
+# Keep every later environment reload on the normalized V2 value.
 printf 'export RESEARCH_LAB_TEE_PROTOCOL=%q\n' \
   "$RESEARCH_LAB_TEE_PROTOCOL" >> "$ENV_CLONE"
 echo "Research Lab TEE protocol: $RESEARCH_LAB_TEE_PROTOCOL"
@@ -523,8 +519,7 @@ PREPARED_GATEWAY_SHA="$(
 )"
 echo "Prepared gateway commit: $PREPARED_GATEWAY_SHA"
 
-if [ "$RESEARCH_LAB_TEE_PROTOCOL" = "v2" ]; then
-  echo "Validating the prepared V2 release before production shutdown"
+echo "Validating the prepared V2 release before production shutdown"
   GATEWAY_DEPLOY_STAGE="v2_pre_shutdown_preflight"
   export GATEWAY_DEPLOY_STAGE
   GATEWAY_PREFLIGHT_TREE="$(mktemp -d /tmp/gateway-v2-preflight.XXXXXX)"
@@ -562,27 +557,7 @@ if [ "$RESEARCH_LAB_TEE_PROTOCOL" = "v2" ]; then
     echo "ERROR: V2 offline artifact preparation failed before shutdown" >&2
     exit 1
   fi
-  rm -rf "$GATEWAY_PREFLIGHT_TREE"
-else
-  echo "Legacy V1 selected; skipping the six-build V2 release preflight"
-  echo "Preparing the shared deterministic enclave build inputs before shutdown"
-  GATEWAY_DEPLOY_STAGE="legacy_enclave_artifact_prepare"
-  export GATEWAY_DEPLOY_STAGE
-  LEGACY_PREP_TREE="$(mktemp -d /tmp/gateway-legacy-preflight.XXXXXX)"
-  if ! git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA" \
-      | tar -xf - -C "$LEGACY_PREP_TREE"; then
-    rm -rf "$LEGACY_PREP_TREE"
-    echo "ERROR: unable to materialize the prepared commit for legacy build preparation" >&2
-    exit 1
-  fi
-  if ! GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
-      bash "$LEGACY_PREP_TREE/gateway/tee/prepare_legacy_enclave_artifacts.sh"; then
-    rm -rf "$LEGACY_PREP_TREE"
-    echo "ERROR: deterministic legacy enclave artifact preparation failed before shutdown" >&2
-    exit 1
-  fi
-  rm -rf "$LEGACY_PREP_TREE"
-fi
+rm -rf "$GATEWAY_PREFLIGHT_TREE"
 
 echo "Stopping existing gateway and Research Lab worker processes"
 pkill -9 -f "python3 main.py" 2>/dev/null || true
@@ -814,11 +789,10 @@ then
   echo "ERROR: gateway dependencies and staged attested runtime are out of sync." >&2
   exit 1
 fi
-if [ "$RESEARCH_LAB_TEE_PROTOCOL" = "v2" ]; then
-  echo "Building deterministic gateway role EIFs from the staged runtime"
+echo "Building deterministic gateway role EIFs from the staged runtime"
   GATEWAY_TEE_SKIP_STAGE=1 bash "$GATEWAY_ROOT/tee/build_role_enclaves.sh"
   echo "Cleaning temporary role Docker images/layers before gateway relaunch"
-  for role in gateway_coordinator gateway_scoring_a gateway_scoring_b gateway_autoresearch; do
+  for role in gateway_coordinator gateway_scoring gateway_autoresearch; do
     sudo docker rmi -f "tee-enclave:${role}" 2>/dev/null || true
   done
   sudo docker builder prune -af 2>/dev/null || true
@@ -873,7 +847,8 @@ if [ "$RESEARCH_LAB_TEE_PROTOCOL" = "v2" ]; then
     --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
     "${V2_BOOTSTRAP_ARGS[@]}" \
     --protected-workflow-manifest "$GATEWAY_ROOT/_attested_runtime/protected_workflows.json" \
-    --encrypted-artifact-policy "$GATEWAY_V2_ARTIFACT_POLICY"
+    --encrypted-artifact-policy "$GATEWAY_V2_ARTIFACT_POLICY" \
+    --config-dir "$GATEWAY_V2_CONFIG_DIR"
 
   echo "Provisioning KMS ciphertext directly to the attested coordinator"
   GATEWAY_DEPLOY_STAGE="v2_kms_provision"
@@ -881,45 +856,10 @@ if [ "$RESEARCH_LAB_TEE_PROTOCOL" = "v2" ]; then
   PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.utils.tee_kms_provision_v2 \
     "${V2_PROVISION_ARGS[@]}"
 
-  echo "Verifying V2 provider and execution-manager readiness"
-  GATEWAY_DEPLOY_STAGE="v2_runtime_readiness"
-  export GATEWAY_DEPLOY_STAGE
-  PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.tee.verify_v2_runtime_ready
-else
-  echo "Building one legacy gateway EIF from the current deploy commit"
-  sudo docker build --no-cache \
-    --build-arg LEADPOET_ENCLAVE_ROLE=gateway_coordinator \
-    -f "$GATEWAY_ROOT/tee/Dockerfile.enclave" \
-    -t tee-enclave:latest \
-    "$GATEWAY_ROOT/"
-  ENCLAVE_BUILD_METADATA_TMP="$(mktemp /tmp/gateway-enclave-build.XXXXXX.json)"
-  set +e
-  sudo nitro-cli build-enclave \
-    --docker-uri tee-enclave:latest \
-    --output-file "$GATEWAY_TEE_EIF_ROOT/tee-enclave.eif" \
-    > "$ENCLAVE_BUILD_METADATA_TMP" 2>/dev/null
-  ENCLAVE_BUILD_STATUS="$?"
-  set -e
-  sudo docker rmi -f tee-enclave:latest 2>/dev/null || true
-  sudo docker builder prune -af 2>/dev/null || true
-  if [ "$ENCLAVE_BUILD_STATUS" -ne 0 ]; then
-    rm -f "$ENCLAVE_BUILD_METADATA_TMP"
-    echo "ERROR: legacy gateway EIF build failed with status $ENCLAVE_BUILD_STATUS" >&2
-    exit "$ENCLAVE_BUILD_STATUS"
-  fi
-  sudo install -m 644 \
-    "$ENCLAVE_BUILD_METADATA_TMP" \
-    "$GATEWAY_TEE_EIF_ROOT/enclave-build-gateway.json"
-  rm -f "$ENCLAVE_BUILD_METADATA_TMP"
-  sudo env \
-    GATEWAY_ROOT="$GATEWAY_ROOT" \
-    GATEWAY_TEE_EIF_ROOT="$GATEWAY_TEE_EIF_ROOT" \
-    GATEWAY_ENV_FILE="$GATEWAY_ENV_FILE" \
-    GATEWAY_ENCLAVE_CPU_COUNT="${GATEWAY_ENCLAVE_CPU_COUNT:-2}" \
-    GATEWAY_ENCLAVE_MEMORY_MB="${GATEWAY_ENCLAVE_MEMORY_MB:-8192}" \
-    RESEARCH_LAB_TEE_PROTOCOL="$RESEARCH_LAB_TEE_PROTOCOL" \
-    bash ./start_enclave.sh
-fi
+echo "Verifying V2 provider and execution-manager readiness"
+GATEWAY_DEPLOY_STAGE="v2_runtime_readiness"
+export GATEWAY_DEPLOY_STAGE
+PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.tee.verify_v2_runtime_ready
 
 echo "Installing Python dependencies"
 GATEWAY_DEPLOY_STAGE="dependency_install"
@@ -947,41 +887,8 @@ export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 export GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
 export LEADPOET_GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-leadpoet/prod/gateway/env}"
 export RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI="${RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI:-s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json}"
-if [ "$RESEARCH_LAB_TEE_PROTOCOL" = "legacy_v1" ]; then
-  # Keep the worker URL identical to the listener started below; do not inherit
-  # a stale URL from the previous process environment.
-  export RESEARCH_LAB_EVIDENCE_PROXY_URL="http://172.17.0.1:8791"
-  export RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH="${RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH:-/home/ec2-user/research_lab_evidence/provider_outcomes.json}"
-else
-  unset RESEARCH_LAB_EVIDENCE_PROXY_URL RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH
-fi
+unset RESEARCH_LAB_EVIDENCE_PROXY_URL RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
-
-if [ "$RESEARCH_LAB_TEE_PROTOCOL" = "legacy_v1" ]; then
-  echo "Starting legacy Research Lab provider evidence proxy"
-  mkdir -p /home/ec2-user/research_lab_evidence "$GATEWAY_LOG_ROOT"
-  cd "$LEADPOET_REPO_ROOT"
-  setsid "$GATEWAY_PYTHON_BIN" -m gateway.research_lab.provider_evidence_proxy \
-    --host 172.17.0.1 \
-    --port 8791 \
-    --day-cache /home/ec2-user/research_lab_evidence/day_cache.json \
-    --outcome-sidecar "$RESEARCH_LAB_PROVIDER_OUTCOME_SIDECAR_PATH" \
-    >> "$GATEWAY_LOG_ROOT/provider_evidence_proxy.log" 2>&1 < /dev/null 9>&- &
-  PROVIDER_PROXY_PID="$!"
-  for i in $(seq 1 10); do
-    if ss -ltn "sport = :8791" 2>/dev/null | grep -q ":8791"; then
-      echo "provider evidence proxy listening on :8791 after ${i}s"
-      break
-    fi
-    sleep 1
-  done
-  if ! ps -p "$PROVIDER_PROXY_PID" >/dev/null 2>&1 \
-      || ! ss -ltn "sport = :8791" 2>/dev/null | grep -q ":8791"; then
-    tail -80 "$GATEWAY_LOG_ROOT/provider_evidence_proxy.log" || true
-    echo "ERROR: legacy provider evidence proxy did not start" >&2
-    exit 1
-  fi
-fi
 
 cd "$LEADPOET_REPO_ROOT"
 setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main > "$GATEWAY_LOG_FILE" 2>&1 < /dev/null 9>&- &

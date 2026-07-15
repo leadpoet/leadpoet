@@ -90,7 +90,7 @@ def test_peer_registry_requires_exact_nitro_release_and_certificate():
     coordinator_boot = _boot(
         "gateway_coordinator", "gateway_coordinator", coordinator_tls, "b"
     )
-    registry, observed = _registry("gateway_scoring_a")
+    registry, observed = _registry("gateway_scoring")
     registered = _register(registry, coordinator_boot, coordinator_tls)
     assert registered["physical_role"] == "gateway_coordinator"
     assert observed == [("gateway_coordinator", "b" * 96)]
@@ -116,13 +116,18 @@ def test_peer_registry_requires_exact_nitro_release_and_certificate():
 
 
 def test_registry_rejects_runner_to_runner_channel():
-    scoring_tls = generate_ephemeral_tls_identity(service_role="gateway_scoring")
-    scoring_boot = _boot(
-        "gateway_scoring_b", "gateway_scoring", scoring_tls, "c"
+    autoresearch_tls = generate_ephemeral_tls_identity(
+        service_role="gateway_autoresearch"
     )
-    registry, _ = _registry("gateway_scoring_a")
+    autoresearch_boot = _boot(
+        "gateway_autoresearch",
+        "gateway_autoresearch",
+        autoresearch_tls,
+        "c",
+    )
+    registry, _ = _registry("gateway_scoring")
     with pytest.raises(InterEnclaveTLSError, match="pair"):
-        _register(registry, scoring_boot, scoring_tls)
+        _register(registry, autoresearch_boot, autoresearch_tls)
 
 
 def test_rpc_request_binds_both_boots_and_topology():
@@ -162,10 +167,10 @@ def test_tls_rpc_round_trip_uses_only_attested_peer_certificates(tmp_path):
         "gateway_coordinator", "gateway_coordinator", coordinator_tls, "b"
     )
     scoring_boot = _boot(
-        "gateway_scoring_a", "gateway_scoring", scoring_tls, "c"
+        "gateway_scoring", "gateway_scoring", scoring_tls, "c"
     )
     coordinator_registry, _ = _registry("gateway_coordinator")
-    scoring_registry, _ = _registry("gateway_scoring_a")
+    scoring_registry, _ = _registry("gateway_scoring")
     _register(coordinator_registry, scoring_boot, scoring_tls)
     _register(scoring_registry, coordinator_boot, coordinator_tls)
 
@@ -207,7 +212,7 @@ def test_tls_rpc_round_trip_uses_only_attested_peer_certificates(tmp_path):
         return client_socket
 
     client = AttestedTLSRPCClient(
-        local_physical_role="gateway_scoring_a",
+        local_physical_role="gateway_scoring",
         local_boot_identity=scoring_boot,
         local_tls_identity=scoring_tls,
         peer_registry=scoring_registry,
@@ -229,5 +234,5 @@ def test_tls_rpc_round_trip_uses_only_attested_peer_certificates(tmp_path):
     assert result == {
         "method": "provider_execute",
         "job_id": "job-1",
-        "peer_role": "gateway_scoring_a",
+        "peer_role": "gateway_scoring",
     }

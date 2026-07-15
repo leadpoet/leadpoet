@@ -7,7 +7,7 @@ from typing import FrozenSet
 
 
 COORDINATOR_ROLE = "gateway_coordinator"
-SCORING_ROLES = frozenset({"gateway_scoring_a", "gateway_scoring_b"})
+SCORING_ROLES = frozenset({"gateway_scoring"})
 AUTORESEARCH_ROLE = "gateway_autoresearch"
 
 COMMON_METHODS = frozenset(

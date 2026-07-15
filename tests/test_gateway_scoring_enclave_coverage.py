@@ -182,7 +182,7 @@ def test_gateway_eif_build_enforces_scoring_manifest():
     assert "protected_workflows.py" in stage_script
     assert "--protected-manifest" in stage_script
     assert "--topology-manifest" in stage_script
-    assert "gateway_scoring_a gateway_scoring_b" in stage_script
+    assert "gateway_scoring gateway_autoresearch" in stage_script
     assert "LEADPOET_ENCLAVE_ROLE" in dockerfile
     assert "topology.py" in dockerfile
     assert 'COPY _enclave_source/ /app/gateway/' in dockerfile
@@ -203,8 +203,7 @@ def test_gateway_eif_build_enforces_scoring_manifest():
     assert '--abi cp39' in prepare_script
     assert 'GATEWAY_TEE_TOPOLOGY_MODE:-full' in start_script
     assert 'gateway_coordinator' in start_script
-    assert 'gateway_scoring_a' in start_script
-    assert 'gateway_scoring_b' in start_script
+    assert 'gateway_scoring' in start_script
     assert 'gateway_autoresearch' in start_script
     assert 'TOTAL_CPUS' in start_script
     assert 'TOTAL_MEMORY_MIB' in start_script
@@ -284,7 +283,7 @@ def test_gateway_build_identity_resolve_command_returns_exact_commit(tmp_path: P
 def test_gateway_build_identity_binds_commit_role_and_execution_manifest(tmp_path: Path):
     gateway_root = tmp_path / "gateway"
     identity = build_identity(
-        role="gateway_scoring_a",
+        role="gateway_scoring",
         service_role="gateway_scoring",
         commit_sha="a" * 40,
         execution_manifest_hash="sha256:" + "b" * 64,
@@ -299,7 +298,7 @@ def test_gateway_build_identity_binds_commit_role_and_execution_manifest(tmp_pat
 
     assert load_identity(
         gateway_root=gateway_root,
-        expected_role="gateway_scoring_a",
+        expected_role="gateway_scoring",
     ) == identity
     with pytest.raises(Exception, match="role mismatch"):
         load_identity(

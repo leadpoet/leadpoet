@@ -81,3 +81,35 @@ def test_icp_set_pins_uniform_goal_of_five(monkeypatch):
     _icps1, _d1, h1 = generate_icp_set(20260715, base_seed=42)
     _icps2, _d2, h2 = generate_icp_set(20260715, base_seed=42)
     assert h1 == h2
+
+
+def test_apply_generated_icp_contract_openrouter_path():
+    """The production OpenRouter path builds ICP dicts directly; the set-level
+    contract must attach max_companies, widen bands to the stage's full range
+    (union, never replacing the realism band), and leave unknown stages alone."""
+    from gateway.tasks.icp_generator import (
+        apply_generated_icp_contract,
+        COMPANY_GOAL_AVERAGE,
+        STAGE_EMPLOYEE_BUCKETS,
+    )
+    icps = [
+        {"icp_id": "a", "company_stage": "Series A", "employee_count": ["51-200"]},
+        {"icp_id": "b", "company_stage": "Public", "employee_count": "5,001-10,000"},
+        {"icp_id": "c", "company_stage": "Bootstrapped", "employee_count": ["11-50"]},
+        {"icp_id": "d", "company_stage": "Series A", "employee_count": ["201-500"]},
+    ]
+    apply_generated_icp_contract(icps)
+    assert all(i["max_companies"] == COMPANY_GOAL_AVERAGE for i in icps)
+    assert set(icps[0]["employee_count"]) == set(STAGE_EMPLOYEE_BUCKETS["Series A"])
+    assert set(icps[1]["employee_count"]) == set(STAGE_EMPLOYEE_BUCKETS["Public"]) | {"5,001-10,000"}
+    assert icps[2]["employee_count"] == ["11-50"]  # unknown stage untouched
+    assert "201-500" in icps[3]["employee_count"]  # realism band preserved (union)
+
+
+def test_generated_icp_contract_matches_llm_stage_vocabulary():
+    """Every stage the LLM is instructed to use must be in the coherence dict,
+    or stage widening silently no-ops in production."""
+    from gateway.tasks.icp_generator import STAGE_EMPLOYEE_BUCKETS
+    llm_stages = {"Seed", "Series A", "Series B", "Series C+", "Private Equity", "Public"}
+    assert llm_stages <= set(STAGE_EMPLOYEE_BUCKETS), (
+        "LLM stage vocabulary drifted from STAGE_EMPLOYEE_BUCKETS")

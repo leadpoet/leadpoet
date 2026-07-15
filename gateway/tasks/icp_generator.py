@@ -44,6 +44,7 @@ from uuid import uuid4
 from research_lab.employee_buckets import (
     DEFAULT_EMPLOYEE_BUCKET_RADIUS,
     GENERATED_EMPLOYEE_BUCKETS,
+    LINKEDIN_EMPLOYEE_BUCKETS,
     normalize_employee_count_bucket,
     normalize_employee_count_buckets,
 )
@@ -1176,6 +1177,43 @@ def attach_generated_exclusions(icps: List[Dict[str, Any]]) -> None:
         icp["excluded_companies"] = generate_exclusions_for_icp(icp)
 
 
+def _widen_employee_count_to_stage(icp: Dict[str, Any]) -> None:
+    """Union the ICP's employee_count with its stage's full coherent band list
+    (CEO: use ALL corresponding ranges when a stage is defined). Union — never
+    replace — so a realism-grounded band (and its verified_example_company) is
+    always preserved; stages outside the dict are left untouched."""
+    stage = str(icp.get("company_stage") or "").strip()
+    bands = STAGE_EMPLOYEE_BUCKETS.get(stage)
+    if not bands:
+        return
+    existing = icp.get("employee_count")
+    if isinstance(existing, (list, tuple)):
+        existing_list = [str(b).strip() for b in existing if str(b).strip()]
+    elif existing:
+        existing_list = [str(existing).strip()]
+    else:
+        existing_list = []
+    order = {b: i for i, b in enumerate(LINKEDIN_EMPLOYEE_BUCKETS)}
+    merged = list(dict.fromkeys([*existing_list, *bands]))
+    icp["employee_count"] = sorted(merged, key=lambda b: order.get(b, 999))
+
+
+def apply_generated_icp_contract(icps: List[Dict[str, Any]]) -> None:
+    """Apply the ICP-contract features that must ride on EVERY generated set,
+    regardless of which generator produced it. The production OpenRouter path
+    builds ICP dicts directly and previously skipped these, so exclusions,
+    the company goal, and stage-size coherence never reached live ICPs.
+
+    Exclusions are attached separately by the async caller because they do
+    provider I/O and must not block the event loop.
+    """
+    for icp in icps:
+        if not isinstance(icp, dict):
+            continue
+        icp["max_companies"] = COMPANY_GOAL_AVERAGE
+        _widen_employee_count_to_stage(icp)
+
+
 def allocate_company_goals(
     count: int,
     *,
@@ -1513,7 +1551,32 @@ async def generate_and_activate_icp_set(
         
         icps, distribution, icp_hash = result
         logger.info(f"✅ OpenRouter generated {len(icps)} ICPs successfully")
-        
+
+        # Set-level ICP contract: uniform company goal + stage-size coherence
+        # (sync, no I/O), then web-verified lab exclusions (provider I/O, run
+        # off the event loop). Applied here so they ride the production
+        # OpenRouter path, not just the key-absent template fallback. The set
+        # hash is recomputed afterward so the stored ICPs, the stored hash, and
+        # the transparency-log hash all cover the final ICPs.
+        apply_generated_icp_contract(icps)
+        try:
+            await asyncio.to_thread(attach_generated_exclusions, icps)
+        except Exception as exc:  # noqa: BLE001 - exclusions are fail-open
+            logger.warning("icp_exclusions_attach_failed error=%s", str(exc)[:160])
+            for icp in icps:
+                if isinstance(icp, dict):
+                    icp.setdefault("excluded_companies", [])
+        icp_hash = compute_icp_set_hash(icps)
+        logger.info(
+            "icp_contract_applied max_companies=%s exclusions=%d/%d stage_widened=%d hash=%s",
+            COMPANY_GOAL_AVERAGE,
+            sum(1 for i in icps if isinstance(i, dict) and i.get("excluded_companies")),
+            len(icps),
+            sum(1 for i in icps if isinstance(i, dict)
+                and str(i.get("company_stage") or "") in STAGE_EMPLOYEE_BUCKETS),
+            icp_hash[:16],
+        )
+
     except Exception as e:
         logger.error(f"❌ OpenRouter ICP generation failed: {e}")
         logger.error("   Will retry automatically on next gateway restart or rotation check")

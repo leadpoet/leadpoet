@@ -146,6 +146,26 @@ def _parse_measurement(output: str) -> str:
     raise GatewayPCR0BuildError("nitro-cli output did not contain a valid PCR0")
 
 
+def _deterministic_docker_build_command(
+    *, gateway_root: Path, image: str, role: str
+) -> list[str]:
+    return [
+        "docker",
+        "build",
+        "--pull",
+        "--no-cache",
+        "--build-arg",
+        "SOURCE_DATE_EPOCH=0",
+        "--build-arg",
+        "LEADPOET_ENCLAVE_ROLE=%s" % role,
+        "-f",
+        str(gateway_root / "tee" / "Dockerfile.enclave"),
+        "-t",
+        image,
+        str(gateway_root),
+    ]
+
+
 def _build_once(
     *,
     source_root: Path,
@@ -184,20 +204,16 @@ def _build_once(
 
     image = "leadpoet-gateway-verify:%s-%s-%s" % (role, commit[:12], index)
     _run(["docker", "rmi", "-f", image], check=False, timeout=120)
+    build_env = dict(os.environ)
+    build_env["DOCKER_BUILDKIT"] = "1"
+    build_env["BUILDX_NO_DEFAULT_ATTESTATIONS"] = "1"
     _run(
-        [
-            "docker",
-            "build",
-            "--pull",
-            "--no-cache",
-            "--build-arg",
-            "LEADPOET_ENCLAVE_ROLE=%s" % role,
-            "-f",
-            str(gateway_root / "tee" / "Dockerfile.enclave"),
-            "-t",
-            image,
-            str(gateway_root),
-        ],
+        _deterministic_docker_build_command(
+            gateway_root=gateway_root,
+            image=image,
+            role=role,
+        ),
+        env=build_env,
         timeout=3600,
     )
     image_id = _run(

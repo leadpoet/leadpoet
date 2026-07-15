@@ -93,6 +93,18 @@ def test_independent_builder_marks_extracted_git_archive_clean():
     assert '"ATTESTED_RUNTIME_SOURCE_IS_CLEAN_GIT_ARCHIVE": "1"' in source
 
 
+def test_gateway_build_command_binds_reproducible_epoch(tmp_path):
+    command = gateway_pcr0_builder._deterministic_docker_build_command(
+        gateway_root=tmp_path / "gateway",
+        image="leadpoet-gateway-verify:test",
+        role="gateway_coordinator",
+    )
+
+    assert command.count("--build-arg") == 2
+    assert "SOURCE_DATE_EPOCH=0" in command
+    assert "LEADPOET_ENCLAVE_ROLE=gateway_coordinator" in command
+
+
 def test_cache_keeps_latest_twenty_verified_commits(tmp_path):
     cache = tmp_path / "cache.json"
     for index in range(25):

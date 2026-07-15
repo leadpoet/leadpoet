@@ -57,11 +57,18 @@ def normalize_source_add_domain(value: str) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
-    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    candidate = raw
+    if "://" not in candidate:
+        candidate = (
+            f"https://[{candidate}]"
+            if candidate.count(":") >= 2 and not candidate.startswith("[")
+            else f"https://{candidate}"
+        )
+    parsed = urlparse(candidate)
     domain = (parsed.hostname or raw).strip().lower()
     if domain.startswith("www."):
         domain = domain[4:]
-    return domain.split(":", 1)[0]
+    return domain
 
 
 def parse_source_add_domains(value: str) -> tuple[str, ...]:
@@ -78,8 +85,31 @@ def parse_source_add_domains(value: str) -> tuple[str, ...]:
 def normalize_source_add_url(value: str, *, field_name: str) -> str:
     raw = str(value or "").strip()
     parsed = urlparse(raw)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError(f"{field_name} must be an http(s) URL")
+    try:
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise ValueError(f"{field_name} has an invalid port") from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or port != 443
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            f"{field_name} must be an HTTPS URL on port 443 without credentials or query data"
+        )
+    if field_name == "api_base_url" and (
+        "%" in parsed.path
+        or "\\" in parsed.path
+        or any(part in {".", ".."} for part in parsed.path.split("/"))
+        or any(character in parsed.path for character in "{}<>[]")
+        or any(ord(character) < 32 or ord(character) == 127 for character in parsed.path)
+        or any(character.isspace() for character in parsed.path)
+    ):
+        raise ValueError("api_base_url path must be fixed and safe")
     return raw.rstrip("/")
 
 
@@ -98,10 +128,21 @@ def _clean_optional_text(value: str, *, max_length: int) -> str:
 
 def _normalize_endpoint_example(item: Mapping[str, Any], index: int) -> dict[str, str]:
     method = str(item.get("method") or "").strip().upper()
-    if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
-        raise ValueError(f"endpoint_examples[{index}].method must be GET, POST, PUT, PATCH, or DELETE")
+    if method not in {"GET", "POST"}:
+        raise ValueError(f"endpoint_examples[{index}].method must be GET or POST")
     path = str(item.get("path") or "").strip()
-    if not path.startswith("/") or "://" in path or any(ch.isspace() for ch in path):
+    if (
+        not path.startswith("/")
+        or "://" in path
+        or "?" in path
+        or "#" in path
+        or "%" in path
+        or "\\" in path
+        or any(part in {".", ".."} for part in path.split("/"))
+        or any(character in path for character in "{}<>[]")
+        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+        or any(ch.isspace() for ch in path)
+    ):
         raise ValueError(f"endpoint_examples[{index}].path must be a relative API path like /v1/search")
     purpose = _clean_short_text(
         str(item.get("purpose") or ""),
@@ -196,9 +237,12 @@ def build_source_add_submission_docs(
 ) -> tuple[dict[str, object], str, str, dict[str, object]]:
     """Return ``(manifest, source_brief, idempotency_key, metadata)`` for intake.
 
-    No raw credential is accepted here. The CLI passes the credential separately
-    so the gateway can KMS-encrypt it and exclude it from the signed payload.
+    Miner credentials are not accepted. Operators attach any required API
+    credential later through the attested gateway administration flow.
     """
+
+    if credential_supplied:
+        raise ValueError("miners must not submit SOURCE_ADD API credentials")
 
     normalized_kind = str(source_kind or "").strip().lower()
     if normalized_kind not in SOURCE_ADD_SOURCE_KINDS:
@@ -219,7 +263,6 @@ def build_source_add_submission_docs(
                 [
                     str(metadata["api_base_url"]),
                     str(metadata["documentation_url"]),
-                    " ".join(str(item) for item in metadata.get("third_party_refs", [])),
                 ]
             )
         )
@@ -244,7 +287,7 @@ def build_source_add_submission_docs(
         "endpoint_summary": str(endpoint_summary or "").strip()[:2000],
         "claimed_output_type": str(claimed_output_type or "").strip()[:200],
         "source_metadata": metadata,
-        "credential_supplied": bool(credential_supplied),
+        "credential_supplied": False,
     }
     digest = _sha256_json(seed).split(":", 1)[1]
     adapter_id = f"adapter:{_slug(clean_name)}-{digest[:12]}"
@@ -262,7 +305,7 @@ def build_source_add_submission_docs(
         "max_trial_cost_cents": int(max_trial_cost_cents),
         "max_request_cost_cents": int(max_request_cost_cents),
         "max_latency_ms": int(max_latency_ms),
-        "credential_policy": "credential_ref_only" if credential_supplied else "no_credentials",
+        "credential_policy": "no_credentials",
         "fixture_refs": [f"fixture:operator-trial:{digest[:16]}"],
     }
     source_brief = "\n".join(
@@ -281,7 +324,7 @@ def build_source_add_submission_docs(
             else "",
             f"Claimed output type: {seed['claimed_output_type'] or 'unspecified'}",
             f"Endpoint details: {seed['endpoint_summary'] or 'not supplied'}",
-            f"Auth material submitted separately: {'yes' if credential_supplied else 'no'}",
+            "API credentials: operator-managed after functional review",
         )
         if line
     )

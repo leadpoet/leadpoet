@@ -99,15 +99,14 @@ class TestIntake:
         assert record is None
         assert SourceAddRejectionReason.HOTKEY_30D_CAP.value in errors
 
-    def test_credential_encrypts_via_kms_and_never_persists_raw(self):
+    def test_miner_credential_policy_and_raw_secret_are_rejected(self):
         record, errors = _intake(
             manifest_doc=_manifest_doc(credential_policy="credential_ref_only"),
             raw_credential="raw-secret-key-123456",
         )
-        assert errors == []
-        assert record.credential_envelope["ciphertext_b64"] == "ZW5jcnlwdGVk"
-        assert record.credential_envelope["credential_ref"].startswith("encrypted_ref:source_add:")
-        assert "raw-secret-key-123456" not in json.dumps(record.to_dict())
+        assert record is None
+        assert any(SourceAddRejectionReason.CREDENTIAL_INVALID.value in error for error in errors)
+        assert "raw-secret-key-123456" not in json.dumps(errors)
 
     def test_raw_credential_with_no_credentials_policy_rejected(self):
         record, errors = _intake(raw_credential="oops-key-123456789012")
@@ -117,7 +116,7 @@ class TestIntake:
     def test_credential_ref_only_without_key_or_ref_rejected(self):
         record, errors = _intake(manifest_doc=_manifest_doc(credential_policy="credential_ref_only"))
         assert record is None
-        assert any("requires a key at intake" in error for error in errors)
+        assert any("miner credentials are not accepted" in error for error in errors)
 
     def test_provenance_precheck_advances_without_accepting(self):
         record, errors = _intake()

@@ -108,16 +108,15 @@ class CoordinatorRewardSourceV2:
             context,
         )
         if kind == "source_add_leg1":
-            provenance = decision.get("provenance_result")
+            functional = decision.get("functional_probe_result")
             if (
-                not isinstance(provenance, Mapping)
-                or provenance.get("precheck_status")
-                != "provenance_precheck_passed"
+                not isinstance(functional, Mapping)
+                or functional.get("result_status") != "passed"
             ):
                 raise CoordinatorRewardSourceV2Error(
-                    "SOURCE_ADD Leg 1 provenance is invalid"
+                    "SOURCE_ADD Leg 1 functional result is invalid"
                 )
-            submission_id = str(provenance.get("submission_id") or "")
+            submission_id = str(functional.get("submission_id") or "")
             submission_rows = self._read(
                 "source_add_submission_by_id",
                 {"submission_id": submission_id},
@@ -138,24 +137,69 @@ class CoordinatorRewardSourceV2:
                 raise CoordinatorRewardSourceV2Error(
                     "SOURCE_ADD Leg 1 owner or status differs from measured submission"
                 )
-            now = self._clock()
-            if now.tzinfo is None:
-                now = now.replace(tzinfo=timezone.utc)
-            day_start = now.astimezone(timezone.utc).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
-            rows = self._read(
-                "source_add_leg1_events_since",
-                {"day_start": day_start.isoformat()},
+            functional_rows = self._read(
+                "source_add_functional_probe_by_submission",
+                {"submission_id": submission_id},
                 context,
             )
-            daily_cap = max(
-                1,
-                int(getattr(config, "source_add_leg1_max_per_utc_day", 10) or 10),
-            )
-            if len(rows) >= daily_cap:
+            if len(functional_rows) != 1:
                 raise CoordinatorRewardSourceV2Error(
-                    "SOURCE_ADD Leg 1 daily cap is reached"
+                    "SOURCE_ADD functional result is missing or ambiguous"
+                )
+            measured = functional_rows[0]
+            if (
+                str(measured.get("adapter_id") or "") != adapter_id
+                or str(measured.get("result_status") or "") != "passed"
+                or dict(measured.get("result_doc") or {}) != dict(functional)
+            ):
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD Leg 1 functional result differs from measured state"
+                )
+            graphs = list(context.external_receipt_graphs)
+            if len(graphs) != 1:
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD Leg 1 requires one functional parent"
+                )
+            graph = graphs[0]
+            root_hash = str(graph.get("root_receipt_hash") or "")
+            root = next(
+                (
+                    item
+                    for item in graph.get("receipts") or ()
+                    if isinstance(item, Mapping)
+                    and item.get("receipt_hash") == root_hash
+                ),
+                None,
+            )
+            if (
+                not isinstance(root, Mapping)
+                or root.get("purpose")
+                != "research_lab.source_add_functional_probe.v2"
+                or root.get("output_root") != sha256_json(dict(functional))
+                or str(measured.get("receipt_hash") or "") != root_hash
+            ):
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD Leg 1 functional receipt differs from measured state"
+                )
+            trigger = decision.get("trigger_evidence")
+            expected_trigger = {
+                "functional_probe_passed": True,
+                "attempt_ref": str(measured.get("attempt_ref") or ""),
+                "functional_probe_receipt_hash": root_hash,
+                "business_artifact_hash": str(
+                    measured.get("business_artifact_hash") or ""
+                ),
+                "functional_probe_result_hash": sha256_json(dict(functional)),
+                "evaluator_version": str(functional.get("evaluator_version") or ""),
+                "route_hash": str(functional.get("route_hash") or ""),
+            }
+            if not isinstance(trigger, Mapping) or dict(trigger) != expected_trigger:
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD Leg 1 trigger differs from measured functional proof"
+                )
+            if not str(measured.get("business_artifact_hash") or ""):
+                raise CoordinatorRewardSourceV2Error(
+                    "SOURCE_ADD Leg 1 business artifact link is missing"
                 )
         else:
             judge_result = decision.get("judge_result")

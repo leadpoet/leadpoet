@@ -199,7 +199,7 @@ def _source_add(kind: str, value: Mapping[str, Any]) -> Dict[str, Any]:
     expected = common | (
         {"trigger_evidence", "judge_result"}
         if kind == "source_add_leg2"
-        else {"provenance_result"}
+        else {"functional_probe_result", "trigger_evidence"}
     )
     if set(value) != expected:
         raise RewardExecutorV2Error("SOURCE_ADD reward fields are invalid")
@@ -216,16 +216,20 @@ def _source_add(kind: str, value: Mapping[str, Any]) -> Dict[str, Any]:
         "reward_epochs": int(value.get("reward_epochs") or 0),
     }
     if kind == "source_add_leg1":
-        provenance = value.get("provenance_result")
+        functional_probe = value.get("functional_probe_result")
+        trigger = value.get("trigger_evidence")
         if (
-            not isinstance(provenance, Mapping)
-            or provenance.get("precheck_status") != "provenance_precheck_passed"
+            not isinstance(functional_probe, Mapping)
+            or functional_probe.get("result_status") != "passed"
+            or not isinstance(trigger, Mapping)
+            or trigger.get("functional_probe_passed") is not True
         ):
             raise RewardExecutorV2Error(
-                "SOURCE_ADD Leg 1 provenance result is invalid"
+                "SOURCE_ADD Leg 1 functional result is invalid"
             )
         reward = create_leg1_reward(
             miner_ref=str(value.get("miner_ref") or ""),
+            trigger_evidence=dict(trigger),
             **kwargs,
         )
     else:

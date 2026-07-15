@@ -1,11 +1,10 @@
 """SOURCE_ADD execution funnel (sourceexperiments.md W5).
 
 P1.5 (``source_add.py``) defined the contracts without execution. This module
-executes them behind ``RESEARCH_LAB_SOURCE_ADD_ENABLED``: submission intake
-(anti-spam caps, catalog dedupe, KMS credential envelope), the cheapest-first
-funnel (manifest validation → static scan → LLM review → sandboxed metered
-trial), category-scoped trial yield, and the acceptance decision that feeds
-the catalog. Leg 1 now triggers at credible provenance precheck; Leg 2 still
+retains the pure intake and legacy manual-trial helpers. Production intake uses
+atomic database admission, measured provenance, and the V2 functional probe;
+operator-managed credentials never enter through the public miner contract.
+Leg 1 triggers only after a measured functional probe, while Leg 2 still
 requires accepted catalog attribution (``source_add_rewards.py``).
 
 Execution boundaries preserved from the plan:
@@ -50,9 +49,17 @@ DEFAULT_MAX_SUBMISSIONS_PER_30D_PER_HOTKEY = 10
 class SourceAddFunnelStage(str, Enum):
     SUBMITTED = "submitted"
     MANIFEST_VALIDATED = "manifest_validated"
+    PROVENANCE_QUEUED = "provenance_queued"
     PROVENANCE_PRECHECK_PASSED = "provenance_precheck_passed"
     NEEDS_MANUAL_REVIEW = "needs_manual_review"
     REJECTED_PRECHECK = "rejected_precheck"
+    FUNCTIONAL_PROBE_QUEUED = "functional_probe_queued"
+    AWAITING_OPERATOR_CREDENTIAL = "awaiting_operator_credential"
+    FUNCTIONAL_PROBE_RETRYABLE = "functional_probe_retryable"
+    FUNCTIONAL_PROBE_PASSED = "functional_probe_passed"
+    FUNCTIONAL_PROBE_FAILED = "functional_probe_failed"
+    LEG1_QUEUED = "leg1_queued"
+    LEG1_CREATED = "leg1_created"
     STATIC_SCAN_PASSED = "static_scan_passed"
     LLM_REVIEW_PASSED = "llm_review_passed"
     TRIAL_COMPLETED = "trial_completed"
@@ -194,10 +201,8 @@ def intake_source_add_submission(
 ) -> tuple[SourceAddSubmissionRecord | None, list[str]]:
     """Validate + admit one submission. Returns (record, errors).
 
-    ``raw_credential`` never persists: when the manifest declares
-    ``credential_ref_only``, the key is passed straight to ``kms_encrypt``
-    (key_vault KMS-envelope pattern; encryption context = miner hotkey +
-    adapter ref) and only the ciphertext envelope enters the record.
+    Public SOURCE_ADD intake never accepts credentials. Authenticated sources
+    wait for an operator-scoped attested credential after provenance review.
     """
 
     errors: list[str] = []
@@ -229,30 +234,9 @@ def intake_source_add_submission(
         return None, errors
 
     credential_envelope: dict[str, str] = {}
-    if manifest.credential_policy == "credential_ref_only":
-        if raw_credential:
-            if kms_encrypt is None:
-                return None, [f"{SourceAddRejectionReason.CREDENTIAL_INVALID.value}: KMS encryption unavailable"]
-            adapter_ref = f"source_add:{manifest.adapter_id}"
-            try:
-                envelope = dict(kms_encrypt(raw_credential, str(miner_hotkey), adapter_ref))
-            except Exception as exc:
-                return None, [f"{SourceAddRejectionReason.CREDENTIAL_INVALID.value}: {str(exc)[:120]}"]
-            if not envelope.get("ciphertext_b64"):
-                return None, [f"{SourceAddRejectionReason.CREDENTIAL_INVALID.value}: empty ciphertext"]
-            credential_envelope = {
-                "ciphertext_b64": str(envelope["ciphertext_b64"]),
-                "kms_key_id": str(envelope.get("kms_key_id") or ""),
-                "encryption_context_hash": str(envelope.get("encryption_context_hash") or ""),
-                "credential_ref": f"encrypted_ref:source_add:{_stable_ref(miner_hotkey, adapter_ref)}",
-            }
-        elif not manifest.credential_ref:
-            return None, [
-                f"{SourceAddRejectionReason.CREDENTIAL_INVALID.value}: credential_ref_only requires a key at intake"
-            ]
-    elif raw_credential:
+    if raw_credential or manifest.credential_policy != "no_credentials" or manifest.credential_ref:
         return None, [
-            f"{SourceAddRejectionReason.CREDENTIAL_INVALID.value}: manifest declares no_credentials but a key was supplied"
+            f"{SourceAddRejectionReason.CREDENTIAL_INVALID.value}: miner credentials are not accepted"
         ]
 
     submission_id = "source_add_submission:" + sha256_json(
@@ -557,8 +541,8 @@ def evaluate_source_add_acceptance(
 
     Returns the advanced (or rejected) record plus the catalog entry on
     acceptance. Catalog acceptance remains the switch that lets improvement
-    loops use this source; Leg 1 is created earlier at credible provenance
-    precheck.
+    loops use this source; Leg 1 is created earlier after a measured functional
+    probe passes.
     """
 
     if record.stage != SourceAddFunnelStage.TRIAL_COMPLETED.value:

@@ -8,10 +8,12 @@ from gateway.tee.coordinator_reward_source_v2 import (
     CoordinatorRewardSourceV2Error,
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
+from leadpoet_canonical.attested_v2 import sha256_json
 
 
 SUBMISSION_ID = "source_add_submission:1234567890abcdef"
 HASH = "sha256:" + "a" * 64
+FUNCTIONAL_RECEIPT_HASH = "sha256:" + "b" * 64
 
 
 class FakeReader:
@@ -50,18 +52,67 @@ def _config():
     )
 
 
-def _context():
+def _context(*, with_functional_parent=False):
+    functional = _functional_result()
     return ExecutionContextV2(
         job_id="reward:test",
         purpose="research_lab.reward_decision.v2",
         epoch_id=100,
+        external_receipt_graphs=(
+            [
+                {
+                    "root_receipt_hash": FUNCTIONAL_RECEIPT_HASH,
+                    "receipts": [
+                        {
+                            "receipt_hash": FUNCTIONAL_RECEIPT_HASH,
+                            "purpose": "research_lab.source_add_functional_probe.v2",
+                            "output_root": sha256_json(functional),
+                        }
+                    ],
+                }
+            ]
+            if with_functional_parent
+            else []
+        ),
     )
 
 
-def _provenance():
+def _functional_result():
     return {
+        "schema_version": "leadpoet.source_add_functional_probe_result.v2",
+        "evaluator_version": "source-add-functional-probe-v2",
         "submission_id": SUBMISSION_ID,
-        "precheck_status": "provenance_precheck_passed",
+        "adapter_id": "adapter:test",
+        "config_ref": "source_add_probe_config:1234567890abcdef",
+        "evaluation_mode": "functional_probe",
+        "result_status": "passed",
+        "route_hash": HASH,
+    }
+
+
+def _functional_row():
+    functional = _functional_result()
+    return {
+        "attempt_ref": "source_add_probe_attempt:1234567890abcdef",
+        "adapter_id": "adapter:test",
+        "result_status": "passed",
+        "receipt_hash": FUNCTIONAL_RECEIPT_HASH,
+        "business_artifact_hash": sha256_json(functional),
+        "result_doc": functional,
+    }
+
+
+def _functional_trigger():
+    functional = _functional_result()
+    measured = _functional_row()
+    return {
+        "functional_probe_passed": True,
+        "attempt_ref": measured["attempt_ref"],
+        "functional_probe_receipt_hash": FUNCTIONAL_RECEIPT_HASH,
+        "business_artifact_hash": measured["business_artifact_hash"],
+        "functional_probe_result_hash": sha256_json(functional),
+        "evaluator_version": functional["evaluator_version"],
+        "route_hash": functional["route_hash"],
     }
 
 
@@ -123,7 +174,7 @@ def test_leg1_replaces_host_reward_rows_with_authenticated_rows():
                     "precheck_status": "provenance_precheck_passed",
                 }
             ],
-            "source_add_leg1_events_since": [],
+            "source_add_functional_probe_by_submission": [_functional_row()],
         }
     )
     resolver = CoordinatorRewardSourceV2(
@@ -141,24 +192,25 @@ def test_leg1_replaces_host_reward_rows_with_authenticated_rows():
             "existing_rewards": [{"adapter_id": "forged", "leg": 1}],
             "alpha_percent": 1.0,
             "reward_epochs": 20,
-            "provenance_result": _provenance(),
+            "functional_probe_result": _functional_result(),
+            "trigger_evidence": _functional_trigger(),
         },
     }
 
-    resolved = resolver.resolve(payload=payload, context=_context())
+    resolved = resolver.resolve(
+        payload=payload,
+        context=_context(with_functional_parent=True),
+    )
 
     assert resolved["decision_payload"]["existing_rewards"] == authenticated
     assert reader.calls == [
         ("source_add_rewards_by_adapter", {"adapter_id": "adapter:test"}),
         ("source_add_submission_by_id", {"submission_id": SUBMISSION_ID}),
-        (
-            "source_add_leg1_events_since",
-            {"day_start": "2026-07-10T00:00:00+00:00"},
-        ),
+        ("source_add_functional_probe_by_submission", {"submission_id": SUBMISSION_ID}),
     ]
 
 
-def test_leg1_enforces_measured_daily_cap():
+def test_leg1_daily_cap_is_not_rechecked_outside_atomic_slot_transaction():
     reader = FakeReader(
         {
             "source_add_rewards_by_adapter": [],
@@ -170,6 +222,7 @@ def test_leg1_enforces_measured_daily_cap():
                     "precheck_status": "provenance_precheck_passed",
                 }
             ],
+            "source_add_functional_probe_by_submission": [_functional_row()],
             "source_add_leg1_events_since": [
                 {"reward_ref": "reward-%d" % index} for index in range(10)
             ],
@@ -189,12 +242,18 @@ def test_leg1_enforces_measured_daily_cap():
             "existing_rewards": [],
             "alpha_percent": 1.0,
             "reward_epochs": 20,
-            "provenance_result": _provenance(),
+            "functional_probe_result": _functional_result(),
+            "trigger_evidence": _functional_trigger(),
         },
     }
 
-    with pytest.raises(CoordinatorRewardSourceV2Error, match="daily cap"):
-        resolver.resolve(payload=payload, context=_context())
+    resolved = resolver.resolve(
+        payload=payload,
+        context=_context(with_functional_parent=True),
+    )
+
+    assert resolved["decision_payload"]["functional_probe_result"]["result_status"] == "passed"
+    assert all(call[0] != "source_add_leg1_events_since" for call in reader.calls)
 
 
 def test_leg2_requires_authenticated_adapter_owner():
@@ -262,11 +321,15 @@ def test_leg1_rejects_host_substituted_miner():
             "existing_rewards": [],
             "alpha_percent": 1.0,
             "reward_epochs": 20,
-            "provenance_result": _provenance(),
+            "functional_probe_result": _functional_result(),
+            "trigger_evidence": _functional_trigger(),
         },
     }
     with pytest.raises(CoordinatorRewardSourceV2Error, match="owner or status"):
-        resolver.resolve(payload=payload, context=_context())
+        resolver.resolve(
+            payload=payload,
+            context=_context(with_functional_parent=True),
+        )
 
 
 def test_leg2_rejects_trigger_that_differs_from_signed_judge():

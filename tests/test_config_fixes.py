@@ -153,6 +153,16 @@ def test_source_add_status_defaults_enabled_and_env_gated(clean_env):
     assert status["source_add"]["rewards_enabled"] is False
 
 
+def test_source_add_work_lease_covers_three_probe_deadline(clean_env):
+    clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_PROBE_TIMEOUT_SECONDS", "120")
+    clean_env.setenv("RESEARCH_LAB_SOURCE_ADD_WORK_LEASE_SECONDS", "30")
+
+    config = ResearchLabGatewayConfig.from_env()
+
+    assert config.source_add_probe_timeout_seconds == 120
+    assert config.source_add_work_lease_seconds == 480
+
+
 def test_research_lab_reward_allocation_defaults(clean_env):
     config = ResearchLabGatewayConfig.from_env()
     assert config.lab_emission_percent == pytest.approx(

@@ -14,6 +14,7 @@ from gateway.tee.provider_broker_v2 import (
 )
 from gateway.tee.source_add_runtime_v2 import (
     SourceAddRuntimeV2Error,
+    build_source_add_probe_route_v2,
     build_source_add_job_envelope_v2,
     build_source_add_runtime_catalog_v2,
     source_add_dynamic_retry_policy_hash,
@@ -27,7 +28,7 @@ from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
 NOW = "2026-07-10T20:00:00Z"
 
 
-def _source_row(*, auth_kind: str = "header") -> dict:
+def _source_row(*, auth_kind: str = "header", request_headers=None) -> dict:
     credential_ref = "encrypted_ref:source_add:" + "a" * 32
     credential = "source-add-secret"
     ciphertext = b"encrypted-source-add-secret"
@@ -88,6 +89,7 @@ def _source_row(*, auth_kind: str = "header") -> dict:
                     "params": [],
                 },
             ],
+            "request_headers": dict(request_headers or {}),
         },
     }
 
@@ -186,7 +188,10 @@ def test_dynamic_provider_uses_only_job_credential_and_exact_route():
         }
 
     broker = _broker(transport)
-    route = build_source_add_runtime_catalog_v2([_source_row()])["routes"][0]
+    operator_user_agent = "source-owner@example.com SOURCE_ADD probe"
+    route = build_source_add_runtime_catalog_v2(
+        [_source_row(request_headers={"User-Agent": operator_user_agent})]
+    )["routes"][0]
     broker.provision_job_credential(
         job_id="job-source-one",
         slot=route["credential_slot"],
@@ -202,7 +207,10 @@ def test_dynamic_provider_uses_only_job_credential_and_exact_route():
         "attempt_number": 0,
         "method": "POST",
         "url": "https://api.source-one.example/v1/search?q=leadpoet",
-        "headers": {"content-type": "application/json"},
+        "headers": {
+            "content-type": "application/json",
+            "user-agent": "generic-gateway-agent",
+        },
         "body_b64": base64.b64encode(b'{"query":"leadpoet"}').decode(
             "ascii"
         ),
@@ -213,6 +221,9 @@ def test_dynamic_provider_uses_only_job_credential_and_exact_route():
     result = broker.execute(request)
     assert result["terminal_status"] == "authenticated_response"
     assert calls[0]["headers"]["x-source-key"] == "source-add-secret"
+    assert calls[0]["headers"]["User-Agent"] == operator_user_agent
+    assert "generic-gateway-agent" not in str(calls[0]["headers"])
+    assert route["request_headers"] == {"User-Agent": operator_user_agent}
     assert "source-add-secret" not in str(result)
 
     with pytest.raises(ProviderBrokerV2Error, match="method/path"):
@@ -241,3 +252,183 @@ def test_job_envelope_uses_dynamic_slot_and_exact_commitments():
     assert envelope["credential_slot"] == route["credential_slot"]
     assert envelope["credential_value_hash"] == route["credential_value_hash"]
     assert envelope["key_ref_hash"] == route["key_ref_hash"]
+
+
+def test_provisional_probe_route_is_exact_and_hash_only_artifacts_drop_body():
+    row = {
+        "submission_id": "source_add_submission:0123456789abcdef",
+        "adapter_id": "adapter:provisional-source",
+        "miner_hotkey": "miner-hotkey",
+        "config_ref": "source_add_probe_config:0123456789abcdef",
+        "probe_doc": {
+            "schema_version": "leadpoet.source_add_probe_config.v2",
+            "provider_id": "sourceadd_0123456789abcdef",
+            "base_url": "https://api.example.com/v1",
+            "auth_kind": "none",
+            "auth_name": "",
+            "request_headers": {},
+            "probes": [
+                {
+                    "method": "GET",
+                    "path": "/records",
+                    "query": {"limit": 1},
+                    "body_json": None,
+                }
+            ],
+        },
+        "credential_envelope": {},
+    }
+    route = build_source_add_probe_route_v2(row)
+    captured_artifacts = []
+    response_body = b'{"records":[{"private":"transient"}]}'
+
+    def artifact_sink(body, **metadata):
+        captured_artifacts.append((bytes(body), dict(metadata)))
+        return {
+            "artifact_id": sha256_bytes(b"artifact:" + body),
+            "plaintext_hash": sha256_bytes(body),
+        }
+
+    def transport(**request):
+        assert request["max_response_bytes"] == 1024 * 1024
+        return {
+            "http_status": 200,
+            "headers": {"content-type": "application/json"},
+            "body": response_body,
+            "tls_peer_chain_hash": "sha256:" + "d" * 64,
+            "tls_protocol": "TLSv1.3",
+        }
+
+    broker = ProviderBrokerV2(
+        credential_ref_hashes={},
+        retry_policy_hashes={},
+        transport=transport,
+        artifact_sink=artifact_sink,
+        clock=lambda: NOW,
+    )
+    result = broker.execute(
+        {
+            "schema_version": PROVIDER_BROKER_SCHEMA_VERSION,
+            "logical_operation_id": "source-add-provisional-probe",
+            "job_id": "job-source-add-probe",
+            "purpose": "research_lab.source_add_functional_probe.v2",
+            "provider_id": route["provider_id"],
+            "attempt_number": 0,
+            "method": "GET",
+            "url": "https://api.example.com/v1/records?limit=1",
+            "headers": {"accept": "application/json"},
+            "body_b64": "",
+            "timeout_ms": 30000,
+            "retry_policy_hash": source_add_dynamic_retry_policy_hash(route),
+            "dynamic_route": route,
+            "max_response_bytes": 1024 * 1024,
+            "artifact_mode": "hash_only",
+        }
+    )
+
+    assert result["terminal_status"] == "authenticated_response"
+    assert base64.b64decode(result["body_b64"]) == response_body
+    assert len(captured_artifacts) == 2
+    assert all(response_body not in artifact for artifact, _meta in captured_artifacts)
+    assert captured_artifacts[1][1]["artifact_kind"] == "provider_response_summary"
+    assert b"transient" not in captured_artifacts[1][0]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"base_url": "http://api.example.com/v1"},
+        {"base_url": "https://api.example.com:8443/v1"},
+        {"request_headers": {"Host": "169.254.169.254"}},
+        {"request_headers": {"User-Agent": "safe\r\nX-Injected: true"}},
+        {
+            "probes": [
+                {
+                    "method": "GET",
+                    "path": "/records/{record_id}",
+                    "query": {},
+                    "body_json": None,
+                }
+            ]
+        },
+        {
+            "probes": [
+                {
+                    "method": "GET",
+                    "path": "/records%2Fadmin",
+                    "query": {},
+                    "body_json": None,
+                }
+            ]
+        },
+        {
+            "probes": [
+                {
+                    "method": "GET",
+                    "path": "/records",
+                    "query": {"api_key": "submitted-secret"},
+                    "body_json": None,
+                }
+            ]
+        },
+    ],
+)
+def test_provisional_probe_route_rejects_unsafe_transport_fields(change):
+    probe_doc = {
+        "schema_version": "leadpoet.source_add_probe_config.v2",
+        "provider_id": "sourceadd_0123456789abcdef",
+        "base_url": "https://api.example.com/v1",
+        "auth_kind": "none",
+        "auth_name": "",
+        "request_headers": {},
+        "probes": [
+            {
+                "method": "GET",
+                "path": "/records",
+                "query": {},
+                "body_json": None,
+            }
+        ],
+    }
+    probe_doc.update(change)
+    with pytest.raises(SourceAddRuntimeV2Error):
+        build_source_add_probe_route_v2(
+            {
+                "submission_id": "source_add_submission:0123456789abcdef",
+                "adapter_id": "adapter:provisional-source",
+                "miner_hotkey": "miner-hotkey",
+                "config_ref": "source_add_probe_config:0123456789abcdef",
+                "probe_doc": probe_doc,
+                "credential_envelope": {},
+            }
+        )
+
+
+def test_provisional_probe_route_rejects_unbounded_post_body_from_database():
+    body = {"level": {"level": {"level": {"level": {"level": {"level": {"level": {"level": {"level": {"level": {"level": {"level": {"level": 1}}}}}}}}}}}}}
+    with pytest.raises(SourceAddRuntimeV2Error, match="structural limits"):
+        build_source_add_probe_route_v2(
+            {
+                "submission_id": "source_add_submission:0123456789abcdef",
+                "adapter_id": "adapter:provisional-source",
+                "miner_hotkey": "miner-hotkey",
+                "config_ref": "source_add_probe_config:0123456789abcdef",
+                "probe_doc": {
+                    "schema_version": "leadpoet.source_add_probe_config.v2",
+                    "provider_id": "sourceadd_0123456789abcdef",
+                    "base_url": "https://api.example.com/v1",
+                    "auth_kind": "none",
+                    "auth_name": "",
+                    "request_headers": {},
+                    "probes": [
+                        {
+                            "method": "POST",
+                            "path": "/records",
+                            "query": {},
+                            "body_json": body,
+                        }
+                    ],
+                },
+                "credential_envelope": {},
+            }
+        )

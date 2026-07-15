@@ -342,6 +342,8 @@ def _sanitized_path(parsed: Any) -> str:
 def _failure_code(exc: BaseException) -> str:
     name = type(exc).__name__.lower()
     text = str(exc).lower()
+    if "response exceeds size limit" in text:
+        return "response_too_large"
     if isinstance(exc, (TimeoutError, socket.timeout)) or "timeout" in name or "timed out" in text:
         return "timeout"
     if isinstance(exc, ssl.SSLError) or "tls" in name or "certificate" in text:
@@ -393,6 +395,7 @@ class HTTPXProviderTransport:
         body: bytes,
         timeout_ms: int,
         upstream_proxy_url: Optional[str] = None,
+        max_response_bytes: int = MAX_RESPONSE_BODY_BYTES,
     ) -> Dict[str, Any]:
         import certifi
         import httpx
@@ -412,23 +415,36 @@ class HTTPXProviderTransport:
             timeout=max(0.001, timeout_ms / 1000.0),
             follow_redirects=False,
         ) as client:
-            response = client.request(
+            if (
+                isinstance(max_response_bytes, bool)
+                or not isinstance(max_response_bytes, int)
+                or not 1 <= max_response_bytes <= MAX_RESPONSE_BODY_BYTES
+            ):
+                raise ProviderBrokerV2Error("provider response limit is invalid")
+            with client.stream(
                 method,
                 url,
                 headers=dict(headers),
                 content=body,
-            )
-            response_body = bytes(response.content)
-            if len(response_body) > MAX_RESPONSE_BODY_BYTES:
-                raise ProviderBrokerV2Error("provider response exceeds size limit")
-            tls_peer_chain_hash, tls_protocol = _extract_tls_metadata(response)
-            return {
-                "http_status": int(response.status_code),
-                "headers": _nonsecret_headers(response.headers),
-                "body": response_body,
-                "tls_peer_chain_hash": tls_peer_chain_hash,
-                "tls_protocol": tls_protocol,
-            }
+            ) as response:
+                chunks = []
+                byte_count = 0
+                for chunk in response.iter_bytes():
+                    byte_count += len(chunk)
+                    if byte_count > max_response_bytes:
+                        raise ProviderBrokerV2Error(
+                            "provider response exceeds size limit"
+                        )
+                    chunks.append(chunk)
+                response_body = b"".join(chunks)
+                tls_peer_chain_hash, tls_protocol = _extract_tls_metadata(response)
+                return {
+                    "http_status": int(response.status_code),
+                    "headers": _nonsecret_headers(response.headers),
+                    "body": response_body,
+                    "tls_peer_chain_hash": tls_peer_chain_hash,
+                    "tls_protocol": tls_protocol,
+                }
 
 
 class ProviderBrokerV2:
@@ -751,6 +767,11 @@ class ProviderBrokerV2:
         if request_fields not in {
             frozenset(required),
             frozenset(required | {"dynamic_route"}),
+            frozenset(required | {"max_response_bytes", "artifact_mode"}),
+            frozenset(
+                required
+                | {"dynamic_route", "max_response_bytes", "artifact_mode"}
+            ),
         }:
             raise ProviderBrokerV2Error("provider request fields are invalid")
         if request["schema_version"] != PROVIDER_BROKER_SCHEMA_VERSION:
@@ -772,6 +793,30 @@ class ProviderBrokerV2:
         )
         if route.allowed_methods and method not in route.allowed_methods:
             raise ProviderBrokerV2Error("provider method differs from measured route")
+        max_response_bytes = MAX_RESPONSE_BODY_BYTES
+        artifact_mode = "encrypted_body"
+        if "max_response_bytes" in request or "artifact_mode" in request:
+            source_add_provenance_summary = (
+                dynamic_route is None
+                and str(request.get("purpose") or "")
+                == "research_lab.source_add_provenance.v2"
+                and provider_id in {"scrapingdog", "wayback"}
+            )
+            if dynamic_route is None and not source_add_provenance_summary:
+                raise ProviderBrokerV2Error(
+                    "bounded hash-only artifacts require a measured SOURCE_ADD route"
+                )
+            max_response_bytes = request.get("max_response_bytes")
+            artifact_mode = str(request.get("artifact_mode") or "")
+            if (
+                isinstance(max_response_bytes, bool)
+                or not isinstance(max_response_bytes, int)
+                or not 1 <= max_response_bytes <= 1024 * 1024
+                or artifact_mode != "hash_only"
+            ):
+                raise ProviderBrokerV2Error(
+                    "dynamic provider artifact policy is invalid"
+                )
         headers = request["headers"]
         if not isinstance(headers, Mapping):
             raise ProviderBrokerV2Error("provider headers must be an object")
@@ -859,6 +904,16 @@ class ProviderBrokerV2:
                 return dict(completed["result"])
 
         outbound_headers = {str(k): str(v) for k, v in headers.items()}
+        if dynamic_route is not None:
+            static_headers = dynamic_route.get("request_headers") or {}
+            for static_name, static_value in static_headers.items():
+                outbound_headers = {
+                    name: value
+                    for name, value in outbound_headers.items()
+                    if name.lower() != str(static_name).lower()
+                }
+                outbound_headers[str(static_name)] = str(static_value)
+        measured_nonsecret_headers = _nonsecret_headers(outbound_headers)
         query = list(parse_qsl(parsed.query, keep_blank_values=True))
         credential_ref_hash = sha256_bytes(
             ("leadpoet-no-credential:" + provider_id).encode("ascii")
@@ -916,12 +971,28 @@ class ProviderBrokerV2:
             "provider_id": provider_id,
             "attempt_number": attempt_number,
             "method": method,
-            "url": urlunsplit(
-                (parsed.scheme, parsed.netloc, parsed.path, parsed.query, "")
+            "url": (
+                urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+                if artifact_mode == "encrypted_body"
+                else ""
             ),
-            "headers": _nonsecret_headers(headers),
-            "body_b64": base64.b64encode(body).decode("ascii"),
+            "path_hash": sha256_bytes((parsed.path or "/").encode("utf-8")),
+            "query_hash": sha256_bytes(parsed.query.encode("utf-8")),
+            "headers": (
+                measured_nonsecret_headers
+                if artifact_mode == "encrypted_body"
+                else {}
+            ),
+            "nonsecret_headers_hash": sha256_json(measured_nonsecret_headers),
+            "body_b64": (
+                base64.b64encode(body).decode("ascii")
+                if artifact_mode == "encrypted_body"
+                else ""
+            ),
+            "body_hash": sha256_bytes(body),
             "timeout_ms": timeout_ms,
+            "max_response_bytes": max_response_bytes,
+            "artifact_mode": artifact_mode,
             "retry_policy_hash": retry_policy_hash,
             "egress_proxy_ref_hash": egress_proxy_ref_hash,
             "dynamic_route_hash": (
@@ -971,19 +1042,38 @@ class ProviderBrokerV2:
             }
             if egress_proxy_url is not None:
                 transport_kwargs["upstream_proxy_url"] = egress_proxy_url
+            if max_response_bytes != MAX_RESPONSE_BODY_BYTES:
+                transport_kwargs["max_response_bytes"] = max_response_bytes
             response = dict(self._transport(**transport_kwargs))
             response_body = bytes(response["body"])
-            if len(response_body) > MAX_RESPONSE_BODY_BYTES:
+            if len(response_body) > max_response_bytes:
                 raise ProviderBrokerV2Error("provider response exceeds size limit")
+            response_artifact_body = response_body
+            response_artifact_kind = "provider_response"
+            if artifact_mode == "hash_only":
+                response_artifact_body = canonical_json(
+                    {
+                        "schema_version": "leadpoet.provider_response_summary.v2",
+                        "http_status": int(response["http_status"]),
+                        "content_type": str(
+                            _nonsecret_headers(response.get("headers", {})).get(
+                                "content-type", ""
+                            )
+                        )[:160],
+                        "byte_count": len(response_body),
+                        "response_hash": sha256_bytes(response_body),
+                    }
+                ).encode("utf-8")
+                response_artifact_kind = "provider_response_summary"
             artifact = dict(
                 self._artifact_sink(
-                    response_body,
+                    response_artifact_body,
                     job_id=str(request["job_id"] or ""),
                     purpose=str(request["purpose"] or ""),
-                    artifact_kind="provider_response",
+                    artifact_kind=response_artifact_kind,
                 )
             )
-            if artifact.get("plaintext_hash") != sha256_bytes(response_body):
+            if artifact.get("plaintext_hash") != sha256_bytes(response_artifact_body):
                 raise ProviderBrokerV2Error(
                     "encrypted provider artifact plaintext hash mismatch"
                 )
@@ -1043,7 +1133,7 @@ class ProviderBrokerV2:
             destination_host=str(parsed.hostname or ""),
             destination_port=parsed.port or 443,
             path_hash=sha256_bytes(_sanitized_path(parsed).encode("utf-8")),
-            nonsecret_headers_hash=sha256_json(_nonsecret_headers(headers)),
+            nonsecret_headers_hash=sha256_json(measured_nonsecret_headers),
             body_hash=sha256_bytes(body),
             credential_ref_hash=credential_ref_hash,
             egress_proxy_ref_hash=egress_proxy_ref_hash,

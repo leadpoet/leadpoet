@@ -147,6 +147,15 @@ PROTECTED_SYMBOLS = {
         "sanitize_source_add_precheck_doc",
         "evaluate_source_add_provenance",
     ),
+    "gateway/research_lab/source_add_workflow.py": (
+        "build_automatic_probe_config",
+        "process_source_add_work_item",
+        "_process_provenance",
+        "_process_functional_probe",
+        "_process_leg1_reward",
+        "_retry_allowed",
+        "_retry_at",
+    ),
     "gateway/research_lab/source_add_llm_judge.py": (
         "SourceAddJudgeVerdict",
         "judge_source_add_implementation",
@@ -207,6 +216,14 @@ PROTECTED_SYMBOLS = {
     ),
     "gateway/tee/coordinator_source_add_v2.py": (
         "CoordinatorSourceAddProvenanceV2",
+        "CoordinatorSourceAddFunctionalProbeV2",
+    ),
+    "gateway/tee/source_add_runtime_v2.py": (
+        "validate_source_add_credential_envelope_v2",
+        "validate_source_add_sealed_job_envelope_v2",
+        "build_source_add_probe_route_v2",
+        "validate_source_add_runtime_route_v2",
+        "build_source_add_probe_job_envelope_v2",
     ),
     "gateway/tee/coordinator_weight_source_v2.py": (
         "CoordinatorWeightSourceV2",

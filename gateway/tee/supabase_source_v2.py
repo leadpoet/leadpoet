@@ -186,8 +186,31 @@ QUERY_POLICIES = {
         policy_id="source_add_submission_by_id",
         table="research_lab_source_add_submission_current",
         select=(
-            "submission_id,adapter_id,miner_hotkey,precheck_status,"
-            "source_identity_hash"
+            "submission_id,adapter_id,miner_hotkey,stage,precheck_status,"
+            "source_identity_hash,source_identity_version"
+        ),
+        parameter_names=("submission_id",),
+        max_pages=1,
+        limit=2,
+    ),
+    "source_add_probe_config_by_submission": SupabaseQueryV2(
+        policy_id="source_add_probe_config_by_submission",
+        table="research_lab_source_add_probe_config_current",
+        select=(
+            "config_ref,submission_id,adapter_id,config_status,probe_doc,"
+            "credential_envelope,created_at"
+        ),
+        parameter_names=("submission_id",),
+        max_pages=1,
+        limit=2,
+    ),
+    "source_add_functional_probe_by_submission": SupabaseQueryV2(
+        policy_id="source_add_functional_probe_by_submission",
+        table="research_lab_source_add_functional_probe_current",
+        select=(
+            "attempt_ref,submission_id,adapter_id,result_status,route_hash,"
+            "response_hash,status_class,content_type,byte_count,duration_ms,"
+            "reason_codes,receipt_hash,business_artifact_hash,result_doc,created_at"
         ),
         parameter_names=("submission_id",),
         max_pages=1,
@@ -508,17 +531,27 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
                 "eq.%s" % _identifier(parameters["adapter_id"], "adapter_id"),
             ),
         )
-    if policy.policy_id == "source_add_submission_by_id":
+    if policy.policy_id in {
+        "source_add_submission_by_id",
+        "source_add_probe_config_by_submission",
+        "source_add_functional_probe_by_submission",
+    }:
         submission_id = _identifier(parameters["submission_id"], "submission_id")
         if not re.fullmatch(r"source_add_submission:[0-9a-f]{16}", submission_id):
             raise SupabaseSourceV2Error("submission_id is invalid")
-        return (("submission_id", "eq.%s" % submission_id),)
+        filters = [("submission_id", "eq.%s" % submission_id)]
+        if policy.policy_id == "source_add_probe_config_by_submission":
+            filters.append(("config_status", "eq.active"))
+        return tuple(filters)
     if policy.policy_id == "source_add_leg1_events_since":
         day_start = _identifier(parameters["day_start"], "day_start")
         if not _TIMESTAMP_RE.fullmatch(day_start):
             raise SupabaseSourceV2Error("day_start is not an ISO timestamp")
         return (
-            ("reason", "eq.leg1_provenance_precheck_passed"),
+            (
+                "reason",
+                "in.(leg1_provenance_precheck_passed,leg1_functional_probe_passed)",
+            ),
             ("created_at", "gte.%s" % day_start),
         )
     if policy.policy_id == "source_add_provisioning_by_adapter":

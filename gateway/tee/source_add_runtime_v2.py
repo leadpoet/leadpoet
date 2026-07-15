@@ -13,7 +13,7 @@ import re
 from typing import Any, Dict, Mapping, Sequence
 from urllib.parse import urlsplit
 
-from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
+from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
 
 
 SOURCE_ADD_CREDENTIAL_ENVELOPE_SCHEMA_VERSION = (
@@ -29,6 +29,7 @@ SOURCE_ADD_RUNTIME_ROUTE_SCHEMA_VERSION = "leadpoet.source_add_runtime_route.v2"
 SOURCE_ADD_RUNTIME_CATALOG_SCHEMA_VERSION = (
     "leadpoet.source_add_runtime_catalog.v2"
 )
+SOURCE_ADD_PROBE_CONFIG_SCHEMA_VERSION = "leadpoet.source_add_probe_config.v2"
 SOURCE_ADD_DYNAMIC_RETRY_SCHEMA_VERSION = (
     "leadpoet.source_add_dynamic_retry_policy.v2"
 )
@@ -69,6 +70,9 @@ _FORBIDDEN_AUTH_HEADERS = frozenset(
         "proxy-authorization",
         "transfer-encoding",
     }
+)
+_SECRET_QUERY_NAMES = frozenset(
+    {"access_token", "api-key", "api_key", "apikey", "key", "token"}
 )
 
 
@@ -294,12 +298,23 @@ def _safe_path(value: Any) -> str:
         not path.startswith("/")
         or "?" in path
         or "#" in path
+        or "%" in path
         or "\\" in path
+        or re.search(r"[{}<>\[\]]|(^|/):[A-Za-z_]", path)
         or any(ord(character) < 32 or ord(character) == 127 for character in path)
+        or any(character.isspace() for character in path)
         or any(part in {".", ".."} for part in path.split("/"))
     ):
         raise SourceAddRuntimeV2Error("SOURCE_ADD route path is unsafe")
     return path
+
+
+def _safe_header_value(value: Any) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) <= 500
+        and all(ord(character) >= 32 and ord(character) != 127 for character in value)
+    )
 
 
 def _base_url(value: Any) -> tuple[str, str, str]:
@@ -324,8 +339,10 @@ def _base_url(value: Any) -> tuple[str, str, str]:
     base_path = (parsed.path or "").rstrip("/")
     if base_path:
         _safe_path(base_path)
-    normalized = "https://" + parsed.hostname.lower() + base_path
-    return normalized, parsed.hostname.lower(), base_path
+    destination_host = parsed.hostname.lower()
+    url_host = "[%s]" % destination_host if ":" in destination_host else destination_host
+    normalized = "https://" + url_host + base_path
+    return normalized, destination_host, base_path
 
 
 def _int(value: Any, field: str, *, minimum: int = 0) -> int:
@@ -338,6 +355,59 @@ def _int(value: Any, field: str, *, minimum: int = 0) -> int:
     if result < minimum:
         raise SourceAddRuntimeV2Error("%s is invalid" % field)
     return result
+
+
+def _validate_probe_body_json(value: Any) -> None:
+    node_count = 0
+
+    def visit(item: Any, depth: int) -> None:
+        nonlocal node_count
+        node_count += 1
+        if depth > 12 or node_count > 2_000:
+            raise SourceAddRuntimeV2Error(
+                "SOURCE_ADD probe body exceeds structural limits"
+            )
+        if isinstance(item, Mapping):
+            if len(item) > 500:
+                raise SourceAddRuntimeV2Error(
+                    "SOURCE_ADD probe body has too many keys"
+                )
+            for key, child in item.items():
+                if not isinstance(key, str) or not key or len(key) > 120:
+                    raise SourceAddRuntimeV2Error(
+                        "SOURCE_ADD probe body key is invalid"
+                    )
+                visit(child, depth + 1)
+            return
+        if isinstance(item, list):
+            if len(item) > 500:
+                raise SourceAddRuntimeV2Error(
+                    "SOURCE_ADD probe body list is too large"
+                )
+            for child in item:
+                visit(child, depth + 1)
+            return
+        if item is None or isinstance(item, (str, int, float, bool)):
+            if isinstance(item, str) and len(item) > 4_096:
+                raise SourceAddRuntimeV2Error(
+                    "SOURCE_ADD probe body string is too large"
+                )
+            return
+        raise SourceAddRuntimeV2Error(
+            "SOURCE_ADD probe body contains an unsupported value"
+        )
+
+    visit(value, 0)
+    try:
+        encoded = canonical_json(value).encode("utf-8")
+    except Exception as exc:
+        raise SourceAddRuntimeV2Error(
+            "SOURCE_ADD probe body is not canonicalizable"
+        ) from exc
+    if len(encoded) > 65_536:
+        raise SourceAddRuntimeV2Error(
+            "SOURCE_ADD probe body exceeds 64 KiB"
+        )
 
 
 def build_source_add_runtime_route_v2(
@@ -424,6 +494,21 @@ def build_source_add_runtime_route_v2(
         raise SourceAddRuntimeV2Error(
             "SOURCE_ADD route policy differs from probe endpoints"
         )
+    request_headers = provision.get("request_headers") or {}
+    if not isinstance(request_headers, Mapping) or len(request_headers) > 16 or any(
+        not _AUTH_NAME_RE.fullmatch(str(name))
+        or str(name).lower() in _FORBIDDEN_AUTH_HEADERS
+        or str(name).lower() in {"authorization", "x-api-key", "api-key"}
+        or (
+            auth_kind in {"header", "bearer"}
+            and str(name).lower() == auth_name.lower()
+        )
+        or not _safe_header_value(value)
+        for name, value in request_headers.items()
+    ):
+        raise SourceAddRuntimeV2Error(
+            "SOURCE_ADD provider request headers are invalid"
+        )
 
     credential_slot = ""
     credential_value_hash = ""
@@ -479,6 +564,10 @@ def build_source_add_runtime_route_v2(
             {"method": method, "path": path}
             for method, path in sorted(allowed_routes)
         ],
+        "request_headers": {
+            str(name): str(value)
+            for name, value in sorted(request_headers.items())
+        },
         "per_day_quota": _int(
             provider.get("per_day_quota"), "SOURCE_ADD per-day quota"
         ),
@@ -490,6 +579,143 @@ def build_source_add_runtime_route_v2(
         "credential_envelope_hash": envelope_hash,
     }
     return {**body, "route_hash": sha256_json(body)}
+
+
+def build_source_add_probe_route_v2(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Build a provisional measured route without catalog eligibility."""
+
+    if not isinstance(row, Mapping):
+        raise SourceAddRuntimeV2Error("SOURCE_ADD probe row is invalid")
+    probe = row.get("probe_doc")
+    if not isinstance(probe, Mapping) or probe.get("schema_version") != SOURCE_ADD_PROBE_CONFIG_SCHEMA_VERSION:
+        raise SourceAddRuntimeV2Error("SOURCE_ADD probe document is invalid")
+    expected_fields = {
+        "schema_version",
+        "provider_id",
+        "base_url",
+        "auth_kind",
+        "auth_name",
+        "request_headers",
+        "probes",
+    }
+    if set(probe) != expected_fields:
+        raise SourceAddRuntimeV2Error("SOURCE_ADD probe fields are invalid")
+    provider_id = str(probe.get("provider_id") or "").strip().lower()
+    if not _PROVIDER_ID_RE.fullmatch(provider_id) or provider_id in _RESERVED_PROVIDER_IDS:
+        raise SourceAddRuntimeV2Error("SOURCE_ADD probe provider id is invalid")
+    normalized_base, destination_host, base_path = _base_url(probe.get("base_url"))
+    auth_kind = str(probe.get("auth_kind") or "none").strip().lower()
+    auth_name = str(probe.get("auth_name") or "").strip()
+    if auth_kind not in _VALID_AUTH_KINDS:
+        raise SourceAddRuntimeV2Error("SOURCE_ADD probe auth kind is invalid")
+    if auth_kind == "bearer" and not auth_name:
+        auth_name = "Authorization"
+    if auth_kind in {"header", "query"} and not auth_name:
+        raise SourceAddRuntimeV2Error("SOURCE_ADD probe auth name is missing")
+    if auth_kind != "none" and not _AUTH_NAME_RE.fullmatch(auth_name):
+        raise SourceAddRuntimeV2Error("SOURCE_ADD probe auth name is invalid")
+    if auth_kind in {"header", "bearer"} and auth_name.lower() in _FORBIDDEN_AUTH_HEADERS:
+        raise SourceAddRuntimeV2Error("SOURCE_ADD probe auth header is unsafe")
+
+    request_headers = probe.get("request_headers")
+    if not isinstance(request_headers, Mapping) or len(request_headers) > 16 or any(
+        not _AUTH_NAME_RE.fullmatch(str(name))
+        or str(name).lower() in _FORBIDDEN_AUTH_HEADERS
+        or str(name).lower() in {"authorization", "x-api-key", "api-key"}
+        or (
+            auth_kind in {"header", "bearer"}
+            and str(name).lower() == auth_name.lower()
+        )
+        or not _safe_header_value(value)
+        for name, value in request_headers.items()
+    ):
+        raise SourceAddRuntimeV2Error("SOURCE_ADD probe request headers are invalid")
+    probes = probe.get("probes")
+    if not isinstance(probes, list) or not 1 <= len(probes) <= 3:
+        raise SourceAddRuntimeV2Error("SOURCE_ADD probe count is invalid")
+    allowed_routes = set()
+    for item in probes:
+        if not isinstance(item, Mapping) or set(item) != {"method", "path", "query", "body_json"}:
+            raise SourceAddRuntimeV2Error("SOURCE_ADD probe example is invalid")
+        method = str(item.get("method") or "").upper()
+        if method not in _VALID_METHODS:
+            raise SourceAddRuntimeV2Error("SOURCE_ADD probe method is invalid")
+        path = _safe_path(item.get("path"))
+        query = item.get("query")
+        if not isinstance(query, Mapping) or len(query) > 20 or any(
+            not isinstance(name, str)
+            or not name
+            or len(name) > 120
+            or name.lower() in _SECRET_QUERY_NAMES
+            or (auth_kind == "query" and name.lower() == auth_name.lower())
+            or not isinstance(value, (str, int, float, bool))
+            or len(str(value)) > 500
+            for name, value in query.items()
+        ):
+            raise SourceAddRuntimeV2Error("SOURCE_ADD probe query is invalid")
+        body_json = item.get("body_json")
+        if method == "GET" and body_json not in ({}, None):
+            raise SourceAddRuntimeV2Error("SOURCE_ADD GET probe body is forbidden")
+        if method == "POST" and not isinstance(body_json, (Mapping, list)):
+            raise SourceAddRuntimeV2Error("SOURCE_ADD POST probe body is invalid")
+        if method == "POST":
+            _validate_probe_body_json(body_json)
+        allowed_routes.add((method, (base_path + path) or "/"))
+
+    credential_slot = ""
+    credential_value_hash = ""
+    key_ref_hash = ""
+    envelope_hash = ""
+    if auth_kind != "none":
+        envelope = validate_source_add_credential_envelope_v2(row.get("credential_envelope") or {})
+        expected_context = {
+            "adapter_ref": "source_add:%s" % str(row.get("adapter_id") or ""),
+            "miner_hotkey": str(row.get("miner_hotkey") or ""),
+            "purpose": "leadpoet_research_lab_source_add_credential",
+        }
+        if envelope["encryption_context"] != expected_context:
+            raise SourceAddRuntimeV2Error("SOURCE_ADD probe credential context differs")
+        credential_slot = source_add_job_credential_slot(provider_id)
+        credential_value_hash = envelope["credential_value_hash"]
+        key_ref_hash = envelope["key_ref_hash"]
+        envelope_hash = sha256_json(
+            {key: value for key, value in envelope.items() if key != "ciphertext_blob"}
+        )
+    elif row.get("credential_envelope"):
+        raise SourceAddRuntimeV2Error("SOURCE_ADD unauthenticated probe carries a credential")
+
+    body = {
+        "schema_version": SOURCE_ADD_RUNTIME_ROUTE_SCHEMA_VERSION,
+        "provider_id": provider_id,
+        "base_url": normalized_base,
+        "destination_host": destination_host,
+        "auth_kind": auth_kind,
+        "auth_name": auth_name,
+        "credential_slot": credential_slot,
+        "credential_value_hash": credential_value_hash,
+        "key_ref_hash": key_ref_hash,
+        "credential_env_refs": [],
+        "allowed_routes": [
+            {"method": method, "path": path}
+            for method, path in sorted(allowed_routes)
+        ],
+        "request_headers": {
+            str(name): str(value)
+            for name, value in sorted(request_headers.items())
+        },
+        "per_day_quota": 0,
+        "est_cost_microusd_per_call": 0,
+        "source_row_hash": sha256_json(
+            {
+                "submission_id": str(row.get("submission_id") or ""),
+                "adapter_id": str(row.get("adapter_id") or ""),
+                "config_ref": str(row.get("config_ref") or ""),
+                "probe_doc": dict(probe),
+            }
+        ),
+        "credential_envelope_hash": envelope_hash,
+    }
+    return validate_source_add_runtime_route_v2({**body, "route_hash": sha256_json(body)})
 
 
 def validate_source_add_runtime_route_v2(
@@ -507,6 +733,7 @@ def validate_source_add_runtime_route_v2(
         "key_ref_hash",
         "credential_env_refs",
         "allowed_routes",
+        "request_headers",
         "per_day_quota",
         "est_cost_microusd_per_call",
         "source_row_hash",
@@ -555,6 +782,21 @@ def validate_source_add_runtime_route_v2(
     routes = body.get("allowed_routes")
     if not isinstance(routes, list) or not routes:
         raise SourceAddRuntimeV2Error("SOURCE_ADD runtime route set is empty")
+    request_headers = body.get("request_headers")
+    if not isinstance(request_headers, Mapping) or len(request_headers) > 16 or any(
+        not _AUTH_NAME_RE.fullmatch(str(name))
+        or str(name).lower() in _FORBIDDEN_AUTH_HEADERS
+        or str(name).lower() in {"authorization", "x-api-key", "api-key"}
+        or (
+            auth_kind in {"header", "bearer"}
+            and str(name).lower() == str(body.get("auth_name") or "").lower()
+        )
+        or not _safe_header_value(value)
+        for name, value in request_headers.items()
+    ):
+        raise SourceAddRuntimeV2Error(
+            "SOURCE_ADD runtime request headers are invalid"
+        )
     normalized_routes = []
     for item in routes:
         if not isinstance(item, Mapping) or set(item) != {"method", "path"}:
@@ -580,6 +822,10 @@ def validate_source_add_runtime_route_v2(
     return {
         **dict(body),
         "allowed_routes": normalized_routes,
+        "request_headers": {
+            str(name): str(value)
+            for name, value in sorted(request_headers.items())
+        },
         "route_hash": str(value["route_hash"]),
     }
 
@@ -763,3 +1009,57 @@ def build_source_add_job_envelope_v2(
         for key, item in normalized.items()
         if key != "ciphertext_blob"
     }
+
+
+def build_source_add_probe_job_envelope_v2(
+    row: Mapping[str, Any], *, job_id: str
+) -> Dict[str, Any] | None:
+    """Create a job-scoped credential envelope for a provisional probe."""
+
+    route = build_source_add_probe_route_v2(row)
+    if route["auth_kind"] == "none":
+        return None
+    envelope = validate_source_add_credential_envelope_v2(
+        row.get("credential_envelope") or {}
+    )
+    if envelope["envelope_kind"] == "coordinator_sealed":
+        normalized = validate_source_add_sealed_job_envelope_v2(
+            {
+                "schema_version": SOURCE_ADD_SEALED_JOB_ENVELOPE_SCHEMA_VERSION,
+                "job_id": str(job_id),
+                "credential_slot": route["credential_slot"],
+                "credential_ref_hash": route["credential_value_hash"],
+                "credential_value_hash": route["credential_value_hash"],
+                "key_ref_hash": route["key_ref_hash"],
+                "ciphertext_blob_b64": str(envelope["ciphertext_b64"]),
+                "ciphertext_blob_hash": str(envelope["ciphertext_blob_hash"]),
+                "encryption_context": dict(envelope["encryption_context"]),
+                "encryption_context_hash": str(envelope["encryption_context_hash"]),
+            }
+        )
+        return {
+            key: item
+            for key, item in normalized.items()
+            if key not in {"ciphertext_blob", "envelope_kind"}
+        }
+    from gateway.utils.tee_kms_provision_v2 import (
+        JOB_PROVIDER_ENVELOPE_SCHEMA_VERSION,
+        validate_job_provider_envelope,
+    )
+
+    normalized = validate_job_provider_envelope(
+        {
+            "schema_version": JOB_PROVIDER_ENVELOPE_SCHEMA_VERSION,
+            "job_id": str(job_id),
+            "credential_slot": route["credential_slot"],
+            "credential_ref_hash": route["credential_value_hash"],
+            "credential_value_hash": route["credential_value_hash"],
+            "key_ref_hash": route["key_ref_hash"],
+            "ciphertext_blob_b64": str(envelope["ciphertext_b64"]),
+            "ciphertext_blob_hash": str(envelope["ciphertext_blob_hash"]),
+            "kms_key_id_hash": str(envelope["kms_key_id_hash"]),
+            "encryption_context": dict(envelope["encryption_context"]),
+            "encryption_context_hash": str(envelope["encryption_context_hash"]),
+        }
+    )
+    return {key: item for key, item in normalized.items() if key != "ciphertext_blob"}

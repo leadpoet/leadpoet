@@ -8,6 +8,7 @@ or network errors.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from html import unescape
 from html.parser import HTMLParser
 import json
@@ -18,6 +19,8 @@ from typing import Any, Callable, Mapping, Sequence
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from publicsuffix2 import get_sld
 
 
 PRECHECK_PASSED = "provenance_precheck_passed"
@@ -171,7 +174,7 @@ def evaluate_source_add_provenance(
         docs_fetch = dict(
             provider_fetch(
                 "/scrape",
-                {"url": documentation_url},
+                {"url": documentation_url, "dynamic": "false"},
                 timeout_seconds,
             )
         )
@@ -185,15 +188,42 @@ def evaluate_source_add_provenance(
     fake_hits = _fake_pattern_hits(lowered_docs[:_MAX_FAKE_SCAN])
     doc["fake_test_markers"] = fake_hits[:8]
     doc["docs_completeness"] = _docs_completeness(lowered_docs)
+    entity_match = _official_entity_match(
+        source_name=source_name,
+        docs_domain=doc["documentation_domain"],
+        docs_title=str(doc["docs_fetch"].get("title") or ""),
+        docs_text=lowered_docs,
+    )
+    doc["official_entity_match"] = entity_match
 
     if fake_hits:
         reasons.append("documentation_contains_fake_or_test_markers")
-    if docs_fetch.get("provider_status") == "error":
+    docs_provider_status = str(docs_fetch.get("provider_status") or "")
+    docs_http_status = int(docs_fetch.get("status") or 0)
+    if docs_provider_status == "error" or (
+        docs_provider_status == "ok" and docs_http_status == 0
+    ):
         reasons.append("documentation_provider_error")
-    if docs_fetch.get("status") and int(docs_fetch.get("status") or 0) >= 400:
+    if docs_http_status and not 200 <= docs_http_status < 300:
         reasons.append("documentation_fetch_failed")
     if docs_fetch.get("provider_status") == "missing_scrapingdog_key":
         reasons.append("scrapingdog_key_missing")
+
+    if provider_fetch is not None:
+        archive_result = dict(
+            provider_fetch(
+                "/archive/available",
+                {"url": api_base_url},
+                timeout_seconds,
+            )
+        )
+    else:
+        archive_result = _archive_available(api_base_url, timeout_seconds=timeout_seconds)
+    archive_summary = _summarize_archive(archive_result)
+    doc["archive_history"] = archive_summary
+    archive_status = int(archive_summary.get("status") or 0)
+    if archive_summary["provider_status"] != "ok" or not 200 <= archive_status < 300:
+        reasons.append("archive_provider_error")
 
     ai_query = _build_ai_query(source_name, api_base_url, documentation_url, third_party_refs)
     if provider_fetch is not None:
@@ -210,6 +240,11 @@ def evaluate_source_add_provenance(
         }
     ai_summary = _summarize_ai(ai_result)
     doc["ai_mode"] = ai_summary
+    ai_status = int(ai_summary.get("status") or 0)
+    if ai_summary["provider_status"] == "missing_scrapingdog_key":
+        reasons.append("scrapingdog_key_missing")
+    elif ai_summary["provider_status"] != "ok" or not 200 <= ai_status < 300:
+        reasons.append("ai_mode_provider_error")
     reference_evidence = _reference_evidence(
         api_base_url=api_base_url,
         documentation_url=documentation_url,
@@ -223,40 +258,52 @@ def evaluate_source_add_provenance(
     doc["ai_legitimacy"] = ai_legitimacy
     ai_fake_hits = _fake_pattern_hits(ai_text)
     if ai_fake_hits:
-        reasons.append("ai_mode_identified_fake_or_test_api")
+        reasons.append("ai_mode_flagged_fake_or_test_api")
     if int(ai_summary.get("reference_count") or 0) == 0:
         reasons.append("ai_mode_no_references")
 
     doc["duration_ms"] = int((time.time() - started) * 1000)
 
-    # Obvious fake/test sources are rejected early. Provider/config failures and
-    # weak provenance remain reviewable by an operator.
-    if "documentation_contains_fake_or_test_markers" in reasons or "ai_mode_identified_fake_or_test_api" in reasons:
+    deterministic_reference_pass = _reference_evidence_passes(
+        reference_evidence,
+        docs_domain_aligned=docs_domain_aligned,
+        archive_history=archive_summary,
+    )
+    deterministic_docs_pass = (
+        str(docs_fetch.get("provider_status") or "") == "ok"
+        and 200 <= int(docs_fetch.get("status") or 0) < 300
+        and int(doc["docs_completeness"]["score"]) >= 2
+        and bool(entity_match["matched"])
+    )
+
+    # Page content and measured history/reference evidence decide the gate.
+    # AI mode is retained as a bounded review hint but cannot independently
+    # pass or reject a source.
+    if "documentation_contains_fake_or_test_markers" in reasons:
         status = PRECHECK_REJECTED
     elif any(
         reason in reasons
-        for reason in ("documentation_fetch_failed", "documentation_provider_error", "scrapingdog_key_missing", "ai_mode_no_references")
+        for reason in (
+            "documentation_fetch_failed",
+            "documentation_provider_error",
+            "scrapingdog_key_missing",
+            "archive_provider_error",
+            "ai_mode_provider_error",
+        )
     ):
         status = PRECHECK_MANUAL
-    elif (
-        ai_legitimacy["uncertain_markers"]
-        or not ai_legitimacy["positive_verdict"]
-        or not _reference_evidence_passes(reference_evidence, docs_domain_aligned=docs_domain_aligned)
-    ):
-        status = PRECHECK_MANUAL
-        if ai_legitimacy["uncertain_markers"] or not ai_legitimacy["positive_verdict"]:
-            reasons.append("ai_mode_legitimacy_not_confirmed")
-        if not _reference_evidence_passes(reference_evidence, docs_domain_aligned=docs_domain_aligned):
-            reasons.append("insufficient_reference_provenance")
-    elif doc["docs_completeness"]["score"] >= 2 or ai_legitimacy["positive_verdict"]:
+    elif deterministic_docs_pass and deterministic_reference_pass:
         status = PRECHECK_PASSED
+        reasons.append("provenance_reference_backed")
     else:
         status = PRECHECK_MANUAL
-        if "low_docs_completeness" not in reasons:
-            reasons.append("low_docs_completeness")
+        if not deterministic_docs_pass:
+            reasons.append("documentation_or_entity_evidence_incomplete")
+        if not deterministic_reference_pass:
+            reasons.append("insufficient_reference_or_archive_provenance")
+        if ai_legitimacy["uncertain_markers"] or not ai_legitimacy["positive_verdict"]:
+            reasons.append("ai_mode_legitimacy_not_confirmed")
 
-    if not reasons:
-        reasons.append("provenance_reference_backed")
     return SourceAddProvenanceResult(status, tuple(sorted(set(reasons))), sanitize_source_add_precheck_doc(doc))
 
 
@@ -274,10 +321,40 @@ def _metadata_required_errors(metadata: Mapping[str, Any]) -> list[str]:
 def _scrapingdog_scrape(target_url: str, *, api_key: str, timeout_seconds: int) -> dict[str, Any]:
     return _scrapingdog_get(
         "/scrape",
-        {"url": target_url},
+        {"url": target_url, "dynamic": "false"},
         api_key=api_key,
         timeout_seconds=timeout_seconds,
     )
+
+
+def _archive_available(target_url: str, *, timeout_seconds: int) -> dict[str, Any]:
+    url = "https://archive.org/wayback/available?" + urllib.parse.urlencode(
+        {"url": target_url}
+    )
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "leadpoet-source-add-precheck/2.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read(120_000)
+            status = int(response.status)
+            content_type = str(response.headers.get("content-type") or "")
+    except Exception as exc:
+        return {
+            "provider_status": "error",
+            "error_type": type(exc).__name__,
+        }
+    try:
+        parsed = json.loads(body.decode("utf-8", "replace"))
+    except Exception:
+        parsed = None
+    return {
+        "provider_status": "ok",
+        "status": status,
+        "content_type": content_type[:120],
+        "json": parsed if isinstance(parsed, Mapping) else None,
+    }
 
 
 def _scrapingdog_ai_mode(query: str, *, api_key: str, timeout_seconds: int) -> dict[str, Any]:
@@ -365,6 +442,34 @@ def _summarize_ai(result: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _summarize_archive(result: Mapping[str, Any]) -> dict[str, Any]:
+    parsed = result.get("json") if isinstance(result.get("json"), Mapping) else {}
+    snapshots = parsed.get("archived_snapshots") if isinstance(parsed, Mapping) else {}
+    closest = snapshots.get("closest") if isinstance(snapshots, Mapping) else {}
+    available = bool(isinstance(closest, Mapping) and closest.get("available") is True)
+    timestamp = str(closest.get("timestamp") or "") if isinstance(closest, Mapping) else ""
+    snapshot_age_days = 0
+    if available and re.fullmatch(r"\d{14}", timestamp):
+        try:
+            snapshot = datetime.strptime(timestamp, "%Y%m%d%H%M%S").replace(
+                tzinfo=timezone.utc
+            )
+            snapshot_age_days = max(
+                0, int((datetime.now(timezone.utc) - snapshot).total_seconds() // 86400)
+            )
+        except ValueError:
+            snapshot_age_days = 0
+    return {
+        "provider_status": str(result.get("provider_status") or "")[:80],
+        "status": int(result.get("status") or 0),
+        "available": available,
+        "snapshot_year": timestamp[:4] if re.fullmatch(r"\d{14}", timestamp) else "",
+        "snapshot_age_days": snapshot_age_days,
+        "established_history": available and snapshot_age_days >= 90,
+        "error_type": str(result.get("error_type") or "")[:80],
+    }
+
+
 def _extract_text(result: Mapping[str, Any]) -> str:
     return _visible_text(_extract_raw_text(result))
 
@@ -423,14 +528,17 @@ def _ai_legitimacy(text: str) -> dict[str, Any]:
 
 
 def _build_ai_query(source_name: str, api_base_url: str, documentation_url: str, refs: Sequence[str]) -> str:
+    # Submitted references are reviewer hints, not trusted search seeds. A
+    # miner could otherwise point the search provider at another domain they
+    # control and manufacture the appearance of independent corroboration.
+    del refs
     return (
         "Assess if this submitted API source is a legitimate established API, not a fake/test API or miner-owned wrapper. "
         "Start with exactly VERDICT: CREDIBLE only when web evidence establishes the named entity owns or operates "
         "the API; otherwise start with VERDICT: UNCERTAIN or VERDICT: REJECT. Return concise evidence and cite "
         "official and independent sources. "
         f"Source name: {str(source_name or '')[:120]}. "
-        f"API base URL: {api_base_url}. Documentation URL: {documentation_url}. "
-        f"Submitted third-party refs: {', '.join(refs[:5])}."
+        f"API base URL: {api_base_url}. Documentation URL: {documentation_url}."
     )[:1800]
 
 
@@ -496,8 +604,15 @@ def _normalize_domain(value: str) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
-    parsed = urllib.parse.urlparse(raw if "://" in raw else "https://" + raw)
-    domain = (parsed.hostname or raw).lower().split(":", 1)[0]
+    candidate = raw
+    if "://" not in candidate:
+        candidate = (
+            "https://[%s]" % candidate
+            if candidate.count(":") >= 2 and not candidate.startswith("[")
+            else "https://" + candidate
+        )
+    parsed = urllib.parse.urlparse(candidate)
+    domain = (parsed.hostname or raw).lower().strip(".")
     return domain[4:] if domain.startswith("www.") else domain
 
 
@@ -556,14 +671,26 @@ def _reference_evidence(
     }
 
 
-def _reference_evidence_passes(evidence: Mapping[str, Any], *, docs_domain_aligned: bool) -> bool:
+def _reference_evidence_passes(
+    evidence: Mapping[str, Any],
+    *,
+    docs_domain_aligned: bool,
+    archive_history: Mapping[str, Any],
+) -> bool:
     aligned = evidence.get("aligned_reference_domains")
     independent = evidence.get("independent_reference_domains")
-    if int(evidence.get("reference_count") or 0) < 2:
-        return False
+    archived = archive_history.get("established_history") is True
     if docs_domain_aligned:
-        return bool(isinstance(aligned, list) and aligned) or bool(
-            isinstance(independent, list) and len(independent) >= 2
+        # Multiple links controlled by the submitted entity are still one
+        # self-assertion. Require either pre-existing archive history or at
+        # least one independently discovered domain plus a result tying back
+        # to the submitted API/docs domain before the source can pass.
+        return archived or (
+            bool(isinstance(independent, list) and independent)
+            and bool(
+                evidence.get("api_domain_referenced")
+                or evidence.get("documentation_domain_referenced")
+            )
         )
     # Cross-domain documentation is allowed only when search evidence ties
     # both submitted domains to the claimed source.
@@ -580,8 +707,40 @@ def _is_us_government_domain(domain: str) -> bool:
 
 
 def _root_domain(domain: str) -> str:
-    parts = [part for part in str(domain or "").split(".") if part]
-    return ".".join(parts[-2:]) if len(parts) >= 2 else str(domain or "")
+    normalized = _normalize_domain(domain)
+    if not normalized:
+        return ""
+    registrable = str(get_sld(normalized) or "").lower().strip(".")
+    return registrable or normalized
+
+
+def _official_entity_match(
+    *,
+    source_name: str,
+    docs_domain: str,
+    docs_title: str,
+    docs_text: str,
+) -> dict[str, Any]:
+    stop = {"api", "data", "developer", "developers", "official", "service"}
+    tokens = [
+        item
+        for item in re.findall(r"[a-z0-9]{3,}", str(source_name or "").lower())
+        if item not in stop
+    ][:8]
+    haystack = " ".join(
+        (
+            str(docs_domain or "").replace(".", " "),
+            str(docs_title or "").lower(),
+            str(docs_text or "")[:12_000],
+        )
+    )
+    matched_tokens = sorted({token for token in tokens if token in haystack})
+    government = _is_us_government_domain(docs_domain)
+    return {
+        "matched": bool(government or matched_tokens),
+        "matched_name_tokens": matched_tokens,
+        "government_domain": government,
+    }
 
 
 __all__ = [

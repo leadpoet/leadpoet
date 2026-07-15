@@ -1,27 +1,35 @@
-from datetime import datetime, timedelta, timezone
 import base64
 import time
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
-from gateway.research_lab import api, source_add_catalog, v2_authority
+from gateway.research_lab import api, source_add_catalog
 from gateway.research_lab.models import (
     AttestedCredentialCiphertextV2,
+    ResearchLabSourceAdapterProbeConfigureRequest,
     ResearchLabSourceAdapterProvisionRequest,
     ResearchLabSourceAdapterSubmissionRequest,
     ResearchLabSourceAddCredentialRecipientRequest,
 )
 from gateway.research_lab.source_add_catalog import (
+    PROVISION_STATUS_APPROVED_PENDING,
     PROVISION_STATUS_ELIGIBLE,
     provider_registry_entries_from_provisioned_rows,
     probe_endpoints_from_provisioned_rows,
     source_add_row_credential_ready,
 )
 from gateway.research_lab.source_add_llm_judge import _parse_verdict
-from gateway.research_lab.source_add_provenance import PRECHECK_MANUAL, PRECHECK_PASSED, SourceAddProvenanceResult
+from gateway.research_lab.source_add_provenance import PRECHECK_MANUAL, PRECHECK_PASSED
 from research_lab.source_add_execution import SourceAddRejectionReason, intake_source_add_submission
-from research_lab.source_add_identity import source_identity_hash
+from research_lab.source_add_identity import (
+    normalize_source_add_domain,
+    normalize_source_add_url,
+    source_documentation_identity_hash,
+    source_identity_alias_hashes_from_metadata,
+    source_identity_hash,
+)
 
 
 def _manifest_doc(**overrides):
@@ -40,42 +48,45 @@ def _manifest_doc(**overrides):
         "max_request_cost_cents": 5,
         "max_latency_ms": 30_000,
         "fixture_refs": ["fixture:test"],
+        "credential_policy": "no_credentials",
+    }
+    doc.update(overrides)
+    return doc
+
+
+def _source_metadata_doc(**overrides):
+    doc = {
+        "api_base_url": "https://api.test-source.example",
+        "documentation_url": "https://docs.test-source.example/api",
+        "auth_type": "none",
+        "endpoint_examples": [
+            {
+                "method": "GET",
+                "path": "/search",
+                "purpose": "Search current source records",
+                "example_query": "q=test",
+            }
+        ],
+        "rate_limit_notes": "Use conservative request pacing.",
+        "data_provenance_notes": "Official source records.",
+        "third_party_refs": [],
     }
     doc.update(overrides)
     return doc
 
 
 @pytest.mark.asyncio
-async def test_source_add_recipient_is_signed_and_scoped_without_secret(monkeypatch):
+async def test_public_source_add_credential_recipient_is_retired(monkeypatch):
     monkeypatch.setattr(
         api.ResearchLabGatewayConfig,
         "from_env",
         staticmethod(lambda: SimpleNamespace(api_enabled=True, source_add_enabled=True)),
     )
     monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
-    observed = {}
+    async def fail_recipient(**_kwargs):
+        raise AssertionError("public miner route must not create a recipient")
 
-    async def fake_recipient(**kwargs):
-        observed.update(kwargs)
-        return {
-            "schema_version": "leadpoet.source_add_ingress_recipient.v2",
-            "purpose": "leadpoet.source_add_credential_ingress.v2",
-            "request_id": "sha256:" + "1" * 64,
-            "boot_identity_hash": "sha256:" + "2" * 64,
-            "miner_hotkey_hash": "sha256:" + "3" * 64,
-            "adapter_ref_hash": "sha256:" + "4" * 64,
-            "credential_ref": api._source_add_intake_credential_ref(
-                kwargs["miner_hotkey"], kwargs["adapter_id"]
-            ),
-            "key_ref_hash": "sha256:" + "5" * 64,
-            "recipient_public_key_hash": "sha256:" + "6" * 64,
-            "request_nonce": "7" * 32,
-            "recipient_public_key_der_b64": base64.b64encode(b"public").decode(),
-            "attestation_document_b64": base64.b64encode(b"attestation").decode(),
-            "key_encryption_algorithm": "RSAES_OAEP_SHA_256",
-        }
-
-    monkeypatch.setattr(api, "_source_add_credential_recipient", fake_recipient)
+    monkeypatch.setattr(api, "_source_add_credential_recipient", fail_recipient)
     payload = ResearchLabSourceAddCredentialRecipientRequest(
         miner_hotkey="miner-hotkey-value",
         signature="signature-value-123",
@@ -83,15 +94,10 @@ async def test_source_add_recipient_is_signed_and_scoped_without_secret(monkeypa
         idempotency_key="recipient-request-1",
         adapter_id="adapter:test-source",
     )
-    response = await api.create_source_add_credential_recipient(payload)
-    assert response.request_id == "sha256:" + "1" * 64
-    assert observed == {
-        "miner_hotkey": "miner-hotkey-value",
-        "adapter_id": "adapter:test-source",
-        "credential_ref": api._source_add_intake_credential_ref(
-            "miner-hotkey-value", "adapter:test-source"
-        ),
-    }
+    with pytest.raises(api.HTTPException) as exc_info:
+        await api.create_source_add_credential_recipient(payload)
+    assert exc_info.value.status_code == 410
+    assert exc_info.value.detail == "SOURCE_ADD miner credentials are not accepted"
 
 
 async def _async_none():
@@ -99,47 +105,29 @@ async def _async_none():
 
 
 @pytest.mark.asyncio
-async def test_source_add_plaintext_credential_is_retired_and_v2_is_signed(monkeypatch):
-    monkeypatch.setattr(
-        api.ResearchLabGatewayConfig,
-        "from_env",
-        staticmethod(
-            lambda: SimpleNamespace(
-                api_enabled=True,
-                production_writes_enabled=True,
-                miner_submissions_enabled=True,
-                source_add_enabled=True,
-            )
-        ),
-    )
-    monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
-    monkeypatch.setattr(
-        api,
-        "_enforce_research_lab_submission_rate_limit",
-        lambda *_args, **_kwargs: _async_none(),
-    )
-    payload = ResearchLabSourceAdapterSubmissionRequest(
-        miner_hotkey="miner-hotkey-value",
-        signature="signature-value-123",
-        timestamp=int(time.time()),
-        idempotency_key="source-submit-1",
-        manifest=_manifest_doc(credential_policy="credential_ref_only"),
-        adapter_credential="plaintext-secret-value",
-    )
-    with pytest.raises(api.HTTPException, match="plaintext SOURCE_ADD"):
-        await api.submit_research_lab_source_adapter(payload)
-
+async def test_source_add_rejects_plaintext_and_v2_miner_credentials():
+    common = {
+        "miner_hotkey": "miner-hotkey-value",
+        "signature": "signature-value-123",
+        "timestamp": int(time.time()),
+        "idempotency_key": "source-submit-1",
+        "manifest": _manifest_doc(),
+        "source_metadata": _source_metadata_doc(),
+    }
+    with pytest.raises(ValidationError, match="miners must not submit"):
+        ResearchLabSourceAdapterSubmissionRequest(
+            **common,
+            adapter_credential="plaintext-secret-value",
+        )
     encrypted = AttestedCredentialCiphertextV2(
         request_id="sha256:" + "8" * 64,
         ciphertext_b64=base64.b64encode(b"x" * 384).decode(),
     )
-    v2_payload = payload.model_copy(
-        update={"adapter_credential": None, "adapter_credential_v2": encrypted}
-    )
-    signed = v2_payload.signed_payload()
-    assert "adapter_credential" not in signed
-    assert signed["adapter_credential_v2"]["request_id"] == encrypted.request_id
-    assert "plaintext-secret-value" not in str(signed)
+    with pytest.raises(ValidationError, match="miners must not submit"):
+        ResearchLabSourceAdapterSubmissionRequest(
+            **common,
+            adapter_credential_v2=encrypted,
+        )
 
 
 def test_intake_rejects_duplicate_source_identity_hash():
@@ -158,92 +146,166 @@ def test_intake_rejects_duplicate_source_identity_hash():
     assert SourceAddRejectionReason.DUPLICATE_SOURCE in errors
 
 
-@pytest.mark.asyncio
-async def test_intake_context_releases_rejected_dedupe_and_keeps_active_global_dedupe(monkeypatch):
-    now = datetime.now(timezone.utc)
-    rejected_hash = "sha256:" + "1" * 64
-    rejected_precheck_hash = "sha256:" + "2" * 64
-    active_other_miner_hash = "sha256:" + "3" * 64
-    active_own_hash = "sha256:" + "4" * 64
-    catalog_hash = "sha256:" + "5" * 64
-    provisioned_hash = "sha256:" + "6" * 64
-    miner_rows = [
-        {
-            "stage": "rejected",
-            "created_at": now.isoformat(),
-            "submission_doc": {"submitted_at": (now - timedelta(days=2)).isoformat()},
-            "source_identity_hash": rejected_hash,
-        },
-        {
-            "stage": "needs_manual_review",
-            "created_at": now.isoformat(),
-            "submission_doc": {"submitted_at": now.isoformat()},
-            "source_identity_hash": active_own_hash,
-        },
-    ]
-    global_rows = [
-        {"stage": "rejected", "source_identity_hash": rejected_hash, "submission_doc": {}},
-        {
-            "stage": "rejected_precheck",
-            "source_identity_hash": rejected_precheck_hash,
-            "submission_doc": {},
-        },
-        {
-            "stage": "needs_manual_review",
-            "source_identity_hash": active_other_miner_hash,
-            "submission_doc": {"manifest": {"declared_base_domains": ["pending.example"]}},
-        },
-        {
-            "stage": "provenance_precheck_passed",
-            "source_identity_hash": active_own_hash,
-            "submission_doc": {},
-        },
-    ]
-
-    async def fake_select_all(table, *, filters=(), **_kwargs):
-        if table == "research_lab_source_add_submission_current":
-            return miner_rows if filters else global_rows
-        if table == "research_lab_source_catalog":
-            return [{"declared_base_domains": ["approved.example"], "source_identity_hash": catalog_hash}]
-        if table == "research_lab_source_add_provisioning_current":
-            return [{"source_identity_hash": provisioned_hash}]
-        raise AssertionError(f"unexpected table: {table}")
-
-    monkeypatch.setattr(api, "select_all", fake_select_all)
-
-    open_count, day_count, month_count, domains, identity_hashes = await api._source_add_intake_context(
-        "hk-owner"
+def test_v2_api_identity_cannot_be_bypassed_by_changing_documentation():
+    original = source_identity_hash(
+        api_base_url="https://API.test-source.example/v1/",
+        documentation_url="https://docs.test-source.example/docs/quickstart",
+        declared_base_domains=["api.test-source.example"],
+    )
+    changed_docs = source_identity_hash(
+        api_base_url="https://api.test-source.example/v1",
+        documentation_url="https://attacker.example/reference",
+        declared_base_domains=["attacker.example"],
+    )
+    different_api_path = source_identity_hash(
+        api_base_url="https://api.test-source.example/v2",
+        documentation_url="https://docs.test-source.example/docs",
     )
 
-    assert open_count == 1
-    assert day_count == 1
-    assert month_count == 2
-    assert domains == ["pending.example", "approved.example"]
-    assert rejected_hash not in identity_hashes
-    assert rejected_precheck_hash not in identity_hashes
-    assert identity_hashes == sorted(
-        {active_other_miner_hash, active_own_hash, catalog_hash, provisioned_hash}
+    assert original == changed_docs
+    assert original != different_api_path
+
+
+def test_v2_documentation_alias_is_reserved_separately_and_stably():
+    first = source_documentation_identity_hash(
+        "https://docs.test-source.example/docs/quickstart"
+    )
+    moved = source_documentation_identity_hash(
+        "https://docs.test-source.example/docs/reference/auth"
+    )
+    metadata_aliases = source_identity_alias_hashes_from_metadata(
+        {"documentation_url": "https://docs.test-source.example/docs/latest"}
+    )
+
+    assert first == moved
+    assert metadata_aliases == (first,)
+
+
+def test_source_identity_normalizes_ipv6_without_truncating_host():
+    assert normalize_source_add_domain("https://[2001:db8::1]/v1") == "2001:db8::1"
+    assert normalize_source_add_domain("2001:db8::1") == "2001:db8::1"
+    assert normalize_source_add_url("https://[2001:db8::1]/v1/") == (
+        "https://[2001:db8::1]/v1"
     )
 
 
 @pytest.mark.asyncio
-async def test_intake_context_fails_closed_when_global_duplicate_read_fails(monkeypatch):
-    async def fake_select_all(table, *, filters=(), **_kwargs):
-        if table == "research_lab_source_add_submission_current" and filters:
-            return []
-        raise RuntimeError("database unavailable")
+async def test_submission_delegates_identity_and_limits_to_atomic_rpc(monkeypatch):
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                miner_submissions_enabled=True,
+                source_add_enabled=True,
+                source_add_max_concurrent_per_hotkey=3,
+                source_add_max_per_day_per_hotkey=5,
+                source_add_max_per_30d_per_hotkey=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
+    monkeypatch.setattr(
+        api,
+        "_enforce_research_lab_submission_rate_limit",
+        lambda *_args, **_kwargs: _async_none(),
+    )
+    observed = {}
 
-    monkeypatch.setattr(api, "select_all", fake_select_all)
+    async def fake_rpc(name, params):
+        observed["name"] = name
+        observed["params"] = dict(params)
+        return {
+            "status": "admitted",
+            "stage": "provenance_queued",
+            "work_id": params["p_work_id"],
+        }
+
+    monkeypatch.setattr(api, "_source_add_rpc", fake_rpc)
+    payload = ResearchLabSourceAdapterSubmissionRequest(
+        miner_hotkey="miner-hotkey-value",
+        signature="signature-value-123",
+        timestamp=int(time.time()),
+        idempotency_key="source-submit-atomic-1",
+        manifest=_manifest_doc(),
+        source_metadata=_source_metadata_doc(),
+    )
+
+    response = await api.submit_research_lab_source_adapter(payload)
+
+    assert response.stage == "provenance_queued"
+    assert observed["name"] == "research_lab_source_add_admit"
+    assert observed["params"]["p_max_open"] == 3
+    assert observed["params"]["p_max_day"] == 5
+    assert observed["params"]["p_max_30d"] == 10
+    assert observed["params"]["p_documentation_identity_hash"].startswith(
+        "sha256:"
+    )
+    assert observed["params"]["p_record_doc"]["manifest"]["credential_policy"] == "no_credentials"
+    assert observed["params"]["p_record_doc"]["credential_envelope"] == {}
+
+
+@pytest.mark.asyncio
+async def test_duplicate_submission_response_is_exact_and_private(monkeypatch):
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                miner_submissions_enabled=True,
+                source_add_enabled=True,
+                source_add_max_concurrent_per_hotkey=3,
+                source_add_max_per_day_per_hotkey=5,
+                source_add_max_per_30d_per_hotkey=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(api, "_verify_signed_miner", lambda _payload: _async_none())
+    monkeypatch.setattr(
+        api,
+        "_enforce_research_lab_submission_rate_limit",
+        lambda *_args, **_kwargs: _async_none(),
+    )
+    async def duplicate_rpc(*_args, **_kwargs):
+        return {"status": "duplicate"}
+
+    monkeypatch.setattr(api, "_source_add_rpc", duplicate_rpc)
+    payload = ResearchLabSourceAdapterSubmissionRequest(
+        miner_hotkey="miner-hotkey-value",
+        signature="signature-value-123",
+        timestamp=int(time.time()),
+        idempotency_key="source-submit-duplicate-1",
+        manifest=_manifest_doc(),
+        source_metadata=_source_metadata_doc(),
+    )
 
     with pytest.raises(api.HTTPException) as exc_info:
-        await api._source_add_intake_context("hk-owner")
+        await api.submit_research_lab_source_adapter(payload)
 
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == "SOURCE_ADD intake temporarily unavailable"
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "Already submitted"
 
 
 @pytest.mark.asyncio
-async def test_owner_provision_endpoint_appends_catalog_and_provisioning(monkeypatch):
+async def test_atomic_source_add_rpc_fails_closed_without_leaking_storage_error(monkeypatch):
+    async def failed_rpc(_name, _params):
+        raise RuntimeError("private duplicate table unavailable")
+
+    monkeypatch.setattr(api, "call_rpc", failed_rpc)
+    with pytest.raises(api.HTTPException) as exc_info:
+        await api._source_add_rpc("research_lab_source_add_admit", {})
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "SOURCE_ADD workflow temporarily unavailable"
+    assert "duplicate" not in exc_info.value.detail.lower()
+
+
+@pytest.mark.asyncio
+async def test_exact_operator_probe_config_is_one_logical_work_across_retries(monkeypatch):
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
     monkeypatch.setattr(
         api.ResearchLabGatewayConfig,
@@ -253,8 +315,84 @@ async def test_owner_provision_endpoint_appends_catalog_and_provisioning(monkeyp
                 api_enabled=True,
                 production_writes_enabled=True,
                 source_add_enabled=True,
-                source_add_credential_kms_key_id="",
-                openrouter_key_kms_key_id="",
+            )
+        ),
+    )
+    submission_id = "source_add_submission:" + "d" * 16
+    call_count = 0
+
+    async def fake_select_one(table, **_kwargs):
+        nonlocal call_count
+        assert table == "research_lab_source_add_submission_current"
+        call_count += 1
+        return {
+            "submission_id": submission_id,
+            "adapter_id": "adapter:test-source",
+            "miner_hotkey": "hk-owner",
+            "stage": "provenance_precheck_passed" if call_count == 1 else "functional_probe_passed",
+            "seq": 3 if call_count == 1 else 99,
+            "submission_doc": {
+                "manifest": _manifest_doc(),
+                "source_metadata": _source_metadata_doc(),
+            },
+            "precheck_status": PRECHECK_PASSED,
+            "precheck_doc": {},
+            "source_identity_hash": "sha256:" + "1" * 64,
+        }
+
+    work_ids = []
+
+    async def fake_rpc(name, params):
+        assert name == "research_lab_source_add_configure_probe"
+        work_ids.append(params["p_work_id"])
+        return {
+            "status": "queued" if len(work_ids) == 1 else "already_configured",
+            "stage": "functional_probe_queued" if len(work_ids) == 1 else "functional_probe_passed",
+            "work_id": params["p_work_id"],
+        }
+
+    monkeypatch.setattr(api, "select_one", fake_select_one)
+    monkeypatch.setattr(api, "_source_add_rpc", fake_rpc)
+    payload = ResearchLabSourceAdapterProbeConfigureRequest(
+        base_url="https://api.test-source.example",
+        auth_kind="none",
+        probes=[
+            {
+                "method": "GET",
+                "path": "/search",
+                "query": {"q": "test"},
+                "body_json": None,
+            }
+        ],
+    )
+
+    first = await api.configure_research_lab_source_adapter_test(
+        submission_id, payload, authorization="Bearer service-role-test"
+    )
+    second = await api.configure_research_lab_source_adapter_test(
+        submission_id, payload, authorization="Bearer service-role-test"
+    )
+
+    assert work_ids[0] == work_ids[1]
+    assert first.queue_status == "queued"
+    assert second.queue_status == "already_configured"
+    assert second.stage == "functional_probe_passed"
+
+
+@pytest.mark.asyncio
+async def test_owner_provision_requires_exact_functional_pass_and_finalizes_atomically(monkeypatch):
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
+    monkeypatch.setattr(
+        api.ResearchLabGatewayConfig,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                api_enabled=True,
+                production_writes_enabled=True,
+                source_add_enabled=True,
+                source_add_functional_probes_enabled=False,
+                evaluation_epoch=0,
+                source_add_probe_timeout_seconds=45,
             )
         ),
     )
@@ -262,10 +400,7 @@ async def test_owner_provision_endpoint_appends_catalog_and_provisioning(monkeyp
         "adapter_id": "adapter:test-source",
         "miner_hotkey": "hk-owner",
         "manifest": _manifest_doc(),
-        "source_metadata": {
-            "api_base_url": "https://api.test-source.example",
-            "documentation_url": "https://docs.test-source.example",
-        },
+        "source_metadata": _source_metadata_doc(),
         "source_identity_hash": "sha256:" + "1" * 64,
     }
     select_one_calls = []
@@ -279,32 +414,63 @@ async def test_owner_provision_endpoint_appends_catalog_and_provisioning(monkeyp
                 "miner_hotkey": "hk-owner",
                 "stage": "provenance_precheck_passed",
                 "submission_doc": submission_doc,
+                "precheck_status": PRECHECK_PASSED,
+                "precheck_doc": {"reasons": ["provenance_reference_backed"]},
                 "source_identity_hash": "sha256:" + "1" * 64,
             }
+        if table == "research_lab_source_add_probe_config_current":
+            return {
+                "config_ref": "source_add_probe_config:0123456789abcdef",
+                "config_status": "active",
+                "probe_doc": {
+                    "schema_version": "leadpoet.source_add_probe_config.v2",
+                    "provider_id": "sourceadd_0123456789abcdef",
+                    "base_url": "https://api.test-source.example",
+                    "auth_kind": "none",
+                    "auth_name": "",
+                    "request_headers": {},
+                    "probes": [
+                        {
+                            "method": "GET",
+                            "path": "/search",
+                            "query": {"q": "test"},
+                            "body_json": None,
+                        }
+                    ],
+                },
+                "credential_envelope": {},
+            }
+        if table == "research_lab_source_add_functional_probe_current":
+            return {
+                "result_status": "passed",
+                "config_ref": "source_add_probe_config:0123456789abcdef",
+            }
+        if table == "research_lab_source_add_provisioning_current":
+            return None
         if table == "research_lab_source_catalog":
             return None
         return None
 
-    writes = []
+    finalized = {}
 
-    async def fake_insert_row(table, row):
-        writes.append((table, dict(row)))
-        return dict(row)
-
-    async def fake_next_event_seq(*_args, **_kwargs):
-        return 0
+    async def fake_rpc(name, params):
+        assert name == "research_lab_source_add_finalize_provision"
+        finalized.update(params)
+        return {
+            "status": "provisioned",
+            "catalog_id": params["p_catalog_row"]["catalog_id"],
+            "provision_ref": params["p_provision_row"]["provision_ref"],
+        }
 
     monkeypatch.setattr(api, "select_one", fake_select_one)
-    monkeypatch.setattr(api, "insert_row", fake_insert_row)
-    monkeypatch.setattr(api, "next_event_seq", fake_next_event_seq)
+    monkeypatch.setattr(api, "_source_add_rpc", fake_rpc)
     monkeypatch.setattr(api, "reserved_builtin_provider_ids_sync", lambda: set())
 
     response = await api.provision_research_lab_source_adapter(
         "source_add_submission:" + "a" * 16,
         ResearchLabSourceAdapterProvisionRequest(
             registry_provider_id="test_source",
-            provision_status=PROVISION_STATUS_ELIGIBLE,
-            auth_kind="none",
+            provision_status=PROVISION_STATUS_APPROVED_PENDING,
             probe_endpoints=[
                 {
                     "endpoint_id": "test_source.search",
@@ -319,19 +485,16 @@ async def test_owner_provision_endpoint_appends_catalog_and_provisioning(monkeyp
     )
 
     assert response.adapter_id == "adapter:test-source"
-    assert response.provision_status == PROVISION_STATUS_ELIGIBLE
-    assert [table for table, _row in writes] == [
-        "research_lab_source_catalog",
-        "research_lab_source_add_provisioning_events",
-    ]
-    assert writes[1][1]["provision_doc"]["provider_registry_entry"]["id"] == "test_source"
-    assert "api_credential" not in str(writes)
+    assert response.provision_status == PROVISION_STATUS_APPROVED_PENDING
+    assert finalized["p_smoke_attempt"] == {}
+    assert finalized["p_provision_row"]["provision_doc"]["provider_registry_entry"]["id"] == "test_source"
+    assert finalized["p_provision_row"]["credential_envelope"] == {}
+    assert "api_credential" not in str(finalized)
 
 
 @pytest.mark.asyncio
-async def test_owner_cannot_mark_authenticated_source_eligible_with_unresolved_env_ref(monkeypatch):
+async def test_owner_eligible_provision_creates_pending_then_queues_exact_smoke(monkeypatch):
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
-    monkeypatch.delenv("SYNTHETIC_SOURCE_CREDENTIAL", raising=False)
     monkeypatch.setattr(
         api.ResearchLabGatewayConfig,
         "from_env",
@@ -340,55 +503,132 @@ async def test_owner_cannot_mark_authenticated_source_eligible_with_unresolved_e
                 api_enabled=True,
                 production_writes_enabled=True,
                 source_add_enabled=True,
-                source_add_credential_kms_key_id="",
-                openrouter_key_kms_key_id="",
+                source_add_functional_probes_enabled=True,
             )
         ),
     )
-    submission_doc = {
-        "adapter_id": "adapter:test-source",
-        "miner_hotkey": "hk-owner",
-        "manifest": _manifest_doc(),
-        "source_metadata": {"api_base_url": "https://api.test-source.example"},
+    submission_id = "source_add_submission:" + "b" * 16
+    config_ref = "source_add_probe_config:0123456789abcdef"
+    probe_doc = {
+        "schema_version": "leadpoet.source_add_probe_config.v2",
+        "provider_id": "sourceadd_0123456789abcdef",
+        "base_url": "https://api.test-source.example",
+        "auth_kind": "none",
+        "auth_name": "",
+        "request_headers": {},
+        "probes": [
+            {
+                "method": "GET",
+                "path": "/search",
+                "query": {"q": "test"},
+                "body_json": None,
+            }
+        ],
     }
 
     async def fake_select_one(table, **_kwargs):
-        assert table == "research_lab_source_add_submission_current"
+        if table == "research_lab_source_add_submission_current":
+            return {
+                "submission_id": submission_id,
+                "adapter_id": "adapter:test-source",
+                "miner_hotkey": "hk-owner",
+                "stage": "functional_probe_passed",
+                "submission_doc": {
+                    "manifest": _manifest_doc(),
+                    "source_metadata": _source_metadata_doc(),
+                },
+                "precheck_status": PRECHECK_PASSED,
+                "precheck_doc": {},
+                "source_identity_hash": "sha256:" + "1" * 64,
+            }
+        if table == "research_lab_source_add_probe_config_current":
+            return {
+                "config_ref": config_ref,
+                "config_status": "active",
+                "probe_doc": probe_doc,
+                "credential_envelope": {},
+            }
+        if table == "research_lab_source_add_functional_probe_current":
+            return {"result_status": "passed", "config_ref": config_ref}
+        return None
+
+    rpc_calls = []
+
+    async def fake_rpc(name, params):
+        rpc_calls.append((name, params))
+        if name == "research_lab_source_add_finalize_provision":
+            assert params["p_provision_row"]["provision_status"] == (
+                PROVISION_STATUS_APPROVED_PENDING
+            )
+            assert params["p_provision_row"]["provision_doc"][
+                "provider_registry_entry"
+            ]["active"] is False
+            assert params["p_smoke_attempt"] == {}
+            return {
+                "status": "provisioned",
+                "catalog_id": params["p_catalog_row"]["catalog_id"],
+                "provision_ref": params["p_provision_row"]["provision_ref"],
+            }
+        assert name == "research_lab_source_add_enqueue_provision_smoke"
+        assert params["p_config_ref"] == config_ref
+        assert params["p_provision_row"]["provision_status"] == (
+            PROVISION_STATUS_ELIGIBLE
+        )
+        assert params["p_provision_row"]["provision_doc"][
+            "provider_registry_entry"
+        ]["active"] is True
         return {
-            "submission_id": "source_add_submission:" + "c" * 16,
-            "adapter_id": "adapter:test-source",
-            "miner_hotkey": "hk-owner",
-            "stage": "provenance_precheck_passed",
-            "submission_doc": submission_doc,
-            "source_identity_hash": "sha256:" + "2" * 64,
+            "status": "queued",
+            "work_id": params["p_work_id"],
+            "work_status": "queued",
         }
 
     monkeypatch.setattr(api, "select_one", fake_select_one)
+    monkeypatch.setattr(api, "_source_add_rpc", fake_rpc)
+    monkeypatch.setattr(api, "reserved_builtin_provider_ids_sync", lambda: set())
 
-    with pytest.raises(api.HTTPException) as exc_info:
-        await api.provision_research_lab_source_adapter(
-            "source_add_submission:" + "c" * 16,
-            ResearchLabSourceAdapterProvisionRequest(
-                registry_provider_id="test_source_auth",
-                provision_status=PROVISION_STATUS_ELIGIBLE,
-                auth_kind="header",
-                auth_name="x-synthetic-key",
-                credential_env_refs=["SYNTHETIC_SOURCE_CREDENTIAL"],
-                probe_endpoints=[
-                    {
-                        "endpoint_id": "test_source_auth.search",
-                        "provider_id": "test_source_auth",
-                        "method": "GET",
-                        "path": "/search",
-                        "params": [],
-                    }
-                ],
-            ),
-            authorization="Bearer service-role-test",
+    response = await api.provision_research_lab_source_adapter(
+        submission_id,
+        ResearchLabSourceAdapterProvisionRequest(
+            registry_provider_id="test_source",
+            provision_status=PROVISION_STATUS_ELIGIBLE,
+            probe_endpoints=[
+                {
+                    "endpoint_id": "test_source.search",
+                    "provider_id": "test_source",
+                    "method": "GET",
+                    "path": "/search",
+                    "params": [
+                        {
+                            "name": "q",
+                            "type": "string",
+                            "required": True,
+                            "location": "query",
+                        }
+                    ],
+                }
+            ],
+        ),
+        authorization="Bearer service-role-test",
+    )
+
+    assert [name for name, _params in rpc_calls] == [
+        "research_lab_source_add_finalize_provision",
+        "research_lab_source_add_enqueue_provision_smoke",
+    ]
+    assert response.provision_status == PROVISION_STATUS_APPROVED_PENDING
+    assert response.requested_provision_status == PROVISION_STATUS_ELIGIBLE
+    assert response.queue_status == "queued"
+    assert response.work_id and response.work_id.startswith("source_add_work:")
+
+
+def test_owner_process_environment_credentials_are_retired():
+    with pytest.raises(ValidationError, match="process-environment credentials are retired"):
+        ResearchLabSourceAdapterProvisionRequest(
+            registry_provider_id="test_source_auth",
+            provision_status=PROVISION_STATUS_ELIGIBLE,
+            credential_env_refs=["SYNTHETIC_SOURCE_CREDENTIAL"],
         )
-
-    assert exc_info.value.status_code == 400
-    assert "cannot become provisioned_autoresearch_eligible" in exc_info.value.detail
 
 
 def test_provisioned_rows_build_provider_and_probe_catalog_entries():
@@ -515,7 +755,7 @@ def test_llm_judge_verdict_parser_rejects_string_source_used():
 
 
 @pytest.mark.asyncio
-async def test_owner_recheck_advances_manual_submission_and_creates_leg1(monkeypatch):
+async def test_owner_recheck_only_queues_provenance_and_never_creates_leg1(monkeypatch):
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
     monkeypatch.setattr(
         api.ResearchLabGatewayConfig,
@@ -525,7 +765,6 @@ async def test_owner_recheck_advances_manual_submission_and_creates_leg1(monkeyp
                 api_enabled=True,
                 production_writes_enabled=True,
                 source_add_enabled=True,
-                source_add_rewards_enabled=True,
             )
         ),
     )
@@ -537,13 +776,7 @@ async def test_owner_recheck_advances_manual_submission_and_creates_leg1(monkeyp
         "manifest": _manifest_doc(),
         "stage": PRECHECK_MANUAL,
         "stage_history": ["submitted", "manifest_validated", PRECHECK_MANUAL],
-        "source_metadata": {
-            "api_base_url": "https://api.test-source.example",
-            "documentation_url": "https://docs.test-source.example",
-            "auth_type": "none",
-            "endpoint_examples": [{"method": "GET", "path": "/search"}],
-            "rate_limit_notes": "Use conservative request pacing.",
-        },
+        "source_metadata": _source_metadata_doc(),
         "precheck_status": PRECHECK_MANUAL,
         "precheck_doc": {"reasons": ["low_docs_completeness"]},
         "source_identity_hash": "sha256:" + "1" * 64,
@@ -562,50 +795,30 @@ async def test_owner_recheck_advances_manual_submission_and_creates_leg1(monkeyp
             "source_identity_hash": "sha256:" + "1" * 64,
         }
 
-    persisted = []
+    queued = {}
 
-    async def fake_persist(record_doc):
-        persisted.append(dict(record_doc))
-
-    async def fake_reward(**kwargs):
-        assert kwargs["precheck_status"] == PRECHECK_PASSED
-        assert kwargs["provenance_graph"]["root_receipt_hash"] == "sha256:" + "9" * 64
+    async def fake_rpc(name, params):
+        assert name == "research_lab_source_add_requeue_provenance"
+        queued.update(params)
         return {
-            "source_add_leg1_reward_status": "created",
-            "reward_ref": "source_add_reward:" + "2" * 16,
-            "start_epoch": 701,
+            "status": "queued",
+            "stage": "provenance_queued",
+            "work_id": params["p_work_id"],
         }
 
     monkeypatch.setattr(api, "select_one", fake_select_one)
-    async def fake_provenance(**_kwargs):
-        return (
-            SourceAddProvenanceResult(
-                PRECHECK_PASSED,
-                ("provenance_reference_backed",),
-                {"docs_completeness": {"score": 5}},
-            ),
-            {"receipt_graph": {"root_receipt_hash": "sha256:" + "9" * 64}},
-        )
-
-    monkeypatch.setattr(
-        v2_authority,
-        "evaluate_source_add_provenance_v2",
-        fake_provenance,
-    )
-    monkeypatch.setattr(api, "persist_source_add_submission", fake_persist)
-    monkeypatch.setattr(api, "_maybe_create_source_add_leg1_reward_for_precheck", fake_reward)
+    monkeypatch.setattr(api, "_source_add_rpc", fake_rpc)
 
     response = await api.recheck_research_lab_source_adapter_provenance(
         submission_id,
         authorization="Bearer service-role-test",
     )
 
-    assert response.precheck_status == PRECHECK_PASSED
-    assert response.stage == PRECHECK_PASSED
-    assert response.leg1_reward_status == "created"
-    assert len(persisted) == 1
-    assert persisted[0]["stage_history"][-1] == PRECHECK_PASSED
-    assert persisted[0]["source_metadata"] == submission_doc["source_metadata"]
+    assert response.precheck_status == PRECHECK_MANUAL
+    assert response.stage == "provenance_queued"
+    assert response.leg1_reward_status == "not_evaluated"
+    assert queued["p_submission_id"] == submission_id
+    assert queued["p_identity_hash"].startswith("sha256:")
 
 
 @pytest.mark.asyncio
@@ -644,4 +857,4 @@ async def test_owner_recheck_refuses_legacy_submission_without_structured_metada
         )
 
     assert exc_info.value.status_code == 400
-    assert "structured SOURCE_ADD fields" in str(exc_info.value.detail)
+    assert "submission metadata is incomplete or invalid" in str(exc_info.value.detail)

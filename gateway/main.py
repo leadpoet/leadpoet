@@ -214,6 +214,7 @@ async def lifespan(app: FastAPI):
     icp_task = None
     fulfillment_task_handle = None
     research_lab_worker_supervisor = None
+    source_add_dispatcher_task = None
     hotkey_bucket_cleanup_task = None
 
     # Now use async_subtensor in a try/finally to ensure cleanup
@@ -392,6 +393,22 @@ async def lifespan(app: FastAPI):
             f"hosted={research_lab_worker_health['hosted_running']} "
             f"scoring={research_lab_worker_health['scoring_running']}"
         )
+
+        from gateway.research_lab.config import ResearchLabGatewayConfig
+
+        source_add_config = ResearchLabGatewayConfig.from_env()
+        if (
+            source_add_config.source_add_enabled
+            and source_add_config.source_add_dispatcher_enabled
+        ):
+            from gateway.research_lab.source_add_workflow import run_source_add_dispatcher
+
+            source_add_dispatcher_task = asyncio.create_task(
+                run_source_add_dispatcher()
+            )
+            print("✅ SOURCE_ADD dispatcher started (one leased queue consumer)")
+        else:
+            print("ℹ️  SOURCE_ADD dispatcher disabled")
         
         print("")
         print("🎯 ARCHITECTURE SUMMARY:")
@@ -431,6 +448,7 @@ async def lifespan(app: FastAPI):
             hotkey_bucket_cleanup_task,
             icp_task,
             fulfillment_task_handle,
+            source_add_dispatcher_task,
         ]
         
         # Filter out None tasks (when DISABLE_BACKGROUND_TASKS=true)

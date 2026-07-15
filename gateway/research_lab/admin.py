@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import getpass
+import hashlib
+import json
 import logging
+import os
+import sys
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from gateway.deploy_readiness import (
     assert_resume_allowed,
@@ -55,7 +64,7 @@ from .promotion import (
     reregister_active_manifest,
     sync_active_model_to_repo_head,
 )
-from .store import select_many, select_one
+from .store import call_rpc, select_all, select_many, select_one
 
 
 logger = logging.getLogger(__name__)
@@ -484,6 +493,103 @@ def build_parser() -> argparse.ArgumentParser:
     house_comparison.add_argument(
         "--end-date", help="Window end (YYYY-MM-DD, inclusive; default today)"
     )
+
+    source_add = sub.add_parser(
+        "source-add",
+        help="Dry-run-first SOURCE_ADD queue, test, and provisioning controls",
+    )
+    source_add_sub = source_add.add_subparsers(
+        dest="source_add_command", required=True
+    )
+
+    source_add_list = source_add_sub.add_parser(
+        "list", help="List current private SOURCE_ADD submissions"
+    )
+    source_add_list.add_argument("--stage")
+    source_add_list.add_argument("--limit", type=int, default=200)
+
+    source_add_sub.add_parser(
+        "status", help="Show SOURCE_ADD dispatcher, queue, probe, and reward state"
+    )
+
+    for action, paused in (("pause", True), ("resume", False)):
+        control = source_add_sub.add_parser(
+            action, help=("Pause" if paused else "Resume") + " SOURCE_ADD work claims"
+        )
+        control.add_argument("--reason", required=True)
+        control.add_argument("--actor-ref", default=default_actor_ref())
+        control.add_argument(
+            "--apply", action="store_true", help="Write the control transition"
+        )
+
+    source_add_recheck = source_add_sub.add_parser(
+        "recheck", help="Queue an owner-requested provenance recheck"
+    )
+    source_add_recheck.add_argument("--submission-id", required=True)
+    source_add_recheck.add_argument("--gateway-url", default="http://127.0.0.1:8000")
+    source_add_recheck.add_argument("--apply", action="store_true")
+
+    source_add_configure = source_add_sub.add_parser(
+        "configure-test",
+        help="Configure and queue an exact V2 functional API test",
+    )
+    source_add_configure.add_argument("--submission-id", required=True)
+    source_add_configure.add_argument("--base-url", required=True)
+    source_add_configure.add_argument(
+        "--auth-kind", choices=("none", "header", "query", "bearer"), default="none"
+    )
+    source_add_configure.add_argument("--auth-name")
+    source_add_configure.add_argument(
+        "--header",
+        action="append",
+        default=[],
+        help="Non-secret request header as NAME=VALUE (repeatable)",
+    )
+    source_add_configure.add_argument(
+        "--probe-json",
+        action="append",
+        required=True,
+        help='Exact probe JSON, e.g. {"method":"GET","path":"/v1/items","query":{},"body_json":null}',
+    )
+    source_add_configure.add_argument("--operator-notes")
+    source_add_configure.add_argument(
+        "--credential-stdin",
+        action="store_true",
+        help="Read an authenticated API credential from stdin instead of a hidden prompt",
+    )
+    source_add_configure.add_argument("--gateway-url", default="http://127.0.0.1:8000")
+    source_add_configure.add_argument("--apply", action="store_true")
+
+    source_add_provision = source_add_sub.add_parser(
+        "provision", help="Approve or make a functionally tested source autoresearch-eligible"
+    )
+    source_add_provision.add_argument("--submission-id", required=True)
+    source_add_provision.add_argument("--registry-provider-id", required=True)
+    source_add_provision.add_argument(
+        "--status",
+        dest="provision_status",
+        choices=("approved_pending_provision", "provisioned_autoresearch_eligible"),
+        default="approved_pending_provision",
+    )
+    source_add_provision.add_argument(
+        "--probe-endpoint-json",
+        action="append",
+        required=True,
+        help="Provider probe endpoint JSON (repeatable)",
+    )
+    source_add_provision.add_argument("--cost-model-json", default="{}")
+    source_add_provision.add_argument("--operator-notes")
+    source_add_provision.add_argument("--gateway-url", default="http://127.0.0.1:8000")
+    source_add_provision.add_argument("--apply", action="store_true")
+
+    source_add_disable = source_add_sub.add_parser(
+        "disable", help="Disable an already provisioned SOURCE_ADD provider"
+    )
+    source_add_disable.add_argument("--submission-id", required=True)
+    source_add_disable.add_argument("--registry-provider-id", required=True)
+    source_add_disable.add_argument("--operator-notes")
+    source_add_disable.add_argument("--gateway-url", default="http://127.0.0.1:8000")
+    source_add_disable.add_argument("--apply", action="store_true")
 
     return parser
 
@@ -915,7 +1021,475 @@ async def _recover_stale_candidate_claims_operator(
     }
 
 
+def _source_add_json_object(value: str, *, field: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(str(value))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{field} must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{field} must be a JSON object")
+    return parsed
+
+
+def _source_add_headers(values: list[str]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for raw in values:
+        name, separator, value = str(raw).partition("=")
+        name = name.strip()
+        if not separator or not name or name in headers:
+            raise ValueError("each --header must be a unique NAME=VALUE")
+        headers[name] = value
+    return headers
+
+
+def _source_add_gateway_url(value: str) -> str:
+    normalized = str(value or "").strip().rstrip("/")
+    parsed = urlsplit(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("SOURCE_ADD gateway URL is invalid")
+    if parsed.scheme == "http" and parsed.hostname not in {
+        "127.0.0.1",
+        "::1",
+        "localhost",
+    }:
+        raise ValueError("plaintext SOURCE_ADD admin auth is loopback-only")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("SOURCE_ADD gateway URL must not contain credentials or query data")
+    return normalized
+
+
+async def _source_add_admin_http(
+    *, gateway_url: str, path: str, payload: Mapping[str, Any]
+) -> dict[str, Any]:
+    service_key = str(os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+    if not service_key:
+        raise ValueError("SUPABASE_SERVICE_ROLE_KEY is required")
+    url = _source_add_gateway_url(gateway_url) + str(path)
+    body = json.dumps(dict(payload), sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+
+    def _call() -> dict[str, Any]:
+        request = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": "Bearer " + service_key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                encoded = response.read(1024 * 1024)
+        except urllib.error.HTTPError as exc:
+            encoded = exc.read(64 * 1024)
+            try:
+                detail = json.loads(encoded.decode("utf-8")).get("detail")
+            except Exception:
+                detail = "request rejected"
+            raise RuntimeError(
+                f"SOURCE_ADD gateway returned HTTP {exc.code}: {detail}"
+            ) from exc
+        try:
+            decoded = json.loads(encoded.decode("utf-8"))
+        except Exception as exc:
+            raise RuntimeError("SOURCE_ADD gateway returned invalid JSON") from exc
+        if not isinstance(decoded, dict):
+            raise RuntimeError("SOURCE_ADD gateway returned an invalid document")
+        return decoded
+
+    return await asyncio.to_thread(_call)
+
+
+def _verify_and_encrypt_source_add_credential(
+    recipient: Mapping[str, Any], credential: bytes
+) -> dict[str, str]:
+    """Verify the exact Nitro recipient claim before encrypting a secret locally."""
+
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+    from gateway.tee.kms_recipient_v2 import (
+        KMS_KEY_ENCRYPTION_ALGORITHM,
+        SOURCE_ADD_INGRESS_RECIPIENT_PURPOSE,
+        SOURCE_ADD_INGRESS_RECIPIENT_SCHEMA_VERSION,
+    )
+    from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
+    from leadpoet_canonical.nitro import verify_nitro_attestation_full
+
+    required = {
+        "schema_version",
+        "purpose",
+        "request_id",
+        "boot_identity_hash",
+        "miner_hotkey_hash",
+        "adapter_ref_hash",
+        "credential_ref",
+        "key_ref_hash",
+        "recipient_public_key_hash",
+        "request_nonce",
+        "recipient_public_key_der_b64",
+        "attestation_document_b64",
+        "key_encryption_algorithm",
+    }
+    if not isinstance(recipient, Mapping) or set(recipient) != required:
+        raise ValueError("SOURCE_ADD recipient fields are invalid")
+    if (
+        recipient.get("schema_version")
+        != SOURCE_ADD_INGRESS_RECIPIENT_SCHEMA_VERSION
+        or recipient.get("purpose") != SOURCE_ADD_INGRESS_RECIPIENT_PURPOSE
+        or recipient.get("key_encryption_algorithm")
+        != KMS_KEY_ENCRYPTION_ALGORITHM
+    ):
+        raise ValueError("SOURCE_ADD recipient policy is invalid")
+    if not credential or len(credential) > 64 * 1024 or b"\x00" in credential:
+        raise ValueError("SOURCE_ADD credential is empty or outside the allowed size")
+    try:
+        public_der = base64.b64decode(
+            str(recipient["recipient_public_key_der_b64"]), validate=True
+        )
+    except Exception as exc:
+        raise ValueError("SOURCE_ADD recipient public key is invalid") from exc
+    public_hash = "sha256:" + hashlib.sha256(public_der).hexdigest()
+    if public_hash != str(recipient.get("recipient_public_key_hash") or ""):
+        raise ValueError("SOURCE_ADD recipient public key hash differs")
+    claim = {
+        name: recipient[name]
+        for name in (
+            "schema_version",
+            "purpose",
+            "boot_identity_hash",
+            "miner_hotkey_hash",
+            "adapter_ref_hash",
+            "credential_ref",
+            "key_ref_hash",
+            "recipient_public_key_hash",
+            "request_nonce",
+        )
+    }
+    request_id = sha256_json(claim)
+    if request_id != str(recipient.get("request_id") or ""):
+        raise ValueError("SOURCE_ADD recipient claim hash differs")
+    valid, attestation = verify_nitro_attestation_full(
+        attestation_b64=str(recipient["attestation_document_b64"]),
+        expected_pubkey=None,
+        expected_purpose=SOURCE_ADD_INGRESS_RECIPIENT_PURPOSE,
+        role="gateway",
+    )
+    if not valid:
+        raise ValueError("SOURCE_ADD Nitro attestation verification failed")
+    expected_user_data = {
+        "schema_version": SOURCE_ADD_INGRESS_RECIPIENT_SCHEMA_VERSION,
+        "purpose": SOURCE_ADD_INGRESS_RECIPIENT_PURPOSE,
+        "claim_hash": request_id,
+    }
+    if (
+        attestation.get("attestation_public_key") != public_der.hex()
+        or attestation.get("user_data") != expected_user_data
+        or canonical_json(attestation["user_data"]) != canonical_json(expected_user_data)
+    ):
+        raise ValueError("SOURCE_ADD attestation is not bound to the recipient claim")
+    try:
+        public_key = serialization.load_der_public_key(public_der)
+    except Exception as exc:
+        raise ValueError("SOURCE_ADD recipient RSA key is invalid") from exc
+    if not isinstance(public_key, rsa.RSAPublicKey) or public_key.key_size < 2048:
+        raise ValueError("SOURCE_ADD recipient key policy is invalid")
+    max_plaintext = (public_key.key_size // 8) - (2 * hashes.SHA256.digest_size) - 2
+    if len(credential) > max_plaintext:
+        raise ValueError("SOURCE_ADD credential exceeds the attested RSA-OAEP limit")
+    ciphertext = public_key.encrypt(
+        credential,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None,
+        ),
+    )
+    return {
+        "request_id": request_id,
+        "ciphertext_b64": base64.b64encode(ciphertext).decode("ascii"),
+    }
+
+
+def _read_source_add_credential(*, from_stdin: bool) -> bytes:
+    if from_stdin:
+        value = sys.stdin.buffer.readline(64 * 1024 + 2).rstrip(b"\r\n")
+    else:
+        value = getpass.getpass("SOURCE_ADD API credential: ").encode("utf-8")
+    if not value or len(value) > 64 * 1024:
+        raise ValueError("SOURCE_ADD credential is empty or outside the allowed size")
+    return value
+
+
+async def _source_add_status() -> dict[str, Any]:
+    control = await select_one(
+        "research_lab_source_add_control", filters=(("singleton", True),)
+    )
+    work = await select_all(
+        "research_lab_source_add_work_items",
+        columns="work_kind,work_status",
+        filters=(),
+        max_rows=50000,
+    )
+    intents = await select_all(
+        "research_lab_source_add_reward_intents",
+        columns="intent_status",
+        filters=(),
+        max_rows=50000,
+    )
+    probes = await select_all(
+        "research_lab_source_add_functional_probe_current",
+        columns="result_status",
+        filters=(),
+        max_rows=50000,
+    )
+
+    def _counts(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
+        output: dict[str, int] = {}
+        for row in rows:
+            key = str(row.get(field) or "unknown")
+            output[key] = output.get(key, 0) + 1
+        return dict(sorted(output.items()))
+
+    work_counts: dict[str, dict[str, int]] = {}
+    for row in work:
+        kind = str(row.get("work_kind") or "unknown")
+        status = str(row.get("work_status") or "unknown")
+        work_counts.setdefault(kind, {})[status] = (
+            work_counts.setdefault(kind, {}).get(status, 0) + 1
+        )
+    return {
+        "ok": True,
+        "action": "source-add status",
+        "control": control or {},
+        "work_counts": work_counts,
+        "functional_probe_counts": _counts(probes, "result_status"),
+        "reward_intent_counts": _counts(intents, "intent_status"),
+    }
+
+
+async def _run_source_add_admin(args: argparse.Namespace) -> dict[str, Any]:
+    action = str(args.source_add_command)
+    if action == "status":
+        return await _source_add_status()
+    if action == "list":
+        if not 1 <= int(args.limit) <= 10000:
+            raise ValueError("--limit must be between 1 and 10000")
+        filters = (("stage", args.stage),) if args.stage else ()
+        rows = await select_all(
+            "research_lab_source_add_submission_current",
+            columns=(
+                "submission_id,adapter_id,miner_hotkey,stage,precheck_status,"
+                "submission_doc,created_at"
+            ),
+            filters=filters,
+            order_by=(("created_at", False),),
+            max_rows=int(args.limit),
+            allow_partial=True,
+        )
+        submissions = []
+        for row in rows[: int(args.limit)]:
+            document = row.get("submission_doc")
+            manifest = document.get("manifest") if isinstance(document, Mapping) else {}
+            submissions.append(
+                {
+                    "submission_id": row.get("submission_id"),
+                    "adapter_id": row.get("adapter_id"),
+                    "miner_hotkey": row.get("miner_hotkey"),
+                    "source_name": manifest.get("source_name") if isinstance(manifest, Mapping) else "",
+                    "stage": row.get("stage"),
+                    "precheck_status": row.get("precheck_status"),
+                    "created_at": row.get("created_at"),
+                }
+            )
+        return {
+            "ok": True,
+            "action": "source-add list",
+            "count": len(submissions),
+            "submissions": submissions,
+        }
+    if action in {"pause", "resume"}:
+        current = await select_one(
+            "research_lab_source_add_control", filters=(("singleton", True),)
+        )
+        if not args.apply:
+            return {
+                "ok": True,
+                "action": f"source-add {action}",
+                "dry_run": True,
+                "current": current or {},
+                "requested_paused": action == "pause",
+                "reason": args.reason,
+                "actor_ref": args.actor_ref,
+            }
+        result = await call_rpc(
+            "research_lab_source_add_set_paused",
+            {
+                "p_paused": action == "pause",
+                "p_reason": args.reason,
+                "p_actor_ref": args.actor_ref,
+            },
+        )
+        if isinstance(result, list) and len(result) == 1:
+            result = result[0]
+        if not isinstance(result, Mapping):
+            raise RuntimeError("SOURCE_ADD control RPC returned an invalid result")
+        return {
+            "ok": True,
+            "action": f"source-add {action}",
+            "dry_run": False,
+            "control": dict(result),
+        }
+    if action == "recheck":
+        if not args.apply:
+            return {
+                "ok": True,
+                "action": "source-add recheck",
+                "dry_run": True,
+                "submission_id": args.submission_id,
+            }
+        result = await _source_add_admin_http(
+            gateway_url=args.gateway_url,
+            path=f"/research-lab/admin/source-adapters/{args.submission_id}/recheck-provenance",
+            payload={},
+        )
+        return {"ok": True, "action": "source-add recheck", "dry_run": False, **result}
+    if action == "configure-test":
+        from .models import ResearchLabSourceAdapterProbeConfigureRequest
+
+        probes = [
+            _source_add_json_object(value, field="--probe-json")
+            for value in args.probe_json
+        ]
+        if not 1 <= len(probes) <= 3:
+            raise ValueError("configure-test requires one to three probes")
+        payload: dict[str, Any] = {
+            "base_url": args.base_url,
+            "auth_kind": args.auth_kind,
+            "auth_name": args.auth_name,
+            "request_headers": _source_add_headers(args.header),
+            "probes": probes,
+            "operator_notes": args.operator_notes,
+        }
+        if args.auth_kind == "none" and args.credential_stdin:
+            raise ValueError("--credential-stdin requires an authenticated --auth-kind")
+        validation_payload = dict(payload)
+        if args.auth_kind != "none":
+            validation_payload["api_credential_v2"] = {
+                "request_id": "sha256:" + "0" * 64,
+                "ciphertext_b64": base64.b64encode(b"0" * 256).decode("ascii"),
+            }
+        validated = ResearchLabSourceAdapterProbeConfigureRequest.model_validate(
+            validation_payload
+        )
+        payload = validated.model_dump(
+            mode="json",
+            exclude={"api_credential", "api_credential_v2"},
+            exclude_none=True,
+        )
+        if not args.apply:
+            return {
+                "ok": True,
+                "action": "source-add configure-test",
+                "dry_run": True,
+                "submission_id": args.submission_id,
+                "credential_required": args.auth_kind != "none",
+                "configuration": payload,
+            }
+        if args.auth_kind != "none":
+            recipient = await _source_add_admin_http(
+                gateway_url=args.gateway_url,
+                path=f"/research-lab/admin/source-adapters/{args.submission_id}/credential-recipient",
+                payload={},
+            )
+            credential = _read_source_add_credential(
+                from_stdin=bool(args.credential_stdin)
+            )
+            payload["api_credential_v2"] = _verify_and_encrypt_source_add_credential(
+                recipient, credential
+            )
+        result = await _source_add_admin_http(
+            gateway_url=args.gateway_url,
+            path=f"/research-lab/admin/source-adapters/{args.submission_id}/configure-test",
+            payload=payload,
+        )
+        return {
+            "ok": True,
+            "action": "source-add configure-test",
+            "dry_run": False,
+            **result,
+        }
+    if action == "provision":
+        from .models import ResearchLabSourceAdapterProvisionRequest
+
+        endpoints = [
+            _source_add_json_object(value, field="--probe-endpoint-json")
+            for value in args.probe_endpoint_json
+        ]
+        payload = ResearchLabSourceAdapterProvisionRequest.model_validate({
+            "registry_provider_id": args.registry_provider_id,
+            "provision_status": args.provision_status,
+            "cost_model": _source_add_json_object(
+                args.cost_model_json, field="--cost-model-json"
+            ),
+            "probe_endpoints": endpoints,
+            "operator_notes": args.operator_notes,
+        }).model_dump(mode="json", exclude_none=True)
+        if not args.apply:
+            return {
+                "ok": True,
+                "action": "source-add provision",
+                "dry_run": True,
+                "submission_id": args.submission_id,
+                "provisioning": payload,
+            }
+        result = await _source_add_admin_http(
+            gateway_url=args.gateway_url,
+            path=f"/research-lab/admin/source-adapters/{args.submission_id}/provision",
+            payload=payload,
+        )
+        return {
+            "ok": True,
+            "action": "source-add provision",
+            "dry_run": False,
+            **result,
+        }
+    if action == "disable":
+        from .models import ResearchLabSourceAdapterProvisionRequest
+
+        payload = ResearchLabSourceAdapterProvisionRequest.model_validate({
+            "registry_provider_id": args.registry_provider_id,
+            "provision_status": "disabled",
+            "operator_notes": args.operator_notes,
+        }).model_dump(mode="json", exclude_none=True)
+        if not args.apply:
+            return {
+                "ok": True,
+                "action": "source-add disable",
+                "dry_run": True,
+                "submission_id": args.submission_id,
+                "provisioning": payload,
+            }
+        result = await _source_add_admin_http(
+            gateway_url=args.gateway_url,
+            path=f"/research-lab/admin/source-adapters/{args.submission_id}/provision",
+            payload=payload,
+        )
+        return {
+            "ok": True,
+            "action": "source-add disable",
+            "dry_run": False,
+            **result,
+        }
+    raise ValueError(f"unknown SOURCE_ADD command: {action}")
+
+
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
+    if args.command == "source-add":
+        return await _run_source_add_admin(args)
     if args.command == "check-deploy-readiness":
         result = build_deploy_readiness(
             gateway_commit=args.gateway_commit,

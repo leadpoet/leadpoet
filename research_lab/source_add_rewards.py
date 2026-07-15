@@ -3,9 +3,9 @@
 Supersedes the P1.5 USD trial-yield bounty bands. Both legs are fixed-term
 emission streams within a separate, first-priority SOURCE_ADD allocation:
 
-- **Leg 1 — credible submission**: 1% of miner emissions ×
-  ``RESEARCH_LAB_REWARD_EPOCHS`` (20), created when a miner-submitted source
-  reaches ``provenance_precheck_passed``. Flat, one per adapter, ever.
+- **Leg 1 — functional source submission**: 1% of miner emissions ×
+  ``RESEARCH_LAB_REWARD_EPOCHS`` (20), created only after a measured V2
+  functional probe passes. Flat, one per adapter, ever.
 - **Leg 2 — implementation rider**: +5% × 20 epochs to the ADAPTER OWNER,
   created alongside the implementing merge's champion grant only when the
   LLM final judge decides the already-winning change was helped by a known
@@ -156,8 +156,9 @@ def create_leg1_reward(
     alpha_percent: float = DEFAULT_LEG1_ALPHA_PERCENT,
     reward_epochs: int = DEFAULT_REWARD_EPOCHS,
     state: str = SourceAddRewardState.ACTIVE.value,
+    trigger_evidence: Mapping[str, Any] | None = None,
 ) -> SourceAddRewardRecord | None:
-    """Create the credible-submission leg. One per adapter, ever.
+    """Create the measured-functional-source leg. One per adapter, ever.
 
     Queue policy is normal FIFO on the allocation rails: pass
     ``state="queued"`` when the lab cap cannot pay right now, exactly like
@@ -176,6 +177,7 @@ def create_leg1_reward(
         start_epoch=int(start_epoch),
         state=state,
         reward_kind=REWARD_KIND_SOURCE_ACCEPTANCE,
+        trigger_evidence=dict(trigger_evidence or {}) or None,
         public_label=PUBLIC_LABELS[REWARD_KIND_SOURCE_ACCEPTANCE],
     )
 

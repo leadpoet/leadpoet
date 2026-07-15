@@ -2337,25 +2337,14 @@ def _research_lab_signed_payload(wallet, payload: dict) -> dict:
 
 
 def _research_lab_source_add_signed_payload(wallet, payload: dict) -> dict:
-    """Sign SOURCE_ADD intake payload without raw adapter credentials.
+    """Sign the complete credential-free SOURCE_ADD intake payload."""
 
-    The gateway intentionally excludes ``adapter_credential`` from signature
-    verification so miners can submit a key for KMS encryption without binding
-    raw secret material into the signed/audited payload.
-    """
-
-    sign_payload = {
-        key: value
-        for key, value in payload.items()
-        if key not in {"signature", "adapter_credential"}
-    }
+    if payload.get("adapter_credential") or payload.get("adapter_credential_v2"):
+        raise ValueError("miners must not submit SOURCE_ADD API credentials")
+    sign_payload = {key: value for key, value in payload.items() if key != "signature"}
     message = json.dumps(sign_payload, sort_keys=True)
     signature = wallet.hotkey.sign(message.encode()).hex()
-    signed = {**sign_payload, "signature": signature}
-    adapter_credential = payload.get("adapter_credential")
-    if adapter_credential:
-        signed["adapter_credential"] = adapter_credential
-    return signed
+    return {**sign_payload, "signature": signature}
 
 
 _RESEARCH_LAB_OPENROUTER_RAW_KEY_FIELDS = (
@@ -3140,7 +3129,7 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
 
     The gateway endpoint is launch-gated by RESEARCH_LAB_SOURCE_ADD_ENABLED.
     Until the operator enables it, this flow exits before collecting source
-    details or credentials.
+    details. API credentials are always operator-managed after submission.
     """
 
     gateway_url = QUALIFICATION_GATEWAY_URL.rstrip("/")
@@ -3159,17 +3148,12 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
     source_add_enabled = bool(status.get("source_add_enabled") or source_add_status.get("enabled"))
     if not source_add_enabled:
         print("SOURCE_ADD submissions are not live yet on this gateway.")
-        print("No source details or credentials were collected or sent.")
-        return
-
-    if not _research_lab_raw_key_gateway_allowed(QUALIFICATION_GATEWAY_URL):
-        print("❌ Refusing to send source credentials over an insecure gateway URL.")
-        print("   Set GATEWAY_URL to an https:// gateway. Localhost HTTP is allowed for local/dev testing only.")
+        print("No source details were collected or sent.")
         return
 
     print("This submits a structured source/API candidate for operator review.")
     print("Do not paste API keys into docs, endpoint examples, rate limits, or provenance notes.")
-    print("Credential entry is hidden and encrypted by the gateway.")
+    print("Any required API credential is added later by an operator; miners never submit keys.")
     print("")
 
     source_name = _research_lab_prompt_required_text("   Source/API name: ", max_length=160)
@@ -3199,19 +3183,6 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
         print(f"❌ Invalid source submission: {exc}")
         return
 
-    adapter_credential = ""
-    credential_prompt = "y" if auth_type != "none" else "n"
-    credential_supplied = input(
-        f"   Submit a credential for encrypted operator trial? [{'Y/n' if auth_type != 'none' else 'y/N'}]: "
-    ).strip().lower()
-    if not credential_supplied:
-        credential_supplied = credential_prompt
-    if credential_supplied in {"y", "yes"}:
-        adapter_credential = getpass.getpass("   Source API credential (hidden; encrypted by gateway): ").strip()
-        if not adapter_credential:
-            print("❌ Credential was requested but no credential was entered.")
-            return
-
     try:
         manifest, source_brief, idempotency_key, source_metadata = build_source_add_submission_docs(
             miner_hotkey=wallet.hotkey.ss58_address,
@@ -3224,7 +3195,7 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
             rate_limit_notes=rate_limit_notes,
             data_provenance_notes=data_provenance_notes,
             third_party_refs=third_party_refs,
-            credential_supplied=bool(adapter_credential),
+            credential_supplied=False,
         )
     except ValueError as exc:
         print(f"❌ Invalid source submission: {exc}")
@@ -3239,7 +3210,7 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
     print(f"   Auth type: {source_metadata.get('auth_type')}")
     print(f"   Endpoint examples: {len(source_metadata.get('endpoint_examples') or [])}")
     print(f"   Domains: {', '.join(manifest.get('declared_base_domains') or [])}")
-    print(f"   Credential supplied: {'yes' if adapter_credential else 'no'}")
+    print("   API credentials: operator-managed")
     confirm = input("   Submit for SOURCE_ADD review? [y/N]: ").strip().lower()
     if confirm not in {"y", "yes"}:
         print("Cancelled.")
@@ -3255,8 +3226,6 @@ def run_research_lab_source_add_flow(wallet, config, netuid: int) -> None:
         "source_brief": source_brief,
         "source_metadata": source_metadata,
     }
-    if adapter_credential:
-        payload["adapter_credential"] = adapter_credential
     signed_payload = _research_lab_source_add_signed_payload(wallet, payload)
     result = _post_research_lab_json("/research-lab/source-adapters", signed_payload, timeout=180)
     if "error" in result:

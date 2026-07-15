@@ -1,6 +1,21 @@
+from datetime import datetime, timezone
+
 import pytest
 
 from gateway.research_lab import source_add_provenance as provenance
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_archive_lookup(monkeypatch):
+    monkeypatch.setattr(
+        provenance,
+        "_archive_available",
+        lambda *_args, **_kwargs: {
+            "provider_status": "ok",
+            "status": 200,
+            "json": {"archived_snapshots": {}},
+        },
+    )
 
 
 def _metadata(api_url="https://openrouter.ai/api/v1", docs_url="https://openrouter.ai/docs/quickstart"):
@@ -198,6 +213,128 @@ def test_provider_failure_is_manual_review_not_exception(monkeypatch):
     assert result.precheck_status == provenance.PRECHECK_MANUAL
 
 
+def test_ai_http_failure_cannot_pass_provenance(monkeypatch):
+    monkeypatch.setattr(
+        provenance,
+        "_scrapingdog_scrape",
+        lambda *_args, **_kwargs: {
+            "provider_status": "ok",
+            "status": 200,
+            "content_type": "text/html",
+            "body_text": (
+                "<title>OpenRouter Quickstart</title> API reference endpoint "
+                "authentication rate limit curl HTTP response"
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        provenance,
+        "_scrapingdog_ai_mode",
+        lambda *_args, **_kwargs: {
+            "provider_status": "ok",
+            "status": 429,
+            "json": {
+                "markdown": "OpenRouter is an established provider.",
+                "references": [
+                    {"link": "https://openrouter.ai/docs"},
+                    {"link": "https://github.com/OpenRouterTeam"},
+                ],
+            },
+        },
+    )
+
+    result = provenance.evaluate_source_add_provenance(
+        source_name="OpenRouter",
+        source_kind="web",
+        declared_base_domains=("openrouter.ai",),
+        source_metadata=_metadata(),
+        scrapingdog_api_key="test-key",
+    )
+
+    assert result.precheck_status == provenance.PRECHECK_MANUAL
+    assert "ai_mode_provider_error" in result.reasons
+
+
+def test_archive_provider_failure_is_manual_review(monkeypatch):
+    monkeypatch.setattr(
+        provenance,
+        "_archive_available",
+        lambda *_args, **_kwargs: {
+            "provider_status": "error",
+            "error_type": "TimeoutError",
+        },
+    )
+    monkeypatch.setattr(
+        provenance,
+        "_scrapingdog_scrape",
+        lambda *_args, **_kwargs: {
+            "provider_status": "ok",
+            "status": 200,
+            "content_type": "text/html",
+            "body_text": "OpenRouter API reference endpoint authentication rate limit curl HTTP",
+        },
+    )
+    monkeypatch.setattr(
+        provenance,
+        "_scrapingdog_ai_mode",
+        lambda *_args, **_kwargs: {
+            "provider_status": "ok",
+            "status": 200,
+            "json": {
+                "markdown": "OpenRouter is an established provider.",
+                "references": [
+                    {"title": "Docs", "link": "https://openrouter.ai/docs"},
+                    {"title": "GitHub", "link": "https://github.com/OpenRouterTeam"},
+                ],
+            },
+        },
+    )
+
+    result = provenance.evaluate_source_add_provenance(
+        source_name="OpenRouter",
+        source_kind="web",
+        declared_base_domains=("openrouter.ai",),
+        source_metadata=_metadata(),
+        scrapingdog_api_key="test-key",
+    )
+
+    assert result.precheck_status == provenance.PRECHECK_MANUAL
+    assert "archive_provider_error" in result.reasons
+
+
+def test_archive_history_must_preexist_submission_window():
+    fresh = provenance._summarize_archive(
+        {
+            "provider_status": "ok",
+            "status": 200,
+            "json": {
+                "archived_snapshots": {
+                    "closest": {
+                        "available": True,
+                        "timestamp": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
+                    }
+                }
+            },
+        }
+    )
+    established = provenance._summarize_archive(
+        {
+            "provider_status": "ok",
+            "status": 200,
+            "json": {
+                "archived_snapshots": {
+                    "closest": {"available": True, "timestamp": "20200101000000"}
+                }
+            },
+        }
+    )
+
+    assert fresh["available"] is True
+    assert fresh["established_history"] is False
+    assert established["established_history"] is True
+    assert established["snapshot_age_days"] >= 90
+
+
 def test_missing_required_metadata_rejects_obvious_bad_submission():
     result = provenance.evaluate_source_add_provenance(
         source_name="No Docs API",
@@ -365,6 +502,64 @@ def test_self_references_only_remain_manual_review(monkeypatch):
     assert "ai_mode_legitimacy_not_confirmed" in result.reasons
 
 
+def test_independent_reference_without_official_domain_remains_manual(monkeypatch):
+    monkeypatch.setattr(
+        provenance,
+        "_scrapingdog_scrape",
+        lambda *_args, **_kwargs: {
+            "provider_status": "ok",
+            "status": 200,
+            "content_type": "text/html",
+            "body_text": "Miner Wrapper API reference endpoint authentication rate limit curl HTTP",
+        },
+    )
+    monkeypatch.setattr(
+        provenance,
+        "_scrapingdog_ai_mode",
+        lambda *_args, **_kwargs: {
+            "provider_status": "ok",
+            "status": 200,
+            "json": {
+                "markdown": "VERDICT: CREDIBLE. A blog calls this an API.",
+                "references": [
+                    {"title": "Unrelated blog", "link": "https://review.example/source"},
+                ],
+            },
+        },
+    )
+
+    result = provenance.evaluate_source_add_provenance(
+        source_name="Miner Wrapper",
+        source_kind="web",
+        declared_base_domains=("miner-owned.example",),
+        source_metadata=_metadata(
+            api_url="https://api.miner-owned.example",
+            docs_url="https://docs.miner-owned.example/api",
+        ),
+        scrapingdog_api_key="test-key",
+    )
+
+    assert result.precheck_status == provenance.PRECHECK_MANUAL
+    assert "insufficient_reference_or_archive_provenance" in result.reasons
+
+
+def test_submitted_third_party_refs_do_not_seed_provider_search():
+    query = provenance._build_ai_query(
+        "Miner Wrapper",
+        "https://api.miner-owned.example",
+        "https://docs.miner-owned.example/api",
+        ("https://second-miner-domain.example/review",),
+    )
+
+    assert "second-miner-domain.example" not in query
+    assert "api.miner-owned.example" in query
+
+
+def test_public_suffix_comparison_does_not_merge_unrelated_co_uk_domains():
+    assert provenance._domains_related("api.vendor.co.uk", "docs.vendor.co.uk")
+    assert not provenance._domains_related("api.vendor.co.uk", "docs.attacker.co.uk")
+
+
 def test_generic_testing_word_does_not_mark_real_docs_fake(monkeypatch):
     monkeypatch.setattr(
         provenance,
@@ -469,6 +664,7 @@ def test_negated_miner_wrapper_wording_is_credible(monkeypatch):
                     "miner-owned wrapper."
                 ),
                 "references": [
+                    {"title": "Official", "link": "https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/"},
                     {"title": "OSINT Review", "link": "https://osintnewsletter.osint-jobs.com/gdelt"},
                     {"title": "Research", "link": "https://www.sobigdata.eu/gdelt"},
                 ],

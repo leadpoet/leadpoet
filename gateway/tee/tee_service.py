@@ -1892,6 +1892,7 @@ def get_v2_coordinator_job_manager():
             CoordinatorChainSourceV2,
         )
         from gateway.tee.coordinator_source_add_v2 import (
+            CoordinatorSourceAddFunctionalProbeV2,
             CoordinatorSourceAddProvenanceV2,
         )
         from gateway.tee.coordinator_reward_source_v2 import (
@@ -1929,6 +1930,11 @@ def get_v2_coordinator_job_manager():
         source_add_provenance = CoordinatorSourceAddProvenanceV2(
             execute_provider=get_v2_provider_broker().execute,
             retry_policy_hash=retry_hashes["scrapingdog"],
+            wayback_retry_policy_hash=retry_hashes["wayback"],
+        )
+        source_add_functional_probe = CoordinatorSourceAddFunctionalProbeV2(
+            reader=source_reader,
+            execute_provider=get_v2_provider_broker().execute,
         )
         reward_source = CoordinatorRewardSourceV2(
             reader=source_reader,
@@ -1971,6 +1977,12 @@ def get_v2_coordinator_job_manager():
                 ),
                 source_add_provenance_resolver=lambda payload, context: (
                     source_add_provenance.resolve(
+                        payload=payload,
+                        context=context,
+                    )
+                ),
+                source_add_functional_probe_resolver=lambda payload, context: (
+                    source_add_functional_probe.resolve(
                         payload=payload,
                         context=context,
                     )

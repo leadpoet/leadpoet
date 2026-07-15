@@ -42,6 +42,7 @@ ROLE_PURPOSES = {
             "research_lab.promotion_decision.v2",
             "research_lab.reward_decision.v2",
             "research_lab.source_add_provenance.v2",
+            "research_lab.source_add_functional_probe.v2",
             "research_lab.source_add_catalog_snapshot.v2",
             "research_lab.source_add_credential.v2",
             "research_lab.openrouter_credential.v2",

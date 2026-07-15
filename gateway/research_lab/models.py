@@ -7,10 +7,11 @@ import hashlib
 import json
 import time
 import base64
-from typing import Any, Optional
+from typing import Any, Literal, Optional, Union
+from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 from gateway.research_lab.config import DEFAULT_LOOP_START_FEE_USD
 from research_lab.canonical import sha256_json
@@ -110,23 +111,186 @@ class ResearchLabLoopDiagnosticsRequest(SignedResearchLabRequest):
     candidate_id: Optional[str] = Field(default=None, min_length=8, max_length=256)
 
 
-class ResearchLabSourceAdapterSubmissionRequest(SignedResearchLabRequest):
-    """W5 SOURCE_ADD submission: adapter manifest (+ optional provider key).
+_SOURCE_ADD_AUTH_TYPES = {"none", "api_key_header", "api_key_query", "bearer"}
+_SOURCE_ADD_RUNTIME_AUTH_KINDS = {"none", "header", "query", "bearer"}
+_SOURCE_ADD_SECRET_QUERY_NAMES = {
+    "access_token",
+    "api-key",
+    "api_key",
+    "apikey",
+    "key",
+    "token",
+}
+_SOURCE_ADD_FORBIDDEN_HEADERS = {
+    "authorization",
+    "connection",
+    "content-length",
+    "cookie",
+    "host",
+    "proxy-authorization",
+    "transfer-encoding",
+    "x-api-key",
+}
 
-    ``adapter_credential`` is KMS-encrypted at intake and never stored raw;
-    it is only accepted when the manifest declares ``credential_ref_only``.
-    """
+
+def _source_add_https_url(value: str, *, field_name: str) -> str:
+    raw = str(value or "").strip().rstrip("/")
+    parsed = urlsplit(raw)
+    try:
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise ValueError(f"{field_name} has an invalid port") from exc
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or port != 443
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"{field_name} must be an HTTPS URL on port 443 without credentials or query data")
+    if field_name in {"api_base_url", "base_url"} and parsed.path:
+        _source_add_fixed_path(parsed.path)
+    return raw
+
+
+def _source_add_fixed_path(value: str) -> str:
+    path = str(value or "").strip()
+    if (
+        not path.startswith("/")
+        or "?" in path
+        or "#" in path
+        or "%" in path
+        or "\\" in path
+        or any(part in {".", ".."} for part in path.split("/"))
+        or any(character in path for character in "{}<>[]")
+        or any(ord(character) < 32 or ord(character) == 127 for character in path)
+        or any(character.isspace() for character in path)
+    ):
+        raise ValueError("SOURCE_ADD endpoint path must be fixed, relative, and safe")
+    return path
+
+
+def _bounded_source_add_json(value: Any) -> Any:
+    node_count = 0
+
+    def visit(item: Any, *, depth: int) -> None:
+        nonlocal node_count
+        node_count += 1
+        if depth > 12 or node_count > 2_000:
+            raise ValueError("SOURCE_ADD probe JSON exceeds structural limits")
+        if isinstance(item, dict):
+            if len(item) > 500:
+                raise ValueError("SOURCE_ADD probe JSON has too many keys")
+            for key, child in item.items():
+                if not isinstance(key, str) or not key or len(key) > 120:
+                    raise ValueError("SOURCE_ADD probe JSON key is invalid")
+                visit(child, depth=depth + 1)
+            return
+        if isinstance(item, list):
+            if len(item) > 500:
+                raise ValueError("SOURCE_ADD probe JSON list is too large")
+            for child in item:
+                visit(child, depth=depth + 1)
+            return
+        if item is None or isinstance(item, (str, int, float, bool)):
+            if isinstance(item, str) and len(item) > 4_096:
+                raise ValueError("SOURCE_ADD probe JSON string is too large")
+            return
+        raise ValueError("SOURCE_ADD probe JSON contains an unsupported value")
+
+    visit(value, depth=0)
+    try:
+        encoded = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("SOURCE_ADD probe JSON is not canonicalizable") from exc
+    if len(encoded) > 65_536:
+        raise ValueError("SOURCE_ADD probe JSON exceeds 64 KiB")
+    return value
+
+
+class ResearchLabSourceEndpointExample(BaseModel):
+    method: Literal["GET", "POST"]
+    path: str = Field(min_length=1, max_length=300)
+    purpose: str = Field(min_length=1, max_length=300)
+    example_query: str = Field(min_length=1, max_length=500)
+
+    @field_validator("method", mode="before")
+    @classmethod
+    def normalize_method(cls, value: Any) -> str:
+        return str(value or "").strip().upper()
+
+    @field_validator("path")
+    @classmethod
+    def valid_path(cls, value: str) -> str:
+        return _source_add_fixed_path(value)
+
+    @field_validator("purpose", "example_query")
+    @classmethod
+    def no_secret_text(cls, value: str) -> str:
+        reject_secret_material(value)
+        return " ".join(value.strip().split())
+
+
+class ResearchLabSourceMetadata(BaseModel):
+    api_base_url: str = Field(min_length=8, max_length=500)
+    documentation_url: str = Field(min_length=8, max_length=500)
+    auth_type: str = Field(min_length=1, max_length=40)
+    endpoint_examples: list[ResearchLabSourceEndpointExample] = Field(min_length=1, max_length=12)
+    rate_limit_notes: str = Field(min_length=1, max_length=1000)
+    data_provenance_notes: str = Field(default="", max_length=1000)
+    third_party_refs: list[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator("api_base_url", "documentation_url")
+    @classmethod
+    def valid_https_url(cls, value: str, info: Any) -> str:
+        return _source_add_https_url(value, field_name=str(info.field_name))
+
+    @field_validator("third_party_refs")
+    @classmethod
+    def valid_third_party_refs(cls, value: list[str]) -> list[str]:
+        return [
+            _source_add_https_url(item, field_name="third_party_refs")
+            for item in value
+        ]
+
+    @field_validator("auth_type")
+    @classmethod
+    def valid_auth_type(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in _SOURCE_ADD_AUTH_TYPES:
+            raise ValueError("invalid SOURCE_ADD auth_type")
+        return normalized
+
+    @field_validator("rate_limit_notes", "data_provenance_notes")
+    @classmethod
+    def metadata_text_has_no_secret(cls, value: str) -> str:
+        reject_secret_material(value)
+        return " ".join(value.strip().split())
+
+
+class ResearchLabSourceAdapterSubmissionRequest(SignedResearchLabRequest):
+    """Credential-free miner SOURCE_ADD submission."""
 
     manifest: dict[str, Any] = Field()
     source_brief: Optional[str] = Field(default=None, max_length=2000)
-    source_metadata: Optional[dict[str, Any]] = Field(default=None)
-    adapter_credential: Optional[str] = Field(default=None, min_length=8, max_length=512)
+    source_metadata: ResearchLabSourceMetadata
+    # Retained only to reject old clients explicitly. SecretStr prevents a
+    # validation error or model representation from echoing plaintext.
+    adapter_credential: Optional[SecretStr] = Field(default=None, min_length=8, max_length=512)
     adapter_credential_v2: Optional[AttestedCredentialCiphertextV2] = None
 
     @model_validator(mode="after")
-    def one_credential_transport(self) -> "ResearchLabSourceAdapterSubmissionRequest":
-        if self.adapter_credential and self.adapter_credential_v2:
-            raise ValueError("SOURCE_ADD credential transports are mutually exclusive")
+    def miner_credentials_are_forbidden(self) -> "ResearchLabSourceAdapterSubmissionRequest":
+        if self.adapter_credential is not None or self.adapter_credential_v2 is not None:
+            raise ValueError("miners must not submit SOURCE_ADD API credentials")
         return self
 
     @field_validator("source_brief")
@@ -136,17 +300,12 @@ class ResearchLabSourceAdapterSubmissionRequest(SignedResearchLabRequest):
             reject_secret_material(value)
         return value
 
-    @field_validator("source_metadata")
-    @classmethod
-    def metadata_has_no_secret_material(cls, value: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
-        if value:
-            reject_secret_material(value)
-        return value
-
     def signed_payload(self) -> dict[str, Any]:
-        # The raw credential must never enter the signature payload path
-        # (it would land in logs/refs); sign everything else.
-        return self.model_dump(exclude={"signature", "adapter_credential"}, exclude_unset=True, mode="json")
+        return self.model_dump(
+            exclude={"signature", "adapter_credential", "adapter_credential_v2"},
+            exclude_unset=True,
+            mode="json",
+        )
 
 
 class ResearchLabSourceAddCredentialRecipientRequest(SignedResearchLabRequest):
@@ -182,11 +341,124 @@ class ResearchLabSourceAdapterRecheckResponse(BaseModel):
     submission_id: str
     adapter_id: str
     stage: str
-    precheck_status: str
+    queue_status: str
+    work_id: str
+    precheck_status: Optional[str] = None
     precheck_reasons: list[str] = Field(default_factory=list)
-    leg1_reward_status: str
+    leg1_reward_status: str = "not_evaluated"
     reward_ref: Optional[str] = None
     start_epoch: Optional[int] = None
+
+
+class ResearchLabSourceAddProbeSpec(BaseModel):
+    method: Literal["GET", "POST"]
+    path: str = Field(min_length=1, max_length=300)
+    query: dict[str, Union[str, int, float, bool]] = Field(
+        default_factory=dict, max_length=20
+    )
+    body_json: Optional[Union[dict[str, Any], list[Any]]] = None
+
+    @field_validator("method", mode="before")
+    @classmethod
+    def normalize_method(cls, value: Any) -> str:
+        return str(value or "").strip().upper()
+
+    @field_validator("path")
+    @classmethod
+    def valid_path(cls, value: str) -> str:
+        return _source_add_fixed_path(value)
+
+    @field_validator("query")
+    @classmethod
+    def valid_query(cls, value: dict[str, Any]) -> dict[str, Any]:
+        normalized: dict[str, Any] = {}
+        for name, item in value.items():
+            key = str(name).strip()
+            if (
+                not key
+                or len(key) > 120
+                or key.lower() in _SOURCE_ADD_SECRET_QUERY_NAMES
+                or len(str(item)) > 500
+            ):
+                raise ValueError("SOURCE_ADD probe query is invalid or secret-bearing")
+            normalized[key] = item
+        return normalized
+
+    @field_validator("body_json")
+    @classmethod
+    def body_has_no_secret_material(cls, value: Any) -> Any:
+        if value is not None:
+            reject_secret_material(value)
+            return _bounded_source_add_json(value)
+        return None
+
+
+class ResearchLabSourceAdapterProbeConfigureRequest(BaseModel):
+    base_url: str = Field(min_length=8, max_length=500)
+    auth_kind: str = Field(default="none", max_length=20)
+    auth_name: Optional[str] = Field(default=None, max_length=120)
+    request_headers: dict[str, str] = Field(default_factory=dict, max_length=16)
+    probes: list[ResearchLabSourceAddProbeSpec] = Field(min_length=1, max_length=3)
+    api_credential: Optional[SecretStr] = Field(default=None, min_length=1, max_length=65536)
+    api_credential_v2: Optional[AttestedCredentialCiphertextV2] = None
+    operator_notes: Optional[str] = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def valid_probe_config(self) -> "ResearchLabSourceAdapterProbeConfigureRequest":
+        self.base_url = _source_add_https_url(self.base_url, field_name="base_url")
+        self.auth_kind = self.auth_kind.strip().lower()
+        if self.auth_kind not in _SOURCE_ADD_RUNTIME_AUTH_KINDS:
+            raise ValueError("invalid SOURCE_ADD auth_kind")
+        self.auth_name = str(self.auth_name or "").strip() or None
+        if self.auth_kind in {"header", "query"} and not self.auth_name:
+            raise ValueError("auth_name is required for header/query auth")
+        if self.auth_kind == "bearer" and not self.auth_name:
+            self.auth_name = "Authorization"
+        if self.api_credential is not None:
+            raise ValueError("plaintext SOURCE_ADD credentials are not accepted")
+        if self.auth_kind != "none" and self.api_credential_v2 is None:
+            raise ValueError("authenticated SOURCE_ADD test requires an attested credential")
+        if self.auth_kind == "none" and self.api_credential_v2 is not None:
+            raise ValueError("credential supplied for unauthenticated SOURCE_ADD test")
+        normalized_headers: dict[str, str] = {}
+        normalized_header_names: set[str] = set()
+        for name, item in self.request_headers.items():
+            header = str(name).strip()
+            normalized_name = header.lower()
+            header_value = str(item)
+            if (
+                not header
+                or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,79}", header)
+                or normalized_name in normalized_header_names
+                or normalized_name in _SOURCE_ADD_FORBIDDEN_HEADERS
+                or (
+                    self.auth_kind in {"header", "bearer"}
+                    and self.auth_name
+                    and normalized_name == self.auth_name.lower()
+                )
+                or len(header_value) > 500
+                or any(
+                    ord(character) < 32 or ord(character) == 127
+                    for character in header_value
+                )
+            ):
+                raise ValueError("SOURCE_ADD request header is unsafe")
+            reject_secret_material(header_value)
+            normalized_header_names.add(normalized_name)
+            normalized_headers[header] = header_value
+        self.request_headers = normalized_headers
+        if self.operator_notes:
+            reject_secret_material(self.operator_notes)
+        return self
+
+
+class ResearchLabSourceAdapterProbeConfigureResponse(BaseModel):
+    submission_id: str
+    adapter_id: str
+    config_ref: str
+    work_id: str
+    stage: str
+    queue_status: str
 
 
 class ResearchLabSourceAdapterProvisionRequest(BaseModel):
@@ -196,16 +468,20 @@ class ResearchLabSourceAdapterProvisionRequest(BaseModel):
     auth_kind: str = Field(default="none", max_length=20)
     auth_name: Optional[str] = Field(default=None, max_length=120)
     credential_env_refs: list[str] = Field(default_factory=list, max_length=8)
-    api_credential: Optional[str] = Field(default=None, min_length=8, max_length=512)
+    api_credential: Optional[SecretStr] = Field(default=None, min_length=1, max_length=65536)
     api_credential_v2: Optional[AttestedCredentialCiphertextV2] = None
     cost_model: dict[str, Any] = Field(default_factory=dict)
     probe_endpoints: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+    request_headers: dict[str, str] = Field(default_factory=dict, max_length=16)
+    test_probes: list[ResearchLabSourceAddProbeSpec] = Field(default_factory=list, max_length=3)
     operator_notes: Optional[str] = Field(default=None, max_length=1000)
 
     @model_validator(mode="after")
-    def one_credential_transport(self) -> "ResearchLabSourceAdapterProvisionRequest":
-        if self.api_credential and self.api_credential_v2:
-            raise ValueError("SOURCE_ADD credential transports are mutually exclusive")
+    def no_legacy_credential_transport(self) -> "ResearchLabSourceAdapterProvisionRequest":
+        if self.api_credential is not None:
+            raise ValueError("plaintext SOURCE_ADD credentials are not accepted")
+        if self.credential_env_refs:
+            raise ValueError("SOURCE_ADD process-environment credentials are retired")
         return self
 
     @field_validator("registry_provider_id")
@@ -223,11 +499,11 @@ class ResearchLabSourceAdapterProvisionRequest(BaseModel):
             reject_secret_material(value)
         return value
 
-    @field_validator("cost_model", "probe_endpoints")
+    @field_validator("cost_model", "probe_endpoints", "request_headers")
     @classmethod
     def provision_docs_have_no_secret_material(cls, value: Any) -> Any:
         reject_secret_material(value)
-        return value
+        return _bounded_source_add_json(value)
 
 
 class ResearchLabSourceAdapterProvisionResponse(BaseModel):
@@ -238,6 +514,9 @@ class ResearchLabSourceAdapterProvisionResponse(BaseModel):
     provision_status: str
     provision_ref: str
     credential_ref: Optional[str] = None
+    requested_provision_status: Optional[str] = None
+    queue_status: Optional[str] = None
+    work_id: Optional[str] = None
 
 
 class ResearchLabOpenRouterKeyRegisterRequest(SignedResearchLabRequest):

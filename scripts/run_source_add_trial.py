@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one SOURCE_ADD submission through the full funnel (W5).
+"""Legacy manual SOURCE_ADD bundle trial.
 
 Operator driver for sourceexperiments.md §5.3 step 4 (the lab-authored test
 adapter) and for early manual funnel runs before a queue consumer exists:
@@ -8,8 +8,9 @@ adapter) and for early manual funnel runs before a queue consumer exists:
     → acceptance evaluation → (with --persist) submission rows + catalog
     entry.
 
-Leg 1 is created by gateway intake when provenance precheck passes, not by
-this operator trial/acceptance helper.
+This script is intentionally disconnected from production SOURCE_ADD. It uses
+the legacy Docker runner, accepts executable adapter bundles, and must never be
+used for automatic miner submissions, catalog writes, or rewards.
 
 Local mode needs no database:
 
@@ -49,7 +50,12 @@ def _now_iso() -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run a SOURCE_ADD trial funnel")
+    parser = argparse.ArgumentParser(description="Run a legacy manual SOURCE_ADD trial funnel")
+    parser.add_argument(
+        "--allow-unsafe-legacy-manual-trial",
+        action="store_true",
+        help="acknowledge that this disconnected runner uses legacy unsafe networking",
+    )
     parser.add_argument("--manifest", required=True, help="adapter manifest JSON path")
     parser.add_argument("--bundle", required=True, help="adapter bundle directory (must contain adapter.py)")
     parser.add_argument("--miner-hotkey", default="lab-operator")
@@ -70,9 +76,24 @@ def main() -> int:
     parser.add_argument("--acceptance-floor", type=float,
                         default=float(os.getenv("RESEARCH_LAB_SOURCE_ADD_ACCEPTANCE_FLOOR_YIELD") or 0.10))
     parser.add_argument("--registry-provider-id", default="", help="evidence-proxy registry id once the source is provisioned")
-    parser.add_argument("--start-epoch", type=int, default=0, help="deprecated; Leg 1 now starts from gateway intake")
+    parser.add_argument("--start-epoch", type=int, default=0, help="deprecated; Leg 1 is issued by the measured functional workflow")
     parser.add_argument("--persist", action="store_true", help="write submission/catalog rows to Supabase")
     args = parser.parse_args()
+
+    if not args.allow_unsafe_legacy_manual_trial or os.getenv(
+        "RESEARCH_LAB_ALLOW_UNSAFE_LEGACY_SOURCE_ADD_TRIAL"
+    ) != "I_UNDERSTAND_THIS_IS_DISCONNECTED":
+        print(
+            "legacy SOURCE_ADD trial is disabled; use the measured V2 functional probe workflow",
+            file=sys.stderr,
+        )
+        return 2
+    if args.persist:
+        print(
+            "legacy SOURCE_ADD trial persistence is permanently disabled",
+            file=sys.stderr,
+        )
+        return 2
 
     from gateway.research_lab.key_vault import decrypt_source_add_credential, encrypt_source_add_credential
     from gateway.research_lab.source_add_trial_runner import (

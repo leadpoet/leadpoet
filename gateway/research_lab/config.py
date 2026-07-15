@@ -677,12 +677,19 @@ class ResearchLabGatewayConfig:
     corpus_export_interval_seconds: int = 3600
     corpus_export_s3_prefix: str = ""
     corpus_export_max_rows: int = 1000
-    # W5/W6 SOURCE_ADD execution + two-leg emission rewards (§3.4 config,
-    # §8 launch defaults). Intake and reward rails are live by default.
+    # SOURCE_ADD intake remains independently controllable. The measured queue,
+    # API probes, and functional Leg 1 rollout are fail-closed by default.
     source_add_enabled: bool = True
     source_add_rewards_enabled: bool = True
-    # KMS key for miner-submitted source credentials; empty falls back to the
-    # OpenRouter key-vault key at the API layer.
+    source_add_dispatcher_enabled: bool = False
+    source_add_functional_probes_enabled: bool = False
+    source_add_functional_rewards_enabled: bool = False
+    source_add_dispatcher_poll_seconds: float = 2.0
+    source_add_work_lease_seconds: int = 300
+    source_add_probe_timeout_seconds: int = 45
+    source_add_probe_max_attempts: int = 5
+    # KMS key for operator-managed SOURCE_ADD credentials; empty falls back to
+    # the OpenRouter key-vault key at the admin API layer.
     source_add_credential_kms_key_id: str = ""
     source_add_sandbox_image: str = "python:3.11-slim"
     source_add_trial_timeout_seconds: int = 300
@@ -758,6 +765,23 @@ class ResearchLabGatewayConfig:
                 legacy_champion_threshold,
                 improvement_threshold_points,
             )
+        source_add_probe_timeout_seconds = min(
+            120,
+            max(
+                5,
+                _int("RESEARCH_LAB_SOURCE_ADD_PROBE_TIMEOUT_SECONDS", 45),
+            ),
+        )
+        source_add_work_lease_seconds = min(
+            900,
+            max(
+                # A functional job can run three bounded probes. Keep the DB
+                # lease alive beyond the coordinator deadline so receipt and
+                # state persistence cannot race a second worker reclaim.
+                source_add_probe_timeout_seconds * 3 + 120,
+                _int("RESEARCH_LAB_SOURCE_ADD_WORK_LEASE_SECONDS", 300),
+            ),
+        )
         return cls(
             api_enabled=_truthy("RESEARCH_LAB_GATEWAY_API_ENABLED", prod_on),
             production_writes_enabled=_truthy("RESEARCH_LAB_PRODUCTION_WRITES_ENABLED", prod_on),
@@ -1291,6 +1315,28 @@ class ResearchLabGatewayConfig:
             corpus_export_max_rows=max(1, _int("RESEARCH_LAB_CORPUS_EXPORT_MAX_ROWS", 1000)),
             source_add_enabled=_truthy("RESEARCH_LAB_SOURCE_ADD_ENABLED", "true"),
             source_add_rewards_enabled=_truthy("RESEARCH_LAB_SOURCE_ADD_REWARDS_ENABLED", "true"),
+            source_add_dispatcher_enabled=_truthy(
+                "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED", "false"
+            ),
+            source_add_functional_probes_enabled=_truthy(
+                "RESEARCH_LAB_SOURCE_ADD_FUNCTIONAL_PROBES_ENABLED", "false"
+            ),
+            source_add_functional_rewards_enabled=_truthy(
+                "RESEARCH_LAB_SOURCE_ADD_FUNCTIONAL_REWARDS_ENABLED", "false"
+            ),
+            source_add_dispatcher_poll_seconds=max(
+                0.25,
+                _float("RESEARCH_LAB_SOURCE_ADD_DISPATCHER_POLL_SECONDS", 2.0),
+            ),
+            source_add_work_lease_seconds=source_add_work_lease_seconds,
+            source_add_probe_timeout_seconds=source_add_probe_timeout_seconds,
+            source_add_probe_max_attempts=min(
+                5,
+                max(
+                    1,
+                    _int("RESEARCH_LAB_SOURCE_ADD_PROBE_MAX_ATTEMPTS", 5),
+                ),
+            ),
             source_add_credential_kms_key_id=os.getenv("RESEARCH_LAB_SOURCE_ADD_CREDENTIAL_KMS_KEY_ID", ""),
             source_add_sandbox_image=os.getenv("RESEARCH_LAB_SOURCE_ADD_SANDBOX_IMAGE", "python:3.11-slim"),
             source_add_trial_timeout_seconds=max(
@@ -1626,6 +1672,9 @@ class ResearchLabGatewayConfig:
             "source_add": {
                 "enabled": self.source_add_enabled,
                 "rewards_enabled": self.source_add_rewards_enabled,
+                "dispatcher_enabled": self.source_add_dispatcher_enabled,
+                "functional_probes_enabled": self.source_add_functional_probes_enabled,
+                "functional_rewards_enabled": self.source_add_functional_rewards_enabled,
                 "max_concurrent_per_hotkey": self.source_add_max_concurrent_per_hotkey,
                 "max_per_day_per_hotkey": self.source_add_max_per_day_per_hotkey,
                 "max_per_30d_per_hotkey": self.source_add_max_per_30d_per_hotkey,

@@ -12,7 +12,10 @@ from gateway.research_lab.source_add_provenance import (
 )
 from gateway.tee.coordinator_executor_v2 import CoordinatorExecutorV2
 from gateway.tee.coordinator_source_add_v2 import (
+    CoordinatorSourceAddFunctionalProbeV2,
     CoordinatorSourceAddProvenanceV2,
+    SOURCE_ADD_FUNCTIONAL_PROBE_EVALUATOR_VERSION,
+    SOURCE_ADD_FUNCTIONAL_PROBE_RESULT_SCHEMA_VERSION,
     SOURCE_ADD_PROVENANCE_REQUEST_SCHEMA_VERSION,
     SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
 )
@@ -23,6 +26,7 @@ from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
 
 HASH_A = "sha256:" + "a" * 64
 HASH_B = "sha256:" + "b" * 64
+CONFIG_REF = "source_add_probe_config:1234567890abcdef"
 
 
 def _payload():
@@ -57,12 +61,70 @@ def _context():
     )
 
 
+class _FunctionalReader:
+    def read(self, *, policy_id, **_kwargs):
+        if policy_id == "source_add_submission_by_id":
+            return [
+                {
+                    "submission_id": "source_add_submission:1234567890abcdef",
+                    "adapter_id": "adapter:example",
+                    "miner_hotkey": "miner-hotkey",
+                }
+            ]
+        if policy_id == "source_add_probe_config_by_submission":
+            return [
+                {
+                    "submission_id": "source_add_submission:1234567890abcdef",
+                    "adapter_id": "adapter:example",
+                    "config_ref": CONFIG_REF,
+                    "config_status": "active",
+                    "probe_doc": {
+                        "schema_version": "leadpoet.source_add_probe_config.v2",
+                        "provider_id": "sourceadd_1234567890abcdef",
+                        "base_url": "https://api.example.com/v1",
+                        "auth_kind": "none",
+                        "auth_name": "",
+                        "request_headers": {},
+                        "probes": [
+                            {
+                                "method": "GET",
+                                "path": "/records",
+                                "query": {"limit": 1},
+                                "body_json": None,
+                            }
+                        ],
+                    },
+                    "credential_envelope": {},
+                }
+            ]
+        raise AssertionError(policy_id)
+
+
+def _functional_context():
+    context = _context()
+    context.purpose = "research_lab.source_add_functional_probe.v2"
+    return context
+
+
+def _functional_payload():
+    return {
+        "schema_version": "leadpoet.source_add_functional_probe_request.v2",
+        "submission_id": "source_add_submission:1234567890abcdef",
+        "config_ref": CONFIG_REF,
+        "evaluation_mode": "functional_probe",
+        "timeout_seconds": 30,
+    }
+
+
 def _authenticated_provider():
     calls = []
 
     def execute(request):
         calls.append(dict(request))
-        if "/scrape?" in request["url"]:
+        if request["provider_id"] == "wayback":
+            body = json.dumps({"archived_snapshots": {}}).encode()
+            content_type = "application/json"
+        elif "/scrape?" in request["url"]:
             body = (
                 "<html><title>Example API Reference</title>"
                 "Quickstart endpoint authentication rate limit curl status code"
@@ -100,23 +162,28 @@ def _authenticated_provider():
     return execute, calls
 
 
-def test_source_add_provenance_uses_two_authenticated_provider_terminals():
+def test_source_add_provenance_uses_three_authenticated_provider_terminals():
     execute, calls = _authenticated_provider()
     context = _context()
     resolver = CoordinatorSourceAddProvenanceV2(
         execute_provider=execute,
         retry_policy_hash=HASH_A,
+        wayback_retry_policy_hash=HASH_B,
     )
 
     result = resolver.resolve(payload=_payload(), context=context)
 
     assert result["schema_version"] == SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION
     assert result["precheck_status"] == PRECHECK_PASSED
-    assert len(calls) == 2
-    assert all(call["provider_id"] == "scrapingdog" for call in calls)
+    assert len(calls) == 3
+    assert [call["provider_id"] for call in calls] == [
+        "scrapingdog",
+        "wayback",
+        "scrapingdog",
+    ]
     assert all("api_key" not in call["url"] for call in calls)
-    assert len(context.attempts) == 2
-    assert len(context.artifacts) == 5
+    assert len(context.attempts) == 3
+    assert len(context.artifacts) == 7
 
 
 def test_source_add_transport_failure_is_visible_manual_review():
@@ -136,26 +203,245 @@ def test_source_add_transport_failure_is_visible_manual_review():
     resolver = CoordinatorSourceAddProvenanceV2(
         execute_provider=execute,
         retry_policy_hash=HASH_A,
+        wayback_retry_policy_hash=HASH_B,
     )
     result = resolver.resolve(payload=_payload(), context=context)
 
     assert result["precheck_status"] == PRECHECK_MANUAL
     assert "documentation_provider_error" in result["reasons"]
-    assert len(context.attempts) == 2
+    assert len(context.attempts) == 3
     assert all(item["terminal_status"] == "transport_failure" for item in context.attempts)
+
+
+def test_functional_probe_uses_exact_dynamic_route_and_persists_hash_summary_only():
+    calls = []
+    body = b'{"records":[{"id":"one"}]}'
+
+    def execute(request):
+        calls.append(dict(request))
+        response_hash = sha256_bytes(body)
+        return {
+            "terminal_status": "authenticated_response",
+            "http_status": 200,
+            "headers": {"content-type": "application/json"},
+            "body_b64": base64.b64encode(body).decode("ascii"),
+            "transport_attempt": {
+                "terminal_status": "authenticated_response",
+                "request_artifact_hash": HASH_A,
+                "response_artifact_hash": HASH_B,
+                "response_hash": response_hash,
+            },
+        }
+
+    context = _functional_context()
+    resolver = CoordinatorSourceAddFunctionalProbeV2(
+        reader=_FunctionalReader(),
+        execute_provider=execute,
+    )
+    result = resolver.resolve(payload=_functional_payload(), context=context)
+
+    assert result["result_status"] == "passed"
+    assert result["response_hash"] == sha256_bytes(body)
+    assert result["byte_count"] == len(body)
+    assert "records" not in str(result)
+    assert calls[0]["url"] == "https://api.example.com/v1/records?limit=1"
+    assert calls[0]["max_response_bytes"] == 1024 * 1024
+    assert calls[0]["artifact_mode"] == "hash_only"
+    assert calls[0]["dynamic_route"]["allowed_routes"] == [
+        {"method": "GET", "path": "/v1/records"}
+    ]
+    assert len(context.attempts) == 1
+    assert len(context.artifacts) == 3
+
+
+@pytest.mark.parametrize(
+    ("status", "content_type", "body", "expected_status", "reason"),
+    [
+        (302, "text/html", b"redirect", "failed", "redirect_forbidden"),
+        (401, "application/json", b'{"error":"denied"}', "awaiting_operator", "operator_credential_or_headers_required"),
+        (404, "application/json", b'{"error":"missing"}', "failed", "endpoint_not_found"),
+        (408, "application/json", b'{"error":"timeout"}', "retryable", "http_408"),
+        (429, "application/json", b'{"error":"slow"}', "retryable", "http_429"),
+        (200, "text/html", b"<html>login</html>", "failed", "non_json_content_type"),
+        (200, "application/json", b'{"error":"bad key"}', "failed", "json_error_envelope"),
+    ],
+)
+def test_functional_probe_failure_policy(status, content_type, body, expected_status, reason):
+    def execute(_request):
+        response_hash = sha256_bytes(body)
+        return {
+            "terminal_status": "authenticated_response",
+            "http_status": status,
+            "headers": {"content-type": content_type, "retry-after": "999999"},
+            "body_b64": base64.b64encode(body).decode("ascii"),
+            "transport_attempt": {
+                "terminal_status": "authenticated_response",
+                "request_artifact_hash": HASH_A,
+                "response_artifact_hash": HASH_B,
+                "response_hash": response_hash,
+            },
+        }
+
+    result = CoordinatorSourceAddFunctionalProbeV2(
+        reader=_FunctionalReader(),
+        execute_provider=execute,
+    ).resolve(payload=_functional_payload(), context=_functional_context())
+
+    assert result["result_status"] == expected_status
+    assert reason in result["reason_codes"]
+    assert result["retry_after_seconds"] <= 21_600
+
+
+def test_functional_probe_rejects_deep_or_empty_json():
+    deep = {}
+    cursor = deep
+    for _ in range(14):
+        cursor["next"] = {}
+        cursor = cursor["next"]
+
+    assert CoordinatorSourceAddFunctionalProbeV2._validate_json_response(
+        response_body=b"{}",
+        content_type="application/json",
+    ) == ("failed", ["empty_json_payload"])
+    status, reasons = CoordinatorSourceAddFunctionalProbeV2._validate_json_response(
+        response_body=json.dumps(deep).encode("utf-8"),
+        content_type="application/json",
+    )
+    assert status == "failed"
+    assert reasons == ["json_depth_exceeded"]
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        (b'{"message":"Unauthorized"}', "json_auth_or_login_envelope"),
+        (b'{"status":"failed"}', "json_error_status"),
+        (b'{"status":"ok","version":"1.2"}', "json_non_data_envelope"),
+        (b'{"records":[],"total":0}', "empty_json_data"),
+        (b'[{"message":"Unauthorized"}]', "json_error_envelope"),
+        (b'["Unauthorized"]', "json_auth_or_login_envelope"),
+        (b'[{}]', "empty_json_data"),
+    ],
+)
+def test_functional_probe_rejects_json_without_usable_data(body, reason):
+    status, reasons = CoordinatorSourceAddFunctionalProbeV2._validate_json_response(
+        response_body=body,
+        content_type="application/json",
+    )
+
+    assert status == "failed"
+    assert reasons == [reason]
+
+
+def test_functional_probe_health_endpoint_cannot_be_sole_pass():
+    class _HealthReader(_FunctionalReader):
+        def read(self, *, policy_id, **kwargs):
+            rows = super().read(policy_id=policy_id, **kwargs)
+            if policy_id == "source_add_probe_config_by_submission":
+                rows[0]["probe_doc"]["probes"] = [
+                    {
+                        "method": "GET",
+                        "path": "/health",
+                        "query": {},
+                        "body_json": None,
+                    }
+                ]
+            return rows
+
+    body = b'{"service":"example","records":[{"status":"ready"}]}'
+
+    def execute(_request):
+        response_hash = sha256_bytes(body)
+        return {
+            "terminal_status": "authenticated_response",
+            "http_status": 200,
+            "headers": {"content-type": "application/json"},
+            "body_b64": base64.b64encode(body).decode("ascii"),
+            "transport_attempt": {
+                "terminal_status": "authenticated_response",
+                "request_artifact_hash": HASH_A,
+                "response_artifact_hash": HASH_B,
+                "response_hash": response_hash,
+            },
+        }
+
+    result = CoordinatorSourceAddFunctionalProbeV2(
+        reader=_HealthReader(),
+        execute_provider=execute,
+    ).resolve(payload=_functional_payload(), context=_functional_context())
+
+    assert result["result_status"] == "manual_review"
+    assert result["reason_codes"] == ["non_data_probe_endpoint"]
+
+
+def test_functional_probe_can_skip_health_and_pass_later_data_endpoint():
+    class _HealthThenDataReader(_FunctionalReader):
+        def read(self, *, policy_id, **kwargs):
+            rows = super().read(policy_id=policy_id, **kwargs)
+            if policy_id == "source_add_probe_config_by_submission":
+                rows[0]["probe_doc"]["probes"] = [
+                    {
+                        "method": "GET",
+                        "path": "/health",
+                        "query": {},
+                        "body_json": None,
+                    },
+                    {
+                        "method": "GET",
+                        "path": "/records",
+                        "query": {},
+                        "body_json": None,
+                    },
+                ]
+            return rows
+
+    body = b'{"records":[{"id":"one"}]}'
+
+    def execute(_request):
+        response_hash = sha256_bytes(body)
+        return {
+            "terminal_status": "authenticated_response",
+            "http_status": 200,
+            "headers": {"content-type": "application/json"},
+            "body_b64": base64.b64encode(body).decode("ascii"),
+            "transport_attempt": {
+                "terminal_status": "authenticated_response",
+                "request_artifact_hash": HASH_A,
+                "response_artifact_hash": HASH_B,
+                "response_hash": response_hash,
+            },
+        }
+
+    result = CoordinatorSourceAddFunctionalProbeV2(
+        reader=_HealthThenDataReader(),
+        execute_provider=execute,
+    ).resolve(payload=_functional_payload(), context=_functional_context())
+
+    assert result["result_status"] == "passed"
+    assert result["selected_probe_index"] == 1
+    assert result["probe_summaries"][0]["result_status"] == "manual_review"
 
 
 @pytest.mark.asyncio
 async def test_leg1_reward_requires_parent_output_and_exact_purpose():
-    provenance = {
-        "schema_version": SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
+    functional = {
+        "schema_version": SOURCE_ADD_FUNCTIONAL_PROBE_RESULT_SCHEMA_VERSION,
+        "evaluator_version": SOURCE_ADD_FUNCTIONAL_PROBE_EVALUATOR_VERSION,
         "submission_id": "source_add_submission:1234567890abcdef",
-        "precheck_status": PRECHECK_PASSED,
-        "reasons": ["provenance_reference_backed"],
-        "precheck_doc": {
-            "precheck_status": PRECHECK_PASSED,
-            "reasons": ["provenance_reference_backed"],
-        },
+        "adapter_id": "adapter:example",
+        "config_ref": "source_add_probe_config:1234567890abcdef",
+        "evaluation_mode": "functional_probe",
+        "result_status": "passed",
+        "route_hash": HASH_B,
+        "selected_probe_index": 0,
+        "response_hash": HASH_A,
+        "status_class": "2xx",
+        "content_type": "application/json",
+        "byte_count": 20,
+        "duration_ms": 10,
+        "retry_after_seconds": 0,
+        "reason_codes": ["bounded_json_data_response"],
+        "probe_summaries": [],
     }
     root_hash = HASH_A
     graph = {
@@ -163,8 +449,8 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
         "receipts": [
             {
                 "receipt_hash": root_hash,
-                "purpose": "research_lab.source_add_provenance.v2",
-                "output_root": sha256_json(provenance),
+                "purpose": "research_lab.source_add_functional_probe.v2",
+                "output_root": sha256_json(functional),
             }
         ],
     }
@@ -184,7 +470,11 @@ async def test_leg1_reward_requires_parent_output_and_exact_purpose():
             "existing_rewards": [],
             "alpha_percent": 1.0,
             "reward_epochs": 20,
-            "provenance_result": provenance,
+            "functional_probe_result": functional,
+            "trigger_evidence": {
+                "functional_probe_passed": True,
+                "functional_probe_result_hash": sha256_json(functional),
+            },
         },
     }
     executor = CoordinatorExecutorV2(

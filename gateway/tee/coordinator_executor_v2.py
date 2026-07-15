@@ -27,7 +27,10 @@ from gateway.tee.reward_executor_v2 import (
     execute_reward_decision_v2,
     reward_receipt_projection_v2,
 )
-from gateway.tee.coordinator_source_add_v2 import OP_SOURCE_ADD_PROVENANCE_V2
+from gateway.tee.coordinator_source_add_v2 import (
+    OP_SOURCE_ADD_FUNCTIONAL_PROBE_V2,
+    OP_SOURCE_ADD_PROVENANCE_V2,
+)
 from gateway.tee.provider_outcome_v2 import (
     validate_provider_outcome_snapshot_v2,
 )
@@ -62,6 +65,9 @@ COORDINATOR_OPERATIONS_V2 = {
     ),
     OP_SOURCE_ADD_PROVENANCE_V2: frozenset(
         {"research_lab.source_add_provenance.v2"}
+    ),
+    OP_SOURCE_ADD_FUNCTIONAL_PROBE_V2: frozenset(
+        {"research_lab.source_add_functional_probe.v2"}
     ),
     OP_SOURCE_ADD_CATALOG_SNAPSHOT_V2: frozenset(
         {"research_lab.source_add_catalog_snapshot.v2"}
@@ -170,6 +176,9 @@ class CoordinatorExecutorV2:
         source_add_provenance_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
+        source_add_functional_probe_resolver: Optional[
+            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
+        ] = None,
         reward_source_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
@@ -201,6 +210,9 @@ class CoordinatorExecutorV2:
         self._qualification_admission_resolver = qualification_admission_resolver
         self._allocation_source_resolver = allocation_source_resolver
         self._source_add_provenance_resolver = source_add_provenance_resolver
+        self._source_add_functional_probe_resolver = (
+            source_add_functional_probe_resolver
+        )
         self._reward_source_resolver = reward_source_resolver
         self._source_add_catalog_resolver = source_add_catalog_resolver
         self._provider_outcome_supplier = provider_outcome_supplier
@@ -243,6 +255,16 @@ class CoordinatorExecutorV2:
             if self._source_add_provenance_resolver is None:
                 raise ValueError("measured SOURCE_ADD provenance is unavailable")
             output = dict(self._source_add_provenance_resolver(payload, context))
+            return ExecutionResultV2(
+                output=output,
+                artifact_hashes=(sha256_json(output),),
+            )
+        if operation == OP_SOURCE_ADD_FUNCTIONAL_PROBE_V2:
+            if self._source_add_functional_probe_resolver is None:
+                raise ValueError("measured SOURCE_ADD functional probe is unavailable")
+            output = dict(
+                self._source_add_functional_probe_resolver(payload, context)
+            )
             return ExecutionResultV2(
                 output=output,
                 artifact_hashes=(sha256_json(output),),
@@ -362,7 +384,7 @@ class CoordinatorExecutorV2:
         kind = str(payload.get("decision_kind") or "")
         expected_purpose = {
             "champion": "research_lab.promotion_decision.v2",
-            "source_add_leg1": "research_lab.source_add_provenance.v2",
+            "source_add_leg1": "research_lab.source_add_functional_probe.v2",
             "source_add_leg2": "research_lab.source_add_judge.v2",
             "reimbursement": "research_lab.candidate_decision.v2",
         }.get(kind)
@@ -394,7 +416,7 @@ class CoordinatorExecutorV2:
             if isinstance(promotion_decision, Mapping):
                 bound_result = {"decision": dict(promotion_decision)}
         elif kind == "source_add_leg1":
-            bound_result = decision_payload.get("provenance_result")
+            bound_result = decision_payload.get("functional_probe_result")
         elif kind == "source_add_leg2":
             bound_result = decision_payload.get("judge_result")
         elif kind == "reimbursement":

@@ -12,6 +12,8 @@ from gateway.research_lab.attested_coordinator_v2 import execute_coordinator_v2
 from gateway.research_lab.attested_scoring_v2 import execute_scoring_v2
 from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.tee.source_add_runtime_v2 import (
+    build_source_add_probe_job_envelope_v2,
+    build_source_add_probe_route_v2,
     build_source_add_runtime_catalog_v2,
     validate_source_add_runtime_catalog_v2,
 )
@@ -37,7 +39,10 @@ from gateway.tee.reward_executor_v2 import (
     reward_receipt_projection_v2,
 )
 from gateway.tee.coordinator_source_add_v2 import (
+    OP_SOURCE_ADD_FUNCTIONAL_PROBE_V2,
     OP_SOURCE_ADD_PROVENANCE_V2,
+    SOURCE_ADD_FUNCTIONAL_PROBE_REQUEST_SCHEMA_VERSION,
+    SOURCE_ADD_FUNCTIONAL_PROBE_RESULT_SCHEMA_VERSION,
     SOURCE_ADD_PROVENANCE_REQUEST_SCHEMA_VERSION,
     SOURCE_ADD_PROVENANCE_RESULT_SCHEMA_VERSION,
 )
@@ -182,6 +187,171 @@ async def evaluate_source_add_provenance_v2(
         },
     )
     return provenance, {
+        **dict(outcome),
+        "status": "matched",
+        "artifact_link_status": link,
+    }
+
+
+async def evaluate_source_add_functional_probe_v2(
+    *,
+    submission_id: str,
+    config_ref: str,
+    evaluation_mode: str,
+    epoch_id: int,
+    sequence: int,
+    artifact_ref: str,
+    timeout_seconds: int = 45,
+    execute: Any = execute_coordinator_v2,
+    load_probe_row: Any = None,
+    persist_links: Any = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run one exact provisional API test through the V2 provider broker."""
+
+    if legacy_v1_enabled():
+        raise ResearchLabV2AuthorityError(
+            "SOURCE_ADD functional probes require V2 coordinator authority"
+        )
+    if evaluation_mode not in {"functional_probe", "provisioning_smoke"}:
+        raise ResearchLabV2AuthorityError(
+            "SOURCE_ADD functional evaluation mode is invalid"
+        )
+    if load_probe_row is None:
+        from gateway.research_lab.store import select_one
+
+        async def load_probe_row(value: str) -> Mapping[str, Any] | None:
+            config = await select_one(
+                "research_lab_source_add_probe_config_current",
+                filters=(
+                    ("submission_id", value),
+                    ("config_status", "active"),
+                ),
+            )
+            submission = await select_one(
+                "research_lab_source_add_submission_current",
+                filters=(("submission_id", value),),
+            )
+            if not isinstance(config, Mapping) or not isinstance(
+                submission, Mapping
+            ):
+                return None
+            return {
+                **dict(config),
+                "miner_hotkey": str(submission.get("miner_hotkey") or ""),
+            }
+
+    row = await load_probe_row(str(submission_id))
+    if not isinstance(row, Mapping) or str(row.get("config_ref") or "") != str(
+        config_ref
+    ):
+        raise ResearchLabV2AuthorityError(
+            "SOURCE_ADD current probe configuration is unavailable"
+        )
+    try:
+        route = build_source_add_probe_route_v2(row)
+    except Exception as exc:
+        raise ResearchLabV2AuthorityError(
+            "SOURCE_ADD probe route is invalid"
+        ) from exc
+
+    dynamic_refs = {}
+    if route["credential_slot"]:
+        dynamic_refs[str(route["credential_slot"])] = str(
+            route["credential_value_hash"]
+        )
+
+    async def envelope_builder(job_id: str):
+        envelope = build_source_add_probe_job_envelope_v2(row, job_id=job_id)
+        return (envelope,) if envelope is not None else ()
+
+    outcome = await execute(
+        operation=OP_SOURCE_ADD_FUNCTIONAL_PROBE_V2,
+        purpose="research_lab.source_add_functional_probe.v2",
+        epoch_id=max(0, int(epoch_id)),
+        sequence=max(0, int(sequence)),
+        payload={
+            "schema_version": SOURCE_ADD_FUNCTIONAL_PROBE_REQUEST_SCHEMA_VERSION,
+            "submission_id": str(submission_id),
+            "config_ref": str(config_ref),
+            "evaluation_mode": str(evaluation_mode),
+            "timeout_seconds": int(timeout_seconds),
+        },
+        input_artifact_hashes=(str(route["route_hash"]),),
+        provider_credential_ref_hashes=dynamic_refs,
+        additional_job_credential_envelope_builder=envelope_builder,
+        timeout_seconds=max(60.0, float(timeout_seconds) * 3.0 + 30.0),
+    )
+    result = outcome.get("result")
+    required = {
+        "schema_version",
+        "evaluator_version",
+        "submission_id",
+        "adapter_id",
+        "config_ref",
+        "evaluation_mode",
+        "result_status",
+        "route_hash",
+        "selected_probe_index",
+        "response_hash",
+        "status_class",
+        "content_type",
+        "byte_count",
+        "duration_ms",
+        "retry_after_seconds",
+        "reason_codes",
+        "probe_summaries",
+    }
+    if (
+        not isinstance(result, Mapping)
+        or set(result) != required
+        or result.get("schema_version")
+        != SOURCE_ADD_FUNCTIONAL_PROBE_RESULT_SCHEMA_VERSION
+        or result.get("submission_id") != str(submission_id)
+        or result.get("config_ref") != str(config_ref)
+        or result.get("evaluation_mode") != str(evaluation_mode)
+        or result.get("route_hash") != route["route_hash"]
+        or result.get("result_status")
+        not in {"passed", "retryable", "awaiting_operator", "manual_review", "failed"}
+        or not isinstance(result.get("reason_codes"), list)
+        or not isinstance(result.get("probe_summaries"), list)
+        or not isinstance(result.get("retry_after_seconds"), int)
+        or not 0 <= int(result["retry_after_seconds"]) <= 21_600
+        or not 1 <= len(result["probe_summaries"]) <= 3
+    ):
+        raise ResearchLabV2AuthorityError(
+            "SOURCE_ADD functional probe result binding differs"
+        )
+    receipt = outcome.get("execution_receipt") or outcome.get("receipt")
+    graph = outcome.get("receipt_graph")
+    if (
+        not isinstance(receipt, Mapping)
+        or not isinstance(graph, Mapping)
+        or receipt.get("output_root") != sha256_json(dict(result))
+        or graph.get("root_receipt_hash") != receipt.get("receipt_hash")
+    ):
+        raise ResearchLabV2AuthorityError(
+            "SOURCE_ADD functional probe receipt differs"
+        )
+    validate_receipt_graph(
+        graph,
+        required_purposes={"research_lab.source_add_functional_probe.v2"},
+    )
+    link = await _persist_business_links(
+        outcome,
+        (
+            {
+                "artifact_kind": (
+                    "source_add_functional_probe"
+                    if evaluation_mode == "functional_probe"
+                    else "source_add_provisioning_smoke"
+                ),
+                "artifact_ref": str(artifact_ref),
+                "artifact_hash": str(receipt["output_root"]),
+            },
+        ),
+        persist_links=persist_links,
+    )
+    return dict(result), {
         **dict(outcome),
         "status": "matched",
         "artifact_link_status": link,

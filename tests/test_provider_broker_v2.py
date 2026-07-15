@@ -229,6 +229,68 @@ def test_scrapingdog_key_is_injected_only_inside_coordinator_query():
     assert "scrapingdog-secret" not in str(attempt)
 
 
+def test_source_add_provenance_static_route_uses_bounded_hash_only_artifacts():
+    transport = FakeTransport()
+    artifact_bodies = []
+    credentials = {
+        "openrouter": "openrouter-secret",
+        "exa": "exa-secret",
+        "scrapingdog": "scrapingdog-secret",
+        "deepline": "deepline-secret",
+        "supabase_service_role": "supabase-service-role-secret",
+        "truelist": "truelist-secret",
+    }
+
+    def sink(body, **_kwargs):
+        artifact_bodies.append(bytes(body))
+        return {
+            "artifact_id": sha256_bytes(b"artifact:" + body),
+            "plaintext_hash": sha256_bytes(body),
+        }
+
+    broker = ProviderBrokerV2(
+        credential_ref_hashes={
+            name: credential_reference_hash(value)
+            for name, value in credentials.items()
+        },
+        retry_policy_hashes={name: HASH for name in BUILTIN_PROVIDER_ROUTES},
+        transport=transport,
+        artifact_sink=sink,
+        clock=lambda: NOW,
+    )
+    broker.provision_credentials(credentials)
+    result = broker.execute(
+        _request(
+            purpose="research_lab.source_add_provenance.v2",
+            provider_id="scrapingdog",
+            method="GET",
+            url=(
+                "https://api.scrapingdog.com/scrape?"
+                "url=https%3A%2F%2Fdocs.example.com&dynamic=false"
+            ),
+            body_b64="",
+            max_response_bytes=240_000,
+            artifact_mode="hash_only",
+        )
+    )
+
+    assert transport.calls[0]["max_response_bytes"] == 240_000
+    assert b'"error":"provider unavailable"' not in artifact_bodies
+    assert all(b"docs.example.com" not in body for body in artifact_bodies)
+    assert result["transport_attempt"]["response_hash"].startswith("sha256:")
+
+
+def test_unrelated_static_route_cannot_request_hash_only_artifacts():
+    broker = _broker(FakeTransport())
+    with pytest.raises(ProviderBrokerV2Error, match="measured SOURCE_ADD route"):
+        broker.execute(
+            _request(
+                max_response_bytes=240_000,
+                artifact_mode="hash_only",
+            )
+        )
+
+
 def test_supabase_service_role_is_injected_only_for_measured_project():
     transport = FakeTransport()
     broker = _broker(transport)

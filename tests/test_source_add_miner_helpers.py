@@ -92,22 +92,17 @@ def test_build_source_add_docs_emit_valid_manifest_without_credential():
     assert "secret" not in str(manifest).lower()
 
 
-def test_build_source_add_docs_emit_valid_manifest_with_credential_ref_only():
-    manifest, source_brief, _idempotency_key, metadata = build_source_add_submission_docs(
-        miner_hotkey="5MinerHotkey",
-        source_name="Registry API",
-        source_kind="registry",
-        declared_base_domains=("registry.example",),
-        endpoint_summary="POST /lookup returns firmographic evidence refs",
-        claimed_output_type="firmographic",
-        credential_supplied=True,
-    )
-
-    assert validate_source_add_adapter_manifest(manifest) == []
-    assert manifest["credential_policy"] == "credential_ref_only"
-    assert "credential_ref" not in manifest
-    assert metadata == {}
-    assert "Auth material submitted separately: yes" in source_brief
+def test_build_source_add_docs_rejects_miner_credentials():
+    with pytest.raises(ValueError, match="miners must not submit"):
+        build_source_add_submission_docs(
+            miner_hotkey="5MinerHotkey",
+            source_name="Registry API",
+            source_kind="registry",
+            declared_base_domains=("registry.example",),
+            endpoint_summary="POST /lookup returns firmographic evidence refs",
+            claimed_output_type="firmographic",
+            credential_supplied=True,
+        )
 
 
 def test_build_source_add_docs_emit_structured_metadata_and_derived_domains():
@@ -129,11 +124,12 @@ def test_build_source_add_docs_emit_structured_metadata_and_derived_domains():
         rate_limit_notes="Provider documents model/account-specific rate limits.",
         data_provenance_notes="Routes to model providers and returns metadata.",
         third_party_refs=("https://github.com/OpenRouterTeam",),
-        credential_supplied=True,
+        credential_supplied=False,
     )
 
     assert validate_source_add_adapter_manifest(manifest) == []
-    assert manifest["declared_base_domains"] == ["openrouter.ai", "github.com"]
+    assert manifest["declared_base_domains"] == ["openrouter.ai"]
+    assert manifest["credential_policy"] == "no_credentials"
     assert metadata["documentation_url"] == "https://openrouter.ai/docs/quickstart"
     assert metadata["auth_type"] == "bearer"
     assert metadata["endpoint_examples"][0]["path"] == "/api/v1/chat/completions"
@@ -168,6 +164,47 @@ def test_source_add_metadata_rejects_missing_docs_bad_auth_and_bad_endpoint():
         assert "endpoint example" in str(exc)
     else:
         raise AssertionError("missing endpoint examples should fail")
+
+    for unsafe_path in (
+        "/v1/search?q=test",
+        "/v1/{tenant}/search",
+        "/v1/../admin",
+        "/v1\\admin",
+        "/v1/%2e%2e/admin",
+        "/v1/search%2Fadmin",
+        "/v1/search results",
+    ):
+        with pytest.raises(ValueError, match="relative API path"):
+            build_source_add_metadata(
+                api_base_url="https://api.example.com",
+                documentation_url="https://docs.example.com",
+                auth_type="none",
+                endpoint_examples=[
+                    {
+                        "method": "GET",
+                        "path": unsafe_path,
+                        "purpose": "Search",
+                        "example_query": "test",
+                    }
+                ],
+                rate_limit_notes="unknown",
+            )
+
+    with pytest.raises(ValueError, match="api_base_url path"):
+        build_source_add_metadata(
+            api_base_url="https://api.example.com/v1%2Fadmin",
+            documentation_url="https://docs.example.com/reference%20guide",
+            auth_type="none",
+            endpoint_examples=[
+                {
+                    "method": "GET",
+                    "path": "/records",
+                    "purpose": "Search",
+                    "example_query": "q=test",
+                }
+            ],
+            rate_limit_notes="unknown",
+        )
 
 
 def test_build_source_add_docs_reject_invalid_kind():

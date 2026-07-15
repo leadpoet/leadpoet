@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import http.client
 import json
 import time
 from pathlib import Path
@@ -10,17 +9,16 @@ from typing import Any
 
 import pytest
 
-from gateway.research_lab.provider_evidence_proxy import (
-    ProviderRegistryEntry,
-    serve_evidence_proxy,
-)
 from gateway.research_lab.provider_probe import probe_guard_terms_from_icp_items
 from gateway.research_lab.source_add_trial_runner import (
     build_source_add_sandbox_runner,
     build_trial_registry_entry,
 )
-from research_lab.eval.provider_evidence_cache import canonical_request_fingerprint
-from research_lab.source_add_execution import intake_source_add_submission, run_sandboxed_trial
+from research_lab.source_add_execution import (
+    SourceAddRejectionReason,
+    intake_source_add_submission,
+    run_sandboxed_trial,
+)
 
 
 def _manifest_doc(**overrides: Any) -> dict[str, Any]:
@@ -70,15 +68,20 @@ class TestTrialRegistryEntry:
         assert entry.auth_kind == "none"  # no_credentials manifest
         assert entry.id.startswith("trial_")
 
-    def test_entry_with_credential_uses_header_auth(self):
-        record = _submission(
+    def test_legacy_miner_credential_manifest_is_rejected_at_intake(self):
+        record, errors = intake_source_add_submission(
+            _manifest_doc(
             adapter_id="adapter:glue-cred-1",
             credential_policy="credential_ref_only",
             credential_ref="encrypted_ref:source_add:abc",
+            ),
+            miner_hotkey="hk-glue",
         )
-        entry = build_trial_registry_entry(record)
-        assert entry.auth_kind == "header"
-        assert entry.auth_name == "x-api-key"
+        assert record is None
+        assert any(
+            SourceAddRejectionReason.CREDENTIAL_INVALID.value in item
+            for item in errors
+        )
 
 
 class TestSandboxRunner:
@@ -140,101 +143,11 @@ class TestSandboxRunner:
                 work_dir=tmp_path / "work",
             )
 
-    def test_trial_proxy_serves_only_the_adapter_provider_with_override_credential(self, tmp_path):
-        """The container-facing guarantee: adapter's provider replays through
-        the per-trial proxy with the in-memory miner key; everything else 404s."""
-
-        record = _submission(
-            adapter_id="adapter:glue-proxy-1",
-            credential_policy="credential_ref_only",
-            credential_ref="encrypted_ref:source_add:xyz",
-        )
+    def test_legacy_trial_has_no_credential_for_public_submission(self):
+        record = _submission(adapter_id="adapter:glue-proxy-1")
         entry = build_trial_registry_entry(record)
-        proxy_url_holder: dict[str, str] = {}
-
-        def _probe_proxy_docker(argv, timeout):
-            proxy_env = next(arg for arg in argv if arg.startswith("RESEARCH_LAB_EVIDENCE_PROXY_URL="))
-            base = proxy_env.split("=", 1)[1]  # http://127.0.0.1:PORT/<entry.id>
-            host_port = base.split("://", 1)[1].split("/", 1)[0]
-            host, port = host_port.split(":")
-            connection = http.client.HTTPConnection(host, int(port), timeout=5)
-            try:
-                # The adapter's own provider route resolves (recorded below).
-                connection.request("GET", f"/{entry.id}/feed?q=x")
-                own = connection.getresponse()
-                own_body = own.read()
-                connection.close()
-                connection = http.client.HTTPConnection(host, int(port), timeout=5)
-                # Any other provider is unreachable from the trial.
-                connection.request("GET", "/exa/search?q=x")
-                other = connection.getresponse()
-                other.read()
-                proxy_url_holder["own_status"] = str(own.status)
-                proxy_url_holder["own_body"] = own_body.decode()
-                proxy_url_holder["other_status"] = str(other.status)
-            finally:
-                connection.close()
-            return 0, json.dumps(_output_doc(record.adapter_id, "icp:1")), ""
-
-        bundle = tmp_path / "bundle"
-        bundle.mkdir()
-        (bundle / "adapter.py").write_text("print('{}')\n", encoding="utf-8")
-        runner, shutdown = build_source_add_sandbox_runner(
-            record=record,
-            bundle_dir=bundle,
-            work_dir=tmp_path / "work",
-            registry_entry=entry,
-            miner_credential="miner-secret-key-123",
-            docker_exec=_probe_proxy_docker,
-        )
-        try:
-            # Pre-record the adapter-provider response so no live call happens.
-            from gateway.research_lab import provider_evidence_proxy as proxy_module  # noqa: F401
-
-            # Reach into the spawned proxy store via a replay: record first.
-            fingerprint = canonical_request_fingerprint("GET", "https://gluefeed.example/feed?q=x", None)
-            # The store is owned by the runner's proxy; simplest path: make the
-            # "live" call fail closed is not needed — record via the day cache
-            # is internal, so instead let the request go "live" and stub it.
-            import urllib.request as _urllib_request
-
-            class _FakeUpstream:
-                status = 200
-                headers: dict[str, str] = {}
-
-                def read(self):
-                    return b'{"feed": []}'
-
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, *args):
-                    return False
-
-            seen_keys: list[str] = []
-            real_urlopen = _urllib_request.urlopen
-
-            def _routed(request, timeout=0):
-                url = request.full_url if hasattr(request, "full_url") else str(request)
-                if "gluefeed.example" in url:
-                    seen_keys.append(request.headers.get("X-api-key", ""))
-                    return _FakeUpstream()
-                return real_urlopen(request, timeout=timeout)
-
-            _urllib_request.urlopen = _routed
-            try:
-                result = runner(record, "icp:1")
-            finally:
-                _urllib_request.urlopen = real_urlopen
-        finally:
-            shutdown()
-        assert "output" in result
-        assert proxy_url_holder["own_status"] == "200"
-        assert proxy_url_holder["own_body"] == '{"feed": []}'
-        # Upstream saw the miner's override key (proxy memory, not env).
-        assert seen_keys == ["miner-secret-key-123"]
-        # Other providers do not exist inside the trial.
-        assert proxy_url_holder["other_status"] == "404"
+        assert entry.auth_kind == "none"
+        assert entry.credential_ref == ()
 
 
 class TestFullTrialThroughRunner:

@@ -543,6 +543,17 @@ async def run_and_save_baseline(
             _save_ckpt(ckpt_path, set_id, per_icp_scores, model_id)
             continue
 
+        goal_raw = icp.get("max_companies") if isinstance(icp, dict) else None
+        if goal_raw is not None:
+            try:
+                goal = max(1, min(int(goal_raw), 50))
+            except (TypeError, ValueError):
+                goal = None
+            if goal is not None and len(leads) > goal:
+                # Scorer-enforced company goal: never score more companies
+                # than the ICP requested (best-first head kept).
+                leads = leads[:goal]
+
         icp_total = 0.0
         # Per-ICP dedup set — score_company's run_company_zero_checks uses
         # this to detect repeated companies within the same ICP submission

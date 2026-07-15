@@ -1128,6 +1128,18 @@ def _baseline_summary_nonempty(row: Mapping[str, Any]) -> bool:
     return isinstance(breakdowns, list) and len(breakdowns) > 0
 
 
+def _icp_company_goal(icp: Any) -> int | None:
+    """The ICP's pinned company goal (max_companies), clamped, or None."""
+    raw = icp.get("max_companies") if isinstance(icp, Mapping) else None
+    if raw is None:
+        return None
+    try:
+        goal = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return max(1, min(goal, 50))
+
+
 def _baseline_summary_checkpointable(row: Mapping[str, Any]) -> bool:
     if row.get("_runtime_error"):
         return False
@@ -9741,6 +9753,17 @@ class ResearchLabGatewayScoringWorker:
         * one inline retry for transient scorer provider errors (classified by
           the same rules as runner errors).
         """
+        # max_companies is scorer-enforced: when the ICP pins a goal, at most
+        # that many companies are scored/counted (model output is best-first,
+        # so the head keeps its best). A model ignoring the field cannot earn
+        # credit for extra companies.
+        goal = _icp_company_goal(icp)
+        if goal is not None and len(outputs) > goal:
+            logger.warning(
+                "research_lab_outputs_capped_to_goal goal=%s submitted=%s",
+                goal, len(outputs),
+            )
+            outputs = list(outputs)[:goal]
 
         async def _call() -> list[dict[str, Any]]:
             if scorer_semaphore is None:

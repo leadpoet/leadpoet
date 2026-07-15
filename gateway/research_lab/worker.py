@@ -2257,6 +2257,7 @@ class ResearchLabHostedWorker:
         readiness = await asyncio.to_thread(
             snapshot_readiness,
             str(os.getenv("RESEARCH_LAB_DEV_SNAPSHOT_URI") or ""),
+            expected_dev_icp_count=self.tree_policy.live_max_icps_per_node,
         )
         tree_preflight_reason = ""
         if not dev_eval_runner_enabled():
@@ -2330,7 +2331,8 @@ class ResearchLabHostedWorker:
         budget_context["tree_policy"] = tree_runtime_policy
         logger.info(
             "research_lab_git_tree_policy run_id=%s mode=%s branch_factor=%s "
-            "beam_width=%s max_depth=%s max_nodes=%s paid_finalists=1 "
+            "beam_width=%s max_depth=%s max_nodes=%s dev_icps_per_node=%s "
+            "paid_finalists=1 "
             "snapshot_hash=%s dev_set_hash=%s",
             context.run_id,
             self.tree_policy.mode,
@@ -2338,6 +2340,7 @@ class ResearchLabHostedWorker:
             self.tree_policy.beam_width,
             self.tree_policy.max_depth,
             self.tree_policy.max_nodes,
+            self.tree_policy.live_max_icps_per_node,
             evaluator_commitment["snapshot_manifest_hash"][:24],
             evaluator_commitment["dev_set_hash"][:24],
         )

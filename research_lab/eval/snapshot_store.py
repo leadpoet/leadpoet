@@ -86,7 +86,6 @@ DEV_ICPS_NAME = "dev_icps.json"
 READY_NAME = "READY.json"
 POINTER_NAME = "current.json"
 RECORD_FAILURES_NAME = "record_failures.jsonl"
-EXPECTED_DEV_ICP_COUNT = 8
 
 
 def build_snapshot_pointer_document(
@@ -792,9 +791,18 @@ class ProviderSnapshotStore:
         self,
         ready: Mapping[str, Any] | None = None,
         *,
+        expected_dev_icp_count: int,
         require_signature: bool | None = None,
     ) -> dict[str, Any]:
-        """Verify publication completeness, exact eight-item binding, and signature."""
+        """Verify publication completeness, configured cohort binding, and signature."""
+        if (
+            isinstance(expected_dev_icp_count, bool)
+            or not isinstance(expected_dev_icp_count, int)
+            or expected_dev_icp_count < 1
+        ):
+            raise DevSnapshotStoreError(
+                "expected development ICP count must be a positive integer"
+            )
         errors: list[str] = []
         doc = dict(ready) if ready is not None else self.load_ready_document()
         if doc is None:
@@ -820,8 +828,8 @@ class ProviderSnapshotStore:
                 if str(doc.get(key) or "") != str(manifest.get(key) or ""):
                     errors.append(f"ready_{key}_mismatch")
         items = self.load_dev_icp_items() or []
-        if len(items) != EXPECTED_DEV_ICP_COUNT:
-            errors.append("dev_set_size_must_equal_eight")
+        if len(items) != expected_dev_icp_count:
+            errors.append("dev_set_size_does_not_match_config")
         if int(doc.get("dev_set_size") or 0) != len(items):
             errors.append("ready_dev_set_size_mismatch")
         provenance = manifest.get("provenance") if isinstance(manifest, Mapping) else {}
@@ -861,6 +869,7 @@ class ProviderSnapshotStore:
             "ready_hash": str(doc.get("ready_hash") or ""),
             "manifest_hash": str(doc.get("manifest_hash") or ""),
             "dev_set_size": len(items),
+            "expected_dev_set_size": expected_dev_icp_count,
             "recorded_at": str(doc.get("recorded_at") or ""),
         }
 

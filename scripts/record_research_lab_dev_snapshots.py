@@ -35,7 +35,7 @@ Example (gateway box):
   python3 scripts/record_research_lab_dev_snapshots.py \
       --source-icps /tmp/source_icps.json \
       --exclude-hashes /tmp/holdout_window_hashes.json \
-      --size 8 --seed dev-v1 \
+      --seed dev-v1 \
       --snapshot-dir /var/lib/research_lab/dev_snapshots/dev-v1 \
       --adapter-path /opt/champion \
       --record
@@ -57,6 +57,13 @@ from typing import Any, Mapping, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from gateway.research_lab.config import (  # noqa: E402
+    MAX_RESEARCH_LAB_GIT_TREE_ICP_COUNT,
+    RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD,
+    ResearchLabGitTreeConfig,
+    ResearchLabGitTreeConfigError,
+)
 
 RECORD_ENABLED_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_RECORD_ENABLED"
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
@@ -387,7 +394,15 @@ def main() -> int:
     parser.add_argument("--source-icps", required=True, help="JSON file of candidate dev ICPs (benchmark-item or raw ICP shapes)")
     parser.add_argument("--exclude-hashes", default="", help="JSON file listing holdout-window icp_refs/icp_hashes/signatures to exclude")
     parser.add_argument("--exclude-hash", action="append", default=[], help="Additional exclusion entry (repeatable)")
-    parser.add_argument("--size", type=int, default=8, help="Dev ICP set size (must be 8)")
+    parser.add_argument(
+        "--size",
+        type=int,
+        default=None,
+        help=(
+            "Compatibility check only; when supplied it must match "
+            + RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD["live_max_icps_per_node"]
+        ),
+    )
     parser.add_argument("--seed", default="dev-v1", help="Deterministic selection seed (default dev-v1)")
     parser.add_argument("--snapshot-dir", default="", help="Local snapshot directory (default: RESEARCH_LAB_DEV_SNAPSHOT_URI when it is a local path)")
     parser.add_argument("--adapter-path", default="", help="Private champion checkout for subprocess execution")
@@ -401,8 +416,21 @@ def main() -> int:
     parser.add_argument("--record", action="store_true", help=f"Actually run the champion with live providers (also requires {RECORD_ENABLED_ENV}=true)")
     args = parser.parse_args()
 
-    if args.size != 8:
-        print("ERROR: production development snapshots require exactly 8 ICPs")
+    try:
+        configured_icp_count = (
+            ResearchLabGitTreeConfig.from_env().live_max_icps_per_node
+        )
+    except ResearchLabGitTreeConfigError as exc:
+        print(f"ERROR: invalid Git-tree configuration: {exc}")
+        return 1
+    if not 1 <= configured_icp_count <= MAX_RESEARCH_LAB_GIT_TREE_ICP_COUNT:
+        print("ERROR: configured Git-tree development ICP count is invalid")
+        return 1
+    if args.size is not None and args.size != configured_icp_count:
+        print(
+            "ERROR: --size differs from the configured Git-tree development "
+            f"ICP count ({configured_icp_count})"
+        )
         return 1
 
     from research_lab.canonical import utc_now_iso
@@ -424,7 +452,7 @@ def main() -> int:
         dev_set = build_dev_icp_set(
             source_items,
             exclude_window_hashes=exclusions,
-            size=args.size,
+            size=configured_icp_count,
             seed=args.seed,
         )
     except Exception as exc:  # noqa: BLE001 - CLI boundary
@@ -562,7 +590,10 @@ def main() -> int:
         ready = store.build_ready_document(manifest)
         if verification["passed"] and not failure_summary["has_failures"]:
             store.write_ready_document(ready)
-        ready_verification = store.verify_ready_document(require_signature=False)
+        ready_verification = store.verify_ready_document(
+            expected_dev_icp_count=configured_icp_count,
+            require_signature=False,
+        )
         print(f"snapshot_count={manifest['snapshot_count']}")
         print(f"content_hash={manifest['content_hash']}")
         print(f"manifest_hash={manifest['manifest_hash']}")

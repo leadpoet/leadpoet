@@ -2,13 +2,17 @@ from dataclasses import replace
 
 import pytest
 
-from gateway.research_lab.config import ResearchLabGatewayConfig
+from gateway.research_lab.config import (
+    DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG,
+    ResearchLabGatewayConfig,
+)
 from gateway.tee.research_lab_runtime_config_v2 import (
     BEHAVIOR_ENV_NAMES,
     HOST_ONLY_SECRET_FIELDS,
     ResearchLabRuntimeConfigV2Error,
     apply_behavior_environment,
     build_research_lab_execution_config,
+    measured_git_tree_config,
     research_lab_config_from_document,
     validate_research_lab_execution_config,
 )
@@ -45,6 +49,9 @@ def test_execution_config_round_trips_every_non_secret_behavior_field():
     assert "https://user:password@proxy.invalid" not in str(document)
     assert document["deployment"] == {"network": "finney", "netuid": 71}
     assert document["behavior_environment"]["RESEARCH_LAB_TREE_MODE"] == "active"
+    assert measured_git_tree_config(document).live_max_icps_per_node == (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
+    )
 
 
 def test_execution_config_rejects_tampering_and_secret_material():
@@ -74,3 +81,10 @@ def test_behavior_environment_is_exact_and_applied(monkeypatch):
 
     assert os.environ["RESEARCH_LAB_TREE_MAX_NODES"] == "5"
     assert "RESEARCH_LAB_LOOP_STAGE_ERROR_CONTAINMENT" not in os.environ
+
+
+def test_measured_tree_icp_count_uses_the_committed_override():
+    document = build_research_lab_execution_config(
+        environment={"RESEARCH_LAB_TREE_LIVE_MAX_ICPS_PER_NODE": "7"}
+    )
+    assert measured_git_tree_config(document).live_max_icps_per_node == 7

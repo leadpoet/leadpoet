@@ -568,12 +568,14 @@ async def test_evaluate_dev_round_trip_is_deterministic(tmp_path):
         dev_items=items,
         snapshot_store=replayer,
         run_label="iteration-1",
+        expected_icp_count=len(items),
     )
     second = await evaluate_dev(
         candidate_runner=_urllib_runner,
         dev_items=items,
         snapshot_store=_replay_store(tmp_path),
         run_label="iteration-1",
+        expected_icp_count=len(items),
     )
     assert first.to_dict() == second.to_dict()
     assert first.dev_score_version == dev_eval.DEV_SCORE_VERSION
@@ -610,6 +612,7 @@ async def test_evaluate_dev_strict_miss_books_zero_and_flags(tmp_path):
         candidate_runner=_urllib_runner,
         dev_items=items,
         snapshot_store=_replay_store(tmp_path),
+        expected_icp_count=len(items),
     )
     assert result.per_icp[0]["dev_score"] > 0.0
     missed = result.per_icp[1]
@@ -628,6 +631,7 @@ async def test_evaluate_dev_empty_policy_yields_zero_companies_not_miss(tmp_path
         candidate_runner=_urllib_runner,
         dev_items=items,
         snapshot_store=_replay_store(tmp_path, miss_policy="empty"),
+        expected_icp_count=len(items),
     )
     row = result.per_icp[0]
     assert row["snapshot_miss"] is False
@@ -642,12 +646,14 @@ async def test_evaluate_dev_requires_replay_mode_and_items(tmp_path):
             candidate_runner=_urllib_runner,
             dev_items=_dev_items(1),
             snapshot_store=_record_store(tmp_path),
+            expected_icp_count=1,
         )
     with pytest.raises(DevEvalError):
         await evaluate_dev(
             candidate_runner=_urllib_runner,
             dev_items=[],
             snapshot_store=_replay_store(tmp_path),
+            expected_icp_count=1,
         )
 
 
@@ -662,6 +668,7 @@ async def test_evaluate_dev_crashing_candidate_ranks_zero_without_aborting(tmp_p
         dev_items=_dev_items(2),
         snapshot_store=_replay_store(tmp_path),
         install_replay_seams=False,
+        expected_icp_count=2,
     )
     assert result.aggregate_dev_score == 0.0
     assert result.failure_count == 2
@@ -683,6 +690,7 @@ async def test_evaluate_dev_manifest_verification(tmp_path):
             dev_items=items,
             snapshot_store=_replay_store(tmp_path),
             require_manifest=True,
+            expected_icp_count=len(items),
         )
 
     recorder.write_dev_icp_items(items)
@@ -693,6 +701,7 @@ async def test_evaluate_dev_manifest_verification(tmp_path):
         dev_items=items,
         snapshot_store=_replay_store(tmp_path),
         require_manifest=True,
+        expected_icp_count=len(items),
     )
     assert result.snapshot_manifest_hash == manifest["manifest_hash"]
 
@@ -706,6 +715,7 @@ async def test_evaluate_dev_manifest_verification(tmp_path):
             candidate_runner=_urllib_runner,
             dev_items=items,
             snapshot_store=_replay_store(tmp_path),
+            expected_icp_count=len(items),
         )
 
 

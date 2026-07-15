@@ -6,6 +6,7 @@ import io
 import json
 from types import SimpleNamespace
 
+from gateway.research_lab.config import DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG
 from research_lab.canonical import sha256_json
 from research_lab.eval.dev_eval import compute_dev_set_hash
 from research_lab.eval.snapshot_store import (
@@ -19,6 +20,7 @@ from scripts import publish_research_lab_dev_snapshot as publisher
 
 
 IMAGE = "123456789.dkr.ecr.test/model@sha256:" + "a" * 64
+DEV_ICP_COUNT = DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
 
 
 class NoSuchKey(Exception):
@@ -87,7 +89,7 @@ def _snapshot(tmp_path):
     root = tmp_path / "snapshot"
     store = ProviderSnapshotStore(str(root), mode=MODE_RECORD)
     items = []
-    for index in range(8):
+    for index in range(DEV_ICP_COUNT):
         icp = {
             "icp_id": f"dev-{index}",
             "industry": "Software Development",
@@ -128,7 +130,10 @@ def _snapshot(tmp_path):
     )
     store.write_manifest(manifest)
     store.write_ready_document(store.build_ready_document(manifest))
-    assert store.verify_ready_document(require_signature=False)["passed"]
+    assert store.verify_ready_document(
+        expected_dev_icp_count=DEV_ICP_COUNT,
+        require_signature=False,
+    )["passed"]
     return root, manifest
 
 

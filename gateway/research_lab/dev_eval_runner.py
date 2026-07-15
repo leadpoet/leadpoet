@@ -46,12 +46,15 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from gateway.research_lab.config import (
+    DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG,
+    MAX_RESEARCH_LAB_GIT_TREE_ICP_COUNT,
+)
 from research_lab.eval.dev_eval import compute_dev_set_hash, evaluate_dev
 from research_lab.eval.snapshot_store import (
     DEV_ICPS_NAME,
     MANIFEST_NAME,
     READY_NAME,
-    EXPECTED_DEV_ICP_COUNT,
     MISS_POLICY_STRICT,
     MODE_REPLAY,
     SNAPSHOT_SUBDIR,
@@ -125,7 +128,14 @@ def _default_cache_root() -> Path:
     return Path(tempfile.gettempdir()) / "research_lab_dev_snapshot_cache"
 
 
-def ensure_local_snapshot_set(root_uri: str, *, cache_root: Path | None = None) -> Path:
+def ensure_local_snapshot_set(
+    root_uri: str,
+    *,
+    cache_root: Path | None = None,
+    expected_dev_icp_count: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
+    ),
+) -> Path:
     """Return a local directory holding the snapshot set.
 
     Local URIs are used in place. S3 prefixes are synced once into a
@@ -146,8 +156,11 @@ def ensure_local_snapshot_set(root_uri: str, *, cache_root: Path | None = None) 
     expected_ready_hash = str(resolution.get("ready_hash") or "")
     if not uri.startswith("s3://"):
         local = Path(uri).expanduser()
-        verification = ProviderSnapshotStore(str(local), mode=MODE_REPLAY).verify_ready_document(
-            require_signature=False
+        verification = ProviderSnapshotStore(
+            str(local), mode=MODE_REPLAY
+        ).verify_ready_document(
+            expected_dev_icp_count=expected_dev_icp_count,
+            require_signature=False,
         )
         if not verification.get("passed"):
             raise DevEvalRunnerError(
@@ -161,7 +174,10 @@ def ensure_local_snapshot_set(root_uri: str, *, cache_root: Path | None = None) 
         return local
 
     remote = ProviderSnapshotStore(uri, mode=MODE_REPLAY)
-    ready_verification = remote.verify_ready_document(require_signature=True)
+    ready_verification = remote.verify_ready_document(
+        expected_dev_icp_count=expected_dev_icp_count,
+        require_signature=True,
+    )
     if not ready_verification.get("passed"):
         raise DevEvalRunnerError(
             "remote snapshot set is not READY: "
@@ -188,7 +204,10 @@ def ensure_local_snapshot_set(root_uri: str, *, cache_root: Path | None = None) 
         marker = target / ".complete"
         if marker.is_file():
             cached = ProviderSnapshotStore(str(target), mode=MODE_REPLAY)
-            verification = cached.verify_ready_document(require_signature=True)
+            verification = cached.verify_ready_document(
+                expected_dev_icp_count=expected_dev_icp_count,
+                require_signature=True,
+            )
             if verification.get("passed"):
                 _verify_pointer_bindings(
                     verification,
@@ -216,7 +235,10 @@ def ensure_local_snapshot_set(root_uri: str, *, cache_root: Path | None = None) 
                 raise DevEvalRunnerError("snapshot READY document vanished during sync")
             (staging / READY_NAME).write_text(ready_raw, encoding="utf-8")
             staged = ProviderSnapshotStore(str(staging), mode=MODE_REPLAY)
-            verification = staged.verify_ready_document(require_signature=True)
+            verification = staged.verify_ready_document(
+                expected_dev_icp_count=expected_dev_icp_count,
+                require_signature=True,
+            )
             if not verification.get("passed"):
                 raise DevEvalRunnerError(
                     "downloaded snapshot verification failed: "
@@ -252,15 +274,23 @@ def snapshot_readiness(
     *,
     cache_root: Path | None = None,
     now: datetime | None = None,
+    expected_dev_icp_count: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
+    ),
 ) -> dict[str, Any]:
     """Return fail-closed snapshot preflight evidence for activation policy."""
     if default_miss_policy() != MISS_POLICY_STRICT:
         return {"ready": False, "reason": "snapshot_miss_policy_must_be_strict"}
     try:
         resolution = resolve_snapshot_uri(root_uri)
-        local = ensure_local_snapshot_set(root_uri, cache_root=cache_root)
+        local = ensure_local_snapshot_set(
+            root_uri,
+            cache_root=cache_root,
+            expected_dev_icp_count=expected_dev_icp_count,
+        )
         store = ProviderSnapshotStore(str(local), mode=MODE_REPLAY, miss_policy=MISS_POLICY_STRICT)
         verification = store.verify_ready_document(
+            expected_dev_icp_count=expected_dev_icp_count,
             require_signature=str(root_uri or "").startswith("s3://")
         )
         if not verification.get("passed"):
@@ -275,7 +305,10 @@ def snapshot_readiness(
             if isinstance(manifest.get("provenance"), Mapping)
             else {}
         )
-        items = load_verified_dev_items(store)
+        items = load_verified_dev_items(
+            store,
+            expected_dev_icp_count=expected_dev_icp_count,
+        )
         recorded_at = str(manifest.get("recorded_at") or "")
         recorded = datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
         if recorded.tzinfo is None:
@@ -291,13 +324,18 @@ def snapshot_readiness(
             else []
         )
         return {
-            "ready": len(items) == EXPECTED_DEV_ICP_COUNT,
-            "reason": "ready" if len(items) == EXPECTED_DEV_ICP_COUNT else "dev_set_size_must_equal_eight",
+            "ready": len(items) == expected_dev_icp_count,
+            "reason": (
+                "ready"
+                if len(items) == expected_dev_icp_count
+                else "dev_set_size_does_not_match_config"
+            ),
             "manifest_hash": str(manifest.get("manifest_hash") or ""),
             "dev_set_hash": str(manifest.get("icp_set_hash") or ""),
             "recorded_at": recorded_at,
             "snapshot_age_seconds": age,
             "dev_set_size": len(items),
+            "expected_dev_set_size": expected_dev_icp_count,
             "ready_hash": str(verification.get("ready_hash") or ""),
             "configured_snapshot_uri": str(root_uri or ""),
             "resolved_snapshot_uri": str(resolution.get("snapshot_uri") or ""),
@@ -319,11 +357,22 @@ def snapshot_readiness(
         }
 
 
-def load_verified_dev_items(store: ProviderSnapshotStore) -> list[dict[str, Any]]:
+def load_verified_dev_items(
+    store: ProviderSnapshotStore,
+    *,
+    expected_dev_icp_count: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
+    ),
+) -> list[dict[str, Any]]:
     """Load dev ICP payloads and bind them to the manifest's icp_set_hash."""
     items = store.load_dev_icp_items()
     if not items:
         raise DevEvalRunnerError("snapshot set carries no dev ICP payloads")
+    if len(items) != expected_dev_icp_count:
+        raise DevEvalRunnerError(
+            "development snapshot size differs from configured ICP count: "
+            f"expected={expected_dev_icp_count} actual={len(items)}"
+        )
     manifest = store.load_manifest()
     expected = str((manifest or {}).get("icp_set_hash") or "")
     if expected and compute_dev_set_hash(items) != expected:
@@ -344,6 +393,9 @@ class DockerReplayDevEvaluator:
         cache_root: Path | None = None,
         docker_executable: str = "docker",
         run_icp_in_docker: Callable[..., Sequence[Mapping[str, Any]]] | None = None,
+        expected_dev_icp_count: int = (
+            DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
+        ),
     ) -> None:
         self._snapshot_uri = str(
             snapshot_uri if snapshot_uri is not None else os.getenv(SNAPSHOT_URI_ENV) or ""
@@ -352,6 +404,9 @@ class DockerReplayDevEvaluator:
         self._docker_executable = docker_executable
         # Test seam: replaces the docker invocation, everything else is real.
         self._run_icp_in_docker = run_icp_in_docker or self._run_icp_in_docker_default
+        self._expected_dev_icp_count = int(expected_dev_icp_count)
+        if not 1 <= self._expected_dev_icp_count <= MAX_RESEARCH_LAB_GIT_TREE_ICP_COUNT:
+            raise DevEvalRunnerError("configured development ICP count is invalid")
         self._prepare_lock: asyncio.Lock | None = None
         self._local_dir: Path | None = None
         self._replay_store: ProviderSnapshotStore | None = None
@@ -363,12 +418,19 @@ class DockerReplayDevEvaluator:
         async with self._prepare_lock:
             if self._local_dir is None or self._replay_store is None or self._dev_items is None:
                 local_dir = await asyncio.to_thread(
-                    ensure_local_snapshot_set, self._snapshot_uri, cache_root=self._cache_root
+                    ensure_local_snapshot_set,
+                    self._snapshot_uri,
+                    cache_root=self._cache_root,
+                    expected_dev_icp_count=self._expected_dev_icp_count,
                 )
                 replay_store = ProviderSnapshotStore(
                     str(local_dir), mode=MODE_REPLAY, miss_policy=MISS_POLICY_STRICT
                 )
-                dev_items = await asyncio.to_thread(load_verified_dev_items, replay_store)
+                dev_items = await asyncio.to_thread(
+                    load_verified_dev_items,
+                    replay_store,
+                    expected_dev_icp_count=self._expected_dev_icp_count,
+                )
                 self._local_dir = local_dir
                 self._replay_store = replay_store
                 self._dev_items = dev_items
@@ -402,6 +464,7 @@ class DockerReplayDevEvaluator:
                 run_label=str(candidate.node_id or ""),
                 install_replay_seams=False,
                 require_manifest=True,
+                expected_icp_count=self._expected_dev_icp_count,
             ),
             timeout=dev_eval_total_timeout_seconds(),
         )
@@ -521,11 +584,21 @@ class AttestedReplayDevEvaluatorV2:
         provider_environment: Mapping[str, str] | None = None,
         model_env_passthrough: Sequence[str] | None = None,
         parent_graphs: Sequence[Mapping[str, Any]] = (),
-        live_provider_call_cap: int = 32,
-        live_cost_cap_microusd: int = 500_000,
-        live_max_icps_per_node: int = 8,
-        live_timeout_seconds: int = 300,
-        evaluation_concurrency: int = 2,
+        live_provider_call_cap: int = (
+            DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_provider_calls
+        ),
+        live_cost_cap_microusd: int = (
+            DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_cap_microusd
+        ),
+        live_max_icps_per_node: int = (
+            DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
+        ),
+        live_timeout_seconds: int = (
+            DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_timeout_seconds
+        ),
+        evaluation_concurrency: int = (
+            DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.evaluation_concurrency
+        ),
         prior_provider_call_count: int = 0,
         prior_settled_cost_microusd: int = 0,
         model_runner_factory: Any = None,
@@ -556,7 +629,7 @@ class AttestedReplayDevEvaluatorV2:
             raise DevEvalRunnerError("tree live provider-call cap is invalid")
         if not 1 <= self._live_cost_cap_microusd <= 500_000:
             raise DevEvalRunnerError("tree live provider-cost cap is invalid")
-        if not 1 <= self._live_max_icps_per_node <= EXPECTED_DEV_ICP_COUNT:
+        if not 1 <= self._live_max_icps_per_node <= MAX_RESEARCH_LAB_GIT_TREE_ICP_COUNT:
             raise DevEvalRunnerError("tree live ICP cap is invalid")
         if self._live_timeout_seconds < 30:
             raise DevEvalRunnerError("tree live evaluation timeout is invalid")
@@ -600,6 +673,7 @@ class AttestedReplayDevEvaluatorV2:
                     ensure_local_snapshot_set,
                     self._snapshot_uri,
                     cache_root=self._cache_root,
+                    expected_dev_icp_count=self._live_max_icps_per_node,
                 )
                 replay_store = ProviderSnapshotStore(
                     str(local_dir),
@@ -607,7 +681,9 @@ class AttestedReplayDevEvaluatorV2:
                     miss_policy=MISS_POLICY_STRICT,
                 )
                 dev_items = await asyncio.to_thread(
-                    load_verified_dev_items, replay_store
+                    load_verified_dev_items,
+                    replay_store,
+                    expected_dev_icp_count=self._live_max_icps_per_node,
                 )
                 verification = await asyncio.to_thread(replay_store.verify_manifest)
                 if not verification.get("passed"):
@@ -895,8 +971,10 @@ class AttestedReplayDevEvaluatorV2:
         if not isinstance(manifest, Mapping):
             raise DevEvalRunnerError("snapshot-set manifest is required and missing")
         dev_items = list(self._dev_items or ())
-        if len(dev_items) != EXPECTED_DEV_ICP_COUNT:
-            raise DevEvalRunnerError("hybrid discovery requires exactly eight ICPs")
+        if len(dev_items) != self._live_max_icps_per_node:
+            raise DevEvalRunnerError(
+                "hybrid discovery snapshot size differs from configured ICP count"
+            )
         discovery_items = dev_items[: self._live_max_icps_per_node]
         runner_factory = self._model_runner_factory or AttestedPrivateModelRunnerV2
         execute = self._execute or execute_scoring_v2
@@ -1347,11 +1425,21 @@ def build_attested_code_edit_dev_evaluator_v2(
     provider_environment: Mapping[str, str] | None = None,
     model_env_passthrough: Sequence[str] | None = None,
     parent_graphs: Sequence[Mapping[str, Any]] = (),
-    live_provider_call_cap: int = 32,
-    live_cost_cap_microusd: int = 500_000,
-    live_max_icps_per_node: int = 8,
-    live_timeout_seconds: int = 300,
-    evaluation_concurrency: int = 2,
+    live_provider_call_cap: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_provider_calls
+    ),
+    live_cost_cap_microusd: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_cap_microusd
+    ),
+    live_max_icps_per_node: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
+    ),
+    live_timeout_seconds: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_timeout_seconds
+    ),
+    evaluation_concurrency: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.evaluation_concurrency
+    ),
     prior_provider_call_count: int = 0,
     prior_settled_cost_microusd: int = 0,
     model_runner_factory: Any = None,

@@ -127,6 +127,7 @@ def _print_hosted_banner(config: ResearchLabGatewayConfig, *, worker_id: str) ->
                 ("Tree mode", tree_policy.mode),
                 ("Tree nodes", tree_policy.max_nodes),
                 ("Branch / beam", f"{tree_policy.branch_factor}/{tree_policy.beam_width}"),
+                ("Tree ICPs/node", tree_policy.live_max_icps_per_node),
             ),
         )
         + "\n",

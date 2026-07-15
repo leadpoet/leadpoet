@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+from gateway.research_lab.config import DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG
 from research_lab.canonical import sha256_json
 from research_lab.eval.dev_eval import intent_signal_signature
 from scripts import export_research_lab_dev_icp_inputs as exporter
@@ -119,7 +120,9 @@ def test_exporter_is_deterministic_and_excludes_full_current_horizon(
         )
 
     assert outputs[0] == outputs[1]
-    assert len(outputs[0]["items"]) == 8
+    assert len(outputs[0]["items"]) == (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
+    )
     selected_signatures = {
         intent_signal_signature(row["icp"]) for row in outputs[0]["items"]
     }

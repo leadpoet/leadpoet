@@ -208,6 +208,7 @@ def _source_and_artifact(tmp_path: Path):
 
 def _payload(tmp_path: Path):
     source_bundle, artifact = _source_and_artifact(tmp_path)
+    tree_policy = TreePolicy(mode="active")
     active_model_result = {
         "schema_version": "leadpoet.active_private_model.v2",
         "artifact": artifact,
@@ -280,14 +281,14 @@ def _payload(tmp_path: Path):
             "requested_compute_budget_usd": 1.0,
             "tree_policy": {
                 "schema_version": "research_lab.git_tree_runtime_policy.v1",
-                "policy": TreePolicy(mode="active").to_dict(),
+                "policy": tree_policy.to_dict(),
                 "evaluator_enabled": True,
                 "evaluator_commitment": {
                     "schema_version": "research_lab.git_tree_evaluator_commitment.v1",
                     "snapshot_manifest_hash": "sha256:" + "7" * 64,
                     "snapshot_ready_hash": "sha256:" + "8" * 64,
                     "dev_set_hash": "sha256:" + "9" * 64,
-                    "dev_set_size": 8,
+                    "dev_set_size": tree_policy.live_max_icps_per_node,
                     "champion_image_digest": artifact["image_digest"],
                     "source_commit": artifact["git_commit_sha"],
                     "model_config_hash": "sha256:" + "a" * 64,
@@ -295,7 +296,7 @@ def _payload(tmp_path: Path):
                     "miss_policy": "strict",
                     "score_version": "research_lab.dev_eval.v2",
                     "evaluation_timeout_seconds": 300,
-                    "live_max_icps_per_node": 8,
+                    "live_max_icps_per_node": tree_policy.live_max_icps_per_node,
                     "live_max_provider_calls": 32,
                     "live_cap_microusd": 500000,
                     "minimum_evidence_retention_days": 30,

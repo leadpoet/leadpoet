@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export eight deterministic retired ICPs and the full current holdout guard."""
+"""Export the configured deterministic retired ICP cohort and holdout guard."""
 
 from __future__ import annotations
 
@@ -16,6 +16,11 @@ if str(ROOT) not in sys.path:
 
 from research_lab.canonical import sha256_json  # noqa: E402
 from research_lab.eval.dev_eval import build_dev_icp_set, intent_signal_signature  # noqa: E402
+from gateway.research_lab.config import (  # noqa: E402
+    MAX_RESEARCH_LAB_GIT_TREE_ICP_COUNT,
+    ResearchLabGitTreeConfig,
+    ResearchLabGitTreeConfigError,
+)
 
 
 def _rows(client: Any, table: str, columns: str, *, order: str, desc: bool) -> list[dict[str, Any]]:
@@ -55,6 +60,17 @@ def main() -> int:
     parser.add_argument("--out-dir", default="dev_icp_inputs")
     parser.add_argument("--seed", default="research-lab-dev-v1")
     args = parser.parse_args()
+
+    try:
+        configured_icp_count = (
+            ResearchLabGitTreeConfig.from_env().live_max_icps_per_node
+        )
+    except ResearchLabGitTreeConfigError as exc:
+        print(f"ERROR: invalid Git-tree configuration: {exc}")
+        return 1
+    if not 1 <= configured_icp_count <= MAX_RESEARCH_LAB_GIT_TREE_ICP_COUNT:
+        print("ERROR: configured Git-tree development ICP count is invalid")
+        return 1
 
     url = os.getenv("SUPABASE_URL", "").strip()
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -125,11 +141,14 @@ def main() -> int:
         selected = build_dev_icp_set(
             retired_items,
             exclude_window_hashes=sorted(exclusions),
-            size=8,
+            size=configured_icp_count,
             seed=str(args.seed),
         )
     except Exception as exc:
-        print(f"ERROR: could not select eight retired ICPs: {exc}")
+        print(
+            "ERROR: could not select the configured retired ICP cohort: "
+            f"{exc}"
+        )
         return 1
 
     out = Path(args.out_dir).expanduser().resolve()
@@ -137,6 +156,7 @@ def main() -> int:
     source_doc = {
         "schema_version": "research_lab.dev_icp_export.v1",
         "selection_seed": str(args.seed),
+        "configured_dev_icp_count": configured_icp_count,
         "rolling_window_hash": str(window.get("rolling_window_hash") or ""),
         "fresh_set_id": fresh_set_id,
         "horizon_set_ids": sorted(horizon_ids),

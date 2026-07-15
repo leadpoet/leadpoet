@@ -576,6 +576,7 @@ def _build_tree_dev_feedback(
     result: Mapping[str, Any],
     candidate: BuiltCodeEditCandidate,
     score: float,
+    max_examples: int,
 ) -> dict[str, Any]:
     """Create bounded feedback without hidden example identities or payloads."""
 
@@ -587,7 +588,7 @@ def _build_tree_dev_feedback(
         else []
     )
     examples: list[dict[str, Any]] = []
-    for index, raw_row in enumerate(rows[:8], start=1):
+    for index, raw_row in enumerate(rows[: max(0, int(max_examples))], start=1):
         row = dict(raw_row) if isinstance(raw_row, Mapping) else {}
         example_score = _finite_feedback_number(
             row.get("dev_score", row.get("score"))
@@ -1069,6 +1070,10 @@ class CodeEditLoopEngine:
                 commitment.get("snapshot_manifest_hash") or ""
             )
             expected_dev_set_hash = str(commitment.get("dev_set_hash") or "")
+            expected_icp_count = int(commitment.get("dev_set_size") or 0)
+            measured_icp_count = int(
+                measured_policy.get("live_max_icps_per_node") or 0
+            )
             evaluation_mode = str(result.get("evaluation_mode") or "replay")
             overlay_hash = str(result.get("overlay_hash") or "")
             cohort_hash = str(result.get("cohort_hash") or "")
@@ -1089,12 +1094,16 @@ class CodeEditLoopEngine:
                 result=result,
                 candidate=candidate,
                 score=score,
+                max_examples=expected_icp_count,
             )
             checks = {
                 "evaluator_reported_eligible": bool(result.get("eligible")),
-                "dev_set_size_is_eight": int(result.get("icp_count") or 0) == 8,
+                "dev_set_size_matches_config": expected_icp_count > 0
+                and expected_icp_count == measured_icp_count
+                and int(result.get("icp_count") or 0) == expected_icp_count,
                 "full_execution_coverage": float(result.get("execution_coverage") or 0.0) == 1.0,
-                "all_icps_scored": int(result.get("scored_icp_count") or 0) == 8,
+                "all_icps_scored": int(result.get("scored_icp_count") or 0)
+                == expected_icp_count,
                 "no_snapshot_misses": int(result.get("snapshot_miss_count") or 0) == 0,
                 "no_true_misses": int(result.get("true_miss_count") or 0) == 0,
                 "no_failures": int(result.get("failure_count") or 0) == 0,
@@ -1118,9 +1127,9 @@ class CodeEditLoopEngine:
                 "score_commitment_matches": str(
                     result.get("score_commitment") or ""
                 ) == expected_score_commitment,
-                "eight_anonymized_feedback_examples": int(
+                "configured_anonymized_feedback_examples": int(
                     dev_feedback.get("example_count") or 0
-                ) == 8,
+                ) == expected_icp_count,
             }
             evaluation_doc = {
                 "schema_version": "research_lab.git_tree_evaluation.v1",

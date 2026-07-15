@@ -4,10 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-import os
 import re
 from typing import Any, Mapping, Sequence
 
+from gateway.research_lab.config import (
+    DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG,
+    DEPRECATED_RESEARCH_LAB_GIT_TREE_ENV_NAMES,
+    MAX_RESEARCH_LAB_GIT_TREE_ICP_COUNT,
+    RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD,
+    ResearchLabGitTreeConfig,
+    ResearchLabGitTreeConfigError,
+)
 from leadpoet_canonical.attested_v2 import sha256_json
 
 
@@ -17,25 +24,9 @@ TREE_EVALUATION_SCHEMA_VERSION = "research_lab.git_tree_evaluation.v1"
 TREE_CHECKPOINT_SCHEMA_VERSION = "research_lab.git_tree_checkpoint.v1"
 TREE_RESULT_SCHEMA_VERSION = "research_lab.git_tree_result.v1"
 
-TREE_MODE_ENV = "RESEARCH_LAB_TREE_MODE"
+TREE_MODE_ENV = RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD["mode"]
 TREE_MODES = frozenset({"off", "active"})
-DEPRECATED_TREE_ENV_NAMES = frozenset(
-    {
-        "RESEARCH_LAB_HOSTED_WORKER_MAX_CANDIDATES",
-        "RESEARCH_LAB_INNER_LOOP_MODE",
-        "RESEARCH_LAB_LOOP_DEV_EVAL_CANDIDATE_WIDTH",
-        "RESEARCH_LAB_LOOP_DEV_PLATEAU_MIN_DELTA",
-        "RESEARCH_LAB_LOOP_DEV_PLATEAU_STOP",
-        "RESEARCH_LAB_LOOP_DEV_PLATEAU_WINDOW",
-        "RESEARCH_LAB_LOOP_DRAFTS_PER_CALL",
-        "RESEARCH_LAB_LOOP_MULTI_CANDIDATE_DRAFTS",
-        "RESEARCH_LAB_LOOP_PAID_FINALIST_COUNT",
-        "RESEARCH_LAB_LOOP_REFUSAL_LANE_ADVANCE",
-        "RESEARCH_LAB_LOOP_STOP_AT_CANDIDATE_CAP",
-        "RESEARCH_LAB_RANKED_PATH_FALLBACK_ENABLED",
-        "RESEARCH_LAB_RANKED_PATH_FALLBACK_MAX_PATHS",
-    }
-)
+DEPRECATED_TREE_ENV_NAMES = DEPRECATED_RESEARCH_LAB_GIT_TREE_ENV_NAMES
 TREE_NODE_TERMINAL_STATUSES = frozenset(
     {"eligible", "ineligible", "failed", "cancelled", "indeterminate"}
 )
@@ -93,24 +84,44 @@ def _node_id(value: Any, *, field_name: str, allow_root: bool = False) -> str:
 
 @dataclass(frozen=True)
 class TreePolicy:
-    mode: str = "off"
-    branch_factor: int = 2
-    beam_width: int = 2
-    max_depth: int = 2
-    max_nodes: int = 6
-    generation_attempts: int = 2
-    build_concurrency: int = 1
-    evaluation_concurrency: int = 2
-    shortlist_size: int = 2
-    diversity_floor: int = 2
-    deadline_seconds: int = 2700
-    finalization_reserve_seconds: int = 120
-    billable_cap_microusd: int = 5_000_000
-    live_max_icps_per_node: int = 8
-    live_max_provider_calls: int = 32
-    live_cap_microusd: int = 500_000
-    live_timeout_seconds: int = 300
-    evidence_retention_days: int = 30
+    mode: str = DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.mode
+    branch_factor: int = DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.branch_factor
+    beam_width: int = DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.beam_width
+    max_depth: int = DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.max_depth
+    max_nodes: int = DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.max_nodes
+    generation_attempts: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.generation_attempts
+    )
+    build_concurrency: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.build_concurrency
+    )
+    evaluation_concurrency: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.evaluation_concurrency
+    )
+    shortlist_size: int = DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.shortlist_size
+    diversity_floor: int = DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.diversity_floor
+    deadline_seconds: int = DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.deadline_seconds
+    finalization_reserve_seconds: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.finalization_reserve_seconds
+    )
+    billable_cap_microusd: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.billable_cap_microusd
+    )
+    live_max_icps_per_node: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
+    )
+    live_max_provider_calls: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_provider_calls
+    )
+    live_cap_microusd: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_cap_microusd
+    )
+    live_timeout_seconds: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_timeout_seconds
+    )
+    evidence_retention_days: int = (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.evidence_retention_days
+    )
 
     def __post_init__(self) -> None:
         mode = str(self.mode or "").strip().lower()
@@ -132,7 +143,10 @@ class TreePolicy:
             "deadline_seconds": (300, 86_400),
             "finalization_reserve_seconds": (30, 3_600),
             "billable_cap_microusd": (0, 1_000_000_000),
-            "live_max_icps_per_node": (8, 8),
+            "live_max_icps_per_node": (
+                1,
+                MAX_RESEARCH_LAB_GIT_TREE_ICP_COUNT,
+            ),
             "live_max_provider_calls": (1, 32),
             "live_cap_microusd": (1, 500_000),
             "live_timeout_seconds": (30, 3_600),
@@ -168,59 +182,11 @@ class TreePolicy:
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "TreePolicy":
-        env = os.environ if environ is None else environ
-        configured_deprecated = sorted(
-            name for name in DEPRECATED_TREE_ENV_NAMES if name in env
-        )
-        if configured_deprecated:
-            raise GitTreeContractError(
-                "deprecated flat/sequential autoresearch environment is configured: "
-                + ", ".join(configured_deprecated)
-            )
-
-        def integer(name: str, default: int) -> int:
-            raw = str(env.get(name, str(default)) or "").strip()
-            try:
-                return int(raw)
-            except ValueError as exc:
-                raise GitTreeContractError(f"{name} must be an integer") from exc
-
-        return cls(
-            mode=str(env.get(TREE_MODE_ENV, "off") or "off"),
-            branch_factor=integer("RESEARCH_LAB_TREE_BRANCH_FACTOR", 2),
-            beam_width=integer("RESEARCH_LAB_TREE_BEAM_WIDTH", 2),
-            max_depth=integer("RESEARCH_LAB_TREE_MAX_DEPTH", 2),
-            max_nodes=integer("RESEARCH_LAB_TREE_MAX_NODES", 6),
-            generation_attempts=integer("RESEARCH_LAB_TREE_GENERATION_ATTEMPTS", 2),
-            build_concurrency=integer("RESEARCH_LAB_TREE_BUILD_CONCURRENCY", 1),
-            evaluation_concurrency=integer(
-                "RESEARCH_LAB_TREE_EVALUATION_CONCURRENCY", 2
-            ),
-            shortlist_size=integer("RESEARCH_LAB_TREE_SHORTLIST_SIZE", 2),
-            diversity_floor=integer("RESEARCH_LAB_TREE_DIVERSITY_FLOOR", 2),
-            deadline_seconds=integer("RESEARCH_LAB_TREE_DEADLINE_SECONDS", 2700),
-            finalization_reserve_seconds=integer(
-                "RESEARCH_LAB_TREE_FINALIZATION_RESERVE_SECONDS", 120
-            ),
-            billable_cap_microusd=integer(
-                "RESEARCH_LAB_TREE_BILLABLE_CAP_MICROUSD", 5_000_000
-            ),
-            live_max_icps_per_node=integer(
-                "RESEARCH_LAB_TREE_LIVE_MAX_ICPS_PER_NODE", 8
-            ),
-            live_max_provider_calls=integer(
-                "RESEARCH_LAB_TREE_LIVE_MAX_PROVIDER_CALLS", 32
-            ),
-            live_cap_microusd=integer(
-                "RESEARCH_LAB_TREE_LIVE_CAP_MICROUSD", 500_000
-            ),
-            live_timeout_seconds=integer(
-                "RESEARCH_LAB_TREE_LIVE_TIMEOUT_SECONDS", 300
-            ),
-            evidence_retention_days=integer(
-                "RESEARCH_LAB_TREE_EVIDENCE_RETENTION_DAYS", 30
-            ),
-        )
+        try:
+            configured = ResearchLabGitTreeConfig.from_env(environ)
+        except ResearchLabGitTreeConfigError as exc:
+            raise GitTreeContractError(str(exc)) from exc
+        return cls(**configured.to_policy_kwargs())
 
     def to_dict(self) -> dict[str, Any]:
         return {

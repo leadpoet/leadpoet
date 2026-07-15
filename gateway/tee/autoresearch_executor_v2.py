@@ -2573,7 +2573,8 @@ class AutoresearchExecutorV2:
             evaluator_commitment.get("schema_version")
             != "research_lab.git_tree_evaluator_commitment.v1"
             or evaluator_commitment.get("miss_policy") != "strict"
-            or int(evaluator_commitment.get("dev_set_size") or 0) != 8
+            or int(evaluator_commitment.get("dev_set_size") or 0)
+            != tree_policy.live_max_icps_per_node
             or not str(evaluator_commitment.get("champion_image_digest") or "")
             or not str(evaluator_commitment.get("source_commit") or "")
             or not str(evaluator_commitment.get("score_version") or "")

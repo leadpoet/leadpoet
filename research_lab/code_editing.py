@@ -12,6 +12,7 @@ import re
 import tokenize
 from typing import Any, Mapping, Sequence
 
+from gateway.research_lab.config import DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG
 from research_lab.canonical import sha256_json
 
 
@@ -333,7 +334,7 @@ def build_loop_direction_planner_messages(
     provider_outcome_digest: Mapping[str, Any] | None = None,
     provider_capability_summary: Mapping[str, Any] | None = None,
     candidate_edit_constraints: Mapping[str, Any] | None = None,
-    branch_factor: int = 2,
+    branch_factor: int = DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.branch_factor,
 ) -> list[dict[str, str]]:
     required_branch_count = max(1, min(8, int(branch_factor)))
     allowed_lanes = list(LOOP_DIRECTION_ALLOWED_LANES)

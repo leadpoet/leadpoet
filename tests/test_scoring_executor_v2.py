@@ -4,6 +4,7 @@ import base64
 import httpx
 import pytest
 
+from gateway.research_lab.config import DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
 from gateway.tee.scoring_executor import (
     OP_BENCHMARK_ICP_SCORE,
@@ -604,7 +605,10 @@ async def test_v2_dev_replay_preserves_score_and_adds_tree_commitments(tmp_path)
             "icp_ref": f"dev_set:{index}",
             "icp_hash": "sha256:" + str(index) * 64,
         }
-        for index in range(1, 9)
+        for index in range(
+            1,
+            DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node + 1,
+        )
     ]
     snapshot_root = tmp_path / "snapshot-set"
     record_store = ProviderSnapshotStore(str(snapshot_root), mode=MODE_RECORD)
@@ -664,6 +668,9 @@ async def test_v2_dev_replay_preserves_score_and_adds_tree_commitments(tmp_path)
         run_label="candidate-node-1",
         install_replay_seams=False,
         require_manifest=True,
+        expected_icp_count=(
+            DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
+        ),
     )
     sandbox = _Sandbox()
     executor = ScoringExecutorV2(

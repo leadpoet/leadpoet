@@ -66,6 +66,7 @@ def test_tree_policy_owns_topology_and_paid_handoff(monkeypatch):
 
     assert worker.tree_policy.mode == "active"
     assert worker.tree_policy.max_nodes == 8
+    assert worker.tree_policy.live_max_icps_per_node == 5
 
 
 def test_active_tree_rejects_legacy_v1_before_worker_readiness(monkeypatch):

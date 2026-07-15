@@ -96,7 +96,7 @@ def test_report_gate_uses_one_snapshot_and_positive_realized_lift(monkeypatch):
     monkeypatch.setattr(
         dev_eval_runner,
         "snapshot_readiness",
-        lambda _uri: {"ready": True, "reason": "ready", "dev_set_size": 8},
+        lambda _uri: {"ready": True, "reason": "ready", "dev_set_size": 5},
     )
     monkeypatch.setattr(dev_eval_runner, "DockerReplayDevEvaluator", lambda **_kwargs: object())
 

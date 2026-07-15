@@ -9,7 +9,7 @@ operators explicitly disable them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import json
 import logging
 import os
@@ -25,6 +25,123 @@ from .ticket_lifecycle import UNPAID_TICKET_TTL_SECONDS
 
 TRUTHY = {"1", "true", "yes", "on"}
 logger = logging.getLogger(__name__)
+
+RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD = {
+    "mode": "RESEARCH_LAB_TREE_MODE",
+    "branch_factor": "RESEARCH_LAB_TREE_BRANCH_FACTOR",
+    "beam_width": "RESEARCH_LAB_TREE_BEAM_WIDTH",
+    "max_depth": "RESEARCH_LAB_TREE_MAX_DEPTH",
+    "max_nodes": "RESEARCH_LAB_TREE_MAX_NODES",
+    "generation_attempts": "RESEARCH_LAB_TREE_GENERATION_ATTEMPTS",
+    "build_concurrency": "RESEARCH_LAB_TREE_BUILD_CONCURRENCY",
+    "evaluation_concurrency": "RESEARCH_LAB_TREE_EVALUATION_CONCURRENCY",
+    "shortlist_size": "RESEARCH_LAB_TREE_SHORTLIST_SIZE",
+    "diversity_floor": "RESEARCH_LAB_TREE_DIVERSITY_FLOOR",
+    "deadline_seconds": "RESEARCH_LAB_TREE_DEADLINE_SECONDS",
+    "finalization_reserve_seconds": (
+        "RESEARCH_LAB_TREE_FINALIZATION_RESERVE_SECONDS"
+    ),
+    "billable_cap_microusd": "RESEARCH_LAB_TREE_BILLABLE_CAP_MICROUSD",
+    "live_max_icps_per_node": "RESEARCH_LAB_TREE_LIVE_MAX_ICPS_PER_NODE",
+    "live_max_provider_calls": "RESEARCH_LAB_TREE_LIVE_MAX_PROVIDER_CALLS",
+    "live_cap_microusd": "RESEARCH_LAB_TREE_LIVE_CAP_MICROUSD",
+    "live_timeout_seconds": "RESEARCH_LAB_TREE_LIVE_TIMEOUT_SECONDS",
+    "evidence_retention_days": "RESEARCH_LAB_TREE_EVIDENCE_RETENTION_DAYS",
+}
+RESEARCH_LAB_GIT_TREE_ENV_NAMES = tuple(
+    RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD.values()
+)
+DEPRECATED_RESEARCH_LAB_GIT_TREE_ENV_NAMES = frozenset(
+    {
+        "RESEARCH_LAB_HOSTED_WORKER_MAX_CANDIDATES",
+        "RESEARCH_LAB_INNER_LOOP_MODE",
+        "RESEARCH_LAB_LOOP_DEV_EVAL_CANDIDATE_WIDTH",
+        "RESEARCH_LAB_LOOP_DEV_PLATEAU_MIN_DELTA",
+        "RESEARCH_LAB_LOOP_DEV_PLATEAU_STOP",
+        "RESEARCH_LAB_LOOP_DEV_PLATEAU_WINDOW",
+        "RESEARCH_LAB_LOOP_DRAFTS_PER_CALL",
+        "RESEARCH_LAB_LOOP_MULTI_CANDIDATE_DRAFTS",
+        "RESEARCH_LAB_LOOP_PAID_FINALIST_COUNT",
+        "RESEARCH_LAB_LOOP_REFUSAL_LANE_ADVANCE",
+        "RESEARCH_LAB_LOOP_STOP_AT_CANDIDATE_CAP",
+        "RESEARCH_LAB_RANKED_PATH_FALLBACK_ENABLED",
+        "RESEARCH_LAB_RANKED_PATH_FALLBACK_MAX_PATHS",
+    }
+)
+MAX_RESEARCH_LAB_GIT_TREE_ICP_COUNT = 8
+
+
+class ResearchLabGitTreeConfigError(ValueError):
+    """The operator-supplied Git-tree configuration is invalid."""
+
+
+@dataclass(frozen=True)
+class ResearchLabGitTreeConfig:
+    """Single source for Git-tree defaults and environment resolution."""
+
+    mode: str = "off"
+    branch_factor: int = 2
+    beam_width: int = 2
+    max_depth: int = 2
+    max_nodes: int = 6
+    generation_attempts: int = 2
+    build_concurrency: int = 1
+    evaluation_concurrency: int = 2
+    shortlist_size: int = 2
+    diversity_floor: int = 2
+    deadline_seconds: int = 2700
+    finalization_reserve_seconds: int = 120
+    billable_cap_microusd: int = 5_000_000
+    live_max_icps_per_node: int = 5
+    live_max_provider_calls: int = 32
+    live_cap_microusd: int = 500_000
+    live_timeout_seconds: int = 300
+    evidence_retention_days: int = 30
+
+    @classmethod
+    def from_env(
+        cls, environ: Mapping[str, Any] | None = None
+    ) -> "ResearchLabGitTreeConfig":
+        env = os.environ if environ is None else environ
+        configured_deprecated = sorted(
+            name for name in DEPRECATED_RESEARCH_LAB_GIT_TREE_ENV_NAMES if name in env
+        )
+        if configured_deprecated:
+            raise ResearchLabGitTreeConfigError(
+                "deprecated flat/sequential autoresearch environment is configured: "
+                + ", ".join(configured_deprecated)
+            )
+
+        defaults = cls()
+        values: dict[str, Any] = {}
+        for field_name, env_name in RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD.items():
+            default = getattr(defaults, field_name)
+            raw = env.get(env_name)
+            if raw is None or not str(raw).strip():
+                values[field_name] = default
+                continue
+            if field_name == "mode":
+                values[field_name] = str(raw).strip().lower()
+                continue
+            try:
+                values[field_name] = int(str(raw).strip())
+            except ValueError as exc:
+                raise ResearchLabGitTreeConfigError(
+                    f"{env_name} must be an integer"
+                ) from exc
+        return cls(**values)
+
+    def to_policy_kwargs(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def to_environment(self) -> dict[str, str]:
+        return {
+            RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD[name]: str(value)
+            for name, value in self.to_policy_kwargs().items()
+        }
+
+
+DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG = ResearchLabGitTreeConfig()
 
 # Single code-level default for the Research Lab loop-start fee. Operators can
 # still override it at runtime with RESEARCH_LAB_LOOP_START_FEE_USD.

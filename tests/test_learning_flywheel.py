@@ -23,6 +23,7 @@ import pytest
 
 from gateway.research_lab import allocator_priors, lesson_store
 from gateway.research_lab import code_loop_engine as engine
+from gateway.research_lab.config import DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG
 from gateway.research_lab.code_build import (
     CodeEditBuildResult,
     CodeEditImageBuildError,
@@ -42,6 +43,9 @@ from research_lab.eval import PrivateModelArtifactManifest
 from research_lab.meta_allocator import validate_cell_yield_prior_record
 
 
+TREE_DEV_ICP_COUNT = (
+    DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
+)
 PARENT_HASH = "sha256:" + "a" * 64
 
 # The scripts/34 event_doc CHECK constraint, replicated verbatim: a reflection
@@ -918,9 +922,9 @@ class _FlywheelTreeEvaluator:
                         "snapshot_manifest_hash": "sha256:" + "4" * 64,
                         "dev_set_hash": "sha256:" + "5" * 64,
                         "eligible": True,
-                        "icp_count": 8,
+                        "icp_count": TREE_DEV_ICP_COUNT,
                         "execution_coverage": 1.0,
-                        "scored_icp_count": 8,
+                        "scored_icp_count": TREE_DEV_ICP_COUNT,
                         "snapshot_miss_count": 0,
                         "true_miss_count": 0,
                         "failure_count": 0,
@@ -949,7 +953,7 @@ class _FlywheelTreeEvaluator:
                                 "company_count": 2,
                                 "scored_company_count": 2,
                             }
-                            for _ in range(8)
+                            for _ in range(TREE_DEV_ICP_COUNT)
                         ],
                     },
                     "receipt_graph": {
@@ -980,6 +984,7 @@ def _tree_runtime_policy() -> dict[str, Any]:
         "evaluator_commitment": {
             "snapshot_manifest_hash": "sha256:" + "4" * 64,
             "dev_set_hash": "sha256:" + "5" * 64,
+            "dev_set_size": policy.live_max_icps_per_node,
             "evaluation_timeout_seconds": 60,
         },
     }

@@ -17,6 +17,7 @@ import tempfile
 import time
 from typing import Any, Awaitable, Callable, Iterator, Mapping, Sequence
 
+from gateway.research_lab.config import RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD
 from gateway.research_lab.dev_eval_runner import snapshot_readiness
 from gateway.research_lab.git_tree_models import TreePolicy
 from gateway.research_lab.promotion import load_active_private_model
@@ -44,7 +45,7 @@ DEFAULT_COMMAND_TIMEOUT_SECONDS = 3 * 60 * 60
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 CommandRunner = Callable[[Sequence[str], Mapping[str, str], int], str]
-ReadinessLoader = Callable[[str], Mapping[str, Any]]
+ReadinessLoader = Callable[..., Mapping[str, Any]]
 ActiveLoader = Callable[..., Awaitable[Any]]
 
 
@@ -249,7 +250,11 @@ async def maybe_refresh_dev_snapshot(
         try:
             active_before = await active_loader(config, register_bootstrap=False)
             identity_before = _artifact_identity(active_before)
-            readiness = await asyncio.to_thread(readiness_loader, pointer_uri)
+            readiness = await asyncio.to_thread(
+                readiness_loader,
+                pointer_uri,
+                expected_dev_icp_count=tree_policy.live_max_icps_per_node,
+            )
             reason = _refresh_reason(readiness, identity_before)
             base_state = {
                 "schema_version": "research_lab.dev_snapshot_refresh_state.v1",
@@ -296,6 +301,9 @@ async def maybe_refresh_dev_snapshot(
             inputs_dir = work_dir / "inputs"
             snapshot_dir = work_dir / "snapshot"
             env = dict(os.environ)
+            env[
+                RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD["live_max_icps_per_node"]
+            ] = str(tree_policy.live_max_icps_per_node)
             try:
                 await asyncio.to_thread(
                     command_runner,
@@ -317,8 +325,6 @@ async def maybe_refresh_dev_snapshot(
                     str(inputs_dir / "source_icps.json"),
                     "--exclude-hashes",
                     str(inputs_dir / "holdout_window_hashes.json"),
-                    "--size",
-                    "8",
                     "--seed",
                     seed,
                     "--snapshot-dir",
@@ -367,7 +373,11 @@ async def maybe_refresh_dev_snapshot(
             finally:
                 shutil.rmtree(work_dir, ignore_errors=True)
 
-            final_readiness = await asyncio.to_thread(readiness_loader, pointer_uri)
+            final_readiness = await asyncio.to_thread(
+                readiness_loader,
+                pointer_uri,
+                expected_dev_icp_count=tree_policy.live_max_icps_per_node,
+            )
             if not _readiness_matches_artifact(final_readiness, identity_before):
                 raise RuntimeError("published snapshot does not match the active private model")
             completed = {

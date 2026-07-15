@@ -52,6 +52,7 @@ def _print_startup_banner(config: ResearchLabGatewayConfig, *, worker_id: str, o
     print(f"Iterations      : {config.auto_research_min_iterations}-{config.auto_research_max_iterations}", flush=True)
     print(f"Tree mode       : {tree_policy.mode}", flush=True)
     print(f"Tree nodes      : {tree_policy.max_nodes}", flush=True)
+    print(f"Tree ICPs/node  : {tree_policy.live_max_icps_per_node}", flush=True)
     print(
         f"Branch / beam   : {tree_policy.branch_factor}/{tree_policy.beam_width}",
         flush=True,

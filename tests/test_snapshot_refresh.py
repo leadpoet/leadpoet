@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 from gateway.research_lab import snapshot_refresh
+from gateway.research_lab.config import RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD
 from gateway.research_lab.git_tree_models import TreePolicy
 from research_lab.eval.snapshot_store import SNAPSHOT_URI_ENV
 
@@ -114,7 +115,7 @@ def test_healthy_snapshot_check_is_persisted_across_restart(monkeypatch, tmp_pat
             tree_policy=TreePolicy(mode="active"),
             now=1000,
             command_runner=command_runner,
-            readiness_loader=lambda _uri: _ready(),
+            readiness_loader=lambda _uri, **_kwargs: _ready(),
             active_loader=active_loader,
         )
     )
@@ -125,7 +126,7 @@ def test_healthy_snapshot_check_is_persisted_across_restart(monkeypatch, tmp_pat
             tree_policy=TreePolicy(mode="active"),
             now=1100,
             command_runner=command_runner,
-            readiness_loader=lambda _uri: _ready(),
+            readiness_loader=lambda _uri, **_kwargs: _ready(),
             active_loader=active_loader,
         )
     )
@@ -138,6 +139,7 @@ def test_healthy_snapshot_check_is_persisted_across_restart(monkeypatch, tmp_pat
 def test_due_refresh_publishes_immutable_target_before_pointer(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path)
     commands: list[list[str]] = []
+    command_envs: list[dict[str, str]] = []
     readiness = iter(
         [
             _ready(ready=False, reason="snapshot_not_ready"),
@@ -150,6 +152,7 @@ def test_due_refresh_publishes_immutable_target_before_pointer(monkeypatch, tmp_
 
     def command_runner(command: Sequence[str], _env: Mapping[str, str], _timeout: int):
         commands.append(list(command))
+        command_envs.append(dict(_env))
         return "ok"
 
     result = asyncio.run(
@@ -159,7 +162,7 @@ def test_due_refresh_publishes_immutable_target_before_pointer(monkeypatch, tmp_
             tree_policy=TreePolicy(mode="active"),
             now=1000,
             command_runner=command_runner,
-            readiness_loader=lambda _uri: next(readiness),
+            readiness_loader=lambda _uri, **_kwargs: next(readiness),
             active_loader=active_loader,
         )
     )
@@ -167,7 +170,12 @@ def test_due_refresh_publishes_immutable_target_before_pointer(monkeypatch, tmp_
     assert len(commands) == 4
     assert commands[0][1].endswith("export_research_lab_dev_icp_inputs.py")
     assert commands[1][1].endswith("record_research_lab_dev_snapshots.py")
-    assert commands[1][commands[1].index("--size") + 1] == "8"
+    assert "--size" not in commands[1]
+    assert all(
+        env[RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD["live_max_icps_per_node"]]
+        == "5"
+        for env in command_envs
+    )
     assert commands[2][1].endswith("publish_research_lab_dev_snapshot.py")
     assert "--skip-current-pointer" in commands[2]
     assert "--skip-current-pointer" not in commands[3]
@@ -193,7 +201,7 @@ def test_active_model_change_keeps_existing_pointer_untouched(monkeypatch, tmp_p
             tree_policy=TreePolicy(mode="active"),
             now=1000,
             command_runner=command_runner,
-            readiness_loader=lambda _uri: _ready(
+            readiness_loader=lambda _uri, **_kwargs: _ready(
                 ready=False,
                 reason="active_model_mismatch",
             ),
@@ -231,7 +239,7 @@ def test_recording_failure_is_visible_and_never_promotes_pointer(monkeypatch, tm
             tree_policy=TreePolicy(mode="active"),
             now=1000,
             command_runner=command_runner,
-            readiness_loader=lambda _uri: _ready(ready=False, reason="not_ready"),
+            readiness_loader=lambda _uri, **_kwargs: _ready(ready=False, reason="not_ready"),
             active_loader=active_loader,
         )
     )
@@ -259,7 +267,7 @@ def test_cross_process_lock_allows_only_one_simultaneous_check(monkeypatch, tmp_
                 worker_index=0,
                 tree_policy=TreePolicy(mode="active"),
                 now=1000,
-                readiness_loader=lambda _uri: _ready(),
+                readiness_loader=lambda _uri, **_kwargs: _ready(),
                 active_loader=active_loader,
             )
         )
@@ -269,7 +277,7 @@ def test_cross_process_lock_allows_only_one_simultaneous_check(monkeypatch, tmp_
             worker_index=0,
             tree_policy=TreePolicy(mode="active"),
             now=1000,
-            readiness_loader=lambda _uri: _ready(),
+            readiness_loader=lambda _uri, **_kwargs: _ready(),
             active_loader=active_loader,
         )
         release.set()

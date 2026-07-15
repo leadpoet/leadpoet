@@ -46,7 +46,6 @@ from research_lab.eval.provider_evidence_cache import (
 )
 from research_lab.eval.private_runtime import canonicalize_private_model_icp
 from research_lab.eval.snapshot_store import (
-    EXPECTED_DEV_ICP_COUNT,
     MODE_REPLAY,
     ProviderSnapshotStore,
 )
@@ -59,6 +58,7 @@ from gateway.tee.research_lab_runtime_config_v2 import (
     measured_dev_eval_total_timeout_seconds,
     measured_dev_replay_environment,
     measured_dev_snapshot_miss_policy,
+    measured_git_tree_config,
     validate_model_sandbox_environment,
     validate_research_lab_execution_config,
 )
@@ -709,8 +709,13 @@ class ScoringExecutorV2:
             ):
                 raise ValueError("dev replay snapshot manifest verification failed")
             dev_items = snapshot_store.load_dev_icp_items()
-            if not dev_items:
-                raise ValueError("dev replay snapshot set carries no ICP items")
+            expected_dev_icp_count = measured_git_tree_config(
+                self._execution_config
+            ).live_max_icps_per_node
+            if len(dev_items) != expected_dev_icp_count:
+                raise ValueError(
+                    "dev replay set size differs from measured Git-tree policy"
+                )
             if total_timeout != measured_dev_eval_total_timeout_seconds(
                 self._execution_config
             ):
@@ -759,6 +764,7 @@ class ScoringExecutorV2:
                     run_label=run_label,
                     install_replay_seams=False,
                     require_manifest=True,
+                    expected_icp_count=expected_dev_icp_count,
                 ),
                 timeout=total_timeout,
             )
@@ -898,8 +904,13 @@ class ScoringExecutorV2:
             ):
                 raise ValueError("dev hybrid snapshot manifest verification failed")
             dev_items = snapshot_store.load_dev_icp_items()
-            if len(dev_items) != EXPECTED_DEV_ICP_COUNT:
-                raise ValueError("dev hybrid set must contain exactly eight ICPs")
+            expected_dev_icp_count = measured_git_tree_config(
+                self._execution_config
+            ).live_max_icps_per_node
+            if len(dev_items) != expected_dev_icp_count:
+                raise ValueError(
+                    "dev hybrid set size differs from measured Git-tree policy"
+                )
             if total_timeout != measured_dev_eval_total_timeout_seconds(
                 self._execution_config
             ):
@@ -992,6 +1003,7 @@ class ScoringExecutorV2:
                     run_label=run_label,
                     install_replay_seams=False,
                     require_manifest=True,
+                    expected_icp_count=expected_dev_icp_count,
                 ),
                 timeout=total_timeout,
             )

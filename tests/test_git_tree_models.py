@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+from gateway.research_lab.config import DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG
 from gateway.research_lab.git_tree_models import (
     GitTreeContractError,
     TreeCheckpoint,
@@ -83,7 +84,13 @@ def test_tree_policy_defaults_and_invalid_cross_field_config():
     assert policy.beam_width == 2
     assert policy.max_depth == 2
     assert policy.max_nodes == 6
-    assert policy.live_max_icps_per_node == 8
+    assert policy.live_max_icps_per_node == 5
+    for field_name, expected in (
+        DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.to_policy_kwargs().items()
+    ):
+        if field_name == "mode":
+            continue
+        assert getattr(policy, field_name) == expected
     assert policy.effective_billable_cap(3_000_000) == 3_000_000
     assert policy.effective_billable_cap(0) == 0
     assert policy.required_final_context_seconds(300) == 420
@@ -98,7 +105,7 @@ def test_tree_policy_defaults_and_invalid_cross_field_config():
             finalization_reserve_seconds=300,
         )
     with pytest.raises(GitTreeContractError, match="live_max_icps_per_node"):
-        TreePolicy(mode="active", live_max_icps_per_node=7)
+        TreePolicy(mode="active", live_max_icps_per_node=9)
     with pytest.raises(GitTreeContractError, match="build_concurrency"):
         TreePolicy(mode="active", build_concurrency=2)
     with pytest.raises(GitTreeContractError, match="final evaluation timeout"):
@@ -124,6 +131,13 @@ def test_tree_policy_rejects_deprecated_or_invalid_values_instead_of_coercing():
         TreePolicy.from_env({"RESEARCH_LAB_TREE_MODE": "shadow"})
     with pytest.raises(GitTreeContractError, match="must be an integer"):
         TreePolicy.from_env({"RESEARCH_LAB_TREE_BRANCH_FACTOR": "two"})
+    configured = TreePolicy.from_env(
+        {
+            "RESEARCH_LAB_TREE_MODE": "active",
+            "RESEARCH_LAB_TREE_LIVE_MAX_ICPS_PER_NODE": "7",
+        }
+    )
+    assert configured.live_max_icps_per_node == 7
 
 
 def test_tree_identity_and_child_slots_are_deterministic_and_parent_bound():

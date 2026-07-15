@@ -16,7 +16,12 @@ import os
 import re
 from typing import Any, Dict, Mapping, Optional
 
-from gateway.research_lab.config import ResearchLabGatewayConfig
+from gateway.research_lab.config import (
+    RESEARCH_LAB_GIT_TREE_ENV_NAMES,
+    ResearchLabGatewayConfig,
+    ResearchLabGitTreeConfig,
+    ResearchLabGitTreeConfigError,
+)
 from gateway.tee.scoring_executor import SCORING_CONFIG_ENV_NAMES
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
 from research_lab.eval.private_runtime import (
@@ -70,24 +75,7 @@ AUTORESEARCH_BEHAVIOR_ENV_NAMES = (
     "RESEARCH_LAB_LOOP_PROVIDER_PROBES_LIVE",
     "RESEARCH_LAB_LOOP_RESUME_RESTORE_SELECTED",
     "RESEARCH_LAB_LOOP_STAGE_ERROR_CONTAINMENT",
-    "RESEARCH_LAB_TREE_BEAM_WIDTH",
-    "RESEARCH_LAB_TREE_BILLABLE_CAP_MICROUSD",
-    "RESEARCH_LAB_TREE_BRANCH_FACTOR",
-    "RESEARCH_LAB_TREE_BUILD_CONCURRENCY",
-    "RESEARCH_LAB_TREE_DEADLINE_SECONDS",
-    "RESEARCH_LAB_TREE_DIVERSITY_FLOOR",
-    "RESEARCH_LAB_TREE_EVALUATION_CONCURRENCY",
-    "RESEARCH_LAB_TREE_EVIDENCE_RETENTION_DAYS",
-    "RESEARCH_LAB_TREE_FINALIZATION_RESERVE_SECONDS",
-    "RESEARCH_LAB_TREE_GENERATION_ATTEMPTS",
-    "RESEARCH_LAB_TREE_LIVE_CAP_MICROUSD",
-    "RESEARCH_LAB_TREE_LIVE_MAX_ICPS_PER_NODE",
-    "RESEARCH_LAB_TREE_LIVE_MAX_PROVIDER_CALLS",
-    "RESEARCH_LAB_TREE_LIVE_TIMEOUT_SECONDS",
-    "RESEARCH_LAB_TREE_MAX_DEPTH",
-    "RESEARCH_LAB_TREE_MAX_NODES",
-    "RESEARCH_LAB_TREE_MODE",
-    "RESEARCH_LAB_TREE_SHORTLIST_SIZE",
+    *RESEARCH_LAB_GIT_TREE_ENV_NAMES,
     "RESEARCH_LAB_SYMBOL_SLICE_BUDGET_SHARE",
     "RESEARCH_LAB_SYMBOL_SLICE_MODE",
     "RESEARCH_LAB_LOOP_WITHIN_RUN_MEMORY",
@@ -463,6 +451,23 @@ def measured_dev_snapshot_miss_policy(document: Mapping[str, Any]) -> str:
         normalized["behavior_environment"].get(SNAPSHOT_MISS_POLICY_ENV) or ""
     ).strip().lower()
     return raw if raw in MISS_POLICIES else MISS_POLICY_STRICT
+
+
+def measured_git_tree_config(
+    document: Mapping[str, Any],
+) -> ResearchLabGitTreeConfig:
+    normalized = validate_research_lab_execution_config(document)
+    environment = {
+        name: value
+        for name, value in normalized["behavior_environment"].items()
+        if name in RESEARCH_LAB_GIT_TREE_ENV_NAMES and value is not None
+    }
+    try:
+        return ResearchLabGitTreeConfig.from_env(environment)
+    except ResearchLabGitTreeConfigError as exc:
+        raise ResearchLabRuntimeConfigV2Error(
+            f"measured Git-tree configuration is invalid: {exc}"
+        ) from exc
 
 
 def validate_model_sandbox_environment(

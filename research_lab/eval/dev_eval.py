@@ -643,6 +643,7 @@ async def evaluate_dev(
     run_label: str = "",
     install_replay_seams: bool = True,
     require_manifest: bool = False,
+    expected_icp_count: int,
 ) -> DevEvalResult:
     """Run one candidate over the frozen dev ICP set against replayed providers.
 
@@ -666,6 +667,12 @@ async def evaluate_dev(
         raise DevEvalError("candidate_runner is required")
     if not dev_items:
         raise DevEvalError("dev_items are required")
+    if (
+        isinstance(expected_icp_count, bool)
+        or not isinstance(expected_icp_count, int)
+        or expected_icp_count < 1
+    ):
+        raise DevEvalError("expected_icp_count must be a positive integer")
     if snapshot_store.mode != MODE_REPLAY:
         raise DevEvalError("evaluate_dev requires a replay-mode snapshot store")
 
@@ -715,13 +722,13 @@ async def evaluate_dev(
     miss_count = sum(1 for row in rows if row["snapshot_miss"])
     successful_count = len(rows) - failure_count
     eligible = bool(
-        len(rows) == 8
+        len(rows) == expected_icp_count
         and failure_count == 0
         and miss_count == 0
         and snapshot_store.miss_policy == "strict"
     )
-    if len(rows) != 8:
-        eligibility_reason = "dev_set_size_must_equal_eight"
+    if len(rows) != expected_icp_count:
+        eligibility_reason = "dev_set_size_does_not_match_config"
     elif snapshot_store.miss_policy != "strict":
         eligibility_reason = "snapshot_miss_policy_not_strict"
     elif miss_count:

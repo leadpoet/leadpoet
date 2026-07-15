@@ -14,6 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from gateway.research_lab.config import (  # noqa: E402
+    ResearchLabGitTreeConfig,
+    ResearchLabGitTreeConfigError,
+)
 from research_lab.eval.snapshot_store import (  # noqa: E402
     POINTER_NAME,
     READY_NAME,
@@ -113,6 +117,14 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        expected_dev_icp_count = (
+            ResearchLabGitTreeConfig.from_env().live_max_icps_per_node
+        )
+    except ResearchLabGitTreeConfigError as exc:
+        print(f"ERROR: invalid Git-tree configuration: {exc}")
+        return 1
+
+    try:
         import boto3
     except Exception as exc:
         print(f"ERROR: boto3 is required: {exc}")
@@ -120,7 +132,10 @@ def main() -> int:
 
     source = Path(args.source_dir).expanduser().resolve()
     local = ProviderSnapshotStore(str(source), mode="replay")
-    verification = local.verify_ready_document(require_signature=False)
+    verification = local.verify_ready_document(
+        expected_dev_icp_count=expected_dev_icp_count,
+        require_signature=False,
+    )
     if not verification.get("passed"):
         print("ERROR: local snapshot is not READY: " + "; ".join(verification.get("errors") or ()))
         return 1
@@ -142,7 +157,10 @@ def main() -> int:
     already_published = False
     if existing:
         remote = ProviderSnapshotStore(target_uri, mode="replay")
-        remote_verification = remote.verify_ready_document(require_signature=True)
+        remote_verification = remote.verify_ready_document(
+            expected_dev_icp_count=expected_dev_icp_count,
+            require_signature=True,
+        )
         if not (
             remote_verification.get("passed")
             and remote_verification.get("manifest_hash") == manifest_hash
@@ -198,7 +216,10 @@ def main() -> int:
             kms_key_id=args.kms_key_id,
             content_type="application/json",
         )
-        final = remote.verify_ready_document(require_signature=True)
+        final = remote.verify_ready_document(
+            expected_dev_icp_count=expected_dev_icp_count,
+            require_signature=True,
+        )
         if not final.get("passed"):
             print(
                 "ERROR: published READY verification failed: "

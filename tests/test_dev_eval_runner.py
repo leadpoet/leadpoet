@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from gateway.research_lab.config import DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG
 from gateway.research_lab.dev_eval_runner import (
     AttestedReplayDevEvaluatorV2,
     DEV_EVAL_ENABLED_ENV,
@@ -47,6 +48,7 @@ from research_lab.eval.provider_evidence_cache import (
 )
 
 IMAGE_DIGEST = "123456789.dkr.ecr.test/model@sha256:" + "a" * 64
+DEV_ICP_COUNT = DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
 
 SCRAPINGDOG_URL = (
     "https://api.scrapingdog.com/linkedin?type=company&linkId={link_id}&api_key={key}"
@@ -107,9 +109,11 @@ def _rich_company(index: int = 0) -> dict:
     }
 
 
-def _write_snapshot_set(tmp_path, items: list[dict]) -> str:
+def _write_snapshot_set(
+    tmp_path, items: list[dict], *, expected_count: int = DEV_ICP_COUNT
+) -> str:
     """Record a complete snapshot set (snapshots + manifest + dev ICPs)."""
-    assert len(items) == 8
+    assert len(items) == expected_count
     root = str(tmp_path / "snapshot_set")
     store = ProviderSnapshotStore(root, mode=MODE_RECORD)
     for item in items:
@@ -195,9 +199,29 @@ def test_factory_returns_evaluator_when_configured(monkeypatch, tmp_path):
 
 
 def test_ensure_local_snapshot_set_uses_local_dir_in_place(tmp_path):
-    items = _dev_items(8)
+    items = _dev_items(DEV_ICP_COUNT)
     root = _write_snapshot_set(tmp_path, items)
     assert ensure_local_snapshot_set(root) == __import__("pathlib").Path(root)
+
+
+def test_snapshot_set_accepts_configured_non_default_icp_count(tmp_path):
+    configured_count = 3
+    items = _dev_items(configured_count)
+    root = _write_snapshot_set(
+        tmp_path,
+        items,
+        expected_count=configured_count,
+    )
+
+    assert ensure_local_snapshot_set(
+        root,
+        expected_dev_icp_count=configured_count,
+    ) == Path(root)
+    replay = ProviderSnapshotStore(root, mode=MODE_REPLAY)
+    assert load_verified_dev_items(
+        replay,
+        expected_dev_icp_count=configured_count,
+    ) == items
 
 
 def test_ensure_local_snapshot_set_requires_manifest(tmp_path):
@@ -225,7 +249,7 @@ def _write_local_pointer(base, target: str, *, manifest_hash: str = "", ready_ha
 def test_local_current_pointer_resolves_verified_immutable_snapshot(tmp_path):
     base = tmp_path / "published"
     base.mkdir()
-    target = _write_snapshot_set(base, _dev_items(8))
+    target = _write_snapshot_set(base, _dev_items(DEV_ICP_COUNT))
     pointer = _write_local_pointer(base, target)
     assert ensure_local_snapshot_set(str(pointer)) == __import__("pathlib").Path(target)
 
@@ -233,7 +257,7 @@ def test_local_current_pointer_resolves_verified_immutable_snapshot(tmp_path):
 def test_snapshot_pointer_rejects_tampering_outside_target_and_mixed_vintages(tmp_path):
     base = tmp_path / "published"
     base.mkdir()
-    target = _write_snapshot_set(base, _dev_items(8))
+    target = _write_snapshot_set(base, _dev_items(DEV_ICP_COUNT))
 
     pointer = _write_local_pointer(base, target)
     tampered = json.loads(pointer.read_text(encoding="utf-8"))
@@ -243,7 +267,9 @@ def test_snapshot_pointer_rejects_tampering_outside_target_and_mixed_vintages(tm
         ensure_local_snapshot_set(str(pointer))
 
     outside = tmp_path / "outside"
-    outside_target = _write_snapshot_set(outside, _dev_items(8))
+    outside_target = _write_snapshot_set(
+        outside, _dev_items(DEV_ICP_COUNT)
+    )
     pointer = _write_local_pointer(base, outside_target)
     with pytest.raises(DevEvalRunnerError, match="pointer_target_outside_base"):
         ensure_local_snapshot_set(str(pointer))
@@ -258,20 +284,29 @@ def test_snapshot_pointer_rejects_tampering_outside_target_and_mixed_vintages(tm
 
 
 def test_load_verified_dev_items_round_trip_and_tamper_guard(tmp_path):
-    items = _dev_items(8)
+    items = _dev_items(DEV_ICP_COUNT)
     root = _write_snapshot_set(tmp_path, items)
     replay = ProviderSnapshotStore(root, mode=MODE_REPLAY)
     assert load_verified_dev_items(replay) == [dict(item) for item in items]
 
     # Swap in a different ICP set without re-recording the manifest.
     tampered = ProviderSnapshotStore(root, mode=MODE_RECORD)
-    tampered.write_dev_icp_items(_dev_items(7))
+    tampered.write_dev_icp_items(_dev_items(DEV_ICP_COUNT - 1))
+    with pytest.raises(DevEvalRunnerError, match="configured ICP count"):
+        load_verified_dev_items(replay)
+
+    same_size_tamper = _dev_items(DEV_ICP_COUNT)
+    same_size_tamper[0]["icp"]["industry"] = "Tampered Industry"
+    same_size_tamper[0]["icp_hash"] = sha256_json(
+        {"icp": same_size_tamper[0]["icp"]}
+    )
+    tampered.write_dev_icp_items(same_size_tamper)
     with pytest.raises(DevEvalRunnerError, match="icp_set_hash"):
         load_verified_dev_items(replay)
 
 
 def test_load_verified_dev_items_requires_payloads(tmp_path):
-    items = _dev_items(8)
+    items = _dev_items(DEV_ICP_COUNT)
     root = _write_snapshot_set(tmp_path, items)
     (__import__("pathlib").Path(root) / "dev_icps.json").unlink()
     replay = ProviderSnapshotStore(root, mode=MODE_REPLAY)
@@ -285,7 +320,7 @@ def test_load_verified_dev_items_requires_payloads(tmp_path):
 
 
 async def test_evaluator_scores_candidate_and_is_deterministic(tmp_path):
-    items = _dev_items(8)
+    items = _dev_items(DEV_ICP_COUNT)
     root = _write_snapshot_set(tmp_path, items)
     companies = {
         "dev-0": [_rich_company(0), _rich_company(1)],
@@ -303,12 +338,12 @@ async def test_evaluator_scores_candidate_and_is_deterministic(tmp_path):
     assert first == second
     assert first["dev_score_version"] == DEV_SCORE_VERSION
     assert first["ranking_only"] is True
-    assert first["icp_count"] == 8
-    assert len(first["per_icp"]) == 8
+    assert first["icp_count"] == DEV_ICP_COUNT
+    assert len(first["per_icp"]) == DEV_ICP_COUNT
     assert first["aggregate_dev_score"] > 0.0
     # Empty company sets are legitimate zero scores, not infrastructure failures.
     assert first["failure_count"] == 0
-    assert first["zero_output_count"] == 6
+    assert first["zero_output_count"] == DEV_ICP_COUNT - 2
     assert first["eligible"] is True
     # The fake docker seam received the candidate image and the local dir.
     assert all(call["image_digest"] == IMAGE_DIGEST for call in fake_docker.calls)
@@ -320,7 +355,7 @@ async def test_evaluator_scores_candidate_and_is_deterministic(tmp_path):
 async def test_attested_evaluator_preserves_legacy_result_and_requests_candidate_test(
     monkeypatch, tmp_path
 ):
-    items = _dev_items(8)
+    items = _dev_items(DEV_ICP_COUNT)
     root = _write_snapshot_set(tmp_path, items)
     source = tmp_path / "candidate-source"
     source.mkdir()
@@ -473,7 +508,7 @@ def test_attested_evaluator_rejects_tampered_cohort_commitment():
 
 
 async def test_evaluator_rejects_mutable_image_reference(tmp_path):
-    items = _dev_items(8)
+    items = _dev_items(DEV_ICP_COUNT)
     root = _write_snapshot_set(tmp_path, items)
     evaluator = DockerReplayDevEvaluator(
         snapshot_uri=root, run_icp_in_docker=_fake_docker_runner({})
@@ -488,16 +523,18 @@ async def test_snapshot_preparation_is_lazy_and_single_flight(
     from gateway.research_lab import dev_eval_runner as runner_module
 
     calls = {"prepare": 0, "load": 0}
-    items = _dev_items(8)
+    items = _dev_items(DEV_ICP_COUNT)
 
-    def prepare_snapshot(uri, *, cache_root=None):
+    def prepare_snapshot(uri, *, cache_root=None, expected_dev_icp_count=None):
         assert uri == "s3://private/snapshot"
         assert cache_root == tmp_path / "cache"
+        assert expected_dev_icp_count == DEV_ICP_COUNT
         calls["prepare"] += 1
         return tmp_path
 
-    def load_items(store):
+    def load_items(store, *, expected_dev_icp_count=None):
         assert isinstance(store, ProviderSnapshotStore)
+        assert expected_dev_icp_count == DEV_ICP_COUNT
         calls["load"] += 1
         return list(items)
 
@@ -763,7 +800,7 @@ async def test_hybrid_discovery_restores_tree_caps_and_limits_live_icps(
         prior_settled_cost_microusd=100_000,
         model_runner_factory=FakeRunner,
     )
-    evaluator._dev_items = _dev_items(8)
+    evaluator._dev_items = _dev_items(3)
 
     async def prepared():
         return (
@@ -878,7 +915,7 @@ async def test_hybrid_discovery_reuses_identical_sibling_request_once(monkeypatc
         live_max_icps_per_node=1,
         model_runner_factory=FakeRunner,
     )
-    evaluator._dev_items = _dev_items(8)
+    evaluator._dev_items = _dev_items(1)
 
     async def prepared():
         return (
@@ -938,7 +975,7 @@ def test_attested_evaluator_rejects_prior_usage_above_cap():
 
 
 async def test_evaluator_books_docker_failures_per_icp_without_aborting(tmp_path):
-    items = _dev_items(8)
+    items = _dev_items(DEV_ICP_COUNT)
     root = _write_snapshot_set(tmp_path, items)
 
     def _crashing(*, image_digest, icp, context, snapshot_dir, timeout_seconds):
@@ -947,8 +984,8 @@ async def test_evaluator_books_docker_failures_per_icp_without_aborting(tmp_path
     evaluator = DockerReplayDevEvaluator(snapshot_uri=root, run_icp_in_docker=_crashing)
     result = await evaluator(_candidate())
     assert result["aggregate_dev_score"] == 0.0
-    assert result["failure_count"] == 8
-    assert result["icp_count"] == 8
+    assert result["failure_count"] == DEV_ICP_COUNT
+    assert result["icp_count"] == DEV_ICP_COUNT
     assert result["eligible"] is False
 
 

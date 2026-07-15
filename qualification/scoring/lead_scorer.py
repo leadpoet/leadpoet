@@ -364,14 +364,8 @@ async def score_company(
     )
 
 
-_SCORER_REVERIFY_ENV = "RESEARCH_LAB_SCORER_LLM_REVERIFY"
 _SCORER_REVERIFY_MODEL = "perplexity/sonar"
 _SCORER_REVERIFY_TIMEOUT_S = 45.0
-
-
-def _scorer_reverify_enabled() -> bool:
-    import os
-    return os.getenv(_SCORER_REVERIFY_ENV, "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _reverify_decision(verdict: dict, icp_attribute: str, icp_stage: str) -> Tuple[bool, str]:
@@ -391,11 +385,12 @@ async def _llm_reverify_company(company: "CompanyOutput", icp: "ICPPrompt") -> T
     stage label — the two dimensions where the scorer otherwise trusts model
     text. One Sonar call per company, only when the ICP pins either dimension.
 
-    Fail semantics: zero ONLY on an affirmative web-grounded mismatch; an
-    indeterminate answer or any provider/parse failure keeps the company
-    (fail-open) — a provider outage must never zero a whole benchmark."""
-    if not _scorer_reverify_enabled():
-        return True, ""
+    This check is MANDATORY whenever the ICP pins either dimension — the
+    attribute's direct evidence URL is optional, but the LLM verification of
+    the claim is not. Fail semantics: zero ONLY on an affirmative web-grounded
+    mismatch; an indeterminate answer or any provider/parse failure keeps the
+    company (fail-open, loudly logged) — a provider outage must never zero a
+    whole benchmark."""
     icp_attribute = str(getattr(icp, "required_attribute", "") or "").strip()
     icp_stage = _normalize_company_stage(getattr(icp, "company_stage", ""))
     if not icp_attribute and not icp_stage:

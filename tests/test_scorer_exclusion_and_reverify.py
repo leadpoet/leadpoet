@@ -68,12 +68,12 @@ def test_reverify_early_exits_without_network():
     async def run(**env):
         with mock.patch.dict(os.environ, env, clear=False):
             return await _llm_reverify_company(_company(), _icp())
-    # no attribute and no stage pinned -> no call, pass
+    # no attribute and no stage pinned -> no call, pass; when either IS
+    # pinned the LLM check is mandatory (no kill-switch exists).
     ok, _ = asyncio.run(run())
     assert ok
-    # flag off -> pass without call
-    ok, _ = asyncio.run(run(RESEARCH_LAB_SCORER_LLM_REVERIFY="0"))
-    assert ok
+    from qualification.scoring import lead_scorer as _ls
+    assert not hasattr(_ls, "_scorer_reverify_enabled")
 
 
 def test_reverify_fail_open_without_key():

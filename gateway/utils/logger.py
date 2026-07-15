@@ -209,6 +209,12 @@ async def _persist_signed_log_entry(
         payload.get("actor_hotkey")
         or payload.get("validator_hotkey")
         or payload.get("miner_hotkey")
+        # System events (gateway boot/restart, signer init) have no acting
+        # hotkey; the column is NOT NULL in production, so a missing actor
+        # must never block the durable audit insert — and a blocked boot
+        # event makes the gateway unbootable. The signed envelope itself is
+        # untouched; this only fills the row-metadata column.
+        or "system:gateway"
     )
     supabase_entry = {
         "event_type": event_type,
@@ -367,7 +373,7 @@ async def _log_event_legacy_format(event: Dict[str, Any]) -> Dict[str, Any]:
             
             supabase_entry = {
                 "event_type": event.get("event_type"),
-                "actor_hotkey": event.get("actor_hotkey"),
+                "actor_hotkey": event.get("actor_hotkey") or "system:gateway",
                 "nonce": event.get("nonce"),
                 "ts": event.get("ts"),
                 "payload_hash": event.get("payload_hash"),

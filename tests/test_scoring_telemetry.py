@@ -547,6 +547,9 @@ async def test_queue_telemetry_callback_failure_cannot_reclassify_scored_job(mon
     async def not_ready(*args, **kwargs):
         return None
 
+    async def no_pending(*args, **kwargs):
+        return []
+
     async def score(job):
         return {"icp_ref": "icp:1", "score": 50.0}
 
@@ -557,6 +560,7 @@ async def test_queue_telemetry_callback_failure_cannot_reclassify_scored_job(mon
     monkeypatch.setattr(global_icp_queue, "claim_next_job", claim)
     monkeypatch.setattr(global_icp_queue, "complete_job", complete)
     monkeypatch.setattr(global_icp_queue, "candidate_ready_to_assemble", not_ready)
+    monkeypatch.setattr(global_icp_queue, "select_many", no_pending)
 
     counters = await global_icp_queue.run_queue_scoring_pass(
         worker_ref="worker:test",

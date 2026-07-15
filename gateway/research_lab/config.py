@@ -615,6 +615,11 @@ class ResearchLabGatewayConfig:
     # private is the inverse regression holdout.
     public_benchmark_public_total_icps: Optional[int] = 10
     public_benchmark_public_weak_total: Optional[int] = 7
+    conditional_validation_mode: str = "off"
+    private_holdout_total_icps: int = 10
+    private_holdout_weak_total: int = 3
+    conditional_holdout_total_icps: int = 20
+    conditional_validation_fresh_icp_count: int = 20
     improvement_threshold_points: float = 1.0
     private_model_manifest_uri: str = (
         "s3://leadpoet-private-model-artifacts-493765492819/research-lab/sourcing-model/current.json"
@@ -741,6 +746,10 @@ class ResearchLabGatewayConfig:
         if scoring_worker_index >= scoring_total_workers:
             scoring_worker_index = scoring_worker_index % scoring_total_workers
         improvement_threshold_points = _improvement_threshold_points()
+        conditional_validation_mode = os.getenv(
+            "RESEARCH_LAB_CONDITIONAL_VALIDATION_MODE",
+            "off",
+        ).strip().lower() or "off"
         legacy_champion_threshold = os.getenv("RESEARCH_LAB_CHAMPION_THRESHOLD_POINTS")
         if legacy_champion_threshold not in (None, "", str(improvement_threshold_points)):
             logger.warning(
@@ -1173,6 +1182,19 @@ class ResearchLabGatewayConfig:
                 if (value := _optional_int("RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_TOTAL")) is not None
                 else 7
             ),
+            conditional_validation_mode=conditional_validation_mode,
+            private_holdout_total_icps=_int(
+                "RESEARCH_LAB_PRIVATE_HOLDOUT_TOTAL_ICPS", 10
+            ),
+            private_holdout_weak_total=_int(
+                "RESEARCH_LAB_PRIVATE_HOLDOUT_WEAK_TOTAL", 3
+            ),
+            conditional_holdout_total_icps=_int(
+                "RESEARCH_LAB_CONDITIONAL_HOLDOUT_TOTAL_ICPS", 20
+            ),
+            conditional_validation_fresh_icp_count=_int(
+                "RESEARCH_LAB_CONDITIONAL_FRESH_ICP_COUNT", 20
+            ),
             improvement_threshold_points=improvement_threshold_points,
             private_model_manifest_uri=os.getenv(
                 "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI",
@@ -1514,7 +1536,41 @@ class ResearchLabGatewayConfig:
             "public_benchmark_public_weak_total": self.public_benchmark_public_weak_total,
         }
 
+    def conditional_validation_policy(self) -> Any:
+        from research_lab.eval.conditional_validation import ConditionalValidationPolicy
+
+        public_total = self.public_benchmark_public_total_icps
+        if public_total is None:
+            public_total = (
+                self.public_benchmark_public_icps_per_day
+                * self.lab_champion_eval_days
+            )
+        public_weak = self.public_benchmark_public_weak_total
+        if public_weak is None:
+            public_weak = (
+                self.public_benchmark_public_weak_per_day
+                * self.lab_champion_eval_days
+            )
+        return ConditionalValidationPolicy(
+            mode=self.conditional_validation_mode,
+            public_total_icps=int(public_total),
+            public_weak_total=int(public_weak),
+            private_total_icps=self.private_holdout_total_icps,
+            private_weak_total=self.private_holdout_weak_total,
+            conditional_total_icps=self.conditional_holdout_total_icps,
+            fresh_icp_count=self.conditional_validation_fresh_icp_count,
+            threshold_points=self.improvement_threshold_points,
+        )
+
     def validate_public_benchmark_split(self) -> None:
+        conditional_policy = self.conditional_validation_policy()
+        if conditional_policy.enabled:
+            if self.lab_champion_window_mode != "hybrid_fresh_retained":
+                raise ValueError(
+                    "conditional validation requires RESEARCH_LAB_CHAMPION_WINDOW_MODE="
+                    "hybrid_fresh_retained"
+                )
+            return
         total_icps = self.lab_champion_eval_days * self.lab_champion_icps_per_day
         if self.lab_champion_window_mode not in {"hybrid_fresh_retained", "legacy_rolling", "rolling", "legacy"}:
             raise ValueError("RESEARCH_LAB_CHAMPION_WINDOW_MODE must be hybrid_fresh_retained or legacy_rolling")
@@ -1623,6 +1679,7 @@ class ResearchLabGatewayConfig:
                 "public_benchmark_public_weak_per_day": self.public_benchmark_public_weak_per_day,
                 "public_benchmark_public_total_icps": self.public_benchmark_public_total_icps,
                 "public_benchmark_public_weak_total": self.public_benchmark_public_weak_total,
+                "conditional_validation": self.conditional_validation_policy().to_dict(),
                 "improvement_threshold_points": self.improvement_threshold_points,
             },
             "arweave_audit": {

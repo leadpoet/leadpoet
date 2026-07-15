@@ -2883,6 +2883,9 @@ class ResearchLabHostedWorker:
                 candidate_source_diff_hash=finalist.get("candidate_source_diff_hash"),
                 candidate_build_doc={
                     **dict(finalist.get("candidate_build_doc") or {}),
+                    "conditional_validation_policy": (
+                        self.config.conditional_validation_policy().to_dict()
+                    ),
                     # Worker-side annotation (deliberately outside the engine's
                     # build_doc_hash, which covers only engine-produced fields):
                     # carries the loop node id to the scoring worker so score

@@ -473,7 +473,7 @@ class ResearchLabScoreBundleCreateRequest(BaseModel):
         bundle = self.score_bundle
         if bundle.get("bundle_type") != "research_lab_evaluation_score_bundle":
             raise ValueError("score_bundle must be a Research Lab evaluation score bundle")
-        if bundle.get("schema_version") != "1.0":
+        if bundle.get("schema_version") not in {"1.0", "1.1"}:
             raise ValueError("unsupported score bundle schema version")
         if not bundle.get("signature_ref"):
             raise ValueError("score bundle signature_ref is required")
@@ -504,7 +504,7 @@ class ResearchLabCandidateEvaluationResultRequest(BaseModel):
             bundle = self.score_bundle
             if bundle.get("bundle_type") != "research_lab_evaluation_score_bundle":
                 raise ValueError("score_bundle must be a Research Lab evaluation score bundle")
-            if bundle.get("schema_version") != "1.0":
+            if bundle.get("schema_version") not in {"1.0", "1.1"}:
                 raise ValueError("unsupported score bundle schema version")
             if not bundle.get("signature_ref"):
                 raise ValueError("score bundle signature_ref is required")

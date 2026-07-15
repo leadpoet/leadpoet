@@ -70,6 +70,13 @@ AttemptCostSink = Callable[
     [str, "list[dict[str, Any]]", Mapping[str, Any]],
     Union[Awaitable[None], None],
 ]
+HoldoutTransitionHook = Callable[
+    [str, Mapping[str, Any]],
+    Union[
+        Awaitable[Optional[Mapping[str, Any]]],
+        Optional[Mapping[str, Any]],
+    ],
+]
 
 
 async def _emit_scoring_telemetry(
@@ -111,6 +118,26 @@ async def _emit_attempt_costs(
             str(icp_ref)[:120],
             exc_info=True,
         )
+
+
+async def _emit_holdout_transition(
+    hook: HoldoutTransitionHook | None,
+    action: str,
+    payload: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    """Persist a gate boundary before beginning conditional provider work.
+
+    Unlike optional telemetry, this callback is part of crash-safe orchestration:
+    failures propagate so a worker cannot run the hidden stage without recording
+    that it crossed the frozen preliminary gate.
+    """
+
+    if hook is None:
+        return None
+    result = hook(action, dict(payload))
+    if inspect.isawaitable(result):
+        result = await result
+    return dict(result) if isinstance(result, Mapping) else None
 
 # Default trace sink configuration (used when no ``trace_sink`` is injected):
 # with the S3 prefix set, one JSON object per ICP is uploaded to
@@ -232,6 +259,10 @@ class RealEvaluatorRequired(RuntimeError):
     """Raised when a production Research Lab evaluation lacks real inputs."""
 
 
+class ConditionalValidationRetryableError(RuntimeError):
+    """Conditional evidence was incomplete and must be retried, not scored."""
+
+
 async def evaluate_private_model_pair(
     *,
     artifact_manifest: PrivateModelArtifactManifest | Mapping[str, Any],
@@ -251,6 +282,7 @@ async def evaluate_private_model_pair(
     trace_sink: TraceSink | None = None,
     scoring_telemetry_hook: ScoringTelemetryHook | None = None,
     attempt_cost_sink: AttemptCostSink | None = None,
+    holdout_transition_hook: HoldoutTransitionHook | None = None,
 ) -> dict[str, Any]:
     """Run a real paired base-vs-candidate evaluation.
 
@@ -330,6 +362,7 @@ async def evaluate_private_model_pair(
             trace_sink=resolved_trace_sink,
             scoring_telemetry_hook=scoring_telemetry_hook,
             attempt_cost_sink=attempt_cost_sink,
+            holdout_transition_hook=holdout_transition_hook,
         )
         return build_score_bundle_from_scored_icps(
             artifact_manifest=artifact,
@@ -1418,6 +1451,8 @@ def build_holdout_gate_result(
     public_icp_count: int,
     private_icp_count: int,
     gate: Mapping[str, Any],
+    conditional_results: Sequence[Mapping[str, Any]] = (),
+    conditional_icp_count: int = 0,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Assemble the (results, gate_result) pair from scored public/private ICP
     results.
@@ -1429,6 +1464,17 @@ def build_holdout_gate_result(
     results and the total/delta fields. ``private_results`` is empty when the
     gate did not pass.
     """
+    if bool(gate.get("conditional_validation_required")):
+        return _build_conditional_holdout_gate_result(
+            public_results=public_results,
+            private_results=private_results,
+            conditional_results=conditional_results,
+            public_icp_count=public_icp_count,
+            private_icp_count=private_icp_count,
+            conditional_icp_count=conditional_icp_count,
+            gate=gate,
+        )
+
     baseline_public_score = float(gate.get("baseline_public_score") or 0.0)
     baseline_aggregate_score = _optional_float(gate.get("baseline_aggregate_score"))
     baseline_private_score = _optional_float(gate.get("baseline_private_score"))
@@ -1470,6 +1516,123 @@ def build_holdout_gate_result(
     return all_results, gate_result
 
 
+def _build_conditional_holdout_gate_result(
+    *,
+    public_results: Sequence[Mapping[str, Any]],
+    private_results: Sequence[Mapping[str, Any]],
+    conditional_results: Sequence[Mapping[str, Any]],
+    public_icp_count: int,
+    private_icp_count: int,
+    conditional_icp_count: int,
+    gate: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    baseline_public_score = float(gate.get("baseline_public_score") or 0.0)
+    baseline_private_score = float(gate.get("baseline_private_score") or 0.0)
+    baseline_conditional_score = float(gate.get("baseline_conditional_score") or 0.0)
+    baseline_preliminary_score = float(gate.get("baseline_preliminary_score") or 0.0)
+    baseline_aggregate_score = float(gate.get("baseline_aggregate_score") or 0.0)
+    threshold_points = float(gate.get("threshold_points") or 0.0)
+    candidate_public_score = _benchmark_style_score(
+        public_results,
+        "candidate_company_scores",
+    )
+    passed_public_gate = candidate_public_score + 1e-9 >= baseline_public_score
+    base_result = {
+        "schema_version": "1.1",
+        "gate_type": "public_private_then_conditional_validation",
+        "decision": (
+            "conditional_validation_required"
+            if passed_public_gate
+            else "rejected_before_private_holdout"
+        ),
+        "baseline_benchmark_bundle_id": str(gate.get("baseline_benchmark_bundle_id") or ""),
+        "baseline_benchmark_hash": str(gate.get("baseline_benchmark_hash") or ""),
+        "baseline_aggregate_score": round(baseline_aggregate_score, 6),
+        "baseline_preliminary_score": round(baseline_preliminary_score, 6),
+        "baseline_public_score": round(baseline_public_score, 6),
+        "baseline_private_score": round(baseline_private_score, 6),
+        "baseline_conditional_score": round(baseline_conditional_score, 6),
+        "candidate_public_score": round(candidate_public_score, 6),
+        "paired_base_public_score": None,
+        "reference_evaluation_mode": "stored_daily_baseline",
+        "threshold_points": round(threshold_points, 6),
+        "public_icp_count": int(public_icp_count),
+        "private_holdout_icp_count": int(private_icp_count),
+        "conditional_holdout_icp_count": int(conditional_icp_count),
+        "private_holdout_evaluated": bool(passed_public_gate),
+        "conditional_holdout_evaluated": False,
+        "conditional_validation_required": True,
+        "category_assignment_hash": str(gate.get("category_assignment_hash") or ""),
+        "conditional_validation_policy_hash": str(
+            gate.get("conditional_validation_policy_hash") or ""
+        ),
+        "provider_excluded_icp_ids": _provider_excluded_icp_ids(public_results),
+    }
+    if not passed_public_gate:
+        return list(public_results), base_result
+
+    preliminary_results = [*public_results, *private_results]
+    candidate_private_score = _benchmark_style_score(
+        private_results,
+        "candidate_company_scores",
+    )
+    candidate_preliminary_score = _benchmark_style_score(
+        preliminary_results,
+        "candidate_company_scores",
+    )
+    preliminary_delta = candidate_preliminary_score - baseline_preliminary_score
+    preliminary_passed = preliminary_delta + 1e-9 >= threshold_points
+    preliminary_decision = (
+        "conditional_validation_required"
+        if preliminary_passed
+        else "rejected_before_conditional_validation"
+    )
+    preliminary_doc = {
+        **base_result,
+        "decision": preliminary_decision,
+        "candidate_private_score": round(candidate_private_score, 6),
+        "candidate_preliminary_score": round(candidate_preliminary_score, 6),
+        "candidate_preliminary_delta": round(preliminary_delta, 6),
+        "preliminary_decision": preliminary_decision,
+        "provider_excluded_icp_ids": _provider_excluded_icp_ids(preliminary_results),
+    }
+    preliminary_promotion_gate = gate.get("preliminary_promotion_gate")
+    if isinstance(preliminary_promotion_gate, Mapping):
+        preliminary_doc["preliminary_promotion_gate"] = dict(
+            preliminary_promotion_gate
+        )
+    if not preliminary_passed or not conditional_results:
+        return preliminary_results, preliminary_doc
+
+    all_results = [*preliminary_results, *conditional_results]
+    candidate_conditional_score = _benchmark_style_score(
+        conditional_results,
+        "candidate_company_scores",
+    )
+    candidate_total_score = _benchmark_style_score(
+        all_results,
+        "candidate_company_scores",
+    )
+    final_delta = candidate_total_score - baseline_aggregate_score
+    final_passed = final_delta + 1e-9 >= threshold_points
+    final_decision = (
+        "conditional_validation_approved"
+        if final_passed
+        else "rejected_after_conditional_validation"
+    )
+    return all_results, {
+        **preliminary_doc,
+        "decision": final_decision,
+        "candidate_conditional_score": round(candidate_conditional_score, 6),
+        "candidate_total_score": round(candidate_total_score, 6),
+        "paired_base_total_score": None,
+        "candidate_delta_vs_daily_baseline": round(final_delta, 6),
+        "conditional_holdout_evaluated": True,
+        "final_decision": final_decision,
+        "provider_excluded_icp_ids": _provider_excluded_icp_ids(all_results),
+    }
+
+
 async def _score_with_private_holdout_gate(
     *,
     benchmark_items: Sequence[Mapping[str, Any]],
@@ -1486,6 +1649,7 @@ async def _score_with_private_holdout_gate(
     trace_sink: TraceSink | None = None,
     scoring_telemetry_hook: ScoringTelemetryHook | None = None,
     attempt_cost_sink: AttemptCostSink | None = None,
+    holdout_transition_hook: HoldoutTransitionHook | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     public_refs = {
         str(item)
@@ -1498,14 +1662,53 @@ async def _score_with_private_holdout_gate(
         item for item in benchmark_items
         if str(item.get("icp_ref") or item.get("icp_hash") or "") in public_refs
     ]
-    private_items = [
-        item for item in benchmark_items
-        if str(item.get("icp_ref") or item.get("icp_hash") or "") not in public_refs
-    ]
+    conditional_required = bool(gate.get("conditional_validation_required"))
+    conditional_refs = {
+        str(item)
+        for item in gate.get("conditional_icp_refs", ())
+        if str(item).strip()
+    }
+    private_refs = {
+        str(item)
+        for item in gate.get("private_icp_refs", ())
+        if str(item).strip()
+    }
+    if conditional_required:
+        if not private_refs or not conditional_refs:
+            raise RealEvaluatorRequired(
+                "conditional holdout gate requires private and conditional ICP refs"
+            )
+        private_items = [
+            item for item in benchmark_items
+            if str(item.get("icp_ref") or item.get("icp_hash") or "") in private_refs
+        ]
+        conditional_items = [
+            item for item in benchmark_items
+            if str(item.get("icp_ref") or item.get("icp_hash") or "") in conditional_refs
+        ]
+        assigned_refs = public_refs | private_refs | conditional_refs
+        item_refs = {
+            str(item.get("icp_ref") or item.get("icp_hash") or "")
+            for item in benchmark_items
+        }
+        if assigned_refs != item_refs:
+            raise RealEvaluatorRequired(
+                "conditional holdout gate does not exactly cover the benchmark bank"
+            )
+        if public_refs & private_refs or public_refs & conditional_refs or private_refs & conditional_refs:
+            raise RealEvaluatorRequired("conditional holdout gate ICP categories overlap")
+    else:
+        private_items = [
+            item for item in benchmark_items
+            if str(item.get("icp_ref") or item.get("icp_hash") or "") not in public_refs
+        ]
+        conditional_items = []
     if not public_items:
         raise RealEvaluatorRequired("private holdout gate matched zero public ICPs")
     if not private_items:
         raise RealEvaluatorRequired("private holdout gate leaves no private ICPs")
+    if conditional_required and not conditional_items:
+        raise RealEvaluatorRequired("conditional holdout gate leaves no conditional ICPs")
 
     public_results = await score_private_model_pair_items(
         benchmark_items=public_items,
@@ -1528,7 +1731,7 @@ async def _score_with_private_holdout_gate(
     candidate_public_score = _benchmark_style_score(public_results, "candidate_company_scores")
     passed_public_gate = candidate_public_score + 1e-9 >= baseline_public_score
     if not passed_public_gate:
-        for item in private_items:
+        for item in [*private_items, *conditional_items]:
             await _emit_scoring_telemetry(
                 scoring_telemetry_hook,
                 "gate_skipped",
@@ -1545,6 +1748,7 @@ async def _score_with_private_holdout_gate(
             public_icp_count=len(public_items),
             private_icp_count=len(private_items),
             gate=gate,
+            conditional_icp_count=len(conditional_items),
         )
 
     private_results = await score_private_model_pair_items(
@@ -1562,13 +1766,118 @@ async def _score_with_private_holdout_gate(
         scoring_telemetry_hook=scoring_telemetry_hook,
         attempt_cost_sink=attempt_cost_sink,
     )
-    return build_holdout_gate_result(
+    preliminary_results, preliminary_gate = build_holdout_gate_result(
         public_results=public_results,
         private_results=private_results,
         public_icp_count=len(public_items),
         private_icp_count=len(private_items),
         gate=gate,
+        conditional_icp_count=len(conditional_items),
     )
+    if not conditional_required:
+        return preliminary_results, preliminary_gate
+    if str(preliminary_gate.get("decision") or "") != "conditional_validation_required":
+        for item in conditional_items:
+            await _emit_scoring_telemetry(
+                scoring_telemetry_hook,
+                "gate_skipped",
+                {
+                    "icp_ref": str(item.get("icp_ref") or item.get("icp_hash") or ""),
+                    "icp_hash": str(item.get("icp_hash") or ""),
+                    "model_role": "candidate",
+                    "failure_category": "preliminary_gate_rejected",
+                },
+            )
+        return preliminary_results, preliminary_gate
+
+    transition_result = await _emit_holdout_transition(
+        holdout_transition_hook,
+        "conditional_validation_started",
+        {
+            **preliminary_gate,
+            # Private in-process input for the gateway authority callback.  The
+            # worker whitelists persisted fields and never serializes this key.
+            "_preliminary_results": [dict(item) for item in preliminary_results],
+        },
+    )
+    if transition_result is None:
+        raise ConditionalValidationRetryableError(
+            "conditional_preliminary_authority_unavailable"
+        )
+    proof = transition_result.get("preliminary_promotion_gate")
+    if not isinstance(proof, Mapping):
+        raise ConditionalValidationRetryableError(
+            "conditional_preliminary_authority_proof_missing"
+        )
+    gate = {**dict(gate), "preliminary_promotion_gate": dict(proof)}
+
+    conditional_results = await score_private_model_pair_items(
+        benchmark_items=conditional_items,
+        base_runner=base_runner,
+        candidate_runner=candidate_runner,
+        company_scorer=scorer,
+        run_context=run_context,
+        image_candidate=image_candidate,
+        runtime_patch=runtime_patch,
+        parent_freshness_check=parent_freshness_check,
+        icp_checkpoint=icp_checkpoint,
+        resume_results=resume_results,
+        trace_sink=trace_sink,
+        scoring_telemetry_hook=scoring_telemetry_hook,
+        attempt_cost_sink=attempt_cost_sink,
+    )
+    if len(conditional_results) != len(conditional_items):
+        raise ConditionalValidationRetryableError(
+            "conditional_validation_incomplete:result_count_mismatch"
+        )
+    expected_conditional_refs = {
+        str(item.get("icp_ref") or item.get("icp_hash") or "")
+        for item in conditional_items
+    }
+    actual_conditional_refs = {
+        str(item.get("icp_ref") or item.get("icp_hash") or "")
+        for item in conditional_results
+    }
+    if actual_conditional_refs != expected_conditional_refs:
+        raise ConditionalValidationRetryableError(
+            "conditional_validation_incomplete:result_identity_mismatch"
+        )
+    conditional_failures = _critical_measurement_failures(conditional_results)
+    if conditional_failures:
+        raise ConditionalValidationRetryableError(
+            "conditional_validation_incomplete:" + ",".join(conditional_failures)
+        )
+    return build_holdout_gate_result(
+        public_results=public_results,
+        private_results=private_results,
+        conditional_results=conditional_results,
+        public_icp_count=len(public_items),
+        private_icp_count=len(private_items),
+        conditional_icp_count=len(conditional_items),
+        gate=gate,
+    )
+
+
+def _critical_measurement_failures(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    failures: set[str] = set()
+    for row in rows:
+        reasons = _failure_reason_tokens(row.get("failure_reason"))
+        if row.get("provider_excluded"):
+            failures.add("provider_excluded")
+        if row.get("provider_cost_cap_blocked"):
+            failures.add("provider_cost_cap_blocked")
+        if row.get("provider_cost_tracking_failed"):
+            failures.add("provider_cost_tracking_failed")
+        for reason in reasons:
+            if (
+                reason.startswith("reference_model_runtime_")
+                or "provider_error" in reason
+                or "timeout" in reason
+            ):
+                failures.add(reason)
+    return sorted(failures)
 
 
 async def _run_parent_freshness_check(
@@ -2013,6 +2322,12 @@ def build_score_bundle_from_scored_icps(
         run_context=run_context,
         serving_model_version_hash=str(private_serving_model_version["version_stamp_hash"]),
     )
+    extra_fields = dict(extra_bundle_fields or {})
+    holdout_gate = (
+        extra_fields.get("private_holdout_gate")
+        if isinstance(extra_fields.get("private_holdout_gate"), Mapping)
+        else {}
+    )
 
     bundle = build_research_evaluation_score_bundle(
         run_id=str(run_context["run_id"]),
@@ -2048,8 +2363,10 @@ def build_score_bundle_from_scored_icps(
         serving_model_version=serving_model_version,
         policy=policy or {},
         signature_ref=str(run_context.get("signature_ref") or ""),
+        schema_version=(
+            "1.1" if bool(holdout_gate.get("conditional_validation_required")) else "1.0"
+        ),
     )
-    extra_fields = dict(extra_bundle_fields or {})
     scoring_health = build_scoring_health_doc(
         enriched_per_icp_results,
         private_holdout_gate=extra_fields.get("private_holdout_gate"),
@@ -2249,6 +2566,8 @@ class QualificationStyleCompanyScorer:
             attested_provider_profile or "default"
         )
         self._attested_receipts: list[dict[str, Any]] = []
+        self._attested_outcome_count = 0
+        self._last_attested_receipt_hash = ""
 
     def _record_attested_outcome(self, outcome: Mapping[str, Any] | None) -> None:
         if not isinstance(outcome, Mapping):
@@ -2257,6 +2576,8 @@ class QualificationStyleCompanyScorer:
         if not isinstance(receipt, Mapping) or not receipt.get("receipt_hash"):
             return
         receipt_hash = str(receipt["receipt_hash"])
+        self._attested_outcome_count += 1
+        self._last_attested_receipt_hash = receipt_hash
         if any(item.get("receipt_hash") == receipt_hash for item in self._attested_receipts):
             return
         self._attested_receipts.append(dict(receipt))
@@ -2265,6 +2586,16 @@ class QualificationStyleCompanyScorer:
         """Return sidecar receipts without changing the scorer result contract."""
 
         return [dict(item) for item in self._attested_receipts]
+
+    def attested_outcome_count(self) -> int:
+        """Count successful measured scoring calls, including deterministic retries."""
+
+        return int(self._attested_outcome_count)
+
+    def last_attested_receipt_hash(self) -> str:
+        """Return the receipt produced by the latest successful measured call."""
+
+        return str(self._last_attested_receipt_hash)
 
     async def __call__(
         self,

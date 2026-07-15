@@ -28,6 +28,7 @@ from gateway.research_lab.bundles import build_research_lab_audit_bundle
 from gateway.research_lab.attested_scoring import (
     canonical_json_bytes as attested_canonical_json_bytes,
     compare_baseline_score_summary as compare_attested_baseline_score_summary,
+    compare_promotion_gate_decision as compare_attested_promotion_gate_decision,
     compare_promotion_metric as compare_attested_promotion_metric,
     compare_score_bundle as compare_attested_score_bundle,
     persist_attested_outcome_artifact_links,
@@ -81,6 +82,7 @@ from gateway.research_lab.provider_profiles_v2 import (
 )
 from gateway.research_lab.tee_protocol import legacy_v1_enabled
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabScoreBundleCreateRequest
+from gateway.tee.scoring_executor import configuration_hash as scoring_configuration_hash
 from gateway.research_lab.promotion import (
     CONFIRMATION_ATTEMPT_FAILED_REASON,
     CONFIRMATION_CLOSED_REASON,
@@ -124,12 +126,14 @@ from gateway.research_lab.store import (
     create_candidate_artifact,
     create_candidate_evaluation_event,
     create_candidate_promotion_event,
+    create_conditional_validation_event,
     create_private_model_benchmark_bundle,
     create_private_model_benchmark_event,
     create_public_benchmark_report,
     create_receipt_event,
     create_rolling_icp_window,
     create_score_bundle,
+    create_scoring_category_result,
     create_scoring_dispatch_event,
     create_signed_audit_bundle,
     create_ticket_event,
@@ -164,10 +168,12 @@ from research_lab.eval.baseline_summary import (
 )
 from research_lab.eval.miner_report_stats import build_icp_stats
 from research_lab.eval.evaluator import (
+    ConditionalValidationRetryableError,
     INCONTAINER_TRACE_KMS_KEY_ENV,
     INCONTAINER_TRACE_S3_PREFIX_ENV,
     QualificationStyleCompanyScorer,
     _benchmark_style_score as _queue_benchmark_style_score,
+    _critical_measurement_failures,
     _upload_incontainer_trace as _upload_incontainer_trace_doc,
     build_holdout_gate_result,
     build_score_bundle_from_scored_icps,
@@ -184,6 +190,10 @@ from research_lab.observability.langfuse_client import observation, run_trace_id
 from research_lab.eval.provider_costs import (
     cost_event_from_trace_entry,
     summarize_provider_cost_trace_entries,
+)
+from research_lab.eval.promotion_metric import (
+    preliminary_promotion_gate_projection,
+    promotion_gate_decision,
 )
 from research_lab.observability.redaction import miner_hotkey_hash
 from research_lab.observability.tracing import finish_score_bundle_observation
@@ -270,6 +280,34 @@ async def _compare_candidate_score_bundle_in_enclave(
             direct_parent_hashes.add(str(baseline_receipt["receipt_hash"]))
             for receipt in baseline_lineage:
                 normalized_parents[str(receipt["receipt_hash"])] = dict(receipt)
+    preliminary_proof = private_holdout_gate.get("preliminary_promotion_gate")
+    if isinstance(preliminary_proof, Mapping):
+        preliminary_bundle_hash = str(
+            preliminary_proof.get("preliminary_score_bundle_hash") or ""
+        ).lower()
+        preliminary_receipt_hash = str(
+            preliminary_proof.get("promotion_decision_receipt_hash") or ""
+        ).lower()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", preliminary_bundle_hash):
+            raise RuntimeError("conditional preliminary score-bundle hash is invalid")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", preliminary_receipt_hash):
+            raise RuntimeError("conditional preliminary decision receipt is invalid")
+        preliminary_receipt, preliminary_lineage = await resolve_attested_artifact_lineage(
+            artifact_kind="promotion_decision",
+            artifact_ref="score_bundle:" + preliminary_bundle_hash.split(":", 1)[1],
+            artifact_hash=preliminary_bundle_hash,
+        )
+        if (
+            preliminary_receipt is None
+            or str(preliminary_receipt.get("receipt_hash") or "").lower()
+            != preliminary_receipt_hash
+        ):
+            raise RuntimeError(
+                "conditional preliminary decision lineage differs from the frozen proof"
+            )
+        direct_parent_hashes.add(preliminary_receipt_hash)
+        for receipt in preliminary_lineage:
+            normalized_parents[str(receipt["receipt_hash"])] = dict(receipt)
     return await compare_attested_score_bundle(
         epoch_id=int(evaluation_epoch),
         purpose="research_lab.candidate_score.v1",
@@ -294,6 +332,150 @@ async def _compare_candidate_score_bundle_in_enclave(
             private_holdout_gate=private_holdout_gate,
         ),
     )
+
+
+def _attested_execution_receipt(outcome: Mapping[str, Any], label: str) -> dict[str, Any]:
+    receipt = outcome.get("execution_receipt") or outcome.get("receipt")
+    if not isinstance(receipt, Mapping):
+        raise ConditionalValidationRetryableError(
+            f"conditional_preliminary_{label}_receipt_missing"
+        )
+    normalized = dict(receipt)
+    for field in ("receipt_hash", "output_root"):
+        value = str(normalized.get(field) or "").lower()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            raise ConditionalValidationRetryableError(
+                f"conditional_preliminary_{label}_{field}_invalid"
+            )
+        normalized[field] = value
+    return normalized
+
+
+async def _authorize_conditional_preliminary_gate(
+    *,
+    config: ResearchLabGatewayConfig,
+    evaluation_epoch: int,
+    candidate: Mapping[str, Any],
+    artifact: PrivateModelArtifactManifest,
+    benchmark: SealedBenchmarkSet,
+    patch: Mapping[str, Any],
+    candidate_artifact: PrivateModelArtifactManifest,
+    preliminary_results: list[Mapping[str, Any]],
+    run_context: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    preliminary_gate: Mapping[str, Any],
+    parent_receipts: list[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Attest the unchanged 20-ICP promotion gate before conditional work."""
+
+    if len(preliminary_results) != int(preliminary_gate.get("public_icp_count") or 0) + int(
+        preliminary_gate.get("private_holdout_icp_count") or 0
+    ):
+        raise ConditionalValidationRetryableError(
+            "conditional_preliminary_result_count_mismatch"
+        )
+    projected_gate = preliminary_promotion_gate_projection(preliminary_gate)
+    provisional_bundle = build_score_bundle_from_scored_icps(
+        artifact_manifest=artifact,
+        benchmark=benchmark,
+        patch_manifest=patch,
+        candidate_artifact_manifest=candidate_artifact.to_dict(),
+        per_icp_results=preliminary_results,
+        run_context=run_context,
+        policy=policy,
+        extra_bundle_fields={"private_holdout_gate": projected_gate},
+    )
+    bundle_outcome = await _compare_candidate_score_bundle_in_enclave(
+        evaluation_epoch=int(evaluation_epoch),
+        artifact=artifact,
+        benchmark=benchmark,
+        patch=patch,
+        candidate_artifact=candidate_artifact,
+        per_icp_results=preliminary_results,
+        run_context=run_context,
+        policy=policy,
+        private_holdout_gate=projected_gate,
+        expected_score_bundle=provisional_bundle,
+        parent_receipts=parent_receipts,
+    )
+    metric = promotion_improvement_metric(provisional_bundle)
+    metric_outcome = await compare_attested_promotion_metric(
+        epoch_id=int(evaluation_epoch),
+        score_bundle=provisional_bundle,
+        expected_improvement_points=float(metric.improvement_points),
+        expected_event_doc=metric.event_doc(),
+    )
+
+    active = await load_active_private_model(config, register_bootstrap=True)
+    candidate_parent = str(
+        candidate.get("parent_artifact_hash")
+        or provisional_bundle.get("parent_artifact_hash")
+        or artifact.model_artifact_hash
+    )
+    active_parent = str(active.artifact.model_artifact_hash)
+    decision = promotion_gate_decision(
+        provisional_bundle,
+        candidate_kind=str(candidate.get("candidate_kind") or "patch"),
+        candidate_parent=candidate_parent,
+        active_parent=active_parent,
+        threshold_points=float(config.improvement_threshold_points),
+        auto_promotion_enabled=bool(config.auto_promotion_enabled),
+    )
+    decision_outcome = await compare_attested_promotion_gate_decision(
+        epoch_id=int(evaluation_epoch),
+        score_bundle=provisional_bundle,
+        decision_payload={
+            "candidate_kind": decision.candidate_kind,
+            "candidate_parent": candidate_parent,
+            "active_parent": active_parent,
+            "threshold_points": decision.threshold_points,
+            "auto_promotion_enabled": decision.auto_promotion_enabled,
+        },
+        expected_decision=decision.to_dict(),
+        metric_outcome=metric_outcome,
+    )
+    if decision.status == "stale_parent_needs_rescore":
+        raise StaleParentDuringScoring(
+            active_artifact=active.artifact,
+            candidate_parent=candidate_parent,
+            progress={
+                "phase": "conditional_preliminary_gate",
+                "completed_icp_count": len(preliminary_results),
+            },
+        )
+    if decision.status != "promotion_passed":
+        raise ConditionalValidationRetryableError(
+            "conditional_preliminary_attested_gate_not_passed:" + decision.status
+        )
+
+    bundle_receipt = _attested_execution_receipt(bundle_outcome, "score_bundle")
+    metric_receipt = _attested_execution_receipt(metric_outcome, "metric")
+    decision_receipt = _attested_execution_receipt(decision_outcome, "decision")
+    proof = {
+        "schema_version": "research_lab_preliminary_promotion_gate.v1",
+        "status": decision.status,
+        "preliminary_score_bundle_hash": str(
+            provisional_bundle.get("score_bundle_hash") or ""
+        ).lower(),
+        "score_bundle_receipt_hash": bundle_receipt["receipt_hash"],
+        "promotion_metric_receipt_hash": metric_receipt["receipt_hash"],
+        "promotion_decision_receipt_hash": decision_receipt["receipt_hash"],
+        "promotion_decision_output_root": decision_receipt["output_root"],
+        "candidate_artifact_hash": str(candidate_artifact.model_artifact_hash),
+        "candidate_parent_artifact_hash": candidate_parent,
+        "active_parent_artifact_hash": active_parent,
+        "rolling_window_hash": str(run_context.get("rolling_window_hash") or ""),
+        "category_assignment_hash": str(
+            preliminary_gate.get("category_assignment_hash") or ""
+        ),
+        "conditional_validation_policy_hash": str(
+            preliminary_gate.get("conditional_validation_policy_hash") or ""
+        ),
+        "scoring_configuration_hash": scoring_configuration_hash(),
+        "threshold_points": float(decision.threshold_points),
+        "decision": decision.to_dict(),
+    }
+    return {**proof, "proof_hash": canonical_hash(proof)}
 
 
 @functools.lru_cache(maxsize=1)
@@ -518,6 +700,128 @@ def _attested_receipts_from(*sources: Any) -> list[dict[str, Any]]:
             if receipt_hash:
                 receipts[receipt_hash] = dict(receipt)
     return [receipts[key] for key in sorted(receipts)]
+
+
+def _attested_outcome_count(source: Any) -> int | None:
+    supplier = getattr(source, "attested_outcome_count", None)
+    if not callable(supplier):
+        return None
+    try:
+        value = int(supplier())
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _last_attested_receipt_hash(source: Any) -> str:
+    supplier = getattr(source, "last_attested_receipt_hash", None)
+    if not callable(supplier):
+        return ""
+    value = str(supplier() or "").lower()
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        return value
+    return ""
+
+
+def _queue_current_attested_receipt_hashes(
+    *,
+    scorer: Any,
+    scorer_outcome_count_before: int | None,
+    receipt_hashes_before: set[str],
+    receipt_hashes_after: set[str],
+) -> list[str]:
+    """Bind one queue result to the measured call that produced it.
+
+    Receipt hashes are content-addressed and may repeat on a deterministic
+    retry. The monotonic call count distinguishes that valid retry from stale
+    receipts accumulated by earlier ICPs.
+    """
+
+    current_hashes = receipt_hashes_after - receipt_hashes_before
+    scorer_outcome_count_after = _attested_outcome_count(scorer)
+    if scorer_outcome_count_before is not None:
+        if (
+            scorer_outcome_count_after is None
+            or scorer_outcome_count_after <= scorer_outcome_count_before
+        ):
+            raise ConditionalValidationRetryableError(
+                "conditional_queue_attested_receipt_missing"
+            )
+        latest_scorer_receipt = _last_attested_receipt_hash(scorer)
+        if not latest_scorer_receipt:
+            raise ConditionalValidationRetryableError(
+                "conditional_queue_attested_receipt_missing"
+            )
+        current_hashes.add(latest_scorer_receipt)
+    if not current_hashes:
+        raise ConditionalValidationRetryableError(
+            "conditional_queue_attested_receipt_missing"
+        )
+    return sorted(current_hashes)
+
+
+def _queue_attested_parent_receipts(
+    docs: Mapping[str, Any],
+    *live_sources: Any,
+) -> list[dict[str, Any]]:
+    receipts = {
+        str(item["receipt_hash"]): dict(item)
+        for item in _attested_receipts_from(*live_sources)
+        if item.get("receipt_hash")
+    }
+    persisted = docs.get("attested_receipt_hashes") or []
+    if not isinstance(persisted, list):
+        raise ConditionalValidationRetryableError(
+            "conditional_queue_receipt_sidecar_invalid"
+        )
+    for value in persisted:
+        receipt_hash = str(value or "").lower()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", receipt_hash):
+            raise ConditionalValidationRetryableError(
+                "conditional_queue_receipt_sidecar_invalid"
+            )
+        receipts.setdefault(receipt_hash, {"receipt_hash": receipt_hash})
+    return [receipts[key] for key in sorted(receipts)]
+
+
+def _queue_job_error_is_retryable(
+    job: Mapping[str, Any],
+    error: BaseException,
+) -> bool:
+    if (
+        isinstance(error, ConditionalValidationRetryableError)
+        and "queue_attested_receipt_missing" in str(error)
+    ):
+        return True
+    if str(job.get("phase") or "") != "conditional":
+        return False
+    return bool(_candidate_scoring_failure_class(error)[1])
+
+
+def _queue_scoring_item(
+    ctx: Mapping[str, Any] | None,
+    job: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    """Resolve one queued item, holding conditional work on missing state."""
+
+    phase = str(job.get("phase") or "")
+    if ctx is None:
+        if phase == "conditional":
+            raise ConditionalValidationRetryableError(
+                "conditional_queue_scoring_context_missing"
+            )
+        return None
+    items_by_ref = ctx.get("items_by_ref")
+    item = (
+        items_by_ref.get(str(job.get("icp_ref") or ""))
+        if isinstance(items_by_ref, Mapping)
+        else None
+    )
+    if item is None and phase == "conditional":
+        raise ConditionalValidationRetryableError(
+            "conditional_queue_scoring_item_missing"
+        )
+    return item if isinstance(item, Mapping) else None
 
 
 async def _attested_model_parent_graphs(
@@ -976,19 +1280,28 @@ def _load_scoring_progress(
     *,
     window_hash: str,
     candidate_artifact_hash: str,
+    commitment_hash: str = "",
 ) -> list[dict[str, Any]]:
     import boto3  # type: ignore
 
     try:
         body = boto3.client("s3").get_object(Bucket=bucket, Key=object_key)["Body"].read()
         doc = json.loads(body.decode("utf-8"))
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "research_lab_scoring_progress_load_failed bucket=%s key=%s error=%s",
+            str(bucket)[:120],
+            str(object_key)[:240],
+            _short_error(exc),
+        )
         return []
     if not isinstance(doc, Mapping):
         return []
     if str(doc.get("rolling_window_hash") or "") != str(window_hash):
         return []
     if str(doc.get("candidate_artifact_hash") or "") != str(candidate_artifact_hash):
+        return []
+    if commitment_hash and str(doc.get("commitment_hash") or "") != str(commitment_hash):
         return []
     rows = doc.get("per_icp_results")
     if not isinstance(rows, list):
@@ -1051,6 +1364,7 @@ def _store_scoring_progress(
     candidate_artifact_hash: str,
     rows: list[dict[str, Any]],
     telemetry_index: Mapping[str, Any] | None = None,
+    commitment_hash: str = "",
 ) -> str:
     import boto3  # type: ignore
 
@@ -1063,17 +1377,27 @@ def _store_scoring_progress(
         "completed_icp_count": len(rows),
         "per_icp_results": rows,
     }
+    if commitment_hash:
+        doc["schema_version"] = "1.1"
+        doc["commitment_hash"] = str(commitment_hash)
     if telemetry_index:
         # Observation-only top-level index. Never copied into per_icp_results
         # or the signed score bundle.
         doc["telemetry_index"] = dict(telemetry_index)
-    boto3.client("s3").put_object(
+    encoded = json.dumps(doc, sort_keys=True, default=str).encode("utf-8")
+    s3 = boto3.client("s3")
+    s3.put_object(
         Bucket=bucket,
         Key=object_key,
-        Body=json.dumps(doc, sort_keys=True, default=str).encode("utf-8"),
+        Body=encoded,
         ContentType="application/json",
     )
-    return canonical_hash(doc)
+    expected_hash = canonical_hash(doc)
+    readback = s3.get_object(Bucket=bucket, Key=object_key)["Body"].read()
+    readback_doc = json.loads(readback.decode("utf-8"))
+    if not isinstance(readback_doc, Mapping) or canonical_hash(readback_doc) != expected_hash:
+        raise RuntimeError("research_lab_scoring_progress_readback_hash_mismatch")
+    return expected_hash
 
 
 def _baseline_progress_s3_location(
@@ -1115,6 +1439,25 @@ def _progress_rows_by_icp_ref(rows: list[dict[str, Any]] | tuple[dict[str, Any],
         if ref:
             indexed[ref] = dict(row)
     return indexed
+
+
+def _retryable_measurement_checkpoint_row(row: Mapping[str, Any]) -> bool:
+    reasons = {
+        token.strip()
+        for token in str(row.get("failure_reason") or "").split(";")
+        if token.strip()
+    }
+    return bool(
+        row.get("provider_excluded")
+        or row.get("provider_cost_cap_blocked")
+        or row.get("provider_cost_tracking_failed")
+        or any(
+            reason.startswith("reference_model_runtime_")
+            or "provider_error" in reason
+            or "timeout" in reason
+            for reason in reasons
+        )
+    )
 
 
 def _baseline_summary_nonempty(row: Mapping[str, Any]) -> bool:
@@ -2103,6 +2446,16 @@ class _TraceCapturingCompanyScorer:
             return []
         return [dict(item) for item in supplier() if isinstance(item, Mapping)]
 
+    def attested_outcome_count(self) -> int | None:
+        """Expose measured-call progress independently from receipt deduplication."""
+
+        return _attested_outcome_count(self._inner)
+
+    def last_attested_receipt_hash(self) -> str:
+        """Expose the receipt emitted by the latest measured scorer call."""
+
+        return _last_attested_receipt_hash(self._inner)
+
 
 def _upload_baseline_incontainer_trace(
     prefix: str,
@@ -2588,6 +2941,8 @@ _TERMINAL_CANDIDATE_ERROR_CLASSES = (
 def _candidate_scoring_failure_class(exc: BaseException) -> tuple[str, bool]:
     text = f"{exc.__class__.__name__}: {str(exc)}"
     lowered = text.lower()
+    if isinstance(exc, ConditionalValidationRetryableError):
+        return "conditional_validation_retryable_failure", True
     if isinstance(exc, CandidateBaselineNotReady) or "matching_completed_private_baseline_required" in lowered:
         return "baseline_not_ready", True
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) or "timed out" in lowered or "timeout" in lowered:
@@ -2640,6 +2995,20 @@ def _candidate_scoring_failure_class(exc: BaseException) -> tuple[str, bool]:
     if isinstance(exc, PrivateModelRuntimeError):
         return "candidate_runtime_error", False
     return "candidate_scoring_error", True
+
+
+def _candidate_scoring_should_requeue(
+    *,
+    failure_class: str,
+    retryable: bool,
+    claim_attempts: int,
+    max_attempts: int,
+) -> bool:
+    if not retryable:
+        return False
+    if failure_class == "conditional_validation_retryable_failure":
+        return True
+    return int(claim_attempts) < int(max_attempts)
 
 
 def _load_candidate_source_diff(candidate: Mapping[str, Any]) -> str:
@@ -3354,8 +3723,8 @@ class ResearchLabGatewayScoringWorker:
         """Per-candidate scoring context for the global-queue path.
 
         Mirrors the setup block in ``_score_candidate`` (artifact/patch/window/
-        gate/runner/run_context) and additionally splits the window into public
-        and private ICP items using the gate's public refs. Cached per
+        gate/runner/run_context) and additionally splits the window into public,
+        private, and optional conditional ICP items using the frozen gate refs. Cached per
         candidate within one queue pass.
         """
         candidate_id = str(candidate["candidate_id"])
@@ -3369,6 +3738,11 @@ class ResearchLabGatewayScoringWorker:
             raise RuntimeError("image_build candidate missing candidate_model_manifest_doc")
         candidate_artifact = PrivateModelArtifactManifest.from_mapping(candidate_manifest_doc)
         window, gate = await self._daily_candidate_scoring_window_and_gate(artifact=artifact)
+        _validate_candidate_conditional_policy_stamp(
+            candidate,
+            gate,
+            active_policy=self.config.conditional_validation_policy().to_dict(),
+        )
         await create_rolling_icp_window(window)
         benchmark = SealedBenchmarkSet(
             benchmark_id=window.benchmark_id,
@@ -3409,14 +3783,35 @@ class ResearchLabGatewayScoringWorker:
         run_context = self._candidate_run_context(
             candidate, window_hash=window.window_hash, evaluation_epoch=evaluation_epoch
         )
+        evaluation_policy = self._evaluation_policy()
+        scoring_config_hash = scoring_configuration_hash()
         public_refs = {str(r) for r in (gate.get("public_icp_refs") or ()) if str(r).strip()}
+        conditional_required = bool(gate.get("conditional_validation_required"))
+        private_refs = {str(r) for r in (gate.get("private_icp_refs") or ()) if str(r).strip()}
+        conditional_refs = {
+            str(r) for r in (gate.get("conditional_icp_refs") or ()) if str(r).strip()
+        }
 
         def _ref(item: Mapping[str, Any]) -> str:
             return str(item.get("icp_ref") or item.get("icp_hash") or "")
 
         items = list(window.benchmark_items)
         public_items = [it for it in items if _ref(it) in public_refs]
-        private_items = [it for it in items if _ref(it) not in public_refs]
+        if conditional_required:
+            private_items = [it for it in items if _ref(it) in private_refs]
+            conditional_items = [it for it in items if _ref(it) in conditional_refs]
+            assigned_refs = public_refs | private_refs | conditional_refs
+            if assigned_refs != {_ref(item) for item in items}:
+                raise RuntimeError("conditional global queue assignment does not cover the window")
+            if (
+                public_refs & private_refs
+                or public_refs & conditional_refs
+                or private_refs & conditional_refs
+            ):
+                raise RuntimeError("conditional global queue assignment overlaps")
+        else:
+            private_items = [it for it in items if _ref(it) not in public_refs]
+            conditional_items = []
         return {
             "candidate": dict(candidate),
             "candidate_id": candidate_id,
@@ -3428,14 +3823,33 @@ class ResearchLabGatewayScoringWorker:
             "benchmark": benchmark,
             "runner": runner,
             "run_context": run_context,
+            "evaluation_policy": evaluation_policy,
+            "scoring_configuration_hash": scoring_config_hash,
             "scorer": QualificationStyleCompanyScorer(
                 attested_epoch_id=evaluation_epoch,
                 attested_purpose="research_lab.candidate_score.v1",
             ),
             "public_items": public_items,
             "private_items": private_items,
+            "conditional_items": conditional_items,
             "items_by_ref": {_ref(it): it for it in items},
             "baseline_public_score": float(gate.get("baseline_public_score") or 0.0),
+            "baseline_preliminary_score": float(
+                gate.get("baseline_preliminary_score") or 0.0
+            ),
+            "threshold_points": float(gate.get("threshold_points") or 0.0),
+            "baseline_benchmark_bundle_id": str(
+                gate.get("baseline_benchmark_bundle_id") or ""
+            ),
+            "baseline_benchmark_hash": str(
+                gate.get("baseline_benchmark_hash") or ""
+            ),
+            "category_assignment_hash": str(
+                gate.get("category_assignment_hash") or ""
+            ),
+            "conditional_policy_hash": str(
+                gate.get("conditional_validation_policy_hash") or ""
+            ),
             "trace_sink": self._candidate_incontainer_trace_sink(
                 candidate_id,
                 persist_costs=not scoring_telemetry_enabled(self.config),
@@ -3451,10 +3865,46 @@ class ResearchLabGatewayScoringWorker:
         _results, gate_result = build_holdout_gate_result(
             public_results=docs.get("public") or (),
             private_results=docs.get("private") or (),
+            conditional_results=docs.get("conditional") or (),
             public_icp_count=len(ctx["public_items"]),
             private_icp_count=len(ctx["private_items"]),
+            conditional_icp_count=len(ctx.get("conditional_items") or ()),
             gate=ctx["gate"],
         )
+        if bool(ctx["gate"].get("conditional_validation_required")):
+            conditional_docs = list(docs.get("conditional") or ())
+            conditional_expected = len(ctx.get("conditional_items") or ())
+            if (
+                str(gate_result.get("decision") or "")
+                == "conditional_validation_required"
+                or (
+                    conditional_docs
+                    and len(conditional_docs) != conditional_expected
+                )
+            ):
+                raise ConditionalValidationRetryableError(
+                    "conditional_validation_incomplete:result_count_mismatch"
+                )
+            expected_conditional_refs = {
+                str(item.get("icp_ref") or item.get("icp_hash") or "")
+                for item in (ctx.get("conditional_items") or ())
+            }
+            actual_conditional_refs = {
+                str(item.get("icp_ref") or item.get("icp_hash") or "")
+                for item in conditional_docs
+            }
+            if conditional_docs and actual_conditional_refs != expected_conditional_refs:
+                raise ConditionalValidationRetryableError(
+                    "conditional_validation_incomplete:result_identity_mismatch"
+                )
+            conditional_failures = _critical_measurement_failures(
+                conditional_docs
+            )
+            if conditional_failures:
+                raise ConditionalValidationRetryableError(
+                    "conditional_validation_incomplete:"
+                    + ",".join(conditional_failures)
+                )
         score_bundle = build_score_bundle_from_scored_icps(
             artifact_manifest=ctx["artifact"],
             benchmark=ctx["benchmark"],
@@ -3462,7 +3912,7 @@ class ResearchLabGatewayScoringWorker:
             candidate_artifact_manifest=ctx["candidate_artifact"].to_dict(),
             per_icp_results=_results,
             run_context={**ctx["run_context"], "signature_ref": "pending"},
-            policy={},
+            policy=ctx["evaluation_policy"],
             extra_bundle_fields={"private_holdout_gate": gate_result},
         )
         await _compare_candidate_score_bundle_in_enclave(
@@ -3473,10 +3923,11 @@ class ResearchLabGatewayScoringWorker:
             candidate_artifact=ctx["candidate_artifact"],
             per_icp_results=_results,
             run_context={**ctx["run_context"], "signature_ref": "pending"},
-            policy={},
+            policy=ctx["evaluation_policy"],
             private_holdout_gate=gate_result,
             expected_score_bundle=score_bundle,
-            parent_receipts=_attested_receipts_from(
+            parent_receipts=_queue_attested_parent_receipts(
+                docs,
                 ctx["runner"],
                 ctx["scorer"],
             ),
@@ -3496,6 +3947,25 @@ class ResearchLabGatewayScoringWorker:
                 receipt_id=candidate.get("receipt_id") or None,
                 score_bundle=score_bundle,
             )
+        )
+        await _persist_conditional_finalization_events(
+            gate_result,
+            candidate_id=candidate_id,
+            source_score_bundle_id=str(bundle["score_bundle_id"]),
+            rolling_window_hash=ctx["window"].window_hash,
+            queue_generation_id=str(ctx.get("queue_generation_id") or "") or None,
+        )
+        await _persist_candidate_category_results(
+            gate_result,
+            source_bundle_ref=str(bundle["score_bundle_id"]),
+            rolling_window_hash=ctx["window"].window_hash,
+            candidate_id=candidate_id,
+            scoring_run_id=(
+                str(ctx["telemetry_session"].run.scoring_run_id)
+                if isinstance(ctx.get("telemetry_session"), ScoringTelemetrySession)
+                and ctx["telemetry_session"].run is not None
+                else ""
+            ),
         )
         if isinstance(ctx, dict):
             ctx["score_bundle_id"] = str(bundle["score_bundle_id"])
@@ -3535,6 +4005,70 @@ class ResearchLabGatewayScoringWorker:
                 else None
             ),
         )
+        try:
+            private_holdout_rejected = (
+                str(gate_result.get("decision") or "")
+                == "rejected_before_private_holdout"
+            )
+            if private_holdout_rejected:
+                promotion_result = await self._record_public_holdout_rejected(
+                    candidate=candidate,
+                    score_bundle_row=bundle,
+                    score_bundle=score_bundle,
+                    gate_result=gate_result,
+                )
+            elif scoring_health_gate.get("decision") == "quarantine":
+                promotion_result = await self._record_scoring_health_quarantined(
+                    candidate=candidate,
+                    score_bundle_row=bundle,
+                    score_bundle=score_bundle,
+                    scoring_health_gate=scoring_health_gate,
+                )
+            else:
+                promotion_result = await self._maybe_promote_scored_candidate(
+                    candidate=candidate,
+                    score_bundle_row=bundle,
+                    score_bundle=score_bundle,
+                )
+            evaluation_epoch = int(ctx["run_context"]["evaluation_epoch"])
+            if promotion_result.get("status") == "stale_parent_needs_rescore":
+                promotion_result = await self._queue_stale_parent_rebase(
+                    candidate,
+                    active_artifact=(
+                        await load_active_private_model(
+                            self.config,
+                            register_bootstrap=True,
+                        )
+                    ).artifact,
+                    candidate_parent=str(candidate.get("parent_artifact_hash") or ""),
+                    evaluation_epoch=evaluation_epoch,
+                    elapsed_seconds=0.0,
+                    stage="after_global_queue_scoring_parent_changed",
+                )
+            await self._maybe_record_score_backfill(
+                candidate=candidate,
+                score_bundle_row=bundle,
+                score_bundle=score_bundle,
+                promotion_result=promotion_result,
+            )
+            await self._maybe_finalize_candidate_receipt(candidate)
+            await safe_project_public_loop_activity(
+                str(candidate["ticket_id"]),
+                source_ref=(
+                    f"candidate_scored:{candidate_id}:{bundle['score_bundle_id']}"
+                ),
+                reason="gateway_qualification_worker_scored_candidate",
+                config=self.config,
+            )
+            await self._write_audit_bundle(evaluation_epoch)
+        except Exception as exc:
+            await self._record_scored_candidate_side_effect_failure(
+                candidate=candidate,
+                candidate_id=candidate_id,
+                score_bundle_id=str(bundle["score_bundle_id"]),
+                error=exc,
+                elapsed_seconds=0.0,
+            )
 
     async def _run_global_icp_queue_pass(self) -> list[str]:
         """One worker pass over the global (candidate, icp) queue.
@@ -3546,24 +4080,102 @@ class ResearchLabGatewayScoringWorker:
         """
         ctx_cache: dict[str, dict[str, Any]] = {}
 
+        def _apply_generation_commitments(
+            ctx: dict[str, Any],
+            generation_row: Mapping[str, Any],
+        ) -> dict[str, Any]:
+            if int(generation_row.get("conditional_total") or 0) <= 0:
+                return ctx
+            expected_strings = {
+                "candidate_id": str(ctx["candidate_id"]),
+                "window_hash": str(ctx["window"].window_hash),
+                "baseline_benchmark_bundle_id": str(
+                    ctx["baseline_benchmark_bundle_id"]
+                ),
+                "baseline_benchmark_hash": str(ctx["baseline_benchmark_hash"]),
+                "category_assignment_hash": str(ctx["category_assignment_hash"]),
+                "conditional_policy_hash": str(ctx["conditional_policy_hash"]),
+                "candidate_artifact_hash": str(
+                    ctx["candidate_artifact"].model_artifact_hash
+                ),
+                "candidate_parent_artifact_hash": str(
+                    ctx["artifact"].model_artifact_hash
+                ),
+                "scoring_configuration_hash": str(
+                    ctx["scoring_configuration_hash"]
+                ),
+            }
+            for field, expected in expected_strings.items():
+                if str(generation_row.get(field) or "") != expected:
+                    raise ConditionalValidationRetryableError(
+                        "conditional_queue_commitment_mismatch:" + field
+                    )
+            expected_counts = {
+                "public_total": len(ctx["public_items"]),
+                "private_total": len(ctx["private_items"]),
+                "conditional_total": len(ctx["conditional_items"]),
+            }
+            for field, expected in expected_counts.items():
+                if int(generation_row.get(field) or 0) != int(expected):
+                    raise ConditionalValidationRetryableError(
+                        "conditional_queue_commitment_mismatch:" + field
+                    )
+            expected_scores = {
+                "baseline_public_score": float(ctx["baseline_public_score"]),
+                "baseline_preliminary_score": float(
+                    ctx["baseline_preliminary_score"]
+                ),
+                "threshold_points": float(ctx["threshold_points"]),
+            }
+            for field, expected in expected_scores.items():
+                actual = float(generation_row.get(field) or 0.0)
+                if not math.isfinite(actual) or abs(actual - expected) > 1e-9:
+                    raise ConditionalValidationRetryableError(
+                        "conditional_queue_commitment_mismatch:" + field
+                    )
+            proof = generation_row.get("preliminary_gate_proof")
+            proof_doc = dict(proof) if isinstance(proof, Mapping) else {}
+            preliminary_status = str(
+                generation_row.get("preliminary_gate_status") or ""
+            )
+            if preliminary_status == "passed" and not proof_doc:
+                raise ConditionalValidationRetryableError(
+                    "conditional_queue_preliminary_proof_missing"
+                )
+            if proof_doc:
+                ctx["gate"] = {
+                    **dict(ctx["gate"]),
+                    "preliminary_promotion_gate": proof_doc,
+                }
+            return ctx
+
         async def _ctx(
             candidate_id: str,
             queue_generation_id: str,
             scoring_run_id: str = "",
         ) -> dict[str, Any] | None:
             cache_key = queue_generation_id or candidate_id
-            if cache_key in ctx_cache:
-                return ctx_cache[cache_key]
-            if queue_generation_id and (not candidate_id or not scoring_run_id):
+            generation_row: Mapping[str, Any] | None = None
+            if queue_generation_id:
                 generation_row = await select_one(
                     global_icp_queue.CANDIDATE_TABLE,
                     filters=(("queue_generation_id", queue_generation_id),),
                 )
-                if generation_row is not None:
-                    candidate_id = candidate_id or str(generation_row.get("candidate_id") or "")
-                    scoring_run_id = scoring_run_id or str(
-                        generation_row.get("scoring_run_id") or ""
-                    )
+                if generation_row is None:
+                    return None
+                candidate_id = candidate_id or str(
+                    generation_row.get("candidate_id") or ""
+                )
+                scoring_run_id = scoring_run_id or str(
+                    generation_row.get("scoring_run_id") or ""
+                )
+            if cache_key in ctx_cache:
+                cached = ctx_cache[cache_key]
+                return (
+                    _apply_generation_commitments(cached, generation_row)
+                    if generation_row is not None
+                    else cached
+                )
             row = await select_one(
                 "research_lab_candidate_evaluation_current",
                 filters=(("candidate_id", candidate_id),),
@@ -3574,6 +4186,8 @@ class ResearchLabGatewayScoringWorker:
             telemetry_session = await load_scoring_session(scoring_run_id)
             ctx["telemetry_session"] = telemetry_session
             ctx["queue_generation_id"] = queue_generation_id
+            if generation_row is not None:
+                _apply_generation_commitments(ctx, generation_row)
             if scoring_telemetry_enabled(self.config) and telemetry_session is None:
                 # Allocation/hydration failed: preserve legacy provider-cost
                 # capture rather than silently dropping spend rows.
@@ -3620,7 +4234,19 @@ class ResearchLabGatewayScoringWorker:
                     window_hash=ctx["window"].window_hash,
                     public_items=ctx["public_items"],
                     private_items=ctx["private_items"],
+                    conditional_items=ctx["conditional_items"],
                     baseline_public_score=ctx["baseline_public_score"],
+                    baseline_preliminary_score=ctx["baseline_preliminary_score"],
+                    threshold_points=ctx["threshold_points"],
+                    baseline_benchmark_bundle_id=ctx["baseline_benchmark_bundle_id"],
+                    baseline_benchmark_hash=ctx["baseline_benchmark_hash"],
+                    category_assignment_hash=ctx["category_assignment_hash"],
+                    conditional_policy_hash=ctx["conditional_policy_hash"],
+                    candidate_artifact_hash=(
+                        ctx["candidate_artifact"].model_artifact_hash
+                    ),
+                    candidate_parent_artifact_hash=ctx["artifact"].model_artifact_hash,
+                    scoring_configuration_hash=ctx["scoring_configuration_hash"],
                     worker_ref=self.worker_ref,
                     seq_base=offset * 10_000,
                     scoring_run_id=str(active_generation.get("scoring_run_id") or ""),
@@ -3641,7 +4267,11 @@ class ResearchLabGatewayScoringWorker:
                     },
                     run_type="candidate_scoring",
                     worker_ref=self.worker_ref,
-                    expected_icp_count=len(ctx["public_items"]) + len(ctx["private_items"]),
+                    expected_icp_count=(
+                        len(ctx["public_items"])
+                        + len(ctx["private_items"])
+                        + len(ctx["conditional_items"])
+                    ),
                     scheduler_type="global_icp_queue",
                     candidate_id=cid,
                     source_run_id=str(row.get("run_id") or ""),
@@ -3663,7 +4293,17 @@ class ResearchLabGatewayScoringWorker:
                 window_hash=ctx["window"].window_hash,
                 public_items=ctx["public_items"],
                 private_items=ctx["private_items"],
+                conditional_items=ctx["conditional_items"],
                 baseline_public_score=ctx["baseline_public_score"],
+                baseline_preliminary_score=ctx["baseline_preliminary_score"],
+                threshold_points=ctx["threshold_points"],
+                baseline_benchmark_bundle_id=ctx["baseline_benchmark_bundle_id"],
+                baseline_benchmark_hash=ctx["baseline_benchmark_hash"],
+                category_assignment_hash=ctx["category_assignment_hash"],
+                conditional_policy_hash=ctx["conditional_policy_hash"],
+                candidate_artifact_hash=ctx["candidate_artifact"].model_artifact_hash,
+                candidate_parent_artifact_hash=ctx["artifact"].model_artifact_hash,
+                scoring_configuration_hash=ctx["scoring_configuration_hash"],
                 worker_ref=self.worker_ref,
                 seq_base=offset * 10_000,
                 scoring_run_id=(
@@ -3704,7 +4344,7 @@ class ResearchLabGatewayScoringWorker:
                             icp_ordinal=int(job.get("item_index") or 0),
                             model_role="candidate",
                             phase=str(job.get("phase") or "all"),
-                            held=str(job.get("phase") or "") == "private",
+                            held=str(job.get("phase") or "") in {"private", "conditional"},
                             source_job_id=str(job.get("job_id") or ""),
                         )
                     await emit_run_event(telemetry_session.run, "assigned")
@@ -3764,10 +4404,8 @@ class ResearchLabGatewayScoringWorker:
                 queue_generation_id,
                 str(job.get("scoring_run_id") or ""),
             )
-            if ctx is None:
-                return {}
-            item = ctx["items_by_ref"].get(str(job.get("icp_ref") or ""))
-            if item is None:
+            item = _queue_scoring_item(ctx, job)
+            if ctx is None or item is None:
                 return {}
             telemetry_session = ctx.get("telemetry_session")
             if not isinstance(telemetry_session, ScoringTelemetrySession):
@@ -3805,7 +4443,7 @@ class ResearchLabGatewayScoringWorker:
                     icp_hash=str(item.get("icp_hash") or ""),
                     runner_role="candidate",
                     candidate_id=candidate_id,
-                    epoch_id=evaluation_epoch,
+                    epoch_id=int(ctx["run_context"].get("evaluation_epoch") or 0),
                     rolling_window_hash=str(job.get("window_hash") or ""),
                     scoring_id=str(execution_context.get("scoring_id") or ""),
                     scoring_run_id=str(execution_context.get("scoring_run_id") or ""),
@@ -3823,6 +4461,12 @@ class ResearchLabGatewayScoringWorker:
                     heartbeat_stop,
                     heartbeat_task,
                 )
+            receipt_hashes_before = {
+                str(item.get("receipt_hash") or "")
+                for item in _attested_receipts_from(ctx["runner"], ctx["scorer"])
+                if item.get("receipt_hash")
+            }
+            scorer_outcome_count_before = _attested_outcome_count(ctx["scorer"])
             results = await score_private_model_pair_items(
                 benchmark_items=[item],
                 base_runner=None,
@@ -3838,7 +4482,44 @@ class ResearchLabGatewayScoringWorker:
                     _queue_attempt_cost_sink if telemetry_session is not None else None
                 ),
             )
-            return dict(results[0]) if results else {}
+            if str(job.get("phase") or "") == "conditional":
+                if len(results) != 1:
+                    raise ConditionalValidationRetryableError(
+                        "conditional_validation_incomplete:result_count_mismatch"
+                    )
+                result_ref = str(
+                    results[0].get("icp_ref") or results[0].get("icp_hash") or ""
+                )
+                if result_ref != str(job.get("icp_ref") or ""):
+                    raise ConditionalValidationRetryableError(
+                        "conditional_validation_incomplete:result_identity_mismatch"
+                    )
+                conditional_failures = _critical_measurement_failures(results)
+                if conditional_failures:
+                    raise ConditionalValidationRetryableError(
+                        "conditional_validation_incomplete:"
+                        + ",".join(conditional_failures)
+                    )
+            result_doc = dict(results[0]) if results else {}
+            if not legacy_v1_enabled():
+                receipt_hashes_after = {
+                    str(item.get("receipt_hash") or "")
+                    for item in _attested_receipts_from(
+                        ctx["runner"],
+                        ctx["scorer"],
+                    )
+                    if item.get("receipt_hash")
+                }
+                new_receipt_hashes = _queue_current_attested_receipt_hashes(
+                    scorer=ctx["scorer"],
+                    scorer_outcome_count_before=scorer_outcome_count_before,
+                    receipt_hashes_before=receipt_hashes_before,
+                    receipt_hashes_after=receipt_hashes_after,
+                )
+                result_doc[
+                    global_icp_queue.ATTESTED_RECEIPT_HASHES_FIELD
+                ] = new_receipt_hashes
+            return result_doc
 
         async def _job_completed(
             job: Mapping[str, Any],
@@ -3874,11 +4555,16 @@ class ResearchLabGatewayScoringWorker:
                     telemetry_session.terminal_execution_ids.add(execution.icp_execution_id)
                 return
             if failed:
+                failure_class, retryable = (
+                    _candidate_scoring_failure_class(error)
+                    if error is not None
+                    else ("queue_job_failed", False)
+                )
                 await emit_icp_event(
                     execution,
                     "failed",
-                    retryable=False,
-                    failure_category="queue_job_failed",
+                    retryable=retryable,
+                    failure_category=failure_class,
                     error=error,
                 )
                 if execution is not None:
@@ -3951,6 +4637,214 @@ class ResearchLabGatewayScoringWorker:
                         event_doc={"released_from_hold": True},
                     )
 
+            conditional_jobs = await select_many(
+                global_icp_queue.JOB_TABLE,
+                filters=(("queue_generation_id", queue_generation_id), ("phase", "conditional")),
+                limit=1000,
+            )
+            if decision == "rejected":
+                for conditional_job in conditional_jobs:
+                    await telemetry_session.skip_unstarted(
+                        icp_ref=str(conditional_job.get("icp_ref") or ""),
+                        model_role="candidate",
+                        failure_category="public_gate_rejected",
+                    )
+
+        async def _preliminary_gate_authorizer(
+            queue_generation_id: str,
+            claim: Mapping[str, Any],
+            docs: Mapping[str, list],
+            preliminary_score: float,
+        ) -> Mapping[str, Any]:
+            ctx = await _ctx(
+                str(claim.get("candidate_id") or ""),
+                queue_generation_id,
+                str(claim.get("scoring_run_id") or ""),
+            )
+            if ctx is None:
+                raise ConditionalValidationRetryableError(
+                    "conditional_queue_preliminary_context_missing"
+                )
+            preliminary_results, preliminary_gate = build_holdout_gate_result(
+                public_results=docs.get("public") or (),
+                private_results=docs.get("private") or (),
+                conditional_results=(),
+                public_icp_count=len(ctx["public_items"]),
+                private_icp_count=len(ctx["private_items"]),
+                conditional_icp_count=len(ctx["conditional_items"]),
+                gate=ctx["gate"],
+            )
+            measured_score = _safe_float(
+                preliminary_gate.get("candidate_preliminary_score"),
+                default=-1.0,
+            )
+            if abs(measured_score - float(preliminary_score)) > 1e-6:
+                raise ConditionalValidationRetryableError(
+                    "conditional_queue_preliminary_score_commitment_mismatch"
+                )
+            await self._check_candidate_scoring_freshness(
+                parent_artifact=ctx["artifact"],
+                candidate_window_hash=ctx["window"].window_hash,
+                progress={
+                    "phase": "conditional_preliminary_gate",
+                    "completed_icp_count": len(preliminary_results),
+                },
+            )
+            return await _authorize_conditional_preliminary_gate(
+                config=self.config,
+                evaluation_epoch=int(ctx["run_context"]["evaluation_epoch"]),
+                candidate=ctx["candidate"],
+                artifact=ctx["artifact"],
+                benchmark=ctx["benchmark"],
+                patch=ctx["patch"],
+                candidate_artifact=ctx["candidate_artifact"],
+                preliminary_results=preliminary_results,
+                run_context={**ctx["run_context"], "signature_ref": "pending"},
+                policy=self._preliminary_evaluation_policy(),
+                preliminary_gate=preliminary_gate,
+                parent_receipts=_queue_attested_parent_receipts(
+                    docs,
+                    ctx["runner"],
+                    ctx["scorer"],
+                ),
+            )
+
+        async def _preliminary_gate_error(
+            queue_generation_id: str,
+            claim: Mapping[str, Any],
+            error: BaseException,
+        ) -> bool:
+            failure_class, _retryable = _candidate_scoring_failure_class(error)
+            attempt = int(claim.get("preliminary_gate_attempt_count") or 0)
+            if isinstance(error, (StaleParentDuringScoring, CandidateBaselineWindowChanged)):
+                cancelled = await global_icp_queue.cancel_preliminary_gate_for_rebase(
+                    queue_generation_id=queue_generation_id,
+                    expected_claimed_by=self.worker_ref,
+                    expected_attempt_count=attempt,
+                    failure_class=failure_class,
+                )
+                if not cancelled:
+                    return False
+                ctx = await _ctx(
+                    str(claim.get("candidate_id") or ""),
+                    "",
+                    str(claim.get("scoring_run_id") or ""),
+                )
+                if ctx is None:
+                    return True
+                candidate = ctx["candidate"]
+                if isinstance(error, StaleParentDuringScoring):
+                    await self._queue_stale_parent_rebase(
+                        candidate,
+                        active_artifact=error.active_artifact,
+                        candidate_parent=error.candidate_parent,
+                        evaluation_epoch=int(ctx["run_context"]["evaluation_epoch"]),
+                        elapsed_seconds=0.0,
+                        stage="global_queue_preliminary_parent_changed",
+                        stale_progress=error.progress,
+                    )
+                else:
+                    await create_candidate_evaluation_event(
+                        candidate_id=str(candidate["candidate_id"]),
+                        run_id=str(candidate["run_id"]),
+                        ticket_id=str(candidate["ticket_id"]),
+                        event_type="queued",
+                        candidate_status="queued",
+                        evaluator_ref=self.worker_ref,
+                        reason="baseline_not_ready",
+                        event_doc={
+                            "queue_generation_id": queue_generation_id,
+                            **_candidate_baseline_wait_event_doc(error),
+                        },
+                    )
+                return True
+
+            await create_conditional_validation_event(
+                candidate_id=str(claim.get("candidate_id") or ""),
+                event_type="retryable_failure",
+                assignment_hash=str(claim.get("category_assignment_hash") or ""),
+                policy_hash=str(claim.get("conditional_policy_hash") or ""),
+                rolling_window_hash=str(claim.get("window_hash") or ""),
+                baseline_benchmark_bundle_id=str(
+                    claim.get("baseline_benchmark_bundle_id") or ""
+                ),
+                source_ref=(
+                    f"queue:{queue_generation_id}:preliminary_attempt:{attempt}:authority"
+                ),
+                threshold_points=_safe_float(
+                    claim.get("threshold_points"),
+                    default=0.0,
+                ),
+                queue_generation_id=queue_generation_id,
+                failure_class=failure_class,
+                event_doc={
+                    "path": "global_icp_queue",
+                    "failure_class": failure_class,
+                    "retryable": True,
+                    "preliminary_gate_attempt_count": attempt,
+                    "conditional_jobs_released": False,
+                },
+            )
+            return False
+
+        async def _preliminary_gate_decided(
+            queue_generation_id: str,
+            decision: str,
+        ) -> None:
+            ctx = await _ctx("", queue_generation_id)
+            if ctx is None:
+                return
+            telemetry_session = ctx.get("telemetry_session")
+            if isinstance(telemetry_session, ScoringTelemetrySession):
+                conditional_jobs = await select_many(
+                    global_icp_queue.JOB_TABLE,
+                    filters=(
+                        ("queue_generation_id", queue_generation_id),
+                        ("phase", "conditional"),
+                    ),
+                    limit=1000,
+                )
+                for conditional_job in conditional_jobs:
+                    icp_ref = str(conditional_job.get("icp_ref") or "")
+                    if decision == "rejected":
+                        await telemetry_session.skip_unstarted(
+                            icp_ref=icp_ref,
+                            model_role="candidate",
+                            failure_category="preliminary_gate_rejected",
+                        )
+                    else:
+                        await emit_icp_event(
+                            telemetry_session.execution_for(
+                                icp_ref=icp_ref,
+                                model_role="candidate",
+                                retry_round=0,
+                            ),
+                            "queued",
+                            event_ordinal=1,
+                            event_doc={"released_from_preliminary_hold": True},
+                        )
+            candidate = ctx.get("candidate") if isinstance(ctx.get("candidate"), Mapping) else {}
+            await create_candidate_evaluation_event(
+                candidate_id=str(candidate.get("candidate_id") or ""),
+                run_id=str(candidate.get("run_id") or ""),
+                ticket_id=str(candidate.get("ticket_id") or ""),
+                event_type="evaluating",
+                candidate_status="evaluating",
+                evaluator_ref=self.worker_ref,
+                reason=(
+                    "conditional_validation_started"
+                    if decision == "passed"
+                    else "conditional_validation_preliminary_rejected"
+                ),
+                event_doc={
+                    "queue_generation_id": queue_generation_id,
+                    "preliminary_gate_status": decision,
+                    "category_assignment_hash": str(
+                        ctx["gate"].get("category_assignment_hash") or ""
+                    ),
+                },
+            )
+
         async def _candidate_assembled(queue_generation_id: str, candidate_id: str) -> None:
             ctx = await _ctx(candidate_id, queue_generation_id)
             telemetry_session = ctx.get("telemetry_session") if ctx is not None else None
@@ -3966,6 +4860,14 @@ class ResearchLabGatewayScoringWorker:
 
         def compute_public_score(public_docs: Sequence[Mapping[str, Any]]) -> float:
             return float(_queue_benchmark_style_score(public_docs, "candidate_company_scores"))
+
+        def compute_preliminary_score(preliminary_docs: Sequence[Mapping[str, Any]]) -> float:
+            return float(
+                _queue_benchmark_style_score(
+                    preliminary_docs,
+                    "candidate_company_scores",
+                )
+            )
 
         async def assemble(
             queue_generation_id: str,
@@ -3983,10 +4885,15 @@ class ResearchLabGatewayScoringWorker:
             lease_seconds=self.config.scoring_worker_model_timeout_seconds + 60,
             score_icp=score_icp,
             compute_public_score=compute_public_score,
+            compute_preliminary_score=compute_preliminary_score,
+            preliminary_gate_authorizer=_preliminary_gate_authorizer,
             assemble_candidate=assemble,
             job_completed=_job_completed,
             stale_job_recovered=_stale_job_recovered,
             gate_decided=_gate_decided,
+            preliminary_gate_decided=_preliminary_gate_decided,
+            preliminary_gate_error=_preliminary_gate_error,
+            retryable_job_error=_queue_job_error_is_retryable,
             candidate_assembled=_candidate_assembled,
         )
         logger.info(
@@ -4014,7 +4921,10 @@ class ResearchLabGatewayScoringWorker:
                 self.config.scoring_worker_baseline_not_ready_retry_seconds,
             ):
                 continue
-            if reason == "candidate_scoring_retryable_failure" and not _status_is_stale(
+            if reason in {
+                "candidate_scoring_retryable_failure",
+                "conditional_validation_retryable_failure",
+            } and not _status_is_stale(
                 status_at,
                 self.config.scoring_worker_retryable_failure_retry_seconds,
             ):
@@ -4813,6 +5723,11 @@ class ResearchLabGatewayScoringWorker:
             window, private_holdout_gate = await self._daily_candidate_scoring_window_and_gate(
                 artifact=artifact,
             )
+            _validate_candidate_conditional_policy_stamp(
+                candidate,
+                private_holdout_gate,
+                active_policy=self.config.conditional_validation_policy().to_dict(),
+            )
             await create_rolling_icp_window(window)
             if scoring_telemetry_enabled(self.config):
                 scheduler_type = "serial"
@@ -4919,6 +5834,38 @@ class ResearchLabGatewayScoringWorker:
                 evaluation_epoch=evaluation_epoch,
             )
             evaluation_policy = self._evaluation_policy()
+            scoring_config_hash = scoring_configuration_hash()
+            checkpoint_commitment_hash = ""
+            if bool(private_holdout_gate.get("conditional_validation_required")):
+                checkpoint_commitment_hash = canonical_hash(
+                    {
+                        "candidate_id": candidate_id,
+                        "candidate_artifact_hash": candidate_artifact.model_artifact_hash,
+                        "active_parent_artifact_hash": artifact.model_artifact_hash,
+                        "rolling_window_hash": window.window_hash,
+                        "category_assignment_hash": str(
+                            private_holdout_gate.get("category_assignment_hash") or ""
+                        ),
+                        "baseline_benchmark_bundle_id": str(
+                            private_holdout_gate.get("baseline_benchmark_bundle_id") or ""
+                        ),
+                        "baseline_benchmark_hash": str(
+                            private_holdout_gate.get("baseline_benchmark_hash") or ""
+                        ),
+                        "conditional_validation_policy_hash": str(
+                            private_holdout_gate.get(
+                                "conditional_validation_policy_hash"
+                            )
+                            or ""
+                        ),
+                        "threshold_points": _safe_float(
+                            private_holdout_gate.get("threshold_points"),
+                            default=0.0,
+                        ),
+                        "scoring_configuration_hash": scoring_config_hash,
+                        "evaluation_policy": evaluation_policy,
+                    }
+                )
             unsigned_run_context = {**run_context, "signature_ref": "pending"}
             # §5.4 scorer-judge traces: wrap the qualification scorer so every
             # per-company judgment is captured (pointer-only in event docs) at
@@ -4963,6 +5910,106 @@ class ResearchLabGatewayScoringWorker:
                     progress=progress,
                 )
 
+            async def holdout_transition(
+                action: str,
+                payload: Mapping[str, Any],
+            ) -> Mapping[str, Any]:
+                if action != "conditional_validation_started":
+                    raise RuntimeError(f"unsupported holdout transition: {action}")
+                preliminary_results_raw = payload.get("_preliminary_results")
+                if not isinstance(preliminary_results_raw, list) or any(
+                    not isinstance(item, Mapping) for item in preliminary_results_raw
+                ):
+                    raise ConditionalValidationRetryableError(
+                        "conditional_preliminary_results_missing"
+                    )
+                await parent_freshness_check(
+                    {
+                        "phase": "conditional_preliminary_gate",
+                        "completed_icp_count": len(preliminary_results_raw),
+                    }
+                )
+                proof = await _authorize_conditional_preliminary_gate(
+                    config=self.config,
+                    evaluation_epoch=evaluation_epoch,
+                    candidate=candidate,
+                    artifact=artifact,
+                    benchmark=benchmark,
+                    patch=patch,
+                    candidate_artifact=candidate_artifact,
+                    preliminary_results=[dict(item) for item in preliminary_results_raw],
+                    run_context=unsigned_run_context,
+                    policy=self._preliminary_evaluation_policy(),
+                    preliminary_gate=payload,
+                    parent_receipts=_attested_receipts_from(
+                        candidate_runner,
+                        candidate_company_scorer,
+                    ),
+                )
+                lifecycle_source_ref = (
+                    f"direct:{checkpoint_commitment_hash}"
+                    if checkpoint_commitment_hash
+                    else f"direct:{candidate_id}:{window.window_hash}"
+                )
+                lifecycle_args = {
+                    "candidate_id": candidate_id,
+                    "assignment_hash": str(
+                        payload.get("category_assignment_hash") or ""
+                    ),
+                    "policy_hash": str(
+                        payload.get("conditional_validation_policy_hash") or ""
+                    ),
+                    "rolling_window_hash": window.window_hash,
+                    "baseline_benchmark_bundle_id": str(
+                        payload.get("baseline_benchmark_bundle_id") or ""
+                    ),
+                    "source_ref": lifecycle_source_ref,
+                    "decision_score": _safe_float(
+                        payload.get("candidate_preliminary_score"),
+                        default=0.0,
+                    ),
+                    "threshold_points": _safe_float(
+                        payload.get("threshold_points"),
+                        default=0.0,
+                    ),
+                }
+                await create_conditional_validation_event(
+                    event_type="preliminary_gate_passed",
+                    event_doc={
+                        "path": "direct_candidate_scoring",
+                        "preliminary_promotion_gate": proof,
+                    },
+                    **lifecycle_args,
+                )
+                await create_conditional_validation_event(
+                    event_type="conditional_started",
+                    event_doc={
+                        "path": "direct_candidate_scoring",
+                        "preliminary_event": "persisted_before_conditional_execution",
+                    },
+                    **lifecycle_args,
+                )
+                await create_candidate_evaluation_event(
+                    candidate_id=candidate_id,
+                    run_id=str(candidate["run_id"]),
+                    ticket_id=str(candidate["ticket_id"]),
+                    event_type="evaluating",
+                    candidate_status="evaluating",
+                    evaluator_ref=self.worker_ref,
+                    reason="conditional_validation_started",
+                    event_doc={
+                        "worker_ref": self.worker_ref,
+                        "rolling_window_hash": window.window_hash,
+                        "checkpoint_commitment_hash": checkpoint_commitment_hash,
+                        "private_holdout_gate": _candidate_gate_event_doc(payload),
+                        "preliminary_promotion_gate_proof_hash": proof["proof_hash"],
+                        "promotion_decision_receipt_hash": proof[
+                            "promotion_decision_receipt_hash"
+                        ],
+                    },
+                )
+                return {"preliminary_promotion_gate": proof}
+
             # Bug #31: resume already-completed ICPs from the persisted progress
             # artifact and checkpoint each new ICP result, so a requeue at ICP
             # 19/20 no longer re-runs the whole evaluation. Best-effort: any
@@ -4987,6 +6034,7 @@ class ResearchLabGatewayScoringWorker:
                         progress_key,
                         window_hash=window.window_hash,
                         candidate_artifact_hash=candidate_artifact.model_artifact_hash,
+                        commitment_hash=checkpoint_commitment_hash,
                     )
                 except Exception as exc:
                     logger.warning(
@@ -5001,7 +6049,21 @@ class ResearchLabGatewayScoringWorker:
                         compact_ref(candidate_id),
                         len(resume_results),
                     )
-                progress_rows = [dict(row) for row in resume_results or []]
+                conditional_refs = {
+                    str(ref)
+                    for ref in (private_holdout_gate.get("conditional_icp_refs") or ())
+                    if str(ref)
+                }
+                progress_rows = [
+                    dict(row)
+                    for row in resume_results or []
+                    if not (
+                        str(row.get("icp_ref") or row.get("icp_hash") or "")
+                        in conditional_refs
+                        and _retryable_measurement_checkpoint_row(row)
+                    )
+                ]
+                resume_results = list(progress_rows)
 
                 public_refs = {
                     str(ref)
@@ -5019,7 +6081,13 @@ class ResearchLabGatewayScoringWorker:
                             icp_hash=str(item.get("icp_hash") or ""),
                             icp_ordinal=item_index,
                             model_role="candidate",
-                            phase="public" if item_ref in public_refs else "private",
+                            phase=(
+                                "public"
+                                if item_ref in public_refs
+                                else "conditional"
+                                if item_ref in conditional_refs
+                                else "private"
+                            ),
                             held=item_ref not in public_refs and resumed_row is None,
                             execution_kind=(
                                 "checkpoint_reuse" if resumed_row is not None else "model_invocation"
@@ -5054,6 +6122,7 @@ class ResearchLabGatewayScoringWorker:
                             candidate_artifact_hash=candidate_artifact.model_artifact_hash,
                             rows=progress_rows,
                             telemetry_index=telemetry_index,
+                            commitment_hash=checkpoint_commitment_hash,
                         )
                         checkpoint_persisted = True
                     except Exception as exc:
@@ -5062,6 +6131,15 @@ class ResearchLabGatewayScoringWorker:
                             compact_ref(candidate_id),
                             str(exc)[:200],
                         )
+                        row_ref = str(row.get("icp_ref") or row.get("icp_hash") or "")
+                        if (
+                            bool(private_holdout_gate.get("conditional_validation_required"))
+                            and row_ref in conditional_refs
+                        ):
+                            raise ConditionalValidationRetryableError(
+                                "conditional_validation_checkpoint_persist_failed:"
+                                f"{compact_ref(row_ref)}"
+                            ) from exc
                     if telemetry_session is not None:
                         failure_reason = str(row.get("failure_reason") or "")
                         latch_skipped = "candidate_model_runtime_skipped_after_" in failure_reason
@@ -5093,6 +6171,11 @@ class ResearchLabGatewayScoringWorker:
                     for ref in (private_holdout_gate.get("public_icp_refs") or ())
                     if str(ref)
                 }
+                conditional_refs = {
+                    str(ref)
+                    for ref in (private_holdout_gate.get("conditional_icp_refs") or ())
+                    if str(ref)
+                }
                 for item_index, item in enumerate(window.benchmark_items):
                     item_ref = str(item.get("icp_ref") or item.get("icp_hash") or "")
                     await telemetry_session.plan(
@@ -5100,7 +6183,13 @@ class ResearchLabGatewayScoringWorker:
                         icp_hash=str(item.get("icp_hash") or ""),
                         icp_ordinal=item_index,
                         model_role="candidate",
-                        phase="public" if item_ref in public_refs else "private",
+                        phase=(
+                            "public"
+                            if item_ref in public_refs
+                            else "conditional"
+                            if item_ref in conditional_refs
+                            else "private"
+                        ),
                         held=item_ref not in public_refs,
                     )
 
@@ -5206,6 +6295,7 @@ class ResearchLabGatewayScoringWorker:
                                 if telemetry_session is not None
                                 else None
                             ),
+                            holdout_transition_hook=holdout_transition,
                         )
                         langfuse_trace_id = finish_score_bundle_observation(langfuse_obs, score_bundle)
                     finally:
@@ -5339,6 +6429,23 @@ class ResearchLabGatewayScoringWorker:
             )
             bundle, _bundle_event = await create_score_bundle(score_bundle_request)
             scored_score_bundle_id = str(bundle["score_bundle_id"])
+            await _persist_conditional_finalization_events(
+                gate_result,
+                candidate_id=candidate_id,
+                source_score_bundle_id=scored_score_bundle_id,
+                rolling_window_hash=window.window_hash,
+            )
+            await _persist_candidate_category_results(
+                gate_result,
+                source_bundle_ref=scored_score_bundle_id,
+                rolling_window_hash=window.window_hash,
+                candidate_id=candidate_id,
+                scoring_run_id=(
+                    str(telemetry_session.run.scoring_run_id)
+                    if telemetry_session is not None and telemetry_session.run is not None
+                    else ""
+                ),
+            )
             if langfuse_trace_id:
                 try:
                     await insert_row(
@@ -5497,6 +6604,9 @@ class ResearchLabGatewayScoringWorker:
             failure_class, retryable = _candidate_scoring_failure_class(exc)
             claim_attempts = await self._candidate_claim_attempt_count(candidate_id)
             max_attempts = int(self.config.scoring_worker_max_claim_requeues)
+            conditional_retry_hold = (
+                failure_class == "conditional_validation_retryable_failure"
+            )
             if failure_class == "baseline_not_ready":
                 retry_after_seconds = int(self.config.scoring_worker_baseline_not_ready_retry_seconds)
                 await create_candidate_evaluation_event(
@@ -5539,8 +6649,60 @@ class ResearchLabGatewayScoringWorker:
                         event_doc={"outcome": "paused_for_baseline"},
                     )
                 return
-            if retryable and claim_attempts < max_attempts:
+            if conditional_retry_hold:
+                gate_for_failure = locals().get("private_holdout_gate")
+                window_for_failure = locals().get("window")
+                if isinstance(gate_for_failure, Mapping) and window_for_failure is not None:
+                    try:
+                        await create_conditional_validation_event(
+                            candidate_id=candidate_id,
+                            event_type="retryable_failure",
+                            assignment_hash=str(
+                                gate_for_failure.get("category_assignment_hash") or ""
+                            ),
+                            policy_hash=str(
+                                gate_for_failure.get(
+                                    "conditional_validation_policy_hash"
+                                )
+                                or ""
+                            ),
+                            rolling_window_hash=str(window_for_failure.window_hash),
+                            baseline_benchmark_bundle_id=str(
+                                gate_for_failure.get(
+                                    "baseline_benchmark_bundle_id"
+                                )
+                                or ""
+                            ),
+                            source_ref=f"direct:claim:{claim_attempts}",
+                            threshold_points=_safe_float(
+                                gate_for_failure.get("threshold_points"),
+                                default=0.0,
+                            ),
+                            failure_class=failure_class,
+                            event_doc={
+                                "claim_attempt": claim_attempts,
+                                "retryable_hold": True,
+                            },
+                        )
+                    except Exception:
+                        logger.warning(
+                            "research_lab_conditional_retry_event_write_failed "
+                            "candidate_id=%s",
+                            compact_ref(candidate_id),
+                            exc_info=True,
+                        )
+            if _candidate_scoring_should_requeue(
+                failure_class=failure_class,
+                retryable=retryable,
+                claim_attempts=claim_attempts,
+                max_attempts=max_attempts,
+            ):
                 retry_after_seconds = int(self.config.scoring_worker_retryable_failure_retry_seconds)
+                retry_reason = (
+                    "conditional_validation_retryable_failure"
+                    if failure_class == "conditional_validation_retryable_failure"
+                    else "candidate_scoring_retryable_failure"
+                )
                 await create_candidate_evaluation_event(
                     candidate_id=candidate_id,
                     run_id=str(candidate["run_id"]),
@@ -5548,7 +6710,7 @@ class ResearchLabGatewayScoringWorker:
                     event_type="queued",
                     candidate_status="queued",
                     evaluator_ref=self.worker_ref,
-                    reason="candidate_scoring_retryable_failure",
+                    reason=retry_reason,
                     event_doc={
                         "failure_class": failure_class,
                         "retryable": True,
@@ -5559,6 +6721,7 @@ class ResearchLabGatewayScoringWorker:
                         "proxy_ref_hash": self.proxy_ref_hash,
                         "claim_attempts": claim_attempts,
                         "max_claim_attempts": max_attempts,
+                        "terminal_attempt_cap_bypassed": conditional_retry_hold,
                     },
                 )
                 logger.warning(
@@ -5817,6 +6980,24 @@ class ResearchLabGatewayScoringWorker:
             and str(gate_result.get("decision") or "") == "rejected_before_private_holdout"
         )
         scoring_health_gate = self._scoring_health_gate_result(score_bundle)
+        if isinstance(gate_result, Mapping):
+            await _persist_conditional_finalization_events(
+                gate_result,
+                candidate_id=candidate_id,
+                source_score_bundle_id=score_bundle_id,
+                rolling_window_hash=rolling_window_hash,
+            )
+            await _persist_candidate_category_results(
+                gate_result,
+                source_bundle_ref=score_bundle_id,
+                rolling_window_hash=rolling_window_hash,
+                candidate_id=candidate_id,
+                scoring_run_id=(
+                    str(telemetry_session.run.scoring_run_id)
+                    if telemetry_session is not None and telemetry_session.run is not None
+                    else ""
+                ),
+            )
         logger.warning(
             format_worker_block(
                 "RESEARCH LAB CANDIDATE REUSING SIGNED SCORE BUNDLE",
@@ -7509,6 +8690,23 @@ class ResearchLabGatewayScoringWorker:
 
         rebase_build_doc = {
             **build.build_doc,
+            **(
+                {
+                    "conditional_validation_policy": dict(
+                        (candidate.get("candidate_build_doc") or {}).get(
+                            "conditional_validation_policy"
+                        )
+                    )
+                }
+                if isinstance(candidate.get("candidate_build_doc"), Mapping)
+                and isinstance(
+                    (candidate.get("candidate_build_doc") or {}).get(
+                        "conditional_validation_policy"
+                    ),
+                    Mapping,
+                )
+                else {}
+            ),
             # Preserve the source candidate's loop-node linkage so the rebased
             # candidate's score bundle keeps the deterministic
             # execution_trace:<uuid5> ref (bundle→trace join survives rebases).
@@ -8080,6 +9278,13 @@ class ResearchLabGatewayScoringWorker:
             }
         start = time.time()
         evaluation_epoch = await self._resolve_evaluation_epoch()
+        conditional_policy = self.config.conditional_validation_policy()
+        expected_icp_count = (
+            conditional_policy.total_icps
+            if conditional_policy.enabled
+            else self.config.lab_champion_eval_days
+            * self.config.lab_champion_icps_per_day
+        )
         logger.info(
             format_worker_block(
                 "RESEARCH LAB PRIVATE BASELINE ALLOCATED",
@@ -8091,7 +9296,8 @@ class ResearchLabGatewayScoringWorker:
                     ("Evaluation epoch", evaluation_epoch),
                     ("Eval days", self.config.lab_champion_eval_days),
                     ("ICPs per day", self.config.lab_champion_icps_per_day),
-                    ("Expected ICPs", self.config.lab_champion_eval_days * self.config.lab_champion_icps_per_day),
+                    ("Expected ICPs", expected_icp_count),
+                    ("Conditional validation", conditional_policy.mode),
                 ),
             )
         )
@@ -8172,6 +9378,27 @@ class ResearchLabGatewayScoringWorker:
         )
         valid_existing = [row for row in existing if _private_benchmark_row_is_valid(row)]
         if valid_existing:
+            if conditional_policy.enabled:
+                try:
+                    await _repair_baseline_category_results_from_row(
+                        valid_existing[0],
+                        expected_policy_hash=str(
+                            conditional_policy.to_dict()["policy_hash"]
+                        ),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "research_lab_conditional_baseline_tracking_repair_failed "
+                        "benchmark_bundle_id=%s error=%s",
+                        compact_ref(valid_existing[0].get("benchmark_bundle_id")),
+                        _short_error(exc),
+                    )
+                    return {
+                        "status": "conditional_baseline_tracking_repair_failed",
+                        "benchmark_date": today,
+                        "rolling_window_hash": window.window_hash,
+                        "error": _short_error(exc),
+                    }
             already_key = f"{today}:{window.window_hash}:{artifact.manifest_hash}"
             if self._baseline_already_logged_date != already_key:
                 logger.info(
@@ -8199,6 +9426,29 @@ class ResearchLabGatewayScoringWorker:
             manifest_hash=artifact.manifest_hash,
         )
         if same_day_reference is not None:
+            if conditional_policy.enabled:
+                try:
+                    await _repair_baseline_category_results_from_row(
+                        same_day_reference,
+                        expected_policy_hash=str(
+                            conditional_policy.to_dict()["policy_hash"]
+                        ),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "research_lab_same_day_conditional_baseline_incompatible "
+                        "benchmark_bundle_id=%s error=%s",
+                        compact_ref(same_day_reference.get("benchmark_bundle_id")),
+                        _short_error(exc),
+                    )
+                    return {
+                        "status": "same_day_conditional_baseline_incompatible",
+                        "benchmark_date": today,
+                        "benchmark_bundle_id": str(
+                            same_day_reference.get("benchmark_bundle_id") or ""
+                        ),
+                        "error": _short_error(exc),
+                    }
             reuse_key = f"{today}:reuse:{artifact.manifest_hash}"
             if self._baseline_already_logged_date != reuse_key:
                 logger.warning(
@@ -8986,6 +10236,29 @@ class ResearchLabGatewayScoringWorker:
             manifest_hash=artifact.manifest_hash,
         )
         if pre_record_conflict is not None:
+            if conditional_policy.enabled:
+                try:
+                    await _repair_baseline_category_results_from_row(
+                        pre_record_conflict,
+                        expected_policy_hash=str(
+                            conditional_policy.to_dict()["policy_hash"]
+                        ),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "research_lab_concurrent_conditional_baseline_incompatible "
+                        "benchmark_bundle_id=%s error=%s",
+                        compact_ref(pre_record_conflict.get("benchmark_bundle_id")),
+                        _short_error(exc),
+                    )
+                    return {
+                        "status": "concurrent_conditional_baseline_incompatible",
+                        "benchmark_date": today,
+                        "benchmark_bundle_id": str(
+                            pre_record_conflict.get("benchmark_bundle_id") or ""
+                        ),
+                        "error": _short_error(exc),
+                    }
             if baseline_telemetry_session is not None:
                 await baseline_telemetry_session.cancel_active(
                     failure_category="baseline_reference_conflict"
@@ -9035,6 +10308,10 @@ class ResearchLabGatewayScoringWorker:
             # that observable ordering, then bind the exact value below.
             "elapsed_seconds": 0.0,
         }
+        if conditional_policy.enabled:
+            baseline_summary_payload["conditional_validation_policy"] = (
+                conditional_policy.to_dict()
+            )
         baseline_summary_result = build_baseline_score_summary(**baseline_summary_payload)
         baseline_summary_payload["elapsed_seconds"] = round(time.time() - start, 3)
         score_summary_doc = {
@@ -9054,6 +10331,7 @@ class ResearchLabGatewayScoringWorker:
         serving_model_version = baseline_summary_result["serving_model_version"]
         per_icp_summaries = baseline_summary_result["per_icp_summaries"]
         visibility_split = baseline_summary_result["visibility_split"]
+        category_assignment = baseline_summary_result.get("category_assignment")
         noise_budget = baseline_summary_result["daily_noise_budget"]
         attested_baseline_outcome = await compare_attested_baseline_score_summary(
             epoch_id=evaluation_epoch,
@@ -9090,6 +10368,18 @@ class ResearchLabGatewayScoringWorker:
             signature_ref=signature_ref,
             score_summary_doc=score_summary_doc,
         )
+        if isinstance(category_assignment, Mapping):
+            await _persist_baseline_category_results(
+                category_assignment,
+                source_bundle_ref=str(bundle["benchmark_bundle_id"]),
+                rolling_window_hash=window.window_hash,
+                scoring_run_id=(
+                    str(baseline_telemetry_session.run.scoring_run_id)
+                    if baseline_telemetry_session is not None
+                    and baseline_telemetry_session.run is not None
+                    else ""
+                ),
+            )
         await persist_attested_outcome_artifact_links(
             attested_baseline_outcome,
             artifact_links=[
@@ -9132,6 +10422,9 @@ class ResearchLabGatewayScoringWorker:
                 "selected_icp_count": len(window.item_refs),
                 "public_icp_count": int(visibility_split.get("public_count") or 0),
                 "private_holdout_icp_count": int(visibility_split.get("private_count") or 0),
+                "conditional_holdout_icp_count": int(
+                    visibility_split.get("conditional_count") or 0
+                ),
                 "private_model_manifest_hash": artifact.manifest_hash,
                 "scoring_worker_source_hash": _scoring_worker_source_hash(),
                 "publication_retry_token_hash": _baseline_publication_retry_token_hash(),
@@ -9149,6 +10442,7 @@ class ResearchLabGatewayScoringWorker:
             public_weak_per_day=self.config.public_benchmark_public_weak_per_day,
             public_total_icps=self.config.public_benchmark_public_total_icps,
             public_weak_total=self.config.public_benchmark_public_weak_total,
+            category_assignment=category_assignment,
         )
         public_report_doc = {
             **public_report_doc,
@@ -10640,6 +11934,12 @@ class ResearchLabGatewayScoringWorker:
         return context
 
     def _evaluation_policy(self) -> dict[str, Any]:
+        conditional_policy = self.config.conditional_validation_policy()
+        expected_icp_count = (
+            conditional_policy.total_icps
+            if conditional_policy.enabled
+            else self.config.lab_champion_eval_days * self.config.lab_champion_icps_per_day
+        )
         return {
             "min_delta": float(
                 os.environ.get(
@@ -10650,13 +11950,26 @@ class ResearchLabGatewayScoringWorker:
             "min_successful_icps": int(
                 os.environ.get(
                     "RESEARCH_LAB_MIN_SUCCESSFUL_ICPS",
-                    str(self.config.lab_champion_eval_days * self.config.lab_champion_icps_per_day),
+                    str(expected_icp_count),
                 )
             ),
             "max_hard_failures": int(os.environ.get("RESEARCH_LAB_MAX_HARD_FAILURES", "0")),
             "min_candidate_score": float(os.environ.get("RESEARCH_LAB_MIN_CANDIDATE_SCORE", "0")),
             "observed_cost_usd": 0.0,
         }
+
+    def _preliminary_evaluation_policy(self) -> dict[str, Any]:
+        """Reproduce the pre-conditional policy for the frozen 20-ICP gate."""
+
+        policy = self._evaluation_policy()
+        if "RESEARCH_LAB_MIN_SUCCESSFUL_ICPS" not in os.environ:
+            conditional_policy = self.config.conditional_validation_policy()
+            if conditional_policy.enabled:
+                policy["min_successful_icps"] = (
+                    conditional_policy.public_total_icps
+                    + conditional_policy.private_total_icps
+                )
+        return policy
 
     def _private_scoring_env(self) -> dict[str, str]:
         env: dict[str, str] = {}
@@ -10845,7 +12158,66 @@ def _private_benchmark_row_is_valid(row: Mapping[str, Any]) -> bool:
         return False
 
 
+def _validate_candidate_conditional_policy_stamp(
+    candidate: Mapping[str, Any],
+    gate: Mapping[str, Any],
+    *,
+    active_policy: Mapping[str, Any],
+) -> None:
+    """Prevent an in-progress candidate from crossing policy generations."""
+
+    build_doc = (
+        candidate.get("candidate_build_doc")
+        if isinstance(candidate.get("candidate_build_doc"), Mapping)
+        else {}
+    )
+    stamp = (
+        build_doc.get("conditional_validation_policy")
+        if isinstance(build_doc.get("conditional_validation_policy"), Mapping)
+        else None
+    )
+    if stamp is None:
+        # Historical candidates created before migration 97 retain their
+        # existing behavior. Every new Git-tree candidate carries the stamp.
+        return
+    stamped_mode = str(stamp.get("mode") or "").strip().lower()
+    active_mode = str(active_policy.get("mode") or "").strip().lower()
+    if stamped_mode not in {"off", "enforce"}:
+        raise CandidateBaselineNotReady("candidate_conditional_policy_stamp_invalid")
+    if stamped_mode != active_mode:
+        raise CandidateBaselineNotReady(
+            "candidate_conditional_policy_changed_after_creation:"
+            f"stamped={stamped_mode}:active={active_mode}"
+        )
+    gate_requires_conditional = bool(gate.get("conditional_validation_required"))
+    if stamped_mode == "off":
+        if gate_requires_conditional:
+            raise CandidateBaselineNotReady(
+                "candidate_stamped_legacy_but_daily_baseline_requires_conditional_validation"
+            )
+        return
+    stamped_hash = str(stamp.get("policy_hash") or "")
+    gate_hash = str(gate.get("conditional_validation_policy_hash") or "")
+    if not gate_requires_conditional or not stamped_hash or stamped_hash != gate_hash:
+        raise CandidateBaselineNotReady(
+            "candidate_conditional_policy_commitment_mismatch:"
+            f"stamped={compact_ref(stamped_hash)}:baseline={compact_ref(gate_hash)}"
+        )
+
+
 def _rolling_window_fetch_kwargs(config: Any) -> dict[str, Any]:
+    conditional_policy_factory = getattr(config, "conditional_validation_policy", None)
+    if callable(conditional_policy_factory):
+        conditional_policy = conditional_policy_factory()
+        if conditional_policy.enabled:
+            return {
+                "window_mode": "hybrid_fresh_retained",
+                "fresh_icp_count": conditional_policy.fresh_icp_count,
+                "retained_icp_count": conditional_policy.retained_icp_count,
+                "min_new_icp_count": conditional_policy.fresh_icp_count,
+                "required_total_icps": conditional_policy.total_icps,
+                "require_unique_icps": True,
+            }
     total = max(
         1,
         _safe_int(getattr(config, "lab_champion_eval_days", 10), default=10)
@@ -10889,6 +12261,76 @@ def _benchmark_summary_has_companies(item: Any) -> bool:
 
 def _private_holdout_gate_from_baseline_row(row: Mapping[str, Any]) -> dict[str, Any] | None:
     doc = row.get("score_summary_doc") if isinstance(row.get("score_summary_doc"), Mapping) else {}
+    assignment = (
+        doc.get("category_assignment")
+        if isinstance(doc.get("category_assignment"), Mapping)
+        else {}
+    )
+    assignment_items = (
+        assignment.get("items")
+        if isinstance(assignment.get("items"), list)
+        else []
+    )
+    if assignment_items:
+        categories: dict[str, list[Mapping[str, Any]]] = {
+            "public": [],
+            "private": [],
+            "conditional": [],
+        }
+        for item in assignment_items:
+            if not isinstance(item, Mapping):
+                return None
+            category = str(item.get("category") or "")
+            if category not in categories:
+                return None
+            categories[category].append(item)
+        if not all(categories.values()):
+            return None
+        preliminary_items = [*categories["public"], *categories["private"]]
+        policy = assignment.get("policy") if isinstance(assignment.get("policy"), Mapping) else {}
+        return {
+            "schema_version": "1.1",
+            "gate_type": "public_private_then_conditional_validation",
+            "baseline_benchmark_bundle_id": str(row.get("benchmark_bundle_id") or ""),
+            "baseline_benchmark_hash": canonical_hash(doc) if doc else "",
+            "baseline_aggregate_score": _safe_float(
+                doc.get("aggregate_score"),
+                default=_average(
+                    [_safe_float(item.get("score"), default=0.0) for item in assignment_items]
+                ),
+            ),
+            "baseline_preliminary_score": _average(
+                [_safe_float(item.get("score"), default=0.0) for item in preliminary_items]
+            ),
+            "baseline_public_score": _average(
+                [_safe_float(item.get("score"), default=0.0) for item in categories["public"]]
+            ),
+            "baseline_private_score": _average(
+                [_safe_float(item.get("score"), default=0.0) for item in categories["private"]]
+            ),
+            "baseline_conditional_score": _average(
+                [_safe_float(item.get("score"), default=0.0) for item in categories["conditional"]]
+            ),
+            "baseline_public_icp_count": len(categories["public"]),
+            "baseline_private_holdout_icp_count": len(categories["private"]),
+            "baseline_conditional_holdout_icp_count": len(categories["conditional"]),
+            "rolling_window_hash": str(row.get("rolling_window_hash") or ""),
+            "private_model_manifest_hash": str(row.get("private_model_manifest_hash") or ""),
+            "public_icp_refs": [str(item.get("icp_ref") or "") for item in categories["public"]],
+            "private_icp_refs": [str(item.get("icp_ref") or "") for item in categories["private"]],
+            "conditional_icp_refs": [
+                str(item.get("icp_ref") or "") for item in categories["conditional"]
+            ],
+            "conditional_validation_required": True,
+            "category_assignment_hash": str(assignment.get("assignment_hash") or ""),
+            "conditional_validation_policy_hash": str(policy.get("policy_hash") or ""),
+            "threshold_points": _safe_float(policy.get("threshold_points"), default=1.0),
+            "baseline_per_icp_scores": {
+                str(item.get("icp_ref") or ""): _safe_float(item.get("score"), default=0.0)
+                for item in assignment_items
+                if str(item.get("icp_ref") or "").strip()
+            },
+        }
     split = doc.get("visibility_split") if isinstance(doc.get("visibility_split"), Mapping) else {}
     items = split.get("items") if isinstance(split.get("items"), list) else []
     public_items = [
@@ -10959,7 +12401,28 @@ def _candidate_gate_event_doc(value: Any) -> dict[str, Any]:
         "baseline_aggregate_score": _safe_float(value.get("baseline_aggregate_score"), default=0.0),
         "baseline_public_score": _safe_float(value.get("baseline_public_score"), default=0.0),
         "baseline_private_score": _safe_float(value.get("baseline_private_score"), default=0.0),
+        "baseline_conditional_score": _safe_float(
+            value.get("baseline_conditional_score"),
+            default=0.0,
+        ),
+        "baseline_preliminary_score": _safe_float(
+            value.get("baseline_preliminary_score"),
+            default=0.0,
+        ),
         "candidate_public_score": _safe_float(value.get("candidate_public_score"), default=0.0),
+        "candidate_private_score": _safe_float(value.get("candidate_private_score"), default=0.0),
+        "candidate_conditional_score": _safe_float(
+            value.get("candidate_conditional_score"),
+            default=0.0,
+        ),
+        "candidate_preliminary_score": _safe_float(
+            value.get("candidate_preliminary_score"),
+            default=0.0,
+        ),
+        "candidate_preliminary_delta": _safe_float(
+            value.get("candidate_preliminary_delta"),
+            default=0.0,
+        ),
         "paired_base_public_score": _safe_float(value.get("paired_base_public_score"), default=0.0),
         "candidate_total_score": _safe_float(value.get("candidate_total_score"), default=0.0),
         "paired_base_total_score": _safe_float(value.get("paired_base_total_score"), default=0.0),
@@ -10970,8 +12433,274 @@ def _candidate_gate_event_doc(value: Any) -> dict[str, Any]:
         "reference_evaluation_mode": str(value.get("reference_evaluation_mode") or ""),
         "public_icp_count": _safe_int(value.get("public_icp_count"), default=0),
         "private_holdout_icp_count": _safe_int(value.get("private_holdout_icp_count"), default=0),
+        "conditional_holdout_icp_count": _safe_int(
+            value.get("conditional_holdout_icp_count"),
+            default=0,
+        ),
         "private_holdout_evaluated": bool(value.get("private_holdout_evaluated")),
+        "conditional_holdout_evaluated": bool(value.get("conditional_holdout_evaluated")),
+        "conditional_validation_required": bool(value.get("conditional_validation_required")),
+        "preliminary_decision": str(value.get("preliminary_decision") or ""),
+        "final_decision": str(value.get("final_decision") or ""),
+        "threshold_points": _safe_float(value.get("threshold_points"), default=0.0),
+        "category_assignment_hash": str(value.get("category_assignment_hash") or ""),
+        "conditional_validation_policy_hash": str(
+            value.get("conditional_validation_policy_hash") or ""
+        ),
     }
+
+
+async def _persist_baseline_category_results(
+    assignment: Mapping[str, Any],
+    *,
+    source_bundle_ref: str,
+    rolling_window_hash: str,
+    scoring_run_id: str = "",
+) -> None:
+    counts = (
+        assignment.get("category_counts")
+        if isinstance(assignment.get("category_counts"), Mapping)
+        else {}
+    )
+    scores = (
+        assignment.get("category_scores")
+        if isinstance(assignment.get("category_scores"), Mapping)
+        else {}
+    )
+    assignment_hash = str(assignment.get("assignment_hash") or "")
+    policy_hash = str(assignment.get("policy_hash") or "")
+    if not assignment_hash or not policy_hash:
+        raise RuntimeError("conditional baseline category commitments are missing")
+    for category in ("public", "private", "conditional"):
+        await create_scoring_category_result(
+            source_kind="baseline",
+            source_bundle_ref=source_bundle_ref,
+            category=category,
+            assignment_hash=assignment_hash,
+            policy_hash=policy_hash,
+            rolling_window_hash=rolling_window_hash,
+            icp_count=_safe_int(counts.get(category), default=0),
+            aggregate_score=_safe_float(scores.get(category), default=0.0),
+            scoring_run_id=scoring_run_id or None,
+        )
+    await create_scoring_category_result(
+        source_kind="baseline",
+        source_bundle_ref=source_bundle_ref,
+        category="overall",
+        assignment_hash=assignment_hash,
+        policy_hash=policy_hash,
+        rolling_window_hash=rolling_window_hash,
+        icp_count=sum(_safe_int(counts.get(name), default=0) for name in ("public", "private", "conditional")),
+        aggregate_score=_safe_float(assignment.get("aggregate_score"), default=0.0),
+        scoring_run_id=scoring_run_id or None,
+    )
+
+
+async def _repair_baseline_category_results_from_row(
+    row: Mapping[str, Any],
+    *,
+    expected_policy_hash: str,
+) -> None:
+    doc = (
+        row.get("score_summary_doc")
+        if isinstance(row.get("score_summary_doc"), Mapping)
+        else {}
+    )
+    assignment = (
+        doc.get("category_assignment")
+        if isinstance(doc.get("category_assignment"), Mapping)
+        else None
+    )
+    if assignment is None:
+        raise RuntimeError("conditional baseline has no category assignment")
+    policy_hash = str(assignment.get("policy_hash") or "")
+    if policy_hash != str(expected_policy_hash or ""):
+        raise RuntimeError(
+            "conditional baseline policy mismatch:"
+            f"stored={compact_ref(policy_hash)}:expected={compact_ref(expected_policy_hash)}"
+        )
+    source_bundle_ref = str(row.get("benchmark_bundle_id") or "")
+    rolling_window_hash = str(row.get("rolling_window_hash") or "")
+    if not source_bundle_ref or not rolling_window_hash:
+        raise RuntimeError("conditional baseline row lacks immutable bundle/window identity")
+    await _persist_baseline_category_results(
+        assignment,
+        source_bundle_ref=source_bundle_ref,
+        rolling_window_hash=rolling_window_hash,
+    )
+
+
+async def _persist_conditional_finalization_events(
+    gate: Mapping[str, Any],
+    *,
+    candidate_id: str,
+    source_score_bundle_id: str,
+    rolling_window_hash: str,
+    queue_generation_id: str | None = None,
+) -> None:
+    if not bool(gate.get("conditional_validation_required")):
+        return
+    assignment_hash = str(gate.get("category_assignment_hash") or "")
+    policy_hash = str(gate.get("conditional_validation_policy_hash") or "")
+    baseline_bundle_id = str(gate.get("baseline_benchmark_bundle_id") or "")
+    if not assignment_hash or not policy_hash or not baseline_bundle_id:
+        raise RuntimeError("conditional finalization commitments are missing")
+    source_ref = str(source_score_bundle_id)
+    threshold = _safe_float(gate.get("threshold_points"), default=0.0)
+    common = {
+        "candidate_id": candidate_id,
+        "assignment_hash": assignment_hash,
+        "policy_hash": policy_hash,
+        "rolling_window_hash": rolling_window_hash,
+        "baseline_benchmark_bundle_id": baseline_bundle_id,
+        "source_ref": source_ref,
+        "threshold_points": threshold,
+        "queue_generation_id": queue_generation_id,
+        "source_score_bundle_id": source_score_bundle_id,
+    }
+    decision = str(gate.get("decision") or "")
+    if decision == "rejected_before_private_holdout":
+        return
+    if decision == "rejected_before_conditional_validation":
+        await create_conditional_validation_event(
+            event_type="preliminary_gate_failed",
+            decision_score=_safe_float(
+                gate.get("candidate_preliminary_score"),
+                default=0.0,
+            ),
+            event_doc={
+                "preliminary_decision": decision,
+                "public_icp_count": _safe_int(gate.get("public_icp_count"), default=0),
+                "private_icp_count": _safe_int(
+                    gate.get("private_holdout_icp_count"),
+                    default=0,
+                ),
+            },
+            **common,
+        )
+        return
+    if decision not in {
+        "conditional_validation_approved",
+        "rejected_after_conditional_validation",
+    } or not bool(gate.get("conditional_holdout_evaluated")):
+        raise RuntimeError(
+            "conditional score bundle lacks a terminal conditional decision:"
+            f"{decision or '<empty>'}"
+        )
+    final_score = _safe_float(gate.get("candidate_total_score"), default=0.0)
+    await create_conditional_validation_event(
+        event_type="conditional_completed",
+        decision_score=_safe_float(
+            gate.get("candidate_conditional_score"),
+            default=0.0,
+        ),
+        event_doc={
+            "conditional_icp_count": _safe_int(
+                gate.get("conditional_holdout_icp_count"),
+                default=0,
+            ),
+            "final_decision": decision,
+        },
+        **common,
+    )
+    await create_conditional_validation_event(
+        event_type=(
+            "final_pass"
+            if decision == "conditional_validation_approved"
+            else "final_fail"
+        ),
+        decision_score=final_score,
+        event_doc={
+            "final_decision": decision,
+            "candidate_delta_vs_daily_baseline": _safe_float(
+                gate.get("candidate_delta_vs_daily_baseline"),
+                default=0.0,
+            ),
+            "total_icp_count": (
+                _safe_int(gate.get("public_icp_count"), default=0)
+                + _safe_int(gate.get("private_holdout_icp_count"), default=0)
+                + _safe_int(gate.get("conditional_holdout_icp_count"), default=0)
+            ),
+        },
+        **common,
+    )
+
+
+async def _persist_candidate_category_results(
+    gate: Mapping[str, Any],
+    *,
+    source_bundle_ref: str,
+    rolling_window_hash: str,
+    candidate_id: str,
+    scoring_run_id: str = "",
+) -> None:
+    if not bool(gate.get("conditional_validation_required")):
+        return
+    assignment_hash = str(gate.get("category_assignment_hash") or "")
+    policy_hash = str(gate.get("conditional_validation_policy_hash") or "")
+    if not assignment_hash or not policy_hash:
+        raise RuntimeError("conditional candidate category commitments are missing")
+    categories: list[tuple[str, str, str, int]] = [
+        (
+            "public",
+            "candidate_public_score",
+            "baseline_public_score",
+            _safe_int(gate.get("public_icp_count"), default=0),
+        )
+    ]
+    if bool(gate.get("private_holdout_evaluated")):
+        categories.extend(
+            [
+                (
+                    "private",
+                    "candidate_private_score",
+                    "baseline_private_score",
+                    _safe_int(gate.get("private_holdout_icp_count"), default=0),
+                ),
+                (
+                    "preliminary",
+                    "candidate_preliminary_score",
+                    "baseline_preliminary_score",
+                    _safe_int(gate.get("public_icp_count"), default=0)
+                    + _safe_int(gate.get("private_holdout_icp_count"), default=0),
+                ),
+            ]
+        )
+    if bool(gate.get("conditional_holdout_evaluated")):
+        categories.extend(
+            [
+                (
+                    "conditional",
+                    "candidate_conditional_score",
+                    "baseline_conditional_score",
+                    _safe_int(gate.get("conditional_holdout_icp_count"), default=0),
+                ),
+                (
+                    "overall",
+                    "candidate_total_score",
+                    "baseline_aggregate_score",
+                    _safe_int(gate.get("public_icp_count"), default=0)
+                    + _safe_int(gate.get("private_holdout_icp_count"), default=0)
+                    + _safe_int(gate.get("conditional_holdout_icp_count"), default=0),
+                ),
+            ]
+        )
+    for category, candidate_field, baseline_field, icp_count in categories:
+        candidate_score = _safe_float(gate.get(candidate_field), default=0.0)
+        baseline_score = _safe_float(gate.get(baseline_field), default=0.0)
+        await create_scoring_category_result(
+            source_kind="candidate",
+            source_bundle_ref=source_bundle_ref,
+            category=category,
+            assignment_hash=assignment_hash,
+            policy_hash=policy_hash,
+            rolling_window_hash=rolling_window_hash,
+            icp_count=icp_count,
+            aggregate_score=candidate_score,
+            scoring_run_id=scoring_run_id or None,
+            candidate_id=candidate_id,
+            delta_vs_baseline=candidate_score - baseline_score,
+        )
 
 
 def _compact_scoring_health_doc(value: Any) -> dict[str, Any]:

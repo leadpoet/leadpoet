@@ -34,6 +34,7 @@ from gateway.research_lab.store import (
     create_private_model_version_event,
     create_private_repo_commit_event,
     create_public_benchmark_report,
+    create_scoring_category_result,
     create_scoring_dispatch_event,
     insert_row,
     select_many,
@@ -2104,9 +2105,18 @@ class ResearchLabPromotionController:
         )
         if not isinstance(gate, Mapping):
             return {"status": "skipped_no_private_holdout_gate"}
-        if str(gate.get("decision") or "") != "private_holdout_approved" or not bool(
-            gate.get("private_holdout_evaluated")
-        ):
+        conditional_required = bool(gate.get("conditional_validation_required"))
+        gate_approved = (
+            str(gate.get("decision") or "") == "conditional_validation_approved"
+            and bool(gate.get("private_holdout_evaluated"))
+            and bool(gate.get("conditional_holdout_evaluated"))
+            if conditional_required
+            else (
+                str(gate.get("decision") or "") == "private_holdout_approved"
+                and bool(gate.get("private_holdout_evaluated"))
+            )
+        )
+        if not gate_approved:
             return {"status": "skipped_private_holdout_not_approved"}
         source_candidate_artifact_hash = str(score_bundle.get("candidate_artifact_hash") or "")
         activation_differs_from_scored_candidate = bool(
@@ -2170,10 +2180,23 @@ class ResearchLabPromotionController:
             per_icp_summaries=per_icp_summaries,
             rolling_window_hash=rolling_window_hash,
         )
+        category_assignment = (
+            _candidate_category_assignment_from_baseline(
+                baseline_score_summary_doc=baseline_doc,
+                per_icp_summaries=per_icp_summaries,
+                rolling_window_hash=rolling_window_hash,
+            )
+            if conditional_required
+            else None
+        )
+        if conditional_required and category_assignment is None:
+            raise RuntimeError(
+                "promoted benchmark bridge missing conditional category assignment"
+            )
         promotion_metric = promotion_improvement_metric(score_bundle).event_doc()
         source_score_bundle_id = str(score_bundle_row.get("score_bundle_id") or "")
         score_summary_doc = {
-            "schema_version": "1.0",
+            "schema_version": "1.1" if conditional_required else "1.0",
             "benchmark_quality": "passed",
             "benchmark_attempt": benchmark_attempt,
             "rolling_window_hash": rolling_window_hash,
@@ -2197,6 +2220,11 @@ class ResearchLabPromotionController:
             "supersedes_until_daily_rebenchmark": True,
             "promotion_metric": promotion_metric,
         }
+        if category_assignment is not None:
+            score_summary_doc["category_assignment"] = category_assignment
+            score_summary_doc["category_scores"] = dict(
+                category_assignment["category_scores"]
+            )
 
         if existing_benchmark is not None:
             benchmark = existing_benchmark
@@ -2229,6 +2257,13 @@ class ResearchLabPromotionController:
                 score_summary_doc=score_summary_doc,
             )
             benchmark_status = "created"
+
+        if category_assignment is not None:
+            await _persist_promoted_baseline_category_results(
+                category_assignment,
+                source_bundle_ref=str(benchmark["benchmark_bundle_id"]),
+                rolling_window_hash=rolling_window_hash,
+            )
 
         public_report = await self._create_or_reuse_promoted_public_report(
             benchmark_date=benchmark_date,
@@ -3856,6 +3891,49 @@ def _candidate_failure_categories(
     return sorted(categories)
 
 
+async def _persist_promoted_baseline_category_results(
+    assignment: Mapping[str, Any],
+    *,
+    source_bundle_ref: str,
+    rolling_window_hash: str,
+) -> None:
+    counts = (
+        assignment.get("category_counts")
+        if isinstance(assignment.get("category_counts"), Mapping)
+        else {}
+    )
+    scores = (
+        assignment.get("category_scores")
+        if isinstance(assignment.get("category_scores"), Mapping)
+        else {}
+    )
+    assignment_hash = str(assignment.get("assignment_hash") or "")
+    policy_hash = str(assignment.get("policy_hash") or "")
+    if not assignment_hash or not policy_hash:
+        raise RuntimeError("promoted conditional baseline commitments are missing")
+    for category in ("public", "private", "conditional"):
+        await create_scoring_category_result(
+            source_kind="baseline",
+            source_bundle_ref=source_bundle_ref,
+            category=category,
+            assignment_hash=assignment_hash,
+            policy_hash=policy_hash,
+            rolling_window_hash=rolling_window_hash,
+            icp_count=int(counts.get(category) or 0),
+            aggregate_score=float(scores.get(category) or 0.0),
+        )
+    await create_scoring_category_result(
+        source_kind="baseline",
+        source_bundle_ref=source_bundle_ref,
+        category="overall",
+        assignment_hash=assignment_hash,
+        policy_hash=policy_hash,
+        rolling_window_hash=rolling_window_hash,
+        icp_count=sum(int(counts.get(name) or 0) for name in ("public", "private", "conditional")),
+        aggregate_score=float(assignment.get("aggregate_score") or 0.0),
+    )
+
+
 def _candidate_visibility_split_from_baseline(
     *,
     baseline_score_summary_doc: Mapping[str, Any],
@@ -3900,7 +3978,10 @@ def _candidate_visibility_split_from_baseline(
             )
     public_count = sum(1 for item in items if str(item.get("visibility") or "") == "public")
     private_count = sum(1 for item in items if str(item.get("visibility") or "") == "private")
-    return {
+    conditional_count = sum(
+        1 for item in items if str(item.get("visibility") or "") == "conditional"
+    )
+    result = {
         "schema_version": str(split.get("schema_version") or "1.0"),
         "split_policy": str(split.get("split_policy") or "source_baseline_visibility_split"),
         "rolling_window_hash": rolling_window_hash,
@@ -3909,6 +3990,80 @@ def _candidate_visibility_split_from_baseline(
         "public_strength_counts": dict(split.get("public_strength_counts") or {}),
         "private_strength_counts": dict(split.get("private_strength_counts") or {}),
         "items": items,
+    }
+    if conditional_count:
+        result["schema_version"] = "1.1"
+        result["conditional_count"] = conditional_count
+        result["assignment_hash"] = str(split.get("assignment_hash") or "")
+        result["policy_hash"] = str(split.get("policy_hash") or "")
+    return result
+
+
+def _candidate_category_assignment_from_baseline(
+    *,
+    baseline_score_summary_doc: Mapping[str, Any],
+    per_icp_summaries: Sequence[Mapping[str, Any]],
+    rolling_window_hash: str,
+) -> dict[str, Any] | None:
+    source = (
+        baseline_score_summary_doc.get("category_assignment")
+        if isinstance(baseline_score_summary_doc.get("category_assignment"), Mapping)
+        else None
+    )
+    if not isinstance(source, Mapping):
+        return None
+    source_items = source.get("items") if isinstance(source.get("items"), list) else []
+    score_by_ref = {
+        str(item.get("icp_ref") or ""): round(float(item.get("score") or 0.0), 6)
+        for item in per_icp_summaries
+        if str(item.get("icp_ref") or "").strip()
+    }
+    if not source_items or len(score_by_ref) != len(source_items):
+        raise RuntimeError("candidate category assignment does not cover the source bank")
+    items: list[dict[str, Any]] = []
+    for item in source_items:
+        if not isinstance(item, Mapping):
+            raise RuntimeError("source category assignment item is invalid")
+        ref = str(item.get("icp_ref") or "")
+        if ref not in score_by_ref:
+            raise RuntimeError(f"candidate category assignment missing ICP ref: {ref}")
+        items.append({**dict(item), "score": score_by_ref[ref]})
+    categories = ("public", "private", "conditional")
+    category_counts = {
+        category: sum(1 for item in items if item.get("category") == category)
+        for category in categories
+    }
+    if any(count <= 0 for count in category_counts.values()):
+        raise RuntimeError("candidate category assignment has an empty category")
+    category_scores = {
+        category: round(
+            _average(
+                [
+                    float(item["score"])
+                    for item in items
+                    if item.get("category") == category
+                ]
+            ),
+            6,
+        )
+        for category in categories
+    }
+    assignment_doc = {
+        "schema_version": str(source.get("schema_version") or "research_lab_icp_category_assignment.v1"),
+        "rolling_window_hash": str(rolling_window_hash),
+        "policy_hash": str(source.get("policy_hash") or ""),
+        "selection_policy": str(source.get("selection_policy") or ""),
+        "category_counts": category_counts,
+        "category_scores": category_scores,
+        "aggregate_score": round(_average(list(score_by_ref.values())), 6),
+        "items": items,
+        "source_assignment_hash": str(source.get("assignment_hash") or ""),
+        "selection_frozen_from_source_baseline": True,
+    }
+    return {
+        **assignment_doc,
+        "assignment_hash": sha256_json(assignment_doc),
+        "policy": dict(source.get("policy") or {}),
     }
 
 
@@ -3948,6 +4103,17 @@ def _build_promoted_public_benchmark_report_doc(
     )
     public_count = int(visibility_split.get("public_count") or len(public_icps))
     private_count = int(visibility_split.get("private_count") or 0)
+    conditional_count = int(visibility_split.get("conditional_count") or 0)
+    public_refs = {
+        str(item.get("icp_ref") or "")
+        for item in visibility_split.get("items") or ()
+        if isinstance(item, Mapping) and item.get("visibility") == "public"
+    }
+    public_scores = [
+        float(item.get("score") or 0.0)
+        for item in per_icp_summaries
+        if str(item.get("icp_ref") or "") in public_refs
+    ]
     report.update(
         {
             "source": "promoted_candidate_score_bundle",
@@ -3974,6 +4140,19 @@ def _build_promoted_public_benchmark_report_doc(
             ),
         }
     )
+    if conditional_count:
+        report.update(
+            {
+                "schema_version": "1.3",
+                "public_score": round(_average(public_scores), 6),
+                "conditional_holdout_icp_count": conditional_count,
+                "redaction_policy": {
+                    **dict(report.get("redaction_policy") or {}),
+                    "conditional_holdout_icp_text": "withheld",
+                    "private_and_conditional_scores": "withheld",
+                },
+            }
+        )
     report.pop("report_public_hash", None)
     if contains_secret_material(report):
         raise ValueError("promoted candidate public benchmark report contains forbidden material")
@@ -4015,9 +4194,12 @@ def _promoted_public_icps_from_source(
 def _public_visibility_split_from_private(visibility_split: Mapping[str, Any]) -> dict[str, Any]:
     items = visibility_split.get("items") if isinstance(visibility_split.get("items"), Sequence) else []
     safe_items: list[dict[str, Any]] = []
+    conditional_count = int(visibility_split.get("conditional_count") or 0)
     if isinstance(items, Sequence) and not isinstance(items, (str, bytes, bytearray)):
         for item in items:
             if not isinstance(item, Mapping):
+                continue
+            if conditional_count and str(item.get("visibility") or "") != "public":
                 continue
             safe_items.append(
                 {
@@ -4032,7 +4214,7 @@ def _public_visibility_split_from_private(visibility_split: Mapping[str, Any]) -
                     "strength_label": str(item.get("strength_label") or "unknown"),
                 }
             )
-    return {
+    result = {
         "schema_version": str(visibility_split.get("schema_version") or "1.0"),
         "split_policy": str(visibility_split.get("split_policy") or ""),
         "rolling_window_hash": str(visibility_split.get("rolling_window_hash") or ""),
@@ -4042,6 +4224,10 @@ def _public_visibility_split_from_private(visibility_split: Mapping[str, Any]) -
         "private_strength_counts": dict(visibility_split.get("private_strength_counts") or {}),
         "items": safe_items,
     }
+    if conditional_count:
+        result["schema_version"] = "1.1"
+        result["conditional_count"] = conditional_count
+    return result
 
 
 def _promoted_public_bucket_rows(
@@ -4056,27 +4242,29 @@ def _promoted_public_bucket_rows(
             if isinstance(item, Mapping):
                 split_by_ref[str(item.get("icp_ref") or "")] = item
     rows: list[dict[str, Any]] = []
+    redact_hidden = int(visibility_split.get("conditional_count") or 0) > 0
     for index, summary in enumerate(per_icp_summaries, start=1):
         ref = str(summary.get("icp_ref") or "")
         split = split_by_ref.get(ref, {})
         diagnostics = summary.get("diagnostics") if isinstance(summary.get("diagnostics"), Mapping) else {}
         score = float(summary.get("score") or 0.0)
         company_count = int(summary.get("company_count") or 0)
+        is_public = str(split.get("visibility") or "") == "public"
         rows.append(
             {
                 "item_rank": int(split.get("item_rank") or index),
-                "icp_ref": ref,
-                "visibility": str(split.get("visibility") or "summary_only"),
-                "strength_label": str(split.get("strength_label") or "unknown"),
-                "industry_bucket": _summary_bucket_value(summary, "industry"),
-                "sub_industry_bucket": _summary_bucket_value(summary, "sub_industry"),
-                "geography_bucket": _summary_bucket_value(summary, "geography_bucket"),
-                "company_size_bucket": _summary_bucket_value(summary, "company_size_bucket"),
-                "intent_category_bucket": _summary_bucket_value(summary, "intent_category_bucket"),
-                "score_band": _score_band(score),
-                "company_count_band": _count_band(company_count),
+                "icp_ref": ref if is_public or not redact_hidden else "",
+                "visibility": str(split.get("visibility") or "summary_only") if is_public or not redact_hidden else "withheld",
+                "strength_label": str(split.get("strength_label") or "unknown") if is_public or not redact_hidden else "withheld",
+                "industry_bucket": _summary_bucket_value(summary, "industry") if is_public or not redact_hidden else "withheld",
+                "sub_industry_bucket": _summary_bucket_value(summary, "sub_industry") if is_public or not redact_hidden else "withheld",
+                "geography_bucket": _summary_bucket_value(summary, "geography_bucket") if is_public or not redact_hidden else "withheld",
+                "company_size_bucket": _summary_bucket_value(summary, "company_size_bucket") if is_public or not redact_hidden else "withheld",
+                "intent_category_bucket": _summary_bucket_value(summary, "intent_category_bucket") if is_public or not redact_hidden else "withheld",
+                "score_band": _score_band(score) if is_public or not redact_hidden else "withheld",
+                "company_count_band": _count_band(company_count) if is_public or not redact_hidden else "withheld",
                 "failure_categories": list(diagnostics.get("failure_categories") or [])
-                if str(split.get("visibility") or "") == "public"
+                if is_public
                 else [],
             }
         )

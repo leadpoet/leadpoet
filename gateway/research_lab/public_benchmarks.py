@@ -58,6 +58,7 @@ def build_public_benchmark_report(
     public_weak_per_day: int = DEFAULT_PUBLIC_WEAK_PER_DAY,
     public_total_icps: Optional[int] = None,
     public_weak_total: Optional[int] = None,
+    category_assignment: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a sanitized report from private daily benchmark summaries.
 
@@ -67,19 +68,27 @@ def build_public_benchmark_report(
     stay withheld.
     """
 
-    split = (
-        _build_scored_visibility_rows(
+    if category_assignment:
+        split = _build_scored_category_rows(
             rolling_window_hash=rolling_window_hash,
             benchmark_items=benchmark_items,
             per_icp_summaries=per_icp_summaries,
-            public_icps_per_day=public_icps_per_day,
-            public_weak_per_day=public_weak_per_day,
-            public_total_icps=public_total_icps,
-            public_weak_total=public_weak_total,
+            category_assignment=category_assignment,
         )
-        if benchmark_items
-        else []
-    )
+    else:
+        split = (
+            _build_scored_visibility_rows(
+                rolling_window_hash=rolling_window_hash,
+                benchmark_items=benchmark_items,
+                per_icp_summaries=per_icp_summaries,
+                public_icps_per_day=public_icps_per_day,
+                public_weak_per_day=public_weak_per_day,
+                public_total_icps=public_total_icps,
+                public_weak_total=public_weak_total,
+            )
+            if benchmark_items
+            else []
+        )
     split_by_ref = {str(row["icp_ref"]): row for row in split}
     bucket_rows: list[dict[str, Any]] = []
     public_icps: list[dict[str, Any]] = []
@@ -101,16 +110,48 @@ def build_public_benchmark_report(
         bucket_rows.append(
             {
                 "item_rank": index,
-                "icp_ref": icp_ref,
-                "visibility": str(split_row.get("visibility")) if split_row else "summary_only",
-                "strength_label": str(split_row.get("strength_label")) if split_row else "unknown",
-                "industry_bucket": _bucket_text(summary.get("industry")),
-                "sub_industry_bucket": _bucket_text(summary.get("sub_industry")),
-                "geography_bucket": _bucket_text(summary.get("geography_bucket") or summary.get("country")),
-                "company_size_bucket": _bucket_text(summary.get("company_size_bucket")),
-                "intent_category_bucket": _bucket_text(summary.get("intent_category_bucket")),
-                "score_band": band,
-                "company_count_band": _count_band(company_count),
+                "icp_ref": icp_ref if is_public or not category_assignment else "",
+                "visibility": (
+                    "public" if is_public else "withheld"
+                ) if category_assignment else (
+                    str(split_row.get("visibility")) if split_row else "summary_only"
+                ),
+                "strength_label": (
+                    str(split_row.get("strength_label"))
+                    if split_row and (is_public or not category_assignment)
+                    else "withheld" if category_assignment else "unknown"
+                ),
+                "industry_bucket": (
+                    _bucket_text(summary.get("industry"))
+                    if is_public or not category_assignment
+                    else "withheld"
+                ),
+                "sub_industry_bucket": (
+                    _bucket_text(summary.get("sub_industry"))
+                    if is_public or not category_assignment
+                    else "withheld"
+                ),
+                "geography_bucket": (
+                    _bucket_text(summary.get("geography_bucket") or summary.get("country"))
+                    if is_public or not category_assignment
+                    else "withheld"
+                ),
+                "company_size_bucket": (
+                    _bucket_text(summary.get("company_size_bucket"))
+                    if is_public or not category_assignment
+                    else "withheld"
+                ),
+                "intent_category_bucket": (
+                    _bucket_text(summary.get("intent_category_bucket"))
+                    if is_public or not category_assignment
+                    else "withheld"
+                ),
+                "score_band": band if is_public or not category_assignment else "withheld",
+                "company_count_band": (
+                    _count_band(company_count)
+                    if is_public or not category_assignment
+                    else "withheld"
+                ),
                 "failure_categories": failures if is_public else [],
             }
         )
@@ -170,6 +211,26 @@ def build_public_benchmark_report(
             "private_artifacts": "withheld",
         },
     }
+    if category_assignment:
+        public_scores = [
+            float(row.get("score") or 0.0)
+            for row in split
+            if row.get("visibility") == "public"
+        ]
+        report.update(
+            {
+                "schema_version": "1.3",
+                "public_score": round(_average(public_scores), 6),
+                "conditional_holdout_icp_count": int(
+                    split_summary.get("conditional_count") or 0
+                ),
+                "redaction_policy": {
+                    **report["redaction_policy"],
+                    "conditional_holdout_icp_text": "withheld",
+                    "private_and_conditional_scores": "withheld",
+                },
+            }
+        )
     if contains_secret_material(report):
         raise ValueError("public benchmark report contains forbidden private or secret material")
     report["report_public_hash"] = sha256_json(report)
@@ -241,7 +302,7 @@ def sanitize_benchmark_item_summary(
         breakdowns=score_breakdowns,
         signal_details=signal_details,
     )
-    return {
+    result = {
         "icp_ref": str(item.get("icp_ref") or ""),
         "icp_hash": str(item.get("icp_hash") or ""),
         "score": round(float(score), 6),
@@ -262,6 +323,7 @@ def sanitize_benchmark_item_summary(
             "rejection_reasons": stats["rejection_reasons"],
         },
     }
+    return result
 
 
 def _build_scored_visibility_rows(
@@ -359,6 +421,61 @@ def _build_scored_visibility_rows(
     return sorted(rows, key=lambda row: int(row["item_rank"]))
 
 
+def _build_scored_category_rows(
+    *,
+    rolling_window_hash: str,
+    benchmark_items: Sequence[Mapping[str, Any]],
+    per_icp_summaries: Sequence[Mapping[str, Any]],
+    category_assignment: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if len(benchmark_items) != len(per_icp_summaries):
+        raise ValueError("benchmark_items and per_icp_summaries must have the same length")
+    if str(category_assignment.get("rolling_window_hash") or "") != str(rolling_window_hash):
+        raise ValueError("category assignment rolling window hash mismatch")
+    assigned_items = (
+        category_assignment.get("items")
+        if isinstance(category_assignment.get("items"), list)
+        else []
+    )
+    assigned_by_ref = {
+        str(item.get("icp_ref") or ""): item
+        for item in assigned_items
+        if isinstance(item, Mapping) and str(item.get("icp_ref") or "")
+    }
+    if len(assigned_by_ref) != len(benchmark_items):
+        raise ValueError("category assignment does not cover the complete benchmark bank")
+    rows: list[dict[str, Any]] = []
+    for index, (item, summary) in enumerate(zip(benchmark_items, per_icp_summaries), start=1):
+        icp_ref = str(item.get("icp_ref") or summary.get("icp_ref") or "")
+        assigned = assigned_by_ref.get(icp_ref)
+        if assigned is None:
+            raise ValueError(f"category assignment missing ICP ref: {icp_ref}")
+        icp_hash = str(item.get("icp_hash") or summary.get("icp_hash") or "")
+        if str(assigned.get("icp_hash") or "") != icp_hash:
+            raise ValueError(f"category assignment ICP hash mismatch: {icp_ref}")
+        category = str(assigned.get("category") or "")
+        if category not in {"public", "private", "conditional"}:
+            raise ValueError(f"category assignment has invalid category: {category}")
+        rows.append(
+            {
+                "item_rank": index,
+                "item": dict(item),
+                "summary": dict(summary),
+                "icp_ref": icp_ref,
+                "icp_hash": icp_hash,
+                "set_id": _set_id_from_item(item),
+                "day_index": int(item.get("day_index") or 0),
+                "day_rank": int(item.get("day_rank") or index),
+                "score": float(summary.get("score") or 0.0),
+                "rolling_window_hash": str(rolling_window_hash),
+                "visibility": category,
+                "strength_label": str(assigned.get("strength_label") or ""),
+                "split_policy": str(category_assignment.get("selection_policy") or ""),
+            }
+        )
+    return rows
+
+
 def _public_split_unbiased_enabled() -> bool:
     """Env gate for the unbiased public split (default ON: the biased split is a defect)."""
     raw = os.getenv(PUBLIC_SPLIT_UNBIASED_ENV, "true").strip().lower()
@@ -380,9 +497,10 @@ def _public_selection_key(row: Mapping[str, Any]) -> str:
 def _visibility_split_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     public_rows = [row for row in rows if row.get("visibility") == "public"]
     private_rows = [row for row in rows if row.get("visibility") == "private"]
+    conditional_rows = [row for row in rows if row.get("visibility") == "conditional"]
     public_strength = Counter(str(row.get("strength_label")) for row in public_rows)
     private_strength = Counter(str(row.get("strength_label")) for row in private_rows)
-    return {
+    result = {
         "schema_version": "1.0",
         "split_policy": str(rows[0].get("split_policy") if rows else "") or SPLIT_POLICY,
         "rolling_window_hash": str(rows[0].get("rolling_window_hash") if rows else ""),
@@ -391,6 +509,10 @@ def _visibility_split_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, An
         "public_strength_counts": dict(sorted(public_strength.items())),
         "private_strength_counts": dict(sorted(private_strength.items())),
     }
+    if conditional_rows:
+        result["schema_version"] = "1.1"
+        result["conditional_count"] = len(conditional_rows)
+    return result
 
 
 def _public_icp_entry(row: Mapping[str, Any]) -> dict[str, Any]:

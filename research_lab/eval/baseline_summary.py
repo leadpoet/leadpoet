@@ -189,8 +189,13 @@ def build_baseline_score_summary(
     max_unresolved_icps: int,
     day_jump_points: float | None,
     elapsed_seconds: float,
+    conditional_validation_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     from gateway.research_lab.public_benchmarks import build_benchmark_visibility_split
+    from research_lab.eval.conditional_validation import (
+        build_conditional_category_assignment,
+        category_assignment_as_visibility_split,
+    )
 
     aggregate_score = _average(
         [summary["score"] for summary in per_icp_summaries]
@@ -202,14 +207,9 @@ def build_baseline_score_summary(
         max_unresolved_icps=max_unresolved_icps,
         day_jump_points=day_jump_points,
     )
-    visibility_split = build_benchmark_visibility_split(
-        rolling_window_hash=rolling_window_hash,
-        benchmark_items=benchmark_items,
-        per_icp_summaries=per_icp_summaries,
-        public_icps_per_day=public_icps_per_day,
-        public_weak_per_day=public_weak_per_day,
-        public_total_icps=public_total_icps,
-        public_weak_total=public_weak_total,
+    conditional_enabled = bool(
+        isinstance(conditional_validation_policy, Mapping)
+        and str(conditional_validation_policy.get("mode") or "") == "enforce"
     )
     serving_model_version = baseline_serving_model_version_doc(
         artifact=artifact_manifest,
@@ -218,6 +218,28 @@ def build_baseline_score_summary(
         rolling_window_hash=rolling_window_hash,
         evaluation_epoch=evaluation_epoch,
     )
+    category_assignment: dict[str, Any] | None = None
+    if conditional_enabled:
+        category_assignment = build_conditional_category_assignment(
+            rolling_window_hash=rolling_window_hash,
+            benchmark_items=benchmark_items,
+            per_icp_summaries=per_icp_summaries,
+            policy=conditional_validation_policy,
+            baseline_serving_model_version_hash=str(
+                serving_model_version["version_stamp_hash"]
+            ),
+        )
+        visibility_split = category_assignment_as_visibility_split(category_assignment)
+    else:
+        visibility_split = build_benchmark_visibility_split(
+            rolling_window_hash=rolling_window_hash,
+            benchmark_items=benchmark_items,
+            per_icp_summaries=per_icp_summaries,
+            public_icps_per_day=public_icps_per_day,
+            public_weak_per_day=public_weak_per_day,
+            public_total_icps=public_total_icps,
+            public_weak_total=public_weak_total,
+        )
     enriched_summaries = with_baseline_evaluation_contexts(
         per_icp_summaries,
         benchmark_date=benchmark_date,
@@ -233,7 +255,7 @@ def build_baseline_score_summary(
         aggregate_score=aggregate_score,
     )
     score_summary_doc = {
-        "schema_version": "1.0",
+        "schema_version": "1.1" if category_assignment is not None else "1.0",
         "benchmark_quality": "passed",
         "benchmark_attempt": int(benchmark_attempt),
         "rolling_window_hash": str(rolling_window_hash),
@@ -245,7 +267,7 @@ def build_baseline_score_summary(
         "baseline_health": baseline_health,
         "elapsed_seconds": round(float(elapsed_seconds), 3),
     }
-    return {
+    result = {
         "aggregate_score": aggregate_score,
         "baseline_health": baseline_health,
         "serving_model_version": serving_model_version,
@@ -254,3 +276,9 @@ def build_baseline_score_summary(
         "daily_noise_budget": noise_budget,
         "score_summary_doc": score_summary_doc,
     }
+    if category_assignment is not None:
+        score_summary_doc["category_assignment"] = category_assignment
+        score_summary_doc["category_scores"] = dict(category_assignment["category_scores"])
+        result["category_assignment"] = category_assignment
+        result["category_scores"] = dict(category_assignment["category_scores"])
+    return result

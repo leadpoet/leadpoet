@@ -31,7 +31,7 @@
     "reward_path"
   ],
   "properties": {
-    "schema_version": { "const": "1.0" },
+    "schema_version": { "enum": ["1.0", "1.1"] },
     "bundle_type": { "const": "research_lab_evaluation_score_bundle" },
     "run_id": { "type": "string", "format": "uuid" },
     "ticket_id": { "type": "string", "format": "uuid" },
@@ -52,6 +52,16 @@
     },
     "execution_trace_ref": { "type": "string", "minLength": 1 },
     "cost_ledger_ref": { "type": "string", "minLength": 1 },
+    "candidate_model_manifest_hash": { "$ref": "#/$defs/sha256" },
+    "candidate_source_diff_hash": { "$ref": "#/$defs/sha256" },
+    "candidate_build_ref": { "type": "string" },
+    "serving_model_version": { "type": "object" },
+    "private_holdout_gate": { "type": "object" },
+    "scoring_health": { "type": "object" },
+    "provider_excluded_icp_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "aggregates": {
       "type": "object",
       "required": [

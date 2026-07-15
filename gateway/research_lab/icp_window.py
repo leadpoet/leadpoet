@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from research_lab.canonical import sha256_json
+from research_lab.eval.conditional_validation import normalized_icp_intent_signature
 
 
 WINDOW_MODE_LEGACY_ROLLING = "legacy_rolling"
@@ -55,6 +56,8 @@ def select_rolling_icp_window_from_sets(
     fresh_icp_count: int = 10,
     retained_icp_count: int = 10,
     min_new_icp_count: int | None = None,
+    required_total_icps: int | None = None,
+    require_unique_icps: bool = False,
     allow_partial: bool = False,
     required_fresh_set_id: int | None = None,
     require_fresh_set_active_at: datetime | None = None,
@@ -95,6 +98,8 @@ def select_rolling_icp_window_from_sets(
         fresh_icp_count=fresh_icp_count,
         retained_icp_count=retained_icp_count,
         min_new_icp_count=min_new_icp_count,
+        required_total_icps=required_total_icps,
+        require_unique_icps=require_unique_icps,
         allow_partial=allow_partial,
     )
 
@@ -261,13 +266,21 @@ def _select_hybrid_fresh_retained_icp_window(
     fresh_icp_count: int,
     retained_icp_count: int,
     min_new_icp_count: int | None,
+    required_total_icps: int | None,
+    require_unique_icps: bool,
     allow_partial: bool,
 ) -> ResearchLabRollingIcpWindow:
     if fresh_icp_count <= 0 or retained_icp_count <= 0:
         raise ValueError("fresh_icp_count and retained_icp_count must be positive")
-    expected_total = int(days) * int(icps_per_day)
+    expected_total = (
+        int(required_total_icps)
+        if required_total_icps is not None
+        else int(days) * int(icps_per_day)
+    )
     if fresh_icp_count + retained_icp_count != expected_total:
-        raise ValueError("fresh_icp_count + retained_icp_count must equal days * icps_per_day")
+        raise ValueError(
+            "fresh_icp_count + retained_icp_count must equal the required ICP total"
+        )
     selected_sets = list(normalized_rows[:days])
     if len(selected_sets) < 2 and not allow_partial:
         raise RollingIcpWindowUnavailable(
@@ -278,23 +291,45 @@ def _select_hybrid_fresh_retained_icp_window(
 
     fresh_set = selected_sets[0]
     retained_sets = selected_sets[1:]
-    fresh_selected = _select_icps_for_day(fresh_set["icps"], icps_per_day=fresh_icp_count)
+    fresh_selected = _select_icps_for_day(
+        fresh_set["icps"],
+        icps_per_day=fresh_icp_count,
+        require_unique_icps=require_unique_icps,
+    )
     if len(fresh_selected) < fresh_icp_count and not allow_partial:
         raise RollingIcpWindowUnavailable(
             f"set_{fresh_set['set_id']}_requires_{fresh_icp_count}_fresh_icps_found_{len(fresh_selected)}"
         )
     selected_records: list[dict[str, Any]] = [
-        {"row": fresh_set, "icp": icp, "cohort": "fresh"}
+        {
+            "row": fresh_set,
+            "icp": icp,
+            "cohort": "fresh",
+            "intent_signal_signature": normalized_intent_signal_signature(icp),
+        }
         for icp in fresh_selected
     ]
     excluded_refs = {
         _icp_ref(fresh_set["set_id"], icp)
         for icp in fresh_selected
     }
+    excluded_hashes = (
+        {_content_icp_hash(icp) for icp in fresh_selected}
+        if require_unique_icps
+        else set()
+    )
+    excluded_intent_signatures = (
+        {normalized_intent_signal_signature(icp) for icp in fresh_selected}
+        if require_unique_icps
+        else set()
+    )
     retained_selected = _select_icps_across_sets(
         retained_sets,
         icp_count=retained_icp_count,
         excluded_refs=excluded_refs,
+        excluded_hashes=excluded_hashes,
+        excluded_intent_signatures=excluded_intent_signatures,
+        require_unique_icps=require_unique_icps,
         initial_seen_features=_seen_features_for_icps(fresh_selected),
     )
     if len(retained_selected) < retained_icp_count and not allow_partial:
@@ -308,19 +343,25 @@ def _select_hybrid_fresh_retained_icp_window(
             f"hybrid_icp_window_requires_{min_new}_new_icps_found_{len(fresh_selected)}"
         )
 
+    extra_doc = {
+        "window_mode": WINDOW_MODE_HYBRID_FRESH_RETAINED,
+        "fresh_set_id": int(fresh_set["set_id"]),
+        "fresh_icp_count": len(fresh_selected),
+        "retained_icp_count": len(retained_selected),
+        "min_new_icp_count": min_new,
+    }
+    if required_total_icps is not None:
+        extra_doc["required_icp_count"] = expected_total
+        extra_doc["unique_identity_policy"] = (
+            "ref_hash_normalized_intent_signature:v2"
+        )
     return _build_window_from_selected_records(
         selected_records,
         required_days=days,
         icps_per_day=icps_per_day,
         schema_version="1.1",
         selection_policy=SELECTION_POLICY_HYBRID,
-        extra_doc={
-            "window_mode": WINDOW_MODE_HYBRID_FRESH_RETAINED,
-            "fresh_set_id": int(fresh_set["set_id"]),
-            "fresh_icp_count": len(fresh_selected),
-            "retained_icp_count": len(retained_selected),
-            "min_new_icp_count": min_new,
-        },
+        extra_doc=extra_doc,
     )
 
 
@@ -333,6 +374,8 @@ async def fetch_rolling_icp_window(
     fresh_icp_count: int = 10,
     retained_icp_count: int = 10,
     min_new_icp_count: int | None = None,
+    required_total_icps: int | None = None,
+    require_unique_icps: bool = False,
     allow_partial: bool = False,
     required_fresh_set_id: int | None = None,
     require_fresh_set_active_at: datetime | None = None,
@@ -366,6 +409,8 @@ async def fetch_rolling_icp_window(
         fresh_icp_count=fresh_icp_count,
         retained_icp_count=retained_icp_count,
         min_new_icp_count=min_new_icp_count,
+        required_total_icps=required_total_icps,
+        require_unique_icps=require_unique_icps,
         allow_partial=allow_partial,
         required_fresh_set_id=required_fresh_set_id,
         require_fresh_set_active_at=require_fresh_set_active_at,
@@ -400,6 +445,12 @@ def intent_signal_signature(icp: Mapping[str, Any]) -> str:
         str(icp.get("product_service") or "").strip().lower(),
     ]
     return "|".join(part for part in fallback if part) or "unknown"
+
+
+def normalized_intent_signal_signature(icp: Mapping[str, Any]) -> str:
+    """Canonical strict-bank signature without changing legacy window bytes."""
+
+    return normalized_icp_intent_signature(icp)
 
 
 def _normalize_set_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -478,7 +529,10 @@ def _build_window_from_selected_records(
             icp_id = str(icp.get("icp_id") or f"icp_{set_id}_{rank:03d}")
             icp_hash = sha256_json({"icp": icp})
             icp_ref = f"qualification_private_icp_sets:{set_id}:{icp_id}"
-            signal_signature = intent_signal_signature(icp)
+            signal_signature = str(
+                record.get("intent_signal_signature")
+                or intent_signal_signature(icp)
+            )
             public_item = {
                 "rank": rank,
                 "day_index": day_index,
@@ -540,18 +594,45 @@ def _select_icps_across_sets(
     *,
     icp_count: int,
     excluded_refs: set[str],
+    excluded_hashes: set[str] | None = None,
+    excluded_intent_signatures: set[str] | None = None,
+    require_unique_icps: bool = False,
     initial_seen_features: Mapping[str, set[str]] | None = None,
 ) -> list[dict[str, Any]]:
+    excluded_hashes = set(excluded_hashes or ())
+    excluded_intent_signatures = set(excluded_intent_signatures or ())
     candidates: list[dict[str, Any]] = []
     for row in rows:
         set_id = int(row["set_id"])
-        for icp in _dedupe_and_rank_icps(row["icps"]):
+        for icp in _dedupe_and_rank_icps(
+            row["icps"],
+            require_unique_icps=require_unique_icps,
+        ):
             ref = _icp_ref(set_id, icp)
-            if ref in excluded_refs:
+            icp_hash = _content_icp_hash(icp)
+            signature = normalized_intent_signal_signature(icp)
+            if ref in excluded_refs or (
+                require_unique_icps
+                and (
+                    icp_hash in excluded_hashes
+                    or signature in excluded_intent_signatures
+                )
+            ):
                 continue
-            candidates.append({"row": row, "icp": icp, "cohort": "retained", "ref": ref})
+            candidates.append(
+                {
+                    "row": row,
+                    "icp": icp,
+                    "cohort": "retained",
+                    "ref": ref,
+                    "icp_hash": icp_hash,
+                    "intent_signal_signature": signature,
+                }
+            )
     selected: list[dict[str, Any]] = []
     seen_refs: set[str] = set(excluded_refs)
+    seen_hashes: set[str] = set(excluded_hashes)
+    seen_intent_signatures: set[str] = set(excluded_intent_signatures)
     seen_features = _empty_seen_features()
     for key, values in (initial_seen_features or {}).items():
         seen_features.setdefault(key, set()).update(str(value) for value in values if str(value).strip())
@@ -567,11 +648,21 @@ def _select_icps_across_sets(
             ),
         )
         ref = str(best.get("ref") or "")
-        if ref in seen_refs:
+        icp_hash = str(best.get("icp_hash") or "")
+        signature = str(best.get("intent_signal_signature") or "")
+        if ref in seen_refs or (
+            require_unique_icps
+            and (
+                icp_hash in seen_hashes
+                or signature in seen_intent_signatures
+            )
+        ):
             remaining.remove(best)
             continue
         selected.append(best)
         seen_refs.add(ref)
+        seen_hashes.add(icp_hash)
+        seen_intent_signatures.add(signature)
         seen_set_ids.add(int(best["row"]["set_id"]))
         remaining.remove(best)
         for key, value in _icp_features(best["icp"]).items():
@@ -580,8 +671,16 @@ def _select_icps_across_sets(
     return selected
 
 
-def _select_icps_for_day(icps: Sequence[Mapping[str, Any]], *, icps_per_day: int) -> list[dict[str, Any]]:
-    ranked = _dedupe_and_rank_icps(icps)
+def _select_icps_for_day(
+    icps: Sequence[Mapping[str, Any]],
+    *,
+    icps_per_day: int,
+    require_unique_icps: bool = False,
+) -> list[dict[str, Any]]:
+    ranked = _dedupe_and_rank_icps(
+        icps,
+        require_unique_icps=require_unique_icps,
+    )
     selected: list[dict[str, Any]] = []
     seen_features = _empty_seen_features()
     remaining = list(ranked)
@@ -601,14 +700,33 @@ def _select_icps_for_day(icps: Sequence[Mapping[str, Any]], *, icps_per_day: int
     return selected
 
 
-def _dedupe_and_rank_icps(icps: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _dedupe_and_rank_icps(
+    icps: Sequence[Mapping[str, Any]],
+    *,
+    require_unique_icps: bool = False,
+) -> list[dict[str, Any]]:
     deduped: dict[str, dict[str, Any]] = {}
-    for index, item in enumerate(icps):
+    if not require_unique_icps:
+        for index, item in enumerate(icps):
+            icp = dict(item)
+            identity = str(icp.get("icp_id") or _stable_icp_hash(icp) or index)
+            current = deduped.get(identity)
+            if current is None or _stable_icp_hash(icp) < _stable_icp_hash(current):
+                deduped[identity] = icp
+        return sorted(deduped.values(), key=_stable_icp_hash)
+
+    seen_hashes: set[str] = set()
+    seen_signatures: set[str] = set()
+    for item in sorted((dict(value) for value in icps), key=_stable_icp_hash):
         icp = dict(item)
-        identity = str(icp.get("icp_id") or _stable_icp_hash(icp) or index)
-        current = deduped.get(identity)
-        if current is None or _stable_icp_hash(icp) < _stable_icp_hash(current):
-            deduped[identity] = icp
+        icp_hash = _content_icp_hash(icp)
+        signature = normalized_intent_signal_signature(icp)
+        identity = str(icp.get("icp_id") or icp_hash)
+        if identity in deduped or icp_hash in seen_hashes or signature in seen_signatures:
+            continue
+        deduped[identity] = icp
+        seen_hashes.add(icp_hash)
+        seen_signatures.add(signature)
     return sorted(deduped.values(), key=_stable_icp_hash)
 
 
@@ -708,6 +826,10 @@ def _stable_icp_hash(icp: Mapping[str, Any]) -> str:
             "prompt": icp.get("prompt"),
         }
     )
+
+
+def _content_icp_hash(icp: Mapping[str, Any]) -> str:
+    return sha256_json({"icp": dict(icp)})
 
 
 def _normalize_feature(value: Any) -> str:

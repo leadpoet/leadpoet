@@ -35,6 +35,7 @@ from gateway.tee.scoring_executor import (
     OP_BUILD_SCORE_BUNDLE,
     OP_QUALIFICATION_COMPANY_SCORES,
     ScoringExecutionResult,
+    configuration_hash,
     execute_scoring_operation,
 )
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
@@ -366,6 +367,8 @@ class ScoringExecutorV2:
             return self._qualification_executor.aggregate_epoch(payload, context)
         if operation == OP_BUILD_BASELINE_SCORE_SUMMARY:
             self._validate_baseline_configuration(payload)
+        if operation == OP_BUILD_SCORE_BUNDLE:
+            self._validate_conditional_preliminary_ancestry(payload, context)
         with self._transport.scope(
             job_id=context.job_id,
             purpose=context.purpose,
@@ -454,6 +457,182 @@ class ScoringExecutorV2:
             raise ValueError(
                 "baseline policy differs from measured configuration"
             )
+        measured_conditional_policy = self._config.conditional_validation_policy()
+        supplied_conditional_policy = payload.get("conditional_validation_policy")
+        if measured_conditional_policy.enabled:
+            if supplied_conditional_policy != measured_conditional_policy.to_dict():
+                raise ValueError(
+                    "conditional validation policy differs from measured configuration"
+                )
+        elif supplied_conditional_policy is not None:
+            raise ValueError(
+                "conditional validation policy is disabled in measured configuration"
+            )
+
+    def _validate_conditional_preliminary_ancestry(
+        self,
+        payload: Mapping[str, Any],
+        context: ExecutionContextV2,
+    ) -> None:
+        extra = payload.get("extra_bundle_fields")
+        gate = extra.get("private_holdout_gate") if isinstance(extra, Mapping) else None
+        if not isinstance(gate, Mapping) or not bool(
+            gate.get("conditional_validation_required")
+        ):
+            return
+        if not bool(gate.get("conditional_holdout_evaluated")):
+            return
+        proof = gate.get("preliminary_promotion_gate")
+        required = {
+            "schema_version",
+            "status",
+            "preliminary_score_bundle_hash",
+            "score_bundle_receipt_hash",
+            "promotion_metric_receipt_hash",
+            "promotion_decision_receipt_hash",
+            "promotion_decision_output_root",
+            "candidate_artifact_hash",
+            "candidate_parent_artifact_hash",
+            "active_parent_artifact_hash",
+            "rolling_window_hash",
+            "category_assignment_hash",
+            "conditional_validation_policy_hash",
+            "scoring_configuration_hash",
+            "threshold_points",
+            "decision",
+            "proof_hash",
+        }
+        if not isinstance(proof, Mapping) or set(proof) != required:
+            raise ValueError("conditional preliminary promotion proof is invalid")
+        proof_body = {key: proof[key] for key in proof if key != "proof_hash"}
+        if (
+            proof.get("schema_version")
+            != "research_lab_preliminary_promotion_gate.v1"
+            or proof.get("proof_hash") != sha256_json(proof_body)
+            or proof.get("status") != "promotion_passed"
+        ):
+            raise ValueError("conditional preliminary promotion proof differs")
+        hash_fields = {
+            "preliminary_score_bundle_hash",
+            "score_bundle_receipt_hash",
+            "promotion_metric_receipt_hash",
+            "promotion_decision_receipt_hash",
+            "promotion_decision_output_root",
+            "candidate_artifact_hash",
+            "candidate_parent_artifact_hash",
+            "active_parent_artifact_hash",
+            "rolling_window_hash",
+            "category_assignment_hash",
+            "conditional_validation_policy_hash",
+            "scoring_configuration_hash",
+        }
+        if any(
+            not re.fullmatch(r"sha256:[0-9a-f]{64}", str(proof.get(field) or ""))
+            for field in hash_fields
+        ):
+            raise ValueError("conditional preliminary promotion proof hash is invalid")
+        decision = proof.get("decision")
+        if not isinstance(decision, Mapping) or set(decision) != {
+            "status",
+            "improvement_points",
+            "threshold_points",
+            "candidate_kind",
+            "auto_promotion_enabled",
+            "active_parent_matches",
+            "metric_rejection_status",
+        }:
+            raise ValueError("conditional preliminary promotion decision is invalid")
+        if (
+            decision.get("status") != "promotion_passed"
+            or decision.get("candidate_kind") != "image_build"
+            or decision.get("auto_promotion_enabled") is not True
+            or decision.get("active_parent_matches") is not True
+            or decision.get("metric_rejection_status") is not None
+        ):
+            raise ValueError("conditional preliminary promotion decision did not pass")
+        threshold = float(proof.get("threshold_points"))
+        if (
+            threshold != float(gate.get("threshold_points"))
+            or threshold != float(decision.get("threshold_points"))
+            or threshold != float(self._config.improvement_threshold_points)
+            or float(decision.get("improvement_points")) < threshold
+        ):
+            raise ValueError("conditional preliminary promotion threshold differs")
+        artifact_manifest = payload.get("artifact_manifest")
+        candidate_manifest = payload.get("candidate_artifact_manifest")
+        patch_manifest = payload.get("patch_manifest")
+        run_context = payload.get("run_context")
+        if not all(
+            isinstance(value, Mapping)
+            for value in (
+                artifact_manifest,
+                candidate_manifest,
+                patch_manifest,
+                run_context,
+            )
+        ):
+            raise ValueError("conditional preliminary promotion inputs are invalid")
+        candidate_parent = str(proof.get("candidate_parent_artifact_hash") or "")
+        if (
+            proof.get("candidate_artifact_hash")
+            != candidate_manifest.get("model_artifact_hash")
+            or candidate_parent != artifact_manifest.get("model_artifact_hash")
+            or candidate_parent != patch_manifest.get("parent_artifact_hash")
+            or proof.get("active_parent_artifact_hash") != candidate_parent
+            or proof.get("rolling_window_hash")
+            != str(run_context.get("rolling_window_hash") or "")
+            or proof.get("category_assignment_hash")
+            != gate.get("category_assignment_hash")
+            or proof.get("conditional_validation_policy_hash")
+            != gate.get("conditional_validation_policy_hash")
+            or proof.get("scoring_configuration_hash") != configuration_hash()
+        ):
+            raise ValueError("conditional preliminary promotion commitment differs")
+        expected_output_root = sha256_json({"decision": dict(decision)})
+        if proof.get("promotion_decision_output_root") != expected_output_root:
+            raise ValueError("conditional preliminary promotion output differs")
+        decision_hash = str(proof.get("promotion_decision_receipt_hash") or "")
+        if decision_hash not in set(getattr(context, "parent_receipt_hashes", ())):
+            raise ValueError("conditional preliminary promotion ancestry is missing")
+        matching_graphs = []
+        for graph in context.external_receipt_graphs:
+            receipts = {
+                str(receipt.get("receipt_hash") or ""): receipt
+                for receipt in graph.get("receipts") or ()
+                if isinstance(receipt, Mapping) and receipt.get("receipt_hash")
+            }
+            if decision_hash in receipts:
+                matching_graphs.append((graph, receipts))
+        if (
+            len(matching_graphs) != 1
+            or matching_graphs[0][0].get("root_receipt_hash") != decision_hash
+        ):
+            raise ValueError("conditional preliminary promotion ancestry is missing")
+        _, receipts = matching_graphs[0]
+        receipt = receipts[decision_hash]
+        metric_hash = str(proof.get("promotion_metric_receipt_hash") or "")
+        score_bundle_hash = str(proof.get("score_bundle_receipt_hash") or "")
+        metric_receipt = receipts.get(metric_hash)
+        score_bundle_receipt = receipts.get(score_bundle_hash)
+        if (
+            receipt.get("role") != "gateway_coordinator"
+            or receipt.get("purpose") != "research_lab.promotion_decision.v2"
+            or receipt.get("status") != "succeeded"
+            or receipt.get("output_root")
+            != proof.get("promotion_decision_output_root")
+            or receipt.get("parent_receipt_hashes") != [metric_hash]
+            or not isinstance(metric_receipt, Mapping)
+            or metric_receipt.get("role") != "gateway_coordinator"
+            or metric_receipt.get("purpose") != "research_lab.ranking.v2"
+            or metric_receipt.get("status") != "succeeded"
+            or metric_receipt.get("parent_receipt_hashes") != [score_bundle_hash]
+            or not isinstance(score_bundle_receipt, Mapping)
+            or score_bundle_receipt.get("role") != "gateway_scoring"
+            or score_bundle_receipt.get("purpose")
+            != "research_lab.candidate_score.v2"
+            or score_bundle_receipt.get("status") != "succeeded"
+        ):
+            raise ValueError("conditional preliminary promotion ancestry differs")
 
     async def _execute_source_add_judge(
         self,

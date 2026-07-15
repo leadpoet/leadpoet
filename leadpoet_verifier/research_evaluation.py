@@ -18,6 +18,7 @@ from .aggregation import aggregate_set_score, per_icp_normalized_score
 
 SCORE_BUNDLE_TYPE = "research_lab_evaluation_score_bundle"
 SCORE_BUNDLE_SCHEMA_VERSION = "1.0"
+SUPPORTED_SCORE_BUNDLE_SCHEMA_VERSIONS = ("1.0", "1.1")
 DEFAULT_LEADS_PER_ICP_NORMALIZER = 5
 DEFAULT_LCB_Z = 1.96
 
@@ -533,7 +534,10 @@ def build_research_evaluation_score_bundle(
     serving_model_version: Mapping[str, Any] | None = None,
     policy: Mapping[str, Any] | None = None,
     signature_ref: str = "",
+    schema_version: str = SCORE_BUNDLE_SCHEMA_VERSION,
 ) -> dict[str, Any]:
+    if schema_version not in SUPPORTED_SCORE_BUNDLE_SCHEMA_VERSIONS:
+        raise ValueError("unsupported score bundle schema version")
     aggregates = compute_evaluation_aggregates(
         per_icp_results,
         leads_per_icp_normalizer=int((policy or {}).get("leads_per_icp_normalizer", DEFAULT_LEADS_PER_ICP_NORMALIZER)),
@@ -561,7 +565,7 @@ def build_research_evaluation_score_bundle(
     else:
         gate = evaluate_improvement_gate(aggregates, policy)
     bundle = {
-        "schema_version": SCORE_BUNDLE_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "bundle_type": SCORE_BUNDLE_TYPE,
         "run_id": str(run_id),
         "ticket_id": str(ticket_id),
@@ -616,7 +620,7 @@ def verify_research_evaluation_score_bundle(
     errors: list[str] = []
     if _contains_secret_material(bundle):
         errors.append("score_bundle_contains_raw_secret_material")
-    if bundle.get("schema_version") != SCORE_BUNDLE_SCHEMA_VERSION:
+    if bundle.get("schema_version") not in SUPPORTED_SCORE_BUNDLE_SCHEMA_VERSIONS:
         errors.append("unsupported_score_bundle_schema_version")
     if bundle.get("bundle_type") != SCORE_BUNDLE_TYPE:
         errors.append("unsupported_score_bundle_type")

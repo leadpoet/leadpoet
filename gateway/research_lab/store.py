@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import logging
+import math
 import os
 from typing import Any, Iterable, Mapping
 from uuid import UUID, uuid4, uuid5, NAMESPACE_URL
@@ -1062,6 +1063,9 @@ async def create_private_model_benchmark_bundle(
     signature_ref: str,
     score_summary_doc: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    schema_version = str(score_summary_doc.get("schema_version") or "1.0")
+    if schema_version not in {"1.0", "1.1"}:
+        raise ValueError(f"unsupported private benchmark schema version: {schema_version}")
     payload = {
         "benchmark_date": benchmark_date,
         "private_model_artifact_hash": private_model_artifact_hash,
@@ -1100,7 +1104,7 @@ async def create_private_model_benchmark_bundle(
         return existing, event
     row = {
         "benchmark_bundle_id": benchmark_bundle_id,
-        "schema_version": "1.0",
+        "schema_version": schema_version,
         **payload,
         "benchmark_bundle_hash": benchmark_bundle_hash,
         "anchored_hash": benchmark_bundle_hash,
@@ -2053,6 +2057,135 @@ async def create_candidate_evaluation_event(
     )
 
 
+_CONDITIONAL_VALIDATION_EVENT_TYPES = {
+    "preliminary_gate_passed",
+    "preliminary_gate_failed",
+    "conditional_started",
+    "retryable_failure",
+    "conditional_completed",
+    "final_pass",
+    "final_fail",
+}
+
+
+async def create_conditional_validation_event(
+    *,
+    candidate_id: str,
+    event_type: str,
+    assignment_hash: str,
+    policy_hash: str,
+    rolling_window_hash: str,
+    baseline_benchmark_bundle_id: str,
+    source_ref: str,
+    decision_score: float | None = None,
+    threshold_points: float | None = None,
+    queue_generation_id: str | None = None,
+    source_score_bundle_id: str | None = None,
+    failure_class: str | None = None,
+    event_doc: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Append one private conditional-validation lifecycle event idempotently."""
+
+    normalized_type = str(event_type or "").strip()
+    if normalized_type not in _CONDITIONAL_VALIDATION_EVENT_TYPES:
+        raise ValueError(f"unsupported conditional validation event: {normalized_type}")
+    score = float(decision_score) if decision_score is not None else None
+    threshold = float(threshold_points) if threshold_points is not None else None
+    if score is not None and (not math.isfinite(score) or score < 0.0 or score > 100.0):
+        raise ValueError("conditional validation decision score must be finite and within 0-100")
+    if threshold is not None and (
+        not math.isfinite(threshold) or threshold < 0.0 or threshold > 100.0
+    ):
+        raise ValueError("conditional validation threshold must be finite and within 0-100")
+    if not str(source_ref or "").strip():
+        raise ValueError("conditional validation event requires source_ref")
+
+    payload = {
+        "schema_version": "1.1",
+        "candidate_id": str(candidate_id),
+        "event_type": normalized_type,
+        "assignment_hash": str(assignment_hash),
+        "policy_hash": str(policy_hash),
+        "rolling_window_hash": str(rolling_window_hash),
+        "baseline_benchmark_bundle_id": str(baseline_benchmark_bundle_id),
+        "source_ref": str(source_ref),
+        "decision_score": round(score, 6) if score is not None else None,
+        "threshold_points": round(threshold, 6) if threshold is not None else None,
+        "queue_generation_id": str(queue_generation_id) if queue_generation_id else None,
+        "source_score_bundle_id": (
+            str(source_score_bundle_id) if source_score_bundle_id else None
+        ),
+        "failure_class": str(failure_class or "") or None,
+        "event_doc": dict(event_doc or {}),
+    }
+    event_hash = canonical_hash(payload)
+    event_id = deterministic_uuid("conditional_validation", event_hash)
+
+    if normalized_type == "retryable_failure":
+        existing_filters = (("event_id", event_id),)
+    else:
+        existing_filters = (
+            ("candidate_id", str(candidate_id)),
+            ("event_type", normalized_type),
+            ("assignment_hash", str(assignment_hash)),
+        )
+    existing = await select_one(
+        "research_lab_conditional_validation_events",
+        filters=existing_filters,
+    )
+    if existing is not None:
+        _validate_conditional_validation_event(existing, payload)
+        return existing
+
+    row = {
+        "event_id": event_id,
+        **payload,
+        "event_hash": event_hash,
+    }
+    try:
+        return await insert_row("research_lab_conditional_validation_events", row)
+    except Exception as exc:
+        message = str(exc).lower()
+        if not any(marker in message for marker in ("duplicate key", "unique constraint", "23505")):
+            raise
+        recovered = await select_one(
+            "research_lab_conditional_validation_events",
+            filters=existing_filters,
+        )
+        if recovered is None:
+            raise
+        _validate_conditional_validation_event(recovered, payload)
+        return recovered
+
+
+def _validate_conditional_validation_event(
+    existing: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> None:
+    for field in (
+        "schema_version",
+        "candidate_id",
+        "event_type",
+        "assignment_hash",
+        "policy_hash",
+        "rolling_window_hash",
+        "baseline_benchmark_bundle_id",
+        "decision_score",
+        "threshold_points",
+        "failure_class",
+    ):
+        actual = existing.get(field)
+        wanted = expected.get(field)
+        if field in {"decision_score", "threshold_points"}:
+            actual = None if actual is None else round(float(actual), 6)
+            wanted = None if wanted is None else round(float(wanted), 6)
+        if actual != wanted:
+            raise RuntimeError(
+                "conditional validation event idempotency conflict:"
+                f"{field}:stored={actual!r}:expected={wanted!r}"
+            )
+
+
 async def create_score_bundle(request: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     bundle = dict(request.score_bundle)
     score_bundle_hash = str(bundle["score_bundle_hash"])
@@ -2078,7 +2211,7 @@ async def create_score_bundle(request: Any) -> tuple[dict[str, Any], dict[str, A
 
     row = {
         "score_bundle_id": score_bundle_id,
-        "schema_version": "1.0",
+        "schema_version": str(bundle.get("schema_version") or "1.0"),
         "run_id": bundle["run_id"],
         "ticket_id": bundle["ticket_id"],
         "receipt_id": str(request.receipt_id) if request.receipt_id else None,
@@ -2130,3 +2263,133 @@ async def create_score_bundle_event(
             "event_doc": event_doc or {},
         },
     )
+
+
+async def create_scoring_category_result(
+    *,
+    source_kind: str,
+    source_bundle_ref: str,
+    category: str,
+    assignment_hash: str,
+    policy_hash: str,
+    rolling_window_hash: str,
+    icp_count: int,
+    aggregate_score: float,
+    scoring_run_id: str | None = None,
+    candidate_id: str | None = None,
+    delta_vs_baseline: float | None = None,
+) -> dict[str, Any]:
+    """Persist one aggregate-only category result idempotently.
+
+    Hidden ICP identities and per-ICP scores remain solely in the private source
+    bundle. This derivative table is service-role-only operational telemetry.
+    """
+
+    score = float(aggregate_score)
+    delta = float(delta_vs_baseline) if delta_vs_baseline is not None else None
+    if not math.isfinite(score) or score < 0.0 or score > 100.0:
+        raise ValueError("category aggregate score must be finite and between 0 and 100")
+    if delta is not None and not math.isfinite(delta):
+        raise ValueError("category delta must be finite")
+    if int(icp_count) <= 0:
+        raise ValueError("category ICP count must be positive")
+    payload = {
+        "schema_version": "1.1",
+        "source_kind": str(source_kind),
+        "source_bundle_ref": str(source_bundle_ref),
+        "category": str(category),
+        "assignment_hash": str(assignment_hash),
+        "policy_hash": str(policy_hash),
+        "rolling_window_hash": str(rolling_window_hash),
+        "icp_count": int(icp_count),
+        "aggregate_score": round(score, 6),
+        "scoring_run_id": str(scoring_run_id) if scoring_run_id else None,
+        "candidate_id": str(candidate_id) if candidate_id else None,
+        "delta_vs_baseline": (
+            round(delta, 6)
+            if delta is not None
+            else None
+        ),
+    }
+    result_hash = canonical_hash(payload)
+    category_result_id = "scoring_category:" + result_hash.split(":", 1)[1]
+    existing = await select_one(
+        "research_lab_scoring_category_results",
+        filters=(("category_result_id", category_result_id),),
+    )
+    if existing is not None:
+        _validate_scoring_category_result(existing, payload)
+        return existing
+    row = {
+        "category_result_id": category_result_id,
+        **payload,
+        "result_doc": {
+            "schema_version": "1.1",
+            "source_kind": payload["source_kind"],
+            "category": payload["category"],
+            "icp_count": payload["icp_count"],
+            "aggregate_score": payload["aggregate_score"],
+            "delta_vs_baseline": payload["delta_vs_baseline"],
+        },
+        "result_hash": result_hash,
+        "anchored_hash": result_hash,
+    }
+    try:
+        return await insert_row("research_lab_scoring_category_results", row)
+    except Exception as exc:
+        message = str(exc).lower()
+        if not any(
+            marker in message
+            for marker in ("duplicate key", "unique constraint", "23505")
+        ):
+            raise
+        recovered = await select_one(
+            "research_lab_scoring_category_results",
+            filters=(
+                ("source_bundle_ref", source_bundle_ref),
+                ("category", category),
+                ("assignment_hash", assignment_hash),
+            ),
+        )
+        if recovered is None:
+            raise
+        _validate_scoring_category_result(recovered, payload)
+        return recovered
+
+
+def _validate_scoring_category_result(
+    existing: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> None:
+    """Reject an idempotency collision that points at different evidence."""
+
+    for field in (
+        "schema_version",
+        "source_kind",
+        "source_bundle_ref",
+        "category",
+        "assignment_hash",
+        "policy_hash",
+        "rolling_window_hash",
+        "scoring_run_id",
+        "candidate_id",
+        "icp_count",
+        "aggregate_score",
+        "delta_vs_baseline",
+    ):
+        actual = existing.get(field)
+        wanted = expected.get(field)
+        if field in {"aggregate_score", "delta_vs_baseline"}:
+            actual = None if actual is None else round(float(actual), 6)
+            wanted = None if wanted is None else round(float(wanted), 6)
+        elif field == "icp_count":
+            actual = int(actual or 0)
+            wanted = int(wanted or 0)
+        else:
+            actual = None if actual is None else str(actual)
+            wanted = None if wanted is None else str(wanted)
+        if actual != wanted:
+            raise RuntimeError(
+                "research_lab_scoring_category_result_conflict:"
+                f"{field}:{actual!r}!={wanted!r}"
+            )

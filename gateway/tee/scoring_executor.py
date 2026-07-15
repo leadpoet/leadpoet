@@ -65,10 +65,18 @@ SCORING_CONFIG_ENV_NAMES = (
     "RESEARCH_LAB_EVAL_WORK_CONSERVING",
     "RESEARCH_LAB_GLOBAL_SCORING_POOL_SIZE",
     "RESEARCH_LAB_GLOBAL_SCORING_QUEUE",
+    "RESEARCH_LAB_IMPROVEMENT_THRESHOLD_POINTS",
     "RESEARCH_LAB_LLM_INCLUDE_REASONING",
     "RESEARCH_LAB_OPENROUTER_GENERATION_ATTEMPTS",
     "RESEARCH_LAB_PROVIDER_COST_CAP_USD_PER_ICP",
     "RESEARCH_LAB_PROVIDER_COST_UNKNOWN_ENDPOINT_POLICY",
+    "RESEARCH_LAB_CONDITIONAL_FRESH_ICP_COUNT",
+    "RESEARCH_LAB_CONDITIONAL_HOLDOUT_TOTAL_ICPS",
+    "RESEARCH_LAB_CONDITIONAL_VALIDATION_MODE",
+    "RESEARCH_LAB_PRIVATE_HOLDOUT_TOTAL_ICPS",
+    "RESEARCH_LAB_PRIVATE_HOLDOUT_WEAK_TOTAL",
+    "RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_TOTAL_ICPS",
+    "RESEARCH_LAB_PUBLIC_BENCHMARK_PUBLIC_WEAK_TOTAL",
     "RESEARCH_LAB_PUBLIC_SPLIT_UNBIASED",
     "RESEARCH_LAB_SCRAPINGDOG_COST_PER_CREDIT_USD",
     "RESEARCH_LAB_SCRAPINGDOG_UNKNOWN_ENDPOINT_CREDITS",
@@ -300,7 +308,9 @@ async def execute_scoring_operation(operation: str, payload: Mapping[str, Any]) 
             "day_jump_points",
             "elapsed_seconds",
         }
-        if set(payload) != required:
+        optional = {"conditional_validation_policy"}
+        payload_fields = frozenset(payload)
+        if payload_fields not in {frozenset(required), frozenset(required | optional)}:
             raise ScoringExecutorError("baseline-summary payload fields do not match schema")
         summary = build_baseline_score_summary(**dict(payload))
         summary_hash = "sha256:" + hashlib.sha256(

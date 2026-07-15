@@ -164,10 +164,14 @@ def test_frozen_http_evidence_miss_never_opens_a_network_socket(tmp_path):
 import urllib.request
 import gateway.tee.sandbox_http_shim_v2 as shim
 
+# install() first: its setup lazily imports httpx/httpcore (which subclass
+# socket.socket at module load) and legitimately uses AF_UNIX sockets to reach
+# the sandbox. The leak detector is armed AFTER setup so it guards only the
+# frozen urlopen under test, not the interceptor's own installation.
+shim.install()
 shim.socket.socket = lambda *args, **kwargs: (_ for _ in ()).throw(
     AssertionError("network socket opened")
 )
-shim.install()
 urllib.request.urlopen("https://api.example.invalid/missing")
 '''
     completed = subprocess.run(

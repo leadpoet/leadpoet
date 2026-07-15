@@ -591,8 +591,17 @@ def _run_autoresearch_binary_fit_checks(
             )
         if not bool(getattr(claim, "passed", False)):
             return False, "required_attribute validation did not pass"
-        if not str(getattr(claim, "evidence_url", "") or "").strip():
-            return False, "required_attribute claim carries no evidence URL"
+        # Some attributes cannot be proven with a single direct URL (negative
+        # attributes, absence-of-evidence validations). A URL-less claim is
+        # accepted when it carries the validation reasoning — the web
+        # re-verification pass is then the truth check for those claims. A
+        # bare "passed" with neither evidence nor reasoning still zeroes.
+        has_url = bool(str(getattr(claim, "evidence_url", "") or "").strip())
+        has_reasoning = bool(str(getattr(claim, "explanation", "") or "").strip()
+                             or str(getattr(claim, "evidence_quote", "") or "").strip())
+        if not has_url and not has_reasoning:
+            return False, ("required_attribute claim carries neither evidence "
+                           "URL nor validation reasoning")
 
     icp_stage = _normalize_company_stage(icp.company_stage)
     if icp_stage:

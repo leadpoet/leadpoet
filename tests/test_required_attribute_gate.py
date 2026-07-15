@@ -67,7 +67,17 @@ def test_unpassed_claim_fails():
     assert not ok and "did not pass" in reason
 
 
-def test_evidence_free_claim_fails():
+def test_urlless_claim_with_reasoning_passes():
+    # Some attributes validate only indirectly (negative attributes,
+    # absence-of-evidence): a URL-less claim with reasoning is accepted and
+    # the web re-verification pass becomes its truth check.
     ok, reason = _run_autoresearch_binary_fit_checks(
         _company(_ok_claim(evidence_url="")), _icp("The company is privately held"))
-    assert not ok and "no evidence URL" in reason
+    assert ok, reason
+
+
+def test_bare_claim_without_url_or_reasoning_fails():
+    ok, reason = _run_autoresearch_binary_fit_checks(
+        _company(_ok_claim(evidence_url="", evidence_quote="", explanation="")),
+        _icp("The company is privately held"))
+    assert not ok and "neither evidence" in reason

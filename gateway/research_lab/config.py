@@ -677,13 +677,14 @@ class ResearchLabGatewayConfig:
     corpus_export_interval_seconds: int = 3600
     corpus_export_s3_prefix: str = ""
     corpus_export_max_rows: int = 1000
-    # SOURCE_ADD intake remains independently controllable. The measured queue,
-    # API probes, and functional Leg 1 rollout are fail-closed by default.
+    # SOURCE_ADD runs end to end by default. The database control row remains
+    # paused after migration so rollout still requires one explicit operator
+    # resume; each environment gate remains available for emergency rollback.
     source_add_enabled: bool = True
     source_add_rewards_enabled: bool = True
-    source_add_dispatcher_enabled: bool = False
-    source_add_functional_probes_enabled: bool = False
-    source_add_functional_rewards_enabled: bool = False
+    source_add_dispatcher_enabled: bool = True
+    source_add_functional_probes_enabled: bool = True
+    source_add_functional_rewards_enabled: bool = True
     source_add_dispatcher_poll_seconds: float = 2.0
     source_add_work_lease_seconds: int = 300
     source_add_probe_timeout_seconds: int = 45
@@ -1316,13 +1317,13 @@ class ResearchLabGatewayConfig:
             source_add_enabled=_truthy("RESEARCH_LAB_SOURCE_ADD_ENABLED", "true"),
             source_add_rewards_enabled=_truthy("RESEARCH_LAB_SOURCE_ADD_REWARDS_ENABLED", "true"),
             source_add_dispatcher_enabled=_truthy(
-                "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED", "false"
+                "RESEARCH_LAB_SOURCE_ADD_DISPATCHER_ENABLED", "true"
             ),
             source_add_functional_probes_enabled=_truthy(
-                "RESEARCH_LAB_SOURCE_ADD_FUNCTIONAL_PROBES_ENABLED", "false"
+                "RESEARCH_LAB_SOURCE_ADD_FUNCTIONAL_PROBES_ENABLED", "true"
             ),
             source_add_functional_rewards_enabled=_truthy(
-                "RESEARCH_LAB_SOURCE_ADD_FUNCTIONAL_REWARDS_ENABLED", "false"
+                "RESEARCH_LAB_SOURCE_ADD_FUNCTIONAL_REWARDS_ENABLED", "true"
             ),
             source_add_dispatcher_poll_seconds=max(
                 0.25,

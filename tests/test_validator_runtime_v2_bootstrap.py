@@ -59,7 +59,9 @@ def _gateway_release(commit="1" * 40):
                         **deterministic,
                     }
                 )
-    return build_release_manifest(evidence)
+    return build_release_manifest(
+        evidence, acceptance_signer_pubkey_hash="sha256:" + "f" * 64
+    )
 
 
 def _validator_release(commit="1" * 40):

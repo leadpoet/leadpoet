@@ -69,7 +69,9 @@ def _gateway_release(commit=COMMIT):
                         **values,
                     }
                 )
-    return build_release_manifest(rows)
+    return build_release_manifest(
+        rows, acceptance_signer_pubkey_hash="sha256:" + "f" * 64
+    )
 
 
 def _validator_release(commit=COMMIT):

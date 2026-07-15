@@ -22,7 +22,27 @@
       "symbol": "build_research_lab_allocation_bundle"
     },
     {
-      "ast_sha256": "sha256:d3ae444d4eb5989b4cf50de862ce1fe538ae26b478b9b60da3781916176b809c",
+      "ast_sha256": "sha256:28103c6f4cbacb839087a6249fd7fac8f791c3d4a4cef67c49a9a4d6e0fdb6eb",
+      "path": "gateway/research_lab/autoresearch_authority_v2.py",
+      "symbol": "run_authoritative_autoresearch_v2"
+    },
+    {
+      "ast_sha256": "sha256:bcf54928258be8b245794e135f0f31f77bafb4bee04d2ca403349c362fabd84b",
+      "path": "gateway/research_lab/autoresearch_runtime.py",
+      "symbol": "AutoResearchLoopEvent"
+    },
+    {
+      "ast_sha256": "sha256:e7adb34de3f35e2ede7edd9c91aae1a0e916e7b3ac7d7088f719bfe07bbef868",
+      "path": "gateway/research_lab/autoresearch_runtime.py",
+      "symbol": "AutoResearchRuntimeSettings"
+    },
+    {
+      "ast_sha256": "sha256:aa62d6cb8afb37098cc3473b4a9b12a02d3508ce94889a1eededb22ac444dc08",
+      "path": "gateway/research_lab/autoresearch_runtime.py",
+      "symbol": "would_exceed_budget"
+    },
+    {
+      "ast_sha256": "sha256:7686a4ae3f4ecfd5bcf6b86f5068d7c3dea896d9c6f6239fb061347c6c0f522d",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "CodeEditLoopEngine"
     },
@@ -32,12 +52,7 @@
       "symbol": "_bind_loop_direction_plan"
     },
     {
-      "ast_sha256": "sha256:91f1682d1fc83b03cd68ab7b69e846be4761adad5c092d08deaf893017688ef4",
-      "path": "gateway/research_lab/code_loop_engine.py",
-      "symbol": "select_inner_loop_candidates"
-    },
-    {
-      "ast_sha256": "sha256:1f58d38cf5a9c9f26798c65e06d5d2cdc2b2fc33a0376330a04006ae77933d41",
+      "ast_sha256": "sha256:0e57da0c0ed584b442a517c198b56e8847883e214f183c4b75b29736334112d7",
       "path": "gateway/research_lab/dev_eval_runner.py",
       "symbol": "AttestedReplayDevEvaluatorV2"
     },
@@ -52,59 +67,109 @@
       "symbol": "snapshot_readiness"
     },
     {
-      "ast_sha256": "sha256:43383938692fdafbb45996d67eff879e838316bd6dd1648576000b211bb7ac04",
-      "path": "gateway/research_lab/inner_loop_activation.py",
-      "symbol": "InnerLoopEvidence"
+      "ast_sha256": "sha256:69155bb22a7e4ac760e8bd549ccf9d305666940cf338fb02eb65d01c6aaa433b",
+      "path": "gateway/research_lab/git_tree_evaluator.py",
+      "symbol": "TreeEvaluationPlan"
     },
     {
-      "ast_sha256": "sha256:d78d8a681420b8c1d8d226ed338ab8057c8a7ea723d5155d6a1f5340afce872d",
-      "path": "gateway/research_lab/inner_loop_activation.py",
-      "symbol": "InnerLoopPolicy"
+      "ast_sha256": "sha256:ea3c13a2cd670d0851d7b06cb03ade71bedea965effe14de79e7c7336554cb76",
+      "path": "gateway/research_lab/git_tree_evaluator.py",
+      "symbol": "classify_candidate_tree_evaluation"
     },
     {
-      "ast_sha256": "sha256:9c5ffd33f5217b961fad172b14784b118831263414ffdd4740aa82c37793addd",
-      "path": "gateway/research_lab/inner_loop_activation.py",
-      "symbol": "_automatic_phase"
+      "ast_sha256": "sha256:2589b612350f08911c4da2c3c3d68e05673857b33862e16c575e04b73fc4a454",
+      "path": "gateway/research_lab/git_tree_evaluator.py",
+      "symbol": "classify_tree_evaluation"
     },
     {
-      "ast_sha256": "sha256:0e125f6ffaf223b099314faa9de349b7c497d5151d2c19f2e972da8b0accaa5b",
-      "path": "gateway/research_lab/inner_loop_activation.py",
-      "symbol": "_rank_gate_passes"
+      "ast_sha256": "sha256:0cf441ea4f8f8e5dae778f0322b71d893ed678df2d240f275629234054dd2c3f",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "TreeCheckpoint"
     },
     {
-      "ast_sha256": "sha256:9b5b389894c47ceb26aca0dffd60d564fd5a7b3e680f9ce0b6990c743a1a5849",
-      "path": "gateway/research_lab/inner_loop_activation.py",
-      "symbol": "build_inner_loop_evidence"
+      "ast_sha256": "sha256:0210f902edb4b00eb45e10f83dd59556f401e86aea6fa18a1d0e9cf3abde9336",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "TreeEvaluation"
     },
     {
-      "ast_sha256": "sha256:4e0f996ea5d728dbdfa07fcc23f449edaa717bd0d2f730b9d46a6a73273e055e",
-      "path": "gateway/research_lab/inner_loop_activation.py",
-      "symbol": "decide_inner_loop_policy"
+      "ast_sha256": "sha256:744a872a25a97230e6c221f048dab2fbc9eb8c0f36dfaa26a42e486e4ff21e0f",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "TreeNode"
     },
     {
-      "ast_sha256": "sha256:0d2c0ac8b5eafe2c55c1a5131a0d5b943f253caf2a76fb929bd7741b821b6ca3",
-      "path": "gateway/research_lab/inner_loop_activation.py",
-      "symbol": "record_inner_loop_event"
+      "ast_sha256": "sha256:7aaf5cc7010e367e7113358600b93fb47085c1a82c9c1dcd9c10c5818c88a074",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "TreePolicy"
     },
     {
-      "ast_sha256": "sha256:ab45b72a177041072cfcf5f45380d3305ae9ec9fe54ca834c5c1bfc2ce8ad105",
-      "path": "gateway/research_lab/inner_loop_activation.py",
-      "symbol": "resolve_inner_loop_policy"
+      "ast_sha256": "sha256:f87f38817be9a2800e493fc69c63624d6c395806463d20f5b3002e16008ba81d",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "TreeResult"
     },
     {
-      "ast_sha256": "sha256:a96d39f5f4dcf4a1245bf0f0dd14596e554100a16c1edf4cf48f2ff6934c3892",
-      "path": "gateway/research_lab/loop_engine.py",
-      "symbol": "AutoResearchLoopEngine"
+      "ast_sha256": "sha256:48980742a285da0be975712b7a7cb2c387f0cf232636bb9075cd7a186330f9c9",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "build_operation_id"
     },
     {
-      "ast_sha256": "sha256:8d11d7437686aa44a4c3cba9c405328a231652e0a047e8bb42a2ea3d6cca0bce",
-      "path": "gateway/research_lab/loop_engine.py",
-      "symbol": "_rank_candidates"
+      "ast_sha256": "sha256:5b2ea251d2d1cc1f902514d300a2e9aae2a70251dab8f80e67cb12f8f2e0fbe4",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "cohort_evaluation_operation_id"
     },
     {
-      "ast_sha256": "sha256:d3a6a9715d2e1abce9a5604008221fec433ab0e5155ac3280264dba96b495be2",
-      "path": "gateway/research_lab/loop_engine.py",
-      "symbol": "_would_exceed_budget"
+      "ast_sha256": "sha256:5346c400f6a407c29ea47fffa8f9fc858b1b8f8406ea0e3d8ba043a047cb21d1",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "derive_child_slot"
+    },
+    {
+      "ast_sha256": "sha256:81a9caff2bf94617e6c108ea82ced04d90dfe12f9d2d83a8d95daebe4cac714b",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "derive_frontier_commitment_hash"
+    },
+    {
+      "ast_sha256": "sha256:71c855d10303d599c526dd7167b979a03692285587d59818c086eb3e2c490fd9",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "derive_tree_id"
+    },
+    {
+      "ast_sha256": "sha256:bf18e8a39cce1f93ad9a7295ea2ab9038f44c9cde8d0a5ca217e4feaf49645fc",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "generation_operation_id"
+    },
+    {
+      "ast_sha256": "sha256:df5fb8059355be087d656380649187ace4689669decbfa9020a8488efe21807f",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "next_child_slot"
+    },
+    {
+      "ast_sha256": "sha256:4bedb6143e2cf4bf7eae5e7c301ce163b85a54680ecfb83b7b66c48fb04e0bbf",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "select_finalist"
+    },
+    {
+      "ast_sha256": "sha256:b280ffb2eba96aaa698bb31da752c6fdc3c2e295e054fa99ef752ff2d1e5338e",
+      "path": "gateway/research_lab/git_tree_models.py",
+      "symbol": "tree_rank_key"
+    },
+    {
+      "ast_sha256": "sha256:415df75868c2d25e4cd2a16b508b23ea8013a24c0a00faaa04222731710a4774",
+      "path": "gateway/research_lab/git_tree_repository.py",
+      "symbol": "GitTreeRepository"
+    },
+    {
+      "ast_sha256": "sha256:6da84b3bd81a1d82a5eff39c91104d7c44f56a1627987a28ffd6bda312f275dd",
+      "path": "gateway/research_lab/git_tree_scheduler.py",
+      "symbol": "GitTreeScheduler"
+    },
+    {
+      "ast_sha256": "sha256:1dc3b0e63cb04b897a1ff45bfd24d04c497fdf509f7314c0f083da8cf6a36f5f",
+      "path": "gateway/research_lab/git_tree_scheduler.py",
+      "symbol": "sanitized_branch_context"
+    },
+    {
+      "ast_sha256": "sha256:9675ead1d8a4cf8c861090fb88ad7c9685a86960b5387bd1b2ea89681180b0f5",
+      "path": "gateway/research_lab/git_tree_store.py",
+      "symbol": "GitTreeStore"
     },
     {
       "ast_sha256": "sha256:9e9873735281d7ae52e6726f1b90dde5b1447dac4cd11c3b0b3388350fbfd2fd",
@@ -132,7 +197,7 @@
       "symbol": "confirmation_min_delta"
     },
     {
-      "ast_sha256": "sha256:5540ba51e7f6d20ed327552963fa1325a37f0d994d5de5c0af5f1fd186a6bad2",
+      "ast_sha256": "sha256:dab4f6b8dd431b46bc77abb403ffe236f07b115991d0402545a148d36b7f890f",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "maybe_refresh_dev_snapshot"
     },
@@ -162,14 +227,24 @@
       "symbol": "sanitize_source_add_precheck_doc"
     },
     {
-      "ast_sha256": "sha256:cfbb879671d28d03aedb65f897fb93428aea8650938c475f88169f608667bbc7",
+      "ast_sha256": "sha256:2ca299fdd9f516017a8dce5a50933d29e2fa0b73d3472b4aa6e7420fa41eb959",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "AutoresearchExecutorV2"
+    },
+    {
+      "ast_sha256": "sha256:fff07bca7ee1ee11d8b8cd9d3ee24de17f565ae44d9cfbda5961794c82a19438",
+      "path": "gateway/tee/coordinator_active_model_source_v2.py",
+      "symbol": "CoordinatorActiveModelSourceV2"
     },
     {
       "ast_sha256": "sha256:c0b490b38a4269bc6e6468dd180cfeccf50f56bb0eb7ea72474b98a9da9f9e19",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
+    },
+    {
+      "ast_sha256": "sha256:6584e644d68b7925834d21270aed7d4b5abcbc97b62925a83854001320e83382",
+      "path": "gateway/tee/coordinator_chain_source_v2.py",
+      "symbol": "CoordinatorChainSourceV2"
     },
     {
       "ast_sha256": "sha256:12f3b85d30ec6cea11162ded9f5b59ed9296676f3fbb93458bd34af575064d08",
@@ -182,9 +257,34 @@
       "symbol": "CoordinatorSourceAddProvenanceV2"
     },
     {
-      "ast_sha256": "sha256:01cfdc6c0af03bc605e2fef09f2c41e937d7bab4584c186196ea5bf0e705a641",
+      "ast_sha256": "sha256:dadf45ec7d59c32d4a7c4ef5786c4d69b83ca9b89cc09cdc2d9b60313629602c",
+      "path": "gateway/tee/coordinator_weight_source_v2.py",
+      "symbol": "CoordinatorWeightSourceV2"
+    },
+    {
+      "ast_sha256": "sha256:28fa91987852fa9c8b64836317f6a67c18817a3b7997ef45bfaba6b0c57e6441",
       "path": "gateway/tee/model_sandbox_v2.py",
       "symbol": "RunscModelSandboxV2"
+    },
+    {
+      "ast_sha256": "sha256:287790eb7225cc9507b07718b06f4529ad6604a1f6cb69bdc6d05c01689668df",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "HTTPXProviderTransport"
+    },
+    {
+      "ast_sha256": "sha256:676df5a89e29e61bcd19caf3031e54f78595d416a5cf6702634d262374999e43",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "ProviderBrokerV2"
+    },
+    {
+      "ast_sha256": "sha256:49d45e079f26a84177ee10d7b19f8fb48ead0567f4df5cde1e202a4d3d46b6f8",
+      "path": "gateway/tee/provider_broker_v2.py",
+      "symbol": "provider_registry_document"
+    },
+    {
+      "ast_sha256": "sha256:e06a7f31b6e3fbd57d8192f7acdbce482e728481565da26f72060f721cbb68af",
+      "path": "gateway/tee/provider_semantics_v2.py",
+      "symbol": "ProviderSemanticsAuthorityV2"
     },
     {
       "ast_sha256": "sha256:347668b0c700895c77f650e2a3e286bcb7f6b52ae746ce1a55d3bacb2be3f258",
@@ -210,6 +310,11 @@
       "ast_sha256": "sha256:7da2dbb5b956aa09fb97070376f579696769dfc2396f003e8f73438d75ffbf9e",
       "path": "gateway/tee/reward_executor_v2.py",
       "symbol": "source_add_reward_row_projection_v2"
+    },
+    {
+      "ast_sha256": "sha256:72199a18a2c7997273437b98e5c2a3a458a9f15982a81429be6d5047edbc2a97",
+      "path": "gateway/tee/scoring_executor_v2.py",
+      "symbol": "ScoringExecutorV2"
     },
     {
       "ast_sha256": "sha256:9da83659412c65a826b0c1e9c6aa9d7b9cce7bf255ae164fc120ea09f0641378",
@@ -322,7 +427,7 @@
       "symbol": "compute_reimbursement_award"
     },
     {
-      "ast_sha256": "sha256:f606e8502efdb75c641840aaf44b9302033de0613a87ac60e593562fb7cd06be",
+      "ast_sha256": "sha256:6666632c4eba50e22241ac5ca2f523691220c5f9f48cbe40a42a0c21d42b53a4",
       "path": "research_lab/code_editing.py",
       "symbol": "build_code_edit_auto_research_messages"
     },
@@ -342,7 +447,7 @@
       "symbol": "build_code_edit_source_inspection_messages"
     },
     {
-      "ast_sha256": "sha256:396e2fc7f27b969b905df6677e0296a65815a6973661e19aa509437af8ae7f78",
+      "ast_sha256": "sha256:3176aaef457ed6ccdc16516588c4afbf0efadf800d15aec071e9d3e4ac17cbc0",
       "path": "research_lab/code_editing.py",
       "symbol": "build_loop_direction_planner_messages"
     },
@@ -532,7 +637,7 @@
       "symbol": "merge_evidence_caches"
     },
     {
-      "ast_sha256": "sha256:55471b86c63ca39b002ee7283b33609a37e8a214bd4c6c3a5cc63b58d7d4fa57",
+      "ast_sha256": "sha256:a7f05a9e9f022c07fc8602936156d2d780527660a4cc9c067a1321bb82467df7",
       "path": "research_lab/eval/snapshot_store.py",
       "symbol": "ProviderSnapshotStore"
     },
@@ -572,7 +677,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:0f4c977cec615238134a733328f8b8bf47b962b466447e9bc28fe06004af4f38",
-  "protected_source_commit": "322f9f653e44fc291710fc754d69c79ed23f9fa1",
+  "manifest_hash": "sha256:5edb30de026503e91307b476d21f84ae2cc103635ad6ef6fadec5d3cec2f003b",
+  "protected_source_commit": "06ee7db2866b37327c53c2c9b32833be907892cd",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

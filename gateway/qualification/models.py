@@ -455,6 +455,23 @@ class LeadOutputRedacted(BaseModel):
 # (gateway/fulfillment/*) still consumes contact-shaped lead rows, but
 # the model competition no longer produces or scores LeadOutput.
 
+class RequiredAttributeClaim(BaseModel):
+    """The model's required-attribute validation result for one company.
+
+    Carried through scoring so the fit gate can enforce that an ICP's
+    ``required_attribute`` was actually validated with evidence — previously
+    the claim was stripped before scoring and never checked. Bounded fields,
+    same prompt-injection containment pattern as IntentSignal.description.
+    """
+    model_config = {"extra": "ignore"}
+
+    text: str = Field("", max_length=2000, description="The attribute requirement text")
+    passed: bool = Field(False, description="Model-reported validation outcome")
+    evidence_url: str = Field("", max_length=2000, description="URL backing the claim")
+    evidence_quote: str = Field("", max_length=2000, description="Quote backing the claim")
+    explanation: str = Field("", max_length=2000, description="Model's reasoning")
+
+
 class CompanyOutput(BaseModel):
     """Schema returned by qualification models in the model competition.
 
@@ -496,6 +513,12 @@ class CompanyOutput(BaseModel):
     # the load-bearing field for company-mode scoring; the whole point
     # of the competition is verifiable intent.
     intent_signals: List[IntentSignal] = Field(..., min_length=1, description="Verifiable intent signals tied to this company")
+
+    # The model's required-attribute validation, enforced by the scorer when
+    # the ICP pins a required_attribute. Optional so legacy outputs still
+    # parse — they fail the scorer's attribute gate instead of the schema.
+    required_attribute: Optional[RequiredAttributeClaim] = Field(
+        None, description="Model-reported required_attribute validation (scorer-enforced)")
 
     @field_validator('company_website')
     @classmethod
@@ -580,6 +603,8 @@ class ICPPrompt(BaseModel):
     geography: str = Field(..., description="Target geography (full)")
     country: str = Field("", description="Target country (extracted)")
     product_service: str = Field(..., description="Product/service being sold")
+    required_attribute: str = Field(
+        "", description="Attribute every returned company must satisfy (scorer-enforced)")
     intent_signals: List[str] = Field(default_factory=list, description="Intent signals to look for")
     intent_max_age_days: int = Field(
         365,

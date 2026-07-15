@@ -478,6 +478,23 @@ def _run_autoresearch_binary_fit_checks(
                 f"Employee count mismatch: '{company.employee_count}' not in {sorted(icp_buckets)}",
             )
 
+    icp_attribute = str(getattr(icp, "required_attribute", "") or "").strip()
+    if icp_attribute:
+        # The ICP's required_attribute is a hard requirement. The model runs
+        # its own attribute validation and reports the claim; the scorer
+        # enforces that a claim exists, passed, and carries evidence — a
+        # company without a backed attribute claim scores zero.
+        claim = getattr(company, "required_attribute", None)
+        if claim is None:
+            return False, (
+                f"Missing required_attribute claim (ICP requires: "
+                f"'{icp_attribute[:120]}')"
+            )
+        if not bool(getattr(claim, "passed", False)):
+            return False, "required_attribute validation did not pass"
+        if not str(getattr(claim, "evidence_url", "") or "").strip():
+            return False, "required_attribute claim carries no evidence URL"
+
     icp_stage = _normalize_company_stage(icp.company_stage)
     if icp_stage:
         company_stage = _normalize_company_stage(company.company_stage)

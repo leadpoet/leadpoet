@@ -2567,6 +2567,21 @@ def _normalize_company_output(
         "state": row.get("state") or row.get("hq_state") or "",
         "description": row.get("description", ""),
         "intent_signals": signals,
+        "required_attribute": _required_attribute_claim(row),
+    }
+
+
+def _required_attribute_claim(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Bounded pass-through of the model's required_attribute validation."""
+    claim = row.get("required_attribute")
+    if not isinstance(claim, Mapping):
+        return None
+    return {
+        "text": str(claim.get("text") or "")[:2000],
+        "passed": bool(claim.get("passed")),
+        "evidence_url": str(claim.get("evidence_url") or "")[:2000],
+        "evidence_quote": str(claim.get("evidence_quote") or "")[:2000],
+        "explanation": str(claim.get("explanation") or "")[:2000],
     }
 
 

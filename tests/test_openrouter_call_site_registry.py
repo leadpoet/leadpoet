@@ -35,6 +35,10 @@ CALL_SITE_REGISTRY = {
     "qualification/scoring/intent_verification_three_stage.py": "captured",
     "qualification/scoring/role_batch_check.py": "captured",
     "qualification/scoring/verification_helpers.py": "captured",
+    # Scorer-side web re-verification of model-reported attribute/stage
+    # claims (2026-07-15): same scoring-pipeline capture posture as the other
+    # qualification/scoring judges.
+    "qualification/scoring/lead_scorer.py": "captured",
     "qualification/validator/hardcoding_detector.py": "captured",
     "validator_models/stage5_verification.py": "captured",
     "gateway/qualification/utils/helpers.py": "captured",

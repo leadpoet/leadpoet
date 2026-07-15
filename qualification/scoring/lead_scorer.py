@@ -438,6 +438,23 @@ async def _llm_reverify_company(company: "CompanyOutput", icp: "ICPPrompt") -> T
                     logger.warning("scorer_reverify_unavailable status=%s", resp.status)
                     return True, ""
                 body = await resp.json()
+        # Re-verification verdicts are training labels — capture the exchange
+        # (never affects the business result).
+        try:
+            from research_lab.openrouter_telemetry import record_openrouter_trace
+
+            record_openrouter_trace(
+                channel="qualification",
+                purpose="lead_scorer_reverify",
+                stage="scorer_judgment",
+                model_id=_SCORER_REVERIFY_MODEL,
+                request_body={"model": _SCORER_REVERIFY_MODEL,
+                              "messages": [{"role": "user", "content": prompt}],
+                              "temperature": 0.0},
+                response_doc=body,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         content = body["choices"][0]["message"]["content"]
         match = re.search(r"\{.*\}", content, re.S)
         verdict = json.loads(match.group(0)) if match else {}

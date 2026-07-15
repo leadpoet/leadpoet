@@ -1154,6 +1154,8 @@ def _load_baseline_scoring_progress(
     benchmark_date: str,
     window_hash: str,
     private_model_artifact_hash: str,
+    repo_git_sha: str = "",
+    manifest_hash: str = "",
 ) -> list[dict[str, Any]]:
     import boto3  # type: ignore
 
@@ -1170,6 +1172,26 @@ def _load_baseline_scoring_progress(
         return []
     if str(doc.get("private_model_artifact_hash") or "") != str(private_model_artifact_hash):
         return []
+    # A benchmark checkpoint is only reusable by the EXACT model that wrote it:
+    # a mid-benchmark model change must rescore every ICP with the new model
+    # (cost recovery comes from the provider-call cache, never from old score
+    # rows). The artifact hash alone missed real change paths (active-row lag
+    # vs current.json, promotions), so the repo commit and manifest hash are
+    # bound too — any mismatch discards the checkpoint entirely.
+    if repo_git_sha and str(doc.get("repo_git_sha") or ""):
+        if str(doc.get("repo_git_sha")).lower() != str(repo_git_sha).lower():
+            logger.warning(
+                "research_lab_baseline_progress_rejected reason=repo_git_sha_changed "
+                "checkpoint=%s current=%s",
+                str(doc.get("repo_git_sha"))[:16], str(repo_git_sha)[:16])
+            return []
+    if manifest_hash and str(doc.get("manifest_hash") or ""):
+        if str(doc.get("manifest_hash")) != str(manifest_hash):
+            logger.warning(
+                "research_lab_baseline_progress_rejected reason=manifest_hash_changed "
+                "checkpoint=%s current=%s",
+                str(doc.get("manifest_hash"))[:24], str(manifest_hash)[:24])
+            return []
     rows = doc.get("per_icp_results")
     if not isinstance(rows, list):
         return []
@@ -1189,6 +1211,8 @@ def _store_baseline_scoring_progress(
     private_model_artifact_hash: str,
     rows: list[dict[str, Any]],
     telemetry_index: Mapping[str, Any] | None = None,
+    repo_git_sha: str = "",
+    manifest_hash: str = "",
 ) -> str:
     import boto3  # type: ignore
 
@@ -1203,6 +1227,8 @@ def _store_baseline_scoring_progress(
         "benchmark_date": str(benchmark_date),
         "rolling_window_hash": str(window_hash),
         "private_model_artifact_hash": str(private_model_artifact_hash),
+        "repo_git_sha": str(repo_git_sha or ""),
+        "manifest_hash": str(manifest_hash or ""),
         "completed_icp_count": len(safe_rows),
         "per_icp_results": safe_rows,
     }
@@ -8384,6 +8410,8 @@ class ResearchLabGatewayScoringWorker:
                 benchmark_date=today,
                 window_hash=window.window_hash,
                 private_model_artifact_hash=artifact.model_artifact_hash,
+                repo_git_sha=baseline_repo_main_sha,
+                manifest_hash=str(artifact.manifest_hash or ""),
             )
             if baseline_progress_rows:
                 logger.info(
@@ -8465,6 +8493,8 @@ class ResearchLabGatewayScoringWorker:
                     private_model_artifact_hash=artifact.model_artifact_hash,
                     rows=baseline_progress_rows,
                     telemetry_index=telemetry_index,
+                    repo_git_sha=baseline_repo_main_sha,
+                    manifest_hash=str(artifact.manifest_hash or ""),
                 )
             if baseline_telemetry_session is not None:
                 await baseline_telemetry_session.complete_result(

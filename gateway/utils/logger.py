@@ -159,7 +159,11 @@ async def _previous_signed_event_hash() -> Optional[str]:
         result = await (
             read_client.table("transparency_log")
             .select("event_hash,created_at")
-            .order("created_at", desc=True)
+            # Order by the primary key (indexed via transparency_log_pkey),
+            # not created_at (unindexed): the append-only log's tip is the
+            # highest id, and sorting the growing table by an unindexed column
+            # timed out at startup and made the gateway unbootable.
+            .order("id", desc=True)
             .limit(100)
             .execute()
         )

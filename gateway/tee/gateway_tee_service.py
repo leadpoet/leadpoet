@@ -155,7 +155,7 @@ class GatewayTEEService:
             # Query the most recent log entry
             result = read_client.table("transparency_log") \
                 .select("payload") \
-                .order("created_at", desc=True) \
+                .order("id", desc=True) \
                 .limit(1) \
                 .execute()
             

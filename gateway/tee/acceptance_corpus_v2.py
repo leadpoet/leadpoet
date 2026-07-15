@@ -8,6 +8,7 @@ fixture is present and the required historical coverage is complete.
 
 from __future__ import annotations
 
+import argparse
 import base64
 from collections import Counter
 from datetime import datetime, timezone
@@ -15,9 +16,13 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any, Dict, Mapping, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 
 
 SCHEMA_VERSION = "leadpoet.v2_acceptance_corpus.v2"
@@ -350,3 +355,120 @@ def load_and_validate_acceptance_corpus_v2(
         corpus_root=corpus_root,
         expected_signing_pubkey_hash=expected_signing_pubkey_hash,
     )
+
+
+def build_acceptance_corpus_from_index_v2(
+    *,
+    fixture_index: Sequence[Mapping[str, Any]],
+    corpus_root: Path,
+    captured_from: str,
+    captured_through: str,
+    signing_key: Ed25519PrivateKey,
+) -> Dict[str, Any]:
+    """Hash external fixture bytes and sign their immutable manifest."""
+
+    root = Path(corpus_root).resolve(strict=True)
+    fixtures = []
+    for raw in fixture_index:
+        if not isinstance(raw, Mapping):
+            raise AcceptanceCorpusV2Error("acceptance fixture index is invalid")
+        required = {
+            "kind",
+            "fixture_id",
+            "captured_at",
+            "artifact_path",
+            "expected_output_hash",
+            "receipt_root",
+            "metadata",
+        }
+        if set(raw) != required:
+            raise AcceptanceCorpusV2Error(
+                "acceptance fixture index fields are invalid"
+            )
+        relative = Path(str(raw.get("artifact_path") or ""))
+        candidate = root.joinpath(*relative.parts)
+        if candidate.is_symlink() or not candidate.is_file():
+            raise AcceptanceCorpusV2Error(
+                "acceptance fixture file is unavailable"
+            )
+        resolved = candidate.resolve(strict=True)
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise AcceptanceCorpusV2Error(
+                "acceptance fixture escapes the corpus root"
+            ) from exc
+        fixtures.append({**dict(raw), "artifact_hash": _sha256_file(resolved)})
+    public_key = signing_key.public_key().public_bytes_raw()
+    return build_acceptance_corpus_v2(
+        fixtures=fixtures,
+        captured_from=captured_from,
+        captured_through=captured_through,
+        signing_pubkey_hex=public_key.hex(),
+        sign_digest=signing_key.sign,
+    )
+
+
+def _load_private_key(path: Path) -> Ed25519PrivateKey:
+    try:
+        payload = Path(path).read_bytes()
+        key = serialization.load_pem_private_key(payload, password=None)
+    except (OSError, TypeError, ValueError) as exc:
+        raise AcceptanceCorpusV2Error(
+            "acceptance signing key is unavailable or invalid"
+        ) from exc
+    if not isinstance(key, Ed25519PrivateKey):
+        raise AcceptanceCorpusV2Error("acceptance signing key is not Ed25519")
+    return key
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--fixture-index", required=True, type=Path)
+    parser.add_argument("--corpus-root", required=True, type=Path)
+    parser.add_argument("--captured-from", required=True)
+    parser.add_argument("--captured-through", required=True)
+    parser.add_argument("--signing-key", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    args = parser.parse_args(argv)
+    if args.output.exists():
+        raise AcceptanceCorpusV2Error(
+            "acceptance corpus manifest already exists; overwrite is forbidden"
+        )
+    try:
+        fixture_index = json.loads(args.fixture_index.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AcceptanceCorpusV2Error(
+            "acceptance fixture index is unavailable or invalid"
+        ) from exc
+    if not isinstance(fixture_index, list):
+        raise AcceptanceCorpusV2Error("acceptance fixture index must be an array")
+    manifest = build_acceptance_corpus_from_index_v2(
+        fixture_index=fixture_index,
+        corpus_root=args.corpus_root,
+        captured_from=args.captured_from,
+        captured_through=args.captured_through,
+        signing_key=_load_private_key(args.signing_key),
+    )
+    signer_hash = _sha256_bytes(bytes.fromhex(manifest["signing_pubkey_hex"]))
+    validate_acceptance_corpus_v2(
+        manifest,
+        corpus_root=args.corpus_root,
+        expected_signing_pubkey_hash=signer_hash,
+    )
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = args.output.open("x", encoding="utf-8")
+    try:
+        json.dump(manifest, descriptor, sort_keys=True, indent=2)
+        descriptor.write("\n")
+    finally:
+        descriptor.close()
+    args.output.chmod(0o600)
+    print("acceptance_corpus_manifest=%s" % args.output)
+    print("acceptance_signer_pubkey_hash=%s" % signer_hash)
+    print("acceptance_manifest_hash=%s" % manifest["manifest_hash"])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

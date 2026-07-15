@@ -39,6 +39,75 @@ def kms_key_reference_hash(key_id: str) -> str:
     return sha256_bytes(("leadpoet-validator-hotkey-kms-v2:" + value).encode())
 
 
+def build_hotkey_envelope_v2(
+    *,
+    validator_hotkey: str,
+    hotkey_public_key: str,
+    seed: bytes,
+    kms_key_id: str,
+    encryption_context: Mapping[str, str],
+    kms_client: Any = None,
+) -> Dict[str, Any]:
+    """KMS-seal one exact sr25519 seed for recipient-only unsealing."""
+
+    payload = bytes(seed)
+    hotkey = str(validator_hotkey or "")
+    public_key = str(hotkey_public_key or "").lower()
+    context = {
+        str(name): str(value)
+        for name, value in sorted(dict(encryption_context).items())
+    }
+    if len(payload) != 32:
+        raise ValidatorHotkeyBootstrapV2Error(
+            "validator hotkey seed must be exactly 32 bytes"
+        )
+    if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{40,64}", hotkey):
+        raise ValidatorHotkeyBootstrapV2Error("validator hotkey is invalid")
+    if not re.fullmatch(r"[0-9a-f]{64}", public_key):
+        raise ValidatorHotkeyBootstrapV2Error(
+            "validator hotkey public key is invalid"
+        )
+    if not str(kms_key_id or "").strip() or not context:
+        raise ValidatorHotkeyBootstrapV2Error(
+            "validator hotkey KMS input is incomplete"
+        )
+    if any(not name or not value or "\x00" in name + value for name, value in context.items()):
+        raise ValidatorHotkeyBootstrapV2Error(
+            "validator hotkey encryption context is invalid"
+        )
+    if kms_client is None:
+        import boto3
+
+        kms_client = boto3.client("kms")
+    response = kms_client.encrypt(
+        KeyId=str(kms_key_id),
+        Plaintext=payload,
+        EncryptionContext=context,
+    )
+    ciphertext = response.get("CiphertextBlob")
+    response_key_id = str(response.get("KeyId") or "")
+    if not isinstance(ciphertext, (bytes, bytearray)) or not ciphertext:
+        raise ValidatorHotkeyBootstrapV2Error(
+            "validator hotkey KMS ciphertext is missing"
+        )
+    document = {
+        "schema_version": HOTKEY_ENVELOPE_SCHEMA_VERSION,
+        "validator_hotkey": hotkey,
+        "hotkey_public_key": public_key,
+        "ciphertext_blob_b64": base64.b64encode(bytes(ciphertext)).decode("ascii"),
+        "ciphertext_blob_hash": sha256_bytes(bytes(ciphertext)),
+        "kms_key_id_hash": kms_key_reference_hash(response_key_id),
+        "encryption_context": context,
+        "encryption_context_hash": sha256_json(context),
+    }
+    normalized = validate_hotkey_envelope(document)
+    return {
+        name: value
+        for name, value in normalized.items()
+        if name != "ciphertext_blob"
+    }
+
+
 def validate_hotkey_envelope(value: Mapping[str, Any]) -> Dict[str, Any]:
     fields = {
         "schema_version",

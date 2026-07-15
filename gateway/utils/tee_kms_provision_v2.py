@@ -40,6 +40,77 @@ def kms_key_reference_hash(key_id: str) -> str:
     return sha256_bytes(("leadpoet-kms-key-v2:" + value).encode("utf-8"))
 
 
+def build_provider_envelope_v2(
+    *,
+    credential_slot: str,
+    plaintext: bytes,
+    credential_ref_hash: str,
+    kms_key_id: str,
+    encryption_context: Mapping[str, str],
+    kms_client: Any = None,
+    allow_binary: bool = False,
+) -> Dict[str, Any]:
+    """Encrypt one boot/profile secret and return its runtime envelope.
+
+    This constructor is intentionally separate from runtime provisioning. It is
+    used by an operator before cutover; the production parent later handles
+    only the resulting KMS ciphertext.
+    """
+
+    slot = str(credential_slot or "")
+    payload = bytes(plaintext)
+    reference_hash = str(credential_ref_hash or "").lower()
+    context = {
+        str(name): str(value)
+        for name, value in sorted(dict(encryption_context).items())
+    }
+    if not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", slot):
+        raise TEEKMSProvisionV2Error("provider envelope slot is invalid")
+    if (
+        not payload
+        or len(payload) > 64 * 1024
+        or (not allow_binary and b"\x00" in payload)
+    ):
+        raise TEEKMSProvisionV2Error("provider envelope plaintext is invalid")
+    if not _HASH_RE.fullmatch(reference_hash):
+        raise TEEKMSProvisionV2Error(
+            "provider envelope credential reference is invalid"
+        )
+    if not str(kms_key_id or "").strip() or not context:
+        raise TEEKMSProvisionV2Error("provider envelope KMS input is incomplete")
+    if any(not name or not value or "\x00" in name + value for name, value in context.items()):
+        raise TEEKMSProvisionV2Error("provider envelope context is invalid")
+    if kms_client is None:
+        import boto3
+
+        kms_client = boto3.client("kms")
+    response = kms_client.encrypt(
+        KeyId=str(kms_key_id),
+        Plaintext=payload,
+        EncryptionContext=context,
+    )
+    ciphertext = response.get("CiphertextBlob")
+    response_key_id = str(response.get("KeyId") or "")
+    if not isinstance(ciphertext, (bytes, bytearray)) or not ciphertext:
+        raise TEEKMSProvisionV2Error("KMS provider ciphertext is missing")
+    document = {
+        "schema_version": PROVIDER_ENVELOPE_SCHEMA_VERSION,
+        "credential_slot": slot,
+        "credential_ref_hash": reference_hash,
+        "ciphertext_blob_b64": base64.b64encode(bytes(ciphertext)).decode("ascii"),
+        "ciphertext_blob_hash": sha256_bytes(bytes(ciphertext)),
+        "kms_key_id_hash": kms_key_reference_hash(response_key_id),
+        "encryption_context": context,
+        "encryption_context_hash": sha256_json(context),
+    }
+    normalized = validate_provider_envelope(document)
+    return {
+        name: value
+        for name, value in normalized.items()
+        if name != "ciphertext_blob"
+    }
+
+
 def validate_provider_envelope(value: Mapping[str, Any]) -> Dict[str, Any]:
     fields = {
         "schema_version",

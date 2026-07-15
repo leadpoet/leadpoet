@@ -1696,7 +1696,9 @@ def _autoresearch_loop_capacity(config: ResearchLabGatewayConfig) -> int:
     proxy_count = _configured_autoresearch_proxy_count()
     total_workers = max(0, int(config.hosted_worker_total_workers or 0))
     if config.hosted_worker_require_proxy and not proxy_count and not config.hosted_worker_proxy_url:
-        return 0
+        # Strict V2 keeps worker proxy plaintext out of the parent process.
+        # The configured total is the sealed profile fleet's bound capacity.
+        return total_workers
     if proxy_count and total_workers:
         return max(1, min(proxy_count, total_workers))
     if proxy_count:

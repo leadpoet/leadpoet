@@ -12,6 +12,7 @@ from validator_tee.enclave.hotkey_authority_v2 import (
 from validator_tee.host.hotkey_bootstrap_v2 import (
     HOTKEY_ENVELOPE_SCHEMA_VERSION,
     ValidatorHotkeyBootstrapV2Error,
+    build_hotkey_envelope_v2,
     kms_key_reference_hash,
     provision_validator_hotkey_v2,
 )
@@ -90,6 +91,42 @@ class KMS:
     def decrypt(self, **request):
         self.request = request
         return self.response
+
+
+class EncryptKMS:
+    def __init__(self):
+        self.request = None
+
+    def encrypt(self, **request):
+        self.request = request
+        return {
+            "KeyId": "arn:aws:kms:us-east-1:123:key/hotkey-v2",
+            "CiphertextBlob": b"sealed-hotkey-seed",
+        }
+
+
+def test_operator_builds_hotkey_envelope_bound_to_public_identity():
+    kms = EncryptKMS()
+    context = {
+        "leadpoet:purpose": "validator-hotkey-v2",
+        "leadpoet:validator_hotkey": HOTKEY,
+    }
+    envelope = build_hotkey_envelope_v2(
+        validator_hotkey=HOTKEY,
+        hotkey_public_key=PUBLIC_KEY,
+        seed=b"s" * 32,
+        kms_key_id="alias/leadpoet-validator-hotkey-v2",
+        encryption_context=context,
+        kms_client=kms,
+    )
+
+    assert kms.request["Plaintext"] == b"s" * 32
+    assert "ssssssss" not in str(envelope)
+    assert envelope["validator_hotkey"] == HOTKEY
+    assert envelope["hotkey_public_key"] == PUBLIC_KEY
+    assert envelope["kms_key_id_hash"] == kms_key_reference_hash(
+        "arn:aws:kms:us-east-1:123:key/hotkey-v2"
+    )
 
 
 def test_parent_relays_only_validator_kms_ciphertexts():

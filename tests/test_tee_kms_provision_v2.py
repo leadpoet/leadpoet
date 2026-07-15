@@ -10,6 +10,7 @@ from gateway.utils.tee_kms_provision_v2 import (
     JOB_PROVIDER_ENVELOPE_SCHEMA_VERSION,
     PROVIDER_ENVELOPE_SCHEMA_VERSION,
     TEEKMSProvisionV2Error,
+    build_provider_envelope_v2,
     kms_key_reference_hash,
     provider_reference_hashes_from_envelopes,
     provision_provider_envelope_v2,
@@ -51,6 +52,7 @@ class _Client:
             "key_encryption_algorithm": KMS_KEY_ENCRYPTION_ALGORITHM,
             "attestation_document_b64": base64.b64encode(b"nitro").decode(),
         }
+
 
     async def v2_provision_encrypted_secret(
         self, *, credential_slot, ciphertext_for_recipient_b64
@@ -106,6 +108,68 @@ class _Client:
             "credential_slot": envelope["credential_slot"],
             "credential_ref_hash": envelope["credential_value_hash"],
         }
+
+
+class _EncryptKMS:
+    def __init__(self):
+        self.request = None
+
+    def encrypt(self, **request):
+        self.request = request
+        return {
+            "KeyId": "arn:aws:kms:us-east-1:123:key/provider-v2",
+            "CiphertextBlob": b"provider-ciphertext",
+        }
+
+
+def test_operator_builds_provider_envelope_without_persisting_plaintext():
+    kms = _EncryptKMS()
+    context = {
+        "leadpoet:purpose": "gateway-provider-v2",
+        "leadpoet:slot": "openrouter",
+    }
+    envelope = build_provider_envelope_v2(
+        credential_slot="openrouter",
+        plaintext=b"secret-provider-key",
+        credential_ref_hash="sha256:" + "c" * 64,
+        kms_key_id="alias/leadpoet-provider-v2",
+        encryption_context=context,
+        kms_client=kms,
+    )
+
+    assert kms.request == {
+        "KeyId": "alias/leadpoet-provider-v2",
+        "Plaintext": b"secret-provider-key",
+        "EncryptionContext": context,
+    }
+    assert "secret-provider-key" not in str(envelope)
+    assert envelope["credential_slot"] == "openrouter"
+    assert envelope["kms_key_id_hash"] == kms_key_reference_hash(
+        "arn:aws:kms:us-east-1:123:key/provider-v2"
+    )
+
+
+def test_binary_plaintext_requires_explicit_artifact_key_mode():
+    with pytest.raises(TEEKMSProvisionV2Error):
+        build_provider_envelope_v2(
+            credential_slot="openrouter",
+            plaintext=b"secret\x00value",
+            credential_ref_hash="sha256:" + "c" * 64,
+            kms_key_id="alias/leadpoet-provider-v2",
+            encryption_context={"purpose": "credential"},
+            kms_client=_EncryptKMS(),
+        )
+
+    envelope = build_provider_envelope_v2(
+        credential_slot="artifact_master_key",
+        plaintext=b"\x00" * 32,
+        credential_ref_hash="sha256:" + "c" * 64,
+        kms_key_id="alias/leadpoet-provider-v2",
+        encryption_context={"purpose": "artifact-key"},
+        kms_client=_EncryptKMS(),
+        allow_binary=True,
+    )
+    assert envelope["credential_slot"] == "artifact_master_key"
 
 
 class _KMS:

@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from gateway.tee.acceptance_corpus_v2 import (
     AcceptanceCorpusV2Error,
     REQUIRED_PROMOTION_BRANCHES,
+    build_acceptance_corpus_from_index_v2,
     build_acceptance_corpus_v2,
     validate_acceptance_corpus_v2,
 )
@@ -126,3 +127,27 @@ def test_acceptance_corpus_rejects_unapproved_signer(tmp_path):
             corpus_root=tmp_path,
             expected_signing_pubkey_hash=_hash("another signer"),
         )
+
+
+def test_acceptance_index_hashes_fixture_bytes_before_signing(tmp_path):
+    fixtures = _fixtures(tmp_path)
+    fixture_index = [
+        {name: value for name, value in fixture.items() if name != "artifact_hash"}
+        for fixture in fixtures
+    ]
+    key = Ed25519PrivateKey.generate()
+    manifest = build_acceptance_corpus_from_index_v2(
+        fixture_index=fixture_index,
+        corpus_root=tmp_path,
+        captured_from="2026-06-01T00:00:00Z",
+        captured_through="2026-07-01T00:00:00Z",
+        signing_key=key,
+    )
+    signer_hash = sha256_bytes(key.public_key().public_bytes_raw())
+
+    assert validate_acceptance_corpus_v2(
+        manifest,
+        corpus_root=tmp_path,
+        expected_signing_pubkey_hash=signer_hash,
+    ) == manifest
+    assert manifest["fixtures"][0]["artifact_hash"].startswith("sha256:")

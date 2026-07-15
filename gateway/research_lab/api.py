@@ -3719,7 +3719,10 @@ def _autoresearch_loop_capacity(config: ResearchLabGatewayConfig) -> int:
     proxy_count = _configured_autoresearch_proxy_count()
     total_workers = max(0, int(config.hosted_worker_total_workers or 0))
     if config.hosted_worker_require_proxy and not proxy_count and not config.hosted_worker_proxy_url:
-        return 0
+        # V2 worker proxies are KMS-sealed and intentionally absent from the
+        # parent environment. The explicit fleet size is bound into the
+        # encrypted-profile transition report and worker process environment.
+        return total_workers
     if proxy_count and total_workers:
         return max(1, min(proxy_count, total_workers))
     if proxy_count:

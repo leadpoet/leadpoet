@@ -175,6 +175,46 @@ def _reject_parent_provider_plaintext(
             )
 
 
+def verify_artifact_bucket_lock_v2(
+    policy: Mapping[str, Any], *, s3_client: Any
+) -> Dict[str, Any]:
+    normalized = validate_artifact_policy(policy)
+    bucket = normalized["bucket_host"].split(".s3", 1)[0]
+    if not bucket:
+        raise GatewayRestartPreflightV2Error("artifact bucket name is invalid")
+    try:
+        versioning = s3_client.get_bucket_versioning(Bucket=bucket)
+        object_lock = s3_client.get_object_lock_configuration(Bucket=bucket)
+    except Exception as exc:
+        raise GatewayRestartPreflightV2Error(
+            "artifact bucket protection is unavailable"
+        ) from exc
+    rule = (
+        dict(object_lock.get("ObjectLockConfiguration") or {})
+        .get("Rule", {})
+        .get("DefaultRetention", {})
+    )
+    days = int(rule.get("Days") or 0) + int(rule.get("Years") or 0) * 365
+    if (
+        versioning.get("Status") != "Enabled"
+        or (object_lock.get("ObjectLockConfiguration") or {}).get(
+            "ObjectLockEnabled"
+        )
+        != "Enabled"
+        or rule.get("Mode") != "COMPLIANCE"
+        or days < normalized["minimum_retention_days"]
+    ):
+        raise GatewayRestartPreflightV2Error(
+            "artifact bucket lacks required COMPLIANCE Object Lock"
+        )
+    return {
+        "bucket": bucket,
+        "object_lock_mode": "COMPLIANCE",
+        "retention_days": days,
+        "versioning": "Enabled",
+    }
+
+
 def verify_gateway_restart_preflight_v2(
     *,
     deploy_commit: str,
@@ -190,6 +230,7 @@ def verify_gateway_restart_preflight_v2(
     parent_environment: Mapping[str, str],
     acceptance_corpus_manifest_path: Optional[Path] = None,
     acceptance_corpus_root: Optional[Path] = None,
+    artifact_s3_client: Any = None,
 ) -> Dict[str, Any]:
     commit = str(deploy_commit or "").lower()
     if not _COMMIT_RE.fullmatch(commit):
@@ -234,6 +275,13 @@ def verify_gateway_restart_preflight_v2(
         acceptance_corpus = None
 
     normalized_policy = validate_artifact_policy(artifact_policy)
+    artifact_storage = (
+        verify_artifact_bucket_lock_v2(
+            normalized_policy, s3_client=artifact_s3_client
+        )
+        if artifact_s3_client is not None
+        else None
+    )
     paths = tuple(Path(path) for path in credential_envelope_paths)
     if len(paths) != len(REQUIRED_BOOT_ENVELOPE_FILES):
         raise GatewayRestartPreflightV2Error(
@@ -295,6 +343,7 @@ def verify_gateway_restart_preflight_v2(
         "boot_credential_slot_count": len(observed_slots),
         "parent_plaintext_provider_slot_count": 0,
         "artifact_bucket_host": normalized_policy["bucket_host"],
+        "artifact_bucket_protection": artifact_storage or "not_requested",
         "worker_proxy_profile_count": int(profile_result["profile_count"]),
         "worker_counts": expected_worker_counts,
         "acceptance_corpus_manifest_hash": (
@@ -319,6 +368,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--acceptance-corpus-root", type=Path)
     args = parser.parse_args(argv)
     parent_vcpus, parent_memory_mib = _observed_capacity()
+    import boto3
+
     result = verify_gateway_restart_preflight_v2(
         deploy_commit=args.deploy_commit,
         release_manifest=_json(args.release_manifest, "gateway V2 release manifest"),
@@ -333,6 +384,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parent_environment=load_parent_environment(args.parent_env_file),
         acceptance_corpus_manifest_path=args.acceptance_corpus_manifest,
         acceptance_corpus_root=args.acceptance_corpus_root,
+        artifact_s3_client=boto3.client("s3"),
     )
     print(json.dumps(result, sort_keys=True, indent=2))
     return 0

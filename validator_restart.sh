@@ -28,9 +28,11 @@ trap cleanup EXIT
 
 cd "$VALIDATOR_ROOT"
 
-echo "Preflight: preserving local validator.py diff if present"
-if ! git diff --quiet -- neurons/validator.py; then
-  git stash push -m "pre-prod-validator-local-validator-py-$(date -u +%Y%m%dT%H%M%SZ)" -- neurons/validator.py
+echo "Preflight: preserving tracked local validator checkout changes if present"
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  restart_stash_message="pre-validator-restart-local-tracked-$(date -u +%Y%m%dT%H%M%SZ)"
+  git stash push -m "$restart_stash_message" -- .
+  echo "Preserved tracked local changes in Git stash: $restart_stash_message"
 fi
 
 echo "Pulling latest GitHub main before stopping validator"

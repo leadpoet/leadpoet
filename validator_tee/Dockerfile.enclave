@@ -45,6 +45,10 @@ RUN python3 -m pip install --no-cache-dir --no-compile --no-deps \
       /tmp/py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl \
     && rm -f /tmp/py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 
+# Commit-reveal stays inside the measured validator authority. This library is
+# rebuilt from the hash-locked official source before every enclave build.
+COPY .validator-tee-artifacts/libbittensor_drand_v2.so /app/validator_tee/enclave/libbittensor_drand_v2.so
+
 # =============================================================================
 # CRITICAL: Delete ALL .pyc files and __pycache__ directories
 # Even with --no-compile, pip may create .pyc files in some edge cases.

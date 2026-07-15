@@ -605,6 +605,9 @@ class ICPPrompt(BaseModel):
     product_service: str = Field(..., description="Product/service being sold")
     required_attribute: str = Field(
         "", description="Attribute every returned company must satisfy (scorer-enforced)")
+    excluded_companies: List[str] = Field(
+        default_factory=list,
+        description="Companies the model must never return: domain, LinkedIn company URL, or name (scorer-enforced)")
     intent_signals: List[str] = Field(default_factory=list, description="Intent signals to look for")
     intent_max_age_days: int = Field(
         365,

@@ -41,6 +41,8 @@ verification (Stage 4 person verification, etc.).
 """
 
 import os
+import aiohttp
+import json
 import re
 import logging
 from datetime import date, datetime
@@ -362,6 +364,94 @@ async def score_company(
     )
 
 
+_SCORER_REVERIFY_ENV = "RESEARCH_LAB_SCORER_LLM_REVERIFY"
+_SCORER_REVERIFY_MODEL = "perplexity/sonar"
+_SCORER_REVERIFY_TIMEOUT_S = 45.0
+
+
+def _scorer_reverify_enabled() -> bool:
+    import os
+    return os.getenv(_SCORER_REVERIFY_ENV, "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _reverify_decision(verdict: dict, icp_attribute: str, icp_stage: str) -> Tuple[bool, str]:
+    """Zero only on an affirmative false from the web-grounded judge; missing
+    or non-boolean answers keep the company (fail-open)."""
+    if icp_attribute and verdict.get("attribute_satisfied") is False:
+        return False, (f"required_attribute refuted by web re-verification: "
+                       f"{str(verdict.get('reason') or '')[:160]}")
+    if icp_stage and verdict.get("stage_matches") is False:
+        return False, (f"company_stage refuted by web re-verification: "
+                       f"{str(verdict.get('reason') or '')[:160]}")
+    return True, ""
+
+
+async def _llm_reverify_company(company: "CompanyOutput", icp: "ICPPrompt") -> Tuple[bool, str]:
+    """Web-grounded re-verification of the model-REPORTED attribute claim and
+    stage label — the two dimensions where the scorer otherwise trusts model
+    text. One Sonar call per company, only when the ICP pins either dimension.
+
+    Fail semantics: zero ONLY on an affirmative web-grounded mismatch; an
+    indeterminate answer or any provider/parse failure keeps the company
+    (fail-open) — a provider outage must never zero a whole benchmark."""
+    if not _scorer_reverify_enabled():
+        return True, ""
+    icp_attribute = str(getattr(icp, "required_attribute", "") or "").strip()
+    icp_stage = _normalize_company_stage(getattr(icp, "company_stage", ""))
+    if not icp_attribute and not icp_stage:
+        return True, ""
+    import os
+    key = (os.environ.get("OPENROUTER_API_KEY")
+           or os.environ.get("QUALIFICATION_OPENROUTER_API_KEY")
+           or os.environ.get("OPENROUTER_KEY") or "")
+    if not key:
+        logger.warning("scorer_reverify_skipped reason=no_openrouter_key")
+        return True, ""
+    claim = getattr(company, "required_attribute", None)
+    checks = []
+    if icp_attribute:
+        checks.append(
+            f'attribute_satisfied: does this company actually satisfy: "{icp_attribute}"? '
+            f'The model cites evidence URL "{getattr(claim, "evidence_url", "") if claim else ""}" '
+            f'and quote "{(getattr(claim, "evidence_quote", "") if claim else "")[:300]}". '
+            f'Verify from the web. Answer false ONLY if you are confident it does not.')
+    if icp_stage:
+        checks.append(
+            f'stage_matches: is this company\'s funding/ownership stage consistent with '
+            f'"{getattr(icp, "company_stage", "")}" (verify from funding announcements, '
+            f'investor pages)? Answer false ONLY if you are confident it is a different stage.')
+    prompt = (
+        f'Company: "{company.company_name}" — website {company.company_website} '
+        f'— LinkedIn {company.company_linkedin or "(none)"}.\n'
+        + "\n".join(f"- {c}" for c in checks)
+        + '\nReturn STRICT JSON only: {"attribute_satisfied": true/false, '
+          '"stage_matches": true/false, "reason": "one sentence"}. '
+          "Use true for any check you cannot confidently resolve."
+    )
+    try:
+        timeout = aiohttp.ClientTimeout(total=_SCORER_REVERIFY_TIMEOUT_S)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                json={"model": _SCORER_REVERIFY_MODEL,
+                      "messages": [{"role": "user", "content": prompt}],
+                      "temperature": 0.0},
+                headers={"Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json"},
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning("scorer_reverify_unavailable status=%s", resp.status)
+                    return True, ""
+                body = await resp.json()
+        content = body["choices"][0]["message"]["content"]
+        match = re.search(r"\{.*\}", content, re.S)
+        verdict = json.loads(match.group(0)) if match else {}
+    except Exception as exc:  # noqa: BLE001 - fail-open on infrastructure error
+        logger.warning("scorer_reverify_failed error=%s", str(exc)[:120])
+        return True, ""
+    return _reverify_decision(verdict, icp_attribute, icp_stage)
+
+
 async def score_company_autoresearch_intent_v2(
     company: CompanyOutput,
     icp: ICPPrompt,
@@ -404,6 +494,10 @@ async def score_company_autoresearch_intent_v2(
         co_verified, co_reason = False, f"company verification error: {str(e)[:120]}"
     if not co_verified:
         return _zero_company_breakdown(f"Company verification failed: {co_reason}")
+
+    reverify_ok, reverify_reason = await _llm_reverify_company(company, icp)
+    if not reverify_ok:
+        return _zero_company_breakdown(reverify_reason)
 
     if company.company_name:
         seen_companies.add(company.company_name.lower().strip())
@@ -478,6 +572,11 @@ def _run_autoresearch_binary_fit_checks(
                 f"Employee count mismatch: '{company.employee_count}' not in {sorted(icp_buckets)}",
             )
 
+    if _matches_exclusion_list(company, getattr(icp, "excluded_companies", None)):
+        return False, (
+            f"Company '{company.company_name}' matches the ICP exclusion list"
+        )
+
     icp_attribute = str(getattr(icp, "required_attribute", "") or "").strip()
     if icp_attribute:
         # The ICP's required_attribute is a hard requirement. The model runs
@@ -545,6 +644,72 @@ def _normalize_icp_employee_buckets(value) -> set:
         for piece in pieces
     }
     return {bucket for bucket in buckets if bucket}
+
+
+_EXCLUSION_NAME_SUFFIXES = {
+    "inc", "incorporated", "llc", "llp", "lp", "ltd", "limited", "corp",
+    "corporation", "co", "company", "plc", "gmbh", "sa", "sas", "srl", "bv",
+    "ag", "pty", "pte", "holdings", "group",
+}
+
+
+def _exclusion_domain_key(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw or " " in raw:
+        return ""
+    raw = re.sub(r"^https?://", "", raw).split("/")[0].split("?")[0]
+    if raw.startswith("www."):
+        raw = raw[4:]
+    if "." not in raw or not re.match(r"^[a-z0-9.-]+$", raw):
+        return ""
+    return raw
+
+
+def _exclusion_linkedin_key(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if "/company/" not in raw:
+        return ""
+    return raw.split("/company/")[1].strip("/").split("/")[0].split("?")[0]
+
+
+def _exclusion_name_key(value: str) -> str:
+    words = re.findall(r"[a-z0-9]+", str(value or "").lower())
+    while words and words[-1] in _EXCLUSION_NAME_SUFFIXES:
+        words.pop()
+    return "".join(words)
+
+
+def _matches_exclusion_list(company: "CompanyOutput", entries) -> bool:
+    """Exact-after-normalization match of a company against the ICP's
+    excluded_companies list (domain, LinkedIn company URL, or name). The
+    sourcing model must never return these; the scorer zeroes any that appear
+    regardless of which model produced the output."""
+    if not entries:
+        return False
+    domains, slugs, names = set(), set(), set()
+    for entry in list(entries)[:50]:
+        raw = str(entry or "").strip()
+        if not raw:
+            continue
+        if "linkedin.com" in raw.lower():
+            slug = _exclusion_linkedin_key(raw)
+            if slug:
+                slugs.add(slug)
+            continue
+        dom = _exclusion_domain_key(raw)
+        if dom:
+            domains.add(dom)
+            continue
+        name = _exclusion_name_key(raw)
+        if name:
+            names.add(name)
+    if domains and _exclusion_domain_key(getattr(company, "company_website", "")) in domains:
+        return True
+    if slugs and _exclusion_linkedin_key(getattr(company, "company_linkedin", "")) in slugs:
+        return True
+    if names and _exclusion_name_key(getattr(company, "company_name", "")) in names:
+        return True
+    return False
 
 
 def _normalize_company_stage(value) -> str:

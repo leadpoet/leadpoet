@@ -69,7 +69,8 @@ def test_company_goal_allocation_invariants():
     assert a == b
 
 
-def test_icp_set_pins_uniform_goal_of_five():
+def test_icp_set_pins_uniform_goal_of_five(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_ICP_EXCLUSIONS_ENABLED", "0")  # no live LLM in tests
     from gateway.tasks.icp_generator import generate_icp_set
     icps, _dist, _h = generate_icp_set(20260715, base_seed=42)
     goals = [icp["max_companies"] for icp in icps]

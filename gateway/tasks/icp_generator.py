@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import os
 import json
+import re
 import time
 import hashlib
 import random
@@ -219,7 +220,8 @@ STAGE_EMPLOYEE_BUCKETS: Dict[str, tuple] = {
     "Public": ("1,001-5,000", "5,001-10,000", "10,001+"),
 }
 
-# Geographies - ALL 51 US states/territories + Dubai & Abu Dhabi (UAE)
+# Geographies - all US states/territories, deliberate multi-state regions
+# (broader supply; see note below), + Dubai & Abu Dhabi (UAE)
 # US states from gateway/utils/geo_lookup_fast.json (source of truth)
 GEOGRAPHIES = [
     "United States, Alabama",
@@ -1082,6 +1084,97 @@ COMPANY_GOAL_MIN = 1
 COMPANY_GOAL_MAX = 25
 COMPANY_GOAL_AVERAGE = 5
 
+# Lab exclusion lists: each generated ICP names real companies the model must
+# NOT return, so the benchmark exercises exclusion honoring end to end (the
+# scorer zeroes any returned excluded company). Kept small by default so an
+# ICP with thin supply is not starved into a zero by its own exclusion.
+_EXCLUSIONS_ENABLED_ENV = "RESEARCH_LAB_ICP_EXCLUSIONS_ENABLED"
+_EXCLUSIONS_COUNT_ENV = "RESEARCH_LAB_ICP_EXCLUSIONS_COUNT"
+_EXCLUSIONS_DEFAULT_COUNT = 1
+_EXCLUSIONS_MAX_COUNT = 3
+_EXCLUSION_DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$")
+
+
+def _exclusions_enabled() -> bool:
+    return os.getenv(_EXCLUSIONS_ENABLED_ENV, "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _exclusions_count() -> int:
+    try:
+        n = int(os.getenv(_EXCLUSIONS_COUNT_ENV, str(_EXCLUSIONS_DEFAULT_COUNT)))
+    except ValueError:
+        n = _EXCLUSIONS_DEFAULT_COUNT
+    return max(1, min(n, _EXCLUSIONS_MAX_COUNT))
+
+
+def generate_exclusions_for_icp(icp: Dict[str, Any], count: Optional[int] = None,
+                                timeout_s: float = 45.0) -> List[str]:
+    """Real companies matching this ICP's hard profile, as flat exclusion
+    entries (domain preferred, name fallback). Fail-open: any provider or
+    parse problem returns [] — an ICP without exclusions is always valid."""
+    if not OPENROUTER_API_KEY:
+        logger.warning("icp_exclusions_skipped reason=no_openrouter_key")
+        return []
+    want = count if count is not None else _exclusions_count()
+    bands = icp.get("employee_count")
+    bands_text = ", ".join(bands) if isinstance(bands, (list, tuple)) else str(bands or "")
+    plural = "y" if want == 1 else "ies"
+    stage = str(icp.get("company_stage") or "").strip()
+    prompt = (
+        f"Name {want} real, currently-operating compan{plural} that match "
+        f"ALL of this profile:\n"
+        f"- Industry: {icp.get('industry', '')} ({icp.get('sub_industry', '')})\n"
+        f"- Headquarters: {icp.get('geography', icp.get('country', ''))}\n"
+        f"- Employee count in one of these LinkedIn bands: {bands_text}\n"
+        + (f"- Funding/ownership stage: {stage}\n" if stage else "")
+        + "Only name companies you can verify exist on the web right now. "
+          'Return STRICT JSON only: [{"name": "<company name>", "domain": "<bare homepage domain like example.com>"}]'
+    )
+    try:
+        response = httpx.post(
+            f"{OPENROUTER_BASE_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                     "Content-Type": "application/json"},
+            json={"model": OPENROUTER_MODEL,
+                  "messages": [{"role": "user", "content": prompt}],
+                  "temperature": 0.0},
+            timeout=timeout_s,
+        )
+        if response.status_code != 200:
+            logger.warning("icp_exclusions_failed status=%s", response.status_code)
+            return []
+        content = response.json()["choices"][0]["message"]["content"]
+        match = re.search(r"\[.*\]", content, re.S)
+        rows = json.loads(match.group(0)) if match else []
+    except Exception as exc:  # noqa: BLE001 - fail-open by design
+        logger.warning("icp_exclusions_failed error=%s", str(exc)[:120])
+        return []
+    entries: List[str] = []
+    for row in rows[:want] if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        domain = str(row.get("domain") or "").strip().lower()
+        domain = re.sub(r"^https?://", "", domain).split("/")[0]
+        if domain.startswith("www."):
+            domain = domain[4:]
+        name = " ".join(str(row.get("name") or "").split())[:120]
+        if domain and _EXCLUSION_DOMAIN_RE.match(domain):
+            entries.append(domain)
+        elif name:
+            entries.append(name)
+    return list(dict.fromkeys(entries))[:want]
+
+
+def attach_generated_exclusions(icps: List[Dict[str, Any]]) -> None:
+    """Populate excluded_companies on each generated ICP (fail-open per ICP)."""
+    if not _exclusions_enabled():
+        logger.info("icp_exclusions_disabled via %s", _EXCLUSIONS_ENABLED_ENV)
+        for icp in icps:
+            icp.setdefault("excluded_companies", [])
+        return
+    for icp in icps:
+        icp["excluded_companies"] = generate_exclusions_for_icp(icp)
+
 
 def allocate_company_goals(
     count: int,
@@ -1165,6 +1258,10 @@ def generate_icp_set(
     # operators decide to switch.
     for icp in icps:
         icp["max_companies"] = COMPANY_GOAL_AVERAGE
+
+    # Lab exclusion lists (real matching companies the model must avoid);
+    # attached before hashing so the set hash covers them.
+    attach_generated_exclusions(icps)
 
     icp_set_hash = compute_icp_set_hash(icps)
 

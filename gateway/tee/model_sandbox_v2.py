@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from gateway.tee.provider_client_v2 import BrokeredProviderTransportV2
 from gateway.tee.sandbox_provider_socket_v2 import SandboxProviderSocketServerV2
+from gateway.tee.sandbox_http_shim_v2 import EVIDENCE_MISS_SENTINEL
 from gateway.tee.source_bundle_v2 import extract_source_bundle_v2
 from gateway.tee.source_add_runtime_v2 import (
     source_add_placeholder_environment_v2,
@@ -43,6 +44,7 @@ from research_lab.eval.provider_evidence_cache import (
     EVIDENCE_CACHE_SCHEMA_VERSION,
     build_evidence_cache_from_trace_entries,
     icp_evidence_cache_key,
+    merge_evidence_caches,
 )
 from research_lab.eval.snapshot_store import (
     SNAPSHOT_MISS_SENTINEL,
@@ -247,7 +249,13 @@ def _request(value: Mapping[str, Any]) -> Dict[str, Any]:
         "environment",
         "provider_evidence_cache",
         "provider_evidence_cache_ref",
+        "provider_evidence_mode",
+        "provider_snapshot_bundle",
+        "provider_snapshot_tree_hash",
+        "provider_snapshot_manifest_hash",
         "provider_cost_scope",
+        "provider_cost_cap_microusd",
+        "provider_call_cap",
         "provider_runtime_catalog",
         "provider_catalog_evidence",
     }
@@ -297,6 +305,30 @@ def _request(value: Mapping[str, Any]) -> Dict[str, Any]:
     ):
         raise ModelSandboxV2Error("provider evidence cache is invalid")
     cache_ref = str(value.get("provider_evidence_cache_ref") or "").lower()
+    evidence_mode = str(value.get("provider_evidence_mode") or "").strip().lower()
+    if evidence_mode not in {"live", "cache_live", "record", "frozen"}:
+        raise ModelSandboxV2Error("provider evidence mode is invalid")
+    if evidence_mode == "frozen" and not normalized_evidence_cache:
+        if not value.get("provider_snapshot_bundle"):
+            raise ModelSandboxV2Error("frozen provider evidence sources are empty")
+    snapshot_bundle = value.get("provider_snapshot_bundle")
+    snapshot_tree_hash = str(value.get("provider_snapshot_tree_hash") or "")
+    snapshot_manifest_hash = str(
+        value.get("provider_snapshot_manifest_hash") or ""
+    )
+    if snapshot_bundle:
+        if (
+            not isinstance(snapshot_bundle, Mapping)
+            or not _HASH_RE.fullmatch(snapshot_tree_hash)
+            or not _HASH_RE.fullmatch(snapshot_manifest_hash)
+            or snapshot_bundle.get("source_tree_hash") != snapshot_tree_hash
+        ):
+            raise ModelSandboxV2Error("provider snapshot commitment is invalid")
+        normalized_snapshot_bundle: Dict[str, Any] = dict(snapshot_bundle)
+    else:
+        if snapshot_tree_hash or snapshot_manifest_hash:
+            raise ModelSandboxV2Error("provider snapshot commitment is incomplete")
+        normalized_snapshot_bundle = {}
     if value.get("operation") == "run_icp":
         raw_input = value.get("input")
         if not isinstance(raw_input, Mapping) or not isinstance(
@@ -316,6 +348,31 @@ def _request(value: Mapping[str, Any]) -> Dict[str, Any]:
     scope = str(value.get("provider_cost_scope") or "").lower()
     if not _HASH_RE.fullmatch(scope):
         raise ModelSandboxV2Error("provider cost scope is invalid")
+    cost_cap_microusd = value.get("provider_cost_cap_microusd")
+    provider_call_cap = value.get("provider_call_cap")
+    if (
+        isinstance(cost_cap_microusd, bool)
+        or not isinstance(cost_cap_microusd, int)
+        or cost_cap_microusd < 0
+        or cost_cap_microusd > 500_000
+        or isinstance(provider_call_cap, bool)
+        or not isinstance(provider_call_cap, int)
+        or provider_call_cap < 0
+        or provider_call_cap > 32
+    ):
+        raise ModelSandboxV2Error("provider tree evaluation caps are invalid")
+    if evidence_mode in {"record", "frozen"}:
+        if value.get("model_kind") == "candidate":
+            if cost_cap_microusd <= 0 or provider_call_cap <= 0:
+                raise ModelSandboxV2Error(
+                    "provider tree evaluation caps are required"
+                )
+        elif cost_cap_microusd or provider_call_cap:
+            raise ModelSandboxV2Error(
+                "provider tree evaluation caps are out of scope"
+            )
+    elif cost_cap_microusd or provider_call_cap:
+        raise ModelSandboxV2Error("provider tree evaluation caps are out of scope")
     try:
         provider_runtime_catalog = validate_source_add_runtime_catalog_v2(
             value.get("provider_runtime_catalog") or {}
@@ -373,7 +430,13 @@ def _request(value: Mapping[str, Any]) -> Dict[str, Any]:
         "environment": dict(sorted(normalized_environment.items())),
         "provider_evidence_cache": normalized_evidence_cache,
         "provider_evidence_cache_ref": cache_ref,
+        "provider_evidence_mode": evidence_mode,
+        "provider_snapshot_bundle": normalized_snapshot_bundle,
+        "provider_snapshot_tree_hash": snapshot_tree_hash,
+        "provider_snapshot_manifest_hash": snapshot_manifest_hash,
         "provider_cost_scope": scope,
+        "provider_cost_cap_microusd": cost_cap_microusd,
+        "provider_call_cap": provider_call_cap,
         "provider_runtime_catalog": provider_runtime_catalog,
         "provider_catalog_evidence": {
             "result": dict(catalog_result),
@@ -591,6 +654,36 @@ class RunscModelSandboxV2:
                 expected_source_tree_hash=artifact.model_artifact_hash,
             )
             _normalize_source_permissions(source_root)
+            provider_snapshot_root: Path | None = None
+            provider_snapshot_archive_hash = sha256_json({})
+            if value["provider_snapshot_bundle"]:
+                provider_snapshot_root = tmp_root / "provider-snapshot"
+                snapshot_evidence = extract_source_bundle_v2(
+                    value["provider_snapshot_bundle"],
+                    destination=provider_snapshot_root,
+                    expected_source_tree_hash=value[
+                        "provider_snapshot_tree_hash"
+                    ],
+                )
+                snapshot_store = ProviderSnapshotStore(
+                    str(provider_snapshot_root),
+                    mode=MODE_REPLAY,
+                )
+                manifest = snapshot_store.load_manifest()
+                verification = snapshot_store.verify_manifest(manifest)
+                if (
+                    manifest is None
+                    or not verification.get("passed")
+                    or manifest.get("manifest_hash")
+                    != value["provider_snapshot_manifest_hash"]
+                ):
+                    raise ModelSandboxV2Error(
+                        "provider snapshot manifest verification failed"
+                    )
+                provider_snapshot_archive_hash = str(
+                    snapshot_evidence["archive_sha256"]
+                )
+                _normalize_source_permissions(provider_snapshot_root)
             broker_root = tmp_root / "broker"
             broker_root.mkdir(mode=0o700)
             provider_scope = self._transport.create_scope(
@@ -621,26 +714,28 @@ class RunscModelSandboxV2:
                     broker_root=broker_root,
                     tmp_root=tmp_root,
                     job_id=job_id,
+                    provider_snapshot_root=provider_snapshot_root,
                 )
             finally:
                 server.close()
         output_hash = sha256_json(result)
         generated_evidence_cache = {}
-        if (
-            value["model_kind"] == "private"
-            and value["operation"] == "run_icp"
-            and str(dict(value["input"].get("context") or {}).get("mode") or "")
-            == "private_baseline"
-        ):
+        if value["operation"] == "run_icp" and value["provider_evidence_mode"] == "record":
             utc_day = str(self._utc_day_supplier() or "")
             if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", utc_day):
                 raise ModelSandboxV2Error("provider evidence cache UTC day is invalid")
+            existing_entries = dict(
+                dict(value["provider_evidence_cache"]).get("entries") or {}
+            )
             generated_evidence_cache = {
                 "schema_version": EVIDENCE_CACHE_SCHEMA_VERSION,
                 "rolling_window_hash": "",
                 "icp_ref": value["provider_evidence_cache_ref"],
                 "utc_day": utc_day,
-                "entries": build_evidence_cache_from_trace_entries(trace_entries),
+                "entries": merge_evidence_caches(
+                    existing_entries,
+                    build_evidence_cache_from_trace_entries(trace_entries),
+                ),
             }
         return {
             "schema_version": MODEL_SANDBOX_RESULT_SCHEMA_VERSION,
@@ -656,6 +751,16 @@ class RunscModelSandboxV2:
                 value["provider_evidence_cache"]
             ),
             "provider_evidence_cache_ref": value["provider_evidence_cache_ref"],
+            "provider_evidence_mode": value["provider_evidence_mode"],
+            "provider_snapshot_archive_hash": provider_snapshot_archive_hash,
+            "provider_snapshot_tree_hash": (
+                value["provider_snapshot_tree_hash"] or sha256_json({})
+            ),
+            "provider_snapshot_manifest_hash": (
+                value["provider_snapshot_manifest_hash"] or sha256_json({})
+            ),
+            "provider_cost_cap_microusd": value["provider_cost_cap_microusd"],
+            "provider_call_cap": value["provider_call_cap"],
             "provider_runtime_catalog_hash": value[
                 "provider_runtime_catalog"
             ]["catalog_hash"],
@@ -757,6 +862,241 @@ class RunscModelSandboxV2:
                 tmp_root=tmp_root,
                 job_id=job_id,
             )
+
+    def execute_dev_provider_replay(
+        self,
+        *,
+        artifact_doc: Mapping[str, Any],
+        source_bundle: Mapping[str, Any],
+        module_name: str,
+        callable_name: str,
+        icp: Mapping[str, Any],
+        context: Mapping[str, Any],
+        environment: Mapping[str, str],
+        credential_env_names: Sequence[str],
+        provider_evidence_cache: Mapping[str, Any],
+        snapshot_root: Path | None,
+        timeout_seconds: int,
+        job_id: str,
+    ) -> list[Mapping[str, Any]]:
+        """Replay one ICP from a frozen measured provider-evidence overlay."""
+
+        artifact = PrivateModelArtifactManifest.from_mapping(artifact_doc)
+        errors = validate_private_model_artifact_manifest(artifact)
+        if errors:
+            raise ModelSandboxV2Error(
+                "model artifact is invalid: " + "; ".join(errors)
+            )
+        normalized_module = str(module_name or "")
+        normalized_callable = str(callable_name or "")
+        if not _MODULE_RE.fullmatch(normalized_module) or not _CALLABLE_RE.fullmatch(
+            normalized_callable
+        ):
+            raise ModelSandboxV2Error("model adapter entrypoint is invalid")
+        normalized_timeout = int(timeout_seconds)
+        if normalized_timeout < 10:
+            raise ModelSandboxV2Error("dev provider replay timeout is outside limit")
+        cache = dict(provider_evidence_cache)
+        if (
+            cache.get("schema_version") != EVIDENCE_CACHE_SCHEMA_VERSION
+            or not isinstance(cache.get("entries"), Mapping)
+        ):
+            raise ModelSandboxV2Error("dev provider evidence cache is invalid")
+        normalized_environment: dict[str, str] = {}
+        for name, item in environment.items():
+            normalized_name = str(name)
+            normalized_value = str(item)
+            if (
+                not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", normalized_name)
+                or normalized_name in _CREDENTIAL_ENV_NAMES
+                or "\x00" in normalized_value
+                or len(normalized_value.encode("utf-8")) > 16 * 1024
+            ):
+                raise ModelSandboxV2Error("dev provider replay environment is invalid")
+            normalized_environment[normalized_name] = normalized_value
+        normalized_credential_names = sorted(
+            {str(name) for name in credential_env_names}
+        )
+        if any(name not in _CREDENTIAL_ENV_NAMES for name in normalized_credential_names):
+            raise ModelSandboxV2Error(
+                "dev provider replay credential name is invalid"
+            )
+        stdin_payload = {
+            "icp": canonicalize_private_model_icp(icp),
+            "context": dict(context),
+        }
+        if len(canonical_json(stdin_payload).encode("utf-8")) > MAX_MODEL_INPUT_BYTES:
+            raise ModelSandboxV2Error("dev provider replay input exceeds limit")
+
+        with tempfile.TemporaryDirectory(
+            prefix="lp-dev-provider-replay-v2-", dir="/tmp"
+        ) as tmp:
+            tmp_root = Path(tmp)
+            source_root = tmp_root / "source"
+            extract_source_bundle_v2(
+                source_bundle,
+                destination=source_root,
+                expected_source_tree_hash=artifact.model_artifact_hash,
+            )
+            _normalize_source_permissions(source_root)
+            evidence_root = tmp_root / "provider-evidence"
+            evidence_root.mkdir(mode=0o700)
+            cache_path = evidence_root / "provider-evidence-cache.json"
+            cache_path.write_text(canonical_json(cache), encoding="utf-8")
+            cache_path.chmod(0o400)
+            evidence_root.chmod(0o500)
+            return self._run_dev_provider_replay(
+                source_root=source_root,
+                evidence_root=evidence_root,
+                module_name=normalized_module,
+                callable_name=normalized_callable,
+                stdin_payload=stdin_payload,
+                environment={
+                    **normalized_environment,
+                    **{
+                        name: _MEASURED_CREDENTIAL_PLACEHOLDER
+                        for name in normalized_credential_names
+                    },
+                    "RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH": (
+                        "/run/leadpoet/provider-evidence-cache.json"
+                    ),
+                    "RESEARCH_LAB_PROVIDER_EVIDENCE_MODE": "frozen",
+                    **(
+                        {
+                            "RESEARCH_LAB_DEV_SNAPSHOT_DIR": (
+                                "/research_lab_dev_snapshots"
+                            )
+                        }
+                        if snapshot_root is not None
+                        else {}
+                    ),
+                },
+                snapshot_root=snapshot_root,
+                timeout_seconds=normalized_timeout,
+                tmp_root=tmp_root,
+                job_id=job_id,
+            )
+
+    def _run_dev_provider_replay(
+        self,
+        *,
+        source_root: Path,
+        evidence_root: Path,
+        module_name: str,
+        callable_name: str,
+        stdin_payload: Mapping[str, Any],
+        environment: Mapping[str, str],
+        snapshot_root: Path | None,
+        timeout_seconds: int,
+        tmp_root: Path,
+        job_id: str,
+    ) -> list[Mapping[str, Any]]:
+        bundle = tmp_root / "bundle"
+        bundle.mkdir(mode=0o700)
+        runsc_root = tmp_root / "runsc"
+        runsc_root.mkdir(mode=0o700)
+        bootstrap = (
+            "from gateway.tee.sandbox_http_shim_v2 import install as _lp_install;"
+            "_lp_install();\n" + _DOCKER_ADAPTER_BOOTSTRAP
+        )
+        readonly_mounts = {"/run/leadpoet": evidence_root}
+        if snapshot_root is not None:
+            readonly_mounts["/research_lab_dev_snapshots"] = Path(snapshot_root)
+        config_doc = _oci_config(
+            config=self.config,
+            source_root=source_root,
+            broker_root=None,
+            process_args=[
+                self.config.python_path,
+                "-c",
+                bootstrap,
+                module_name,
+                callable_name,
+            ],
+            environment=environment,
+            readonly_mounts=readonly_mounts,
+        )
+        (bundle / "config.json").write_text(
+            canonical_json(config_doc), encoding="utf-8"
+        )
+        sandbox_id = "lp-dev-provider-%s-%s" % (
+            hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:16],
+            secrets.token_hex(8),
+        )
+        command = [
+            str(self.config.runsc_path),
+            "--root=%s" % runsc_root,
+            "--rootless=true",
+            "--network=none",
+            "--platform=ptrace",
+            "run",
+            "--bundle=%s" % bundle,
+            sandbox_id,
+        ]
+        try:
+            completed = self._process_runner(
+                command,
+                input=canonical_json(stdin_payload),
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
+                env={"HOME": str(tmp_root), "PATH": "/usr/local/bin:/usr/bin:/bin"},
+                check=False,
+            )
+        finally:
+            try:
+                self._process_runner(
+                    [
+                        str(self.config.runsc_path),
+                        "--root=%s" % runsc_root,
+                        "delete",
+                        "--force",
+                        sandbox_id,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    timeout=30,
+                    env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
+                    check=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_dev_provider_replay_cleanup_failed "
+                    "sandbox_id=%s error=%s",
+                    sandbox_id,
+                    str(exc)[:240],
+                )
+        if int(completed.returncode) != 0:
+            stderr = str(completed.stderr or "")
+            if EVIDENCE_MISS_SENTINEL in stderr:
+                fingerprint = stderr.rsplit(EVIDENCE_MISS_SENTINEL, 1)[-1].splitlines()[0]
+                raise SnapshotMiss("provider-evidence:" + fingerprint.strip())
+            raise ModelSandboxV2Error(
+                "dev provider replay adapter failed with code %s stderr_hash=%s"
+                % (
+                    completed.returncode,
+                    sha256_bytes(stderr.encode("utf-8")),
+                )
+            )
+        if len(str(completed.stdout).encode("utf-8")) > MAX_MODEL_OUTPUT_BYTES:
+            raise ModelSandboxV2Error("dev provider replay adapter output exceeds limit")
+        try:
+            decoded = json.loads(str(completed.stdout))
+        except json.JSONDecodeError as exc:
+            raise ModelSandboxV2Error(
+                "dev provider replay adapter output is invalid JSON"
+            ) from exc
+        if not isinstance(decoded, list):
+            raise ModelSandboxV2Error(
+                "dev provider replay adapter must return a JSON array"
+            )
+        return list(
+            ensure_private_model_outputs(
+                decoded,
+                context_label="V2 dev provider replay model sandbox",
+                require_non_empty=False,
+            )
+        )
 
     def _run_dev_replay(
         self,
@@ -877,6 +1217,7 @@ class RunscModelSandboxV2:
         broker_root: Path,
         tmp_root: Path,
         job_id: str,
+        provider_snapshot_root: Path | None,
     ) -> tuple[Any, list[dict[str, Any]]]:
         operation = value["operation"]
         if operation == "run_icp":
@@ -902,6 +1243,20 @@ class RunscModelSandboxV2:
         environment = {
             **dict(value["environment"]),
             "RESEARCH_LAB_PROVIDER_COST_SCOPE": value["provider_cost_scope"],
+            "RESEARCH_LAB_PROVIDER_EVIDENCE_MODE": value["provider_evidence_mode"],
+            **(
+                {
+                    "RESEARCH_LAB_PROVIDER_COST_CAP_MICROUSD": str(
+                        value["provider_cost_cap_microusd"]
+                    ),
+                    "RESEARCH_LAB_PROVIDER_CALL_CAP": str(
+                        value["provider_call_cap"]
+                    ),
+                }
+                if value["provider_cost_cap_microusd"]
+                and value["provider_call_cap"]
+                else {}
+            ),
             **{
                 name: _MEASURED_CREDENTIAL_PLACEHOLDER
                 for name in sorted(_CREDENTIAL_ENV_NAMES)
@@ -921,6 +1276,12 @@ class RunscModelSandboxV2:
             environment["RESEARCH_LAB_PROVIDER_EVIDENCE_CACHE_PATH"] = (
                 "/run/leadpoet/provider-evidence-cache.json"
             )
+        readonly_mounts: dict[str, Path] = {}
+        if provider_snapshot_root is not None:
+            readonly_mounts["/research_lab_dev_snapshots"] = provider_snapshot_root
+            environment["RESEARCH_LAB_DEV_SNAPSHOT_DIR"] = (
+                "/research_lab_dev_snapshots"
+            )
         config_doc = _oci_config(
             config=self.config,
             source_root=source_root,
@@ -933,6 +1294,7 @@ class RunscModelSandboxV2:
                 value["callable_name"],
             ],
             environment=environment,
+            readonly_mounts=readonly_mounts,
         )
         (bundle / "config.json").write_text(
             canonical_json(config_doc), encoding="utf-8"

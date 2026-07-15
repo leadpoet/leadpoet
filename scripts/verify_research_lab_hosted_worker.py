@@ -25,10 +25,9 @@ from gateway.research_lab.code_build import (  # noqa: E402
     resolve_source_inspection_requests,
 )
 from gateway.research_lab.code_loop_engine import CodeEditLoopEngine  # noqa: E402
-from gateway.research_lab.loop_engine import (  # noqa: E402
-    AutoResearchLoopEngine,
+from gateway.research_lab.autoresearch_runtime import (  # noqa: E402
     AutoResearchLoopEvent,
-    AutoResearchLoopSettings,
+    AutoResearchRuntimeSettings,
     OpenRouterCallResult,
 )
 from gateway.research_lab.store import canonical_hash, scoring_dispatch_event_anchor_payload  # noqa: E402
@@ -420,32 +419,6 @@ def main() -> int:
             if _is_retryable_worker_exception(RuntimeError(message)):
                 errors.append(f"worker incorrectly classified permanent auth error as retryable: {message}")
 
-    async def _noop_call(*_args, **_kwargs):
-        return OpenRouterCallResult(content='{"candidates":[]}')
-
-    async def _noop_event(_event: AutoResearchLoopEvent):
-        return None
-
-    budget_engine = AutoResearchLoopEngine(
-        settings=AutoResearchLoopSettings(
-            min_seconds=0,
-            max_seconds=60,
-            min_iterations=2,
-            max_iterations=12,
-            draft_timeout_seconds=30,
-            reflection_timeout_seconds=30,
-            estimated_iteration_cost_usd=0.5,
-            max_candidates=3,
-        ),
-        call_openrouter=_noop_call,
-        event_sink=_noop_event,
-    )
-    budget_settings = budget_engine._settings_for_budget(
-        12,
-        {"requested_compute_budget_usd": 1.0},
-    )
-    if budget_settings.max_iterations != 2:
-        errors.append("auto-research budget did not cap requested loop iterations")
     glm_config = ResearchLabGatewayConfig(
         auto_research_model="z-ai/glm-5.2",
         auto_research_reasoning_effort="xhigh",
@@ -796,8 +769,6 @@ def main() -> int:
         errors.append("worker accepted missing proxy while proxy enforcement was enabled")
     except HostedResearchLabWorkerError:
         pass
-    errors.extend(asyncio.run(_verify_auto_research_loop_engine(artifact, registry)))
-
     if errors:
         for error in errors:
             print(f"ERROR: {error}")
@@ -831,258 +802,6 @@ def _fake_generation_stats_opener(body: dict[str, object]):
         return _FakeOpenRouterResponse(body)
 
     return _open
-
-
-async def _verify_auto_research_loop_engine(artifact: PrivateModelArtifactManifest, registry) -> list[str]:
-    errors: list[str] = []
-    events: list[AutoResearchLoopEvent] = []
-    calls: list[dict[str, object]] = []
-
-    async def _call_model(messages, timeout_seconds: int, max_tokens: int) -> OpenRouterCallResult:
-        calls.append({"timeout_seconds": timeout_seconds, "max_tokens": max_tokens, "message_count": len(messages)})
-        if max_tokens <= 700:
-            return OpenRouterCallResult(
-                content='{"worked":"kept valid typed patches","failed":"none","why":"contract validation passed","next_question":"try one narrower variant","decision":"continue"}',
-                provider_usage={"provider": "openrouter", "response_id": f"reflection-{len(calls)}", "cost_microusd": 100000},
-                cost_microusd=100000,
-            )
-        draft_call_count = sum(1 for call in calls if int(call["max_tokens"]) > 700)
-        if draft_call_count == 2:
-            return OpenRouterCallResult(
-                content='{"candidates":[{"hypothesis":{"failure_mode":"bad draft"},"patch":{"patch_type":"PROMPT_EDIT","patch_doc":"not-an-object"}}]}',
-                provider_usage={"provider": "openrouter", "response_id": f"draft-{len(calls)}", "cost_microusd": 400000},
-                cost_microusd=400000,
-            )
-        return OpenRouterCallResult(
-            content=_candidate_response(),
-            provider_usage={"provider": "openrouter", "response_id": f"draft-{len(calls)}", "cost_microusd": 400000},
-            cost_microusd=400000,
-        )
-
-    async def _event_sink(event: AutoResearchLoopEvent) -> None:
-        events.append(event)
-
-    result = await AutoResearchLoopEngine(
-        settings=AutoResearchLoopSettings(
-            min_seconds=0,
-            max_seconds=5,
-            min_iterations=2,
-            max_iterations=2,
-            draft_timeout_seconds=10,
-            reflection_timeout_seconds=10,
-            estimated_iteration_cost_usd=0.5,
-            max_candidates=2,
-        ),
-        call_openrouter=_call_model,
-        event_sink=_event_sink,
-    ).run(
-        run_id="11111111-1111-4111-8111-111111111111",
-        ticket={
-            "ticket_id": "22222222-2222-4222-8222-222222222222",
-            "miner_hotkey": "5FminerHotkey111",
-            "island": "generalist",
-            "brief_sanitized_ref": "brief_sanitized:sha256:abc123",
-            "ticket_doc": {"brief_public_summary": "benchmark-wide improvement"},
-            "requested_loop_count": 2,
-        },
-        artifact=artifact,
-        component_registry=registry,
-        benchmark_public_summary={"item_count": "validator_resolved"},
-        model_id="test/model",
-        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
-        requested_loop_count=2,
-        miner_brief_ref="brief_sanitized:sha256:abc123",
-    )
-
-    event_types = [event.event_type for event in events]
-    if result.iterations_completed != 2:
-        errors.append("auto-research loop engine did not honor requested multi-iteration count")
-    if len(calls) < 4:
-        errors.append("auto-research loop engine did not make draft and reflection calls per iteration")
-    if not result.selected_candidates:
-        errors.append("auto-research loop engine did not select candidate finalists")
-    if result.actual_openrouter_cost_microusd != 1000000:
-        errors.append("auto-research loop engine did not aggregate actual OpenRouter spend")
-    if len(result.provider_usage) != 4:
-        errors.append("auto-research loop engine did not retain provider usage for all model calls")
-    if "patch_validation_failed" not in event_types:
-        errors.append("auto-research loop engine did not record malformed draft failures")
-    for expected in ("loop_started", "hypothesis_drafted", "patch_drafted", "reflection_recorded", "candidate_selected", "loop_completed"):
-        if expected not in event_types:
-            errors.append(f"auto-research loop engine missing event: {expected}")
-    if "candidate_selected" in event_types and "reflection_recorded" in event_types:
-        if event_types.index("candidate_selected") < event_types.index("reflection_recorded"):
-            errors.append("auto-research loop selected candidates before recording any reflection")
-
-    budget_guard_events: list[AutoResearchLoopEvent] = []
-    budget_guard_calls: list[dict[str, object]] = []
-
-    async def _budget_guard_call(messages, timeout_seconds: int, max_tokens: int) -> OpenRouterCallResult:
-        budget_guard_calls.append({"timeout_seconds": timeout_seconds, "max_tokens": max_tokens, "message_count": len(messages)})
-        if max_tokens <= 700:
-            return OpenRouterCallResult(
-                content='{"worked":"reflection should not run","failed":"budget guard failed","why":"unexpected reflection","next_question":"stop","decision":"stop"}',
-                provider_usage={"provider": "openrouter", "response_id": "unexpected-reflection", "cost_microusd": 100000},
-                cost_microusd=100000,
-            )
-        return OpenRouterCallResult(
-            content=_candidate_response(),
-            provider_usage={"provider": "openrouter", "response_id": "budget-draft", "cost_microusd": 1000000},
-            cost_microusd=1000000,
-        )
-
-    async def _budget_guard_event_sink(event: AutoResearchLoopEvent) -> None:
-        budget_guard_events.append(event)
-
-    budget_guard_result = await AutoResearchLoopEngine(
-        settings=AutoResearchLoopSettings(
-            min_seconds=0,
-            max_seconds=5,
-            min_iterations=1,
-            max_iterations=2,
-            draft_timeout_seconds=10,
-            reflection_timeout_seconds=10,
-            estimated_iteration_cost_usd=0.5,
-            max_candidates=1,
-        ),
-        call_openrouter=_budget_guard_call,
-        event_sink=_budget_guard_event_sink,
-    ).run(
-        run_id="33333333-3333-4333-8333-333333333333",
-        ticket={
-            "ticket_id": "44444444-4444-4444-8444-444444444444",
-            "miner_hotkey": "5FminerHotkey222",
-            "island": "generalist",
-            "brief_sanitized_ref": "brief_sanitized:sha256:def456",
-            "ticket_doc": {"brief_public_summary": "benchmark-wide improvement"},
-            "requested_loop_count": 2,
-        },
-        artifact=artifact,
-        component_registry=registry,
-        benchmark_public_summary={"item_count": "validator_resolved"},
-        model_id="test/model",
-        budget_context={"requested_compute_budget_usd": 1.1, "research_model_tier": "default"},
-        requested_loop_count=2,
-        miner_brief_ref="brief_sanitized:sha256:def456",
-    )
-    budget_guard_event_types = [event.event_type for event in budget_guard_events]
-    if len(budget_guard_calls) != 1:
-        errors.append("auto-research hard budget guard did not stop before reflection")
-    if budget_guard_result.stop_reason != "compute_budget_exhausted_before_reflection":
-        errors.append("auto-research hard budget guard did not report reflection budget exhaustion")
-    if budget_guard_result.actual_openrouter_cost_microusd != 1000000:
-        errors.append("auto-research hard budget guard did not preserve actual draft spend only")
-    if "reflection_recorded" in budget_guard_event_types:
-        errors.append("auto-research hard budget guard still recorded a reflection")
-
-    pause_events: list[AutoResearchLoopEvent] = []
-    pause_calls: list[dict[str, object]] = []
-
-    async def _pause_call(messages, timeout_seconds: int, max_tokens: int) -> OpenRouterCallResult:
-        pause_calls.append({"timeout_seconds": timeout_seconds, "max_tokens": max_tokens, "message_count": len(messages)})
-        if max_tokens <= 700:
-            return OpenRouterCallResult(
-                content='{"worked":"kept valid typed patches","failed":"none","why":"checkpoint boundary reached","next_question":"resume later","decision":"continue"}',
-                provider_usage={"provider": "openrouter", "response_id": f"pause-reflection-{len(pause_calls)}", "cost_microusd": 100000},
-                cost_microusd=100000,
-            )
-        return OpenRouterCallResult(
-            content=_candidate_response(),
-            provider_usage={"provider": "openrouter", "response_id": f"pause-draft-{len(pause_calls)}", "cost_microusd": 400000},
-            cost_microusd=400000,
-        )
-
-    async def _pause_event_sink(event: AutoResearchLoopEvent) -> None:
-        pause_events.append(event)
-
-    async def _pause_after_first_checkpoint() -> bool:
-        return any(event.event_type == "checkpoint_saved" for event in pause_events)
-
-    paused_result = await AutoResearchLoopEngine(
-        settings=AutoResearchLoopSettings(
-            min_seconds=0,
-            max_seconds=5,
-            min_iterations=1,
-            max_iterations=2,
-            draft_timeout_seconds=10,
-            reflection_timeout_seconds=10,
-            estimated_iteration_cost_usd=0.5,
-            max_candidates=2,
-        ),
-        call_openrouter=_pause_call,
-        event_sink=_pause_event_sink,
-    ).run(
-        run_id="55555555-5555-4555-8555-555555555555",
-        ticket={
-            "ticket_id": "66666666-6666-4666-8666-666666666666",
-            "miner_hotkey": "5FminerHotkey333",
-            "island": "generalist",
-            "brief_sanitized_ref": "brief_sanitized:sha256:ghi789",
-            "ticket_doc": {"brief_public_summary": "benchmark-wide improvement"},
-            "requested_loop_count": 2,
-        },
-        artifact=artifact,
-        component_registry=registry,
-        benchmark_public_summary={"item_count": "validator_resolved"},
-        model_id="test/model",
-        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
-        requested_loop_count=2,
-        miner_brief_ref="brief_sanitized:sha256:ghi789",
-        should_pause=_pause_after_first_checkpoint,
-    )
-    pause_event_types = [event.event_type for event in pause_events]
-    if paused_result.status != "paused" or paused_result.stop_reason != "maintenance_pause_requested":
-        errors.append("auto-research maintenance pause did not return paused result")
-    if "checkpoint_saved" not in pause_event_types or "loop_paused" not in pause_event_types:
-        errors.append("auto-research maintenance pause did not emit checkpoint and paused events")
-    if not paused_result.checkpoint_doc or not paused_result.checkpoint_doc.get("checkpoint_hash"):
-        errors.append("auto-research maintenance pause did not return checkpoint doc")
-
-    resume_events: list[AutoResearchLoopEvent] = []
-
-    async def _resume_event_sink(event: AutoResearchLoopEvent) -> None:
-        resume_events.append(event)
-
-    resumed_result = await AutoResearchLoopEngine(
-        settings=AutoResearchLoopSettings(
-            min_seconds=0,
-            max_seconds=5,
-            min_iterations=1,
-            max_iterations=2,
-            draft_timeout_seconds=10,
-            reflection_timeout_seconds=10,
-            estimated_iteration_cost_usd=0.5,
-            max_candidates=2,
-        ),
-        call_openrouter=_pause_call,
-        event_sink=_resume_event_sink,
-    ).run(
-        run_id="55555555-5555-4555-8555-555555555555",
-        ticket={
-            "ticket_id": "66666666-6666-4666-8666-666666666666",
-            "miner_hotkey": "5FminerHotkey333",
-            "island": "generalist",
-            "brief_sanitized_ref": "brief_sanitized:sha256:ghi789",
-            "ticket_doc": {"brief_public_summary": "benchmark-wide improvement"},
-            "requested_loop_count": 2,
-        },
-        artifact=artifact,
-        component_registry=registry,
-        benchmark_public_summary={"item_count": "validator_resolved"},
-        model_id="test/model",
-        budget_context={"requested_compute_budget_usd": 5.0, "research_model_tier": "default"},
-        requested_loop_count=2,
-        miner_brief_ref="brief_sanitized:sha256:ghi789",
-        resume_state=paused_result.checkpoint_doc,
-    )
-    resume_event_types = [event.event_type for event in resume_events]
-    if "loop_resumed" not in resume_event_types:
-        errors.append("auto-research resume did not emit loop_resumed event")
-    if resumed_result.status != "completed" or not resumed_result.selected_candidates:
-        errors.append("auto-research resume did not complete with selected candidates")
-    if resumed_result.openrouter_call_count < paused_result.openrouter_call_count:
-        errors.append("auto-research resume reset OpenRouter call accounting")
-    return errors
 
 
 def _verify_image_extracted_code_builder(artifact: PrivateModelArtifactManifest) -> list[str]:
@@ -1477,7 +1196,7 @@ async def _verify_code_edit_loop_uses_extracted_source_context(
                 code_edit_build_timeout_seconds=30,
             )
             result = await CodeEditLoopEngine(
-                settings=AutoResearchLoopSettings(
+                settings=AutoResearchRuntimeSettings(
                     min_seconds=0,
                     max_seconds=30,
                     min_iterations=1,

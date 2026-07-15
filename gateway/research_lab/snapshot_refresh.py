@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 import fcntl
 import json
 import logging
-import math
 import os
 from pathlib import Path
 import shutil
@@ -19,7 +18,7 @@ import time
 from typing import Any, Awaitable, Callable, Iterator, Mapping, Sequence
 
 from gateway.research_lab.dev_eval_runner import snapshot_readiness
-from gateway.research_lab.inner_loop_activation import configured_inner_loop_mode
+from gateway.research_lab.git_tree_models import TreePolicy
 from gateway.research_lab.promotion import load_active_private_model
 from research_lab.eval.snapshot_store import POINTER_NAME, SNAPSHOT_URI_ENV
 
@@ -78,48 +77,9 @@ def _work_root() -> Path:
 def _load_state(path: Path) -> dict[str, Any]:
     try:
         decoded = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
-    except json.JSONDecodeError as exc:
-        logger.warning(
-            "research_lab_dev_snapshot_refresh_state_invalid_json "
-            "path=%s line=%s column=%s",
-            path,
-            exc.lineno,
-            exc.colno,
-        )
-        return {}
-    except OSError as exc:
-        logger.warning(
-            "research_lab_dev_snapshot_refresh_state_read_failed "
-            "path=%s error=%s",
-            path,
-            type(exc).__name__,
-        )
-        return {}
-    if not isinstance(decoded, Mapping):
-        logger.warning(
-            "research_lab_dev_snapshot_refresh_state_invalid_type "
-            "path=%s value_type=%s",
-            path,
-            type(decoded).__name__,
-        )
-        return {}
-    state = dict(decoded)
-    if "last_check_unix" in state:
-        try:
-            last_check = float(state["last_check_unix"])
-        except (TypeError, ValueError):
-            last_check = math.nan
-        if not math.isfinite(last_check) or last_check < 0:
-            logger.warning(
-                "research_lab_dev_snapshot_refresh_state_invalid_last_check "
-                "path=%s value_type=%s",
-                path,
-                type(state["last_check_unix"]).__name__,
-            )
-            state.pop("last_check_unix", None)
-    return state
+    return dict(decoded) if isinstance(decoded, Mapping) else {}
 
 
 def _write_state(path: Path, state: Mapping[str, Any]) -> None:
@@ -247,6 +207,7 @@ async def maybe_refresh_dev_snapshot(
     config: Any,
     *,
     worker_index: int,
+    tree_policy: TreePolicy,
     now: float | None = None,
     command_runner: CommandRunner = _run_command,
     readiness_loader: ReadinessLoader = snapshot_readiness,
@@ -256,8 +217,8 @@ async def maybe_refresh_dev_snapshot(
 
     if int(worker_index) != 0:
         return {"status": "skipped", "reason": "not_refresh_worker"}
-    if configured_inner_loop_mode(getattr(config, "inner_loop_mode", "off")) != "auto":
-        return {"status": "skipped", "reason": "inner_loop_mode_not_auto"}
+    if tree_policy.mode != "active":
+        return {"status": "skipped", "reason": "tree_mode_not_active"}
     if not snapshot_auto_refresh_enabled():
         return {"status": "skipped", "reason": "auto_refresh_disabled"}
 

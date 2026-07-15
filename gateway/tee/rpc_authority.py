@@ -27,6 +27,9 @@ COMMON_METHODS = frozenset(
 COORDINATOR_METHODS = frozenset(
     {
         "append_event",
+        "initialize_event_signer",
+        "sign_transparency_event",
+        "get_event_signing_identity",
         "get_buffer",
         "clear_buffer",
         "get_buffer_size",

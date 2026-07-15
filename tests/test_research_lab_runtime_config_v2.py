@@ -18,7 +18,6 @@ def test_execution_config_round_trips_every_non_secret_behavior_field():
     source = replace(
         ResearchLabGatewayConfig(),
         improvement_threshold_points=3.25,
-        inner_loop_mode="rank",
         loop_planner_model="openai/test-model",
         loop_planner_fallback_models=("model/a", "model/b"),
         reimbursement_epochs=37,
@@ -30,7 +29,10 @@ def test_execution_config_round_trips_every_non_secret_behavior_field():
     )
     document = build_research_lab_execution_config(
         config=source,
-        environment={"RESEARCH_LAB_LOOP_DRAFTS_PER_CALL": "4"},
+        environment={
+            "RESEARCH_LAB_TREE_MODE": "active",
+            "RESEARCH_LAB_TREE_MAX_NODES": "6",
+        },
         network="finney",
         netuid=71,
     )
@@ -42,7 +44,7 @@ def test_execution_config_round_trips_every_non_secret_behavior_field():
     assert "must-not-cross-boundary" not in str(document)
     assert "https://user:password@proxy.invalid" not in str(document)
     assert document["deployment"] == {"network": "finney", "netuid": 71}
-    assert document["fields"]["inner_loop_mode"] == "rank"
+    assert document["behavior_environment"]["RESEARCH_LAB_TREE_MODE"] == "active"
 
 
 def test_execution_config_rejects_tampering_and_secret_material():
@@ -60,15 +62,15 @@ def test_execution_config_rejects_tampering_and_secret_material():
 
 def test_behavior_environment_is_exact_and_applied(monkeypatch):
     values = {name: None for name in BEHAVIOR_ENV_NAMES}
-    values["RESEARCH_LAB_LOOP_DRAFTS_PER_CALL"] = "5"
+    values["RESEARCH_LAB_TREE_MAX_NODES"] = "5"
     document = build_research_lab_execution_config(environment=values)
-    monkeypatch.setenv("RESEARCH_LAB_LOOP_DRAFTS_PER_CALL", "2")
+    monkeypatch.setenv("RESEARCH_LAB_TREE_MAX_NODES", "2")
     monkeypatch.setenv("RESEARCH_LAB_LOOP_STAGE_ERROR_CONTAINMENT", "false")
     apply_behavior_environment(document)
     assert document["behavior_environment"][
-        "RESEARCH_LAB_LOOP_DRAFTS_PER_CALL"
+        "RESEARCH_LAB_TREE_MAX_NODES"
     ] == "5"
     import os
 
-    assert os.environ["RESEARCH_LAB_LOOP_DRAFTS_PER_CALL"] == "5"
+    assert os.environ["RESEARCH_LAB_TREE_MAX_NODES"] == "5"
     assert "RESEARCH_LAB_LOOP_STAGE_ERROR_CONTAINMENT" not in os.environ

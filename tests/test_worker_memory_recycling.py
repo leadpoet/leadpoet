@@ -10,6 +10,7 @@ host-side byte budget on decoded in-container trace entries.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
@@ -22,6 +23,11 @@ from gateway.research_lab.scoring_worker import (
     _worker_recycle_rss_mb,
 )
 from gateway.research_lab.worker_autostart import (
+    EXPECTED_HOSTED_WORKERS,
+    EXPECTED_SCORING_WORKERS,
+    ResearchLabWorkerAutoStartPlan,
+    ResearchLabWorkerFleetPlan,
+    ResearchLabWorkerStartupError,
     ResearchLabWorkerSupervisor,
     _child_rss_mb,
     _hard_rss_limit_mb,
@@ -151,6 +157,46 @@ def test_supervisor_rss_telemetry_line(monkeypatch, supervisor_with_stub, capsys
     assert "scoring:0=777MB" in out
 
 
+def _fleet(kind: str, count: int) -> ResearchLabWorkerFleetPlan:
+    return ResearchLabWorkerFleetPlan(
+        kind=kind,
+        worker_count=count,
+        worker_prefix=kind,
+        log_level="INFO",
+        proxy_refs=tuple("proxy-%d" % index for index in range(count)),
+        enabled=True,
+    )
+
+
+def test_full_topology_worker_health_requires_exact_unchanged_counts(monkeypatch):
+    monkeypatch.setenv("GATEWAY_TEE_TOPOLOGY_MODE", "full")
+    plan = ResearchLabWorkerAutoStartPlan(
+        auto_start_enabled=True,
+        hosted=_fleet("hosted", EXPECTED_HOSTED_WORKERS),
+        scoring=_fleet("scoring", EXPECTED_SCORING_WORKERS),
+    )
+    supervisor = ResearchLabWorkerSupervisor(plan)
+    supervisor.children = {
+        **{"hosted:%d" % index: _StubChild(1000 + index) for index in range(EXPECTED_HOSTED_WORKERS)},
+        **{"scoring:%d" % index: _StubChild(2000 + index) for index in range(EXPECTED_SCORING_WORKERS)},
+    }
+    supervisor._ready_children = set(supervisor.children)
+    health = supervisor.health()
+    assert health["hosted_running"] == 10
+    assert health["scoring_running"] == 25
+
+
+def test_full_topology_worker_health_rejects_reduced_fleet(monkeypatch):
+    monkeypatch.setenv("GATEWAY_TEE_TOPOLOGY_MODE", "full")
+    plan = ResearchLabWorkerAutoStartPlan(
+        auto_start_enabled=True,
+        hosted=_fleet("hosted", EXPECTED_HOSTED_WORKERS - 1),
+        scoring=_fleet("scoring", EXPECTED_SCORING_WORKERS),
+    )
+    with pytest.raises(ResearchLabWorkerStartupError, match="exactly 10"):
+        ResearchLabWorkerSupervisor(plan).health()
+
+
 def _trace_line(seq: int, payload_pad: str = "") -> str:
     return (
         f"{INCONTAINER_TRACE_MARKER} "
@@ -167,8 +213,11 @@ def test_trace_parse_unbudgeted_keeps_all(monkeypatch):
 
 def test_trace_parse_drops_entries_past_byte_budget(monkeypatch, caplog):
     monkeypatch.setenv("RESEARCH_LAB_INCONTAINER_TRACE_MAX_BYTES", "200")
+    trace_logger = logging.getLogger("research_lab.eval.private_runtime")
+    monkeypatch.setattr(trace_logger, "disabled", False)
+    monkeypatch.setattr(trace_logger, "propagate", True)
     stderr = "\n".join(_trace_line(i, payload_pad="x" * 60) for i in range(10))
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("WARNING", logger=trace_logger.name):
         entries = parse_incontainer_trace_lines(stderr)
     assert 0 < len(entries) < 10
     assert entries[0]["seq"] == 0

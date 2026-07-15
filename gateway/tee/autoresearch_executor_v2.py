@@ -13,6 +13,7 @@ import asyncio
 import base64
 from dataclasses import fields
 import json
+import math
 from pathlib import Path
 import re
 import tempfile
@@ -40,6 +41,14 @@ from gateway.research_lab.code_loop_engine import (
     CodeEditLoopResult,
 )
 from gateway.research_lab.config import ResearchLabGatewayConfig
+from gateway.research_lab.git_tree_models import (
+    GitTreeContractError,
+    TreeChildSlot,
+    TreeNode,
+    TreePolicy,
+    derive_tree_id,
+    generation_operation_id,
+)
 from gateway.research_lab.provider_capabilities import (
     load_effective_provider_capabilities_sync,
 )
@@ -56,9 +65,9 @@ from gateway.research_lab.key_vault import (
     strict_openrouter_provider_policy,
     verify_openrouter_workspace_privacy,
 )
-from gateway.research_lab.loop_engine import (
+from gateway.research_lab.autoresearch_runtime import (
     AutoResearchLoopEvent,
-    AutoResearchLoopSettings,
+    AutoResearchRuntimeSettings,
     OpenRouterCallResult,
 )
 from gateway.research_lab.source_symbol_index import build_source_symbol_index
@@ -123,6 +132,10 @@ HOST_BUILD_RESULT_SCHEMA_VERSION = "leadpoet.autoresearch_build_result.v2"
 HOST_ARTIFACT_RESULT_SCHEMA_VERSION = "leadpoet.autoresearch_artifact_result.v2"
 HOST_PAUSE_RESULT_SCHEMA_VERSION = "leadpoet.autoresearch_pause_result.v2"
 HOST_DEV_EVAL_RESULT_SCHEMA_VERSION = "leadpoet.autoresearch_dev_eval_result.v2"
+HOST_DEV_EVAL_COHORT_RESULT_SCHEMA_VERSION = (
+    "leadpoet.autoresearch_dev_eval_cohort_result.v3"
+)
+HOST_GIT_TREE_RESULT_SCHEMA_VERSION = "leadpoet.autoresearch_git_tree_result.v2"
 
 OP_RUN_CODE_EDIT_LOOP = "run_code_edit_loop"
 OP_VERIFY_OPENROUTER_GUARD = "verify_openrouter_guard"
@@ -145,6 +158,7 @@ HOST_WRITE_ARTIFACT = "autoresearch_write_artifact"
 HOST_CHECK_PAUSE = "autoresearch_check_pause"
 HOST_DEV_EVALUATE = "autoresearch_dev_evaluate"
 HOST_RECORD_PRIVACY = "autoresearch_record_privacy_proof"
+HOST_GIT_TREE = "autoresearch_git_tree"
 
 AUTORESEARCH_HOST_OPERATIONS_V2 = frozenset(
     {
@@ -155,6 +169,7 @@ AUTORESEARCH_HOST_OPERATIONS_V2 = frozenset(
         HOST_CHECK_PAUSE,
         HOST_DEV_EVALUATE,
         HOST_RECORD_PRIVACY,
+        HOST_GIT_TREE,
     }
 )
 
@@ -171,6 +186,7 @@ _REQUEST_FIELDS = {
     "artifact",
     "component_registry",
     "component_registry_evidence",
+    "active_model_evidence",
     "provider_catalog_evidence",
     "provider_outcome_evidence",
     "benchmark_public_summary",
@@ -338,15 +354,27 @@ def _candidate_document(candidate: BuiltCodeEditCandidate) -> Dict[str, Any]:
         "dev_evaluation": dict(candidate.dev_evaluation),
         "dev_feedback": dict(candidate.dev_feedback),
         "dev_feedback_hash": candidate.dev_feedback_hash,
-        "chain_step": candidate.chain_step,
-        "chain_root_artifact_hash": candidate.chain_root_artifact_hash,
-        "chain_parent_artifact_hash": candidate.chain_parent_artifact_hash,
-        "chain_parent_node_id": candidate.chain_parent_node_id,
-        "chain_parent_dev_score": candidate.chain_parent_dev_score,
-        "chain_feedback_hash": candidate.chain_feedback_hash,
-        "chain_incremental_source_diff_hash": candidate.chain_incremental_source_diff_hash,
-        "chain_cumulative_source_diff_hash": candidate.chain_cumulative_source_diff_hash,
-        "chain_composition": dict(candidate.chain_composition),
+        "tree_id": candidate.tree_id,
+        "tree_parent_node_id": candidate.tree_parent_node_id,
+        "tree_root_branch_id": candidate.tree_root_branch_id,
+        "tree_depth": candidate.tree_depth,
+        "tree_child_slot": candidate.tree_child_slot,
+        "tree_branch_objective_path_id": (
+            candidate.tree_branch_objective_path_id
+        ),
+        "tree_branch_objective_hash": candidate.tree_branch_objective_hash,
+        "tree_generation_attempt_count": (
+            candidate.tree_generation_attempt_count
+        ),
+        "tree_git_commit": candidate.tree_git_commit,
+        "tree_root_artifact_hash": candidate.tree_root_artifact_hash,
+        "tree_parent_artifact_hash": candidate.tree_parent_artifact_hash,
+        "tree_parent_dev_score": candidate.tree_parent_dev_score,
+        "tree_parent_feedback_hash": candidate.tree_parent_feedback_hash,
+        "tree_incremental_source_diff_hash": candidate.tree_incremental_source_diff_hash,
+        "tree_cumulative_source_diff_hash": candidate.tree_cumulative_source_diff_hash,
+        "tree_composition": dict(candidate.tree_composition),
+        "tree_settled_cost_microusd": candidate.tree_settled_cost_microusd,
     }
 
 
@@ -363,6 +391,7 @@ def _result_document(result: CodeEditLoopResult) -> Dict[str, Any]:
         "actual_openrouter_cost_usd": result.actual_openrouter_cost_usd,
         "actual_openrouter_cost_microusd": result.actual_openrouter_cost_microusd,
         "openrouter_call_count": result.openrouter_call_count,
+        "tree_result": result.tree_result.to_dict(),
         "provider_usage": [dict(item) for item in result.provider_usage],
         "status": result.status,
         "checkpoint_doc": (
@@ -516,6 +545,463 @@ class _HostArtifactIO:
         return dict(value)
 
 
+class _HostGitTreeRepository:
+    """Signed proxy for the host's private SHA-256 Git object database."""
+
+    def __init__(self, context: ExecutionContextV2, *, tree_id: str) -> None:
+        self._context = context
+        self._tree_id = _hash(tree_id, "Git-tree id")
+
+    def initialize(
+        self,
+        *,
+        source_root: Path,
+        root_artifact_hash: str,
+        policy_hash: str,
+        run_id: str = "",
+        root_manifest_hash: str = "",
+        root_image_digest: str = "",
+        evaluator_commitment_hash: str = "",
+        tree_doc: Mapping[str, Any] | None = None,
+    ) -> str:
+        root_source_tree_hash = compute_private_source_tree_hash(Path(source_root))
+        payload = {
+            "action": "initialize",
+            "tree_id": self._tree_id,
+            "root_artifact_hash": _hash(
+                root_artifact_hash, "Git-tree root artifact hash"
+            ),
+            "policy_hash": _hash(policy_hash, "Git-tree policy hash"),
+            "root_source_tree_hash": _hash(
+                root_source_tree_hash, "Git-tree root source hash"
+            ),
+            "run_id": str(run_id),
+            "root_manifest_hash": _hash(
+                root_manifest_hash, "Git-tree root manifest hash"
+            ),
+            "root_image_digest": _hash(
+                root_image_digest, "Git-tree root image digest"
+            ),
+            "evaluator_commitment_hash": _hash(
+                evaluator_commitment_hash,
+                "Git-tree evaluator commitment hash",
+            ),
+            "tree_doc": dict(tree_doc or {}),
+        }
+        state_hash = sha256_json(payload)
+        response = self._context.execute_host_operation(
+            operation=HOST_GIT_TREE,
+            payload=payload,
+            expected_state_hash=state_hash,
+            timeout_seconds=1800,
+            response_validator=lambda value: self._validate_response(
+                value, action="initialize", state_hash=state_hash
+            ),
+        )
+        result = _mapping(response.get("result"), "Git-tree initialize result")
+        if set(result) != {
+            "tree_id",
+            "root_git_commit",
+            "root_source_tree_hash",
+        }:
+            raise AutoresearchExecutorV2Error(
+                "Git-tree initialize result fields are invalid"
+            )
+        if (
+            result.get("tree_id") != self._tree_id
+            or result.get("root_source_tree_hash") != root_source_tree_hash
+            or not _HEX_HASH_RE.fullmatch(str(result.get("root_git_commit") or ""))
+        ):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree initialize result binding differs"
+            )
+        return str(result["root_git_commit"])
+
+    def plan_slot(
+        self,
+        *,
+        slot: TreeChildSlot,
+        request_hash: str,
+        operation_id: str,
+        node_doc: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        if operation_id != generation_operation_id(slot):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree generation operation identity differs"
+            )
+        return self._execute_control(
+            {
+                "action": "plan_slot",
+                "tree_id": self._tree_id,
+                "slot": slot.to_dict(),
+                "request_hash": _hash(
+                    request_hash, "Git-tree generation request"
+                ),
+                "operation_id": _hash(
+                    operation_id, "Git-tree generation operation"
+                ),
+                "node_doc": dict(node_doc),
+            },
+            action="plan_slot",
+        )
+
+    def settle_operation(
+        self,
+        *,
+        operation_id: str,
+        operation_status: str,
+        request_hash: str,
+        result_hash: str,
+        settled_cost_microusd: int,
+        provider_call_count: int,
+        settlement_doc: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        return self._execute_control(
+            {
+                "action": "settle_operation",
+                "tree_id": self._tree_id,
+                "operation_id": _hash(operation_id, "Git-tree operation"),
+                "operation_status": str(operation_status),
+                "request_hash": _hash(
+                    request_hash, "Git-tree operation request"
+                ),
+                "result_hash": _hash(
+                    result_hash, "Git-tree operation result"
+                ),
+                "settled_cost_microusd": max(
+                    0, int(settled_cost_microusd)
+                ),
+                "provider_call_count": max(0, int(provider_call_count)),
+                "settlement_doc": dict(settlement_doc),
+            },
+            action="settle_operation",
+        )
+
+    def reserve_operation(
+        self,
+        *,
+        operation_id: str,
+        operation_kind: str,
+        request_hash: str,
+        node_id: str = "",
+        reservation_doc: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        return self._execute_control(
+            {
+                "action": "reserve_operation",
+                "tree_id": self._tree_id,
+                "operation_id": _hash(operation_id, "Git-tree operation"),
+                "operation_kind": str(operation_kind),
+                "request_hash": _hash(
+                    request_hash, "Git-tree operation request"
+                ),
+                "node_id": str(node_id or ""),
+                "reservation_doc": dict(reservation_doc or {}),
+            },
+            action="reserve_operation",
+        )
+
+    def inspect_operation(self, *, operation_id: str) -> Mapping[str, Any]:
+        return self._execute_control(
+            {
+                "action": "inspect_operation",
+                "tree_id": self._tree_id,
+                "operation_id": _hash(operation_id, "Git-tree operation"),
+            },
+            action="inspect_operation",
+        )
+
+    def operation_settlement_commitment(self) -> Mapping[str, Any]:
+        result = self._execute_control(
+            {
+                "action": "operation_settlement_commitment",
+                "tree_id": self._tree_id,
+            },
+            action="operation_settlement_commitment",
+        )
+        if set(result) != {
+            "tree_id",
+            "action",
+            "operation_count",
+            "settled_cost_microusd",
+            "provider_call_count",
+            "operation_settlement_hash",
+        }:
+            raise AutoresearchExecutorV2Error(
+                "Git-tree operation commitment fields are invalid"
+            )
+        _hash(
+            result.get("operation_settlement_hash"),
+            "Git-tree operation settlement hash",
+        )
+        for field in (
+            "operation_count",
+            "settled_cost_microusd",
+            "provider_call_count",
+        ):
+            value = result.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise AutoresearchExecutorV2Error(
+                    "Git-tree operation commitment counts are invalid"
+                )
+        return dict(result)
+
+    def publish_bundle(self) -> Mapping[str, Any]:
+        result = self._execute_control(
+            {
+                "action": "publish_bundle",
+                "tree_id": self._tree_id,
+            },
+            action="publish_bundle",
+        )
+        uri = str(result.get("bundle_uri") or "")
+        if (
+            not uri.startswith("s3://")
+            or not result.get("readback_verified")
+            or int(result.get("bundle_size_bytes") or 0) <= 0
+        ):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree bundle result is invalid"
+            )
+        _hash(result.get("bundle_hash"), "Git-tree bundle hash")
+        return dict(result)
+
+    def record_node(self, *, node_doc: Mapping[str, Any]) -> Mapping[str, Any]:
+        node = TreeNode.from_mapping(node_doc)
+        if node.tree_id != self._tree_id:
+            raise AutoresearchExecutorV2Error(
+                "Git-tree node belongs to another tree"
+            )
+        return self._execute_control(
+            {
+                "action": "record_node",
+                "tree_id": self._tree_id,
+                "node": node.to_dict(),
+            },
+            action="record_node",
+        )
+
+    def commit_checkpoint(
+        self, *, checkpoint_hash: str, checkpoint_doc: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        if sha256_json(dict(checkpoint_doc)) != checkpoint_hash:
+            raise AutoresearchExecutorV2Error("Git-tree checkpoint hash differs")
+        return self._execute_control(
+            {
+                "action": "commit_checkpoint",
+                "tree_id": self._tree_id,
+                "checkpoint_hash": checkpoint_hash,
+                "checkpoint": dict(checkpoint_doc),
+            },
+            action="commit_checkpoint",
+        )
+
+    def select_final(
+        self, *, selection_hash: str, selection_doc: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        if sha256_json(dict(selection_doc)) != selection_hash:
+            raise AutoresearchExecutorV2Error(
+                "Git-tree final selection hash differs"
+            )
+        return self._execute_control(
+            {
+                "action": "select_final",
+                "tree_id": self._tree_id,
+                "selection_hash": selection_hash,
+                "selection": dict(selection_doc),
+            },
+            action="select_final",
+        )
+
+    def fail_tree(
+        self, *, failure_hash: str, failure_doc: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        if sha256_json(dict(failure_doc)) != failure_hash:
+            raise AutoresearchExecutorV2Error("Git-tree failure hash differs")
+        return self._execute_control(
+            {
+                "action": "fail_tree",
+                "tree_id": self._tree_id,
+                "failure_hash": failure_hash,
+                "failure": dict(failure_doc),
+            },
+            action="fail_tree",
+        )
+
+    def _execute_control(
+        self, payload: Mapping[str, Any], *, action: str
+    ) -> Mapping[str, Any]:
+        state_hash = sha256_json(dict(payload))
+        response = self._context.execute_host_operation(
+            operation=HOST_GIT_TREE,
+            payload=dict(payload),
+            expected_state_hash=state_hash,
+            timeout_seconds=180,
+            response_validator=lambda value: self._validate_response(
+                value, action=action, state_hash=state_hash
+            ),
+        )
+        result = _mapping(response.get("result"), f"Git-tree {action} result")
+        if result.get("tree_id") != self._tree_id or result.get("action") != action:
+            raise AutoresearchExecutorV2Error(
+                f"Git-tree {action} result binding differs"
+            )
+        return dict(result)
+
+    def commit_child(
+        self,
+        *,
+        slot: TreeChildSlot,
+        draft: CodeEditDraft,
+        expected_parent_source_tree_hash: str,
+    ) -> Dict[str, Any]:
+        if slot.tree_id != self._tree_id:
+            raise AutoresearchExecutorV2Error(
+                "Git-tree child slot belongs to another tree"
+            )
+        payload = {
+            "action": "commit_child",
+            "tree_id": self._tree_id,
+            "slot": slot.to_dict(),
+            "draft": draft.to_dict(),
+            "expected_parent_source_tree_hash": _hash(
+                expected_parent_source_tree_hash,
+                "Git-tree parent source hash",
+            ),
+        }
+        state_hash = sha256_json(payload)
+        response = self._context.execute_host_operation(
+            operation=HOST_GIT_TREE,
+            payload=payload,
+            expected_state_hash=state_hash,
+            timeout_seconds=300,
+            response_validator=lambda value: self._validate_response(
+                value, action="commit_child", state_hash=state_hash
+            ),
+        )
+        result = _mapping(response.get("result"), "Git-tree commit result")
+        required = {
+            "schema_version",
+            "tree_id",
+            "node_id",
+            "parent_node_id",
+            "root_branch_id",
+            "depth",
+            "slot_index",
+            "git_commit",
+            "parent_git_commit",
+            "source_tree_hash",
+            "draft_patch_hash",
+            "incremental_patch_hash",
+            "cumulative_patch_hash",
+            "changed_files",
+            "incremental_patch",
+            "cumulative_patch",
+        }
+        if set(result) != required:
+            raise AutoresearchExecutorV2Error(
+                "Git-tree commit result fields are invalid"
+            )
+        if any(
+            (
+                result.get("tree_id") != slot.tree_id,
+                result.get("node_id") != slot.node_id,
+                result.get("parent_node_id") != slot.parent_node_id,
+                result.get("root_branch_id") != slot.root_branch_id,
+                int(result.get("depth") or 0) != slot.depth,
+                int(result.get("slot_index") or -1) != slot.slot_index,
+                result.get("draft_patch_hash")
+                != sha256_json({"unified_diff": draft.unified_diff}),
+            )
+        ):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree commit result topology differs"
+            )
+        incremental_patch = str(result.get("incremental_patch") or "")
+        cumulative_patch = str(result.get("cumulative_patch") or "")
+        if (
+            not _HEX_HASH_RE.fullmatch(str(result.get("git_commit") or ""))
+            or not _HEX_HASH_RE.fullmatch(
+                str(result.get("parent_git_commit") or "")
+            )
+            or not incremental_patch.startswith("diff --git ")
+            or not cumulative_patch.startswith("diff --git ")
+            or result.get("incremental_patch_hash")
+            != sha256_json({"unified_diff": incremental_patch})
+            or result.get("cumulative_patch_hash")
+            != sha256_json({"unified_diff": cumulative_patch})
+        ):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree commit result commitment differs"
+            )
+        _hash(result.get("source_tree_hash"), "Git-tree child source hash")
+        changed_files = result.get("changed_files")
+        if (
+            not isinstance(changed_files, list)
+            or not changed_files
+            or any(not isinstance(item, str) or not item for item in changed_files)
+        ):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree commit changed-file set is invalid"
+            )
+        return dict(result)
+
+    def verify_node_identity(
+        self,
+        *,
+        node_id: str,
+        git_commit: str,
+        parent_node_id: str,
+    ) -> None:
+        payload = {
+            "action": "verify_node_identity",
+            "tree_id": self._tree_id,
+            "node_id": str(node_id),
+            "git_commit": str(git_commit),
+            "parent_node_id": str(parent_node_id),
+        }
+        state_hash = sha256_json(payload)
+        response = self._context.execute_host_operation(
+            operation=HOST_GIT_TREE,
+            payload=payload,
+            expected_state_hash=state_hash,
+            timeout_seconds=120,
+            response_validator=lambda value: self._validate_response(
+                value, action="verify_node_identity", state_hash=state_hash
+            ),
+        )
+        result = _mapping(response.get("result"), "Git-tree verify result")
+        if result != {
+            "tree_id": self._tree_id,
+            "node_id": str(node_id),
+            "git_commit": str(git_commit),
+            "parent_node_id": str(parent_node_id),
+            "verified": True,
+        }:
+            raise AutoresearchExecutorV2Error(
+                "Git-tree verification result binding differs"
+            )
+
+    @staticmethod
+    def _validate_response(
+        value: Mapping[str, Any], *, action: str, state_hash: str
+    ) -> Dict[str, Any]:
+        if set(value) != {"schema_version", "action", "state_hash", "result"}:
+            raise AutoresearchExecutorV2Error(
+                "Git-tree host response fields are invalid"
+            )
+        if (
+            value.get("schema_version") != HOST_GIT_TREE_RESULT_SCHEMA_VERSION
+            or value.get("action") != action
+            or value.get("state_hash") != state_hash
+            or not isinstance(value.get("result"), Mapping)
+        ):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree host response binding differs"
+            )
+        return dict(value)
+
+
 class _HostCandidateBuilder:
     def __init__(
         self,
@@ -532,7 +1018,7 @@ class _HostCandidateBuilder:
             source_context.source_tree_hash: source_context,
         }
         self._source_context_lock = threading.RLock()
-        self._derived_source_root = source_context.source_root.parent / "sequential-candidates"
+        self._derived_source_root = source_context.source_root.parent / "git-tree-candidates"
         self._derived_source_root.mkdir(parents=True, exist_ok=True)
         self._source_bundle_hash = source_bundle_hash
         self._context = execution_context
@@ -551,7 +1037,7 @@ class _HostCandidateBuilder:
             context = self._source_contexts.get(parent_artifact.model_artifact_hash)
         if context is None:
             raise AutoresearchExecutorV2Error(
-                "source context differs from known sequential parent artifacts"
+                "source context differs from known Git-tree parent artifacts"
             )
         return context
 
@@ -561,15 +1047,12 @@ class _HostCandidateBuilder:
     def check_patch_applies(self, *args: Any, **kwargs: Any) -> None:
         self._local.check_patch_applies(*args, **kwargs)
 
-    def compose_cumulative_draft(self, *args: Any, **kwargs: Any):
-        return self._local.compose_cumulative_draft(*args, **kwargs)
-
     def restore_rehydrated_candidate_source_context(
         self,
         *,
         candidate: BuiltCodeEditCandidate,
     ) -> ParentImageSourceContext:
-        """Rebuild a measured sequential parent from its committed root patch."""
+        """Rebuild a measured tree node from its committed cumulative root patch."""
 
         artifact = candidate.build.candidate_model_manifest
         artifact_hash = artifact.model_artifact_hash
@@ -583,10 +1066,11 @@ class _HostCandidateBuilder:
                 {"unified_diff": candidate.draft.unified_diff}
             )
             if (
-                candidate.chain_step <= 0
-                or candidate.chain_root_artifact_hash != root_hash
-                or candidate.chain_cumulative_source_diff_hash != draft_hash
+                candidate.tree_depth <= 0
+                or candidate.tree_root_artifact_hash != root_hash
+                or candidate.tree_cumulative_source_diff_hash != draft_hash
                 or candidate.build.source_diff_hash != draft_hash
+                or not re.fullmatch(r"[0-9a-f]{64}", candidate.tree_git_commit)
                 or str(
                     candidate.build.code_edit_manifest.get("parent_artifact_hash")
                     or ""
@@ -594,7 +1078,7 @@ class _HostCandidateBuilder:
                 != root_hash
             ):
                 raise AutoresearchExecutorV2Error(
-                    "rehydrated sequential candidate commitment differs"
+                    "rehydrated Git-tree candidate commitment differs"
                 )
             source_errors = self._local.validate_draft_against_source_context(
                 candidate.draft,
@@ -602,7 +1086,7 @@ class _HostCandidateBuilder:
             )
             if source_errors:
                 raise AutoresearchExecutorV2Error(
-                    "rehydrated sequential candidate source binding differs"
+                    "rehydrated Git-tree candidate source binding differs"
                 )
 
             destination = (
@@ -635,7 +1119,7 @@ class _HostCandidateBuilder:
                 measured_hash = compute_private_source_tree_hash(staging)
                 if measured_hash != artifact_hash:
                     raise AutoresearchExecutorV2Error(
-                        "rehydrated sequential candidate source hash differs"
+                        "rehydrated Git-tree candidate source hash differs"
                     )
                 _copy_source_tree(staging, destination)
 
@@ -1128,6 +1612,18 @@ class AutoresearchExecutorV2:
                 artifact=artifact,
                 config=config,
             )
+            tree_runtime_policy = _mapping(
+                request["budget_context"].get("tree_policy"),
+                "Git-tree runtime policy",
+            )
+            tree_policy = TreePolicy.from_mapping(
+                _mapping(tree_runtime_policy.get("policy"), "Git-tree policy")
+            )
+            tree_id = derive_tree_id(
+                run_id=request["run_id"],
+                root_artifact_hash=artifact.model_artifact_hash,
+                policy=tree_policy,
+            )
             (
                 provider_entries,
                 provider_capabilities,
@@ -1159,7 +1655,7 @@ class AutoresearchExecutorV2:
                 model_doc=request["model_doc"],
                 openrouter_context=request["openrouter_context"],
             )
-            settings = AutoResearchLoopSettings(**request["loop_settings"])
+            settings = AutoResearchRuntimeSettings(**request["loop_settings"])
             engine = self._engine_factory(
                 settings=settings,
                 call_openrouter=loop_caller,
@@ -1175,6 +1671,10 @@ class AutoresearchExecutorV2:
                 ),
                 provider_outcome_digest=(request["provider_outcome_digest"] or None),
                 artifact_io=artifact_io,
+                tree_repository=_HostGitTreeRepository(
+                    context,
+                    tree_id=tree_id,
+                ),
                 provider_registry_loader=lambda: (
                     list(provider_entries),
                     provider_capabilities,
@@ -1679,10 +2179,10 @@ class AutoresearchExecutorV2:
         if not isinstance(requested_loop_count, int) or requested_loop_count < 1:
             raise AutoresearchExecutorV2Error("requested_loop_count is invalid")
         settings = _mapping(payload.get("loop_settings"), "loop_settings")
-        settings_fields = {item.name for item in fields(AutoResearchLoopSettings)}
+        settings_fields = {item.name for item in fields(AutoResearchRuntimeSettings)}
         if set(settings) != settings_fields:
             raise AutoresearchExecutorV2Error("loop settings fields are invalid")
-        AutoResearchLoopSettings(**settings).normalized()
+        AutoResearchRuntimeSettings(**settings).normalized()
         hashes = payload.get("probe_private_window_term_hashes")
         if not isinstance(hashes, list) or any(
             not _HEX_HASH_RE.fullmatch(str(item or "")) for item in hashes
@@ -1774,6 +2274,56 @@ class AutoresearchExecutorV2:
         ):
             raise AutoresearchExecutorV2Error(
                 "component registry result is not committed by its receipt graph"
+            )
+        active_model_evidence = _mapping(
+            payload.get("active_model_evidence"),
+            "active_model_evidence",
+        )
+        if set(active_model_evidence) != {
+            "result",
+            "receipt_graph",
+            "root_receipt_hash",
+        }:
+            raise AutoresearchExecutorV2Error(
+                "active model evidence fields are invalid"
+            )
+        active_model_result = _mapping(
+            active_model_evidence.get("result"),
+            "active model result",
+        )
+        active_model_graph = _mapping(
+            active_model_evidence.get("receipt_graph"),
+            "active model receipt graph",
+        )
+        active_model_root = _hash(
+            active_model_evidence.get("root_receipt_hash"),
+            "active model receipt hash",
+        )
+        validate_receipt_graph(
+            active_model_graph,
+            required_purposes=("research_lab.active_private_model.v2",),
+            require_boot_attestation_verification=(
+                self._scoring_graph_verifier is not None
+            ),
+            boot_attestation_verifier=(
+                (lambda identity: self._scoring_graph_verifier(identity))
+                if self._scoring_graph_verifier is not None
+                else None
+            ),
+        )
+        if (
+            active_model_graph.get("root_receipt_hash") != active_model_root
+            or active_model_result.get("artifact") != payload.get("artifact")
+            or not any(
+                receipt.get("receipt_hash") == active_model_root
+                and receipt.get("purpose")
+                == "research_lab.active_private_model.v2"
+                and receipt.get("output_root") == sha256_json(active_model_result)
+                for receipt in active_model_graph.get("receipts", [])
+            )
+        ):
+            raise AutoresearchExecutorV2Error(
+                "active model evidence differs from autoresearch artifact"
             )
         catalog_evidence = _mapping(
             payload.get("provider_catalog_evidence"),
@@ -1959,6 +2509,149 @@ class AutoresearchExecutorV2:
             raise AutoresearchExecutorV2Error(
                 "provider outcome digest differs from measured snapshot"
             )
+        budget_context = _mapping(
+            payload.get("budget_context"), "budget_context"
+        )
+        tree_runtime_policy = _mapping(
+            budget_context.get("tree_policy"), "Git-tree runtime policy"
+        )
+        if set(tree_runtime_policy) != {
+            "schema_version",
+            "policy",
+            "evaluator_enabled",
+            "evaluator_commitment",
+            "prior_evaluation_provider_call_count",
+            "prior_evaluation_cost_microusd",
+            "snapshot_age_seconds",
+        } or tree_runtime_policy.get("schema_version") != (
+            "research_lab.git_tree_runtime_policy.v1"
+        ):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree runtime policy fields are invalid"
+            )
+        tree_policy = TreePolicy.from_mapping(
+            _mapping(tree_runtime_policy.get("policy"), "Git-tree policy")
+        )
+        if tree_policy.mode != "active":
+            raise AutoresearchExecutorV2Error(
+                "measured Git-tree policy is not active"
+            )
+        evaluator_commitment = _mapping(
+            tree_runtime_policy.get("evaluator_commitment"),
+            "Git-tree evaluator commitment",
+        )
+        if set(evaluator_commitment) != {
+            "schema_version",
+            "snapshot_manifest_hash",
+            "snapshot_ready_hash",
+            "dev_set_hash",
+            "dev_set_size",
+            "champion_image_digest",
+            "source_commit",
+            "model_config_hash",
+            "provider_model_ids",
+            "miss_policy",
+            "score_version",
+            "evaluation_timeout_seconds",
+            "live_max_icps_per_node",
+            "live_max_provider_calls",
+            "live_cap_microusd",
+            "minimum_evidence_retention_days",
+        }:
+            raise AutoresearchExecutorV2Error(
+                "Git-tree evaluator commitment fields are invalid"
+            )
+        for field in (
+            "snapshot_manifest_hash",
+            "snapshot_ready_hash",
+            "dev_set_hash",
+            "model_config_hash",
+        ):
+            _hash(evaluator_commitment.get(field), field)
+        provider_model_ids = evaluator_commitment.get("provider_model_ids")
+        if (
+            evaluator_commitment.get("schema_version")
+            != "research_lab.git_tree_evaluator_commitment.v1"
+            or evaluator_commitment.get("miss_policy") != "strict"
+            or int(evaluator_commitment.get("dev_set_size") or 0) != 8
+            or not str(evaluator_commitment.get("champion_image_digest") or "")
+            or not str(evaluator_commitment.get("source_commit") or "")
+            or not str(evaluator_commitment.get("score_version") or "")
+            or not isinstance(provider_model_ids, list)
+            or any(not isinstance(item, str) or not item for item in provider_model_ids)
+            or int(evaluator_commitment.get("evaluation_timeout_seconds") or 0) < 30
+            or int(evaluator_commitment.get("live_max_icps_per_node") or 0)
+            != tree_policy.live_max_icps_per_node
+            or int(evaluator_commitment.get("live_max_provider_calls") or 0)
+            != tree_policy.live_max_provider_calls
+            or int(evaluator_commitment.get("live_cap_microusd") or 0)
+            != tree_policy.live_cap_microusd
+            or int(
+                evaluator_commitment.get("minimum_evidence_retention_days")
+                or 0
+            )
+            != tree_policy.evidence_retention_days
+            or tree_runtime_policy.get("evaluator_enabled") is not True
+            or payload.get("dev_evaluator_enabled") is not True
+            or int(settings.get("max_candidates") or 0) != tree_policy.max_nodes
+        ):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree evaluator commitment is not production eligible"
+            )
+        evaluation_timeout_seconds = int(
+            evaluator_commitment.get("evaluation_timeout_seconds") or 0
+        )
+        try:
+            required_final_context_seconds = (
+                tree_policy.required_final_context_seconds(
+                    evaluation_timeout_seconds
+                )
+            )
+        except GitTreeContractError as exc:
+            raise AutoresearchExecutorV2Error(
+                "Git-tree deadline cannot contain final evaluation and handoff"
+            ) from exc
+        if required_final_context_seconds >= int(settings.get("max_seconds") or 0):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree runtime max_seconds cannot contain final evaluation "
+                "and handoff"
+            )
+        prior_evaluation_provider_call_count = tree_runtime_policy.get(
+            "prior_evaluation_provider_call_count"
+        )
+        prior_evaluation_cost_microusd = tree_runtime_policy.get(
+            "prior_evaluation_cost_microusd"
+        )
+        if (
+            isinstance(prior_evaluation_provider_call_count, bool)
+            or not isinstance(prior_evaluation_provider_call_count, int)
+            or prior_evaluation_provider_call_count < 0
+            or prior_evaluation_provider_call_count
+            > tree_policy.live_max_provider_calls
+            or isinstance(prior_evaluation_cost_microusd, bool)
+            or not isinstance(prior_evaluation_cost_microusd, int)
+            or prior_evaluation_cost_microusd < 0
+            or prior_evaluation_cost_microusd > tree_policy.live_cap_microusd
+        ):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree prior evaluation usage is invalid"
+            )
+        try:
+            snapshot_age_seconds = float(
+                tree_runtime_policy.get("snapshot_age_seconds")
+            )
+        except (TypeError, ValueError) as exc:
+            raise AutoresearchExecutorV2Error(
+                "Git-tree snapshot age is invalid"
+            ) from exc
+        if (
+            not math.isfinite(snapshot_age_seconds)
+            or snapshot_age_seconds < 0
+            or snapshot_age_seconds > 14 * 86400
+        ):
+            raise AutoresearchExecutorV2Error(
+                "Git-tree snapshot is stale or invalid"
+            )
         return {
             "schema_version": AUTORESEARCH_REQUEST_SCHEMA_VERSION,
             "run_id": run_id,
@@ -1974,7 +2667,7 @@ class AutoresearchExecutorV2:
             ),
             "model_id": model_id,
             "model_doc": _mapping(payload.get("model_doc"), "model_doc"),
-            "budget_context": _mapping(payload.get("budget_context"), "budget_context"),
+            "budget_context": budget_context,
             "requested_loop_count": requested_loop_count,
             "resume_state": _mapping(payload.get("resume_state"), "resume_state"),
             "loop_settings": settings,
@@ -2150,6 +2843,232 @@ class AutoresearchExecutorV2:
                 ),
             }
 
+        async def evaluate_cohort(
+            candidates: Sequence[BuiltCodeEditCandidate],
+            *,
+            remaining_tree_budget_microusd: int | None = None,
+        ) -> Mapping[str, Any]:
+            ordered = sorted(tuple(candidates), key=lambda item: str(item.node_id))
+            if not ordered:
+                raise AutoresearchExecutorV2Error("dev-eval cohort is empty")
+            candidate_docs = [_candidate_document(item) for item in ordered]
+            candidate_hashes = [sha256_json(item) for item in candidate_docs]
+            if (
+                remaining_tree_budget_microusd is None
+                or isinstance(remaining_tree_budget_microusd, bool)
+                or int(remaining_tree_budget_microusd) < 0
+            ):
+                raise AutoresearchExecutorV2Error(
+                    "dev-eval cohort remaining tree budget is invalid"
+                )
+            remaining_budget = int(remaining_tree_budget_microusd)
+            request_hash = sha256_json(
+                {
+                    "schema_version": "leadpoet.autoresearch_dev_eval_cohort_request.v4",
+                    "candidate_hashes": candidate_hashes,
+                    "remaining_tree_budget_microusd": remaining_budget,
+                }
+            )
+
+            def validate(value: Mapping[str, Any]) -> Dict[str, Any]:
+                required = {
+                    "schema_version",
+                    "cohort_request_hash",
+                    "cohort_hash",
+                    "evaluation_mode",
+                    "overlay_hash",
+                    "provider_call_count",
+                    "settled_cost_microusd",
+                    "results",
+                }
+                if set(value) != required:
+                    raise AutoresearchExecutorV2Error(
+                        "dev-eval cohort response fields are invalid"
+                    )
+                if (
+                    value.get("schema_version")
+                    != HOST_DEV_EVAL_COHORT_RESULT_SCHEMA_VERSION
+                    or value.get("cohort_request_hash") != request_hash
+                ):
+                    raise AutoresearchExecutorV2Error(
+                        "dev-eval cohort response binding differs"
+                    )
+                cohort_hash = _hash(value.get("cohort_hash"), "cohort hash")
+                overlay_hash = _hash(value.get("overlay_hash"), "overlay hash")
+                mode = str(value.get("evaluation_mode") or "")
+                if mode not in {"replay", "hybrid"}:
+                    raise AutoresearchExecutorV2Error(
+                        "dev-eval cohort mode is invalid"
+                    )
+                provider_call_count = value.get("provider_call_count")
+                settled_cost = value.get("settled_cost_microusd")
+                if (
+                    isinstance(provider_call_count, bool)
+                    or not isinstance(provider_call_count, int)
+                    or provider_call_count < 0
+                    or isinstance(settled_cost, bool)
+                    or not isinstance(settled_cost, int)
+                    or settled_cost < 0
+                ):
+                    raise AutoresearchExecutorV2Error(
+                        "dev-eval cohort accounting is invalid"
+                    )
+                rows = value.get("results")
+                if not isinstance(rows, list) or len(rows) != len(ordered):
+                    raise AutoresearchExecutorV2Error(
+                        "dev-eval cohort result count differs"
+                    )
+                expected_by_node = {
+                    str(candidate.node_id): candidate_hashes[index]
+                    for index, candidate in enumerate(ordered)
+                }
+                normalized_rows: list[dict[str, Any]] = []
+                seen_nodes: set[str] = set()
+                required_purpose = (
+                    "research_lab.candidate_hybrid_test.v2"
+                    if mode == "hybrid"
+                    else "research_lab.candidate_test.v2"
+                )
+                for row in rows:
+                    if not isinstance(row, Mapping) or set(row) != {
+                        "node_id",
+                        "candidate_hash",
+                        "result",
+                        "receipt_graph",
+                        "evaluation_metadata",
+                    }:
+                        raise AutoresearchExecutorV2Error(
+                            "dev-eval cohort row fields are invalid"
+                        )
+                    node_id = str(row.get("node_id") or "")
+                    if (
+                        node_id not in expected_by_node
+                        or node_id in seen_nodes
+                        or row.get("candidate_hash") != expected_by_node[node_id]
+                    ):
+                        raise AutoresearchExecutorV2Error(
+                            "dev-eval cohort candidate binding differs"
+                        )
+                    seen_nodes.add(node_id)
+                    result = _mapping(row.get("result"), "dev-eval cohort result")
+                    graph = _mapping(
+                        row.get("receipt_graph"), "dev-eval cohort receipt graph"
+                    )
+                    metadata = _mapping(
+                        row.get("evaluation_metadata"),
+                        "dev-eval cohort metadata",
+                    )
+                    if set(metadata) != {
+                        "evaluation_mode",
+                        "overlay_hash",
+                        "cohort_hash",
+                        "provider_call_count",
+                        "settled_cost_microusd",
+                        "evaluation_plan",
+                    } or any(
+                        metadata.get(name) != expected
+                        for name, expected in (
+                            ("evaluation_mode", mode),
+                            ("overlay_hash", overlay_hash),
+                            ("cohort_hash", cohort_hash),
+                            ("provider_call_count", provider_call_count),
+                            ("settled_cost_microusd", settled_cost),
+                        )
+                    ):
+                        raise AutoresearchExecutorV2Error(
+                            "dev-eval cohort metadata differs"
+                        )
+                    if not isinstance(metadata.get("evaluation_plan"), Mapping):
+                        raise AutoresearchExecutorV2Error(
+                            "dev-eval cohort plan is invalid"
+                        )
+                    validate_receipt_graph(
+                        graph,
+                        required_purposes=(required_purpose,),
+                        require_boot_attestation_verification=(
+                            self._scoring_graph_verifier is not None
+                        ),
+                        boot_attestation_verifier=(
+                            (lambda identity: self._scoring_graph_verifier(identity))
+                            if self._scoring_graph_verifier is not None
+                            else None
+                        ),
+                    )
+                    root = next(
+                        item
+                        for item in graph["receipts"]
+                        if item["receipt_hash"] == graph["root_receipt_hash"]
+                    )
+                    if (
+                        root.get("role") != "gateway_scoring"
+                        or root.get("output_root")
+                        != sha256_bytes(canonical_json(result).encode("utf-8"))
+                    ):
+                        raise AutoresearchExecutorV2Error(
+                            "dev-eval cohort result commitment differs"
+                        )
+                    context.record_external_receipt_graph(graph)
+                    normalized_rows.append(
+                        {
+                            "node_id": node_id,
+                            "candidate_hash": expected_by_node[node_id],
+                            "result": result,
+                            "receipt_graph": graph,
+                            "evaluation_metadata": metadata,
+                        }
+                    )
+                if seen_nodes != set(expected_by_node):
+                    raise AutoresearchExecutorV2Error(
+                        "dev-eval cohort omitted a candidate"
+                    )
+                return {
+                    "schema_version": HOST_DEV_EVAL_COHORT_RESULT_SCHEMA_VERSION,
+                    "cohort_request_hash": request_hash,
+                    "cohort_hash": cohort_hash,
+                    "evaluation_mode": mode,
+                    "overlay_hash": overlay_hash,
+                    "provider_call_count": provider_call_count,
+                    "settled_cost_microusd": settled_cost,
+                    "results": normalized_rows,
+                }
+
+            response = await asyncio.to_thread(
+                context.execute_host_operation,
+                operation=HOST_DEV_EVALUATE,
+                payload={
+                    "candidates": candidate_docs,
+                    "candidate_hashes": candidate_hashes,
+                    "cohort_request_hash": request_hash,
+                    "remaining_tree_budget_microusd": remaining_budget,
+                },
+                expected_state_hash=request_hash,
+                timeout_seconds=1800,
+                response_validator=validate,
+            )
+            return {
+                "schema_version": "research_lab.git_tree_eval_cohort_result.v1",
+                "cohort_hash": response["cohort_hash"],
+                "evaluation_mode": response["evaluation_mode"],
+                "overlay_hash": response["overlay_hash"],
+                "provider_call_count": response["provider_call_count"],
+                "settled_cost_microusd": response["settled_cost_microusd"],
+                "results": [
+                    {
+                        "node_id": row["node_id"],
+                        "candidate_hash": row["candidate_hash"],
+                        "result": {
+                            **dict(row["result"]),
+                            **dict(row["evaluation_metadata"]),
+                            "receipt_root": str(
+                                row["receipt_graph"].get("root_receipt_hash") or ""
+                            ),
+                        },
+                    }
+                    for row in response["results"]
+                ],
+            }
+
+        setattr(evaluate, "evaluate_cohort", evaluate_cohort)
         return evaluate
 
     def _loop_model_caller(

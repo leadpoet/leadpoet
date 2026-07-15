@@ -38,6 +38,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -73,6 +74,7 @@ DEV_EVAL_CACHE_DIR_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_CACHE_DIR"
 DEFAULT_TOTAL_TIMEOUT_SECONDS = 300
 CONTAINER_SNAPSHOT_DIR = "/research_lab_dev_snapshots"
 _TRUTHY = ("1", "true", "yes", "on")
+_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PROVIDER_CREDENTIAL_ENV_NAMES = frozenset(
     {
         "DEEPLINE_API_KEY",
@@ -516,6 +518,17 @@ class AttestedReplayDevEvaluatorV2:
         snapshot_uri: str | None = None,
         cache_root: Path | None = None,
         execute: Any = None,
+        provider_environment: Mapping[str, str] | None = None,
+        model_env_passthrough: Sequence[str] | None = None,
+        parent_graphs: Sequence[Mapping[str, Any]] = (),
+        live_provider_call_cap: int = 32,
+        live_cost_cap_microusd: int = 500_000,
+        live_max_icps_per_node: int = 8,
+        live_timeout_seconds: int = 300,
+        evaluation_concurrency: int = 2,
+        prior_provider_call_count: int = 0,
+        prior_settled_cost_microusd: int = 0,
+        model_runner_factory: Any = None,
     ) -> None:
         self._epoch_id = max(0, int(epoch_id))
         self._worker_index = int(worker_index)
@@ -524,10 +537,50 @@ class AttestedReplayDevEvaluatorV2:
         ).strip()
         self._cache_root = cache_root
         self._execute = execute
+        self._provider_environment = {
+            str(name): str(value)
+            for name, value in dict(provider_environment or {}).items()
+        }
+        self._model_env_passthrough = (
+            tuple(str(item) for item in model_env_passthrough)
+            if model_env_passthrough is not None
+            else None
+        )
+        self._parent_graphs = tuple(dict(item) for item in parent_graphs)
+        self._live_provider_call_cap = int(live_provider_call_cap)
+        self._live_cost_cap_microusd = int(live_cost_cap_microusd)
+        self._live_max_icps_per_node = int(live_max_icps_per_node)
+        self._live_timeout_seconds = int(live_timeout_seconds)
+        self._evaluation_concurrency = int(evaluation_concurrency)
+        if not 1 <= self._live_provider_call_cap <= 32:
+            raise DevEvalRunnerError("tree live provider-call cap is invalid")
+        if not 1 <= self._live_cost_cap_microusd <= 500_000:
+            raise DevEvalRunnerError("tree live provider-cost cap is invalid")
+        if not 1 <= self._live_max_icps_per_node <= EXPECTED_DEV_ICP_COUNT:
+            raise DevEvalRunnerError("tree live ICP cap is invalid")
+        if self._live_timeout_seconds < 30:
+            raise DevEvalRunnerError("tree live evaluation timeout is invalid")
+        if not 1 <= self._evaluation_concurrency <= 16:
+            raise DevEvalRunnerError("tree evaluation concurrency is invalid")
+        self._model_runner_factory = model_runner_factory
         self._prepare_lock: asyncio.Lock | None = None
+        self._discovery_lock: asyncio.Lock | None = None
         self._local_dir: Path | None = None
         self._replay_store: ProviderSnapshotStore | None = None
         self._snapshot_bundle: dict[str, Any] | None = None
+        self._dev_items: list[dict[str, Any]] | None = None
+        self._tree_paid_call_count = max(0, int(prior_provider_call_count))
+        self._tree_cost_microusd = max(
+            0, int(prior_settled_cost_microusd)
+        )
+        if self._tree_paid_call_count > self._live_provider_call_cap:
+            raise DevEvalRunnerError(
+                "prior tree provider-call usage exceeds the configured cap"
+            )
+        if self._tree_cost_microusd > self._live_cost_cap_microusd:
+            raise DevEvalRunnerError(
+                "prior tree provider-cost usage exceeds the configured cap"
+            )
 
     async def _ensure_prepared(
         self,
@@ -539,6 +592,7 @@ class AttestedReplayDevEvaluatorV2:
                 self._local_dir is None
                 or self._replay_store is None
                 or self._snapshot_bundle is None
+                or self._dev_items is None
             ):
                 from gateway.tee.source_bundle_v2 import build_source_bundle_v2
 
@@ -552,7 +606,9 @@ class AttestedReplayDevEvaluatorV2:
                     mode=MODE_REPLAY,
                     miss_policy=MISS_POLICY_STRICT,
                 )
-                await asyncio.to_thread(load_verified_dev_items, replay_store)
+                dev_items = await asyncio.to_thread(
+                    load_verified_dev_items, replay_store
+                )
                 verification = await asyncio.to_thread(replay_store.verify_manifest)
                 if not verification.get("passed"):
                     raise DevEvalRunnerError(
@@ -566,28 +622,134 @@ class AttestedReplayDevEvaluatorV2:
                 self._local_dir = local_dir
                 self._replay_store = replay_store
                 self._snapshot_bundle = snapshot_bundle
+                self._dev_items = dev_items
             return (
                 self._local_dir,
                 self._replay_store,
                 dict(self._snapshot_bundle),
             )
 
-    async def __call__(self, candidate: Any) -> Mapping[str, Any]:
-        from gateway.research_lab.attested_scoring_v2 import execute_scoring_v2
-        from gateway.research_lab.model_authority_v2 import (
-            source_bundle_for_artifact_v2,
-        )
-        from gateway.tee.scoring_executor_v2 import (
-            DEV_REPLAY_REQUEST_SCHEMA_VERSION,
-            OP_DEV_REPLAY_V2,
-        )
+    def _candidate_identity(self, candidate: Any) -> dict[str, str]:
         from leadpoet_canonical.attested_v2 import sha256_json
-        from research_lab.eval.private_runtime import private_model_env_passthrough
 
         artifact = candidate.build.candidate_model_manifest
         image_digest = str(artifact.image_digest or "").strip()
         if "@sha256:" not in image_digest:
             raise DevEvalRunnerError("candidate image digest is not immutable")
+        node_id = str(candidate.node_id or "").strip()
+        if not node_id:
+            raise DevEvalRunnerError("candidate node identity is missing")
+        document = {
+            "node_id": node_id,
+            "iteration": str(max(0, int(candidate.iteration))),
+            "model_artifact_hash": str(artifact.model_artifact_hash),
+            "manifest_hash": str(artifact.manifest_hash),
+            "image_digest": image_digest,
+            "source_diff_hash": str(
+                getattr(candidate.build, "source_diff_hash", "") or ""
+            ),
+        }
+        return {**document, "candidate_hash": sha256_json(document)}
+
+    def _measured_environment(self) -> tuple[dict[str, str], list[str]]:
+        from research_lab.eval.private_runtime import private_model_env_passthrough
+
+        environment: dict[str, str] = {}
+        credential_env_names: list[str] = []
+        passthrough = self._model_env_passthrough or tuple(
+            private_model_env_passthrough()
+        )
+        for name in passthrough:
+            if name not in os.environ:
+                continue
+            if name in _PROVIDER_CREDENTIAL_ENV_NAMES:
+                credential_env_names.append(name)
+            else:
+                environment[name] = str(os.environ[name])
+        return environment, sorted(set(credential_env_names))
+
+    @staticmethod
+    def _validate_outcome(
+        *,
+        outcome: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        evaluation_mode: str,
+        overlay_hash: str,
+        cohort_hash: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        from leadpoet_canonical.attested_v2 import sha256_json
+
+        result = outcome.get("result")
+        graph = outcome.get("receipt_graph")
+        if not isinstance(result, Mapping) or not isinstance(graph, Mapping):
+            raise DevEvalRunnerError("measured dev evaluation result is incomplete")
+        if str(result.get("dev_set_hash") or "") != str(
+            manifest.get("icp_set_hash") or ""
+        ):
+            raise DevEvalRunnerError("measured dev evaluation ICP commitment differs")
+        if str(result.get("snapshot_manifest_hash") or "") != str(
+            manifest.get("manifest_hash") or ""
+        ):
+            raise DevEvalRunnerError(
+                "measured dev evaluation snapshot commitment differs"
+            )
+        if str(result.get("evaluation_mode") or "") != evaluation_mode:
+            raise DevEvalRunnerError(
+                "measured dev evaluation mode commitment differs"
+            )
+        if str(result.get("overlay_hash") or "") != overlay_hash:
+            raise DevEvalRunnerError(
+                "measured dev evaluation overlay commitment differs"
+            )
+        if str(result.get("cohort_hash") or "") != cohort_hash:
+            raise DevEvalRunnerError(
+                "measured dev evaluation cohort commitment differs"
+            )
+        root = next(
+            (
+                item
+                for item in graph.get("receipts", ())
+                if isinstance(item, Mapping)
+                and item.get("receipt_hash") == graph.get("root_receipt_hash")
+            ),
+            None,
+        )
+        if not isinstance(root, Mapping) or root.get("output_root") != sha256_json(
+            dict(result)
+        ):
+            raise DevEvalRunnerError(
+                "measured dev evaluation output commitment differs"
+            )
+        return dict(result), dict(graph)
+
+    async def _evaluate_candidate(
+        self,
+        candidate: Any,
+        *,
+        evaluation_mode: str,
+        cohort_hash: str,
+        provider_evidence_caches: Mapping[str, Any] | None = None,
+        overlay_hash: str = "",
+        parent_graphs: Sequence[Mapping[str, Any]] = (),
+    ) -> Mapping[str, Any]:
+        from gateway.research_lab.attested_scoring_v2 import execute_scoring_v2
+        from gateway.research_lab.model_authority_v2 import (
+            source_bundle_for_artifact_v2,
+        )
+        from gateway.tee.scoring_executor_v2 import (
+            DEV_HYBRID_REQUEST_SCHEMA_VERSION,
+            DEV_REPLAY_REQUEST_SCHEMA_VERSION,
+            OP_DEV_HYBRID_V2,
+            OP_DEV_REPLAY_V2,
+        )
+        from leadpoet_canonical.attested_v2 import sha256_json
+
+        artifact = candidate.build.candidate_model_manifest
+        self._candidate_identity(candidate)
+        if not _HASH_RE.fullmatch(cohort_hash):
+            raise DevEvalRunnerError(
+                "candidate evaluation cohort commitment is invalid"
+            )
         _local_dir, replay_store, snapshot_bundle = await self._ensure_prepared()
         manifest = replay_store.load_manifest()
         if not isinstance(manifest, Mapping):
@@ -596,41 +758,58 @@ class AttestedReplayDevEvaluatorV2:
             artifact,
             timeout_seconds=dev_eval_total_timeout_seconds(),
         )
-        environment: dict[str, str] = {}
-        credential_env_names: list[str] = []
-        for name in private_model_env_passthrough():
-            if name not in os.environ:
-                continue
-            if name in _PROVIDER_CREDENTIAL_ENV_NAMES:
-                credential_env_names.append(name)
-            else:
-                environment[name] = str(os.environ[name])
-        per_icp_timeout = _per_icp_timeout_seconds(
-            len(load_verified_dev_items(replay_store))
-        )
+        environment, credential_env_names = self._measured_environment()
+        dev_items = list(self._dev_items or ())
+        per_icp_timeout = _per_icp_timeout_seconds(len(dev_items))
         execute = self._execute or execute_scoring_v2
+        if evaluation_mode == "hybrid":
+            caches = dict(provider_evidence_caches or {})
+            if not caches or sha256_json(caches) != overlay_hash:
+                raise DevEvalRunnerError("hybrid evidence overlay is incomplete")
+            operation = OP_DEV_HYBRID_V2
+            purpose = "research_lab.candidate_hybrid_test.v2"
+            schema_version = DEV_HYBRID_REQUEST_SCHEMA_VERSION
+        elif evaluation_mode == "replay":
+            caches = {}
+            operation = OP_DEV_REPLAY_V2
+            purpose = "research_lab.candidate_test.v2"
+            schema_version = DEV_REPLAY_REQUEST_SCHEMA_VERSION
+        else:
+            raise DevEvalRunnerError("candidate evaluation mode is invalid")
+        payload = {
+            "schema_version": schema_version,
+            "artifact": artifact.to_dict(),
+            "source_bundle": source_bundle,
+            "snapshot_bundle": snapshot_bundle,
+            "snapshot_tree_hash": snapshot_bundle["source_tree_hash"],
+            "snapshot_manifest_hash": str(manifest.get("manifest_hash") or ""),
+            "module_name": "research_lab_adapter",
+            "callable_name": "run_icp",
+            "environment": environment,
+            "credential_env_names": credential_env_names,
+            "run_label": str(candidate.node_id or ""),
+            "cohort_hash": cohort_hash,
+            "miss_policy": replay_store.miss_policy,
+            "per_icp_timeout_seconds": per_icp_timeout,
+            "total_timeout_seconds": dev_eval_total_timeout_seconds(),
+        }
+        if evaluation_mode == "hybrid":
+            payload.update(
+                {
+                    "provider_evidence_caches": caches,
+                    "overlay_hash": overlay_hash,
+                }
+            )
         outcome = await execute(
-            operation=OP_DEV_REPLAY_V2,
-            purpose="research_lab.candidate_test.v2",
+            operation=operation,
+            purpose=purpose,
             epoch_id=self._epoch_id,
             sequence=max(0, int(candidate.iteration)),
-            payload={
-                "schema_version": DEV_REPLAY_REQUEST_SCHEMA_VERSION,
-                "artifact": artifact.to_dict(),
-                "source_bundle": source_bundle,
-                "snapshot_bundle": snapshot_bundle,
-                "snapshot_tree_hash": snapshot_bundle["source_tree_hash"],
-                "snapshot_manifest_hash": str(manifest.get("manifest_hash") or ""),
-                "module_name": "research_lab_adapter",
-                "callable_name": "run_icp",
-                "environment": environment,
-                "credential_env_names": sorted(credential_env_names),
-                "run_label": str(candidate.node_id or ""),
-                "miss_policy": replay_store.miss_policy,
-                "per_icp_timeout_seconds": per_icp_timeout,
-                "total_timeout_seconds": dev_eval_total_timeout_seconds(),
-            },
+            payload=payload,
             worker_index=self._worker_index,
+            parent_graphs=(
+                tuple(dict(item) for item in parent_graphs)
+            ),
             input_artifact_hashes=(
                 artifact.model_artifact_hash,
                 artifact.manifest_hash,
@@ -638,33 +817,23 @@ class AttestedReplayDevEvaluatorV2:
                 str(snapshot_bundle["archive_sha256"]),
                 str(snapshot_bundle["source_tree_hash"]),
                 str(manifest.get("manifest_hash") or ""),
+                cohort_hash,
+                *((overlay_hash,) if evaluation_mode == "hybrid" else ()),
+                *(
+                    tuple(sha256_json(dict(caches[key])) for key in sorted(caches))
+                    if evaluation_mode == "hybrid"
+                    else ()
+                ),
             ),
             timeout_seconds=float(dev_eval_total_timeout_seconds() + 120),
         )
-        result = outcome.get("result")
-        graph = outcome.get("receipt_graph")
-        if not isinstance(result, Mapping) or not isinstance(graph, Mapping):
-            raise DevEvalRunnerError("measured dev replay result is incomplete")
-        if str(result.get("dev_set_hash") or "") != str(
-            manifest.get("icp_set_hash") or ""
-        ):
-            raise DevEvalRunnerError("measured dev replay ICP commitment differs")
-        if str(result.get("snapshot_manifest_hash") or "") != str(
-            manifest.get("manifest_hash") or ""
-        ):
-            raise DevEvalRunnerError("measured dev replay snapshot commitment differs")
-        root = next(
-            (
-                item
-                for item in graph.get("receipts", ())
-                if item.get("receipt_hash") == graph.get("root_receipt_hash")
-            ),
-            None,
+        result, graph = self._validate_outcome(
+            outcome=outcome,
+            manifest=manifest,
+            evaluation_mode=evaluation_mode,
+            overlay_hash=(overlay_hash if evaluation_mode == "hybrid" else sha256_json({})),
+            cohort_hash=cohort_hash,
         )
-        if not isinstance(root, Mapping) or root.get("output_root") != sha256_json(
-            dict(result)
-        ):
-            raise DevEvalRunnerError("measured dev replay output commitment differs")
         logger.info(
             "research_lab_loop_dev_eval_result node_id=%s lane=%s aggregate_dev_score=%s "
             "icp_count=%s scored_icp_count=%s snapshot_miss_count=%s failure_count=%s "
@@ -679,7 +848,465 @@ class AttestedReplayDevEvaluatorV2:
             replay_store.miss_policy,
             str(result.get("dev_score_version") or ""),
         )
-        return {"result": dict(result), "receipt_graph": dict(graph)}
+        return {"result": result, "receipt_graph": graph}
+
+    async def _discover_provider_overlay(
+        self,
+        *,
+        candidates: Sequence[Any],
+        cohort_hash: str,
+        remaining_tree_budget_microusd: int | None,
+    ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...], int, int]:
+        if self._discovery_lock is None:
+            self._discovery_lock = asyncio.Lock()
+        async with self._discovery_lock:
+            return await self._discover_provider_overlay_locked(
+                candidates=candidates,
+                cohort_hash=cohort_hash,
+                remaining_tree_budget_microusd=(
+                    remaining_tree_budget_microusd
+                ),
+            )
+
+    async def _discover_provider_overlay_locked(
+        self,
+        *,
+        candidates: Sequence[Any],
+        cohort_hash: str,
+        remaining_tree_budget_microusd: int | None,
+    ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...], int, int]:
+        from gateway.research_lab.attested_scoring_v2 import execute_scoring_v2
+        from gateway.research_lab.model_authority_v2 import (
+            AttestedPrivateModelRunnerV2,
+        )
+        from leadpoet_canonical.attested_v2 import sha256_json
+        from research_lab.eval import DockerPrivateModelSpec
+        from research_lab.eval.private_runtime import (
+            canonicalize_private_model_icp,
+            private_model_env_passthrough,
+        )
+        from research_lab.eval.provider_evidence_cache import (
+            EVIDENCE_CACHE_SCHEMA_VERSION,
+            icp_evidence_cache_key,
+        )
+
+        _local_dir, replay_store, snapshot_bundle = await self._ensure_prepared()
+        manifest = replay_store.load_manifest()
+        if not isinstance(manifest, Mapping):
+            raise DevEvalRunnerError("snapshot-set manifest is required and missing")
+        dev_items = list(self._dev_items or ())
+        if len(dev_items) != EXPECTED_DEV_ICP_COUNT:
+            raise DevEvalRunnerError("hybrid discovery requires exactly eight ICPs")
+        discovery_items = dev_items[: self._live_max_icps_per_node]
+        runner_factory = self._model_runner_factory or AttestedPrivateModelRunnerV2
+        execute = self._execute or execute_scoring_v2
+        env_passthrough = self._model_env_passthrough or tuple(
+            private_model_env_passthrough()
+        )
+        tree_ids = {
+            str(getattr(candidate, "tree_id", "") or "")
+            for candidate in candidates
+        }
+        if len(tree_ids) != 1 or not next(iter(tree_ids)):
+            raise DevEvalRunnerError(
+                "hybrid discovery candidates do not share one tree"
+            )
+        tree_id = next(iter(tree_ids))
+        if (
+            self._tree_paid_call_count >= self._live_provider_call_cap
+            or self._tree_cost_microusd >= self._live_cost_cap_microusd
+        ):
+            raise DevEvalRunnerError("hybrid discovery tree budget is exhausted")
+        scope = sha256_json(
+            {
+                "schema_version": "research_lab.git_tree_hybrid_scope.v1",
+                "epoch_id": self._epoch_id,
+                "tree_id": tree_id,
+                "cohort_hash": cohort_hash,
+                "snapshot_manifest_hash": str(
+                    manifest.get("manifest_hash") or ""
+                ),
+            }
+        )
+        caches: dict[str, dict[str, Any]] = {}
+        cache_graphs: dict[str, dict[str, Any]] = {}
+        total_paid_calls = 0
+        total_cost_microusd = 0
+        remaining_provider_calls = (
+            self._live_provider_call_cap - self._tree_paid_call_count
+        )
+        remaining_cost_microusd = (
+            self._live_cost_cap_microusd - self._tree_cost_microusd
+        )
+        if remaining_tree_budget_microusd is not None:
+            remaining_cost_microusd = min(
+                remaining_cost_microusd,
+                max(0, int(remaining_tree_budget_microusd)),
+            )
+        if remaining_provider_calls <= 0 or remaining_cost_microusd <= 0:
+            raise DevEvalRunnerError("hybrid discovery tree budget is exhausted")
+        for item_index, item in enumerate(discovery_items):
+            raw_icp = item.get("icp") if isinstance(item, Mapping) else None
+            canonical_icp = canonicalize_private_model_icp(
+                dict(raw_icp or item)
+            )
+            cache_ref = icp_evidence_cache_key(canonical_icp)
+            current_cache: dict[str, Any] = {}
+            current_graph: dict[str, Any] | None = None
+            current_hash = ""
+            for candidate in candidates:
+                artifact = candidate.build.candidate_model_manifest
+                runner = runner_factory(
+                    artifact=artifact,
+                    spec=DockerPrivateModelSpec(
+                        image_digest=artifact.image_digest,
+                        env_passthrough=tuple(env_passthrough),
+                        extra_env=self._provider_environment,
+                        timeout_seconds=self._live_timeout_seconds,
+                    ),
+                    model_kind="candidate",
+                    worker_index=self._worker_index,
+                    epoch_id=self._epoch_id,
+                    parent_graphs=self._parent_graphs,
+                    execute=execute,
+                )
+                await runner.run_with_provider_evidence(
+                    canonical_icp,
+                    {
+                        "mode": "candidate_hybrid_discovery",
+                        "evaluation_epoch": self._epoch_id,
+                        "dev_eval": True,
+                        "run_label": str(candidate.node_id or ""),
+                        "dev_item_number": item_index + 1,
+                        "cohort_hash": cohort_hash,
+                        "snapshot_manifest_hash": str(
+                            manifest.get("manifest_hash") or ""
+                        ),
+                        "miss_policy": MISS_POLICY_STRICT,
+                    },
+                    provider_evidence_cache=current_cache,
+                    provider_evidence_mode="record",
+                    cache_parent_graphs=((current_graph,) if current_graph else ()),
+                    provider_snapshot_bundle=snapshot_bundle,
+                    provider_snapshot_tree_hash=str(
+                        snapshot_bundle["source_tree_hash"]
+                    ),
+                    provider_snapshot_manifest_hash=str(
+                        manifest.get("manifest_hash") or ""
+                    ),
+                    provider_cost_scope=scope,
+                    provider_cost_cap_microusd=remaining_cost_microusd,
+                    provider_call_cap=remaining_provider_calls,
+                )
+                generated = runner.generated_provider_evidence_cache(cache_ref)
+                authorities = runner.attested_authorities()
+                summary = runner.provider_evidence_summary(cache_ref)
+                cost_summary = summary.get("cost_summary")
+                if (
+                    not isinstance(generated, Mapping)
+                    or generated.get("schema_version")
+                    != EVIDENCE_CACHE_SCHEMA_VERSION
+                    or generated.get("icp_ref") != cache_ref
+                    or not isinstance(generated.get("entries"), Mapping)
+                    or not authorities
+                    or not isinstance(cost_summary, Mapping)
+                ):
+                    raise DevEvalRunnerError(
+                        "hybrid discovery returned incomplete measured evidence"
+                    )
+                generated_doc = dict(generated)
+                generated_hash = sha256_json(generated_doc)
+                if generated_hash != current_hash:
+                    authority_graph = authorities[-1].get("receipt_graph")
+                    if not isinstance(authority_graph, Mapping):
+                        raise DevEvalRunnerError(
+                            "hybrid discovery tape graph is missing"
+                        )
+                    current_cache = generated_doc
+                    current_graph = dict(authority_graph)
+                    current_hash = generated_hash
+                total_paid_calls += max(
+                    0, int(cost_summary.get("paid_call_count") or 0)
+                )
+                total_cost_microusd += max(
+                    0,
+                    int(
+                        round(
+                            float(cost_summary.get("total_cost_usd") or 0.0)
+                            * 1_000_000
+                        )
+                    ),
+                )
+                if (
+                    int(cost_summary.get("tracking_failed_count") or 0) > 0
+                    or bool(cost_summary.get("cap_blocked"))
+                    or bool(cost_summary.get("cap_exceeded_after_success"))
+                ):
+                    raise DevEvalRunnerError(
+                        "hybrid discovery provider accounting did not settle"
+                    )
+            if not current_cache or current_graph is None:
+                raise DevEvalRunnerError(
+                    "hybrid discovery did not produce a frozen ICP overlay"
+                )
+            caches[cache_ref] = current_cache
+            cache_graphs[cache_ref] = current_graph
+        if (
+            self._tree_paid_call_count + total_paid_calls
+            > self._live_provider_call_cap
+        ):
+            raise DevEvalRunnerError("hybrid discovery provider-call cap exceeded")
+        if (
+            self._tree_cost_microusd + total_cost_microusd
+            > self._live_cost_cap_microusd
+        ):
+            raise DevEvalRunnerError("hybrid discovery provider-cost cap exceeded")
+        if total_cost_microusd > remaining_cost_microusd:
+            raise DevEvalRunnerError(
+                "hybrid discovery exceeded the remaining funded budget"
+            )
+        self._tree_paid_call_count += total_paid_calls
+        self._tree_cost_microusd += total_cost_microusd
+        return (
+            caches,
+            tuple(cache_graphs[key] for key in sorted(cache_graphs)),
+            total_paid_calls,
+            total_cost_microusd,
+        )
+
+    async def evaluate_cohort(
+        self,
+        candidates: Sequence[Any],
+        *,
+        remaining_tree_budget_microusd: int | None = None,
+    ) -> Mapping[str, Any]:
+        from gateway.research_lab.git_tree_evaluator import (
+            TreeEvaluationPlan,
+            classify_candidate_tree_evaluation,
+        )
+        from leadpoet_canonical.attested_v2 import sha256_json
+
+        ordered = sorted(tuple(candidates), key=lambda item: str(item.node_id))
+        if not ordered:
+            raise DevEvalRunnerError("development-evaluation cohort is empty")
+        identities = [self._candidate_identity(item) for item in ordered]
+        if len({item["node_id"] for item in identities}) != len(identities):
+            raise DevEvalRunnerError("development-evaluation cohort has duplicate nodes")
+        plans = {
+            str(candidate.node_id): classify_candidate_tree_evaluation(candidate)
+            for candidate in ordered
+        }
+        identities_by_node = {
+            item["node_id"]: item for item in identities
+        }
+
+        def cohort_commitment() -> str:
+            return sha256_json(
+                {
+                    "schema_version": "research_lab.git_tree_eval_cohort.v1",
+                    "epoch_id": self._epoch_id,
+                    "candidates": identities,
+                    "evaluation_plans": [
+                        plans[item["node_id"]].to_dict()
+                        for item in identities
+                    ],
+                }
+            )
+
+        semaphore = asyncio.Semaphore(self._evaluation_concurrency)
+
+        async def evaluate_round(
+            *,
+            evaluation_mode: str,
+            cohort_hash: str,
+            caches: Mapping[str, Any],
+            overlay_hash: str,
+            parent_graphs: Sequence[Mapping[str, Any]],
+        ) -> dict[str, dict[str, Any]]:
+            async def evaluate_one(candidate: Any) -> tuple[str, dict[str, Any]]:
+                async with semaphore:
+                    envelope = await self._evaluate_candidate(
+                        candidate,
+                        evaluation_mode=evaluation_mode,
+                        cohort_hash=cohort_hash,
+                        provider_evidence_caches=caches,
+                        overlay_hash=overlay_hash,
+                        parent_graphs=parent_graphs,
+                    )
+                return str(candidate.node_id), dict(envelope)
+
+            return dict(
+                await asyncio.gather(
+                    *(evaluate_one(item) for item in ordered)
+                )
+            )
+
+        probe_cohort_hash = cohort_commitment()
+        hybrid_candidates = [
+            item for item in ordered if plans[str(item.node_id)].mode == "hybrid"
+        ]
+        if hybrid_candidates:
+            (
+                caches,
+                cache_graphs,
+                provider_call_count,
+                settled_cost_microusd,
+            ) = await self._discover_provider_overlay(
+                candidates=hybrid_candidates,
+                cohort_hash=probe_cohort_hash,
+                remaining_tree_budget_microusd=(
+                    remaining_tree_budget_microusd
+                ),
+            )
+            overlay_hash = sha256_json(caches)
+            mode = "hybrid"
+            cohort_hash = probe_cohort_hash
+            envelopes = await evaluate_round(
+                evaluation_mode=mode,
+                cohort_hash=cohort_hash,
+                caches=caches,
+                overlay_hash=overlay_hash,
+                parent_graphs=cache_graphs,
+            )
+        else:
+            caches = {}
+            cache_graphs = ()
+            provider_call_count = 0
+            settled_cost_microusd = 0
+            overlay_hash = sha256_json({})
+            mode = "replay"
+            envelopes = await evaluate_round(
+                evaluation_mode=mode,
+                cohort_hash=probe_cohort_hash,
+                caches=caches,
+                overlay_hash=overlay_hash,
+                parent_graphs=(),
+            )
+            runtime_miss_candidates = [
+                candidate
+                for candidate in ordered
+                if int(
+                    dict(envelopes[str(candidate.node_id)]["result"]).get(
+                        "snapshot_miss_count"
+                    )
+                    or 0
+                )
+                > 0
+                or int(
+                    dict(envelopes[str(candidate.node_id)]["result"]).get(
+                        "true_miss_count"
+                    )
+                    or 0
+                )
+                > 0
+            ]
+            if runtime_miss_candidates:
+                for candidate in runtime_miss_candidates:
+                    node_id = str(candidate.node_id)
+                    plan = plans[node_id]
+                    plans[node_id] = TreeEvaluationPlan(
+                        mode="hybrid",
+                        reason_codes=tuple(
+                            sorted(
+                                set(plan.reason_codes)
+                                | {"strict_replay_miss_requires_live_overlay"}
+                            )
+                        ),
+                        changed_line_count=plan.changed_line_count,
+                        target_file_count=plan.target_file_count,
+                        patch_hash=plan.patch_hash,
+                    )
+                cohort_hash = cohort_commitment()
+                (
+                    caches,
+                    cache_graphs,
+                    provider_call_count,
+                    settled_cost_microusd,
+                ) = await self._discover_provider_overlay(
+                    candidates=runtime_miss_candidates,
+                    cohort_hash=cohort_hash,
+                    remaining_tree_budget_microusd=(
+                        remaining_tree_budget_microusd
+                    ),
+                )
+                overlay_hash = sha256_json(caches)
+                initial_graphs = tuple(
+                    dict(envelopes[str(candidate.node_id)]["receipt_graph"])
+                    for candidate in ordered
+                )
+                parents_by_root = {
+                    str(graph.get("root_receipt_hash") or ""): dict(graph)
+                    for graph in (*initial_graphs, *cache_graphs)
+                }
+                if "" in parents_by_root:
+                    raise DevEvalRunnerError(
+                        "runtime hybrid ancestry has an invalid receipt root"
+                    )
+                mode = "hybrid"
+                envelopes = await evaluate_round(
+                    evaluation_mode=mode,
+                    cohort_hash=cohort_hash,
+                    caches=caches,
+                    overlay_hash=overlay_hash,
+                    parent_graphs=tuple(
+                        parents_by_root[key]
+                        for key in sorted(parents_by_root)
+                    ),
+                )
+            else:
+                cohort_hash = probe_cohort_hash
+
+        results = [
+            {
+                "node_id": str(candidate.node_id),
+                "candidate_hash": identities_by_node[str(candidate.node_id)][
+                    "candidate_hash"
+                ],
+                "result": dict(envelopes[str(candidate.node_id)]["result"]),
+                "receipt_graph": dict(
+                    envelopes[str(candidate.node_id)]["receipt_graph"]
+                ),
+                "evaluation_metadata": {
+                    "evaluation_mode": mode,
+                    "overlay_hash": overlay_hash,
+                    "cohort_hash": cohort_hash,
+                    "provider_call_count": provider_call_count,
+                    "settled_cost_microusd": settled_cost_microusd,
+                    "evaluation_plan": plans[str(candidate.node_id)].to_dict(),
+                },
+            }
+            for candidate in ordered
+        ]
+        return {
+            "schema_version": "research_lab.git_tree_eval_cohort_result.v1",
+            "cohort_hash": cohort_hash,
+            "evaluation_mode": mode,
+            "overlay_hash": overlay_hash,
+            "provider_call_count": provider_call_count,
+            "settled_cost_microusd": settled_cost_microusd,
+            "results": results,
+        }
+
+    async def __call__(self, candidate: Any) -> Mapping[str, Any]:
+        # Kept only for the signed host-operation compatibility surface while
+        # the tree engine uses evaluate_cohort(). A scalar call never performs
+        # live discovery because it cannot establish round-wide fairness.
+        from leadpoet_canonical.attested_v2 import sha256_json
+
+        identity = self._candidate_identity(candidate)
+        cohort_hash = sha256_json(
+            {
+                "schema_version": "research_lab.git_tree_scalar_eval.v1",
+                "epoch_id": self._epoch_id,
+                "candidate": identity,
+                "evaluation_mode": "replay",
+            }
+        )
+        return await self._evaluate_candidate(
+            candidate,
+            evaluation_mode="replay",
+            cohort_hash=cohort_hash,
+        )
 
 
 def build_code_edit_dev_evaluator(
@@ -717,6 +1344,17 @@ def build_attested_code_edit_dev_evaluator_v2(
     snapshot_uri: str | None = None,
     cache_root: Path | None = None,
     execute: Any = None,
+    provider_environment: Mapping[str, str] | None = None,
+    model_env_passthrough: Sequence[str] | None = None,
+    parent_graphs: Sequence[Mapping[str, Any]] = (),
+    live_provider_call_cap: int = 32,
+    live_cost_cap_microusd: int = 500_000,
+    live_max_icps_per_node: int = 8,
+    live_timeout_seconds: int = 300,
+    evaluation_concurrency: int = 2,
+    prior_provider_call_count: int = 0,
+    prior_settled_cost_microusd: int = 0,
+    model_runner_factory: Any = None,
 ) -> AttestedReplayDevEvaluatorV2 | None:
     """V2 worker factory preserving the existing optional dev-eval gate."""
     if not dev_eval_runner_enabled():
@@ -737,4 +1375,15 @@ def build_attested_code_edit_dev_evaluator_v2(
         snapshot_uri=uri,
         cache_root=cache_root,
         execute=execute,
+        provider_environment=provider_environment,
+        model_env_passthrough=model_env_passthrough,
+        parent_graphs=parent_graphs,
+        live_provider_call_cap=live_provider_call_cap,
+        live_cost_cap_microusd=live_cost_cap_microusd,
+        live_max_icps_per_node=live_max_icps_per_node,
+        live_timeout_seconds=live_timeout_seconds,
+        evaluation_concurrency=evaluation_concurrency,
+        prior_provider_call_count=prior_provider_call_count,
+        prior_settled_cost_microusd=prior_settled_cost_microusd,
+        model_runner_factory=model_runner_factory,
     )

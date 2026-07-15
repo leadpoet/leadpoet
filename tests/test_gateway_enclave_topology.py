@@ -113,7 +113,9 @@ def _release():
                         **values,
                     }
                 )
-    return build_release_manifest(rows)
+    return build_release_manifest(
+        rows, acceptance_signer_pubkey_hash="sha256:" + "f" * 64
+    )
 
 
 def test_topology_health_matches_exact_approved_role_release(monkeypatch):

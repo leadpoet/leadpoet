@@ -37,6 +37,7 @@ OP_ATTEST_ARTIFACT_PERSISTENCE = "attest_artifact_persistence"
 OP_ATTEST_QUALIFICATION_ADMISSION = "attest_qualification_admission"
 OP_ATTEST_WEIGHT_INPUT = "attest_weight_input"
 OP_ATTEST_WEIGHT_PUBLICATION = "attest_weight_publication"
+OP_ATTEST_ACTIVE_PRIVATE_MODEL = "attest_active_private_model"
 OP_SOURCE_ADD_CATALOG_SNAPSHOT_V2 = "source_add_catalog_snapshot_v2"
 OP_PROVIDER_OUTCOME_SNAPSHOT_V2 = "provider_outcome_snapshot_v2"
 OP_REGISTER_OPENROUTER_CREDENTIAL_V2 = "register_openrouter_credential_v2"
@@ -85,6 +86,9 @@ COORDINATOR_OPERATIONS_V2 = {
     ),
     OP_ATTEST_WEIGHT_PUBLICATION: frozenset(
         {"gateway.weights.publication.v2"}
+    ),
+    OP_ATTEST_ACTIVE_PRIVATE_MODEL: frozenset(
+        {"research_lab.active_private_model.v2"}
     ),
 }
 
@@ -185,6 +189,9 @@ class CoordinatorExecutorV2:
                 ExecutionResultV2,
             ]
         ] = None,
+        active_private_model_resolver: Optional[
+            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
+        ] = None,
         config_supplier: Callable[[], ResearchLabGatewayConfig] = (
             ResearchLabGatewayConfig
         ),
@@ -199,6 +206,7 @@ class CoordinatorExecutorV2:
         self._provider_outcome_supplier = provider_outcome_supplier
         self._openrouter_registration_resolver = openrouter_registration_resolver
         self._openrouter_preflight_resolver = openrouter_preflight_resolver
+        self._active_private_model_resolver = active_private_model_resolver
         self._config = config_supplier()
 
     async def __call__(
@@ -217,6 +225,18 @@ class CoordinatorExecutorV2:
             return self._attest_weight_input(payload, context)
         if operation == OP_ATTEST_WEIGHT_PUBLICATION:
             return self._attest_weight_publication(payload, context)
+        if operation == OP_ATTEST_ACTIVE_PRIVATE_MODEL:
+            if self._active_private_model_resolver is None:
+                raise ValueError("active private model source is unavailable")
+            document = dict(self._active_private_model_resolver(payload, context))
+            return ExecutionResultV2(
+                output=document,
+                artifact_hashes=(
+                    str(document["artifact"]["model_artifact_hash"]),
+                    str(document["artifact"]["manifest_hash"]),
+                    str(document["source_state_hash"]),
+                ),
+            )
         if operation == OP_RESEARCH_LAB_ALLOCATION:
             return await self._research_lab_allocation(payload, context)
         if operation == OP_SOURCE_ADD_PROVENANCE_V2:

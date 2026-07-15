@@ -195,6 +195,12 @@ async def test_attested_model_runner_preserves_inputs_but_never_sends_parent_cre
                 "input_hash": sha256_json(payload["input"]),
                 "provider_evidence_cache_hash": sha256_json(cache_doc),
                 "provider_evidence_cache_ref": cache_ref,
+                "provider_evidence_mode": payload["provider_evidence_mode"],
+                "provider_snapshot_archive_hash": sha256_json({}),
+                "provider_snapshot_tree_hash": sha256_json({}),
+                "provider_snapshot_manifest_hash": sha256_json({}),
+                "provider_cost_cap_microusd": 0,
+                "provider_call_cap": 0,
                 "provider_runtime_catalog_hash": observed[0]["payload"][
                     "provider_runtime_catalog"
                 ]["catalog_hash"],
@@ -289,6 +295,12 @@ def test_attested_model_metadata_uses_same_measured_authority(tmp_path, monkeypa
                 "input_hash": sha256_json(payload["input"]),
                 "provider_evidence_cache_hash": sha256_json({}),
                 "provider_evidence_cache_ref": "",
+                "provider_evidence_mode": payload["provider_evidence_mode"],
+                "provider_snapshot_archive_hash": sha256_json({}),
+                "provider_snapshot_tree_hash": sha256_json({}),
+                "provider_snapshot_manifest_hash": sha256_json({}),
+                "provider_cost_cap_microusd": 0,
+                "provider_call_cap": 0,
                 "provider_runtime_catalog_hash": payload[
                     "provider_runtime_catalog"
                 ]["catalog_hash"],
@@ -385,6 +397,12 @@ async def test_private_baseline_persists_signed_tape_before_atomic_cache_publish
                 "input_hash": sha256_json(payload["input"]),
                 "provider_evidence_cache_hash": sha256_json({}),
                 "provider_evidence_cache_ref": cache_ref,
+                "provider_evidence_mode": payload["provider_evidence_mode"],
+                "provider_snapshot_archive_hash": sha256_json({}),
+                "provider_snapshot_tree_hash": sha256_json({}),
+                "provider_snapshot_manifest_hash": sha256_json({}),
+                "provider_cost_cap_microusd": 0,
+                "provider_call_cap": 0,
                 "provider_runtime_catalog_hash": payload[
                     "provider_runtime_catalog"
                 ]["catalog_hash"],

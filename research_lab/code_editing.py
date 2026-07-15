@@ -333,7 +333,9 @@ def build_loop_direction_planner_messages(
     provider_outcome_digest: Mapping[str, Any] | None = None,
     provider_capability_summary: Mapping[str, Any] | None = None,
     candidate_edit_constraints: Mapping[str, Any] | None = None,
+    branch_factor: int = 2,
 ) -> list[dict[str, str]]:
+    required_branch_count = max(1, min(8, int(branch_factor)))
     allowed_lanes = list(LOOP_DIRECTION_ALLOWED_LANES)
     indexed_paths = [
         str(item.get("path") or "")
@@ -408,6 +410,7 @@ def build_loop_direction_planner_messages(
         "prior_attempts": _redacted_mapping({"attempts": list(prior_attempts or [])}).get("attempts", []),
         "allowed_lanes": allowed_lanes,
         "candidate_edit_constraints": _redacted_mapping(candidate_edit_constraints or {}),
+        "required_root_branch_count": required_branch_count,
     }
     if provider_outcome_digest:
         # W2: recorded provider truth (error/status histograms, zero-result
@@ -445,7 +448,7 @@ def build_loop_direction_planner_messages(
         "- Capability expansion may edit that existing provider module only; never introduce a new host, credential/env reference, dependency, or network client.\n"
         "- candidate_edit_constraints is binding. Never require a new file. If it reports no editable test files, use validation_mode=runtime_checks and do not require adding tests.\n"
         "- success_criteria must describe observable behavior and existing validation, not repository work such as creating a test file.\n"
-        "- Return two or three ranked paths only when every path is independently safe and source-feasible. One path is valid when no safe alternative exists.\n"
+        "- Return exactly Context JSON required_root_branch_count independently safe, source-feasible ranked paths whenever that many genuinely distinct mechanisms exist. Return fewer only when another safe independent mechanism does not exist; never duplicate or paraphrase one path to fill the count.\n"
         "- Every schema_version 1.1 ranked path must carry its own target_behavior, must_inspect, allowed_lanes, disallowed_lanes, must_not_try, success_criteria, novelty_requirements, anti_overfit_checks, validation_mode, and validation_paths.\n"
         "- The ranked path named by selected_path_id is authoritative. Copy its lane, mechanism, target_behavior, must_inspect, lane constraints, safety constraints, success criteria, novelty requirements, anti-overfit checks, validation_mode, and validation_paths exactly into the duplicate top-level fields.\n"
         "- Prefer canonical source references as file.py::qualified.symbol. file.py:symbol, an exact bare file, and a uniquely resolvable bare symbol are accepted only when they bind to the extracted source index.\n"
@@ -703,20 +706,21 @@ def build_code_edit_auto_research_messages(
         if isinstance(budget_context, Mapping)
         else None
     )
-    sequential_context = (
-        raw_within_run_memory.get("sequential_chain")
+    tree_branch_context = (
+        raw_within_run_memory.get("git_tree_branch")
         if isinstance(raw_within_run_memory, Mapping)
         else None
     )
-    sequential_rules = ""
-    if isinstance(sequential_context, Mapping):
-        sequential_rules = (
-            "Best-so-far sequential chain:\n"
-            "- The extracted runtime source in this prompt is the exact selected parent candidate, not the run-start source.\n"
-            "- Produce exactly one incremental edit directly on this parent source. Do not recreate an independent sibling from the original model.\n"
-            "- Use Context JSON budget_context.within_run_memory.sequential_chain.parent_feedback to preserve strong anonymized examples and address weak or empty examples.\n"
-            "- Feedback example numbers are intentionally anonymous. Never infer identities, hidden inputs, or hard-code example-specific values.\n"
-            "- Do not merely restate or optimize the aggregate score; change the parent code through a general mechanism supported by the detailed feedback.\n\n"
+    tree_branch_rules = ""
+    if isinstance(tree_branch_context, Mapping):
+        tree_branch_rules = (
+            "Git-tree branch ancestry:\n"
+            "- The extracted runtime source is the exact committed parent for this node.\n"
+            "- Produce exactly one incremental child edit directly on that parent source.\n"
+            "- Use only Context JSON budget_context.within_run_memory.git_tree_branch.parent_feedback and this branch's ancestor commitments.\n"
+            "- Never recreate the run-start source, merge a sibling, or infer sibling source or feedback.\n"
+            "- Parent feedback examples are anonymous. Never infer hidden identities or hard-code example-specific values.\n"
+            "- Improve the parent through a general mechanism supported by its detailed feedback; do not merely optimize the aggregate score.\n\n"
         )
     system = (
         "You are Leadpoet Research Lab's code-editing auto-research engine. "
@@ -773,7 +777,7 @@ def build_code_edit_auto_research_messages(
         "- Do not remove ICP constraints unless replacing them with a more faithful constraint or adding a compensating downstream validation/filter.\n"
         "- If relaxing a brittle query constraint, preserve the semantic constraint elsewhere.\n"
         "- Provider fallback changes must classify, retry, timeout, log, or route provider/runtime failures; pure query wording changes are not provider fallback.\n\n"
-        + sequential_rules
+        + tree_branch_rules
         +
         "LoopDirectionPlan binding:\n"
         "- If loop_direction_plan is present, it is binding.\n"
@@ -1150,8 +1154,8 @@ def loop_direction_plan_contract_errors(plan: LoopDirectionPlan) -> list[str]:
     if not plan.ranked_paths:
         errors.append("loop_direction_plan_v1_1_requires_ranked_paths")
         return errors
-    if len(plan.ranked_paths) > 3:
-        errors.append("loop_direction_plan_v1_1_allows_at_most_three_ranked_paths")
+    if len(plan.ranked_paths) > 8:
+        errors.append("loop_direction_plan_v1_1_allows_at_most_eight_ranked_paths")
     selected: Mapping[str, Any] | None = None
     seen_ids: set[str] = set()
     required_path_fields = {

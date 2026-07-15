@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -54,8 +55,15 @@ def _evidence():
     return rows
 
 
+def _release(rows=None):
+    return build_release_manifest(
+        rows or _evidence(),
+        acceptance_signer_pubkey_hash=_hash("f"),
+    )
+
+
 def test_release_requires_six_matching_builds_for_every_role():
-    release = build_release_manifest(_evidence())
+    release = _release()
     assert validate_release_manifest(release) == release
     assert release["verified_build_count"] == 24
     assert all(value["verified_build_count"] == 6 for value in release["roles"].values())
@@ -68,25 +76,25 @@ def test_release_rejects_cross_host_pcr_or_image_divergence():
     rows = _evidence()
     rows[0]["pcr0"] = "f" * 96
     with pytest.raises(ReleaseManifestV2Error, match="diverged at pcr0"):
-        build_release_manifest(rows)
+        _release(rows)
 
     rows = _evidence()
     rows[0]["normalized_image_hash"] = _hash("f")
     with pytest.raises(ReleaseManifestV2Error, match="normalized_image_hash"):
-        build_release_manifest(rows)
+        _release(rows)
 
 
 def test_release_rejects_missing_or_duplicate_build_evidence():
     rows = _evidence()
     with pytest.raises(ReleaseManifestV2Error, match="exactly 24"):
-        build_release_manifest(rows[:-1])
+        _release(rows[:-1])
     rows[-1] = copy.deepcopy(rows[-2])
     with pytest.raises(ReleaseManifestV2Error, match="duplicated"):
-        build_release_manifest(rows)
+        _release(rows)
 
 
 def test_release_hash_detects_role_summary_tampering():
-    release = build_release_manifest(_evidence())
+    release = _release()
     release["roles"]["gateway_coordinator"]["pcr0"] = "f" * 96
     with pytest.raises(ReleaseManifestV2Error, match="hash mismatch"):
         validate_release_manifest(release)
@@ -117,6 +125,10 @@ def test_release_assembly_script_accepts_exact_two_parent_evidence(tmp_path):
         check=True,
         capture_output=True,
         text=True,
+        env={
+            **os.environ,
+            "GATEWAY_V2_ACCEPTANCE_SIGNER_PUBKEY_HASH": _hash("f"),
+        },
     )
     assert validate_release_manifest(json.loads(output.read_text()))["commit_sha"] == "1" * 40
     assert output.stat().st_mode & 0o777 == 0o600

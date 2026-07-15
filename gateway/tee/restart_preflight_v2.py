@@ -13,6 +13,9 @@ from urllib.request import Request, urlopen
 from gateway.research_lab.provider_profiles_v2 import (
     verify_required_worker_proxy_profiles_v2,
 )
+from gateway.tee.acceptance_corpus_v2 import (
+    load_and_validate_acceptance_corpus_v2,
+)
 from gateway.tee.artifact_persistence_v2 import validate_artifact_policy
 from gateway.tee.provider_broker_v2 import (
     credential_reference_hash,
@@ -173,6 +176,8 @@ def verify_gateway_restart_preflight_v2(
     parent_vcpus: int,
     parent_memory_mib: int,
     parent_environment: Mapping[str, str],
+    acceptance_corpus_manifest_path: Optional[Path] = None,
+    acceptance_corpus_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     commit = str(deploy_commit or "").lower()
     if not _COMMIT_RE.fullmatch(commit):
@@ -197,6 +202,24 @@ def verify_gateway_restart_preflight_v2(
             raise GatewayRestartPreflightV2Error(
                 "full V2 deployment has insufficient parent capacity"
             )
+        if acceptance_corpus_manifest_path is None or acceptance_corpus_root is None:
+            raise GatewayRestartPreflightV2Error(
+                "full V2 deployment requires the signed acceptance corpus"
+            )
+        try:
+            acceptance_corpus = load_and_validate_acceptance_corpus_v2(
+                Path(acceptance_corpus_manifest_path),
+                corpus_root=Path(acceptance_corpus_root),
+                expected_signing_pubkey_hash=release[
+                    "acceptance_signer_pubkey_hash"
+                ],
+            )
+        except Exception as exc:
+            raise GatewayRestartPreflightV2Error(
+                "signed V2 acceptance corpus is invalid: %s" % exc
+            ) from exc
+    else:
+        acceptance_corpus = None
 
     normalized_policy = validate_artifact_policy(artifact_policy)
     paths = tuple(Path(path) for path in credential_envelope_paths)
@@ -245,6 +268,11 @@ def verify_gateway_restart_preflight_v2(
         "parent_plaintext_provider_slot_count": 0,
         "artifact_bucket_host": normalized_policy["bucket_host"],
         "worker_proxy_profile_count": int(profile_result["profile_count"]),
+        "acceptance_corpus_manifest_hash": (
+            str(acceptance_corpus["manifest_hash"])
+            if acceptance_corpus is not None
+            else "component_only"
+        ),
     }
 
 
@@ -258,6 +286,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--topology-mode", choices=("full", "component"), required=True)
     parser.add_argument("--credential-envelope", action="append", type=Path, default=[])
     parser.add_argument("--parent-env-file", required=True, type=Path)
+    parser.add_argument("--acceptance-corpus-manifest", type=Path)
+    parser.add_argument("--acceptance-corpus-root", type=Path)
     args = parser.parse_args(argv)
     parent_vcpus, parent_memory_mib = _observed_capacity()
     result = verify_gateway_restart_preflight_v2(
@@ -272,6 +302,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parent_vcpus=parent_vcpus,
         parent_memory_mib=parent_memory_mib,
         parent_environment=load_parent_environment(args.parent_env_file),
+        acceptance_corpus_manifest_path=args.acceptance_corpus_manifest,
+        acceptance_corpus_root=args.acceptance_corpus_root,
     )
     print(json.dumps(result, sort_keys=True, indent=2))
     return 0

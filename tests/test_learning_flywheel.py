@@ -28,7 +28,14 @@ from gateway.research_lab.code_build import (
     CodeEditImageBuildError,
     ParentImageSourceContext,
 )
-from gateway.research_lab.loop_engine import AutoResearchLoopSettings
+from gateway.research_lab.autoresearch_runtime import AutoResearchRuntimeSettings
+from gateway.research_lab.git_tree_models import TreePolicy, derive_tree_id
+from gateway.research_lab.git_tree_repository import (
+    GitTreeCommit,
+    operation_settlement_commitment,
+)
+from gateway.research_lab.source_symbol_index import build_source_symbol_index
+from leadpoet_canonical.attested_v2 import sha256_json
 from research_lab.code_editing import CodeEditDraft
 from research_lab.engine_v1 import ReflectionRecord
 from research_lab.eval import PrivateModelArtifactManifest
@@ -44,6 +51,15 @@ _EVENT_DOC_CHECK = re.compile(
     r"(?i)(sk-or-|openrouter_api_key|raw_openrouter_key|raw_secret|service_role|"
     r"private_repo|judge_prompt|hidden_icp|icp_plaintext)"
 )
+
+
+@pytest.fixture(autouse=True)
+def _measured_tree_evaluation_env(monkeypatch):
+    monkeypatch.setenv(
+        "RESEARCH_LAB_DEV_SNAPSHOT_URI",
+        "s3://test-bucket/dev-snapshots/READY.json",
+    )
+    monkeypatch.setenv("RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED", "true")
 
 
 def _manifest(manifest_uri: str = "file:///local/manifest.json") -> PrivateModelArtifactManifest:
@@ -592,6 +608,44 @@ _DRAFT_RESPONSE = json.dumps(
     }
 )
 
+_TREE_PLAN_RESPONSE = json.dumps(
+    {
+        "schema_version": "1.1",
+        "miner_focus_interpretation": "improve sourcing recall",
+        "loop_goal": "widen qualified discovery without weakening fit",
+        "required_lane": "provider",
+        "required_mechanism": "widen provider query fan-out",
+        "selected_path_id": "provider-recall",
+        "ranked_paths": [
+            {
+                "path_id": "provider-recall",
+                "lane": "provider",
+                "mechanism": "widen provider query fan-out",
+                "target_behavior": ["recover qualified companies"],
+                "must_inspect": ["sourcing_model/pipeline.py"],
+                "allowed_lanes": ["provider"],
+                "disallowed_lanes": ["qualification"],
+                "must_not_try": ["weaken ICP constraints"],
+                "success_criteria": ["candidate builds and replays"],
+                "novelty_requirements": ["change the query fan-out"],
+                "anti_overfit_checks": ["preserve qualified outputs"],
+                "validation_mode": "runtime_checks",
+                "validation_paths": [],
+            }
+        ],
+        "target_behavior": ["recover qualified companies"],
+        "must_inspect": ["sourcing_model/pipeline.py"],
+        "allowed_lanes": ["provider"],
+        "disallowed_lanes": ["qualification"],
+        "must_not_try": ["weaken ICP constraints"],
+        "success_criteria": ["candidate builds and replays"],
+        "novelty_requirements": ["change the query fan-out"],
+        "anti_overfit_checks": ["preserve qualified outputs"],
+        "validation_mode": "runtime_checks",
+        "validation_paths": [],
+    }
+)
+
 
 class _FakeCaller:
     def __init__(self):
@@ -600,7 +654,7 @@ class _FakeCaller:
     async def __call__(self, messages, timeout_seconds, max_tokens, stage):
         self.calls.append((stage, messages))
         if stage == "loop_planner":
-            raise RuntimeError("planner unavailable in test")
+            return _TREE_PLAN_RESPONSE
         if stage == "source_inspection":
             return json.dumps(
                 {"requests": [{"operation": "read_file", "path": "sourcing_model/pipeline.py"}]}
@@ -632,6 +686,8 @@ class _FakeBuilder:
             code_edit_source_inspection_total_bytes=16000,
             code_edit_source_inspection_search_matches=5,
             code_edit_patch_repair_attempts=0,
+            loop_provider_probes_enabled=False,
+            provider_capability_catalog_enabled=False,
         )
 
     def prepare_parent_source_context(self, *, parent_artifact, workspace_dir):
@@ -646,10 +702,11 @@ class _FakeBuilder:
     def build(self, *, draft, parent_artifact, run_id, candidate_index, source_context):
         if self._build_error is not None:
             raise self._build_error
+        normalized_patch = draft.unified_diff.rstrip() + "\n"
         return CodeEditBuildResult(
             candidate_model_manifest=_manifest(),
             code_edit_manifest={"target_files": list(draft.target_files), "kind": "code_edit"},
-            source_diff_hash="sha256:" + "f" * 64,
+            source_diff_hash=sha256_json({"unified_diff": normalized_patch}),
             build_doc={"build_doc_hash": "sha256:" + "1" * 64},
         )
 
@@ -658,6 +715,12 @@ def _source_context(tmp_path: Path) -> ParentImageSourceContext:
     source_root = tmp_path / "source"
     (source_root / "sourcing_model").mkdir(parents=True)
     (source_root / "sourcing_model" / "pipeline.py").write_text("x = 1\n", encoding="utf-8")
+    planner_source_index = build_source_symbol_index(
+        source_root=source_root,
+        editable_files=("sourcing_model/pipeline.py",),
+        source_tree_hash="sha256:" + "8" * 64,
+        parent_image_digest_hash="sha256:" + "9" * 64,
+    )
     return ParentImageSourceContext(
         source_root=source_root,
         source_mode="extracted",
@@ -666,7 +729,260 @@ def _source_context(tmp_path: Path) -> ParentImageSourceContext:
         top_level_paths=("sourcing_model",),
         editable_files=("sourcing_model/pipeline.py",),
         file_previews=(),
+        planner_source_index=planner_source_index,
     )
+
+
+class _FlywheelArtifactIO:
+    def __init__(self):
+        self.documents: dict[str, dict[str, Any]] = {}
+
+    def write_json(self, *, uri, document, content_hash, artifact_kind):
+        assert artifact_kind == "loop_candidate_rehydration"
+        self.documents[uri] = json.loads(json.dumps(document))
+        return {"uri": uri, "content_hash": content_hash, "persisted": True}
+
+    def read_json(self, *, uri, content_hash):
+        document = json.loads(json.dumps(self.documents[uri]))
+        assert document["loop_candidate_artifact_hash"] == content_hash
+        return document
+
+
+class _FlywheelTreeRepository:
+    def __init__(self):
+        self.tree_id = ""
+        self.root_commit = "7" * 64
+        self.operations: dict[str, dict[str, Any]] = {}
+
+    def initialize(self, **kwargs):
+        tree_doc = dict(kwargs["tree_doc"])
+        self.tree_id = derive_tree_id(
+            run_id=kwargs["run_id"],
+            root_artifact_hash=kwargs["root_artifact_hash"],
+            policy=TreePolicy.from_mapping(tree_doc["policy"]),
+        )
+        return self.root_commit
+
+    def plan_slot(self, *, slot, request_hash, operation_id, node_doc):
+        if operation_id in self.operations:
+            return {
+                "created": False,
+                "operation_status": self.operations[operation_id]["status"],
+            }
+        self.operations[operation_id] = {
+            "operation_id": operation_id,
+            "operation_kind": "generation",
+            "request_hash": request_hash,
+            "node_id": slot.node_id,
+            "node_doc": dict(node_doc),
+            "status": "reserved",
+        }
+        return {"created": True, "operation_status": "reserved"}
+
+    def reserve_operation(
+        self,
+        *,
+        operation_id,
+        operation_kind,
+        request_hash,
+        node_id="",
+        reservation_doc=None,
+    ):
+        if operation_id in self.operations:
+            return {
+                "created": False,
+                "operation_status": self.operations[operation_id]["status"],
+            }
+        self.operations[operation_id] = {
+            "operation_id": operation_id,
+            "operation_kind": operation_kind,
+            "request_hash": request_hash,
+            "node_id": node_id,
+            "reservation_doc": dict(reservation_doc or {}),
+            "status": "reserved",
+        }
+        return {"created": True, "operation_status": "reserved"}
+
+    def inspect_operation(self, *, operation_id):
+        operation = self.operations.get(operation_id)
+        if operation is None:
+            return {"exists": False, "operation_id": operation_id}
+        return {
+            "exists": True,
+            "operation_id": operation_id,
+            "operation": json.loads(json.dumps(operation)),
+        }
+
+    def operation_settlement_commitment(self):
+        return operation_settlement_commitment(
+            tree_id=self.tree_id,
+            operations=[
+                {**operation, "tree_id": self.tree_id}
+                for operation in self.operations.values()
+            ],
+        )
+
+    def settle_operation(
+        self,
+        *,
+        operation_id,
+        operation_status,
+        request_hash,
+        result_hash,
+        settled_cost_microusd,
+        provider_call_count,
+        settlement_doc,
+    ):
+        operation = self.operations[operation_id]
+        assert operation["request_hash"] == request_hash
+        if operation["status"] != "reserved":
+            assert operation["status"] == operation_status
+            return {"created": False, "record": dict(operation)}
+        operation.update(
+            {
+                "status": operation_status,
+                "result_hash": result_hash,
+                "settled_cost_microusd": settled_cost_microusd,
+                "provider_call_count": provider_call_count,
+                "settlement_doc": json.loads(json.dumps(settlement_doc)),
+            }
+        )
+        return {"created": True, "record": dict(operation)}
+
+    def commit_child(self, *, slot, draft, expected_parent_source_tree_hash):
+        patch = draft.unified_diff.rstrip() + "\n"
+        patch_hash = sha256_json({"unified_diff": patch})
+        return GitTreeCommit(
+            tree_id=slot.tree_id,
+            node_id=slot.node_id,
+            parent_node_id=slot.parent_node_id,
+            root_branch_id=slot.root_branch_id,
+            depth=slot.depth,
+            slot_index=slot.slot_index,
+            git_commit=sha256_json(
+                {"tree_id": slot.tree_id, "node_id": slot.node_id}
+            ).split(":", 1)[1],
+            parent_git_commit=self.root_commit,
+            source_tree_hash=PARENT_HASH,
+            draft_patch_hash=sha256_json({"unified_diff": draft.unified_diff}),
+            incremental_patch=patch,
+            incremental_patch_hash=patch_hash,
+            cumulative_patch=patch,
+            cumulative_patch_hash=patch_hash,
+            changed_files=tuple(draft.target_files),
+        )
+
+    def verify_node_identity(self, **kwargs):
+        return {"verified": True, **kwargs}
+
+    def record_node(self, *, node_doc):
+        return {"created": True, "node_id": node_doc["node_id"]}
+
+    def commit_checkpoint(self, *, checkpoint_hash, checkpoint_doc):
+        assert sha256_json(dict(checkpoint_doc)) == checkpoint_hash
+        return {"created": True}
+
+    def publish_bundle(self):
+        return {
+            "bundle_uri": f"s3://test-bucket/trees/{self.tree_id}/tree.bundle",
+            "bundle_hash": "sha256:" + "8" * 64,
+            "bundle_size_bytes": 1024,
+            "readback_verified": True,
+        }
+
+    def select_final(self, *, selection_hash, selection_doc):
+        assert sha256_json(dict(selection_doc)) == selection_hash
+        return {"created": True}
+
+    def fail_tree(self, *, failure_hash, failure_doc):
+        assert sha256_json(dict(failure_doc)) == failure_hash
+        return {"created": True}
+
+
+class _FlywheelTreeEvaluator:
+    async def evaluate_cohort(
+        self, candidates, *, remaining_tree_budget_microusd=None
+    ):
+        assert remaining_tree_budget_microusd is not None
+        cohort_hash = sha256_json(
+            {"node_ids": sorted(candidate.node_id for candidate in candidates)}
+        )
+        overlay_hash = sha256_json({})
+        return {
+            "results": [
+                {
+                    "node_id": candidate.node_id,
+                    "result": {
+                        "aggregate_dev_score": 72.0,
+                        "dev_score_version": "flywheel-tree-v1",
+                        "snapshot_manifest_hash": "sha256:" + "4" * 64,
+                        "dev_set_hash": "sha256:" + "5" * 64,
+                        "eligible": True,
+                        "icp_count": 8,
+                        "execution_coverage": 1.0,
+                        "scored_icp_count": 8,
+                        "snapshot_miss_count": 0,
+                        "true_miss_count": 0,
+                        "failure_count": 0,
+                        "zero_output_count": 0,
+                        "miss_policy": "strict",
+                        "evaluation_mode": "replay",
+                        "overlay_hash": overlay_hash,
+                        "cohort_hash": cohort_hash,
+                        "provider_call_count": 0,
+                        "settled_cost_microusd": 0,
+                        "score_commitment": sha256_json(
+                            {
+                                "schema_version": "research_lab.git_tree_dev_score_commitment.v1",
+                                "dev_score_version": "flywheel-tree-v1",
+                                "dev_set_hash": "sha256:" + "5" * 64,
+                                "snapshot_manifest_hash": "sha256:" + "4" * 64,
+                                "miss_policy": "strict",
+                                "evaluation_mode": "replay",
+                                "overlay_hash": overlay_hash,
+                                "cohort_hash": cohort_hash,
+                            }
+                        ),
+                        "per_icp": [
+                            {
+                                "dev_score": 72.0,
+                                "company_count": 2,
+                                "scored_company_count": 2,
+                            }
+                            for _ in range(8)
+                        ],
+                    },
+                    "receipt_graph": {
+                        "root_receipt_hash": "sha256:" + "6" * 64
+                    },
+                }
+                for candidate in candidates
+            ]
+        }
+
+
+def _tree_runtime_policy() -> dict[str, Any]:
+    policy = TreePolicy(
+        mode="active",
+        branch_factor=1,
+        beam_width=1,
+        max_depth=1,
+        max_nodes=1,
+        shortlist_size=1,
+        diversity_floor=1,
+        deadline_seconds=300,
+        finalization_reserve_seconds=30,
+    )
+    return {
+        "schema_version": "research_lab.git_tree_runtime_policy.v1",
+        "policy": policy.to_dict(),
+        "evaluator_enabled": True,
+        "evaluator_commitment": {
+            "snapshot_manifest_hash": "sha256:" + "4" * 64,
+            "dev_set_hash": "sha256:" + "5" * 64,
+            "evaluation_timeout_seconds": 60,
+        },
+    }
 
 
 def _run_engine(tmp_path: Path, *, build_error: Exception | None = None):
@@ -677,7 +993,7 @@ def _run_engine(tmp_path: Path, *, build_error: Exception | None = None):
         events.append(event)
 
     loop_engine = engine.CodeEditLoopEngine(
-        settings=AutoResearchLoopSettings(
+        settings=AutoResearchRuntimeSettings(
             min_seconds=0,
             max_seconds=300,
             min_iterations=1,
@@ -690,6 +1006,9 @@ def _run_engine(tmp_path: Path, *, build_error: Exception | None = None):
         call_openrouter=caller,
         event_sink=_sink,
         builder=_FakeBuilder(_source_context(tmp_path), build_error=build_error),
+        artifact_io=_FlywheelArtifactIO(),
+        tree_repository=_FlywheelTreeRepository(),
+        dev_evaluator=_FlywheelTreeEvaluator(),
     )
     result = asyncio.run(
         loop_engine.run(
@@ -701,11 +1020,16 @@ def _run_engine(tmp_path: Path, *, build_error: Exception | None = None):
                 "brief_sanitized_ref": "brief:1",
                 "ticket_doc": {"brief_public_summary": "improve sourcing recall"},
             },
-            artifact=_manifest(),
+            artifact=_manifest(
+                "s3://test-bucket/research-lab/sourcing-model/manifest.json"
+            ),
             component_registry=_registry_doc(),
             benchmark_public_summary={"aggregate": 12.0},
             model_id="test-model",
-            budget_context={"requested_compute_budget_usd": 5.0},
+            budget_context={
+                "requested_compute_budget_usd": 5.0,
+                "tree_policy": _tree_runtime_policy(),
+            },
             requested_loop_count=1,
         )
     )

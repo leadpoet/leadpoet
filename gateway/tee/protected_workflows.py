@@ -37,30 +37,53 @@ PROTECTED_SYMBOLS = {
         "validate_code_edit_draft",
         "code_edit_candidate_manifest",
     ),
-    "gateway/research_lab/loop_engine.py": (
-        "AutoResearchLoopEngine",
-        "_rank_candidates",
-        "_would_exceed_budget",
+    "gateway/research_lab/autoresearch_runtime.py": (
+        "AutoResearchRuntimeSettings",
+        "AutoResearchLoopEvent",
+        "would_exceed_budget",
     ),
     "gateway/research_lab/code_loop_engine.py": (
         "CodeEditLoopEngine",
         "_bind_loop_direction_plan",
-        "select_inner_loop_candidates",
+    ),
+    "gateway/research_lab/git_tree_models.py": (
+        "TreePolicy",
+        "TreeEvaluation",
+        "TreeNode",
+        "TreeCheckpoint",
+        "TreeResult",
+        "derive_tree_id",
+        "derive_frontier_commitment_hash",
+        "derive_child_slot",
+        "generation_operation_id",
+        "build_operation_id",
+        "cohort_evaluation_operation_id",
+        "tree_rank_key",
+        "select_finalist",
+        "next_child_slot",
+    ),
+    "gateway/research_lab/git_tree_scheduler.py": (
+        "GitTreeScheduler",
+        "sanitized_branch_context",
+    ),
+    "gateway/research_lab/git_tree_repository.py": (
+        "GitTreeRepository",
+    ),
+    "gateway/research_lab/git_tree_store.py": (
+        "GitTreeStore",
+    ),
+    "gateway/research_lab/git_tree_evaluator.py": (
+        "TreeEvaluationPlan",
+        "classify_tree_evaluation",
+        "classify_candidate_tree_evaluation",
     ),
     "gateway/research_lab/dev_eval_runner.py": (
         "snapshot_readiness",
         "DockerReplayDevEvaluator",
         "AttestedReplayDevEvaluatorV2",
     ),
-    "gateway/research_lab/inner_loop_activation.py": (
-        "InnerLoopEvidence",
-        "InnerLoopPolicy",
-        "decide_inner_loop_policy",
-        "resolve_inner_loop_policy",
-        "_automatic_phase",
-        "_rank_gate_passes",
-        "build_inner_loop_evidence",
-        "record_inner_loop_event",
+    "gateway/research_lab/autoresearch_authority_v2.py": (
+        "run_authoritative_autoresearch_v2",
     ),
     "gateway/research_lab/snapshot_refresh.py": (
         "maybe_refresh_dev_snapshot",
@@ -176,11 +199,28 @@ PROTECTED_SYMBOLS = {
     "gateway/tee/coordinator_allocation_source_v2.py": (
         "CoordinatorAllocationSourceV2",
     ),
+    "gateway/tee/coordinator_active_model_source_v2.py": (
+        "CoordinatorActiveModelSourceV2",
+    ),
+    "gateway/tee/coordinator_chain_source_v2.py": (
+        "CoordinatorChainSourceV2",
+    ),
     "gateway/tee/coordinator_source_add_v2.py": (
         "CoordinatorSourceAddProvenanceV2",
     ),
+    "gateway/tee/coordinator_weight_source_v2.py": (
+        "CoordinatorWeightSourceV2",
+    ),
     "gateway/tee/model_sandbox_v2.py": (
         "RunscModelSandboxV2",
+    ),
+    "gateway/tee/provider_broker_v2.py": (
+        "HTTPXProviderTransport",
+        "ProviderBrokerV2",
+        "provider_registry_document",
+    ),
+    "gateway/tee/provider_semantics_v2.py": (
+        "ProviderSemanticsAuthorityV2",
     ),
     "gateway/tee/reward_executor_v2.py": (
         "reward_receipt_projection_v2",
@@ -188,6 +228,9 @@ PROTECTED_SYMBOLS = {
         "source_add_reward_row_projection_v2",
         "reimbursement_reward_row_projection_v2",
         "execute_reward_decision_v2",
+    ),
+    "gateway/tee/scoring_executor_v2.py": (
+        "ScoringExecutorV2",
     ),
 }
 

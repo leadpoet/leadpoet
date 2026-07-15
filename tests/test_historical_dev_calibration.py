@@ -1,4 +1,4 @@
-"""Read-only and activation-gate tests for historical dev calibration."""
+"""Read-only validation-gate tests for historical dev calibration."""
 
 from __future__ import annotations
 
@@ -112,4 +112,4 @@ def test_report_gate_uses_one_snapshot_and_positive_realized_lift(monkeypatch):
     assert report["eligible_pair_count"] == 30
     assert report["spearman_rho"] == 1.0
     assert report["top_quartile_realized_lift"] > 0
-    assert report["activation_gate"]["passed"] is True
+    assert report["calibration_gate"]["passed"] is True

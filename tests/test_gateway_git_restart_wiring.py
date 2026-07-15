@@ -43,10 +43,20 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
             'setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main',
             'sleep 240',
             'curl -fsS http://localhost:8000/health',
+            'curl -fsS http://localhost:8000/health/v2-authority',
             'GATEWAY_DEPLOY_STAGE="host_restart_script_install"',
             'finalize_deployment_record succeeded',
         ),
     )
+
+
+def test_gateway_restart_fails_closed_on_all_authoritative_readiness_routes() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    assert "http://localhost:8000/health/v2-authority >/dev/null" in script
+    assert "http://localhost:8000/research-lab/status >/dev/null" in script
+    assert "http://localhost:8000/attest >/dev/null" in script
+    assert "http://localhost:8000/research-lab/status || true" not in script
+    assert "http://localhost:8000/attest || true" not in script
 
 
 def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> None:
@@ -67,6 +77,12 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     assert script.index('--deploy-commit "$PREPARED_GATEWAY_SHA"') < shutdown
     assert script.index('--release-manifest "$GATEWAY_V2_RELEASE_MANIFEST"') < shutdown
     assert script.index('--parent-env-file "$ENV_CLONE"') < shutdown
+    assert script.index(
+        '--acceptance-corpus-manifest "$GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST"'
+    ) < shutdown
+    assert script.index(
+        '--acceptance-corpus-root "$GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT"'
+    ) < shutdown
     assert script.index('--topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}"') < shutdown
     assert script.index("prepare_offline_artifacts_v2.sh") < shutdown
     assert script.index('pkill -9 -f "python3 -u -m gateway.main"') > shutdown

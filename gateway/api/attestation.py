@@ -33,13 +33,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from gateway.tee.enclave_signer import (
-    get_enclave_public_key_hex,
-    get_attestation_document,
-    get_attestation_document_b64,
-    get_cached_code_hash,
-    is_keypair_initialized,
-)
+from gateway.utils.tee_client import coordinator_tee_client
 
 
 router = APIRouter(prefix="/attestation", tags=["attestation"])
@@ -77,6 +71,15 @@ class PubkeyResponse(BaseModel):
     enclave_pubkey: str  # Hex-encoded Ed25519 public key
 
 
+async def _event_signing_identity() -> dict:
+    identity = await coordinator_tee_client.get_event_signing_identity()
+    if identity.get("purpose") != "gateway_event_signing":
+        raise RuntimeError("coordinator enclave returned the wrong signing purpose")
+    if not identity.get("enclave_pubkey") or not identity.get("code_hash"):
+        raise RuntimeError("coordinator enclave event identity is incomplete")
+    return identity
+
+
 @router.get("/document", response_model=AttestationDocumentResponse)
 async def get_attestation_document_endpoint():
     """
@@ -94,7 +97,7 @@ async def get_attestation_document_endpoint():
     1. Fetch this endpoint
     2. Decode attestation_document from base64
     3. Verify COSE_Sign1 signature against AWS Nitro root certificate
-    4. Extract PCR0 from attestation and verify against pinned allowlist
+    4. Extract PCR0 and verify it against the independently rebuilt role/commit value
     5. Extract user_data from attestation and verify:
        - purpose == "gateway_event_signing"
        - enclave_pubkey matches response
@@ -111,37 +114,19 @@ async def get_attestation_document_endpoint():
     - Auditors should report this limitation in their output
     """
     try:
-        # Check if TEE is initialized
-        if not is_keypair_initialized():
+        identity = await _event_signing_identity()
+        attestation_b64 = str(identity.get("attestation_document_b64") or "")
+        if not attestation_b64:
             raise HTTPException(
                 status_code=503,
-                detail="TEE enclave not initialized. Gateway may be starting up."
+                detail="Coordinator event signer has no Nitro attestation.",
             )
-        
-        # Get attestation document (base64)
-        try:
-            attestation_b64 = get_attestation_document_b64()
-            trust_level = "full_nitro" if attestation_b64 else "signature_only"
-        except Exception:
-            # No attestation available (dev mode)
-            attestation_b64 = ""
-            trust_level = "signature_only"
-        
-        # Get enclave public key
-        enclave_pubkey = get_enclave_public_key_hex()
-        
-        # Get code hash (cached at boot)
-        try:
-            code_hash = get_cached_code_hash()
-        except RuntimeError:
-            # Code hash not cached - compute it
-            from gateway.tee.gateway_tee_service import compute_code_hash
-            code_hash = compute_code_hash()
+        trust_level = "full_nitro"
         
         return AttestationDocumentResponse(
             attestation_document=attestation_b64,
-            enclave_pubkey=enclave_pubkey,
-            code_hash=code_hash,
+            enclave_pubkey=str(identity["enclave_pubkey"]),
+            code_hash=str(identity["code_hash"]),
             trust_level=trust_level,
         )
         
@@ -169,15 +154,8 @@ async def get_pubkey_endpoint():
         enclave_pubkey: Hex-encoded Ed25519 public key (64 hex chars)
     """
     try:
-        if not is_keypair_initialized():
-            raise HTTPException(
-                status_code=503,
-                detail="TEE enclave not initialized. Gateway may be starting up."
-            )
-        
-        return PubkeyResponse(
-            enclave_pubkey=get_enclave_public_key_hex()
-        )
+        identity = await _event_signing_identity()
+        return PubkeyResponse(enclave_pubkey=str(identity["enclave_pubkey"]))
         
     except HTTPException:
         raise
@@ -202,28 +180,10 @@ async def attestation_health():
     - pubkey_prefix: First 16 chars of public key (for identification)
     """
     try:
-        initialized = is_keypair_initialized()
-        
-        if not initialized:
-            return {
-                "tee_initialized": False,
-                "attestation_available": False,
-                "trust_level": "unavailable",
-                "pubkey_prefix": None,
-                "message": "TEE not initialized"
-            }
-        
-        # Get pubkey prefix for identification
-        pubkey = get_enclave_public_key_hex()
+        identity = await _event_signing_identity()
+        pubkey = str(identity["enclave_pubkey"])
         pubkey_prefix = pubkey[:16] if pubkey else None
-        
-        # Check attestation availability
-        try:
-            attestation_b64 = get_attestation_document_b64()
-            attestation_available = bool(attestation_b64)
-        except Exception:
-            attestation_available = False
-        
+        attestation_available = bool(identity.get("attestation_document_b64"))
         trust_level = "full_nitro" if attestation_available else "signature_only"
         
         return {

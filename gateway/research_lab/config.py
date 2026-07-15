@@ -348,10 +348,6 @@ class ResearchLabGatewayConfig:
     hosted_worker_enabled: bool = False
     hosted_worker_poll_seconds: int = 15
     hosted_worker_max_runs: int = 0
-    hosted_worker_max_candidates: int = 1
-    inner_loop_mode: str = "off"
-    hosted_worker_dev_eval_candidate_width: int = 3
-    hosted_worker_paid_finalist_count: int = 1
     hosted_worker_dry_run: bool = False
     hosted_worker_id: str = ""
     hosted_worker_index: int = 0
@@ -447,8 +443,6 @@ class ResearchLabGatewayConfig:
     loop_planner_max_tokens: int = 12000
     loop_planner_temperature: float = 0.40
     loop_planner_allow_non_zdr: bool = False
-    ranked_path_fallback_enabled: bool = True
-    ranked_path_fallback_max_paths: int = 3
     planner_symbol_index_enabled: bool = True
     planner_reference_repair_enabled: bool = True
     planner_reference_repair_max_attempts: int = 1
@@ -674,21 +668,6 @@ class ResearchLabGatewayConfig:
             hosted_worker_enabled=_truthy("RESEARCH_LAB_HOSTED_WORKER_ENABLED"),
             hosted_worker_poll_seconds=_int("RESEARCH_LAB_HOSTED_WORKER_POLL_SECONDS", 15),
             hosted_worker_max_runs=_int("RESEARCH_LAB_HOSTED_WORKER_MAX_RUNS", 0),
-            hosted_worker_max_candidates=max(1, _int("RESEARCH_LAB_HOSTED_WORKER_MAX_CANDIDATES", 1)),
-            inner_loop_mode=(
-                os.getenv("RESEARCH_LAB_INNER_LOOP_MODE", "off").strip().lower()
-                if os.getenv("RESEARCH_LAB_INNER_LOOP_MODE", "off").strip().lower()
-                in {"off", "auto", "observe", "shadow", "rank"}
-                else "off"
-            ),
-            hosted_worker_dev_eval_candidate_width=max(
-                1,
-                _int("RESEARCH_LAB_LOOP_DEV_EVAL_CANDIDATE_WIDTH", 3),
-            ),
-            hosted_worker_paid_finalist_count=max(
-                1,
-                _int("RESEARCH_LAB_LOOP_PAID_FINALIST_COUNT", 1),
-            ),
             hosted_worker_dry_run=_truthy("RESEARCH_LAB_HOSTED_WORKER_DRY_RUN", "false"),
             hosted_worker_id=os.getenv("RESEARCH_LAB_HOSTED_WORKER_ID", ""),
             hosted_worker_index=worker_index,
@@ -923,14 +902,6 @@ class ResearchLabGatewayConfig:
                 max(0.0, _float("RESEARCH_LAB_LOOP_PLANNER_TEMPERATURE", 0.40)),
             ),
             loop_planner_allow_non_zdr=_truthy("RESEARCH_LAB_LOOP_PLANNER_ALLOW_NON_ZDR"),
-            ranked_path_fallback_enabled=_truthy(
-                "RESEARCH_LAB_RANKED_PATH_FALLBACK_ENABLED",
-                "true",
-            ),
-            ranked_path_fallback_max_paths=max(
-                1,
-                _int("RESEARCH_LAB_RANKED_PATH_FALLBACK_MAX_PATHS", 3),
-            ),
             planner_symbol_index_enabled=_truthy(
                 "RESEARCH_LAB_PLANNER_SYMBOL_INDEX_ENABLED",
                 "true",
@@ -1254,10 +1225,6 @@ class ResearchLabGatewayConfig:
             return {}
         default_doc = {
             "model": self.auto_research_model,
-            "max_candidates": self.hosted_worker_max_candidates,
-            "inner_loop_mode": self.inner_loop_mode,
-            "dev_eval_candidate_width": self.hosted_worker_dev_eval_candidate_width,
-            "paid_finalist_count": self.hosted_worker_paid_finalist_count,
             "max_tokens": self.auto_research_max_tokens,
             "description": "Default hosted auto-research model",
         }
@@ -1274,10 +1241,6 @@ class ResearchLabGatewayConfig:
             if self.auto_research_model:
                 return self.default_auto_research_model_tier, self.auto_research_model, {
                     "model": self.auto_research_model,
-                    "max_candidates": self.hosted_worker_max_candidates,
-                    "inner_loop_mode": self.inner_loop_mode,
-                    "dev_eval_candidate_width": self.hosted_worker_dev_eval_candidate_width,
-                    "paid_finalist_count": self.hosted_worker_paid_finalist_count,
                     "max_tokens": self.auto_research_max_tokens,
                 }
             raise ValueError("no hosted auto-research model is configured")
@@ -1331,9 +1294,6 @@ class ResearchLabGatewayConfig:
                 if key
                 in {
                     "model",
-                    "max_candidates",
-                    "dev_eval_candidate_width",
-                    "paid_finalist_count",
                     "max_compute_budget_usd",
                     "max_tokens",
                     "description",
@@ -1557,10 +1517,6 @@ class ResearchLabGatewayConfig:
                 "enabled": self.hosted_worker_enabled,
                 "dry_run": self.hosted_worker_dry_run,
                 "poll_seconds": self.hosted_worker_poll_seconds,
-                "max_candidates": self.hosted_worker_max_candidates,
-                "inner_loop_mode": self.inner_loop_mode,
-                "dev_eval_candidate_width": self.hosted_worker_dev_eval_candidate_width,
-                "paid_finalist_count": self.hosted_worker_paid_finalist_count,
                 "worker_id": self.hosted_worker_id,
                 "worker_index": self.hosted_worker_index,
                 "total_workers": self.hosted_worker_total_workers,
@@ -1594,8 +1550,6 @@ class ResearchLabGatewayConfig:
                     "enabled": self.loop_planner_enabled,
                     "model_configured": bool(self.loop_planner_model),
                     "fallback_model_count": len(self.loop_planner_fallback_models),
-                    "ranked_path_fallback_enabled": self.ranked_path_fallback_enabled,
-                    "ranked_path_fallback_max_paths": self.ranked_path_fallback_max_paths,
                     "symbol_index_enabled": self.planner_symbol_index_enabled,
                     "reference_repair_enabled": self.planner_reference_repair_enabled,
                     "reference_repair_max_attempts": self.planner_reference_repair_max_attempts,
@@ -1704,15 +1658,6 @@ class ResearchLabGatewayConfig:
                 "approved_model_tiers": {
                     tier: {
                         "model_configured": bool(doc.get("model")),
-                        "max_candidates": doc.get("max_candidates", self.hosted_worker_max_candidates),
-                        "dev_eval_candidate_width": doc.get(
-                            "dev_eval_candidate_width",
-                            self.hosted_worker_dev_eval_candidate_width,
-                        ),
-                        "paid_finalist_count": doc.get(
-                            "paid_finalist_count",
-                            self.hosted_worker_paid_finalist_count,
-                        ),
                         "max_compute_budget_usd": doc.get("max_compute_budget_usd", self.max_compute_budget_usd),
                         "max_tokens": doc.get("max_tokens", self.auto_research_max_tokens),
                         "reasoning_effort": doc.get("reasoning_effort"),

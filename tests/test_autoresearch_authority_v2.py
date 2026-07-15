@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,7 +26,14 @@ from leadpoet_canonical.attested_v2 import (
     sha256_json,
 )
 from research_lab.eval import build_local_private_artifact_manifest
-from gateway.research_lab.loop_engine import AutoResearchLoopSettings
+from gateway.research_lab.autoresearch_runtime import AutoResearchRuntimeSettings
+from gateway.research_lab.git_tree_models import (
+    TreeCheckpoint,
+    TreePolicy,
+    TreeResult,
+    derive_tree_id,
+)
+from gateway.research_lab.git_tree_repository import GitTreeRepository
 
 
 MINER_HOTKEY = "miner-hotkey"
@@ -47,7 +56,10 @@ class _CoordinatorClient:
         return {"status": "released", "job_id": str(job_id)}
 
 
-def _coordinator_graph(result):
+def _coordinator_graph(
+    result,
+    purpose="research_lab.provider_outcome_snapshot.v2",
+):
     key = Ed25519PrivateKey.generate()
     public_key = key.public_key().public_bytes_raw().hex()
     boot = create_boot_identity(
@@ -73,7 +85,7 @@ def _coordinator_graph(result):
     receipt = create_signed_execution_receipt(
         body=build_execution_receipt_body(
             role="gateway_coordinator",
-            purpose="research_lab.provider_outcome_snapshot.v2",
+            purpose=purpose,
             job_id="provider-outcome-snapshot",
             epoch_id=10,
             sequence=0,
@@ -250,6 +262,18 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
         clock=lambda: "2026-07-10T20:00:00Z"
     ).snapshot()
     outcome_graph, outcome_receipt = _coordinator_graph(outcome_result)
+    active_result = {
+        "schema_version": "leadpoet.active_private_model.v2",
+        "artifact": artifact.to_dict(),
+        "active_model": {
+            "private_model_version_id": "private_model_version:" + "1" * 64
+        },
+        "source_state_hash": "sha256:" + "2" * 64,
+    }
+    active_graph, active_receipt = _coordinator_graph(
+        active_result,
+        purpose="research_lab.active_private_model.v2",
+    )
     catalog = build_source_add_runtime_catalog_v2([])
     catalog_result = {
         "schema_version": "leadpoet.source_add_catalog_snapshot.v2",
@@ -314,20 +338,46 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
 
     async def execute(**kwargs):
         observed.update(kwargs)
+        policy = TreePolicy(mode="active")
+        tree_id = derive_tree_id(
+            run_id="run-1",
+            root_artifact_hash=artifact.model_artifact_hash,
+            policy=policy,
+        )
+        checkpoint = TreeCheckpoint(
+            tree_id=tree_id,
+            root_artifact_hash=artifact.model_artifact_hash,
+            policy=policy,
+            nodes=(),
+            frontier_hash="sha256:" + "7" * 64,
+            operation_settlement_hash="sha256:" + "8" * 64,
+            stop_reason="tree_final_selection_committed",
+        )
+        tree_result = TreeResult(
+            tree_id=tree_id,
+            status="failed",
+            stop_reason="no_eligible_tree_finalist",
+            selected_node_id="",
+            nodes=(),
+            checkpoint=checkpoint,
+        )
         return {
             "result": {
                 "schema_version": "leadpoet.autoresearch_result.v2",
                 "selected_candidates": [],
                 "iterations_completed": 1,
-                "stop_reason": "max_iterations",
+                "stop_reason": "no_eligible_tree_finalist",
                 "elapsed_seconds": 1.0,
                 "estimated_cost_usd": 0.5,
                 "actual_openrouter_cost_usd": 0.0,
                 "actual_openrouter_cost_microusd": 0,
                 "openrouter_call_count": 0,
+                "tree_result": tree_result.to_dict(),
                 "provider_usage": [],
-                "status": "completed",
-                "checkpoint_doc": None,
+                "status": "failed",
+                "checkpoint_doc": {
+                    "git_tree_checkpoint": checkpoint.to_dict()
+                },
             }
         }
 
@@ -343,7 +393,7 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
             budget_context={},
             requested_loop_count=1,
             resume_state=None,
-            loop_settings=AutoResearchLoopSettings(
+            loop_settings=AutoResearchRuntimeSettings(
                 min_seconds=0,
                 max_seconds=60,
                 min_iterations=1,
@@ -381,6 +431,11 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
                 "receipt": {"receipt_hash": component_hash},
                 "receipt_graph": {"root_receipt_hash": component_hash},
             },
+            active_model_authority={
+                "result": active_result,
+                "receipt": active_receipt,
+                "receipt_graph": active_graph,
+            },
             expected_event_state_hash="sha256:" + "c" * 64,
             record_loop_event=lambda _event: {},
             code_builder=SimpleNamespace(
@@ -396,13 +451,164 @@ def test_authoritative_loop_binds_measured_provider_outcome_parent(
         )
     )
 
-    assert result.loop_result.status == "completed"
+    assert result.loop_result.status == "failed"
     assert observed["payload"]["provider_outcome_digest"] == outcome_result[
         "provider_outcome_digest"
     ]
     assert observed["parent_graphs"][-1] == outcome_graph
+    assert active_graph in observed["parent_graphs"]
+    assert active_receipt["receipt_hash"] in observed["input_artifact_hashes"]
     assert outcome_receipt["receipt_hash"] in observed["input_artifact_hashes"]
     assert len(client.released) == 1
+
+
+def test_tree_recovery_objects_are_kms_encrypted_read_back_and_restorable(
+    tmp_path, monkeypatch
+):
+    import boto3
+
+    class FakeS3:
+        def __init__(self):
+            self.objects = {}
+            self.puts = []
+
+        def put_object(self, **kwargs):
+            assert kwargs["ServerSideEncryption"] == "aws:kms"
+            assert kwargs["SSEKMSKeyId"] == "alias/test-tree-key"
+            self.puts.append(dict(kwargs))
+            self.objects[(kwargs["Bucket"], kwargs["Key"])] = bytes(
+                kwargs["Body"]
+            )
+            return {"ETag": "fixture"}
+
+        def get_object(self, **kwargs):
+            return {
+                "ServerSideEncryption": "aws:kms",
+                "Body": io.BytesIO(
+                    self.objects[(kwargs["Bucket"], kwargs["Key"])]
+                ),
+            }
+
+    fake_s3 = FakeS3()
+    monkeypatch.setattr(boto3, "client", lambda service: fake_s3)
+    monkeypatch.setenv(
+        authority.TREE_ARTIFACT_KMS_KEY_ENV, "alias/test-tree-key"
+    )
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "research_lab_adapter.py").write_text(
+        "def run():\n    return []\n", encoding="utf-8"
+    )
+    policy = TreePolicy(mode="active")
+    tree_id = derive_tree_id(
+        run_id="run-authority-recovery",
+        root_artifact_hash="sha256:" + "a" * 64,
+        policy=policy,
+    )
+    workspace = tmp_path / "tree"
+    repository = GitTreeRepository(workspace=workspace, tree_id=tree_id)
+    root_commit = repository.initialize(
+        source_root=source,
+        root_artifact_hash="sha256:" + "a" * 64,
+        policy_hash=policy.policy_hash,
+    )
+    checkpoint_doc = {"tree_id": tree_id, "frontier": []}
+    checkpoint_hash = sha256_json(checkpoint_doc)
+    repository.commit_checkpoint(
+        checkpoint_hash=checkpoint_hash,
+        checkpoint_doc=checkpoint_doc,
+    )
+
+    descriptor = asyncio.run(
+        authority._publish_tree_recovery(
+            repository=repository,
+            tree_id=tree_id,
+            checkpoint_hash=checkpoint_hash,
+            manifest_uri="s3://private-bucket/manifests/current.json",
+        )
+    )
+    recovery_state, bundle_bytes = asyncio.run(
+        authority._load_tree_recovery(
+            descriptor=descriptor,
+            expected_tree_id=tree_id,
+        )
+    )
+    assert descriptor["kms_encrypted"] is True
+    assert len(fake_s3.puts) == 2
+
+    shutil.rmtree(workspace)
+    bundle_path = tmp_path / "restored.bundle"
+    bundle_path.write_bytes(bundle_bytes)
+    restored = GitTreeRepository(workspace=workspace, tree_id=tree_id)
+    assert restored.restore_recovery_state(
+        recovery_state=recovery_state,
+        bundle_path=bundle_path,
+    ) == root_commit
+    assert restored.state_status() == "complete"
+
+
+def test_tree_recovery_rejects_unencrypted_s3_readback(monkeypatch):
+    import boto3
+
+    monkeypatch.setattr(
+        boto3,
+        "client",
+        lambda _service: SimpleNamespace(
+            get_object=lambda **_kwargs: {
+                "ServerSideEncryption": "AES256",
+                "Body": io.BytesIO(b"private"),
+            }
+        ),
+    )
+    with pytest.raises(authority.AutoresearchAuthorityV2Error, match="SSE-KMS"):
+        authority._read_tree_object(
+            uri="s3://private-bucket/object",
+            content_hash=sha256_bytes(b"private"),
+            size_bytes=len(b"private"),
+        )
+
+
+def test_tree_final_selection_requires_artifact_and_lineage_authority():
+    tree_id = "sha256:" + "1" * 64
+    selection = {
+        "schema_version": "research_lab.git_tree_selection.v1",
+        "tree_id": tree_id,
+        "selected_node_id": "tree-node:" + "2" * 64,
+        "selected_candidate_artifact_hash": "sha256:" + "3" * 64,
+        "selected_node_git_commit": "4" * 64,
+        "selected_lineage_hash": "sha256:" + "5" * 64,
+        "paid_finalist_count": 1,
+    }
+    assert authority._validated_tree_final_selection(
+        selection,
+        expected_tree_id=tree_id,
+        expected_selection_hash=sha256_json(selection),
+    ) == selection["selected_node_id"]
+
+    for field in (
+        "selected_candidate_artifact_hash",
+        "selected_node_git_commit",
+        "selected_lineage_hash",
+    ):
+        with pytest.raises(
+            authority.AutoresearchAuthorityV2Error,
+            match="selection authority is incomplete",
+        ):
+            authority._validated_tree_final_selection(
+                {**selection, field: ""},
+                expected_tree_id=tree_id,
+                expected_selection_hash=sha256_json({**selection, field: ""}),
+            )
+
+    with pytest.raises(
+        authority.AutoresearchAuthorityV2Error,
+        match="selection authority is incomplete",
+    ):
+        authority._validated_tree_final_selection(
+            selection,
+            expected_tree_id=tree_id,
+            expected_selection_hash="sha256:" + "0" * 64,
+        )
 
 
 async def _async_value(value):

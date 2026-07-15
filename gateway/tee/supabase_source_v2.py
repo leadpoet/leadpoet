@@ -99,6 +99,32 @@ QUERY_POLICIES = {
         order="created_at.desc",
         limit=1,
     ),
+    "active_private_model_current": SupabaseQueryV2(
+        policy_id="active_private_model_current",
+        table="research_lab_private_model_version_current",
+        select=(
+            "private_model_version_id,model_artifact_hash,private_model_manifest_hash,"
+            "private_model_manifest_uri,git_commit_sha,config_hash,component_registry_version,"
+            "scoring_adapter_version,source_candidate_id,source_score_bundle_id,"
+            "source_benchmark_bundle_id,signature_ref,build_id,redacted_version_doc,"
+            "current_version_status,current_status_at"
+        ),
+        parameter_names=(),
+        max_pages=1,
+        order="current_status_at.desc",
+        limit=2,
+    ),
+    "score_bundle_by_id": SupabaseQueryV2(
+        policy_id="score_bundle_by_id",
+        table="research_evaluation_score_bundle_current",
+        select=(
+            "score_bundle_id,score_bundle_hash,score_bundle_doc,current_event_status,"
+            "current_status_at"
+        ),
+        parameter_names=("score_bundle_id",),
+        max_pages=1,
+        limit=2,
+    ),
     "allocation_reimbursement_schedules": SupabaseQueryV2(
         policy_id="allocation_reimbursement_schedules",
         table="research_reimbursement_schedules",
@@ -426,6 +452,13 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
             ("epoch", "eq.%d" % _non_negative_int(parameters["epoch_id"], "epoch_id")),
             ("netuid", "eq.%d" % _non_negative_int(parameters["netuid"], "netuid")),
         )
+    if policy.policy_id == "active_private_model_current":
+        return (("current_version_status", "eq.active"),)
+    if policy.policy_id == "score_bundle_by_id":
+        score_bundle_id = _identifier(parameters["score_bundle_id"], "score_bundle_id")
+        if not re.fullmatch(r"score_bundle:[0-9a-f]{64}", score_bundle_id):
+            raise SupabaseSourceV2Error("score_bundle_id is invalid")
+        return (("score_bundle_id", "eq.%s" % score_bundle_id),)
     if policy.policy_id == "allocation_reimbursement_schedules":
         epoch_id = _non_negative_int(parameters["epoch_id"], "epoch_id")
         start_epoch = _non_negative_int(parameters["start_epoch"], "start_epoch")

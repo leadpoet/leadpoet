@@ -66,7 +66,9 @@ def _release():
                         **values,
                     }
                 )
-    return build_release_manifest(rows)
+    return build_release_manifest(
+        rows, acceptance_signer_pubkey_hash="sha256:" + "f" * 64
+    )
 
 
 class _Client:

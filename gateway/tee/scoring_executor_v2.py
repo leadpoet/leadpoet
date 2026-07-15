@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+import re
 import tempfile
 import threading
 from typing import Any, Callable, Dict, Iterable, Mapping
@@ -39,7 +40,13 @@ from gateway.tee.scoring_executor import (
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
 from research_lab.eval import PrivateModelArtifactManifest
 from research_lab.eval.dev_eval import compute_dev_set_hash, evaluate_dev
+from research_lab.eval.provider_evidence_cache import (
+    EVIDENCE_CACHE_SCHEMA_VERSION,
+    icp_evidence_cache_key,
+)
+from research_lab.eval.private_runtime import canonicalize_private_model_icp
 from research_lab.eval.snapshot_store import (
+    EXPECTED_DEV_ICP_COUNT,
     MODE_REPLAY,
     ProviderSnapshotStore,
 )
@@ -70,14 +77,17 @@ SCORE_PURPOSES_V2 = frozenset(
 
 OP_RUN_MODEL_SANDBOX_V2 = "run_model_sandbox_v2"
 OP_DEV_REPLAY_V2 = "run_dev_replay_v2"
+OP_DEV_HYBRID_V2 = "run_dev_hybrid_v2"
 OP_PROVIDER_PREFLIGHT_V2 = "provider_preflight_v2"
 OP_SOURCE_ADD_LEG2_JUDGE_V2 = "source_add_leg2_judge_v2"
-DEV_REPLAY_REQUEST_SCHEMA_VERSION = "leadpoet.dev_replay_request.v2"
+DEV_REPLAY_REQUEST_SCHEMA_VERSION = "leadpoet.dev_replay_request.v3"
+DEV_HYBRID_REQUEST_SCHEMA_VERSION = "leadpoet.dev_hybrid_request.v3"
 PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION = "leadpoet.provider_preflight_request.v2"
 SOURCE_ADD_JUDGE_REQUEST_SCHEMA_VERSION = "leadpoet.source_add_judge_request.v2"
 SOURCE_ADD_JUDGE_RESULT_SCHEMA_VERSION = "leadpoet.source_add_judge_result.v2"
 PROVIDER_CREDENTIAL_REFS_FIELD = "_v2_provider_credential_ref_hashes"
 PROVIDER_CREDENTIAL_PROFILE_FIELD = "_v2_provider_credential_profile"
+_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class DevEvalRunnerError(RuntimeError):
@@ -93,9 +103,13 @@ SCORING_OPERATIONS_V2 = {
         {
             "research_lab.private_model_run.v2",
             "research_lab.candidate_model_run.v2",
+            "research_lab.candidate_hybrid_discovery.v2",
         }
     ),
     OP_DEV_REPLAY_V2: frozenset({"research_lab.candidate_test.v2"}),
+    OP_DEV_HYBRID_V2: frozenset(
+        {"research_lab.candidate_hybrid_test.v2"}
+    ),
     OP_PROVIDER_PREFLIGHT_V2: frozenset(
         {"research_lab.provider_preflight.v2"}
     ),
@@ -203,6 +217,8 @@ class ScoringExecutorV2:
             raise ValueError("V2 provider credential profile differs from job manifest")
         if operation == OP_DEV_REPLAY_V2:
             return await self._execute_dev_replay(payload, context)
+        if operation == OP_DEV_HYBRID_V2:
+            return await self._execute_dev_hybrid(payload, context)
         if operation == OP_RUN_MODEL_SANDBOX_V2:
             if self._model_sandbox is None:
                 raise ValueError("measured model sandbox is unavailable")
@@ -289,7 +305,11 @@ class ScoringExecutorV2:
             )
             if generated_cache:
                 if (
-                    context.purpose != "research_lab.private_model_run.v2"
+                    context.purpose
+                    not in {
+                        "research_lab.private_model_run.v2",
+                        "research_lab.candidate_hybrid_discovery.v2",
+                    }
                     or sha256_json(generated_cache) != generated_cache_hash
                 ):
                     raise ValueError(
@@ -316,6 +336,9 @@ class ScoringExecutorV2:
                     "runtime_config_hash",
                     "input_hash",
                     "provider_evidence_cache_hash",
+                    "provider_snapshot_archive_hash",
+                    "provider_snapshot_tree_hash",
+                    "provider_snapshot_manifest_hash",
                     "provider_runtime_catalog_hash",
                     "generated_provider_evidence_cache_hash",
                     "trace_entries_hash",
@@ -615,6 +638,7 @@ class ScoringExecutorV2:
             "environment",
             "credential_env_names",
             "run_label",
+            "cohort_hash",
             "miss_policy",
             "per_icp_timeout_seconds",
             "total_timeout_seconds",
@@ -651,6 +675,9 @@ class ScoringExecutorV2:
         if per_icp_timeout < 10 or total_timeout < 30:
             raise ValueError("dev replay timeout is invalid")
         run_label = str(payload.get("run_label") or "")
+        cohort_hash = str(payload.get("cohort_hash") or "")
+        if not _HASH_RE.fullmatch(cohort_hash):
+            raise ValueError("dev replay cohort commitment is invalid")
         if len(run_label.encode("utf-8")) > 1024:
             raise ValueError("dev replay run label is too large")
 
@@ -735,7 +762,30 @@ class ScoringExecutorV2:
                 ),
                 timeout=total_timeout,
             )
-        result_doc = result.to_dict()
+        result_doc = {
+            **result.to_dict(),
+            "evaluation_mode": "replay",
+            "overlay_hash": sha256_json({}),
+            "cohort_hash": cohort_hash,
+        }
+        result_doc["score_commitment"] = sha256_json(
+            {
+                "schema_version": (
+                    "research_lab.git_tree_dev_score_commitment.v1"
+                ),
+                "dev_score_version": str(
+                    result_doc.get("dev_score_version") or ""
+                ),
+                "dev_set_hash": str(result_doc.get("dev_set_hash") or ""),
+                "snapshot_manifest_hash": str(
+                    result_doc.get("snapshot_manifest_hash") or ""
+                ),
+                "miss_policy": str(result_doc.get("miss_policy") or ""),
+                "evaluation_mode": "replay",
+                "overlay_hash": sha256_json({}),
+                "cohort_hash": cohort_hash,
+            }
+        )
         return ExecutionResultV2(
             output=result_doc,
             artifact_hashes=(
@@ -745,6 +795,240 @@ class ScoringExecutorV2:
                 str(snapshot_evidence["archive_sha256"]),
                 snapshot_tree_hash,
                 snapshot_manifest_hash,
+                cohort_hash,
+                sha256_json(result_doc),
+            ),
+        )
+
+    async def _execute_dev_hybrid(
+        self,
+        payload: Mapping[str, Any],
+        context: ExecutionContextV2,
+    ) -> ExecutionResultV2:
+        """Score one candidate against a frozen, receipt-bound round overlay."""
+
+        if self._model_sandbox is None:
+            raise ValueError("measured model sandbox is unavailable")
+        required = {
+            "schema_version",
+            "artifact",
+            "source_bundle",
+            "snapshot_bundle",
+            "snapshot_tree_hash",
+            "snapshot_manifest_hash",
+            "module_name",
+            "callable_name",
+            "environment",
+            "credential_env_names",
+            "run_label",
+            "cohort_hash",
+            "miss_policy",
+            "per_icp_timeout_seconds",
+            "total_timeout_seconds",
+            "provider_evidence_caches",
+            "overlay_hash",
+        }
+        if not isinstance(payload, Mapping) or set(payload) != required:
+            raise ValueError("dev hybrid request fields are invalid")
+        if payload.get("schema_version") != DEV_HYBRID_REQUEST_SCHEMA_VERSION:
+            raise ValueError("dev hybrid request schema is invalid")
+        artifact = PrivateModelArtifactManifest.from_mapping(payload["artifact"])
+        source_bundle = dict(payload["source_bundle"])
+        snapshot_bundle = dict(payload["snapshot_bundle"])
+        snapshot_tree_hash = str(payload.get("snapshot_tree_hash") or "")
+        snapshot_manifest_hash = str(payload.get("snapshot_manifest_hash") or "")
+        if snapshot_bundle.get("source_tree_hash") != snapshot_tree_hash:
+            raise ValueError("dev hybrid snapshot bundle commitment differs")
+        environment = payload.get("environment")
+        credential_env_names = payload.get("credential_env_names")
+        caches = payload.get("provider_evidence_caches")
+        overlay_hash = str(payload.get("overlay_hash") or "")
+        cohort_hash = str(payload.get("cohort_hash") or "")
+        if (
+            not isinstance(environment, Mapping)
+            or not isinstance(credential_env_names, list)
+            or not isinstance(caches, Mapping)
+            or sha256_json(dict(caches)) != overlay_hash
+            or not _HASH_RE.fullmatch(cohort_hash)
+        ):
+            raise ValueError("dev hybrid evidence fields are invalid")
+        if dict(environment) != measured_dev_replay_environment(
+            self._execution_config
+        ):
+            raise ValueError("dev hybrid environment differs from measured policy")
+        if credential_env_names != list(
+            measured_credential_environment_names(self._execution_config)
+        ):
+            raise ValueError(
+                "dev hybrid credential environment differs from measured policy"
+            )
+        per_icp_timeout = int(payload["per_icp_timeout_seconds"])
+        total_timeout = int(payload["total_timeout_seconds"])
+        if per_icp_timeout < 10 or total_timeout < 30:
+            raise ValueError("dev hybrid timeout is invalid")
+        run_label = str(payload.get("run_label") or "")
+        if len(run_label.encode("utf-8")) > 1024:
+            raise ValueError("dev hybrid run label is too large")
+
+        with tempfile.TemporaryDirectory(prefix="lp-dev-hybrid-v2-") as tmp:
+            snapshot_root = Path(tmp) / "snapshot-set"
+            snapshot_evidence = extract_source_bundle_v2(
+                snapshot_bundle,
+                destination=snapshot_root,
+                expected_source_tree_hash=snapshot_tree_hash,
+            )
+            for path in sorted(snapshot_root.rglob("*"), reverse=True):
+                if path.is_file():
+                    path.chmod(0o444)
+                elif path.is_dir():
+                    path.chmod(0o555)
+            snapshot_root.chmod(0o555)
+            snapshot_store = ProviderSnapshotStore(
+                str(snapshot_root),
+                mode=MODE_REPLAY,
+                miss_policy=str(payload["miss_policy"]),
+            )
+            manifest = snapshot_store.load_manifest()
+            verification = snapshot_store.verify_manifest(manifest)
+            if (
+                manifest is None
+                or not verification["passed"]
+                or str(manifest.get("manifest_hash") or "")
+                != snapshot_manifest_hash
+            ):
+                raise ValueError("dev hybrid snapshot manifest verification failed")
+            dev_items = snapshot_store.load_dev_icp_items()
+            if len(dev_items) != EXPECTED_DEV_ICP_COUNT:
+                raise ValueError("dev hybrid set must contain exactly eight ICPs")
+            if total_timeout != measured_dev_eval_total_timeout_seconds(
+                self._execution_config
+            ):
+                raise ValueError("dev hybrid total timeout differs from measured policy")
+            if per_icp_timeout != measured_dev_eval_icp_timeout_seconds(
+                self._execution_config,
+                item_count=len(dev_items),
+            ):
+                raise ValueError("dev hybrid ICP timeout differs from measured policy")
+            if str(payload["miss_policy"]) != measured_dev_snapshot_miss_policy(
+                self._execution_config
+            ):
+                raise ValueError("dev hybrid miss policy differs from measured policy")
+            expected_dev_set_hash = str(manifest.get("icp_set_hash") or "")
+            if compute_dev_set_hash(dev_items) != expected_dev_set_hash:
+                raise ValueError("dev hybrid ICP set commitment differs")
+            expected_refs = {
+                icp_evidence_cache_key(
+                    canonicalize_private_model_icp(dict(item.get("icp") or item))
+                )
+                for item in dev_items
+            }
+            if set(str(key) for key in caches) != expected_refs:
+                raise ValueError("dev hybrid overlay does not cover the dev set")
+            normalized_caches: Dict[str, Dict[str, Any]] = {}
+            cache_hashes: list[str] = []
+            for cache_ref in sorted(expected_refs):
+                cache = caches.get(cache_ref)
+                if (
+                    not isinstance(cache, Mapping)
+                    or cache.get("schema_version") != EVIDENCE_CACHE_SCHEMA_VERSION
+                    or cache.get("icp_ref") != cache_ref
+                    or not isinstance(cache.get("entries"), Mapping)
+                ):
+                    raise ValueError("dev hybrid provider evidence cache is invalid")
+                normalized = dict(cache)
+                cache_hash = sha256_json(normalized)
+                expected_input_root = provider_evidence_tape_input_root(
+                    cache_ref, cache_hash
+                )
+                matches = [
+                    receipt
+                    for graph in context.external_receipt_graphs
+                    for receipt in graph.get("receipts") or ()
+                    if isinstance(receipt, Mapping)
+                    and receipt.get("role") == "gateway_scoring"
+                    and receipt.get("purpose")
+                    == "research_lab.provider_evidence_tape.v2"
+                    and receipt.get("status") == "succeeded"
+                    and receipt.get("input_root") == expected_input_root
+                    and receipt.get("output_root") == cache_hash
+                ]
+                if len(matches) != 1:
+                    raise ValueError(
+                        "dev hybrid cache has no unique measured tape ancestry"
+                    )
+                normalized_caches[cache_ref] = normalized
+                cache_hashes.append(cache_hash)
+
+            async def candidate_runner(
+                icp: Mapping[str, Any],
+                run_context: Mapping[str, Any],
+            ):
+                canonical_icp = canonicalize_private_model_icp(icp)
+                cache_ref = icp_evidence_cache_key(canonical_icp)
+                try:
+                    return await asyncio.to_thread(
+                        self._model_sandbox.execute_dev_provider_replay,
+                        artifact_doc=artifact.to_dict(),
+                        source_bundle=source_bundle,
+                        module_name=str(payload["module_name"]),
+                        callable_name=str(payload["callable_name"]),
+                        icp=canonical_icp,
+                        context=run_context,
+                        environment=dict(environment),
+                        credential_env_names=list(credential_env_names),
+                        provider_evidence_cache=normalized_caches[cache_ref],
+                        snapshot_root=snapshot_root,
+                        timeout_seconds=per_icp_timeout,
+                        job_id=context.job_id,
+                    )
+                except ModelSandboxV2Error as exc:
+                    raise DevEvalRunnerError(str(exc)) from exc
+
+            result = await asyncio.wait_for(
+                evaluate_dev(
+                    candidate_runner=candidate_runner,
+                    dev_items=dev_items,
+                    snapshot_store=snapshot_store,
+                    run_label=run_label,
+                    install_replay_seams=False,
+                    require_manifest=True,
+                ),
+                timeout=total_timeout,
+            )
+        result_doc = {
+            **result.to_dict(),
+            "evaluation_mode": "hybrid",
+            "overlay_hash": overlay_hash,
+            "cohort_hash": cohort_hash,
+        }
+        result_doc["score_commitment"] = sha256_json(
+            {
+                "schema_version": (
+                    "research_lab.git_tree_dev_score_commitment.v1"
+                ),
+                "dev_score_version": str(result_doc.get("dev_score_version") or ""),
+                "dev_set_hash": str(result_doc.get("dev_set_hash") or ""),
+                "snapshot_manifest_hash": str(
+                    result_doc.get("snapshot_manifest_hash") or ""
+                ),
+                "miss_policy": str(result_doc.get("miss_policy") or ""),
+                "evaluation_mode": "hybrid",
+                "overlay_hash": overlay_hash,
+                "cohort_hash": cohort_hash,
+            }
+        )
+        return ExecutionResultV2(
+            output=result_doc,
+            artifact_hashes=(
+                artifact.model_artifact_hash,
+                artifact.manifest_hash,
+                str(source_bundle["archive_sha256"]),
+                str(snapshot_evidence["archive_sha256"]),
+                snapshot_tree_hash,
+                snapshot_manifest_hash,
+                overlay_hash,
+                cohort_hash,
+                *tuple(cache_hashes),
                 sha256_json(result_doc),
             ),
         )

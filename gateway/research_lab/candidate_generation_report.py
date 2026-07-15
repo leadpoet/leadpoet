@@ -83,28 +83,6 @@ def _category_for_reason(reason: str, latest_stage: str) -> str:
     return "other_no_buildable"
 
 
-def _fallback_state(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    attempted = False
-    exhausted = False
-    succeeded = False
-    attempts = 0
-    for row in canonical_loop_event_order(rows):
-        doc = _event_doc(row)
-        if doc.get("ranked_path_fallback_attempted"):
-            attempted = True
-            attempts += 1
-        if doc.get("terminal_after_ranked_paths_exhausted"):
-            exhausted = True
-        if attempted and _event_type(row) in {"candidate_selected", "candidate_build_passed"}:
-            succeeded = True
-    return {
-        "attempted": attempted,
-        "succeeded": succeeded,
-        "exhausted": exhausted,
-        "attempt_count": attempts,
-    }
-
-
 def build_candidate_generation_failure_report(
     *,
     loop_event_rows: Sequence[Mapping[str, Any]],
@@ -150,7 +128,6 @@ def build_candidate_generation_failure_report(
             if raw_terminal_available
             else _latest_stage_from_public_row(row)
         )
-        fallback = _fallback_state(loop_rows)
         summaries.append(
             {
                 "run_id": run_id,
@@ -158,7 +135,6 @@ def build_candidate_generation_failure_report(
                 "primary_reason": sanitize_diagnostic_text(primary_reason, max_length=120),
                 "latest_stage": sanitize_diagnostic_text(latest_stage, max_length=120),
                 "failure_category": _category_for_reason(primary_reason, latest_stage),
-                "ranked_path_fallback": fallback,
                 "public_summary": public_candidate_generation_failure_summary(failure_summary),
             }
         )
@@ -195,7 +171,6 @@ def build_candidate_generation_failure_report(
                 "primary_reason": sanitize_diagnostic_text(reason, max_length=120),
                 "latest_stage": sanitize_diagnostic_text(latest_stage, max_length=120),
                 "failure_category": _category_for_reason(reason, latest_stage),
-                "ranked_path_fallback": _fallback_state(ordered_rows),
                 "public_summary": public_candidate_generation_failure_summary(summary),
             }
         )
@@ -203,9 +178,6 @@ def build_candidate_generation_failure_report(
     by_reason = Counter(item["primary_reason"] for item in summaries)
     by_stage = Counter(item["latest_stage"] or "unknown" for item in summaries)
     by_category = Counter(item["failure_category"] for item in summaries)
-    fallback_attempted = sum(1 for item in summaries if item["ranked_path_fallback"]["attempted"])
-    fallback_succeeded = sum(1 for item in summaries if item["ranked_path_fallback"]["succeeded"])
-    fallback_exhausted = sum(1 for item in summaries if item["ranked_path_fallback"]["exhausted"])
     report = {
         "schema_version": "1.0",
         "report_type": "research_lab_candidate_generation_failures",
@@ -217,11 +189,6 @@ def build_candidate_generation_failure_report(
             "by_primary_reason": dict(sorted(by_reason.items())),
             "by_latest_stage": dict(sorted(by_stage.items())),
             "by_failure_category": dict(sorted(by_category.items())),
-            "ranked_path_fallback": {
-                "attempted": fallback_attempted,
-                "succeeded": fallback_succeeded,
-                "exhausted": fallback_exhausted,
-            },
         },
         "sample_runs": summaries[:25],
     }

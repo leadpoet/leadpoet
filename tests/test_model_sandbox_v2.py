@@ -89,7 +89,13 @@ def _request(tmp_path: Path):
         "environment": {},
         "provider_evidence_cache": {},
         "provider_evidence_cache_ref": "",
+        "provider_evidence_mode": "live",
+        "provider_snapshot_bundle": {},
+        "provider_snapshot_tree_hash": "",
+        "provider_snapshot_manifest_hash": "",
         "provider_cost_scope": sha256_json({"job": "model-job-1"}),
+        "provider_cost_cap_microusd": 0,
+        "provider_call_cap": 0,
         "provider_runtime_catalog": runtime_catalog,
         "provider_catalog_evidence": {
             "result": catalog_result,
@@ -181,6 +187,7 @@ def test_private_baseline_builds_exact_measured_provider_evidence_tape(tmp_path)
             "callable_name": "run_icp",
             "input": {"icp": icp, "context": {"mode": "private_baseline"}},
             "provider_evidence_cache_ref": cache_ref,
+            "provider_evidence_mode": "record",
         }
     )
     transport = BrokeredProviderTransportV2(lambda _request: {})

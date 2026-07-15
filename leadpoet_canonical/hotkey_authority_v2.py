@@ -837,14 +837,6 @@ def classify_application_message_v2(message: bytes, *, validator_hotkey: str) ->
             r"FULFILLMENT_SCORE:%s:[A-Za-z0-9_.:-]{1,256}:[0-9a-f-]{36}:[0-9]+"
             % re.escape(hotkey),
         ),
-        (
-            "validator.jwt_request.v2",
-            r"leadpoet-jwt-request:[0-9]+",
-        ),
-        (
-            "validator.legacy_reward_request.v2",
-            r"leadpoet-weights-request:[0-9]+",
-        ),
     )
     for purpose, pattern in exact_patterns:
         if re.fullmatch(pattern, text):

@@ -69,13 +69,6 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 from pathlib import Path
 
-# Enclave signing (CRITICAL: This is the signing authority)
-# Try both import paths to support local dev and EC2 deployment
-try:
-    from gateway.tee.enclave_signer import sign_event, is_keypair_initialized
-except ImportError:
-    from tee.enclave_signer import sign_event, is_keypair_initialized
-
 try:
     from gateway.config import BUILD_ID
 except ImportError:
@@ -153,6 +146,126 @@ def compute_payload_hash(payload: dict) -> str:
     payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'), default=str)  # Handle datetime objects
     payload_bytes = payload_json.encode('utf-8')
     return hashlib.sha256(payload_bytes).hexdigest()
+
+
+async def _previous_signed_event_hash() -> Optional[str]:
+    """Read the latest durable signed event before initializing a new boot."""
+    try:
+        try:
+            from gateway.db.client import get_async_read_client
+        except ImportError:
+            from db.client import get_async_read_client
+        read_client = await get_async_read_client()
+        result = await (
+            read_client.table("transparency_log")
+            .select("event_hash,created_at")
+            .order("created_at", desc=True)
+            .limit(100)
+            .execute()
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "cannot read the durable transparency-log tip"
+        ) from exc
+
+    for row in result.data or []:
+        event_hash = str(row.get("event_hash") or "").strip().lower()
+        if len(event_hash) == 64 and all(
+            char in "0123456789abcdef" for char in event_hash
+        ):
+            return event_hash
+    return None
+
+
+async def _persist_signed_log_entry(
+    *,
+    event_type: str,
+    payload: Dict[str, Any],
+    payload_hash: str,
+    log_entry: Dict[str, Any],
+    tee_buffer: Dict[str, Any],
+) -> None:
+    """Persist the exact enclave-signed envelope without repacking it."""
+    signed_event = log_entry.get("signed_event")
+    if not isinstance(signed_event, dict):
+        raise RuntimeError("enclave returned an invalid signed transparency event")
+
+    supabase = await _get_supabase_async()
+    if not supabase:
+        raise RuntimeError("Supabase is unavailable for signed transparency event")
+
+    email_hash = payload.get("email_hash") if isinstance(payload, dict) else None
+    linkedin_combo_hash = (
+        payload.get("linkedin_combo_hash") if isinstance(payload, dict) else None
+    )
+    arweave_tx_id = (
+        payload.get("arweave_tx_id") if isinstance(payload, dict) else None
+    )
+    actor_hotkey = (
+        payload.get("actor_hotkey")
+        or payload.get("validator_hotkey")
+        or payload.get("miner_hotkey")
+    )
+    supabase_entry = {
+        "event_type": event_type,
+        "nonce": str(uuid.uuid4()),
+        "ts": signed_event["timestamp"],
+        "payload_hash": payload_hash,
+        "signature": log_entry["enclave_signature"],
+        "payload": payload,
+        "signed_log_entry": log_entry,
+        "event_hash": log_entry["event_hash"],
+        "enclave_pubkey": log_entry["enclave_pubkey"],
+        "boot_id": signed_event["boot_id"],
+        "monotonic_seq": signed_event["monotonic_seq"],
+        "prev_event_hash": signed_event["prev_event_hash"],
+        "created_at": signed_event["timestamp"],
+        "actor_hotkey": actor_hotkey,
+        "email_hash": email_hash,
+        "linkedin_combo_hash": linkedin_combo_hash,
+        "arweave_tx_id": arweave_tx_id,
+        "build_id": BUILD_ID,
+        "tee_sequence": tee_buffer.get("sequence"),
+        "tee_buffer_size": tee_buffer.get("buffer_size"),
+    }
+    await supabase.table("transparency_log").insert(
+        {key: value for key, value in supabase_entry.items() if value is not None}
+    ).execute()
+
+
+async def initialize_enclave_event_signing() -> Dict[str, Any]:
+    """Initialize and attest the coordinator-enclave transparency signer."""
+    try:
+        from gateway.utils.tee_client import tee_client
+    except ImportError:
+        from utils.tee_client import tee_client
+
+    previous_tip = await _previous_signed_event_hash()
+    initialized = await tee_client.initialize_event_signer(previous_tip)
+    identity = initialized.get("identity")
+    restart_log_entry = initialized.get("restart_log_entry")
+    tee_buffer = initialized.get("buffer")
+    if not isinstance(identity, dict) or not isinstance(restart_log_entry, dict):
+        raise RuntimeError("coordinator enclave returned invalid signer initialization")
+    if not isinstance(tee_buffer, dict):
+        raise RuntimeError("coordinator enclave did not buffer its restart event")
+    if identity.get("purpose") != "gateway_event_signing":
+        raise RuntimeError("coordinator enclave returned the wrong signing purpose")
+    if not identity.get("attestation_document_b64"):
+        raise RuntimeError("coordinator event signer has no Nitro attestation")
+
+    signed_event = restart_log_entry.get("signed_event") or {}
+    restart_payload = signed_event.get("payload")
+    if not isinstance(restart_payload, dict):
+        raise RuntimeError("coordinator enclave returned an invalid restart event")
+    await _persist_signed_log_entry(
+        event_type=str(signed_event.get("event_type") or ""),
+        payload=restart_payload,
+        payload_hash=str(initialized.get("payload_hash") or ""),
+        log_entry=restart_log_entry,
+        tee_buffer=tee_buffer,
+    )
+    return identity
 
 
 async def log_event(event_or_type, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -302,24 +415,28 @@ async def _log_event_signed_format(event_type: str, payload: Dict[str, Any]) -> 
         Full log_entry with signed_event, event_hash, enclave_signature
     """
     
-    # ============================================================
-    # Step 1: Sign event with enclave key
-    # ============================================================
-    
+    payload_hash = compute_payload_hash(payload)
     try:
-        # sign_event() is the SINGLE source of timestamp truth
-        log_entry = sign_event(event_type, payload)
-        
-        # Extract metadata for logging
+        try:
+            from gateway.utils.tee_client import tee_client
+        except ImportError:
+            from utils.tee_client import tee_client
+        enclave_result = await tee_client.sign_transparency_event(
+            event_type=event_type,
+            payload=payload,
+            payload_hash=payload_hash,
+        )
+        log_entry = enclave_result.get("log_entry")
+        tee_result = enclave_result.get("buffer")
+        if not isinstance(log_entry, dict) or not isinstance(tee_result, dict):
+            raise RuntimeError("coordinator enclave returned an invalid event result")
         signed_event = log_entry["signed_event"]
         event_hash = log_entry["event_hash"]
         monotonic_seq = signed_event["monotonic_seq"]
-        
         logger.info(
-            f"✅ Event signed: {event_type} "
+            f"✅ Event signed and buffered in coordinator enclave: {event_type} "
             f"(seq={monotonic_seq}, hash={event_hash[:16]}...)"
         )
-    
     except Exception as e:
         logger.error(f"❌ Event signing failed: {event_type} - {e}")
         await _fallback_log_to_file({"event_type": event_type, "payload": payload}, error=str(e))
@@ -328,89 +445,29 @@ async def _log_event_signed_format(event_type: str, payload: Dict[str, Any]) -> 
             f"This is a critical failure - request cannot proceed."
         )
     
-    # ============================================================
-    # Step 2: Store to Supabase (NEW format - with TEE columns)
-    # ============================================================
-    
-    supabase = await _get_supabase_async()
-    payload_hash = compute_payload_hash(payload)
-    if supabase:
-        try:
-            email_hash = payload.get("email_hash") if isinstance(payload, dict) else None
-            linkedin_combo_hash = payload.get("linkedin_combo_hash") if isinstance(payload, dict) else None
-            arweave_tx_id = payload.get("arweave_tx_id") if isinstance(payload, dict) else None
-            actor_hotkey = payload.get("actor_hotkey") or payload.get("validator_hotkey") or payload.get("miner_hotkey")
-
-            supabase_entry = {
-                "event_type": event_type,
-                "nonce": str(uuid.uuid4()),
-                "ts": signed_event["timestamp"],
-                "payload_hash": payload_hash,
-                "signature": log_entry["enclave_signature"],
-                "payload": payload,
-                "signed_log_entry": log_entry,
-                "event_hash": event_hash,
-                "enclave_pubkey": log_entry["enclave_pubkey"],
-                "boot_id": signed_event["boot_id"],
-                "monotonic_seq": monotonic_seq,
-                "prev_event_hash": signed_event["prev_event_hash"],
-                "created_at": signed_event["timestamp"],
-                "actor_hotkey": actor_hotkey,
-                "email_hash": email_hash,
-                "linkedin_combo_hash": linkedin_combo_hash,
-                "arweave_tx_id": arweave_tx_id,
-                "build_id": BUILD_ID,
-            }
-            
-            supabase_entry = {k: v for k, v in supabase_entry.items() if v is not None}
-            
-            await supabase.table("transparency_log").insert(supabase_entry).execute()
-            
-            logger.info(f"✅ Event stored (signed): {event_type} (hash={event_hash[:16]}...)")
-        
-        except Exception as e:
-            logger.error(f"❌ Failed to store signed event: {event_type} - {e}")
-            await _fallback_log_to_file(log_entry, error=str(e))
-            raise RuntimeError(
-                f"Failed to store signed event to Supabase: {e}. "
-                f"Event type: {event_type}."
-            )
-    else:
-        logger.warning(f"⚠️ Supabase not configured - signed event not stored: {event_type}")
-    
-    # ============================================================
-    # Step 3: Append exact signed event to TEE buffer for Arweave
-    # ============================================================
     try:
-        tee_result = await _append_signed_event_to_tee_buffer(
+        await _persist_signed_log_entry(
             event_type=event_type,
-            log_entry=log_entry,
+            payload=payload,
             payload_hash=payload_hash,
+            log_entry=log_entry,
+            tee_buffer=tee_result,
         )
         log_entry["tee_sequence"] = tee_result.get("sequence")
         log_entry["tee_buffer_size"] = tee_result.get("buffer_size")
         log_entry["tee_buffered"] = True
-        if supabase and log_entry.get("event_hash"):
-            await _patch_tee_buffer_metadata(
-                event_hash=log_entry["event_hash"],
-                tee_sequence=tee_result.get("sequence"),
-                tee_buffer_size=tee_result.get("buffer_size"),
-            )
         logger.info(
-            "✅ Event buffered for Arweave: %s (tee_seq=%s)",
+            "✅ Enclave-signed event persisted: %s (tee_seq=%s)",
             event_type,
             tee_result.get("sequence"),
         )
     except Exception as e:
-        log_entry["tee_buffered"] = False
-        log_entry["tee_buffer_error"] = str(e)[:300]
-        logger.error("❌ Failed to buffer signed event for Arweave: %s - %s", event_type, e)
-        await _fallback_log_to_file(log_entry, error=f"TEE buffer append failed: {e}")
-        if _requires_tee_buffer(event_type, payload):
-            raise RuntimeError(
-                f"Failed to buffer required signed event in TEE: {event_type}. "
-                f"Event hash: {event_hash}."
-            ) from e
+        logger.error("❌ Failed to persist signed event: %s - %s", event_type, e)
+        await _fallback_log_to_file(log_entry, error=f"Signed event persistence failed: {e}")
+        raise RuntimeError(
+            f"Failed to persist enclave-signed event: {event_type}. "
+            f"Event hash: {event_hash}."
+        ) from e
 
     # Return the full log_entry
     return log_entry
@@ -636,9 +693,8 @@ def get_signer_info() -> Dict[str, Any]:
     Returns:
         Dict with signer state information
     """
-    # Try both import paths to support local dev and EC2 deployment
-    try:
-        from gateway.tee.enclave_signer import get_signer_state
-    except ImportError:
-        from tee.enclave_signer import get_signer_state
-    return get_signer_state()
+    return {
+        "authority": "gateway_coordinator_enclave",
+        "host_signer_present": False,
+        "identity_endpoint": "/attestation/health",
+    }

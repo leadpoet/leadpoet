@@ -22,6 +22,7 @@ BUILD_EVIDENCE_SCHEMA_VERSION = "leadpoet.gateway_role_build_evidence.v2"
 RELEASE_MANIFEST_SCHEMA_VERSION = "leadpoet.gateway_release_manifest.v2"
 BUILDER_DOMAINS = frozenset({"gateway", "validator"})
 BUILDS_PER_DOMAIN = 3
+PROTECTED_BASELINE_COMMIT = "7c9766b71d4c08b0059f6e3230dbe742b1d58e79"
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
@@ -126,7 +127,11 @@ def normalize_build_evidence(value: Mapping[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
-def build_release_manifest(evidence: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
+def build_release_manifest(
+    evidence: Iterable[Mapping[str, Any]],
+    *,
+    acceptance_signer_pubkey_hash: str,
+) -> Dict[str, Any]:
     normalized = [normalize_build_evidence(item) for item in evidence]
     expected_count = len(ROLE_SPECS) * len(BUILDER_DOMAINS) * BUILDS_PER_DOMAIN
     if len(normalized) != expected_count:
@@ -201,6 +206,11 @@ def build_release_manifest(evidence: Iterable[Mapping[str, Any]]) -> Dict[str, A
         "schema_version": RELEASE_MANIFEST_SCHEMA_VERSION,
         "commit_sha": release_commit,
         "topology_hash": topology_hash(),
+        "protected_baseline_commit": PROTECTED_BASELINE_COMMIT,
+        "acceptance_signer_pubkey_hash": _hash(
+            acceptance_signer_pubkey_hash,
+            "acceptance_signer_pubkey_hash",
+        ),
         "roles": role_documents,
         "build_evidence_root": _sha256_json(sorted_evidence),
         "verified_build_count": len(sorted_evidence),
@@ -213,6 +223,8 @@ def validate_release_manifest(value: Mapping[str, Any]) -> Dict[str, Any]:
         "schema_version",
         "commit_sha",
         "topology_hash",
+        "protected_baseline_commit",
+        "acceptance_signer_pubkey_hash",
         "roles",
         "build_evidence_root",
         "verified_build_count",
@@ -226,6 +238,12 @@ def validate_release_manifest(value: Mapping[str, Any]) -> Dict[str, Any]:
         raise ReleaseManifestV2Error("release manifest roles are incomplete")
     if value.get("topology_hash") != topology_hash():
         raise ReleaseManifestV2Error("release manifest topology hash mismatch")
+    if value.get("protected_baseline_commit") != PROTECTED_BASELINE_COMMIT:
+        raise ReleaseManifestV2Error("release protected baseline commit differs")
+    _hash(
+        value.get("acceptance_signer_pubkey_hash"),
+        "acceptance_signer_pubkey_hash",
+    )
     if value.get("verified_build_count") != len(ROLE_SPECS) * 6:
         raise ReleaseManifestV2Error("release manifest build count is invalid")
     commit = str(value.get("commit_sha") or "").lower()
@@ -289,6 +307,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--evidence", action="append", type=Path, default=[])
     parser.add_argument("--output", type=Path)
     parser.add_argument("--verify", type=Path)
+    parser.add_argument("--acceptance-signer-pubkey-hash")
     args = parser.parse_args(argv)
     if bool(args.verify) == bool(args.evidence):
         raise ReleaseManifestV2Error("select --verify or one or more --evidence files")
@@ -301,7 +320,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for path in args.evidence:
             value = json.loads(path.read_text(encoding="utf-8"))
             evidence.extend(value if isinstance(value, list) else [value])
-        release = build_release_manifest(evidence)
+        if not args.acceptance_signer_pubkey_hash:
+            raise ReleaseManifestV2Error(
+                "--acceptance-signer-pubkey-hash is required when building a release"
+            )
+        release = build_release_manifest(
+            evidence,
+            acceptance_signer_pubkey_hash=args.acceptance_signer_pubkey_hash,
+        )
         if not args.output:
             raise ReleaseManifestV2Error("--output is required when building a release")
         args.output.parent.mkdir(parents=True, exist_ok=True)

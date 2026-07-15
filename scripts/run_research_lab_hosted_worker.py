@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gateway.research_lab.config import ResearchLabGatewayConfig  # noqa: E402
+from gateway.research_lab.git_tree_models import TreePolicy  # noqa: E402
 from gateway.research_lab.worker import ResearchLabHostedWorker  # noqa: E402
 
 
@@ -36,6 +37,7 @@ def _configure_logging(level: str) -> None:
 
 
 def _print_startup_banner(config: ResearchLabGatewayConfig, *, worker_id: str, once: bool) -> None:
+    tree_policy = TreePolicy.from_env()
     print("\n" + "=" * 70, flush=True)
     print("Research Lab Hosted Auto-Research Worker", flush=True)
     print("=" * 70, flush=True)
@@ -48,7 +50,12 @@ def _print_startup_banner(config: ResearchLabGatewayConfig, *, worker_id: str, o
     print(f"Proxy ref       : {_proxy_ref(config.hosted_worker_proxy_url)}", flush=True)
     print(f"Runtime target  : {config.auto_research_min_seconds}s-{config.auto_research_max_seconds}s", flush=True)
     print(f"Iterations      : {config.auto_research_min_iterations}-{config.auto_research_max_iterations}", flush=True)
-    print(f"Candidate limit : {config.hosted_worker_max_candidates}", flush=True)
+    print(f"Tree mode       : {tree_policy.mode}", flush=True)
+    print(f"Tree nodes      : {tree_policy.max_nodes}", flush=True)
+    print(
+        f"Branch / beam   : {tree_policy.branch_factor}/{tree_policy.beam_width}",
+        flush=True,
+    )
     print("=" * 70 + "\n", flush=True)
 
 

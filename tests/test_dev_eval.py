@@ -323,6 +323,33 @@ def test_replay_bootstrap_serves_httpx_async_client_from_snapshot_dir(tmp_path):
     assert decoded["body"] == body
 
 
+def test_replay_bootstrap_serves_aiohttp_from_snapshot_dir(tmp_path):
+    pytest.importorskip("aiohttp")
+    recorder = _record_store(tmp_path)
+    body = _record_companies_response(recorder, "acme", [_rich_company()])
+    url = SCRAPINGDOG_URL.format(link_id="acme", key="CONTAINERAIOHTTPKEY")
+    probe = (
+        "\nimport asyncio, json, aiohttp\n"
+        "async def _probe():\n"
+        "    async with aiohttp.ClientSession() as client:\n"
+        f"        async with client.get({url!r}) as response:\n"
+        "            payload = {'status': response.status, 'body': await response.text()}\n"
+        "    print(json.dumps(payload))\n"
+        "asyncio.run(_probe())\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", dev_replay_bootstrap() + probe],
+        text=True,
+        capture_output=True,
+        timeout=60,
+        env={SNAPSHOT_DIR_ENV: str(tmp_path / "snapshot_set"), "PATH": ""},
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    decoded = json.loads(completed.stdout)
+    assert decoded == {"status": 200, "body": body}
+
+
 def test_replay_bootstrap_strict_miss_fails_loudly(tmp_path):
     _record_store(tmp_path)
     probe = (
@@ -445,13 +472,26 @@ async def test_replay_seam_async_client_strict_miss(tmp_path):
                 await client.get("https://api.exa.ai/search")
 
 
-async def test_replay_seam_blocks_aiohttp_live_traffic(tmp_path):
+async def test_replay_seam_serves_aiohttp_without_live_traffic(tmp_path):
+    aiohttp = pytest.importorskip("aiohttp")
+    recorder = _record_store(tmp_path)
+    body = _record_companies_response(recorder, "acme", [_rich_company()])
+    url = SCRAPINGDOG_URL.format(link_id="acme", key="AIOHTTPKEY")
+    replayer = _replay_store(tmp_path)
+    with replayer.replay_installed():
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                assert response.status == 200
+                assert await response.text() == body
+
+
+async def test_replay_seam_aiohttp_strict_miss_is_typed(tmp_path):
     aiohttp = pytest.importorskip("aiohttp")
     _record_store(tmp_path)
     replayer = _replay_store(tmp_path)
     with replayer.replay_installed():
         async with aiohttp.ClientSession() as session:
-            with pytest.raises(DevSnapshotStoreError):
+            with pytest.raises(SnapshotMiss):
                 await session.get("https://api.exa.ai/search")
 
 

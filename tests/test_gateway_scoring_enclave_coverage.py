@@ -62,10 +62,15 @@ def test_scoring_import_closure_contains_authority_modules():
     )
     assert "gateway.research_lab.worker_process" in modules
     assert "gateway.research_lab.worker" in modules
+    assert "gateway.research_lab.autoresearch_runtime" in modules
     assert "gateway.research_lab.code_loop_engine" in modules
-    assert "gateway.research_lab.loop_engine" in modules
     assert "gateway.research_lab.code_build" in modules
     assert "gateway.research_lab.dev_eval_runner" in modules
+    assert "gateway.research_lab.git_tree_evaluator" in modules
+    assert "gateway.research_lab.git_tree_models" in modules
+    assert "gateway.research_lab.git_tree_repository" in modules
+    assert "gateway.research_lab.git_tree_scheduler" in modules
+    assert "gateway.research_lab.git_tree_store" in modules
     assert "research_lab.code_editing" in modules
     assert "research_lab.eval.evaluator" in modules
     assert "research_lab.eval.baseline_summary" in modules
@@ -81,6 +86,23 @@ def test_scoring_import_closure_contains_authority_modules():
     assert "gateway.tee.model_sandbox_v2" in modules
     assert "gateway.tee.provider_broker_v2" in modules
     assert "gateway.tee.scoring_executor_v2" in modules
+    assert "gateway.tee.coordinator_active_model_source_v2" in modules
+    assert "gateway.research_lab.active_model_authority_v2" in modules
+    assert "leadpoet_canonical.allocation_handoff_v2" in modules
+    coordinator_modules = {
+        item["module"]
+        for item in manifest["role_manifests"]["gateway_coordinator"]["files"]
+    }
+    assert {
+        "gateway.tee.coordinator_active_model_source_v2",
+        "gateway.tee.coordinator_allocation_source_v2",
+        "gateway.tee.coordinator_chain_source_v2",
+        "gateway.tee.coordinator_reward_source_v2",
+        "gateway.tee.coordinator_source_add_v2",
+        "gateway.tee.coordinator_weight_source_v2",
+        "gateway.research_lab.active_model_authority_v2",
+        "leadpoet_canonical.allocation_handoff_v2",
+    } <= coordinator_modules
     assert {item["source_path"] for item in manifest["data_files"]} == set(
         MEASURED_DATA_PATHS
     )

@@ -375,7 +375,13 @@ def test_weight_input_request_rejects_other_hotkeys_and_inverted_windows():
 
 
 def test_unknown_and_binary_application_messages_are_rejected():
-    for message in (b"arbitrary signing oracle", b"\xff\x00", b"GET_EPOCH_LEADS:1:attacker"):
+    for message in (
+        b"arbitrary signing oracle",
+        b"\xff\x00",
+        b"GET_EPOCH_LEADS:1:attacker",
+        b"leadpoet-jwt-request:1234567890",
+        b"leadpoet-weights-request:1234567890",
+    ):
         with pytest.raises(HotkeyAuthorityV2Error):
             classify_application_message_v2(message, validator_hotkey=HOTKEY)
 

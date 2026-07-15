@@ -114,14 +114,9 @@ pcr_measurements: Dict[str, str] = {
 }
 pcr_measurements_lock = Lock()
 
-# Lazily initialized so the existing event/checkpoint service has no scoring
-# startup dependency while attested scoring is disabled (the default).
-scoring_job_manager = None
-scoring_job_manager_lock = Lock()
-scoring_egress_proxy = None
-scoring_egress_proxy_lock = Lock()
-scoring_runtime_configuration = None
-scoring_runtime_configuration_lock = Lock()
+# The coordinator provider relay is initialized lazily after V2 runtime lock.
+provider_egress_proxy = None
+provider_egress_proxy_lock = Lock()
 v2_runtime_identity = None
 v2_runtime_identity_lock = Lock()
 v2_peer_registry = None
@@ -157,6 +152,8 @@ v2_artifact_persistence_verifier = None
 v2_artifact_persistence_verifier_lock = Lock()
 v2_ingress_seal_cache = {}
 v2_ingress_seal_cache_lock = Lock()
+event_signer_initialization_lock = Lock()
+event_signer_initialization = None
 
 print("=" * 80, flush=True)
 print("🐛 DEBUG: All imports and global state OK", flush=True)
@@ -220,6 +217,131 @@ def sign_data(data: bytes) -> bytes:
         generate_keypair()
     
     return private_key.sign(data)
+
+
+def _event_signer_module():
+    try:
+        from gateway.tee import enclave_signer
+    except ImportError:
+        import enclave_signer
+    return enclave_signer
+
+
+def _event_signing_identity() -> Dict[str, Any]:
+    signer = _event_signer_module()
+    if not signer.is_keypair_initialized():
+        raise RuntimeError("transparency event signer is not initialized")
+    attestation_document = signer.get_attestation_document()
+    return {
+        "purpose": "gateway_event_signing",
+        "enclave_pubkey": signer.get_enclave_public_key_hex(),
+        "code_hash": signer.get_cached_code_hash(),
+        "attestation_document_b64": base64.b64encode(attestation_document).decode(
+            "ascii"
+        ),
+        "signer_state": signer.get_signer_state(),
+    }
+
+
+def initialize_event_signer(prev_log_tip_hash: Optional[str]) -> Dict[str, Any]:
+    """Initialize the coordinator-only event signer and emit one restart event."""
+    global event_signer_initialization
+
+    normalized_tip = str(prev_log_tip_hash or "").strip().lower() or None
+    if normalized_tip is not None and (
+        len(normalized_tip) != 64
+        or any(char not in "0123456789abcdef" for char in normalized_tip)
+    ):
+        raise ValueError("previous transparency log tip must be a SHA-256 hex digest")
+
+    with event_signer_initialization_lock:
+        if event_signer_initialization is not None:
+            initialized_tip = event_signer_initialization["previous_log_tip_hash"]
+            if normalized_tip != initialized_tip:
+                raise RuntimeError(
+                    "transparency signer is already initialized with another log tip"
+                )
+            return dict(event_signer_initialization["response"])
+
+        signer = _event_signer_module()
+        if signer.is_keypair_initialized():
+            raise RuntimeError("transparency signer state was initialized out of order")
+
+        signer.initialize_enclave_keypair()
+        code_hash = compute_code_hash()
+        if code_hash == "0" * 64:
+            raise RuntimeError("gateway code hash is unavailable")
+        signer.set_cached_code_hash(code_hash)
+        signer.generate_attestation_document(code_hash)
+
+        restart_log_entry = signer.publish_restart_event(normalized_tip)
+        restart_payload = restart_log_entry["signed_event"]["payload"]
+        payload_hash = hashlib.sha256(
+            json.dumps(
+                restart_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        buffer_result = append_event(
+            {
+                "event_type": restart_log_entry["signed_event"]["event_type"],
+                "event_hash": restart_log_entry["event_hash"],
+                "payload_hash": payload_hash,
+                "signed_log_entry": restart_log_entry,
+            }
+        )
+        response = {
+            "identity": _event_signing_identity(),
+            "restart_log_entry": restart_log_entry,
+            "payload_hash": payload_hash,
+            "buffer": buffer_result,
+        }
+        event_signer_initialization = {
+            "previous_log_tip_hash": normalized_tip,
+            "response": response,
+        }
+        return dict(response)
+
+
+def sign_transparency_event(
+    *, event_type: str, payload: Dict[str, Any], payload_hash: str
+) -> Dict[str, Any]:
+    """Sign and buffer a transparency event without exposing signing material."""
+    if event_signer_initialization is None:
+        raise RuntimeError("transparency event signer is not initialized")
+    normalized_type = str(event_type or "").strip()
+    if not normalized_type:
+        raise ValueError("event_type is required")
+    if not isinstance(payload, dict):
+        raise ValueError("event payload must be an object")
+    expected_payload_hash = hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    if str(payload_hash or "").strip().lower() != expected_payload_hash:
+        raise ValueError("transparency payload hash mismatch")
+
+    signer = _event_signer_module()
+    log_entry = signer.sign_event(normalized_type, payload)
+    buffer_result = append_event(
+        {
+            "event_type": normalized_type,
+            "event_hash": log_entry["event_hash"],
+            "payload_hash": expected_payload_hash,
+            "signed_log_entry": log_entry,
+        }
+    )
+    return {
+        "log_entry": log_entry,
+        "payload_hash": expected_payload_hash,
+        "buffer": buffer_result,
+    }
 
 
 # ============================================================================
@@ -965,161 +1087,26 @@ def get_cached_attestation_hash() -> str:
 # RPC HANDLER (vsock Request/Response)
 # ============================================================================
 
-def _scoring_runtime_paths() -> None:
-    gateway_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    app_root = os.path.dirname(gateway_root)
-    staged_runtime = os.path.join(gateway_root, "_attested_runtime")
-    for path in (staged_runtime, app_root):
-        if path not in sys.path:
-            sys.path.insert(0, path)
-
-
-def _scoring_attestation_document_b64(manifest: Dict[str, Any]) -> str:
-    document = get_attestation_document_with_pcrs(
-        user_data_fields={
-            "purpose": manifest["purpose"],
-            "epoch_id": manifest["epoch_id"],
-            "job_id": manifest["job_id"],
-            "config_hash": manifest["config_hash"],
-            "input_root": manifest["payload_sha256"],
-        },
-    )
-    encoded = str(document.get("attestation_document") or "")
-    if not encoded:
-        raise RuntimeError("hardware attestation document is unavailable")
-    try:
-        raw = bytes.fromhex(encoded)
-    except ValueError as exc:
-        raise RuntimeError("hardware attestation document is invalid") from exc
-    return base64.b64encode(raw).decode("ascii")
-
-
-def get_scoring_egress_proxy():
-    global scoring_egress_proxy
-    with scoring_egress_proxy_lock:
-        if scoring_egress_proxy is not None:
-            return scoring_egress_proxy
+def get_provider_egress_proxy():
+    global provider_egress_proxy
+    with provider_egress_proxy_lock:
+        if provider_egress_proxy is not None:
+            return provider_egress_proxy
         from gateway.tee.egress_proxy import EnclaveEgressProxy, configured_proxy_ports
 
         local_port, forwarder_port = configured_proxy_ports()
-        scoring_egress_proxy = EnclaveEgressProxy(
+        provider_egress_proxy = EnclaveEgressProxy(
             recv_exact=_recv_exact,
             local_port=local_port,
             forwarder_port=forwarder_port,
         )
-        scoring_egress_proxy.start()
+        provider_egress_proxy.start()
         print(
-            "[TEE] Scoring egress proxy initialized local_port=%s forwarder_port=%s"
+            "[TEE] V2 provider egress relay initialized local_port=%s forwarder_port=%s"
             % (local_port, forwarder_port),
             flush=True,
         )
-        return scoring_egress_proxy
-
-
-def configure_scoring_runtime(params: Dict[str, Any]) -> Dict[str, Any]:
-    """Provision the reviewed scoring environment once, before any job runs."""
-
-    global scoring_runtime_configuration
-    from gateway.tee.scoring_executor import (
-        SCORING_RUNTIME_ENV_NAMES,
-        configuration_hash,
-        normalize_runtime_environment,
-    )
-
-    if not isinstance(params, dict) or set(params) != {
-        "schema_version",
-        "environment",
-        "configuration_hash",
-    }:
-        raise ValueError("scoring runtime configuration fields do not match the schema")
-    if params.get("schema_version") != "leadpoet.gateway_scoring_runtime.v1":
-        raise ValueError("unsupported scoring runtime configuration schema")
-    environment = normalize_runtime_environment(params.get("environment"))
-    expected_hash = configuration_hash(environment)
-    if params.get("configuration_hash") != expected_hash:
-        raise ValueError("scoring runtime configuration hash mismatch")
-    with scoring_job_manager_lock:
-        with scoring_runtime_configuration_lock:
-            if scoring_runtime_configuration is not None:
-                if scoring_runtime_configuration["configuration_hash"] != expected_hash:
-                    raise ValueError("scoring runtime configuration is immutable for enclave lifetime")
-                return dict(scoring_runtime_configuration)
-            if scoring_job_manager is not None:
-                raise ValueError("scoring runtime must be configured before scoring manager initialization")
-            for name in SCORING_RUNTIME_ENV_NAMES:
-                value = environment[name]
-                if value is None:
-                    os.environ.pop(name, None)
-                else:
-                    os.environ[name] = value
-            scoring_runtime_configuration = {
-                "schema_version": "leadpoet.gateway_scoring_runtime.v1",
-                "status": "configured",
-                "configuration_hash": expected_hash,
-                "configured_variable_count": sum(
-                    1 for value in environment.values() if value is not None
-                ),
-            }
-            return dict(scoring_runtime_configuration)
-
-
-def get_scoring_job_manager():
-    global scoring_job_manager
-    with scoring_job_manager_lock:
-        if scoring_job_manager is not None:
-            return scoring_job_manager
-        _scoring_runtime_paths()
-        from gateway.tee.scoring_import_closure import verify_staged_manifest
-        from gateway.tee.build_identity import load_identity
-        from gateway.tee.protected_workflows import load_manifest as load_protected_manifest
-        from gateway.tee.protected_workflows import verify_manifest as verify_protected_manifest
-        from gateway.tee.scoring_job_manager import ScoringJobManager
-
-        gateway_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        expected_role = str(
-            os.getenv("LEADPOET_ENCLAVE_ROLE", "gateway_coordinator")
-            or "gateway_coordinator"
-        ).strip()
-        manifest = verify_staged_manifest(
-            gateway_root=Path(gateway_root),
-            expected_role=expected_role,
-        )
-        identity = load_identity(
-            gateway_root=Path(gateway_root),
-            expected_role=expected_role,
-        )
-        protected_manifest = load_protected_manifest(
-            Path(gateway_root) / "tee" / "protected_workflows.json"
-        )
-        verify_protected_manifest(Path(gateway_root), protected_manifest)
-        role_manifest = manifest["role_manifests"].get(expected_role)
-        if not isinstance(role_manifest, dict):
-            raise RuntimeError("gateway enclave role import manifest missing")
-        if identity["execution_manifest_hash"] != role_manifest["manifest_hash"]:
-            raise RuntimeError("gateway enclave build identity manifest mismatch")
-        if identity["protected_manifest_hash"] != protected_manifest["manifest_hash"]:
-            raise RuntimeError("gateway enclave protected workflow manifest mismatch")
-        configured_mode = str(
-            os.getenv("RESEARCH_LAB_ATTESTED_SCORING_MODE", "off") or "off"
-        ).strip().lower()
-        if configured_mode != "off":
-            get_scoring_egress_proxy()
-        scoring_job_manager = ScoringJobManager(
-            build_manifest_hash=str(role_manifest["manifest_hash"]),
-            commit_sha=str(identity["commit_sha"]),
-            signer=sign_data,
-            public_key_supplier=lambda: get_public_key_bytes().hex(),
-            attestation_supplier=_scoring_attestation_document_b64,
-        )
-        print(
-            "[TEE] Attested scoring initialized mode=%s commit=%s manifest=%s" % (
-                scoring_job_manager.mode,
-                scoring_job_manager.commit_sha[:12],
-                str(manifest["manifest_hash"])[:23],
-            ),
-            flush=True,
-        )
-        return scoring_job_manager
+        return provider_egress_proxy
 
 
 def get_v2_runtime_identity():
@@ -1528,7 +1515,7 @@ def get_v2_provider_broker():
 
         if configuration.get("provider_registry_hash") != provider_registry_hash():
             raise RuntimeError("provider registry differs from measured routes")
-        get_scoring_egress_proxy()
+        get_provider_egress_proxy()
         v2_provider_broker = ProviderBrokerV2(
             credential_ref_hashes=credential_hashes,
             retry_policy_hashes=retry_hashes,
@@ -1910,6 +1897,9 @@ def get_v2_coordinator_job_manager():
         from gateway.tee.coordinator_reward_source_v2 import (
             CoordinatorRewardSourceV2,
         )
+        from gateway.tee.coordinator_active_model_source_v2 import (
+            CoordinatorActiveModelSourceV2,
+        )
         from gateway.tee.qualification_admission_v2 import (
             CoordinatorQualificationAdmissionV2,
         )
@@ -1943,6 +1933,10 @@ def get_v2_coordinator_job_manager():
         reward_source = CoordinatorRewardSourceV2(
             reader=source_reader,
             chain_source=chain_source,
+            config_supplier=runtime.research_lab_config,
+        )
+        active_model_source = CoordinatorActiveModelSourceV2(
+            reader=source_reader,
             config_supplier=runtime.research_lab_config,
         )
         openrouter_registration = OpenRouterRegistrationAuthorityV2(
@@ -1995,6 +1989,9 @@ def get_v2_coordinator_job_manager():
                 ),
                 openrouter_preflight_resolver=(
                     openrouter_registration.preflight
+                ),
+                active_private_model_resolver=lambda payload, context: (
+                    active_model_source.resolve(payload=payload, context=context)
                 ),
                 config_supplier=runtime.research_lab_config,
             ),
@@ -2301,61 +2298,6 @@ def start_v2_tls_service() -> Dict[str, Any]:
         }
 
 
-def handle_scoring_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        if method == "scoring_configure_runtime":
-            return {"result": configure_scoring_runtime(params)}
-        manager = get_scoring_job_manager()
-        if method == "scoring_health":
-            result = manager.health()
-            if getattr(manager, "mode", "off") != "off":
-                result["egress_proxy"] = get_scoring_egress_proxy().status()
-            if hasattr(manager, "build_manifest_hash"):
-                result["runtime_configuration"] = (
-                    dict(scoring_runtime_configuration)
-                    if scoring_runtime_configuration is not None
-                    else {"status": "not_configured"}
-                )
-        elif method == "scoring_submit_job":
-            manifest = params.get("manifest")
-            if (
-                isinstance(manifest, dict)
-                and manifest.get("operation") == "qualification_company_scores"
-                and scoring_runtime_configuration is None
-            ):
-                raise ValueError("qualification scoring runtime is not configured")
-            result = manager.submit(manifest)
-        elif method == "scoring_put_chunk":
-            result = manager.put_chunk(
-                job_id=params.get("job_id"),
-                offset=params.get("offset"),
-                data_b64=params.get("data_b64"),
-                chunk_sha256=params.get("chunk_sha256"),
-            )
-        elif method == "scoring_seal_job":
-            result = manager.seal(params.get("job_id"))
-        elif method == "scoring_get_status":
-            result = manager.status(params.get("job_id"))
-        elif method == "scoring_cancel_job":
-            result = manager.cancel(params.get("job_id"))
-        elif method == "scoring_get_result":
-            result = manager.result_chunk(
-                job_id=params.get("job_id"),
-                offset=params.get("offset", 0),
-                max_bytes=params.get("max_bytes", 512 * 1024),
-            )
-        elif method == "scoring_get_receipt":
-            result = manager.receipt(params.get("job_id"))
-        else:
-            return {"status": "error", "error": "Unknown scoring method"}
-        return {"result": result}
-    except Exception as exc:
-        print(
-            "[TEE] Attested scoring RPC rejected method=%s type=%s" % (method, type(exc).__name__),
-            flush=True,
-        )
-        return {"status": "error", "error": str(exc)}
-
 def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """
     Handle RPC method call from parent EC2.
@@ -2369,9 +2311,8 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
     - build_checkpoint: Build Merkle tree checkpoint from buffered events
     - get_public_key: Get enclave's public key
     - get_attestation: Get attestation document
-    - set_pcr_measurements: Set PCR measurements from parent EC2
     - sign_checkpoint: Sign checkpoint header
-    - scoring_*: Submit, inspect, cancel, and retrieve bounded scoring jobs
+    - scoring_v2_*: Submit and retrieve authoritative V2 scoring jobs
     
     Args:
         method: RPC method name
@@ -2394,6 +2335,23 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
             if not event:
                 return {"error": "Missing 'event' parameter"}
             return {"result": append_event(event)}
+
+        elif method == "initialize_event_signer":
+            return {
+                "result": initialize_event_signer(params.get("prev_log_tip_hash"))
+            }
+
+        elif method == "sign_transparency_event":
+            return {
+                "result": sign_transparency_event(
+                    event_type=params.get("event_type"),
+                    payload=params.get("payload"),
+                    payload_hash=params.get("payload_hash"),
+                )
+            }
+
+        elif method == "get_event_signing_identity":
+            return {"result": _event_signing_identity()}
         
         elif method == "get_buffer":
             return {"result": get_buffer()}
@@ -2454,12 +2412,6 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         elif method.startswith("v2_"):
             return handle_v2_runtime_rpc(method, params)
         
-        elif method == "set_pcr_measurements":
-            pcr0 = params.get("pcr0")
-            pcr1 = params.get("pcr1")
-            pcr2 = params.get("pcr2")
-            return {"result": set_pcr_measurements(pcr0, pcr1, pcr2)}
-        
         elif method == "sign_checkpoint":
             # Sign checkpoint header with enclave key
             checkpoint_header = params.get("checkpoint_header")
@@ -2485,11 +2437,6 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         ):
             return handle_v2_execution_rpc(method, params)
 
-        elif method.startswith("scoring_"):
-            if enclave_role in {"gateway_scoring_a", "gateway_scoring_b"}:
-                return {"error": "V1 scoring RPC is disabled for V2 role"}
-            return handle_scoring_rpc(method, params)
-        
         else:
             return {"error": f"Unknown method: {method}"}
     

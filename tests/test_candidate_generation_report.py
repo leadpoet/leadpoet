@@ -160,26 +160,15 @@ def test_structured_binding_failure_precedes_stale_unread_warning():
     assert summary["primary_reason"] == "binding_plan_source_missing"
 
 
-def test_candidate_generation_failure_report_aggregates_public_and_fallback_rows():
+def test_candidate_generation_failure_report_aggregates_public_and_terminal_rows():
     loop_events = [
         _event("run-a", "loop_direction_planned"),
-        _event(
-            "run-a",
-            "candidate_generation_fallback_requested",
-            {
-                "ranked_path_fallback_attempted": True,
-                "previous_path_id": "path-a",
-                "next_path_id": "path-b",
-                "fallback_index": 1,
-            },
-        ),
         _event("run-a", "candidate_selected"),
         _event(
             "run-b",
             "no_viable_patch",
             {
                 "reason": "required file is not present in editable_files",
-                "terminal_after_ranked_paths_exhausted": True,
             },
         ),
         _event("run-b", "loop_failed", {"run_summary": {"selected_candidate_count": 0}}),
@@ -209,11 +198,7 @@ def test_candidate_generation_failure_report_aggregates_public_and_fallback_rows
 
     assert report["total_no_buildable_candidate"] == 2
     assert report["counts"]["by_primary_reason"]["binding_plan_source_missing"] == 2
-    assert report["counts"]["ranked_path_fallback"] == {
-        "attempted": 1,
-        "succeeded": 1,
-        "exhausted": 1,
-    }
+    assert "ranked_path_fallback" not in report["counts"]
     assert {row["failure_category"] for row in report["sample_runs"]} >= {"source_path_failure"}
 
 

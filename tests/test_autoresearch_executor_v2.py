@@ -13,17 +13,25 @@ from gateway.research_lab.code_loop_engine import (
     BuiltCodeEditCandidate,
     CodeEditLoopResult,
 )
+from gateway.research_lab.git_tree_models import (
+    TreeCheckpoint,
+    TreePolicy,
+    TreeResult,
+    derive_tree_id,
+)
 from gateway.research_lab.code_build import (
     CodeEditBuildResult,
     CodeEditCandidateBuilder,
     CodeEditPatchApplyError,
 )
 from gateway.research_lab.config import ResearchLabGatewayConfig
-from gateway.research_lab.loop_engine import AutoResearchLoopEvent
+from gateway.research_lab.autoresearch_runtime import AutoResearchLoopEvent
 from gateway.tee.autoresearch_executor_v2 import (
     AUTORESEARCH_REQUEST_SCHEMA_VERSION,
     HOST_APPEND_EVENT,
     HOST_EVENT_RESULT_SCHEMA_VERSION,
+    HOST_GIT_TREE,
+    HOST_GIT_TREE_RESULT_SCHEMA_VERSION,
     OPENROUTER_GUARD_REQUEST_SCHEMA_VERSION,
     OP_REPAIR_STALE_PARENT,
     OP_RUN_CODE_EDIT_LOOP,
@@ -33,6 +41,8 @@ from gateway.tee.autoresearch_executor_v2 import (
     AutoresearchExecutorV2,
     AutoresearchExecutorV2Error,
     _HostCandidateBuilder,
+    _HostGitTreeRepository,
+    _candidate_document,
     _source_context,
 )
 from gateway.tee.execution_job_manager_v2 import ExecutionContextV2
@@ -123,22 +133,49 @@ class _FakeEngine:
         )
         await self.kwargs["event_sink"](
             AutoResearchLoopEvent(
-                event_type="loop_completed",
-                loop_status="completed",
+                event_type="loop_failed",
+                loop_status="failed",
                 elapsed_seconds=1.25,
                 event_doc={"run_id": kwargs["run_id"], "candidate_count": 0},
             )
         )
+        policy = TreePolicy.from_mapping(
+            kwargs["budget_context"]["tree_policy"]["policy"]
+        )
+        tree_id = derive_tree_id(
+            run_id=kwargs["run_id"],
+            root_artifact_hash=kwargs["artifact"].model_artifact_hash,
+            policy=policy,
+        )
+        checkpoint = TreeCheckpoint(
+            tree_id=tree_id,
+            root_artifact_hash=kwargs["artifact"].model_artifact_hash,
+            policy=policy,
+            nodes=(),
+            frontier_hash="sha256:" + "7" * 64,
+            operation_settlement_hash="sha256:" + "8" * 64,
+            stop_reason="tree_final_selection_committed",
+        )
+        tree_result = TreeResult(
+            tree_id=tree_id,
+            status="failed",
+            stop_reason="no_eligible_tree_finalist",
+            selected_node_id="",
+            nodes=(),
+            checkpoint=checkpoint,
+        )
         return CodeEditLoopResult(
             selected_candidates=(),
             iterations_completed=1,
-            stop_reason="max_iterations",
+            stop_reason="no_eligible_tree_finalist",
             elapsed_seconds=1.25,
             estimated_cost_usd=0.5,
             actual_openrouter_cost_usd=0.0,
             actual_openrouter_cost_microusd=0,
             openrouter_call_count=0,
-            status="completed",
+            tree_result=tree_result,
+            status="failed",
+            checkpoint_doc={"git_tree_checkpoint": checkpoint.to_dict()},
         )
 
 
@@ -171,6 +208,15 @@ def _source_and_artifact(tmp_path: Path):
 
 def _payload(tmp_path: Path):
     source_bundle, artifact = _source_and_artifact(tmp_path)
+    active_model_result = {
+        "schema_version": "leadpoet.active_private_model.v2",
+        "artifact": artifact,
+        "active_model": {
+            "private_model_version_id": "private-model-v1",
+        },
+        "source_state_hash": "sha256:" + "f" * 64,
+    }
+    active_model_graph = _active_model_graph(active_model_result)
     component_registry = {"schema_version": "1.0", "components": []}
     component_result = {
         "schema_version": "leadpoet.model_sandbox_result.v2",
@@ -212,6 +258,11 @@ def _payload(tmp_path: Path):
             "receipt_graph": component_graph,
             "root_receipt_hash": component_graph["root_receipt_hash"],
         },
+        "active_model_evidence": {
+            "result": active_model_result,
+            "receipt_graph": active_model_graph,
+            "root_receipt_hash": active_model_graph["root_receipt_hash"],
+        },
         "provider_catalog_evidence": {
             "result": catalog_result,
             "receipt_graph": catalog_graph,
@@ -225,25 +276,53 @@ def _payload(tmp_path: Path):
         "benchmark_public_summary": {},
         "model_id": "openai/test-model",
         "model_doc": {},
-        "budget_context": {"requested_compute_budget_usd": 1.0},
+        "budget_context": {
+            "requested_compute_budget_usd": 1.0,
+            "tree_policy": {
+                "schema_version": "research_lab.git_tree_runtime_policy.v1",
+                "policy": TreePolicy(mode="active").to_dict(),
+                "evaluator_enabled": True,
+                "evaluator_commitment": {
+                    "schema_version": "research_lab.git_tree_evaluator_commitment.v1",
+                    "snapshot_manifest_hash": "sha256:" + "7" * 64,
+                    "snapshot_ready_hash": "sha256:" + "8" * 64,
+                    "dev_set_hash": "sha256:" + "9" * 64,
+                    "dev_set_size": 8,
+                    "champion_image_digest": artifact["image_digest"],
+                    "source_commit": artifact["git_commit_sha"],
+                    "model_config_hash": "sha256:" + "a" * 64,
+                    "provider_model_ids": [],
+                    "miss_policy": "strict",
+                    "score_version": "research_lab.dev_eval.v2",
+                    "evaluation_timeout_seconds": 300,
+                    "live_max_icps_per_node": 8,
+                    "live_max_provider_calls": 32,
+                    "live_cap_microusd": 500000,
+                    "minimum_evidence_retention_days": 30,
+                },
+                "prior_evaluation_provider_call_count": 0,
+                "prior_evaluation_cost_microusd": 0,
+                "snapshot_age_seconds": 0.0,
+            },
+        },
         "requested_loop_count": 1,
         "resume_state": {},
         "loop_settings": {
             "min_seconds": 0,
-            "max_seconds": 60,
+            "max_seconds": 2700,
             "min_iterations": 1,
             "max_iterations": 1,
             "draft_timeout_seconds": 30,
             "reflection_timeout_seconds": 30,
             "estimated_iteration_cost_usd": 0.5,
-            "max_candidates": 1,
+            "max_candidates": 6,
         },
         "source_bundle": source_bundle,
         "probe_private_window_term_hashes": [],
         "provider_outcome_digest": provider_outcome_result[
             "provider_outcome_digest"
         ],
-        "dev_evaluator_enabled": False,
+        "dev_evaluator_enabled": True,
         "openrouter_context": {
             "key_ref": "encrypted_ref:openrouter:" + "1" * 32,
             "miner_hotkey": "miner-hotkey",
@@ -405,6 +484,64 @@ def _provider_catalog_graph(catalog_result):
     )
 
 
+def _active_model_graph(active_model_result):
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key().public_bytes_raw().hex()
+    boot = create_boot_identity(
+        body=build_boot_identity_body(
+            role="gateway_coordinator",
+            physical_role="gateway_coordinator",
+            commit_sha="a" * 40,
+            pcr0="b" * 96,
+            build_manifest_hash="sha256:" + "c" * 64,
+            dependency_lock_hash="sha256:" + "d" * 64,
+            config_hash="sha256:" + "e" * 64,
+            boot_nonce="6" * 32,
+            signing_pubkey=public_key,
+            transport_pubkey="7" * 64,
+            transport_certificate_hash="sha256:" + "8" * 64,
+            attestation_user_data_hash="sha256:" + "9" * 64,
+            issued_at="2026-07-10T20:00:00Z",
+        ),
+        attestation_document_b64=base64.b64encode(b"attestation").decode(
+            "ascii"
+        ),
+    )
+    receipt = create_signed_execution_receipt(
+        body=build_execution_receipt_body(
+            role="gateway_coordinator",
+            purpose="research_lab.active_private_model.v2",
+            job_id="active-private-model",
+            epoch_id=1,
+            sequence=0,
+            commit_sha="a" * 40,
+            pcr0="b" * 96,
+            build_manifest_hash="sha256:" + "c" * 64,
+            dependency_lock_hash="sha256:" + "d" * 64,
+            config_hash="sha256:" + "e" * 64,
+            boot_identity_hash=boot["boot_identity_hash"],
+            input_root="sha256:" + "a" * 64,
+            output_root=sha256_json(active_model_result),
+            transport_root_hash=EMPTY_TRANSPORT_ROOT,
+            host_operation_root_hash=EMPTY_HOST_OPERATION_ROOT,
+            artifact_root=EMPTY_ARTIFACT_ROOT,
+            parent_receipt_hashes=(),
+            status="succeeded",
+            failure_code=None,
+            issued_at="2026-07-10T20:00:00Z",
+        ),
+        enclave_pubkey=public_key,
+        sign_digest=private_key.sign,
+    )
+    return build_receipt_graph(
+        root_receipt_hash=receipt["receipt_hash"],
+        boot_identities=(boot,),
+        receipts=(receipt,),
+        transport_attempts=(),
+        host_operations=(),
+    )
+
+
 def _provider_outcome_graph(provider_outcome_result):
     private_key = Ed25519PrivateKey.generate()
     public_key = private_key.public_key().public_bytes_raw().hex()
@@ -467,6 +604,7 @@ def _parent_receipt_hashes(payload):
     return (
         PRIVACY_RECEIPT_HASH,
         payload["component_registry_evidence"]["root_receipt_hash"],
+        payload["active_model_evidence"]["root_receipt_hash"],
         payload["provider_catalog_evidence"]["root_receipt_hash"],
         payload["provider_outcome_evidence"]["root_receipt_hash"],
     )
@@ -545,9 +683,10 @@ def test_autoresearch_executor_runs_existing_engine_and_commits_events(tmp_path)
     assert result.output["schema_version"] == "leadpoet.autoresearch_result.v2"
     assert result.output["iterations_completed"] == 1
     assert result.output["selected_candidates"] == []
+    assert result.output["tree_result"]["status"] == "failed"
     assert [record["payload"]["event"]["event_type"] for record in channel.records] == [
         "loop_started",
-        "loop_completed",
+        "loop_failed",
     ]
     assert len(context.stage_receipts) == 1
     assert context.stage_receipts[0].purpose == "research_lab.candidate_decision.v2"
@@ -568,7 +707,44 @@ def test_autoresearch_executor_runs_existing_engine_and_commits_events(tmp_path)
     )
 
 
-def test_v2_builder_restores_sequential_parent_from_cumulative_patch(tmp_path):
+def test_host_git_tree_operation_commitment_is_strictly_validated():
+    tree_id = "sha256:" + "1" * 64
+    observed = {}
+
+    class Context:
+        @staticmethod
+        def execute_host_operation(**kwargs):
+            observed.update(kwargs)
+            response = {
+                "schema_version": HOST_GIT_TREE_RESULT_SCHEMA_VERSION,
+                "action": "operation_settlement_commitment",
+                "state_hash": kwargs["expected_state_hash"],
+                "result": {
+                    "tree_id": tree_id,
+                    "action": "operation_settlement_commitment",
+                    "operation_count": 3,
+                    "settled_cost_microusd": 12_345,
+                    "provider_call_count": 2,
+                    "operation_settlement_hash": "sha256:" + "2" * 64,
+                },
+            }
+            return kwargs["response_validator"](response)
+
+    result = _HostGitTreeRepository(
+        Context(), tree_id=tree_id
+    ).operation_settlement_commitment()
+
+    assert observed["operation"] == HOST_GIT_TREE
+    assert observed["payload"] == {
+        "action": "operation_settlement_commitment",
+        "tree_id": tree_id,
+    }
+    assert result["operation_count"] == 3
+    assert result["settled_cost_microusd"] == 12_345
+    assert result["provider_call_count"] == 2
+
+
+def test_v2_builder_restores_git_tree_parent_from_cumulative_patch(tmp_path):
     source_bundle, root_artifact_doc = _source_and_artifact(tmp_path)
     root_artifact = PrivateModelArtifactManifest.from_mapping(root_artifact_doc)
     source_root = tmp_path / "private-source"
@@ -620,14 +796,29 @@ def test_v2_builder_restores_sequential_parent_from_cumulative_patch(tmp_path):
             source_diff_hash=source_diff_hash,
             build_doc={},
         ),
-        node_id="node-restored-v2",
+        node_id="tree-node:" + "1" * 64,
         iteration=1,
-        chain_step=1,
-        chain_root_artifact_hash=root_artifact.model_artifact_hash,
-        chain_parent_artifact_hash=root_artifact.model_artifact_hash,
-        chain_incremental_source_diff_hash=source_diff_hash,
-        chain_cumulative_source_diff_hash=source_diff_hash,
+        tree_id=derive_tree_id(
+            run_id="run-restored-v2",
+            root_artifact_hash=root_artifact.model_artifact_hash,
+            policy=TreePolicy(mode="active"),
+        ),
+        tree_parent_node_id="root",
+        tree_root_branch_id="tree-node:" + "1" * 64,
+        tree_depth=1,
+        tree_branch_objective_path_id="bounded-query-path",
+        tree_branch_objective_hash="sha256:" + "3" * 64,
+        tree_generation_attempt_count=2,
+        tree_git_commit="2" * 64,
+        tree_root_artifact_hash=root_artifact.model_artifact_hash,
+        tree_parent_artifact_hash=root_artifact.model_artifact_hash,
+        tree_incremental_source_diff_hash=source_diff_hash,
+        tree_cumulative_source_diff_hash=source_diff_hash,
     )
+    candidate_doc = _candidate_document(candidate)
+    assert candidate_doc["tree_branch_objective_path_id"] == "bounded-query-path"
+    assert candidate_doc["tree_branch_objective_hash"] == "sha256:" + "3" * 64
+    assert candidate_doc["tree_generation_attempt_count"] == 2
     config = _config()
     builder = _HostCandidateBuilder(
         config=config,
@@ -665,12 +856,12 @@ def test_v2_builder_restores_sequential_parent_from_cumulative_patch(tmp_path):
     )
     with pytest.raises(
         AutoresearchExecutorV2Error,
-        match="rehydrated sequential candidate commitment differs",
+        match="rehydrated Git-tree candidate commitment differs",
     ):
         tampered_builder.restore_rehydrated_candidate_source_context(
             candidate=replace(
                 candidate,
-                chain_cumulative_source_diff_hash="sha256:" + "0" * 64,
+                tree_cumulative_source_diff_hash="sha256:" + "0" * 64,
             )
         )
 

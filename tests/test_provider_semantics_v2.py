@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import json
+from types import SimpleNamespace
+import threading
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -406,6 +409,59 @@ def test_live_record_then_cache_hit_preserves_existing_fingerprint_and_costs():
     assert digest["providers"]["exa"]["live_call_count"] == 1
     assert digest["providers"]["exa"]["cache_hit_count"] == 1
     assert digest["providers"]["exa"]["measured_spend_microusd"] == 5000
+
+
+def test_concurrent_identical_requests_single_flight_one_paid_call(monkeypatch):
+    from gateway.tee import provider_semantics_v2 as semantics_module
+
+    broker = _Broker()
+    broker_entered = threading.Event()
+    release_broker = threading.Event()
+    original_execute = broker.execute
+
+    def blocking_execute(request):
+        broker_entered.set()
+        assert release_broker.wait(timeout=2.0)
+        return original_execute(request)
+
+    broker.execute = blocking_execute
+    waiter_entered = threading.Event()
+
+    class TrackingEvent(threading.Event):
+        def wait(self, timeout=None):
+            waiter_entered.set()
+            return super().wait(timeout)
+
+    monkeypatch.setattr(
+        semantics_module,
+        "threading",
+        SimpleNamespace(RLock=threading.RLock, Event=TrackingEvent),
+    )
+    authority, _broker, cache, _artifacts = _authority(broker=broker)
+    request = _request()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(authority.execute, request)
+        assert broker_entered.wait(timeout=2.0)
+        second = executor.submit(
+            authority.execute,
+            {**request, "logical_operation_id": "provider-operation-sibling"},
+        )
+        assert waiter_entered.wait(timeout=2.0)
+        release_broker.set()
+        results = [first.result(timeout=2.0), second.result(timeout=2.0)]
+
+    assert len(broker.calls) == 1
+    assert cache.persist_count == 1
+    cost_events = [
+        decode_cost_event_header(
+            result["headers"]["X-Research-Lab-Provider-Cost-Event"]
+        )
+        for result in results
+    ]
+    assert sum(bool(event["billable"]) for event in cost_events) == 1
+    assert sum(float(event["cost_usd"]) for event in cost_events) == 0.005
+    assert {result["evidence"] for result in results} == {"recorded", "hit"}
 
 
 def test_persistent_cache_survives_authority_restart_without_live_call():

@@ -92,7 +92,14 @@ def _fixture(tmp_path: Path):
                         **values,
                     }
                 )
-    return gateway_root, eif_root, build_release_manifest(rows), observed
+    return (
+        gateway_root,
+        eif_root,
+        build_release_manifest(
+            rows, acceptance_signer_pubkey_hash="sha256:" + "f" * 64
+        ),
+        observed,
+    )
 
 
 def test_local_role_artifacts_must_match_approved_six_build_release(tmp_path):

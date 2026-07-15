@@ -210,6 +210,36 @@ class TEEClient:
             {"status": "buffered", "sequence": N}
         """
         return await self._send_rpc("append_event", {"event": event})
+
+    async def initialize_event_signer(
+        self, prev_log_tip_hash: Optional[str]
+    ) -> Dict:
+        """Initialize the coordinator-enclave transparency signer once per boot."""
+        return await self._send_rpc(
+            "initialize_event_signer",
+            {"prev_log_tip_hash": prev_log_tip_hash},
+        )
+
+    async def sign_transparency_event(
+        self,
+        *,
+        event_type: str,
+        payload: Dict,
+        payload_hash: str,
+    ) -> Dict:
+        """Create, sign, and buffer one transparency event in the enclave."""
+        return await self._send_rpc(
+            "sign_transparency_event",
+            {
+                "event_type": event_type,
+                "payload": payload,
+                "payload_hash": payload_hash,
+            },
+        )
+
+    async def get_event_signing_identity(self) -> Dict:
+        """Return the Nitro-bound public identity for transparency signatures."""
+        return await self._send_rpc("get_event_signing_identity", {})
     
     async def get_buffer(self) -> List[Dict]:
         """
@@ -536,70 +566,6 @@ class TEEClient:
             }
         """
         return await self._send_rpc("build_checkpoint", {})
-
-    async def scoring_configure_runtime(
-        self,
-        *,
-        environment: Dict,
-        configuration_hash: str,
-    ) -> Dict:
-        """Provision reviewed scoring env values once without logging them."""
-        return await self._send_rpc(
-            "scoring_configure_runtime",
-            {
-                "schema_version": "leadpoet.gateway_scoring_runtime.v1",
-                "environment": environment,
-                "configuration_hash": configuration_hash,
-            },
-        )
-
-    async def scoring_health(self) -> Dict:
-        """Return attested-scoring mode, bounds, and queue health."""
-        return await self._send_rpc("scoring_health", {})
-
-    async def scoring_submit_job(self, manifest: Dict) -> Dict:
-        return await self._send_rpc("scoring_submit_job", {"manifest": manifest})
-
-    async def scoring_put_chunk(
-        self,
-        *,
-        job_id: str,
-        offset: int,
-        data: bytes,
-    ) -> Dict:
-        return await self._send_rpc(
-            "scoring_put_chunk",
-            {
-                "job_id": job_id,
-                "offset": offset,
-                "data_b64": base64.b64encode(data).decode("ascii"),
-                "chunk_sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
-            },
-        )
-
-    async def scoring_seal_job(self, job_id: str) -> Dict:
-        return await self._send_rpc("scoring_seal_job", {"job_id": job_id})
-
-    async def scoring_get_status(self, job_id: str) -> Dict:
-        return await self._send_rpc("scoring_get_status", {"job_id": job_id})
-
-    async def scoring_cancel_job(self, job_id: str) -> Dict:
-        return await self._send_rpc("scoring_cancel_job", {"job_id": job_id})
-
-    async def scoring_get_result(
-        self,
-        job_id: str,
-        *,
-        offset: int = 0,
-        max_bytes: int = 512 * 1024,
-    ) -> Dict:
-        return await self._send_rpc(
-            "scoring_get_result",
-            {"job_id": job_id, "offset": offset, "max_bytes": max_bytes},
-        )
-
-    async def scoring_get_receipt(self, job_id: str) -> Dict:
-        return await self._send_rpc("scoring_get_receipt", {"job_id": job_id})
 
     async def scoring_v2_health(self) -> Dict:
         return await self._send_rpc("scoring_v2_health", {})

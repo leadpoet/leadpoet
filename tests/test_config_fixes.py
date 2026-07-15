@@ -205,8 +205,6 @@ def test_deliberately_unchanged_defaults(clean_env):
     # Serial benchmark default; prod sets concurrency explicitly (§8.3: no >1
     # without dedicated Exa key + parity check).
     assert config.private_baseline_concurrency == 1
-    # Raise only after scoring parallelism lands.
-    assert config.hosted_worker_max_candidates == 1
     # Auto-commit stays opt-in at the code level (§8.3; prod sets it itself).
     assert config.auto_commit_enabled is False
     assert config.crowning_enabled is True

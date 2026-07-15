@@ -58,14 +58,9 @@ from gateway.api import metrics as metrics_api
 # Import qualification router (Lead Qualification Agent Competition - Phase 10)
 from gateway.qualification.api.router import qualification_router
 
-# Import Research Lab router
-try:
-    from gateway.research_lab.api import router as research_lab_router
-    _RESEARCH_LAB_ROUTER_AVAILABLE = True
-except Exception as _research_lab_import_err:
-    _RESEARCH_LAB_ROUTER_AVAILABLE = False
-    import logging as _logging
-    _logging.getLogger(__name__).warning(f"Research Lab router import failed: {_research_lab_import_err}")
+# Research Lab is an authoritative V2 service. Import failures must abort
+# startup instead of silently launching a gateway without its protected path.
+from gateway.research_lab.api import router as research_lab_router
 
 # Import fulfillment router (Lead Fulfillment System)
 try:
@@ -107,37 +102,25 @@ async def lifespan(app: FastAPI):
     """
     
     # ════════════════════════════════════════════════════════════════
-    # TEE ENCLAVE KEYPAIR INITIALIZATION (CRITICAL FOR EVENT SIGNING)
+    # COORDINATOR-ENCLAVE EVENT SIGNER INITIALIZATION
     # ════════════════════════════════════════════════════════════════
     print("="*80)
-    print("🔐 INITIALIZING TEE ENCLAVE KEYPAIR")
+    print("🔐 INITIALIZING COORDINATOR-ENCLAVE EVENT SIGNER")
     print("="*80)
     try:
-        from gateway.tee.enclave_signer import initialize_enclave_keypair, generate_attestation_document, get_cached_code_hash
-        enclave_pubkey = initialize_enclave_keypair()
-        print(f"✅ TEE enclave keypair initialized")
+        from gateway.utils.logger import initialize_enclave_event_signing
+
+        event_signing_identity = await initialize_enclave_event_signing()
+        enclave_pubkey = str(event_signing_identity["enclave_pubkey"])
+        print("✅ Coordinator-enclave event signer initialized")
         print(f"   Pubkey: {enclave_pubkey[:32]}...")
-        
-        # Generate attestation document (required for auditor verification)
-        try:
-            from gateway.tee.gateway_tee_service import compute_code_hash
-            code_hash = compute_code_hash()
-            attestation_doc = generate_attestation_document(code_hash)
-            if attestation_doc and len(attestation_doc) > 0:
-                print(f"✅ Attestation document generated ({len(attestation_doc)} bytes)")
-            else:
-                print(f"⚠️  Attestation document empty (non-Nitro environment)")
-        except Exception as att_err:
-            print(f"⚠️  Could not generate attestation: {att_err}")
-        
-        print("✅ Event signing ENABLED (TEE-signed transparency log)")
+        print("✅ Event signing ENABLED (Nitro-held key + enclave hash chain)")
         print("✅ Receipt integrity ENABLED (canonical hashes + TEE-signed audit events)")
-        print("   Legacy static gateway PEM is not required by the active receipt path")
+        print("   No transparency-signing private key exists in the parent process")
     except Exception as e:
-        print(f"❌ CRITICAL ERROR initializing enclave keypair: {e}")
-        print("   Event signing will FAIL!")
-        print("   Weight submissions will return 500 errors!")
-        print("   This is a critical failure - check TEE enclave health")
+        print(f"❌ CRITICAL ERROR initializing coordinator event signer: {e}")
+        print("   Refusing gateway startup without Nitro-backed event authority")
+        raise RuntimeError("coordinator-enclave event signer initialization failed") from e
     print("="*80 + "\n")
     
     # Start the event-loop stall watchdog first, so even a hang later in
@@ -396,13 +379,19 @@ async def lifespan(app: FastAPI):
         # Start gateway-owned Research Lab worker fleets. This mirrors the
         # validator dynamic worker model: one auto-research/scoring worker per
         # configured gateway proxy, supervised by the gateway process.
-        if _RESEARCH_LAB_ROUTER_AVAILABLE:
-            from gateway.research_lab.worker_autostart import ResearchLabWorkerSupervisor
+        from gateway.research_lab.worker_autostart import ResearchLabWorkerSupervisor
 
-            research_lab_worker_supervisor = ResearchLabWorkerSupervisor()
-            research_lab_worker_supervisor.start()
-        else:
-            print("⚠️  Research Lab router unavailable - worker fleets not started")
+        research_lab_worker_supervisor = ResearchLabWorkerSupervisor()
+        research_lab_worker_supervisor.start()
+        research_lab_worker_health = research_lab_worker_supervisor.health()
+        app.state.research_lab_worker_supervisor = research_lab_worker_supervisor
+        app.state.research_lab_worker_health = research_lab_worker_health
+        app.state.event_signing_identity = dict(event_signing_identity)
+        print(
+            "✅ Research Lab authoritative workers ready: "
+            f"hosted={research_lab_worker_health['hosted_running']} "
+            f"scoring={research_lab_worker_health['scoring_running']}"
+        )
         
         print("")
         print("🎯 ARCHITECTURE SUMMARY:")
@@ -564,8 +553,7 @@ app.include_router(metrics_api.router)
 # Lead Qualification Agent Competition API (Phase 10)
 app.include_router(qualification_router)
 
-if _RESEARCH_LAB_ROUTER_AVAILABLE:
-    app.include_router(research_lab_router)
+app.include_router(research_lab_router)
 
 if _FULFILLMENT_ROUTER_AVAILABLE:
     app.include_router(fulfillment_router)
@@ -611,6 +599,39 @@ async def health():
     Simple endpoint for container orchestration health probes.
     """
     return {"status": "healthy"}
+
+
+@app.get("/health/v2-authority")
+async def v2_authority_health():
+    """Fail-closed readiness for the live V2 enclave and worker authority."""
+    try:
+        supervisor = app.state.research_lab_worker_supervisor
+        worker_health = supervisor.health()
+
+        from gateway.api.attestation import _event_signing_identity
+        from gateway.tee.verify_v2_runtime_ready import verify_v2_runtime_ready
+
+        event_identity, enclave_health = await asyncio.gather(
+            _event_signing_identity(),
+            verify_v2_runtime_ready(),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"authoritative V2 runtime is not ready: {type(exc).__name__}",
+        ) from exc
+    return {
+        "schema_version": "leadpoet.gateway_v2_authority_health.v2",
+        "status": "ready",
+        "commit_sha": GITHUB_COMMIT,
+        "event_signer": {
+            "purpose": event_identity["purpose"],
+            "enclave_pubkey": event_identity["enclave_pubkey"],
+            "code_hash": event_identity["code_hash"],
+        },
+        "workers": worker_health,
+        "enclaves": enclave_health,
+    }
 
 
 # ============================================================

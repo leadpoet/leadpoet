@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import hashlib
 import os
 from pathlib import Path
+import select
 import subprocess
 import sys
 import threading
@@ -14,6 +15,13 @@ from typing import Mapping
 
 
 TRUTHY = {"1", "true", "yes", "on"}
+EXPECTED_HOSTED_WORKERS = 10
+EXPECTED_SCORING_WORKERS = 25
+WORKER_READY_FD_ENV = "RESEARCH_LAB_WORKER_READY_FD"
+
+
+class ResearchLabWorkerStartupError(RuntimeError):
+    """An authoritative worker failed before entering its poll loop."""
 
 HOSTED_PROXY_PREFIXES = (
     "RESEARCH_LAB_AUTO_RESEARCH_WEBSHARE_PROXY",
@@ -69,6 +77,16 @@ def _rss_telemetry_seconds() -> float:
         return float(os.getenv("RESEARCH_LAB_WORKER_RSS_TELEMETRY_SECONDS", "300"))
     except ValueError:
         return 300.0
+
+
+def _startup_timeout_seconds() -> float:
+    try:
+        return max(
+            1.0,
+            float(os.getenv("RESEARCH_LAB_WORKER_STARTUP_TIMEOUT_SECONDS", "30")),
+        )
+    except ValueError:
+        return 30.0
 
 
 def _int_env(env: Mapping[str, str], name: str, default: int = 0) -> int:
@@ -202,8 +220,31 @@ class ResearchLabWorkerSupervisor:
         self._monitor_thread: threading.Thread | None = None
         self._package_parent = Path(__file__).resolve().parents[2]
         self._worker_script = Path(__file__).resolve().parent / "worker_process.py"
+        self._ready_children: set[str] = set()
+
+    def _full_topology_required(self) -> bool:
+        return os.getenv("GATEWAY_TEE_TOPOLOGY_MODE", "full").strip() == "full"
+
+    def _validate_authoritative_plan(self) -> None:
+        if not self._full_topology_required():
+            return
+        if not self.plan.auto_start_enabled:
+            raise ResearchLabWorkerStartupError(
+                "authoritative V2 worker autostart cannot be disabled"
+            )
+        expected = {
+            "hosted": (self.plan.hosted, EXPECTED_HOSTED_WORKERS),
+            "scoring": (self.plan.scoring, EXPECTED_SCORING_WORKERS),
+        }
+        for kind, (fleet, count) in expected.items():
+            if not fleet.enabled or fleet.worker_count != count:
+                raise ResearchLabWorkerStartupError(
+                    "%s worker fleet must contain exactly %d enabled workers; got %d (%s)"
+                    % (kind, count, fleet.worker_count, fleet.reason or "enabled")
+                )
 
     def start(self) -> None:
+        self._validate_authoritative_plan()
         if not self.plan.auto_start_enabled:
             print("⚠️  Research Lab worker autostart disabled", flush=True)
             return
@@ -237,10 +278,13 @@ class ResearchLabWorkerSupervisor:
             key = f"{fleet.kind}:{index}"
             self.children[key] = child
             self._child_specs[key] = (fleet, index)
+            self._ready_children.add(key)
 
     def _start_child(self, fleet: ResearchLabWorkerFleetPlan, index: int) -> subprocess.Popen[bytes]:
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
+        read_fd, write_fd = os.pipe()
+        env[WORKER_READY_FD_ENV] = str(write_fd)
         if fleet.kind == "hosted":
             env.setdefault("RESEARCH_LAB_HOSTED_WORKER_ENABLED", "true")
             if index < len(fleet.proxy_values):
@@ -263,7 +307,66 @@ class ResearchLabWorkerSupervisor:
             "--log-level",
             fleet.log_level,
         ]
-        return subprocess.Popen(command, cwd=str(self._package_parent), env=env)
+        try:
+            child = subprocess.Popen(
+                command,
+                cwd=str(self._package_parent),
+                env=env,
+                pass_fds=(write_fd,),
+            )
+        except Exception:
+            os.close(read_fd)
+            raise
+        finally:
+            os.close(write_fd)
+        try:
+            ready, _, _ = select.select(
+                [read_fd], [], [], _startup_timeout_seconds()
+            )
+            marker = os.read(read_fd, 64) if ready else b""
+        finally:
+            os.close(read_fd)
+        if marker != b"ready\n" or child.poll() is not None:
+            if child.poll() is None:
+                child.terminate()
+            raise ResearchLabWorkerStartupError(
+                "%s worker %d failed to signal readiness"
+                % (fleet.kind, index + 1)
+            )
+        return child
+
+    def health(self) -> dict[str, object]:
+        """Return strict live-worker readiness without changing worker state."""
+        self._validate_authoritative_plan()
+        dead = sorted(key for key, child in self.children.items() if child.poll() is not None)
+        running = {key for key, child in self.children.items() if child.poll() is None}
+        missing_ready = sorted(running - self._ready_children)
+        hosted_running = sum(key.startswith("hosted:") for key in running)
+        scoring_running = sum(key.startswith("scoring:") for key in running)
+        if dead or missing_ready:
+            raise ResearchLabWorkerStartupError(
+                "authoritative V2 workers are not healthy: dead=%s missing_ready=%s"
+                % (dead, missing_ready)
+            )
+        if self._full_topology_required() and (
+            hosted_running != EXPECTED_HOSTED_WORKERS
+            or scoring_running != EXPECTED_SCORING_WORKERS
+        ):
+            raise ResearchLabWorkerStartupError(
+                "authoritative V2 worker count differs: hosted=%d scoring=%d"
+                % (hosted_running, scoring_running)
+            )
+        return {
+            "schema_version": "leadpoet.research_lab_worker_health.v2",
+            "status": "ready",
+            "topology_mode": (
+                "full" if self._full_topology_required() else "component"
+            ),
+            "hosted_configured": self.plan.hosted.worker_count,
+            "hosted_running": hosted_running,
+            "scoring_configured": self.plan.scoring.worker_count,
+            "scoring_running": scoring_running,
+        }
 
     def _monitor_children(self) -> None:
         hard_rss_limit_mb = _hard_rss_limit_mb()
@@ -309,7 +412,9 @@ class ResearchLabWorkerSupervisor:
                     f"with code {code}; restarting",
                     flush=True,
                 )
+                self._ready_children.discard(key)
                 self.children[key] = self._start_child(fleet, index)
+                self._ready_children.add(key)
             if emit_telemetry:
                 last_telemetry = time.monotonic()
                 if telemetry:
@@ -334,6 +439,7 @@ class ResearchLabWorkerSupervisor:
                 child.kill()
             self.children.pop(key, None)
             self._child_specs.pop(key, None)
+            self._ready_children.discard(key)
         if self._monitor_thread is not None:
             self._monitor_thread.join(timeout=2)
         print("   ✅ Research Lab worker fleets stopped", flush=True)

@@ -49,6 +49,7 @@ from research_lab.eval.private_runtime import (
     canonicalize_private_model_icp,
     publish_incontainer_trace_entries,
 )
+from research_lab.eval.provider_costs import summarize_provider_cost_trace_entries
 from research_lab.eval.provider_evidence_cache import icp_evidence_cache_key
 
 
@@ -439,6 +440,8 @@ class AttestedPrivateModelRunnerV2:
             "sequence": 0,
             "receipts": [],
             "authorities": [],
+            "generated_caches": {},
+            "evidence_summaries": {},
             "lock": threading.Lock(),
         }
 
@@ -482,6 +485,14 @@ class AttestedPrivateModelRunnerV2:
                     cache_hash=sha256_json(cache_document),
                 ),
             )
+        run_mode = str(dict(context or {}).get("mode") or "")
+        evidence_mode = (
+            "record"
+            if self.model_kind == "private" and run_mode == "private_baseline"
+            else "cache_live"
+            if cache_document
+            else "live"
+        )
         result = await self._execute_operation(
             operation="run_icp",
             input_doc={
@@ -490,6 +501,14 @@ class AttestedPrivateModelRunnerV2:
             },
             provider_evidence_cache=cache_document,
             provider_evidence_cache_ref=cache_ref,
+            provider_evidence_mode=evidence_mode,
+            provider_snapshot_bundle={},
+            provider_snapshot_tree_hash="",
+            provider_snapshot_manifest_hash="",
+            provider_cost_scope_override="",
+            provider_cost_cap_microusd=0,
+            provider_call_cap=0,
+            publish_provider_evidence_cache=True,
             additional_parent_graphs=cache_parent_graphs,
         )
         return list(
@@ -499,6 +518,67 @@ class AttestedPrivateModelRunnerV2:
                 require_non_empty=False,
             )
         )
+
+    async def run_with_provider_evidence(
+        self,
+        icp: Mapping[str, Any],
+        context: Mapping[str, Any],
+        *,
+        provider_evidence_cache: Mapping[str, Any],
+        provider_evidence_mode: str,
+        cache_parent_graphs: Sequence[Mapping[str, Any]] = (),
+        provider_snapshot_bundle: Mapping[str, Any] | None = None,
+        provider_snapshot_tree_hash: str = "",
+        provider_snapshot_manifest_hash: str = "",
+        provider_cost_scope: str = "",
+        provider_cost_cap_microusd: int = 0,
+        provider_call_cap: int = 0,
+    ) -> list[Mapping[str, Any]]:
+        """Run one ICP under an explicitly committed tree-evaluation tape mode."""
+
+        canonical_icp = canonicalize_private_model_icp(icp)
+        result = await self._execute_operation(
+            operation="run_icp",
+            input_doc={
+                "icp": canonical_icp,
+                "context": _redacted_context(context),
+            },
+            provider_evidence_cache=dict(provider_evidence_cache),
+            provider_evidence_cache_ref=_provider_evidence_cache_ref(canonical_icp),
+            provider_evidence_mode=str(provider_evidence_mode),
+            provider_snapshot_bundle=dict(provider_snapshot_bundle or {}),
+            provider_snapshot_tree_hash=str(provider_snapshot_tree_hash or ""),
+            provider_snapshot_manifest_hash=str(
+                provider_snapshot_manifest_hash or ""
+            ),
+            provider_cost_scope_override=str(provider_cost_scope or ""),
+            provider_cost_cap_microusd=int(provider_cost_cap_microusd),
+            provider_call_cap=int(provider_call_cap),
+            publish_provider_evidence_cache=False,
+            additional_parent_graphs=cache_parent_graphs,
+        )
+        return list(
+            ensure_private_model_outputs(
+                result,
+                context_label="V2 measured tree evaluation",
+                require_non_empty=False,
+            )
+        )
+
+    def generated_provider_evidence_cache(
+        self, cache_ref: str
+    ) -> dict[str, Any]:
+        with self._shared_state["lock"]:
+            return dict(
+                self._shared_state.get("generated_caches", {}).get(cache_ref) or {}
+            )
+
+    def provider_evidence_summary(self, cache_ref: str) -> dict[str, Any]:
+        with self._shared_state["lock"]:
+            return dict(
+                self._shared_state.get("evidence_summaries", {}).get(cache_ref)
+                or {}
+            )
 
     def metadata(self) -> Mapping[str, Any]:
         try:
@@ -510,6 +590,14 @@ class AttestedPrivateModelRunnerV2:
                     input_doc={},
                     provider_evidence_cache={},
                     provider_evidence_cache_ref="",
+                    provider_evidence_mode="live",
+                    provider_snapshot_bundle={},
+                    provider_snapshot_tree_hash="",
+                    provider_snapshot_manifest_hash="",
+                    provider_cost_scope_override="",
+                    provider_cost_cap_microusd=0,
+                    provider_call_cap=0,
+                    publish_provider_evidence_cache=False,
                 )
             )
         raise AttestedPrivateModelRunnerV2Error(
@@ -523,6 +611,14 @@ class AttestedPrivateModelRunnerV2:
         input_doc: Mapping[str, Any],
         provider_evidence_cache: Mapping[str, Any],
         provider_evidence_cache_ref: str,
+        provider_evidence_mode: str,
+        provider_snapshot_bundle: Mapping[str, Any],
+        provider_snapshot_tree_hash: str,
+        provider_snapshot_manifest_hash: str,
+        provider_cost_scope_override: str,
+        provider_cost_cap_microusd: int,
+        provider_call_cap: int,
+        publish_provider_evidence_cache: bool,
         additional_parent_graphs: Sequence[Mapping[str, Any]] = (),
     ) -> Any:
         source_bundle = await asyncio.to_thread(
@@ -548,7 +644,9 @@ class AttestedPrivateModelRunnerV2:
         ).strip()
         if evaluation_scope:
             scope_doc["evaluation_scope"] = evaluation_scope
-        provider_cost_scope = sha256_json(scope_doc)
+        provider_cost_scope = str(provider_cost_scope_override or "") or sha256_json(
+            scope_doc
+        )
         cache_hash = sha256_json(dict(provider_evidence_cache))
         image_hash = "sha256:" + self.artifact.image_digest.rsplit("@sha256:", 1)[1]
         execution_epoch = (
@@ -630,6 +728,8 @@ class AttestedPrivateModelRunnerV2:
         purpose = (
             "research_lab.private_model_run.v2"
             if self.model_kind == "private"
+            else "research_lab.candidate_hybrid_discovery.v2"
+            if provider_evidence_mode == "record"
             else "research_lab.candidate_model_run.v2"
         )
         with self._shared_state["lock"]:
@@ -667,7 +767,13 @@ class AttestedPrivateModelRunnerV2:
                 ),
                 "provider_evidence_cache": dict(provider_evidence_cache),
                 "provider_evidence_cache_ref": provider_evidence_cache_ref,
+                "provider_evidence_mode": provider_evidence_mode,
+                "provider_snapshot_bundle": dict(provider_snapshot_bundle),
+                "provider_snapshot_tree_hash": provider_snapshot_tree_hash,
+                "provider_snapshot_manifest_hash": provider_snapshot_manifest_hash,
                 "provider_cost_scope": provider_cost_scope,
+                "provider_cost_cap_microusd": int(provider_cost_cap_microusd),
+                "provider_call_cap": int(provider_call_cap),
                 "provider_runtime_catalog": runtime_catalog,
                 "provider_catalog_evidence": {
                     "result": dict(catalog_result),
@@ -703,6 +809,15 @@ class AttestedPrivateModelRunnerV2:
                 image_hash,
                 str(source_bundle["archive_sha256"]),
                 cache_hash,
+                *(
+                    (
+                        str(provider_snapshot_bundle["archive_sha256"]),
+                        provider_snapshot_tree_hash,
+                        provider_snapshot_manifest_hash,
+                    )
+                    if provider_snapshot_bundle
+                    else ()
+                ),
                 catalog_root,
                 str(catalog_result["provisioned_sources_hash"]),
                 str(catalog_result["private_registry_rows_hash"]),
@@ -727,6 +842,20 @@ class AttestedPrivateModelRunnerV2:
             "input_hash": sha256_json(dict(input_doc)),
             "provider_evidence_cache_hash": cache_hash,
             "provider_evidence_cache_ref": provider_evidence_cache_ref,
+            "provider_evidence_mode": provider_evidence_mode,
+            "provider_snapshot_archive_hash": (
+                str(provider_snapshot_bundle.get("archive_sha256") or "")
+                if provider_snapshot_bundle
+                else sha256_json({})
+            ),
+            "provider_snapshot_tree_hash": (
+                provider_snapshot_tree_hash or sha256_json({})
+            ),
+            "provider_snapshot_manifest_hash": (
+                provider_snapshot_manifest_hash or sha256_json({})
+            ),
+            "provider_cost_cap_microusd": int(provider_cost_cap_microusd),
+            "provider_call_cap": int(provider_call_cap),
             "provider_runtime_catalog_hash": runtime_catalog["catalog_hash"],
         }
         if any(result.get(name) != value for name, value in expected.items()):
@@ -740,6 +869,7 @@ class AttestedPrivateModelRunnerV2:
             raise AttestedPrivateModelRunnerV2Error(
                 "measured model trace commitment differs"
             )
+        cost_summary = summarize_provider_cost_trace_entries(trace_entries)
         if result.get("output_hash") != sha256_json(result.get("output")):
             raise AttestedPrivateModelRunnerV2Error(
                 "measured model output commitment differs"
@@ -776,10 +906,22 @@ class AttestedPrivateModelRunnerV2:
                 cache_ref=provider_evidence_cache_ref,
                 cache_hash=generated_cache_hash,
             )
-            _write_provider_evidence_cache(
-                cache_ref=provider_evidence_cache_ref,
-                cache_document=generated_cache,
-            )
+            if publish_provider_evidence_cache:
+                _write_provider_evidence_cache(
+                    cache_ref=provider_evidence_cache_ref,
+                    cache_document=generated_cache,
+                )
+            with self._shared_state["lock"]:
+                self._shared_state.setdefault("generated_caches", {})[
+                    provider_evidence_cache_ref
+                ] = dict(generated_cache)
+                self._shared_state.setdefault("evidence_summaries", {})[
+                    provider_evidence_cache_ref
+                ] = {
+                    "cache_hash": generated_cache_hash,
+                    "trace_entries_hash": str(result.get("trace_entries_hash") or ""),
+                    "cost_summary": dict(cost_summary),
+                }
         with self._shared_state["lock"]:
             receipt_hash = str(receipt.get("receipt_hash") or "")
             receipts = self._shared_state["receipts"]

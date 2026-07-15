@@ -20,6 +20,8 @@ def _config():
 async def test_attested_allocation_wraps_unchanged_bundle(monkeypatch):
     expected_bundle = {"bundle_type": "research_lab_live_allocation_bundle", "epoch": 7}
     receipt = {"receipt_hash": "sha256:" + "1" * 64}
+    graph = {"root_receipt_hash": receipt["receipt_hash"], "receipts": [receipt]}
+    persistence = {"root_receipt_hash": receipt["receipt_hash"]}
 
     async def _build(**kwargs):
         assert kwargs["persist_snapshot"] is False
@@ -27,32 +29,40 @@ async def test_attested_allocation_wraps_unchanged_bundle(monkeypatch):
             {
                 "status": "matched",
                 "receipt": receipt,
-                "parent_receipts": [],
+                "receipt_graph": graph,
                 "lineage_bindings": [],
                 "lineage_complete": True,
-                "pcr0": "a" * 96,
-                "persistence_status": "persisted",
+                "persistence": persistence,
             }
         )
         return expected_bundle
 
+    def _handoff(**kwargs):
+        assert kwargs == {
+            "bundle": expected_bundle,
+            "receipt_graph": graph,
+            "lineage_bindings": [],
+            "lineage_complete": True,
+            "persistence": persistence,
+        }
+        return {"schema_version": "leadpoet.attested_allocation_handoff.v2"}
+
     monkeypatch.setattr(api.ResearchLabGatewayConfig, "from_env", _config)
     monkeypatch.setattr(api, "build_research_lab_allocation_bundle", _build)
+    monkeypatch.setattr(
+        "leadpoet_canonical.allocation_handoff_v2.build_allocation_handoff_v2",
+        _handoff,
+    )
 
     result = await api.get_research_lab_attested_allocation(7)
 
-    assert result["bundle"] is expected_bundle
-    assert result["receipt"] is receipt
-    assert result["parent_receipts"] == []
-    assert result["lineage_bindings"] == []
-    assert result["lineage_complete"] is True
-    assert result["schema_version"] == "leadpoet.attested_allocation_bundle.v2"
-    assert result["gateway_pcr0"] == "a" * 96
-    assert result["persistence_status"] == "persisted"
+    assert result == {
+        "schema_version": "leadpoet.attested_allocation_handoff.v2"
+    }
 
 
 @pytest.mark.asyncio
-async def test_attested_allocation_is_unavailable_when_shadow_did_not_match(monkeypatch):
+async def test_attested_allocation_is_unavailable_when_v2_authority_did_not_match(monkeypatch):
     async def _build(**kwargs):
         kwargs["attestation_out"].update({"status": "shadow_mismatch"})
         return {"epoch": 8}

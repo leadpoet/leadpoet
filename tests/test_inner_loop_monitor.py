@@ -1,4 +1,4 @@
-"""Failure isolation tests for the read-only inner-loop monitor."""
+"""Failure isolation tests for the read-only Git-tree monitor."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ def test_monitor_reports_one_unavailable_source_without_losing_other_data(
     monkeypatch,
 ):
     async def select_all(table, **_kwargs):
-        if table == "research_lab_inner_loop_activation_events":
+        if table == "research_lab_autoresearch_tree_events":
             raise RuntimeError("relation does not exist")
         if table == "research_lab_results_ledger":
             return [
@@ -30,8 +30,8 @@ def test_monitor_reports_one_unavailable_source_without_losing_other_data(
     monkeypatch.delenv("RESEARCH_LAB_DEV_SNAPSHOT_URI", raising=False)
     result = asyncio.run(monitor._collect(14))
 
-    assert "activation_events" in result["data_source_errors"]
-    assert "monitor_data_source_error:activation_events" in result["alerts"]
+    assert "tree_events" in result["data_source_errors"]
+    assert "monitor_data_source_error:tree_events" in result["alerts"]
     assert result["ledger_yield"]["status_counts"] == {"keep": 1}
     assert result["ledger_yield"]["kept_delta_sum"] == 0.5
     assert result["ledger_yield"]["total_cost_usd"] == 2.0

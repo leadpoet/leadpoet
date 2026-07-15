@@ -30,6 +30,8 @@ RESEARCH_LAB_TEE_PROTOCOL="${RESEARCH_LAB_TEE_PROTOCOL:-}"
 GATEWAY_V2_CONFIG_DIR="${GATEWAY_V2_CONFIG_DIR:-/home/ec2-user/.config/leadpoet/v2}"
 GATEWAY_V2_RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-manifest.json}"
 GATEWAY_V2_ARTIFACT_POLICY="${GATEWAY_V2_ARTIFACT_POLICY:-$GATEWAY_V2_CONFIG_DIR/encrypted-artifact-policy.json}"
+GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST="${GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST:-$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2.json}"
+GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT="${GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT:-$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2}"
 export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
 export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:-$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT/validator-runtime}"
 GATEWAY_DEPLOY_STAGE="${GATEWAY_DEPLOY_STAGE:-bootstrap}"
@@ -99,6 +101,7 @@ enforce_deployment_environment() {
   export GATEWAY_TEE_EIF_ROOT
   export RESEARCH_LAB_TEE_PROTOCOL
   export GATEWAY_V2_CONFIG_DIR GATEWAY_V2_RELEASE_MANIFEST GATEWAY_V2_ARTIFACT_POLICY
+  export GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT
   export GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"
   export PYTHONPATH="$LEADPOET_REPO_ROOT"
   export GITHUB_SHA="$GATEWAY_DEPLOY_SHA"
@@ -542,6 +545,8 @@ if [ "$RESEARCH_LAB_TEE_PROTOCOL" = "v2" ]; then
       --artifact-policy "$GATEWAY_V2_ARTIFACT_POLICY" \
       --config-dir "$GATEWAY_V2_CONFIG_DIR" \
       --parent-env-file "$ENV_CLONE" \
+      --acceptance-corpus-manifest "$GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST" \
+      --acceptance-corpus-root "$GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT" \
       --topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}" \
       "${V2_PREFLIGHT_CREDENTIAL_ARGS[@]}"; then
     rm -rf "$GATEWAY_PREFLIGHT_TREE"
@@ -996,6 +1001,11 @@ if ! timeout 15 curl -fsS http://localhost:8000/health >/dev/null; then
   tail -120 "$GATEWAY_LOG_FILE"
   exit 1
 fi
+if ! timeout 60 curl -fsS http://localhost:8000/health/v2-authority >/dev/null; then
+  tail -160 "$GATEWAY_LOG_FILE"
+  echo "ERROR: authoritative V2 enclave/worker readiness failed" >&2
+  exit 1
+fi
 
 BUILD_INFO_RESPONSE="$(timeout 15 curl -fsS http://localhost:8000/build-info)"
 python3 - "$GATEWAY_DEPLOY_SHA" "$BUILD_INFO_RESPONSE" <<'VERIFY_BUILD_INFO'
@@ -1010,8 +1020,8 @@ if actual != expected:
 print(f"verified gateway /build-info commit: {actual}")
 VERIFY_BUILD_INFO
 
-curl -fsS http://localhost:8000/research-lab/status || true
-curl -fsS http://localhost:8000/attest || true
+timeout 30 curl -fsS http://localhost:8000/research-lab/status >/dev/null
+timeout 30 curl -fsS http://localhost:8000/attest >/dev/null
 
 GATEWAY_DEPLOY_STAGE="host_restart_script_install"
 export GATEWAY_DEPLOY_STAGE

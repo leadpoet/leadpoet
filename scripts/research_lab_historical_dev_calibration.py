@@ -172,9 +172,9 @@ async def build_report(
         DockerReplayDevEvaluator,
         snapshot_readiness,
     )
-    from gateway.research_lab.inner_loop_activation import (
-        HISTORICAL_PAIR_GATE,
-        SPEARMAN_GATE,
+    from gateway.research_lab.calibration_metrics import (
+        MIN_HISTORICAL_PAIR_COUNT,
+        MIN_SPEARMAN_RHO,
         spearman_correlation,
         top_quartile_lift,
     )
@@ -238,14 +238,14 @@ async def build_report(
         "dev_set_hashes": set_hashes,
         "spearman_rho": rho,
         "top_quartile_realized_lift": lift,
-        "activation_gate": {
-            "minimum_pair_count": HISTORICAL_PAIR_GATE,
-            "minimum_spearman_rho": SPEARMAN_GATE,
+        "calibration_gate": {
+            "minimum_pair_count": MIN_HISTORICAL_PAIR_COUNT,
+            "minimum_spearman_rho": MIN_SPEARMAN_RHO,
             "requires_positive_top_quartile_lift": True,
             "passed": bool(
-                len(pairs) >= HISTORICAL_PAIR_GATE
+                len(pairs) >= MIN_HISTORICAL_PAIR_COUNT
                 and rho is not None
-                and rho >= SPEARMAN_GATE
+                and rho >= MIN_SPEARMAN_RHO
                 and lift is not None
                 and lift > 0.0
                 and len(snapshot_hashes) == 1

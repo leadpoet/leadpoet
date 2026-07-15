@@ -69,7 +69,9 @@ def _release(commit: str = COMMIT):
                         **deterministic,
                     }
                 )
-    return build_release_manifest(evidence)
+    return build_release_manifest(
+        evidence, acceptance_signer_pubkey_hash="sha256:" + "f" * 64
+    )
 
 
 def _credential_envelopes(tmp_path: Path) -> list[Path]:
@@ -103,6 +105,13 @@ def _verify(tmp_path: Path, monkeypatch, **overrides):
             "profile_count": 35,
         },
     )
+    monkeypatch.setattr(
+        preflight,
+        "load_and_validate_acceptance_corpus_v2",
+        lambda *_args, **_kwargs: {
+            "manifest_hash": "sha256:" + "e" * 64,
+        },
+    )
     credential_envelopes = overrides.pop(
         "credential_envelope_paths",
         None,
@@ -119,6 +128,8 @@ def _verify(tmp_path: Path, monkeypatch, **overrides):
         "parent_vcpus": 32,
         "parent_memory_mib": 250000,
         "parent_environment": {},
+        "acceptance_corpus_manifest_path": tmp_path / "acceptance.json",
+        "acceptance_corpus_root": tmp_path / "acceptance",
     }
     values.update(overrides)
     return preflight.verify_gateway_restart_preflight_v2(**values)
@@ -136,6 +147,7 @@ def test_full_restart_preflight_accepts_only_complete_approved_release(
     assert result["boot_credential_slot_count"] == 7
     assert result["parent_plaintext_provider_slot_count"] == 0
     assert result["worker_proxy_profile_count"] == 35
+    assert result["acceptance_corpus_manifest_hash"] == "sha256:" + "e" * 64
 
 
 def test_full_restart_preflight_rejects_current_undersized_gateway(
@@ -203,6 +215,23 @@ def test_component_preflight_keeps_release_and_secret_gates_without_resize(
     assert result["status"] == "ready"
     assert result["role_count"] == 1
     assert result["worker_proxy_profile_count"] == 0
+    assert result["acceptance_corpus_manifest_hash"] == "component_only"
+
+
+def test_full_restart_preflight_rejects_missing_acceptance_corpus(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    with pytest.raises(
+        preflight.GatewayRestartPreflightV2Error,
+        match="requires the signed acceptance corpus",
+    ):
+        _verify(
+            tmp_path,
+            monkeypatch,
+            acceptance_corpus_manifest_path=None,
+            acceptance_corpus_root=None,
+        )
 
 
 def test_restart_preflight_rejects_protected_provider_key_in_parent_env(

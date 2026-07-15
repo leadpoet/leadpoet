@@ -58,15 +58,15 @@ def main() -> int:
             },
         ),
         "engine": (
-            ROOT / "gateway" / "research_lab" / "loop_engine.py",
+            ROOT / "gateway" / "research_lab" / "code_loop_engine.py",
             {
                 "checkpoint_saved",
-                "loop_paused",
                 "loop_resumed",
                 "resume_state",
                 "should_pause",
-                "pause_after_minimum_runtime",
-                "_selected_candidates_from_checkpoint",
+                "maintenance_pause_requested",
+                "_restore_selected_from_resume",
+                "git_tree_checkpoint",
             },
         ),
         "admin": (

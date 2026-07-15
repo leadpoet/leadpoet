@@ -232,7 +232,8 @@ class TestParentImagePrepull:
         build_fn = next(
             node
             for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef) and node.name == "build"
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_build_under_deadline"
         )
         call_linenos: dict[str, int] = {}
         for node in ast.walk(build_fn):

@@ -10,7 +10,9 @@ from gateway.tee.scoring_executor import (
     execute_scoring_operation,
 )
 from gateway.tee.scoring_executor_v2 import (
+    DEV_HYBRID_REQUEST_SCHEMA_VERSION,
     DEV_REPLAY_REQUEST_SCHEMA_VERSION,
+    OP_DEV_HYBRID_V2,
     OP_DEV_REPLAY_V2,
     OP_PROVIDER_PREFLIGHT_V2,
     OP_RUN_MODEL_SANDBOX_V2,
@@ -33,6 +35,11 @@ from leadpoet_canonical.attested_v2 import (
 )
 from research_lab.eval import build_local_private_artifact_manifest
 from research_lab.eval.dev_eval import compute_dev_set_hash, evaluate_dev
+from research_lab.eval.private_runtime import canonicalize_private_model_icp
+from research_lab.eval.provider_evidence_cache import (
+    EVIDENCE_CACHE_SCHEMA_VERSION,
+    icp_evidence_cache_key,
+)
 from research_lab.eval.snapshot_store import MODE_RECORD, MODE_REPLAY, ProviderSnapshotStore
 
 
@@ -389,6 +396,9 @@ async def test_v2_adapter_routes_model_jobs_through_measured_sandbox():
         "runtime_config_hash": "sha256:" + "4" * 64,
         "input_hash": "sha256:" + "5" * 64,
         "provider_evidence_cache_hash": "sha256:" + "6" * 64,
+        "provider_snapshot_archive_hash": sha256_json({}),
+        "provider_snapshot_tree_hash": sha256_json({}),
+        "provider_snapshot_manifest_hash": sha256_json({}),
         "provider_runtime_catalog_hash": runtime_catalog["catalog_hash"],
         "generated_provider_evidence_cache_hash": "sha256:" + "7" * 64,
         "trace_entries_hash": "sha256:" + "8" * 64,
@@ -421,7 +431,13 @@ async def test_v2_adapter_routes_model_jobs_through_measured_sandbox():
                 "environment": {},
                 "provider_evidence_cache": {},
                 "provider_evidence_cache_ref": "",
+                "provider_evidence_mode": "live",
+                "provider_snapshot_bundle": {},
+                "provider_snapshot_tree_hash": "",
+                "provider_snapshot_manifest_hash": "",
                 "provider_cost_scope": HASH,
+                "provider_cost_cap_microusd": 0,
+                "provider_call_cap": 0,
                 "provider_runtime_catalog": runtime_catalog,
                 "provider_catalog_evidence": catalog_evidence,
             },
@@ -435,7 +451,13 @@ async def test_v2_adapter_routes_model_jobs_through_measured_sandbox():
         "environment": {},
         "provider_evidence_cache": {},
         "provider_evidence_cache_ref": "",
+        "provider_evidence_mode": "live",
+        "provider_snapshot_bundle": {},
+        "provider_snapshot_tree_hash": "",
+        "provider_snapshot_manifest_hash": "",
         "provider_cost_scope": HASH,
+        "provider_cost_cap_microusd": 0,
+        "provider_call_cap": 0,
         "provider_runtime_catalog": runtime_catalog,
         "provider_catalog_evidence": catalog_evidence,
     }
@@ -475,6 +497,9 @@ async def test_v2_model_cache_requires_exact_tape_ancestry():
                 "runtime_config_hash": HASH,
                 "input_hash": HASH,
                 "provider_evidence_cache_hash": cache_hash,
+                "provider_snapshot_archive_hash": sha256_json({}),
+                "provider_snapshot_tree_hash": sha256_json({}),
+                "provider_snapshot_manifest_hash": sha256_json({}),
                 "provider_runtime_catalog_hash": runtime_catalog["catalog_hash"],
                 "generated_provider_evidence_cache_hash": sha256_json({}),
                 "trace_entries_hash": HASH,
@@ -500,7 +525,13 @@ async def test_v2_model_cache_requires_exact_tape_ancestry():
         "environment": {},
         "provider_evidence_cache": cache_doc,
         "provider_evidence_cache_ref": cache_ref,
+        "provider_evidence_mode": "cache_live",
+        "provider_snapshot_bundle": {},
+        "provider_snapshot_tree_hash": "",
+        "provider_snapshot_manifest_hash": "",
         "provider_cost_scope": HASH,
+        "provider_cost_cap_microusd": 0,
+        "provider_call_cap": 0,
         "provider_runtime_catalog": runtime_catalog,
         "provider_catalog_evidence": catalog_evidence,
     }
@@ -539,7 +570,7 @@ async def test_v2_model_cache_requires_exact_tape_ancestry():
 
 
 @pytest.mark.asyncio
-async def test_v2_dev_replay_is_byte_identical_to_existing_dev_calculation(tmp_path):
+async def test_v2_dev_replay_preserves_score_and_adds_tree_commitments(tmp_path):
     source = tmp_path / "candidate-source"
     source.mkdir()
     (source / "research_lab_adapter.py").write_text(
@@ -611,9 +642,14 @@ async def test_v2_dev_replay_is_byte_identical_to_existing_dev_calculation(tmp_p
     class _Sandbox:
         def __init__(self):
             self.calls = []
+            self.hybrid_calls = []
 
         def execute_dev_replay(self, **kwargs):
             self.calls.append(dict(kwargs))
+            return companies(kwargs["icp"])
+
+        def execute_dev_provider_replay(self, **kwargs):
+            self.hybrid_calls.append(dict(kwargs))
             return companies(kwargs["icp"])
 
     replay_store = ProviderSnapshotStore(str(snapshot_root), mode=MODE_REPLAY)
@@ -643,6 +679,7 @@ async def test_v2_dev_replay_is_byte_identical_to_existing_dev_calculation(tmp_p
             }
         ),
     )
+    cohort_hash = "sha256:" + "d" * 64
     payload = {
         "schema_version": DEV_REPLAY_REQUEST_SCHEMA_VERSION,
         "artifact": artifact,
@@ -655,9 +692,49 @@ async def test_v2_dev_replay_is_byte_identical_to_existing_dev_calculation(tmp_p
         "environment": {},
         "credential_env_names": [],
         "run_label": "candidate-node-1",
+        "cohort_hash": cohort_hash,
         "miss_policy": "strict",
         "per_icp_timeout_seconds": 30,
         "total_timeout_seconds": 60,
+    }
+    caches = {}
+    cache_graphs = []
+    for item in dev_items:
+        canonical_icp = canonicalize_private_model_icp(item["icp"])
+        cache_ref = icp_evidence_cache_key(canonical_icp)
+        cache = {
+            "schema_version": EVIDENCE_CACHE_SCHEMA_VERSION,
+            "icp_ref": cache_ref,
+            "entries": {},
+        }
+        cache_hash = sha256_json(cache)
+        receipt_hash = sha256_json({"cache_ref": cache_ref})
+        caches[cache_ref] = cache
+        cache_graphs.append(
+            {
+                "root_receipt_hash": receipt_hash,
+                "receipts": [
+                    {
+                        "receipt_hash": receipt_hash,
+                        "role": "gateway_scoring",
+                        "purpose": "research_lab.provider_evidence_tape.v2",
+                        "status": "succeeded",
+                        "input_root": provider_evidence_tape_input_root(
+                            cache_ref, cache_hash
+                        ),
+                        "output_root": cache_hash,
+                    }
+                ],
+            }
+        )
+    overlay_hash = sha256_json(caches)
+    hybrid_cohort_hash = "sha256:" + "e" * 64
+    hybrid_payload = {
+        **payload,
+        "schema_version": DEV_HYBRID_REQUEST_SCHEMA_VERSION,
+        "cohort_hash": hybrid_cohort_hash,
+        "provider_evidence_caches": caches,
+        "overlay_hash": overlay_hash,
     }
     try:
         measured = await executor(
@@ -669,10 +746,61 @@ async def test_v2_dev_replay_is_byte_identical_to_existing_dev_calculation(tmp_p
                 epoch_id=24000,
             ),
         )
+        hybrid_measured = await executor(
+            OP_DEV_HYBRID_V2,
+            hybrid_payload,
+            ExecutionContextV2(
+                job_id="dev-hybrid-job-1",
+                purpose="research_lab.candidate_hybrid_test.v2",
+                epoch_id=24000,
+                external_receipt_graphs=cache_graphs,
+            ),
+        )
     finally:
         executor.close()
 
-    assert canonical_json(measured.output) == canonical_json(expected.to_dict())
+    expected_output = {
+        **expected.to_dict(),
+        "evaluation_mode": "replay",
+        "overlay_hash": sha256_json({}),
+        "cohort_hash": cohort_hash,
+    }
+    expected_output["score_commitment"] = sha256_json(
+        {
+            "schema_version": "research_lab.git_tree_dev_score_commitment.v1",
+            "dev_score_version": expected.dev_score_version,
+            "dev_set_hash": expected.dev_set_hash,
+            "snapshot_manifest_hash": expected.snapshot_manifest_hash,
+            "miss_policy": expected.miss_policy,
+            "evaluation_mode": "replay",
+            "overlay_hash": sha256_json({}),
+            "cohort_hash": cohort_hash,
+        }
+    )
+    assert canonical_json(measured.output) == canonical_json(expected_output)
+    assert measured.output["aggregate_dev_score"] == expected.aggregate_dev_score
+    assert cohort_hash in measured.artifact_hashes
     assert len(sandbox.calls) == len(dev_items)
     assert all(call["timeout_seconds"] == 30 for call in sandbox.calls)
     assert all(call["miss_policy"] == "strict" for call in sandbox.calls)
+    assert hybrid_measured.output["aggregate_dev_score"] == (
+        expected.aggregate_dev_score
+    )
+    assert hybrid_measured.output["evaluation_mode"] == "hybrid"
+    assert hybrid_measured.output["overlay_hash"] == overlay_hash
+    assert hybrid_measured.output["cohort_hash"] == hybrid_cohort_hash
+    assert hybrid_measured.output["score_commitment"] == sha256_json(
+        {
+            "schema_version": "research_lab.git_tree_dev_score_commitment.v1",
+            "dev_score_version": expected.dev_score_version,
+            "dev_set_hash": expected.dev_set_hash,
+            "snapshot_manifest_hash": expected.snapshot_manifest_hash,
+            "miss_policy": expected.miss_policy,
+            "evaluation_mode": "hybrid",
+            "overlay_hash": overlay_hash,
+            "cohort_hash": hybrid_cohort_hash,
+        }
+    )
+    assert len(sandbox.hybrid_calls) == len(dev_items)
+    assert hybrid_cohort_hash in hybrid_measured.artifact_hashes
+    assert overlay_hash in hybrid_measured.artifact_hashes

@@ -93,6 +93,7 @@ def _files_mentioning_openrouter() -> set[str]:
         for line in result.stdout.splitlines()
         if (path := line.strip())
         and path.split("/", 1)[0] in roots
+        and (REPO_ROOT / path).is_file()
         and "openrouter.ai/api/v1"
         in (REPO_ROOT / path).read_text(encoding="utf-8")
     }

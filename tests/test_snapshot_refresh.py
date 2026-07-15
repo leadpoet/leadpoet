@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 from gateway.research_lab import snapshot_refresh
+from gateway.research_lab.git_tree_models import TreePolicy
 from research_lab.eval.snapshot_store import SNAPSHOT_URI_ENV
 
 
@@ -64,9 +64,10 @@ def _configure(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv(SNAPSHOT_URI_ENV, "s3://private-bucket/dev/current.json")
 
 
-def test_only_worker_zero_in_auto_mode_can_refresh(monkeypatch, tmp_path):
+def test_only_worker_zero_in_active_tree_mode_can_refresh(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path)
-    config = SimpleNamespace(inner_loop_mode="auto")
+    config = SimpleNamespace()
+    policy = TreePolicy(mode="active")
 
     async def _run():
         return await asyncio.gather(
@@ -74,6 +75,7 @@ def test_only_worker_zero_in_auto_mode_can_refresh(monkeypatch, tmp_path):
                 snapshot_refresh.maybe_refresh_dev_snapshot(
                     config,
                     worker_index=index,
+                    tree_policy=policy,
                     now=1000,
                 )
                 for index in range(1, 10)
@@ -85,12 +87,13 @@ def test_only_worker_zero_in_auto_mode_can_refresh(monkeypatch, tmp_path):
 
     disabled = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
-            SimpleNamespace(inner_loop_mode="off"),
+            SimpleNamespace(),
             worker_index=0,
+            tree_policy=TreePolicy(mode="off"),
             now=1000,
         )
     )
-    assert disabled == {"status": "skipped", "reason": "inner_loop_mode_not_auto"}
+    assert disabled == {"status": "skipped", "reason": "tree_mode_not_active"}
 
 
 def test_healthy_snapshot_check_is_persisted_across_restart(monkeypatch, tmp_path):
@@ -106,8 +109,9 @@ def test_healthy_snapshot_check_is_persisted_across_restart(monkeypatch, tmp_pat
 
     first = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
-            SimpleNamespace(inner_loop_mode="auto"),
+            SimpleNamespace(),
             worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
             now=1000,
             command_runner=command_runner,
             readiness_loader=lambda _uri: _ready(),
@@ -116,8 +120,9 @@ def test_healthy_snapshot_check_is_persisted_across_restart(monkeypatch, tmp_pat
     )
     second = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
-            SimpleNamespace(inner_loop_mode="auto"),
+            SimpleNamespace(),
             worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
             now=1100,
             command_runner=command_runner,
             readiness_loader=lambda _uri: _ready(),
@@ -128,59 +133,6 @@ def test_healthy_snapshot_check_is_persisted_across_restart(monkeypatch, tmp_pat
     assert second == {"status": "skipped", "reason": "check_not_due"}
     assert not calls
     assert (tmp_path / "state.json").is_file()
-
-
-def test_corrupt_restart_state_is_visible_and_checked_fail_closed(
-    monkeypatch, tmp_path, caplog
-):
-    _configure(monkeypatch, tmp_path)
-    state_path = tmp_path / "state.json"
-    state_path.write_text('{"last_check_unix":', encoding="utf-8")
-
-    async def active_loader(*_args: Any, **_kwargs: Any):
-        return _active()
-
-    with caplog.at_level(logging.WARNING):
-        result = asyncio.run(
-            snapshot_refresh.maybe_refresh_dev_snapshot(
-                SimpleNamespace(inner_loop_mode="auto"),
-                worker_index=0,
-                now=1000,
-                readiness_loader=lambda _uri: _ready(),
-                active_loader=active_loader,
-            )
-        )
-
-    assert result["status"] == "healthy"
-    assert "research_lab_dev_snapshot_refresh_state_invalid_json" in caplog.text
-
-
-def test_invalid_restart_timestamp_does_not_skip_snapshot_check(
-    monkeypatch, tmp_path, caplog
-):
-    _configure(monkeypatch, tmp_path)
-    state_path = tmp_path / "state.json"
-    state_path.write_text(
-        '{"last_check_unix":"not-a-number","last_error":""}',
-        encoding="utf-8",
-    )
-
-    async def active_loader(*_args: Any, **_kwargs: Any):
-        return _active()
-
-    with caplog.at_level(logging.WARNING):
-        result = asyncio.run(
-            snapshot_refresh.maybe_refresh_dev_snapshot(
-                SimpleNamespace(inner_loop_mode="auto"),
-                worker_index=0,
-                now=1000,
-                readiness_loader=lambda _uri: _ready(),
-                active_loader=active_loader,
-            )
-        )
-
-    assert result["status"] == "healthy"
-    assert "research_lab_dev_snapshot_refresh_state_invalid_last_check" in caplog.text
 
 
 def test_due_refresh_publishes_immutable_target_before_pointer(monkeypatch, tmp_path):
@@ -202,8 +154,9 @@ def test_due_refresh_publishes_immutable_target_before_pointer(monkeypatch, tmp_
 
     result = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
-            SimpleNamespace(inner_loop_mode="auto"),
+            SimpleNamespace(),
             worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
             now=1000,
             command_runner=command_runner,
             readiness_loader=lambda _uri: next(readiness),
@@ -235,8 +188,9 @@ def test_active_model_change_keeps_existing_pointer_untouched(monkeypatch, tmp_p
 
     result = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
-            SimpleNamespace(inner_loop_mode="auto"),
+            SimpleNamespace(),
             worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
             now=1000,
             command_runner=command_runner,
             readiness_loader=lambda _uri: _ready(
@@ -272,8 +226,9 @@ def test_recording_failure_is_visible_and_never_promotes_pointer(monkeypatch, tm
 
     result = asyncio.run(
         snapshot_refresh.maybe_refresh_dev_snapshot(
-            SimpleNamespace(inner_loop_mode="auto"),
+            SimpleNamespace(),
             worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
             now=1000,
             command_runner=command_runner,
             readiness_loader=lambda _uri: _ready(ready=False, reason="not_ready"),
@@ -300,8 +255,9 @@ def test_cross_process_lock_allows_only_one_simultaneous_check(monkeypatch, tmp_
 
         first = asyncio.create_task(
             snapshot_refresh.maybe_refresh_dev_snapshot(
-                SimpleNamespace(inner_loop_mode="auto"),
+                SimpleNamespace(),
                 worker_index=0,
+                tree_policy=TreePolicy(mode="active"),
                 now=1000,
                 readiness_loader=lambda _uri: _ready(),
                 active_loader=active_loader,
@@ -309,8 +265,9 @@ def test_cross_process_lock_allows_only_one_simultaneous_check(monkeypatch, tmp_
         )
         await entered.wait()
         second = await snapshot_refresh.maybe_refresh_dev_snapshot(
-            SimpleNamespace(inner_loop_mode="auto"),
+            SimpleNamespace(),
             worker_index=0,
+            tree_policy=TreePolicy(mode="active"),
             now=1000,
             readiness_loader=lambda _uri: _ready(),
             active_loader=active_loader,

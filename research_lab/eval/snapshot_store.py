@@ -59,6 +59,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib.parse import parse_qsl, urlsplit
 
@@ -511,10 +512,8 @@ class ProviderSnapshotStore:
         ``urllib.request.urlopen``, ``requests.Session.send``,
         ``httpx.Client.send`` and ``httpx.AsyncClient.send`` (the HTTP
         libraries best-effort, only when importable) — so an in-process
-        candidate runner needs no snapshot awareness. ``aiohttp`` replay is
-        not supported: its session request is patched to raise loudly rather
-        than leak live traffic. Patches are process-global while active; run
-        ICPs serially.
+        candidate runner needs no snapshot awareness. Patches are
+        process-global while active; run ICPs serially.
         """
         if self.mode != MODE_REPLAY:
             raise DevSnapshotStoreError("replay_installed requires a replay-mode store")
@@ -536,7 +535,7 @@ class ProviderSnapshotStore:
         try:
             self._install_requests_replay(restore)
             self._install_httpx_replay(restore)
-            self._install_aiohttp_guard(restore)
+            self._install_aiohttp_replay(restore)
             yield self
         finally:
             for undo in reversed(restore):
@@ -600,20 +599,31 @@ class ProviderSnapshotStore:
         httpx.AsyncClient.send = _replay_async_send
         restore.append(lambda: setattr(httpx.AsyncClient, "send", original_async_send))
 
-    def _install_aiohttp_guard(self, restore: list[Callable[[], None]]) -> None:
+    def _install_aiohttp_replay(self, restore: list[Callable[[], None]]) -> None:
         try:
             import aiohttp
         except (ImportError, ModuleNotFoundError):
             return
         original_request = aiohttp.ClientSession._request  # noqa: SLF001
 
-        async def _replay_unsupported(session, method, str_or_url, *args, **kwargs):  # noqa: ANN001
-            raise DevSnapshotStoreError(
-                "aiohttp replay is not supported in-process; "
-                f"refusing live request to {str_or_url}"
-            )
+        store = self
 
-        aiohttp.ClientSession._request = _replay_unsupported  # noqa: SLF001
+        async def _replay_request(session, method, str_or_url, *args, **kwargs):  # noqa: ANN001
+            body = kwargs.get("json")
+            if body is None:
+                body = kwargs.get("data")
+            doc = store.replay(
+                str(method or "GET"),
+                str(str_or_url),
+                params=kwargs.get("params"),
+                body=body,
+            )
+            response = _FakeAiohttpResponse(str(str_or_url), doc)
+            if kwargs.get("raise_for_status") is True:
+                response.raise_for_status()
+            return response
+
+        aiohttp.ClientSession._request = _replay_request  # noqa: SLF001
         restore.append(
             lambda: setattr(aiohttp.ClientSession, "_request", original_request)
         )
@@ -991,6 +1001,71 @@ class _FakeUrllibResponse:
         self.close()
 
 
+class _FakeAiohttpContent:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+        self._offset = 0
+
+    async def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            size = len(self._body) - self._offset
+        start = self._offset
+        self._offset = min(len(self._body), self._offset + max(0, int(size)))
+        return self._body[start : self._offset]
+
+
+class _FakeAiohttpResponse:
+    """Minimal aiohttp response over one replayed provider snapshot."""
+
+    def __init__(self, url: str, doc: Mapping[str, Any]) -> None:
+        self.status = int(doc.get("status") or 0)
+        self.headers = dict(doc.get("headers") or {})
+        self.url = url
+        self.reason = "replayed provider response"
+        self.history = ()
+        self.request_info = SimpleNamespace(real_url=url)
+        self._body = str(doc.get("body_text") or "").encode("utf-8")
+        self.content = _FakeAiohttpContent(self._body)
+
+    async def __aenter__(self) -> "_FakeAiohttpResponse":
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        self.release()
+        await self.wait_for_close()
+
+    async def read(self) -> bytes:
+        return self._body
+
+    async def text(self, encoding: str | None = None, errors: str = "strict") -> str:
+        return self._body.decode(encoding or "utf-8", errors=errors)
+
+    async def json(self, *args: Any, **kwargs: Any) -> Any:
+        return json.loads(self._body.decode(kwargs.get("encoding") or "utf-8"))
+
+    def raise_for_status(self) -> None:
+        if self.status < 400:
+            return
+        import aiohttp
+
+        raise aiohttp.ClientResponseError(
+            request_info=self.request_info,
+            history=(),
+            status=self.status,
+            message=self.reason,
+            headers=self.headers,
+        )
+
+    def release(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    async def wait_for_close(self) -> None:
+        return None
+
+
 def container_replay_env(
     snapshot_dir: str,
     *,
@@ -1148,7 +1223,7 @@ def _rl_dev_normalized_body(body):
     return body
 
 
-def _rl_dev_request_identity(method, url, body):
+def _rl_dev_request_identity(method, url, body, params=None):
     split = urlsplit(str(url or ""))
     host = split.netloc.lower().rsplit("@", 1)[-1]
     for default_port in (":80", ":443"):
@@ -1158,6 +1233,8 @@ def _rl_dev_request_identity(method, url, body):
     endpoint = host + path if path else host
     query = {}
     for name, value in parse_qsl(split.query, keep_blank_values=True):
+        query.setdefault(str(name), []).append(str(value))
+    for name, value in dict(params or {}).items():
         query.setdefault(str(name), []).append(str(value))
     significant = {
         "query": _rl_dev_strip_auth({name: sorted(values) for name, values in query.items()}),
@@ -1178,8 +1255,8 @@ class _RlDevSnapshotMiss(RuntimeError):
     pass
 
 
-def _rl_dev_lookup(method, url, body):
-    provider, request_key, storage_name = _rl_dev_request_identity(method, url, body)
+def _rl_dev_lookup(method, url, body, params=None):
+    provider, request_key, storage_name = _rl_dev_request_identity(method, url, body, params)
     path = _rl_dev_snapshot_path(storage_name)
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as handle:
@@ -1230,6 +1307,73 @@ class _RlDevFakeResponse(object):
 
     def __exit__(self, *exc_info):
         self.close()
+
+
+class _RlDevAiohttpContent(object):
+    def __init__(self, body):
+        self._body = body
+        self._offset = 0
+
+    async def read(self, size=-1):
+        if size is None or size < 0:
+            size = len(self._body) - self._offset
+        start = self._offset
+        self._offset = min(len(self._body), self._offset + max(0, int(size)))
+        return self._body[start:self._offset]
+
+
+class _RlDevRequestInfo(object):
+    def __init__(self, url):
+        self.real_url = url
+
+
+class _RlDevAiohttpResponse(object):
+    def __init__(self, url, doc):
+        self.status = int(doc.get("status") or 0)
+        self.headers = dict(doc.get("headers") or {})
+        self.url = url
+        self.reason = "replayed provider response"
+        self.history = ()
+        self.request_info = _RlDevRequestInfo(url)
+        self._body = str(doc.get("body_text") or "").encode("utf-8")
+        self.content = _RlDevAiohttpContent(self._body)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        self.release()
+        await self.wait_for_close()
+
+    async def read(self):
+        return self._body
+
+    async def text(self, encoding=None, errors="strict"):
+        return self._body.decode(encoding or "utf-8", errors=errors)
+
+    async def json(self, *args, **kwargs):
+        return json.loads(self._body.decode(kwargs.get("encoding") or "utf-8"))
+
+    def raise_for_status(self):
+        if self.status < 400:
+            return
+        import aiohttp
+        raise aiohttp.ClientResponseError(
+            request_info=self.request_info,
+            history=(),
+            status=self.status,
+            message=self.reason,
+            headers=self.headers,
+        )
+
+    def release(self):
+        return None
+
+    def close(self):
+        return None
+
+    async def wait_for_close(self):
+        return None
 """
 
 
@@ -1302,12 +1446,22 @@ def _rl_dev_install_replay():
     try:
         import aiohttp as _rl_aiohttp
 
-        async def _rl_dev_replay_aiohttp_unsupported(session, method, str_or_url, *args, **kwargs):
-            raise RuntimeError(
-                "aiohttp replay is not supported; refusing live request to " + str(str_or_url)
+        async def _rl_dev_replay_aiohttp_request(session, method, str_or_url, *args, **kwargs):
+            body = kwargs.get("json")
+            if body is None:
+                body = kwargs.get("data")
+            doc = _rl_dev_lookup(
+                str(method or "GET"),
+                str(str_or_url),
+                body,
+                kwargs.get("params"),
             )
+            response = _RlDevAiohttpResponse(str(str_or_url), doc)
+            if kwargs.get("raise_for_status") is True:
+                response.raise_for_status()
+            return response
 
-        _rl_aiohttp.ClientSession._request = _rl_dev_replay_aiohttp_unsupported
+        _rl_aiohttp.ClientSession._request = _rl_dev_replay_aiohttp_request
     except (ImportError, ModuleNotFoundError):
         pass
     except Exception as exc:
@@ -1342,10 +1496,12 @@ def _rl_dev_record_failure(reason, request_key=""):
         )
 
 
-def _rl_dev_record(method, url, body, status, headers, body_text):
+def _rl_dev_record(method, url, body, status, headers, body_text, params=None):
     request_key = ""
     try:
-        provider, request_key, storage_name = _rl_dev_request_identity(method, url, body)
+        provider, request_key, storage_name = _rl_dev_request_identity(
+            method, url, body, params
+        )
         content_type = ""
         for key, value in dict(headers or {}).items():
             if str(key).lower() == "content-type":
@@ -1495,10 +1651,11 @@ def _rl_dev_install_record():
             _rl_dev_record(
                 str(method or "GET"),
                 str(str_or_url or ""),
-                kwargs.get("data") if kwargs.get("data") is not None else kwargs.get("json"),
+                kwargs.get("json") if kwargs.get("json") is not None else kwargs.get("data"),
                 response.status,
                 dict(response.headers or {}),
                 body.decode(charset, "replace"),
+                kwargs.get("params"),
             )
             return response
 
@@ -1518,7 +1675,7 @@ def dev_replay_bootstrap() -> str:
     Prepend to the adapter bootstrap; activates only when
     ``RESEARCH_LAB_DEV_SNAPSHOT_DIR`` is set (see :func:`container_replay_env`).
     Serves urllib/requests/httpx traffic from the mounted snapshot directory
-    and never opens a live connection; aiohttp raises loudly (unsupported).
+    and never opens a live connection, including aiohttp.
     """
     return _BOOTSTRAP_KEY_HELPERS + _REPLAY_BOOTSTRAP_BODY
 
@@ -1530,6 +1687,6 @@ def dev_record_bootstrap() -> str:
     pointing at a writable directory: live urllib/requests/httpx responses
     pass through unchanged while a snapshot record is persisted per request
     key (recording is best-effort; a persistence failure never breaks the
-    live call). aiohttp traffic is not recorded (documented follow-up).
+    live call), including aiohttp traffic.
     """
     return _BOOTSTRAP_KEY_HELPERS + _RECORD_BOOTSTRAP_BODY

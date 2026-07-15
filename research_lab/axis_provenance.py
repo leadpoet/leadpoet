@@ -80,7 +80,7 @@ STAGE_PROVENANCE: dict[str, dict[str, Any]] = {
         "teacher_model_flag": False,
         "drives_control_flow": True,
     },
-    # -- legacy prompt-loop stages (gateway/research_lab/loop_engine.py)
+    # -- historical prompt-loop rows (the retired runtime no longer emits these)
     "loop_iteration": {
         "call_emitter": CALL_EMITTER_CODE,
         "purpose": "draft_prompt_iteration",

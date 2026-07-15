@@ -525,11 +525,23 @@ async def _attested_model_parent_graphs(
     model_kind: str,
     artifact: PrivateModelArtifactManifest,
     candidate_id: str = "",
+    epoch_id: int = 0,
 ) -> tuple[dict[str, Any], ...]:
     if legacy_v1_enabled():
         return ()
     if model_kind == "private":
-        return ()
+        from gateway.research_lab.active_model_authority_v2 import (
+            attest_active_private_model_v2,
+        )
+
+        authority = await attest_active_private_model_v2(
+            artifact=artifact,
+            epoch_id=int(epoch_id),
+        )
+        graph = authority.get("receipt_graph")
+        if not isinstance(graph, Mapping):
+            raise RuntimeError("active private model V2 receipt graph is missing")
+        return (dict(graph),)
     if model_kind != "candidate" or not candidate_id:
         raise RuntimeError("candidate model V2 lineage identity is missing")
     from gateway.research_lab.attested_v2_store import (
@@ -3353,6 +3365,7 @@ class ResearchLabGatewayScoringWorker:
                 model_kind="candidate",
                 artifact=candidate_artifact,
                 candidate_id=candidate_id,
+                epoch_id=evaluation_epoch,
             ),
         )
         run_context = self._candidate_run_context(
@@ -3754,6 +3767,7 @@ class ResearchLabGatewayScoringWorker:
                     icp_hash=str(item.get("icp_hash") or ""),
                     runner_role="candidate",
                     candidate_id=candidate_id,
+                    epoch_id=evaluation_epoch,
                     rolling_window_hash=str(job.get("window_hash") or ""),
                     scoring_id=str(execution_context.get("scoring_id") or ""),
                     scoring_run_id=str(execution_context.get("scoring_run_id") or ""),
@@ -7110,6 +7124,7 @@ class ResearchLabGatewayScoringWorker:
                 model_kind=confirmation_model_kind,
                 artifact=artifact,
                 candidate_id=confirmation_candidate_id,
+                epoch_id=int(confirmation_scope.get("evaluation_epoch") or 0),
             ),
         )
         retry_runner = AttestedPrivateModelRunnerV2(
@@ -7244,6 +7259,7 @@ class ResearchLabGatewayScoringWorker:
             }
             await create_candidate_promotion_event(
                 candidate_id=candidate_id,
+                epoch_id=int(evaluation_epoch),
                 event_type="unsupported_candidate_kind",
                 promotion_status="rejected",
                 active_parent_artifact_hash=active_parent,
@@ -8284,6 +8300,11 @@ class ResearchLabGatewayScoringWorker:
             model_kind="private",
             worker_index=self.config.scoring_worker_index,
             epoch_id=evaluation_epoch,
+            parent_graphs=await _attested_model_parent_graphs(
+                model_kind="private",
+                artifact=artifact,
+                epoch_id=evaluation_epoch,
+            ),
         )
         scorer = QualificationStyleCompanyScorer(
             attested_epoch_id=evaluation_epoch,
@@ -8582,6 +8603,7 @@ class ResearchLabGatewayScoringWorker:
                     model_kind="private",
                     worker_index=self.config.scoring_worker_index,
                     epoch_id=evaluation_epoch,
+                    parent_graphs=runner.parent_graphs,
                 )
                 batch_summaries, retry_stats = await self._run_baseline_batch(
                     runner=runner,

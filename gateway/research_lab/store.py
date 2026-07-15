@@ -713,6 +713,7 @@ async def create_candidate_artifact(request: Any) -> tuple[dict[str, Any], dict[
         filters=(("candidate_id", candidate_id),),
     )
     if existing:
+        await _record_candidate_tree_handoff(request=request, candidate_id=candidate_id)
         event = await _existing_or_recovered_event(
             "research_lab_candidate_evaluation_events",
             "candidate_id",
@@ -759,8 +760,20 @@ async def create_candidate_artifact(request: Any) -> tuple[dict[str, Any], dict[
             "candidate_build_doc": dict(getattr(request, "candidate_build_doc", None) or {}),
         }
     )
+    tree_id = str(getattr(request, "git_tree_id", "") or "")
+    if tree_id:
+        row.update(
+            {
+                "git_tree_id": tree_id,
+                "git_tree_node_id": str(request.git_tree_node_id),
+                "git_tree_root_commit": str(request.git_tree_root_commit),
+                "git_tree_node_commit": str(request.git_tree_node_commit),
+                "git_tree_lineage_hash": str(request.git_tree_lineage_hash),
+            }
+        )
     row["anchored_hash"] = canonical_hash(row)
     inserted = await insert_row("research_lab_candidate_artifacts", row)
+    await _record_candidate_tree_handoff(request=request, candidate_id=candidate_id)
     event = await create_candidate_evaluation_event(
         candidate_id=candidate_id,
         run_id=str(request.run_id),
@@ -774,6 +787,122 @@ async def create_candidate_artifact(request: Any) -> tuple[dict[str, Any], dict[
         },
     )
     return inserted, event
+
+
+async def _record_candidate_tree_handoff(
+    *, request: Any, candidate_id: str
+) -> None:
+    tree_id = str(getattr(request, "git_tree_id", "") or "")
+    if not tree_id:
+        return
+    await record_candidate_tree_handoff(
+        tree_id=tree_id,
+        run_id=str(request.run_id),
+        candidate_id=str(candidate_id),
+        node_id=str(request.git_tree_node_id),
+        root_git_commit=str(request.git_tree_root_commit),
+        node_git_commit=str(request.git_tree_node_commit),
+        lineage_hash=str(request.git_tree_lineage_hash),
+    )
+
+
+async def record_candidate_tree_handoff(
+    *,
+    tree_id: str,
+    run_id: str,
+    candidate_id: str,
+    node_id: str,
+    root_git_commit: str,
+    node_git_commit: str,
+    lineage_hash: str,
+) -> None:
+    """Atomically bind one selected tree node to its scoring candidate."""
+
+    handoff_doc = {
+        "schema_version": "research_lab.git_tree_candidate_handoff.v1",
+        "tree_id": tree_id,
+        "run_id": str(run_id),
+        "candidate_id": str(candidate_id),
+        "node_id": str(node_id),
+        "root_git_commit": str(root_git_commit),
+        "node_git_commit": str(node_git_commit),
+        "lineage_hash": str(lineage_hash),
+    }
+    handoff_hash = sha256_json(handoff_doc)
+    completion_doc = {
+        "schema_version": "research_lab.git_tree_completed.v1",
+        "tree_id": tree_id,
+        "run_id": str(run_id),
+        "candidate_id": str(candidate_id),
+        "node_id": str(node_id),
+        "handoff_hash": handoff_hash,
+        "paid_finalist_count": 1,
+    }
+    last_error: BaseException | None = None
+    for _attempt in range(5):
+        current = await select_one(
+            "research_lab_autoresearch_tree_current",
+            columns=(
+                "tree_id,current_event_type,current_event_doc,current_event_hash"
+            ),
+            filters=(("tree_id", tree_id),),
+        )
+        if not current:
+            raise RuntimeError("Git-tree candidate handoff tree is missing")
+        current_type = str(current.get("current_event_type") or "")
+        if current_type == "tree_completed":
+            if dict(current.get("current_event_doc") or {}) != completion_doc:
+                raise RuntimeError("Git-tree candidate completion differs")
+            return
+        if current_type in {"tree_failed", "tree_cancelled_root_changed"}:
+            raise RuntimeError("Git-tree candidate handoff targets a terminal tree")
+        previous_event_hash = str(
+            current.get("current_event_hash") or "sha256:" + "0" * 64
+        )
+        completed_event_hash = sha256_json(
+            {
+                "schema_version": "research_lab.git_tree_event.v1",
+                "tree_id": tree_id,
+                "event_type": "tree_completed",
+                "node_id": str(node_id),
+                "previous_event_hash": previous_event_hash,
+                "event_doc": completion_doc,
+            }
+        )
+        try:
+            data = await call_rpc(
+                "record_research_lab_autoresearch_tree_handoff",
+                {
+                    "requested_tree_id": tree_id,
+                    "requested_run_id": str(run_id),
+                    "requested_candidate_id": str(candidate_id),
+                    "requested_node_id": str(node_id),
+                    "requested_root_git_commit": str(root_git_commit),
+                    "requested_node_git_commit": str(node_git_commit),
+                    "requested_lineage_hash": str(lineage_hash),
+                    "requested_handoff_doc": handoff_doc,
+                    "requested_handoff_hash": handoff_hash,
+                    "requested_previous_event_hash": previous_event_hash,
+                    "requested_completed_event_hash": completed_event_hash,
+                },
+            )
+        except Exception as exc:
+            last_error = exc
+            message = str(exc).lower()
+            if "40001" not in message and "event_conflict" not in message:
+                raise
+            continue
+        if isinstance(data, list):
+            data = data[0] if data else None
+        if (
+            not isinstance(data, Mapping)
+            or not isinstance(data.get("handoff"), Mapping)
+            or not isinstance(data.get("completion_event"), Mapping)
+        ):
+            raise RuntimeError("Git-tree candidate handoff returned no row")
+        return
+    assert last_error is not None
+    raise last_error
 
 
 async def create_auto_research_loop_event(

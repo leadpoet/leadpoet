@@ -1,8 +1,6 @@
-import importlib
 import base64
+import importlib
 import json
-import os
-import sys
 from pathlib import Path
 
 
@@ -31,55 +29,70 @@ def test_v1_scoring_rpc_is_not_authorized_for_v2_role(monkeypatch):
     }
 
 
-def test_scoring_attestation_binds_exact_job_purpose_and_inputs(monkeypatch):
+def test_v1_scoring_runtime_service_is_absent(monkeypatch):
     service = _tee_service(monkeypatch)
-    captured = {}
-
-    def fake_attestation(*, user_data_fields):
-        captured.update(user_data_fields)
-        return {"attestation_document": b"signed-document".hex()}
-
-    monkeypatch.setattr(service, "get_attestation_document_with_pcrs", fake_attestation)
-    manifest = {
-        "purpose": "research_lab.candidate_score.v1",
-        "epoch_id": 42,
-        "job_id": "job-42",
-        "config_hash": "sha256:" + "a" * 64,
-        "payload_sha256": "sha256:" + "b" * 64,
-    }
-    encoded = service._scoring_attestation_document_b64(manifest)
-    assert base64.b64decode(encoded) == b"signed-document"
-    assert captured == {
-        "purpose": manifest["purpose"],
-        "epoch_id": 42,
-        "job_id": "job-42",
-        "config_hash": manifest["config_hash"],
-        "input_root": manifest["payload_sha256"],
-    }
+    assert not hasattr(service, "get_scoring_job_manager")
+    assert not hasattr(service, "configure_scoring_runtime")
+    assert not hasattr(service, "handle_scoring_rpc")
+    assert not hasattr(service, "scoring_runtime_configuration")
 
 
-def test_v1_scoring_runtime_configuration_is_inaccessible(monkeypatch):
-    from gateway.tee.scoring_executor import (
-        SCORING_RUNTIME_ENV_NAMES,
-        configuration_hash,
+def test_coordinator_signs_and_hash_chains_transparency_events_in_enclave(monkeypatch):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    tee_dir = Path(__file__).resolve().parents[1] / "gateway" / "tee"
+    monkeypatch.syspath_prepend(str(tee_dir))
+    monkeypatch.setenv("LEADPOET_ENCLAVE_ROLE", "gateway_coordinator")
+    service = importlib.import_module("gateway.tee.tee_service")
+    from gateway.tee import enclave_signer
+
+    enclave_signer._reset_for_testing()
+    service.event_signer_initialization = None
+    service.event_buffer.clear()
+    service.sequence_counter = 0
+    monkeypatch.setattr(service, "compute_code_hash", lambda: "1" * 64)
+
+    def fake_attestation(code_hash):
+        assert code_hash == "1" * 64
+        enclave_signer._ATTESTATION_DOCUMENT = b"nitro-document"
+        return enclave_signer._ATTESTATION_DOCUMENT
+
+    monkeypatch.setattr(
+        enclave_signer,
+        "generate_attestation_document",
+        fake_attestation,
     )
 
-    service = _tee_service(monkeypatch)
-    monkeypatch.setattr(service, "scoring_job_manager", None)
-    monkeypatch.setattr(service, "scoring_runtime_configuration", None)
-    for name in SCORING_RUNTIME_ENV_NAMES:
-        monkeypatch.delenv(name, raising=False)
-    environment = {name: None for name in SCORING_RUNTIME_ENV_NAMES}
-    environment["QUALIFICATION_OPENROUTER_API_KEY"] = "secret-value-never-returned"
-    expected_hash = configuration_hash(environment)
-    params = {
-        "schema_version": "leadpoet.gateway_scoring_runtime.v1",
-        "environment": environment,
-        "configuration_hash": expected_hash,
-    }
+    initialized = service.handle_rpc(
+        "initialize_event_signer",
+        {"prev_log_tip_hash": "a" * 64},
+    )["result"]
+    restart = initialized["restart_log_entry"]
+    assert restart["signed_event"]["prev_event_hash"] == "a" * 64
+    assert initialized["identity"]["attestation_document_b64"] == base64.b64encode(
+        b"nitro-document"
+    ).decode("ascii")
 
-    response = service.handle_rpc("scoring_configure_runtime", params)
-    assert response == {
-        "error": "RPC method is not authorized for enclave role gateway_scoring_a"
-    }
-    assert "QUALIFICATION_OPENROUTER_API_KEY" not in os.environ
+    payload = {"epoch_id": 42, "validator_hotkey": "validator"}
+    payload_hash = __import__("hashlib").sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    signed = service.handle_rpc(
+        "sign_transparency_event",
+        {
+            "event_type": "WEIGHT_SUBMISSION_V2",
+            "payload": payload,
+            "payload_hash": payload_hash,
+        },
+    )["result"]
+    entry = signed["log_entry"]
+    assert entry["signed_event"]["prev_event_hash"] == restart["event_hash"]
+    Ed25519PublicKey.from_public_bytes(bytes.fromhex(entry["enclave_pubkey"])).verify(
+        bytes.fromhex(entry["enclave_signature"]),
+        bytes.fromhex(entry["event_hash"]),
+    )
+    assert len(service.event_buffer) == 2
+
+    enclave_signer._reset_for_testing()
+    service.event_signer_initialization = None
+    service.event_buffer.clear()

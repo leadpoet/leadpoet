@@ -31,22 +31,22 @@ from gateway.research_lab.autoresearch_authority_v2 import (
 )
 from gateway.research_lab.chain import resolve_research_lab_evaluation_epoch
 from gateway.research_lab.code_build import CodeEditCandidateBuilder, CodeEditInfraFailureError
-from gateway.research_lab.code_loop_engine import CodeEditLoopEngine
+from gateway.research_lab.git_tree_models import (
+    TreePolicy,
+    derive_tree_id,
+)
+from gateway.research_lab.git_tree_store import GitTreeStore
 from gateway.research_lab.model_authority_v2 import AttestedPrivateModelRunnerV2
-from gateway.research_lab.provider_outcome_digest import build_run_provider_outcome_digest
+from gateway.research_lab.active_model_authority_v2 import (
+    attest_active_private_model_v2,
+)
 from gateway.research_lab.provider_probe import build_probe_guard_term_hashes
 from gateway.research_lab.config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
 from gateway.research_lab.dev_eval_runner import (
     build_attested_code_edit_dev_evaluator_v2,
-    build_code_edit_dev_evaluator,
     dev_eval_runner_enabled,
     dev_eval_total_timeout_seconds,
     snapshot_readiness,
-)
-from gateway.research_lab.inner_loop_activation import (
-    configured_inner_loop_mode,
-    record_inner_loop_event,
-    resolve_inner_loop_policy,
 )
 from gateway.research_lab.key_vault import (
     OpenRouterKeyVaultError,
@@ -56,10 +56,11 @@ from gateway.research_lab.key_vault import (
     verify_openrouter_workspace_privacy,
 )
 from gateway.research_lab.logging_utils import compact_ref, format_worker_block, format_worker_line
-from gateway.research_lab.loop_engine import (
+from gateway.research_lab.autoresearch_runtime import (
     AutoResearchLoopEvent,
-    AutoResearchLoopSettings,
+    AutoResearchRuntimeSettings,
     OpenRouterCallResult,
+    budget_limit_microusd,
 )
 from gateway.research_lab.maintenance import (
     autoresearch_queue_capacity_doc,
@@ -73,7 +74,7 @@ from gateway.research_lab.provider_preflight import (
     PREFLIGHT_REASON_PREFIX,
     preflight_gate,
 )
-from gateway.research_lab.tee_protocol import legacy_v1_enabled
+from gateway.research_lab.tee_protocol import v2_enabled
 from gateway.research_lab.models import ResearchLabCandidateArtifactCreateRequest, ResearchLabReceiptCreateRequest
 from gateway.research_lab.promotion import (
     PromotionPausedError,
@@ -110,6 +111,7 @@ from gateway.research_lab.store import (
     create_openrouter_privacy_proof_event_sync,
     find_queued_receipt_for_run,
     latest_auto_research_checkpoint,
+    record_candidate_tree_handoff,
     select_all,
     select_many,
     select_one,
@@ -361,11 +363,81 @@ class HostedResearchLabWorkerError(RuntimeError):
 def _single_paid_finalist_candidates(
     candidates: Sequence[Any], paid_finalist_count: int
 ) -> tuple[Any, ...]:
-    if int(paid_finalist_count) != 1:
+    if int(paid_finalist_count) != 1 or len(candidates) != 1:
         raise HostedResearchLabWorkerError(
-            "inner-loop paid finalist invariant requires exactly one candidate"
+            "Git-tree paid finalist invariant requires exactly one candidate"
         )
-    return tuple(candidates[:1])
+    return tuple(candidates)
+
+
+def _tree_observation_from_selection(
+    selection: Mapping[str, Any],
+) -> dict[str, Any]:
+    summary = selection.get("evaluation_summary")
+    if not isinstance(summary, Mapping):
+        raise HostedResearchLabWorkerError(
+            "Git-tree selection is missing its evaluation summary"
+        )
+    summary = dict(summary)
+    if summary.get("schema_version") != "research_lab.git_tree_evaluation_summary.v1":
+        raise HostedResearchLabWorkerError(
+            "Git-tree evaluation summary schema is invalid"
+        )
+    numeric_names = (
+        "node_count",
+        "built_node_count",
+        "evaluated_node_count",
+        "eligible_node_count",
+        "missing_evaluation_count",
+        "unclassified_error_count",
+        "snapshot_miss_count",
+        "true_miss_count",
+        "failure_count",
+        "zero_output_count",
+    )
+    values: dict[str, int] = {}
+    for name in numeric_names:
+        raw = summary.get(name)
+        if isinstance(raw, bool):
+            raise HostedResearchLabWorkerError(
+                f"Git-tree evaluation summary {name} is invalid"
+            )
+        try:
+            normalized = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise HostedResearchLabWorkerError(
+                f"Git-tree evaluation summary {name} is invalid"
+            ) from exc
+        if normalized < 0:
+            raise HostedResearchLabWorkerError(
+                f"Git-tree evaluation summary {name} is invalid"
+            )
+        values[name] = normalized
+    if (
+        values["built_node_count"] > values["node_count"]
+        or values["evaluated_node_count"] > values["built_node_count"]
+        or values["eligible_node_count"] > values["evaluated_node_count"]
+        or values["missing_evaluation_count"]
+        != values["built_node_count"] - values["evaluated_node_count"]
+        or values["node_count"] != int(selection.get("node_count") or 0)
+        or values["built_node_count"]
+        != int(selection.get("built_node_count") or 0)
+        or values["eligible_node_count"]
+        != int(selection.get("eligible_node_count") or 0)
+    ):
+        raise HostedResearchLabWorkerError(
+            "Git-tree evaluation summary counts are inconsistent"
+        )
+    for name in (
+        "evaluation_mode_counts",
+        "ineligible_reason_counts",
+        "node_status_counts",
+    ):
+        if not isinstance(summary.get(name), Mapping):
+            raise HostedResearchLabWorkerError(
+                f"Git-tree evaluation summary {name} is invalid"
+            )
+    return {**summary, **values}
 
 
 class RetryableHostedResearchLabWorkerError(HostedResearchLabWorkerError):
@@ -1088,6 +1160,54 @@ class HostedWorkerOutcome:
         }
 
 
+async def _load_tree_evaluation_usage(
+    *, tree_id: str, max_rows: int
+) -> dict[str, Any]:
+    """Restore tree-wide live-evaluation usage from durable settlements."""
+
+    rows = await select_all(
+        "research_lab_autoresearch_operation_current",
+        columns=(
+            "logical_operation_id,operation_status,settled_cost_microusd,"
+            "provider_call_count"
+        ),
+        filters=(
+            ("tree_id", str(tree_id)),
+            ("operation_kind", "evaluation"),
+        ),
+        order_by=(("logical_operation_id", False),),
+        batch_size=min(1000, max(1, int(max_rows))),
+        max_rows=max(1, int(max_rows)),
+    )
+    ambiguous = sorted(
+        str(row.get("logical_operation_id") or "")
+        for row in rows
+        if str(row.get("operation_status") or "")
+        in {"reserved", "indeterminate"}
+    )
+    terminal = [
+        row
+        for row in rows
+        if str(row.get("operation_status") or "") in {"succeeded", "failed"}
+    ]
+    return {
+        "settled_cost_microusd": sum(
+            max(0, int(row.get("settled_cost_microusd") or 0))
+            for row in terminal
+        ),
+        "provider_call_count": sum(
+            max(0, int(row.get("provider_call_count") or 0))
+            for row in terminal
+        ),
+        "ambiguous_operation_ids": tuple(item for item in ambiguous if item),
+        "terminal_operation_count": len(terminal),
+    }
+
+
+def _tree_budget_microusd(budget_context: Mapping[str, Any]) -> int:
+    return budget_limit_microusd(budget_context)
+
+
 @dataclass
 class HostedRunContext:
     queue_row: Mapping[str, Any]
@@ -1234,6 +1354,27 @@ class ResearchLabHostedWorker:
 
     def __init__(self, config: ResearchLabGatewayConfig | None = None, *, worker_ref: str | None = None):
         self.config = config or ResearchLabGatewayConfig.from_env()
+        self.tree_policy = TreePolicy.from_env()
+        if self.tree_policy.mode == "active":
+            if not v2_enabled():
+                raise HostedResearchLabWorkerError(
+                    "active Git-tree autoresearch requires "
+                    "RESEARCH_LAB_TEE_PROTOCOL=v2"
+                )
+            required_final_context_seconds = (
+                self.tree_policy.required_final_context_seconds(
+                    dev_eval_total_timeout_seconds()
+                )
+            )
+            effective_deadline_seconds = min(
+                self.tree_policy.deadline_seconds,
+                int(self.config.auto_research_max_seconds),
+            )
+            if required_final_context_seconds >= effective_deadline_seconds:
+                raise HostedResearchLabWorkerError(
+                    "Git-tree runtime deadline must exceed the final evaluation "
+                    "timeout plus the finalization reserve"
+                )
         self.worker_ref = (
             worker_ref
             or self.config.hosted_worker_id
@@ -1325,6 +1466,12 @@ class ResearchLabHostedWorker:
             await self._maybe_expire_unpaid_tickets()
             await self._recover_stale_paused_runs()
             await self._run_periodic_reconciles()
+        if self.tree_policy.mode == "off":
+            return HostedWorkerOutcome(
+                processed=False,
+                dry_run=self.config.hosted_worker_dry_run,
+                status="git_tree_mode_off",
+            )
         builder_unavailable = self._code_edit_builder_unavailable_reason()
         if builder_unavailable:
             logger.warning(
@@ -1588,6 +1735,7 @@ class ResearchLabHostedWorker:
             await maybe_refresh_dev_snapshot(
                 self.config,
                 worker_index=int(self.config.hosted_worker_index or 0),
+                tree_policy=self.tree_policy,
             )
         except Exception as exc:
             logger.warning(
@@ -2035,23 +2183,10 @@ class ResearchLabHostedWorker:
             )
         openrouter_key_ref = _miner_openrouter_key_ref(context)
         context.openrouter_key_ref = openrouter_key_ref
-        if legacy_v1_enabled():
-            resolved_openrouter_env = await self.key_resolver.resolve(
-                openrouter_key_ref,
-                miner_hotkey=str(context.ticket["miner_hotkey"]),
-            )
-            context.openrouter_management_key = (
-                await self.key_resolver.resolve_management_key(
-                    openrouter_key_ref,
-                    miner_hotkey=str(context.ticket["miner_hotkey"]),
-                )
-            )
-            provider_env = dict(resolved_openrouter_env)
-            await self._preflight_openrouter_credit(context, provider_env)
-        else:
-            # V2 leases both encrypted credentials directly into the
-            # coordinator enclave. The hosted parent never decrypts either key.
-            provider_env = {}
+        # Tree execution is V2-only. Both encrypted credentials are leased
+        # directly into the measured coordinator; the hosted parent never
+        # decrypts either key.
+        provider_env: dict[str, str] = {}
         context.provider_env = provider_env
         docker_provider_env = _private_model_docker_env(
             self.config,
@@ -2061,74 +2196,168 @@ class ResearchLabHostedWorker:
             },
         )
         budget_context = self._run_budget_context(context)
+        requested_budget_microusd = _tree_budget_microusd(budget_context)
+        if self.tree_policy.effective_billable_cap(requested_budget_microusd) <= 0:
+            return await self._mark_paused(
+                context,
+                loop_result=None,
+                checkpoint_doc=None,
+                reason="tree_funded_budget_unavailable",
+            )
         _tier, model_id, model_doc = self.config.resolve_auto_research_model(
             str(budget_context.get("research_model_tier") or "")
-        )
-        configured_max_candidates = self._max_candidates_for_run(
-            budget_context, model_doc
-        )
-        configured_paid_finalist_count = self._paid_finalist_count_for_run(
-            model_doc, configured_max_candidates
         )
         resume_state = await latest_auto_research_checkpoint(context.run_id)
 
         active_start = await load_active_private_model(self.config, register_bootstrap=True)
         artifact = active_start.artifact
-        requested_inner_loop_mode = configured_inner_loop_mode(
-            self.config.inner_loop_mode
+        tree_id = derive_tree_id(
+            run_id=context.run_id,
+            root_artifact_hash=artifact.model_artifact_hash,
+            policy=self.tree_policy,
         )
-        readiness: dict[str, Any] = {
-            "ready": False,
-            "reason": "inner_loop_mode_off",
-        }
-        if requested_inner_loop_mode != "off":
-            readiness = await asyncio.to_thread(
-                snapshot_readiness,
-                str(os.getenv("RESEARCH_LAB_DEV_SNAPSHOT_URI") or ""),
+        authority_pause = await self._guard_existing_tree_authority(
+            context=context,
+            artifact=artifact,
+            requested_tree_id=tree_id,
+            checkpoint_doc=resume_state,
+        )
+        if authority_pause is not None:
+            return authority_pause
+        resume_block_reason = self._tree_resume_block_reason(
+            resume_state,
+            artifact,
+            expected_tree_id=tree_id,
+        )
+        if resume_block_reason:
+            return await self._mark_paused(
+                context,
+                loop_result=None,
+                checkpoint_doc=resume_state,
+                reason=resume_block_reason,
             )
-            if readiness.get("ready") and str(
+        tree_evaluation_usage = await _load_tree_evaluation_usage(
+            tree_id=tree_id,
+            max_rows=max(100, int(self.tree_policy.max_nodes) * 4),
+        )
+        if tree_evaluation_usage["ambiguous_operation_ids"]:
+            logger.warning(
+                "research_lab_git_tree_evaluation_resume_blocked "
+                "run_id=%s tree_id=%s ambiguous_operation_count=%s",
+                compact_ref(context.run_id),
+                tree_id[:24],
+                len(tree_evaluation_usage["ambiguous_operation_ids"]),
+            )
+            return await self._mark_paused(
+                context,
+                loop_result=None,
+                checkpoint_doc=resume_state,
+                reason="tree_evaluation_operation_indeterminate",
+            )
+        readiness = await asyncio.to_thread(
+            snapshot_readiness,
+            str(os.getenv("RESEARCH_LAB_DEV_SNAPSHOT_URI") or ""),
+        )
+        tree_preflight_reason = ""
+        if not dev_eval_runner_enabled():
+            tree_preflight_reason = "tree_dev_evaluator_kill_switch_disabled"
+        elif not bool(readiness.get("ready")):
+            tree_preflight_reason = "tree_snapshot_not_ready:" + str(
+                readiness.get("reason") or "unknown"
+            )
+        elif float(readiness.get("snapshot_age_seconds") or 0.0) > 14 * 86400:
+            tree_preflight_reason = "tree_snapshot_stale"
+        elif str(readiness.get("champion_image_digest") or "") != str(
+            artifact.image_digest or ""
+        ):
+            tree_preflight_reason = (
+                "tree_snapshot_champion_image_differs_from_active_model"
+            )
+        if tree_preflight_reason:
+            logger.warning(
+                "research_lab_git_tree_preflight_deferred run_id=%s reason=%s",
+                compact_ref(context.run_id),
+                tree_preflight_reason,
+            )
+            return await self._mark_paused(
+                context,
+                loop_result=None,
+                checkpoint_doc=resume_state,
+                reason=tree_preflight_reason,
+            )
+
+        evaluator_commitment = {
+            "schema_version": "research_lab.git_tree_evaluator_commitment.v1",
+            "snapshot_manifest_hash": str(readiness.get("manifest_hash") or ""),
+            "snapshot_ready_hash": str(readiness.get("ready_hash") or ""),
+            "dev_set_hash": str(readiness.get("dev_set_hash") or ""),
+            "dev_set_size": int(readiness.get("dev_set_size") or 0),
+            "champion_image_digest": str(
                 readiness.get("champion_image_digest") or ""
-            ) != str(artifact.image_digest or ""):
-                readiness = {
-                    **readiness,
-                    "ready": False,
-                    "reason": "snapshot_champion_image_differs_from_active_model",
-                }
-        inner_loop_policy = await resolve_inner_loop_policy(
-            requested_mode=requested_inner_loop_mode,
-            snapshot_readiness=readiness,
-            dev_eval_kill_switch_enabled=dev_eval_runner_enabled(),
-            configured_candidate_width=configured_max_candidates,
-            configured_paid_finalist_count=configured_paid_finalist_count,
-            stop_at_candidate_cap_enabled=(
-                str(
-                    os.getenv("RESEARCH_LAB_LOOP_STOP_AT_CANDIDATE_CAP")
-                    or "true"
-                ).strip().lower()
-                in {"1", "true", "yes", "on"}
             ),
-            evaluation_timeout_seconds=dev_eval_total_timeout_seconds(),
-        )
-        max_candidates = int(inner_loop_policy.candidate_width)
-        paid_finalist_count = int(inner_loop_policy.paid_finalist_count)
-        budget_context["inner_loop_policy"] = inner_loop_policy.to_dict()
+            "source_commit": str(readiness.get("source_commit") or ""),
+            "model_config_hash": str(
+                readiness.get("model_config_hash") or ""
+            ),
+            "provider_model_ids": list(readiness.get("provider_model_ids") or ()),
+            "miss_policy": "strict",
+            "score_version": "research_lab.dev_eval.v2",
+            "evaluation_timeout_seconds": dev_eval_total_timeout_seconds(),
+            "live_max_icps_per_node": self.tree_policy.live_max_icps_per_node,
+            "live_max_provider_calls": self.tree_policy.live_max_provider_calls,
+            "live_cap_microusd": self.tree_policy.live_cap_microusd,
+            "minimum_evidence_retention_days": (
+                self.tree_policy.evidence_retention_days
+            ),
+        }
+        tree_runtime_policy = {
+            "schema_version": "research_lab.git_tree_runtime_policy.v1",
+            "policy": self.tree_policy.to_dict(),
+            "evaluator_enabled": True,
+            "evaluator_commitment": evaluator_commitment,
+            "prior_evaluation_provider_call_count": int(
+                tree_evaluation_usage["provider_call_count"]
+            ),
+            "prior_evaluation_cost_microusd": int(
+                tree_evaluation_usage["settled_cost_microusd"]
+            ),
+            "snapshot_age_seconds": float(
+                readiness.get("snapshot_age_seconds") or 0.0
+            ),
+        }
+        max_candidates = self.tree_policy.max_nodes
+        paid_finalist_count = 1
+        budget_context["tree_policy"] = tree_runtime_policy
         logger.info(
-            "research_lab_inner_loop_policy run_id=%s requested_mode=%s phase=%s "
-            "candidate_width=%s paid_finalists=%s evaluator_enabled=%s "
-            "sequential_chain=%s fallback_reason=%s snapshot_hash=%s",
+            "research_lab_git_tree_policy run_id=%s mode=%s branch_factor=%s "
+            "beam_width=%s max_depth=%s max_nodes=%s paid_finalists=1 "
+            "snapshot_hash=%s dev_set_hash=%s",
             context.run_id,
-            requested_inner_loop_mode,
-            inner_loop_policy.effective_phase,
-            max_candidates,
-            paid_finalist_count,
-            inner_loop_policy.evaluator_enabled,
-            inner_loop_policy.sequential_chain_enabled,
-            inner_loop_policy.fallback_reason or "none",
-            inner_loop_policy.snapshot_manifest_hash[:24],
+            self.tree_policy.mode,
+            self.tree_policy.branch_factor,
+            self.tree_policy.beam_width,
+            self.tree_policy.max_depth,
+            self.tree_policy.max_nodes,
+            evaluator_commitment["snapshot_manifest_hash"][:24],
+            evaluator_commitment["dev_set_hash"][:24],
         )
-        # If the active model changed since this run was paused, the checkpoint is stale;
-        # restart from scratch against the current model rather than resuming a stale parent.
-        resume_state = self._validate_resume_state_freshness(resume_state, artifact, context.run_id)
+        evaluation_epoch, _evaluation_block, _epoch_source = (
+            await resolve_research_lab_evaluation_epoch()
+        )
+        active_model_authority: dict[str, Any] = {}
+        active_model_parent_graphs: tuple[dict[str, Any], ...] = ()
+        active_model_authority = dict(
+            await attest_active_private_model_v2(
+                artifact=artifact,
+                epoch_id=evaluation_epoch,
+            )
+        )
+        active_model_graph = active_model_authority.get("receipt_graph")
+        if not isinstance(active_model_graph, Mapping):
+            raise HostedResearchLabWorkerError(
+                "active private model lacks measured V2 lineage"
+            )
+        active_model_parent_graphs = (dict(active_model_graph),)
         outcome_memory = await self._active_parent_outcome_memory(artifact)
         if outcome_memory:
             budget_context["active_parent_outcome_memory"] = outcome_memory
@@ -2144,10 +2373,12 @@ class ResearchLabHostedWorker:
                 ),
                 model_kind="private",
                 worker_index=int(self.config.hosted_worker_index or 0),
+                epoch_id=evaluation_epoch,
+                parent_graphs=active_model_parent_graphs,
             )
             metadata = runner.metadata()
             authorities = runner.attested_authorities()
-            if not legacy_v1_enabled() and len(authorities) != 1:
+            if len(authorities) != 1:
                 raise HostedResearchLabWorkerError(
                     "private runtime metadata lacks one measured authority"
                 )
@@ -2282,102 +2513,7 @@ class ResearchLabHostedWorker:
                     )
                 return dict(loop_event_row or {})
 
-            async def _call_legacy_loop_model(
-                messages: Sequence[Mapping[str, str]],
-                timeout_seconds: int,
-                max_tokens: int,
-                call_stage: str = "code_edit_draft",
-            ) -> OpenRouterCallResult:
-                if context.claim_lost:
-                    raise HostedResearchLabClaimLost(
-                        "hosted run claim was lost; refusing further OpenRouter calls"
-                    )
-                stage_options = _resolve_code_edit_loop_stage_model_request(
-                    self.config,
-                    stage=call_stage,
-                    model_id=model_id,
-                    model_doc=model_doc,
-                    requested_max_tokens=max_tokens,
-                )
-                stage = str(stage_options["stage"])
-                stage_model_id = str(stage_options["model_id"])
-                stage_reasoning_effort = str(stage_options["reasoning_effort"])
-                stage_temperature = float(stage_options["temperature"])
-                stage_max_tokens = int(stage_options["max_tokens"])
-                stage_model_ids = tuple(
-                    str(item)
-                    for item in stage_options.get("model_ids", ())
-                    if str(item).strip()
-                ) or (stage_model_id,)
-                allow_non_zdr = bool(stage_options.get("allow_non_zdr"))
-                effective_max_tokens = (
-                    max(1, stage_max_tokens)
-                    if stage in {"loop_planner", "plan_alignment_judge"}
-                    else self._auto_research_max_tokens_for_call(
-                        requested_max_tokens=stage_max_tokens,
-                        model_doc=model_doc,
-                    )
-                )
-                last_exc: Exception | None = None
-                fallback_usage: list[dict[str, Any]] = []
-                for model_attempt_index, attempt_model_id in enumerate(stage_model_ids):
-                    try:
-                        result = await self._call_openrouter(
-                            messages=messages,
-                            api_key=context.provider_env["OPENROUTER_API_KEY"],
-                            model_id=attempt_model_id,
-                            reasoning_effort=stage_reasoning_effort,
-                            timeout_seconds=timeout_seconds,
-                            max_tokens=effective_max_tokens,
-                            temperature=stage_temperature,
-                            allow_non_zdr=allow_non_zdr,
-                            capture_run_id=context.run_id,
-                            capture_stage=stage,
-                            privacy_key_ref=context.openrouter_key_ref,
-                            privacy_miner_hotkey=str(context.ticket["miner_hotkey"]),
-                            privacy_management_key=context.openrouter_management_key,
-                        )
-                        if fallback_usage:
-                            usage = dict(result.provider_usage or {})
-                            usage["model_fallback_attempts"] = fallback_usage
-                            usage["model_fallback_attempt_count"] = len(fallback_usage)
-                            result = OpenRouterCallResult(
-                                content=result.content,
-                                provider_usage=usage,
-                                cost_microusd=result.cost_microusd,
-                            )
-                        return result
-                    except CreditBlockedHostedRunError:
-                        raise
-                    except HostedResearchLabWorkerError as exc:
-                        last_exc = exc
-                        if model_attempt_index >= len(stage_model_ids) - 1:
-                            raise
-                        fallback_usage.append(
-                            {
-                                "stage": stage,
-                                "model_ref": compact_ref(attempt_model_id),
-                                "error_hash": sha256_json({"error": str(exc)}),
-                                "next_model_ref": compact_ref(
-                                    stage_model_ids[model_attempt_index + 1]
-                                ),
-                            }
-                        )
-                        logger.warning(
-                            "research_lab_openrouter_stage_model_fallback "
-                            "stage=%s model=%s next_model=%s error_hash=%s",
-                            stage,
-                            compact_ref(attempt_model_id),
-                            compact_ref(stage_model_ids[model_attempt_index + 1]),
-                            fallback_usage[-1]["error_hash"],
-                        )
-                if last_exc is not None:
-                    raise last_exc
-                raise HostedResearchLabWorkerError(
-                    "OpenRouter stage model resolution failed"
-                )
-
-            loop_settings = AutoResearchLoopSettings(
+            loop_settings = AutoResearchRuntimeSettings(
                 min_seconds=self.config.auto_research_min_seconds,
                 max_seconds=self.config.auto_research_max_seconds,
                 min_iterations=self.config.auto_research_min_iterations,
@@ -2412,132 +2548,111 @@ class ResearchLabHostedWorker:
             evaluation_epoch, _evaluation_block, _epoch_source = (
                 await resolve_research_lab_evaluation_epoch()
             )
-            if legacy_v1_enabled():
-                dev_evaluator = (
-                    build_code_edit_dev_evaluator()
-                    if inner_loop_policy.evaluator_enabled
-                    else None
+            dev_evaluator = build_attested_code_edit_dev_evaluator_v2(
+                epoch_id=evaluation_epoch,
+                worker_index=int(self.config.hosted_worker_index or 0),
+                provider_environment=docker_provider_env,
+                model_env_passthrough=_private_model_env_passthrough(self.config),
+                parent_graphs=active_model_parent_graphs,
+                live_provider_call_cap=self.tree_policy.live_max_provider_calls,
+                live_cost_cap_microusd=self.tree_policy.live_cap_microusd,
+                live_max_icps_per_node=self.tree_policy.live_max_icps_per_node,
+                live_timeout_seconds=self.tree_policy.live_timeout_seconds,
+                evaluation_concurrency=self.tree_policy.evaluation_concurrency,
+                prior_provider_call_count=int(
+                    tree_evaluation_usage["provider_call_count"]
+                ),
+                prior_settled_cost_microusd=int(
+                    tree_evaluation_usage["settled_cost_microusd"]
+                ),
+            )
+            openrouter_guard = await verify_openrouter_guard_v2(
+                key_ref=context.openrouter_key_ref,
+                miner_hotkey=str(context.ticket["miner_hotkey"]),
+                epoch_id=evaluation_epoch,
+                worker_index=int(self.config.hosted_worker_index or 0),
+                require_egress_proxy=bool(
+                    self.config.hosted_worker_require_proxy
+                ),
+            )
+            if openrouter_guard.credit_depleted:
+                raise CreditBlockedHostedRunError(
+                    "OpenRouter key insufficient credits before generation "
+                    "(limit_remaining=%s)"
+                    % openrouter_guard.credit_limit_remaining
                 )
-                loop_result = await CodeEditLoopEngine(
-                    settings=loop_settings,
-                    call_openrouter=_call_legacy_loop_model,
-                    event_sink=_record_loop_event,
-                    builder=code_builder,
-                    dev_evaluator=dev_evaluator,
-                    probe_private_window_term_hashes=probe_guard_hashes,
-                    provider_outcome_digest=await asyncio.to_thread(
-                        build_run_provider_outcome_digest
+            privacy_proof_doc = dict(openrouter_guard.proof_doc)
+            await asyncio.to_thread(
+                create_openrouter_privacy_proof_event_sync,
+                key_ref=context.openrouter_key_ref,
+                miner_hotkey=str(context.ticket["miner_hotkey"]),
+                run_id=context.run_id,
+                stage="autoresearch_v2_authority",
+                proof_status="passed",
+                proof_doc=dict(privacy_proof_doc),
+            )
+            expected_event_state_hash = sha256_json(
+                {
+                    "run_id": context.run_id,
+                    "ticket_id": context.ticket_id,
+                    "receipt_id": context.receipt_id,
+                    "resume_state_hash": sha256_json(dict(resume_state or {})),
+                    "queue_event_hash": str(
+                        context.queue_row.get("current_event_hash")
+                        or context.queue_row.get("anchored_hash")
+                        or ""
                     ),
-                ).run(
-                    run_id=context.run_id,
-                    ticket=context.ticket,
-                    artifact=artifact,
-                    component_registry=registry.to_dict(),
-                    benchmark_public_summary=benchmark_public_summary,
-                    model_id=model_id,
-                    budget_context=budget_context,
-                    requested_loop_count=int(
-                        context.ticket.get("requested_loop_count") or 1
+                }
+            )
+
+            def _record_v2_privacy_proof(**command: Any) -> Mapping[str, Any]:
+                return create_openrouter_privacy_proof_event_sync(
+                    key_ref=str(command.get("key_ref") or ""),
+                    miner_hotkey=str(command.get("miner_hotkey") or ""),
+                    run_id=(
+                        str(command["run_id"])
+                        if command.get("run_id")
+                        else None
                     ),
-                    resume_state=resume_state,
-                    should_pause=is_autoresearch_maintenance_paused,
-                )
-                autoresearch_authority: dict[str, Any] = {}
-            else:
-                dev_evaluator = (
-                    build_attested_code_edit_dev_evaluator_v2(
-                        epoch_id=evaluation_epoch,
-                        worker_index=int(self.config.hosted_worker_index or 0),
-                    )
-                    if inner_loop_policy.evaluator_enabled
-                    else None
-                )
-                openrouter_guard = await verify_openrouter_guard_v2(
-                    key_ref=context.openrouter_key_ref,
-                    miner_hotkey=str(context.ticket["miner_hotkey"]),
-                    epoch_id=evaluation_epoch,
-                    worker_index=int(self.config.hosted_worker_index or 0),
-                    require_egress_proxy=bool(
-                        self.config.hosted_worker_require_proxy
-                    ),
-                )
-                if openrouter_guard.credit_depleted:
-                    raise CreditBlockedHostedRunError(
-                        "OpenRouter key insufficient credits before generation "
-                        "(limit_remaining=%s)"
-                        % openrouter_guard.credit_limit_remaining
-                    )
-                privacy_proof_doc = dict(openrouter_guard.proof_doc)
-                await asyncio.to_thread(
-                    create_openrouter_privacy_proof_event_sync,
-                    key_ref=context.openrouter_key_ref,
-                    miner_hotkey=str(context.ticket["miner_hotkey"]),
-                    run_id=context.run_id,
-                    stage="autoresearch_v2_authority",
-                    proof_status="passed",
-                    proof_doc=dict(privacy_proof_doc),
-                )
-                expected_event_state_hash = sha256_json(
-                    {
-                        "run_id": context.run_id,
-                        "ticket_id": context.ticket_id,
-                        "receipt_id": context.receipt_id,
-                        "resume_state_hash": sha256_json(dict(resume_state or {})),
-                        "queue_event_hash": str(
-                            context.queue_row.get("current_event_hash")
-                            or context.queue_row.get("anchored_hash")
-                            or ""
-                        ),
-                    }
+                    stage=str(command.get("stage") or ""),
+                    proof_status=str(command.get("proof_status") or ""),
+                    proof_doc=dict(command.get("proof_doc") or {}),
                 )
 
-                def _record_v2_privacy_proof(**command: Any) -> Mapping[str, Any]:
-                    return create_openrouter_privacy_proof_event_sync(
-                        key_ref=str(command.get("key_ref") or ""),
-                        miner_hotkey=str(command.get("miner_hotkey") or ""),
-                        run_id=(
-                            str(command["run_id"])
-                            if command.get("run_id")
-                            else None
-                        ),
-                        stage=str(command.get("stage") or ""),
-                        proof_status=str(command.get("proof_status") or ""),
-                        proof_doc=dict(command.get("proof_doc") or {}),
-                    )
-
-                authoritative_loop = await run_authoritative_autoresearch_v2(
-                    run_id=context.run_id,
-                    ticket=context.ticket,
-                    artifact=artifact,
-                    component_registry=registry.to_dict(),
-                    benchmark_public_summary=benchmark_public_summary,
-                    model_id=model_id,
-                    model_doc=model_doc,
-                    budget_context=budget_context,
-                    requested_loop_count=int(
-                        context.ticket.get("requested_loop_count") or 1
-                    ),
-                    resume_state=resume_state,
-                    loop_settings=loop_settings,
-                    probe_private_window_term_hashes=tuple(probe_guard_hashes),
-                    openrouter_key_ref=context.openrouter_key_ref,
-                    miner_hotkey=str(context.ticket["miner_hotkey"]),
-                    openrouter_guard=openrouter_guard,
-                    component_registry_authority=component_registry_authority,
-                    expected_event_state_hash=expected_event_state_hash,
-                    record_loop_event=_record_loop_event,
-                    code_builder=code_builder,
-                    should_pause=is_autoresearch_maintenance_paused,
-                    record_privacy_proof=_record_v2_privacy_proof,
-                    dev_evaluator=dev_evaluator,
-                    epoch_id=evaluation_epoch,
-                    worker_index=int(self.config.hosted_worker_index or 0),
-                    require_egress_proxy=bool(
-                        self.config.hosted_worker_require_proxy
-                    ),
-                )
-                loop_result = authoritative_loop.loop_result
-                autoresearch_authority = dict(authoritative_loop.authority)
+            authoritative_loop = await run_authoritative_autoresearch_v2(
+                run_id=context.run_id,
+                ticket=context.ticket,
+                artifact=artifact,
+                component_registry=registry.to_dict(),
+                benchmark_public_summary=benchmark_public_summary,
+                model_id=model_id,
+                model_doc=model_doc,
+                budget_context=budget_context,
+                requested_loop_count=int(
+                    context.ticket.get("requested_loop_count") or 1
+                ),
+                resume_state=resume_state,
+                loop_settings=loop_settings,
+                probe_private_window_term_hashes=tuple(probe_guard_hashes),
+                openrouter_key_ref=context.openrouter_key_ref,
+                miner_hotkey=str(context.ticket["miner_hotkey"]),
+                openrouter_guard=openrouter_guard,
+                component_registry_authority=component_registry_authority,
+                active_model_authority=active_model_authority,
+                expected_event_state_hash=expected_event_state_hash,
+                record_loop_event=_record_loop_event,
+                code_builder=code_builder,
+                should_pause=is_autoresearch_maintenance_paused,
+                record_privacy_proof=_record_v2_privacy_proof,
+                dev_evaluator=dev_evaluator,
+                epoch_id=evaluation_epoch,
+                worker_index=int(self.config.hosted_worker_index or 0),
+                require_egress_proxy=bool(
+                    self.config.hosted_worker_require_proxy
+                ),
+            )
+            loop_result = authoritative_loop.loop_result
+            autoresearch_authority = dict(authoritative_loop.authority)
             if loop_result.status == "paused":
                 return await self._mark_paused(
                     context,
@@ -2545,92 +2660,54 @@ class ResearchLabHostedWorker:
                     checkpoint_doc=loop_result.checkpoint_doc or latest_checkpoint,
                     reason="maintenance_pause_checkpointed",
                 )
-            inner_loop_selection: dict[str, Any] = {}
-            candidate_eval_docs: list[dict[str, Any]] = []
+            git_tree_selection: dict[str, Any] = {}
             for recorded in reversed(recorded_loop_events):
                 event_doc = (
                     dict(recorded.get("event_doc") or {})
                     if isinstance(recorded.get("event_doc"), Mapping)
                     else {}
                 )
-                if not inner_loop_selection and isinstance(
-                    event_doc.get("inner_loop_selection"), Mapping
+                if not git_tree_selection and isinstance(
+                    event_doc.get("git_tree_selection"), Mapping
                 ):
-                    inner_loop_selection = dict(event_doc["inner_loop_selection"])
-                if (
-                    recorded.get("event_type") == "candidate_build_passed"
-                    and isinstance(event_doc.get("dev_evaluation"), Mapping)
-                ):
-                    candidate_eval_docs.append(dict(event_doc["dev_evaluation"]))
-
-            candidate_count = int(
-                inner_loop_selection.get("candidate_count")
-                or len(loop_result.selected_candidates)
+                    git_tree_selection = dict(event_doc["git_tree_selection"])
+            evaluation_summary = _tree_observation_from_selection(
+                git_tree_selection
+            )
+            candidate_count = int(evaluation_summary["node_count"])
+            built_candidate_count = int(evaluation_summary["built_node_count"])
+            evaluated_candidate_count = int(
+                evaluation_summary["evaluated_node_count"]
             )
             eligible_candidate_count = int(
-                inner_loop_selection.get("eligible_candidate_count") or 0
+                evaluation_summary["eligible_node_count"]
             )
-            unclassified_error_count = sum(
-                1 for doc in candidate_eval_docs if doc.get("unclassified_error")
+            unclassified_error_count = int(
+                evaluation_summary["unclassified_error_count"]
             )
-            snapshot_miss_count = sum(
-                int(doc.get("snapshot_miss_count") or 0)
-                for doc in candidate_eval_docs
-            )
-            true_miss_count = sum(
-                int(doc.get("true_miss_count") or 0)
-                for doc in candidate_eval_docs
-            )
-            evaluation_failure_count = sum(
-                int(doc.get("failure_count") or 0)
-                for doc in candidate_eval_docs
-            )
-            zero_output_count = sum(
-                int(doc.get("zero_output_count") or 0)
-                for doc in candidate_eval_docs
-            )
-            silent_miss_count = (
-                max(0, candidate_count - len(candidate_eval_docs))
-                if inner_loop_policy.evaluator_enabled
-                else 0
+            snapshot_miss_count = int(evaluation_summary["snapshot_miss_count"])
+            true_miss_count = int(evaluation_summary["true_miss_count"])
+            evaluation_failure_count = int(evaluation_summary["failure_count"])
+            zero_output_count = int(evaluation_summary["zero_output_count"])
+            silent_miss_count = int(
+                evaluation_summary["missing_evaluation_count"]
             )
             paid_count = int(
-                inner_loop_selection.get("paid_finalist_count")
+                git_tree_selection.get("paid_finalist_count")
                 or (1 if loop_result.selected_candidates else 0)
             )
-            width_mismatch = bool(
-                inner_loop_policy.effective_phase in {"shadow", "rank"}
-                and candidate_count != inner_loop_policy.candidate_width
-            )
-            sequential_chain_enabled = bool(
-                inner_loop_selection.get("sequential_chain_enabled")
-                or inner_loop_policy.sequential_chain_enabled
-            )
-            sequential_chain_complete = bool(
-                inner_loop_selection.get("sequential_chain_complete")
-            )
-            sequential_chain_invariant_violations = int(
-                sequential_chain_enabled and not sequential_chain_complete
-            )
-            run_eligible = bool(
-                inner_loop_policy.evaluator_enabled
-                and candidate_count == inner_loop_policy.candidate_width
-                and eligible_candidate_count == candidate_count
-                and candidate_count > 0
-                and paid_count == 1
-                and unclassified_error_count == 0
-                and silent_miss_count == 0
-                and sequential_chain_invariant_violations == 0
-            )
-            activation_evidence = {
-                "run_eligible": run_eligible,
-                "candidate_count": candidate_count,
-                "configured_candidate_width": inner_loop_policy.candidate_width,
-                "evaluated_candidate_count": len(candidate_eval_docs),
+            tree_evidence = {
+                "schema_version": "research_lab.git_tree_observation.v1",
+                "tree_id": str(git_tree_selection.get("tree_id") or ""),
+                "policy_hash": str(git_tree_selection.get("policy_hash") or ""),
+                "node_count": candidate_count,
+                "built_candidate_count": built_candidate_count,
+                "configured_max_nodes": self.tree_policy.max_nodes,
+                "evaluated_candidate_count": evaluated_candidate_count,
                 "eligible_candidate_count": eligible_candidate_count,
                 "candidate_eligibility_rate": (
-                    round(eligible_candidate_count / candidate_count, 6)
-                    if candidate_count
+                    round(eligible_candidate_count / built_candidate_count, 6)
+                    if built_candidate_count
                     else 0.0
                 ),
                 "unclassified_error_count": unclassified_error_count,
@@ -2639,75 +2716,56 @@ class ResearchLabHostedWorker:
                 "true_miss_count": true_miss_count,
                 "evaluation_failure_count": evaluation_failure_count,
                 "zero_output_count": zero_output_count,
-                "candidate_width_mismatch": width_mismatch,
-                "sequential_chain_enabled": sequential_chain_enabled,
-                "sequential_chain_complete": sequential_chain_complete,
-                "sequential_chain_invariant_violations": (
-                    sequential_chain_invariant_violations
+                "evaluation_mode_counts": dict(
+                    evaluation_summary["evaluation_mode_counts"]
                 ),
-                "paid_finalist_invariant_violations": int(
-                    bool(loop_result.selected_candidates) and paid_count != 1
+                "ineligible_reason_counts": dict(
+                    evaluation_summary["ineligible_reason_counts"]
                 ),
-                "protected_workflow_invariant_violations": 0,
-                "fallback_reason": str(
-                    inner_loop_selection.get("fallback_reason")
-                    or inner_loop_policy.fallback_reason
-                    or ""
+                "node_status_counts": dict(
+                    evaluation_summary["node_status_counts"]
                 ),
-                "ranking_applied": bool(
-                    inner_loop_selection.get("ranking_applied")
+                "paid_finalist_count": paid_count,
+                "paid_finalist_invariant_violations": int(paid_count not in {0, 1}),
+                "selected_node_id": str(
+                    git_tree_selection.get("selected_node_id") or ""
                 ),
-                "hypothetical_winner_node_id": inner_loop_selection.get(
-                    "hypothetical_winner_node_id"
+                "frontier_hash": str(
+                    git_tree_selection.get("frontier_hash") or ""
                 ),
-                "actual_paid_candidate_node_id": inner_loop_selection.get(
-                    "actual_paid_candidate_node_id"
-                ),
-                "snapshot_manifest_hash": inner_loop_policy.snapshot_manifest_hash,
-                "dev_set_hash": inner_loop_policy.dev_set_hash,
-                "snapshot_age_seconds": inner_loop_policy.snapshot_age_seconds,
+                "snapshot_manifest_hash": evaluator_commitment[
+                    "snapshot_manifest_hash"
+                ],
+                "dev_set_hash": evaluator_commitment["dev_set_hash"],
+                "snapshot_age_seconds": tree_runtime_policy[
+                    "snapshot_age_seconds"
+                ],
                 "runtime_seconds": round(float(loop_result.elapsed_seconds), 3),
             }
-            try:
-                await record_inner_loop_event(
-                    event_type="run_observed",
-                    phase=inner_loop_policy.effective_phase,
-                    run_id=context.run_id,
-                    evidence_doc=activation_evidence,
+            terminal_authority_receipt = (
+                autoresearch_authority.get("execution_receipt")
+                or autoresearch_authority.get("receipt")
+            )
+            if not isinstance(terminal_authority_receipt, Mapping):
+                raise HostedResearchLabWorkerError(
+                    "V2 autoresearch terminal authority is missing"
                 )
-            except Exception as exc:
-                logger.warning(
-                    "research_lab_inner_loop_observation_write_failed "
-                    "run_id=%s phase=%s error=%s",
-                    context.run_id,
-                    inner_loop_policy.effective_phase,
-                    str(exc)[:240],
-                )
-            if not legacy_v1_enabled():
-                terminal_authority_receipt = (
-                    autoresearch_authority.get("execution_receipt")
-                    or autoresearch_authority.get("receipt")
-                )
-                if not isinstance(terminal_authority_receipt, Mapping):
-                    raise HostedResearchLabWorkerError(
-                        "V2 autoresearch terminal authority is missing"
-                    )
-                from gateway.research_lab.attested_v2_store import (
-                    persist_business_artifact_links_v2,
-                )
+            from gateway.research_lab.attested_v2_store import (
+                persist_business_artifact_links_v2,
+            )
 
-                await persist_business_artifact_links_v2(
-                    receipt_hash=str(terminal_authority_receipt["receipt_hash"]),
-                    artifacts=(
-                        {
-                            "artifact_kind": "autoresearch_run",
-                            "artifact_ref": context.run_id,
-                            "artifact_hash": str(
-                                terminal_authority_receipt["output_root"]
-                            ),
-                        },
-                    ),
-                )
+            await persist_business_artifact_links_v2(
+                receipt_hash=str(terminal_authority_receipt["receipt_hash"]),
+                artifacts=(
+                    {
+                        "artifact_kind": "autoresearch_run",
+                        "artifact_ref": context.run_id,
+                        "artifact_hash": str(
+                            terminal_authority_receipt["output_root"]
+                        ),
+                    },
+                ),
+            )
             if not loop_result.selected_candidates:
                 failure_summary = build_candidate_generation_failure_summary(
                     recorded_loop_events,
@@ -2782,6 +2840,9 @@ class ResearchLabHostedWorker:
                     "dev_score": candidate.dev_score,
                     "dev_score_version": candidate.dev_score_version,
                     "redacted_public_summary": candidate.draft.redacted_summary,
+                    "git_tree_lineage": dict(
+                        candidate.build.build_doc.get("git_tree") or {}
+                    ),
                 }
                 for candidate in paid_finalist_candidates
             ]
@@ -2798,6 +2859,14 @@ class ResearchLabHostedWorker:
             redacted_summary = str(finalist.get("redacted_public_summary") or "")
             candidate_artifact_hash = str(candidate_patch_manifest["candidate_artifact_hash"])
             candidate_patch_hash = sha256_json(candidate_patch_manifest)
+            git_tree_lineage = dict(finalist.get("git_tree_lineage") or {})
+            git_tree_composition = dict(
+                git_tree_lineage.get("composition") or {}
+            )
+            if not git_tree_lineage or not git_tree_composition:
+                raise HostedResearchLabWorkerError(
+                    "selected autoresearch candidate has no Git-tree lineage"
+                )
             request = ResearchLabCandidateArtifactCreateRequest(
                 run_id=context.run_id,
                 ticket_id=context.ticket_id,
@@ -2833,48 +2902,56 @@ class ResearchLabHostedWorker:
                 },
                 hypothesis_doc=hypothesis_doc,
                 redacted_public_summary=redacted_summary,
+                git_tree_id=str(git_tree_lineage.get("tree_id") or ""),
+                git_tree_node_id=str(git_tree_lineage.get("node_id") or ""),
+                git_tree_root_commit=str(
+                    git_tree_composition.get("root_git_commit") or ""
+                ),
+                git_tree_node_commit=str(
+                    git_tree_lineage.get("git_commit") or ""
+                ),
+                git_tree_lineage_hash=sha256_json(git_tree_lineage),
             )
             candidate_row, _candidate_event = await self._store_write_with_retry(
                 "candidate_artifact_create",
                 lambda request=request: create_candidate_artifact(request),
             )
-            if not legacy_v1_enabled():
-                authority_receipt = (
-                    autoresearch_authority.get("execution_receipt")
-                    or autoresearch_authority.get("receipt")
+            authority_receipt = (
+                autoresearch_authority.get("execution_receipt")
+                or autoresearch_authority.get("receipt")
+            )
+            candidate_model_manifest = finalist.get("candidate_model_manifest")
+            if not isinstance(authority_receipt, Mapping) or not isinstance(
+                candidate_model_manifest,
+                Mapping,
+            ):
+                raise HostedResearchLabWorkerError(
+                    "V2 autoresearch candidate authority is missing"
                 )
-                candidate_model_manifest = finalist.get("candidate_model_manifest")
-                if not isinstance(authority_receipt, Mapping) or not isinstance(
-                    candidate_model_manifest,
-                    Mapping,
-                ):
-                    raise HostedResearchLabWorkerError(
-                        "V2 autoresearch candidate authority is missing"
-                    )
-                from gateway.research_lab.attested_v2_store import (
-                    persist_business_artifact_links_v2,
-                )
+            from gateway.research_lab.attested_v2_store import (
+                persist_business_artifact_links_v2,
+            )
 
-                await persist_business_artifact_links_v2(
-                    receipt_hash=str(authority_receipt["receipt_hash"]),
-                    artifacts=(
-                        {
-                            "artifact_kind": "candidate_model",
-                            "artifact_ref": str(candidate_row["candidate_id"]),
-                            "artifact_hash": str(candidate_model_manifest["manifest_hash"]),
-                        },
-                        {
-                            "artifact_kind": "candidate_patch",
-                            "artifact_ref": str(candidate_row["candidate_id"]),
-                            "artifact_hash": candidate_patch_hash,
-                        },
-                        {
-                            "artifact_kind": "candidate_source",
-                            "artifact_ref": str(candidate_row["candidate_id"]),
-                            "artifact_hash": str(finalist["candidate_source_diff_hash"]),
-                        },
-                    ),
-                )
+            await persist_business_artifact_links_v2(
+                receipt_hash=str(authority_receipt["receipt_hash"]),
+                artifacts=(
+                    {
+                        "artifact_kind": "candidate_model",
+                        "artifact_ref": str(candidate_row["candidate_id"]),
+                        "artifact_hash": str(candidate_model_manifest["manifest_hash"]),
+                    },
+                    {
+                        "artifact_kind": "candidate_patch",
+                        "artifact_ref": str(candidate_row["candidate_id"]),
+                        "artifact_hash": candidate_patch_hash,
+                    },
+                    {
+                        "artifact_kind": "candidate_source",
+                        "artifact_ref": str(candidate_row["candidate_id"]),
+                        "artifact_hash": str(finalist["candidate_source_diff_hash"]),
+                    },
+                ),
+            )
             duplicate_existing_candidate = bool(
                 str(candidate_row.get("run_id") or "") and str(candidate_row.get("run_id") or "") != context.run_id
             )
@@ -2929,6 +3006,11 @@ class ResearchLabHostedWorker:
                 }
             )
 
+        if len(candidate_ids) != 1:
+            raise HostedResearchLabWorkerError(
+                "Git-tree handoff requires exactly one official candidate"
+            )
+
         reimbursement_decision = await self._maybe_create_reimbursement_decision(
             context=context,
             budget_context=budget_context,
@@ -2942,13 +3024,14 @@ class ResearchLabHostedWorker:
             "candidate_ids": list(candidate_ids),
             "reimbursement": reimbursement_decision or {"status": "not_written"},
             "candidate_selection_policy": {
-                "dev_eval_candidate_width": int(max_candidates),
+                "architecture": "git_tree_v1",
+                "max_nodes": int(max_candidates),
                 "paid_finalist_count": int(paid_finalist_count),
                 "selected_candidate_count": len(loop_result.selected_candidates),
                 "submitted_finalist_count": len(candidate_ids),
-                "inner_loop_policy": inner_loop_policy.to_dict(),
-                "inner_loop_selection": dict(inner_loop_selection),
-                "activation_evidence": dict(activation_evidence),
+                "git_tree_policy": dict(tree_runtime_policy),
+                "git_tree_selection": dict(git_tree_selection),
+                "git_tree_evidence": dict(tree_evidence),
             },
         }
 
@@ -2964,8 +3047,8 @@ class ResearchLabHostedWorker:
                 "openrouter_call_count": loop_result.openrouter_call_count,
                 "estimated_cost_usd": round(loop_result.estimated_cost_usd, 6),
                 "actual_openrouter_cost_usd": round(loop_result.actual_openrouter_cost_usd, 6),
-                "inner_loop_policy": inner_loop_policy.to_dict(),
-                "inner_loop_selection": dict(inner_loop_selection),
+                "git_tree_policy": dict(tree_runtime_policy),
+                "git_tree_selection": dict(git_tree_selection),
             },
             "reimbursement": reimbursement_decision or {"status": "not_written"},
             "next_stage": "gateway_qualification_worker_evaluation",
@@ -3329,7 +3412,51 @@ class ResearchLabHostedWorker:
         )
 
     async def _complete_from_existing_candidate_artifacts(self, context: HostedRunContext) -> HostedWorkerOutcome | None:
-        candidate_ids = await self._candidate_ids_for_run(context.run_id)
+        handoffs = await select_many(
+            "research_lab_autoresearch_tree_handoffs",
+            columns="tree_id,run_id,candidate_id,node_id",
+            filters=(("run_id", context.run_id),),
+            limit=2,
+        )
+        if len(handoffs) > 1:
+            raise HostedResearchLabWorkerError(
+                "Git-tree recovery found multiple official handoffs"
+            )
+        if handoffs:
+            candidate_ids = [str(handoffs[0]["candidate_id"])]
+        else:
+            candidate_rows = await self._candidate_rows_for_run(context.run_id)
+            if not candidate_rows:
+                return None
+            if len(candidate_rows) != 1:
+                raise HostedResearchLabWorkerError(
+                    "Git-tree recovery requires exactly one candidate artifact"
+                )
+            candidate = candidate_rows[0]
+            required_tree_fields = {
+                name: str(candidate.get(name) or "")
+                for name in (
+                    "git_tree_id",
+                    "git_tree_node_id",
+                    "git_tree_root_commit",
+                    "git_tree_node_commit",
+                    "git_tree_lineage_hash",
+                )
+            }
+            if not all(required_tree_fields.values()):
+                raise HostedResearchLabWorkerError(
+                    "Git-tree recovery candidate lineage is incomplete"
+                )
+            await record_candidate_tree_handoff(
+                tree_id=required_tree_fields["git_tree_id"],
+                run_id=context.run_id,
+                candidate_id=str(candidate["candidate_id"]),
+                node_id=required_tree_fields["git_tree_node_id"],
+                root_git_commit=required_tree_fields["git_tree_root_commit"],
+                node_git_commit=required_tree_fields["git_tree_node_commit"],
+                lineage_hash=required_tree_fields["git_tree_lineage_hash"],
+            )
+            candidate_ids = [str(candidate["candidate_id"])]
         if not candidate_ids:
             return None
         receipt_id = context.receipt_id or await self._ensure_queued_receipt(context)
@@ -3383,13 +3510,21 @@ class ResearchLabHostedWorker:
         )
 
     async def _candidate_ids_for_run(self, run_id: str) -> list[str]:
-        rows = await select_many(
-            "research_lab_candidate_artifacts",
-            columns="candidate_id",
-            filters=(("run_id", run_id),),
-            limit=max(10, int(self.config.hosted_worker_max_candidates or 1) * 5),
-        )
+        rows = await self._candidate_rows_for_run(run_id)
         return [str(row["candidate_id"]) for row in rows if row.get("candidate_id")]
+
+    async def _candidate_rows_for_run(
+        self, run_id: str
+    ) -> list[Mapping[str, Any]]:
+        return await select_many(
+            "research_lab_candidate_artifacts",
+            columns=(
+                "candidate_id,git_tree_id,git_tree_node_id,"
+                "git_tree_root_commit,git_tree_node_commit,git_tree_lineage_hash"
+            ),
+            filters=(("run_id", run_id),),
+            limit=max(10, int(self.tree_policy.max_nodes) * 5),
+        )
 
     async def _receipt_id_for_run(self, run_id: str) -> str | None:
         rows = await select_many(
@@ -3621,17 +3756,118 @@ class ResearchLabHostedWorker:
                 f"OpenRouter key insufficient credits before generation (limit_remaining={remaining})"
             )
 
-    def _validate_resume_state_freshness(
-        self, resume_state: Any, artifact: Any, run_id: str
-    ) -> Any:
-        """Discard a checkpoint whose model no longer matches the active parent.
+    async def _guard_existing_tree_authority(
+        self,
+        *,
+        context: HostedRunContext,
+        artifact: Any,
+        requested_tree_id: str,
+        checkpoint_doc: Mapping[str, Any] | None,
+    ) -> HostedWorkerOutcome | None:
+        existing = await select_one(
+            "research_lab_autoresearch_tree_current",
+            columns=(
+                "tree_id,run_id,root_artifact_hash,root_manifest_hash,policy_hash,"
+                "current_event_type,current_event_hash"
+            ),
+            filters=(("run_id", context.run_id),),
+        )
+        if not existing:
+            return None
+        existing_tree_id = str(existing.get("tree_id") or "")
+        existing_artifact_hash = str(existing.get("root_artifact_hash") or "")
+        existing_manifest_hash = str(existing.get("root_manifest_hash") or "")
+        existing_policy_hash = str(existing.get("policy_hash") or "")
+        current_event_type = str(existing.get("current_event_type") or "")
+        authority_changed = any(
+            (
+                existing_tree_id != requested_tree_id,
+                existing_artifact_hash
+                != str(getattr(artifact, "model_artifact_hash", "") or ""),
+                existing_manifest_hash
+                != str(getattr(artifact, "manifest_hash", "") or ""),
+                existing_policy_hash != self.tree_policy.policy_hash,
+            )
+        )
+        terminal_types = {
+            "tree_completed",
+            "tree_failed",
+            "tree_cancelled_root_changed",
+        }
+        if authority_changed and current_event_type not in terminal_types:
+            cancellation_doc = {
+                "schema_version": "research_lab.git_tree_root_change.v1",
+                "run_id": context.run_id,
+                "tree_id": existing_tree_id,
+                "requested_tree_id": requested_tree_id,
+                "old_root_artifact_hash": existing_artifact_hash,
+                "new_root_artifact_hash": str(
+                    getattr(artifact, "model_artifact_hash", "") or ""
+                ),
+                "old_root_manifest_hash": existing_manifest_hash,
+                "new_root_manifest_hash": str(
+                    getattr(artifact, "manifest_hash", "") or ""
+                ),
+                "old_policy_hash": existing_policy_hash,
+                "new_policy_hash": self.tree_policy.policy_hash,
+                "reason": "tree_authority_changed_before_resume",
+            }
+            await GitTreeStore().append_event_next(
+                tree_id=existing_tree_id,
+                event_type="tree_cancelled_root_changed",
+                event_doc=cancellation_doc,
+            )
+            current_event_type = "tree_cancelled_root_changed"
+        if not authority_changed and current_event_type == "tree_failed":
+            logger.warning(
+                "research_lab_git_tree_terminal_failure run_id=%s tree_id=%s",
+                compact_ref(context.run_id),
+                existing_tree_id[:24],
+            )
+            return await self._mark_failed(
+                context,
+                "Git-tree autoresearch completed without an eligible finalist",
+                reason="git_tree_no_eligible_finalist",
+            )
+        if authority_changed or current_event_type in terminal_types:
+            reason = (
+                "tree_root_or_policy_changed_cancelled"
+                if authority_changed
+                else f"tree_terminal_without_recoverable_handoff:{current_event_type}"
+            )
+            logger.warning(
+                "research_lab_git_tree_resume_paused run_id=%s tree_id=%s reason=%s",
+                compact_ref(context.run_id),
+                existing_tree_id[:24],
+                reason,
+            )
+            return await self._mark_paused(
+                context,
+                loop_result=None,
+                checkpoint_doc=checkpoint_doc,
+                reason=reason,
+            )
+        return None
 
-        A credit-blocked (or otherwise paused) run that resumes after the active model
-        changed would resume against a stale parent. Per CTO policy, null the checkpoint
-        so the run restarts from scratch against the current model (no payment re-consumed).
-        """
+    @staticmethod
+    def _tree_resume_block_reason(
+        resume_state: Any,
+        artifact: Any,
+        *,
+        expected_tree_id: str,
+    ) -> str:
+        """Reject stale or pre-tree checkpoints instead of substituting a root."""
+
         if not isinstance(resume_state, Mapping):
-            return resume_state
+            return ""
+        tree_checkpoint = resume_state.get("git_tree_checkpoint")
+        if not isinstance(tree_checkpoint, Mapping):
+            return "tree_checkpoint_not_authoritative"
+        checkpoint_tree_id = str(
+            tree_checkpoint.get("tree_id") or resume_state.get("git_tree_id") or ""
+        )
+        if checkpoint_tree_id != expected_tree_id:
+            return "tree_checkpoint_identity_changed"
         ckpt_artifact = str(resume_state.get("artifact_hash") or "")
         ckpt_manifest = str(resume_state.get("manifest_hash") or "")
         active_artifact = str(getattr(artifact, "model_artifact_hash", "") or "")
@@ -3641,14 +3877,8 @@ class ResearchLabHostedWorker:
             or (ckpt_manifest and active_manifest and ckpt_manifest != active_manifest)
         )
         if mismatch:
-            logger.warning(
-                "research_lab_resume_checkpoint_stale_restart run_id=%s ckpt_artifact=%s active_artifact=%s",
-                compact_ref(run_id),
-                compact_ref(ckpt_artifact),
-                compact_ref(active_artifact),
-            )
-            return None
-        return resume_state
+            return "tree_checkpoint_root_changed"
+        return ""
 
     async def _resolve_loop_start_credit_id(self, context: HostedRunContext) -> str | None:
         """Resolve the run's preserved loop-start credit ref, looking past the
@@ -3715,7 +3945,7 @@ class ResearchLabHostedWorker:
             if isinstance(autoresearch_result, Mapping)
             else (
                 _autoresearch_result_document_v2(loop_result)
-                if loop_result is not None and not legacy_v1_enabled()
+                if loop_result is not None
                 else None
             )
         )
@@ -4025,7 +4255,7 @@ class ResearchLabHostedWorker:
         provider_usage = cost_evidence_provider_usage(cost_evidence)
         failure_authority = getattr(failure_exception, "authority", None)
         signed_failure_result = None
-        if not legacy_v1_enabled() and isinstance(failure_authority, Mapping):
+        if isinstance(failure_authority, Mapping):
             candidate_result = failure_authority.get("result")
             execution_receipt = (
                 failure_authority.get("execution_receipt")
@@ -5016,25 +5246,6 @@ class ResearchLabHostedWorker:
             context_doc["topup_reason"] = str(queue_doc["topup_reason"])
         return context_doc
 
-    def _max_candidates_for_run(self, budget_context: Mapping[str, Any], model_doc: Mapping[str, Any]) -> int:
-        configured = int(
-            model_doc.get("dev_eval_candidate_width")
-            or model_doc.get("max_candidates")
-            or self.config.hosted_worker_dev_eval_candidate_width
-            or self.config.hosted_worker_max_candidates
-        )
-        budget = float(budget_context.get("requested_compute_budget_usd") or self.config.default_compute_budget_usd)
-        budget_limited = max(1, min(configured, int(max(1.0, budget // max(1.0, self.config.min_compute_budget_usd)))))
-        return max(1, min(self.config.hosted_worker_dev_eval_candidate_width, budget_limited))
-
-    def _paid_finalist_count_for_run(self, model_doc: Mapping[str, Any], max_candidates: int) -> int:
-        configured = int(
-            model_doc.get("paid_finalist_count")
-            or self.config.hosted_worker_paid_finalist_count
-            or 1
-        )
-        return max(1, min(int(max_candidates), configured))
-
     def _auto_research_max_tokens_for_call(
         self,
         *,
@@ -5396,7 +5607,7 @@ def _redacted_budget_context(value: Mapping[str, Any]) -> dict[str, Any]:
         "continue_from_run_id",
         "continuation_context",
         "topup_reason",
-        "inner_loop_policy",
+        "tree_policy",
     }
     return {key: value[key] for key in allowed if key in value}
 

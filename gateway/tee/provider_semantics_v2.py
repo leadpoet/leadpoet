@@ -78,6 +78,7 @@ _REQUEST_FIELDS = {
 }
 _OPTIONAL_REQUEST_FIELDS = {"dynamic_route"}
 _LOCAL_RESPONSE_SCHEMA_VERSION = "leadpoet.attested_local_provider_response.v2"
+TREE_PROVIDER_CALL_CAP_HEADER = "X-Research-Lab-Tree-Provider-Call-Cap"
 _LEGACY_PROVIDER_IDS = {
     "openrouter": "or",
     "scrapingdog": "sd",
@@ -186,6 +187,7 @@ class ProviderSemanticsAuthorityV2:
         self._inflight: Dict[tuple[str, str], threading.Event] = {}
         self._cost_ledgers: Dict[tuple[str, str], ProviderCostLedger] = {}
         self._live_calls: Dict[tuple[str, str], int] = {}
+        self._tree_live_calls: Dict[tuple[str, str], int] = {}
         self._cache_day = ""
         self._lock = threading.RLock()
 
@@ -365,6 +367,45 @@ class ProviderSemanticsAuthorityV2:
                     additional_attempts=lookup_attempts,
                     additional_artifacts=lookup_artifacts,
                 )
+            raw_tree_call_cap = _header(
+                headers, TREE_PROVIDER_CALL_CAP_HEADER
+            ).strip()
+            if raw_tree_call_cap:
+                try:
+                    tree_call_cap = int(raw_tree_call_cap)
+                except ValueError as exc:
+                    raise ProviderSemanticsV2Error(
+                        "tree provider call cap is invalid"
+                    ) from exc
+                scope = _header(headers, "X-Research-Lab-Cost-Scope").strip()
+                if not scope or tree_call_cap < 1 or tree_call_cap > 10_000:
+                    raise ProviderSemanticsV2Error(
+                        "tree provider call cap scope is invalid"
+                    )
+                tree_call_key = (day, scope)
+                with self._lock:
+                    used_tree_calls = self._tree_live_calls.get(tree_call_key, 0)
+                    if used_tree_calls < tree_call_cap:
+                        self._tree_live_calls[tree_call_key] = used_tree_calls + 1
+                if used_tree_calls >= tree_call_cap:
+                    event_doc = ledger.block_event(
+                        provider=provider,
+                        endpoint=redacted_endpoint(provider, normalized["url"]),
+                        request_fingerprint=fingerprint,
+                        reason="provider_call_cap_reached",
+                        status_code=402,
+                        evidence="blocked",
+                    ).to_doc()
+                    return self._local_response(
+                        normalized,
+                        parsed=parsed,
+                        body=b'{"error":"research_lab_tree_provider_call_cap_exceeded"}',
+                        status=402,
+                        evidence="blocked",
+                        cost_event=event_doc,
+                        additional_attempts=lookup_attempts,
+                        additional_artifacts=lookup_artifacts,
+                    )
             return self._live(
                 normalized,
                 original_body=original_body,
@@ -1030,4 +1071,5 @@ class ProviderSemanticsAuthorityV2:
         self._cache.clear()
         self._cost_ledgers.clear()
         self._live_calls.clear()
+        self._tree_live_calls.clear()
         self._cache_day = day

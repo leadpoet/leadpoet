@@ -23,21 +23,40 @@ from gateway.research_lab.code_build import (
     CodeEditPrivateTestError,
     CodeEditBuildResult,
     CodeEditCandidateBuilder,
-    attach_sequential_lineage,
+    attach_git_tree_lineage,
     resolve_source_inspection_requests,
 )
-from gateway.research_lab.loop_engine import (
+from gateway.research_lab.git_tree_models import (
+    GitTreeContractError,
+    TreeChildSlot,
+    TreeCheckpoint,
+    TreeEvaluation,
+    TreeNode,
+    TreePolicy,
+    TreeResult,
+    build_operation_id,
+    cohort_evaluation_operation_id,
+    derive_tree_id,
+    generation_operation_id,
+    select_finalist,
+    summarize_tree_evaluations,
+)
+from gateway.research_lab.git_tree_scheduler import (
+    GitTreeScheduler,
+    GitTreeSchedulerError,
+    sanitized_branch_context,
+)
+from gateway.research_lab.autoresearch_runtime import (
     AutoResearchLoopEvent,
-    AutoResearchLoopResult,
-    AutoResearchLoopSettings,
+    AutoResearchRuntimeSettings,
     OpenRouterCallResult,
-    _budget_limit_microusd,
-    _coerce_call_result,
-    _estimated_call_microusd,
-    _running_cost_ledger,
-    _safe_budget_doc,
-    _settings_doc,
-    _would_exceed_budget,
+    budget_limit_microusd as _budget_limit_microusd,
+    coerce_call_result as _coerce_call_result,
+    estimated_call_microusd as _estimated_call_microusd,
+    running_cost_ledger as _running_cost_ledger,
+    runtime_settings_doc as _settings_doc,
+    safe_budget_doc as _safe_budget_doc,
+    would_exceed_budget as _would_exceed_budget,
 )
 from research_lab.axis_provenance import call_episode
 from gateway.research_lab.logging_utils import safe_event_error_text
@@ -182,24 +201,6 @@ _UNIMPLEMENTABLE_PLAN_MARKERS = (
 def _binding_plan_unimplementable_reason(reason: str) -> bool:
     text = str(reason or "").strip().lower()
     return bool(text and any(marker in text for marker in _UNIMPLEMENTABLE_PLAN_MARKERS))
-
-
-def _ranked_path_fallback_enabled(config: Any) -> bool:
-    attr = getattr(config, "ranked_path_fallback_enabled", None)
-    if attr is not None:
-        return bool(attr)
-    return _engine_env_flag("RESEARCH_LAB_RANKED_PATH_FALLBACK_ENABLED", "true")
-
-
-def _ranked_path_fallback_max_paths(config: Any) -> int:
-    attr = getattr(config, "ranked_path_fallback_max_paths", None)
-    if attr is None:
-        raw = os.getenv("RESEARCH_LAB_RANKED_PATH_FALLBACK_MAX_PATHS", "3")
-        try:
-            attr = int(raw)
-        except (TypeError, ValueError):
-            attr = 3
-    return max(1, int(attr))
 
 
 def _planner_reference_repair_enabled(config: Any) -> bool:
@@ -353,95 +354,79 @@ def _loop_plan_selected_path_id(plan_doc: Mapping[str, Any] | None) -> str:
     return str(plan_doc.get("selected_path_id") or "").strip()
 
 
-def _ranked_path_fallback_plan(
+def _tree_branch_direction_plan(
     base_plan_doc: Mapping[str, Any] | None,
     *,
-    attempted_path_ids: set[str],
-    max_paths: int,
-    fallback_index: int,
-    refused_lanes: frozenset[str] | set[str] = frozenset(),
+    root_slot_index: int,
 ) -> dict[str, Any] | None:
+    """Bind one immutable ranked objective to one root branch.
+
+    The planner emits an ordered set of independently viable paths. A tree
+    branch owns the path at its root slot for its entire ancestry; a sibling's
+    refusal or score can never mutate this document.
+    """
+
     if not isinstance(base_plan_doc, Mapping):
         return None
     ranked_paths = base_plan_doc.get("ranked_paths")
     if not isinstance(ranked_paths, (list, tuple)):
         return None
-    # Diversity preference: when a lane was refused against the inspected
-    # source, prefer the next un-attempted path in a DIFFERENT lane; fall back
-    # to same-lane paths only when no alternative lane remains.
-    if refused_lanes:
-        preferred = _ranked_path_fallback_plan(
-            {
-                **dict(base_plan_doc),
-                "ranked_paths": [
-                    raw_path
-                    for raw_path in ranked_paths
-                    if isinstance(raw_path, Mapping)
-                    and str(raw_path.get("lane") or raw_path.get("required_lane") or "")
-                    not in refused_lanes
-                ],
-            },
-            attempted_path_ids=attempted_path_ids,
-            max_paths=max_paths,
-            fallback_index=fallback_index,
+    index = int(root_slot_index)
+    if index < 0 or index >= len(ranked_paths):
+        return None
+    raw_path = ranked_paths[index]
+    if not isinstance(raw_path, Mapping):
+        return None
+    path_id = _ranked_path_id(raw_path)
+    required_lane = str(
+        raw_path.get("lane") or raw_path.get("required_lane") or ""
+    ).strip()
+    required_mechanism = str(
+        raw_path.get("mechanism")
+        or raw_path.get("required_mechanism")
+        or raw_path.get("hypothesis")
+        or ""
+    ).strip()
+    if not path_id or not required_lane or not required_mechanism:
+        return None
+    candidate = dict(base_plan_doc)
+    candidate["no_new_safe_path"] = False
+    candidate["ranked_paths"] = [dict(raw_path)]
+    candidate["selected_path_id"] = path_id
+    candidate["required_lane"] = required_lane
+    candidate["required_mechanism"] = required_mechanism
+    for field_name in (
+        "target_behavior",
+        "must_inspect",
+        "allowed_lanes",
+        "disallowed_lanes",
+        "must_not_try",
+        "success_criteria",
+        "novelty_requirements",
+        "anti_overfit_checks",
+        "validation_paths",
+    ):
+        candidate[field_name] = raw_path.get(field_name, [])
+    for field_name in ("generalization_claim", "novelty_contrast"):
+        candidate[field_name] = raw_path.get(
+            field_name, base_plan_doc.get(field_name, "")
         )
-        if preferred is not None:
-            return preferred
-    checked = 0
-    for raw_path in ranked_paths:
-        if not isinstance(raw_path, Mapping):
-            continue
-        path_id = _ranked_path_id(raw_path)
-        if not path_id or path_id in attempted_path_ids:
-            continue
-        checked += 1
-        if checked > max_paths:
-            return None
-        required_lane = str(raw_path.get("lane") or raw_path.get("required_lane") or "")
-        required_mechanism = str(
-            raw_path.get("mechanism")
-            or raw_path.get("required_mechanism")
-            or raw_path.get("hypothesis")
-            or ""
+    candidate["validation_mode"] = raw_path.get(
+        "validation_mode", "runtime_checks"
+    )
+    candidate.pop("plan_hash", None)
+    candidate["plan_hash"] = sha256_json(candidate)
+    try:
+        return loop_direction_plan_from_mapping(candidate).to_dict()
+    except Exception as exc:
+        logger.warning(
+            "research_lab_git_tree_branch_plan_invalid "
+            "selected_path_id=%s plan_hash=%s error=%s",
+            path_id[:120],
+            str(candidate.get("plan_hash") or "")[:80],
+            safe_event_error_text(exc),
         )
-        if not required_lane or not required_mechanism:
-            continue
-        candidate = dict(base_plan_doc)
-        candidate["no_new_safe_path"] = False
-        candidate["selected_path_id"] = path_id
-        candidate["required_lane"] = required_lane
-        candidate["required_mechanism"] = required_mechanism
-        for field_name in (
-            "target_behavior",
-            "must_inspect",
-            "allowed_lanes",
-            "disallowed_lanes",
-            "must_not_try",
-            "success_criteria",
-            "novelty_requirements",
-            "anti_overfit_checks",
-            "validation_paths",
-        ):
-            candidate[field_name] = raw_path.get(field_name, [])
-        for field_name in ("generalization_claim", "novelty_contrast"):
-            candidate[field_name] = raw_path.get(field_name, "")
-        candidate["validation_mode"] = raw_path.get("validation_mode", "runtime_checks")
-        candidate["ranked_path_fallback"] = {
-            "schema_version": "1.0",
-            "fallback_index": max(1, int(fallback_index)),
-            "path_id": path_id,
-            "source_plan_hash": str(base_plan_doc.get("plan_hash") or ""),
-        }
-        candidate.pop("plan_hash", None)
-        candidate["plan_hash"] = sha256_json(candidate)
-        return candidate
-    return None
-
-
-def _stop_at_candidate_cap_enabled() -> bool:
-    """Bug 20 kill switch: stop iterating/building once max_candidates is reached (no build-and-discard)."""
-
-    return _engine_env_flag("RESEARCH_LAB_LOOP_STOP_AT_CANDIDATE_CAP", "true")
+        return None
 
 
 def _fallback_max_target_files(config: Any) -> int:
@@ -455,15 +440,6 @@ def _fallback_max_target_files(config: Any) -> int:
         return max(1, int(os.getenv("RESEARCH_LAB_CODE_EDIT_FALLBACK_MAX_TARGET_FILES", "3")))
     except ValueError:
         return 3
-
-
-def _refusal_lane_advance_enabled() -> bool:
-    """After a source-grounded refusal (drafter declined the lane against the
-    inspected source, and the bounded fallback declined again), advance to the
-    next ranked path — or terminate cheaply — instead of re-asking the same
-    lane every iteration until the compute budget dies."""
-
-    return _engine_env_flag("RESEARCH_LAB_LOOP_REFUSAL_LANE_ADVANCE", "true")
 
 
 def _judge_parse_soft_skip_enabled() -> bool:
@@ -498,26 +474,6 @@ def _reflection_emission_enabled() -> bool:
     return _engine_env_flag("RESEARCH_LAB_REFLECTION_EMISSION_ENABLED", "true")
 
 
-def _multi_candidate_drafts_enabled() -> bool:
-    """§6.2-8 kill switch: ask for and parse up to N>1 candidates per draft call,
-    bounded by the remaining candidate slots, instead of a flat
-    ``settings.max_candidates``. Inert at prod config: with
-    ``hosted_worker_max_candidates=1`` the remaining-slot bound keeps N at 1."""
-
-    return _engine_env_flag("RESEARCH_LAB_LOOP_MULTI_CANDIDATE_DRAFTS", "true")
-
-
-def _drafts_per_call_limit() -> int:
-    """§6.2-8: cap on candidates requested/parsed from one draft call (default 3, min 1)."""
-
-    raw = os.environ.get("RESEARCH_LAB_LOOP_DRAFTS_PER_CALL", "").strip()
-    try:
-        value = int(raw) if raw else 3
-    except ValueError:
-        value = 3
-    return max(1, value)
-
-
 def _dev_eval_enabled() -> bool:
     """§6.3-1 L1 dev-eval rung flag (default ON when a dev evaluator is wired):
     score built candidates through the wired ``dev_evaluator`` seam.
@@ -531,36 +487,6 @@ def _dev_snapshot_uri() -> str:
     (``research_lab.eval.snapshot_store.SNAPSHOT_URI_ENV``). Empty = no set."""
 
     return os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_URI", "").strip()
-
-
-def _dev_plateau_stop_enabled() -> bool:
-    """§6.3-4 lite flag (default OFF): stop iterating early when the recent dev
-    scores show no improvement over the run's best (requires dev-eval on)."""
-
-    return _engine_env_flag("RESEARCH_LAB_LOOP_DEV_PLATEAU_STOP", "false")
-
-
-def _dev_plateau_window() -> int:
-    """§6.3-4 lite: consecutive non-improving dev scores before stopping (default 2)."""
-
-    raw = os.environ.get("RESEARCH_LAB_LOOP_DEV_PLATEAU_WINDOW", "").strip()
-    try:
-        value = int(raw) if raw else 2
-    except ValueError:
-        value = 2
-    return max(1, value)
-
-
-def _dev_plateau_min_delta() -> float:
-    """§6.3-4 lite: a dev score must beat the run's best by more than this to
-    count as improvement (default 0.5 on the capped-top-5 dev-score scale)."""
-
-    raw = os.environ.get("RESEARCH_LAB_LOOP_DEV_PLATEAU_MIN_DELTA", "").strip()
-    try:
-        value = float(raw) if raw else 0.5
-    except ValueError:
-        value = 0.5
-    return max(0.0, value)
 
 
 @dataclass(frozen=True)
@@ -579,22 +505,29 @@ class BuiltCodeEditCandidate:
     # per-ICP outputs; checkpoints need the commitment and coverage facts, not
     # hidden development examples or provider payloads.
     dev_evaluation: Mapping[str, Any] = field(default_factory=dict)
-    # Private, anonymized test feedback for the next sequential edit. It never
+    # Private, anonymized test feedback for direct children. It never
     # contains ICP refs, hashes, company payloads, provider output, or prompts.
     dev_feedback: Mapping[str, Any] = field(default_factory=dict)
     dev_feedback_hash: str = ""
-    # Sequential lineage is separate from the promotion parent. Every built
-    # image remains rooted at the approved model, while these fields prove
-    # which best-so-far candidate supplied the source and feedback for the edit.
-    chain_step: int = 0
-    chain_root_artifact_hash: str = ""
-    chain_parent_artifact_hash: str = ""
-    chain_parent_node_id: str = ""
-    chain_parent_dev_score: float | None = None
-    chain_feedback_hash: str = ""
-    chain_incremental_source_diff_hash: str = ""
-    chain_cumulative_source_diff_hash: str = ""
-    chain_composition: Mapping[str, Any] = field(default_factory=dict)
+    # Tree ancestry is separate from the official promotion parent. Every
+    # official candidate remains rooted at the approved active model.
+    tree_id: str = ""
+    tree_parent_node_id: str = "root"
+    tree_root_branch_id: str = ""
+    tree_depth: int = 0
+    tree_child_slot: int = 0
+    tree_branch_objective_path_id: str = ""
+    tree_branch_objective_hash: str = ""
+    tree_generation_attempt_count: int = 0
+    tree_git_commit: str = ""
+    tree_root_artifact_hash: str = ""
+    tree_parent_artifact_hash: str = ""
+    tree_parent_dev_score: float | None = None
+    tree_parent_feedback_hash: str = ""
+    tree_incremental_source_diff_hash: str = ""
+    tree_cumulative_source_diff_hash: str = ""
+    tree_composition: Mapping[str, Any] = field(default_factory=dict)
+    tree_settled_cost_microusd: int = 0
 
 
 def _candidate_dev_evaluation_matches_policy(
@@ -602,129 +535,21 @@ def _candidate_dev_evaluation_matches_policy(
     policy: Mapping[str, Any],
 ) -> bool:
     evidence = candidate.dev_evaluation
-    if not isinstance(evidence, Mapping) or not bool(evidence.get("eligible")):
-        return False
-    score = candidate.dev_score
-    if score is None or not math.isfinite(float(score)):
+    if not isinstance(evidence, Mapping) or not evidence:
         return False
     expected = policy.get("evaluator_commitment")
     actual = evidence.get("evaluator_commitment")
-    return bool(
+    commitment_matches = bool(
         isinstance(expected, Mapping)
         and isinstance(actual, Mapping)
         and dict(actual) == dict(expected)
     )
-
-
-def _sequential_chain_enabled(policy: Mapping[str, Any] | None) -> bool:
-    policy_doc = dict(policy or {})
-    return bool(
-        policy_doc.get("sequential_chain_enabled")
-        and str(policy_doc.get("effective_phase") or "") in {"shadow", "rank"}
-    )
-
-
-def _best_eligible_chain_parent(
-    candidates: Sequence[BuiltCodeEditCandidate],
-    policy: Mapping[str, Any],
-) -> BuiltCodeEditCandidate | None:
-    eligible = [
-        candidate
-        for candidate in candidates
-        if _candidate_dev_evaluation_matches_policy(candidate, policy)
-    ]
-    if not eligible:
-        return None
-    # max() is stable for ties, so the earliest built candidate remains the
-    # parent when scores are equal.
-    return max(eligible, key=lambda candidate: float(candidate.dev_score or 0.0))
-
-
-def _sequential_chain_is_complete(
-    candidates: Sequence[BuiltCodeEditCandidate],
-    policy: Mapping[str, Any],
-) -> bool:
-    if not _sequential_chain_enabled(policy):
-        return True
-    items = list(candidates)
-    expected_width = max(1, int(policy.get("candidate_width") or 1))
-    if len(items) != expected_width or not items:
+    if not commitment_matches:
         return False
-    root_hash = str(items[0].chain_root_artifact_hash or "")
-    if not root_hash:
-        return False
-    prior: list[BuiltCodeEditCandidate] = []
-    for index, candidate in enumerate(items):
-        composition = candidate.chain_composition
-        if candidate.chain_step != index + 1:
-            return False
-        if candidate.chain_root_artifact_hash != root_hash:
-            return False
-        if not isinstance(composition, Mapping):
-            return False
-        if composition.get("cumulative_apply_verified") is not True:
-            return False
-        if str(composition.get("root_source_tree_hash") or "") != root_hash:
-            return False
-        if (
-            str(composition.get("parent_source_tree_hash") or "")
-            != candidate.chain_parent_artifact_hash
-        ):
-            return False
-        if (
-            str(composition.get("incremental_source_diff_hash") or "")
-            != candidate.chain_incremental_source_diff_hash
-        ):
-            return False
-        if (
-            str(composition.get("cumulative_source_diff_hash") or "")
-            != candidate.chain_cumulative_source_diff_hash
-        ):
-            return False
-        if candidate.chain_cumulative_source_diff_hash != candidate.build.source_diff_hash:
-            return False
-        if str(candidate.build.code_edit_manifest.get("parent_artifact_hash") or "") != root_hash:
-            return False
-        if index == 0:
-            if candidate.chain_parent_artifact_hash != root_hash:
-                return False
-            if candidate.chain_parent_node_id or candidate.chain_feedback_hash:
-                return False
-            if candidate.chain_parent_dev_score is not None:
-                return False
-            if (
-                candidate.chain_incremental_source_diff_hash
-                != candidate.chain_cumulative_source_diff_hash
-            ):
-                return False
-        else:
-            expected_parent = _best_eligible_chain_parent(prior, policy)
-            if expected_parent is None:
-                if candidate.chain_parent_artifact_hash != root_hash:
-                    return False
-                if candidate.chain_parent_node_id or candidate.chain_feedback_hash:
-                    return False
-                if candidate.chain_parent_dev_score is not None:
-                    return False
-            else:
-                if candidate.chain_parent_node_id != expected_parent.node_id:
-                    return False
-                if (
-                    candidate.chain_parent_artifact_hash
-                    != expected_parent.build.candidate_model_manifest.model_artifact_hash
-                ):
-                    return False
-                if candidate.chain_feedback_hash != expected_parent.dev_feedback_hash:
-                    return False
-                if not candidate.chain_feedback_hash:
-                    return False
-                if (
-                    candidate.chain_parent_dev_score is None
-                    or candidate.chain_parent_dev_score != expected_parent.dev_score
-                ):
-                    return False
-        prior.append(candidate)
-    return True
+    if not bool(evidence.get("eligible")):
+        return candidate.dev_score is None
+    score = candidate.dev_score
+    return bool(score is not None and math.isfinite(float(score)))
 
 
 def _finite_feedback_number(value: Any) -> float | None:
@@ -746,7 +571,7 @@ def _score_band(score: float | None) -> str:
     return "zero"
 
 
-def _build_sequential_dev_feedback(
+def _build_tree_dev_feedback(
     *,
     result: Mapping[str, Any],
     candidate: BuiltCodeEditCandidate,
@@ -809,11 +634,14 @@ def _build_sequential_dev_feedback(
         guidance.append(
             "Improve result quality and ranking before broadening result volume."
         )
-    parent_score = _finite_feedback_number(candidate.chain_parent_dev_score)
+    parent_score = _finite_feedback_number(candidate.tree_parent_dev_score)
     payload = {
-        "schema_version": "research_lab.sequential_dev_feedback.v1",
+        "schema_version": "research_lab.git_tree_dev_feedback.v1",
         "candidate_node_id": str(candidate.node_id)[:80],
-        "chain_step": max(0, int(candidate.chain_step)),
+        "tree_id": str(candidate.tree_id),
+        "parent_node_id": str(candidate.tree_parent_node_id),
+        "root_branch_id": str(candidate.tree_root_branch_id),
+        "depth": max(0, int(candidate.tree_depth)),
         "aggregate_score": round(float(score), 6),
         "parent_score": round(parent_score, 6) if parent_score is not None else None,
         "score_change_from_parent": (
@@ -827,7 +655,7 @@ def _build_sequential_dev_feedback(
         "examples": examples,
         "guidance": guidance,
         "rules": [
-            "Use this only for the next edit in this run.",
+            "Use this only for direct children on this branch.",
             "Do not infer hidden example identities or add example-specific branches.",
             "The approved scoring and promotion workflow remains authoritative.",
         ],
@@ -835,86 +663,125 @@ def _build_sequential_dev_feedback(
     return {**payload, "feedback_hash": sha256_json(payload)}
 
 
-def select_inner_loop_candidates(
-    candidates: Sequence[BuiltCodeEditCandidate],
-    policy: Mapping[str, Any] | None,
-) -> tuple[list[BuiltCodeEditCandidate], dict[str, Any]]:
-    """Apply one fail-closed terminal inner-loop selection decision.
-
-    Build order is authoritative unless the effective phase is ``rank``, at
-    least two candidates exist, and every built candidate has eligible
-    evidence for the exact current evaluator commitment. ``shadow`` computes
-    the hypothetical winner but intentionally retains ordinary build order.
-    """
-
-    items = list(candidates)
-    policy_doc = dict(policy or {})
-    phase = str(policy_doc.get("effective_phase") or "off")
-    eligible = [
-        candidate
-        for candidate in items
-        if _candidate_dev_evaluation_matches_policy(candidate, policy_doc)
-    ]
-    expected_width = max(1, int(policy_doc.get("candidate_width") or 1))
-    chain_complete = _sequential_chain_is_complete(items, policy_doc)
-    complete = (
-        len(items) == expected_width
-        and len(items) >= 2
-        and len(eligible) == len(items)
-        and chain_complete
-    )
-    score_order = sorted(
-        items,
-        key=lambda candidate: -float(candidate.dev_score or 0.0),
-    ) if complete else list(items)
-    ranking_applied = bool(phase == "rank" and complete)
-    ordered = score_order if ranking_applied else list(items)
-
-    if phase not in {"shadow", "rank"}:
-        fallback_reason = str(policy_doc.get("fallback_reason") or "phase_does_not_rank")
-    elif len(items) != expected_width:
-        fallback_reason = "incomplete_candidate_width"
-    elif not complete:
-        fallback_reason = (
-            "incomplete_sequential_chain"
-            if len(eligible) == len(items) and not chain_complete
-            else "incomplete_or_mismatched_candidate_evaluations"
-        )
-    elif phase == "shadow":
-        fallback_reason = "shadow_preserves_ordinary_candidate"
+def _candidate_tree_node(
+    candidate: BuiltCodeEditCandidate,
+    *,
+    status: str | None = None,
+) -> TreeNode:
+    evidence = dict(candidate.dev_evaluation or {})
+    score = candidate.dev_score
+    eligible = bool(evidence.get("eligible")) and score is not None
+    normalized_status = str(status or ("eligible" if eligible else "ineligible"))
+    if normalized_status == "evaluating":
+        evaluation = None
     else:
-        fallback_reason = ""
+        evaluation = TreeEvaluation(
+            score=float(score) if eligible else None,
+            eligible=eligible,
+            reason=str(evidence.get("eligibility_reason") or "evaluation_missing"),
+            execution_coverage=float(evidence.get("execution_coverage") or 0.0),
+            snapshot_miss_count=max(
+                0, int(evidence.get("snapshot_miss_count") or 0)
+            ),
+            true_miss_count=max(0, int(evidence.get("true_miss_count") or 0)),
+            failure_count=max(0, int(evidence.get("failure_count") or 0)),
+            zero_output_count=max(0, int(evidence.get("zero_output_count") or 0)),
+            snapshot_hash=str(evidence.get("snapshot_manifest_hash") or ""),
+            dev_set_hash=str(evidence.get("dev_set_hash") or ""),
+            policy=str(evidence.get("miss_policy") or "strict"),
+            score_version=str(candidate.dev_score_version or ""),
+            receipt_root=str(evidence.get("receipt_root") or ""),
+            context_hash=str(evidence.get("context_hash") or ""),
+            parent_delta=(
+                float(evidence["parent_delta"])
+                if isinstance(evidence.get("parent_delta"), (int, float))
+                and not isinstance(evidence.get("parent_delta"), bool)
+                else None
+            ),
+            settled_cost_microusd=max(
+                0, int(evidence.get("settled_cost_microusd") or 0)
+            ),
+            provider_call_count=max(
+                0, int(evidence.get("provider_call_count") or 0)
+            ),
+            evaluation_mode=str(evidence.get("evaluation_mode") or "replay"),
+            unclassified_error=bool(evidence.get("unclassified_error")),
+            feedback=dict(candidate.dev_feedback or {}),
+        )
+    return TreeNode(
+        tree_id=candidate.tree_id,
+        node_id=candidate.node_id,
+        parent_node_id=candidate.tree_parent_node_id,
+        root_branch_id=candidate.tree_root_branch_id,
+        depth=candidate.tree_depth,
+        slot_index=candidate.tree_child_slot,
+        status=normalized_status,
+        branch_objective_path_id=candidate.tree_branch_objective_path_id,
+        branch_objective_hash=candidate.tree_branch_objective_hash,
+        generation_attempt_count=candidate.tree_generation_attempt_count,
+        git_commit=candidate.tree_git_commit,
+        source_tree_hash=(
+            candidate.build.candidate_model_manifest.model_artifact_hash
+        ),
+        incremental_patch_hash=candidate.tree_incremental_source_diff_hash,
+        cumulative_patch_hash=candidate.tree_cumulative_source_diff_hash,
+        candidate_artifact_hash=(
+            candidate.build.candidate_model_manifest.model_artifact_hash
+        ),
+        lineage_hash=sha256_json(
+            dict(candidate.build.build_doc.get("git_tree") or {})
+        ),
+        complexity=(
+            len(candidate.draft.target_files)
+            + sum(
+                1
+                for line in candidate.draft.unified_diff.splitlines()
+                if line.startswith(("+", "-"))
+                and not line.startswith(("+++", "---"))
+            )
+        ),
+        settled_cost_microusd=max(
+            0, int(candidate.tree_settled_cost_microusd)
+        ),
+        evaluation=evaluation,
+    )
 
-    hypothetical = score_order[0] if complete and score_order else None
-    paid = ordered[0] if ordered else None
-    decision = {
-        "schema_version": "research_lab.inner_loop_selection.v1",
-        "effective_phase": phase,
-        "candidate_count": len(items),
-        "evaluated_candidate_count": sum(
-            1 for candidate in items if isinstance(candidate.dev_evaluation, Mapping)
-            and bool(candidate.dev_evaluation)
-        ),
-        "eligible_candidate_count": len(eligible),
-        "all_candidate_evaluations_eligible": bool(
-            len(items) == expected_width
-            and len(items) >= 2
-            and len(eligible) == len(items)
-        ),
-        "sequential_chain_enabled": _sequential_chain_enabled(policy_doc),
-        "sequential_chain_complete": chain_complete,
-        "ranking_applied": ranking_applied,
-        "strict_fallback_applied": bool(
-            (phase == "rank" and not ranking_applied)
-            or (phase == "shadow" and not complete)
-        ),
-        "fallback_reason": fallback_reason,
-        "hypothetical_winner_node_id": hypothetical.node_id if hypothetical else None,
-        "actual_paid_candidate_node_id": paid.node_id if paid else None,
-        "paid_finalist_count": 1 if paid else 0,
-        "evaluator_commitment": dict(policy_doc.get("evaluator_commitment") or {}),
+
+def _apply_tree_cohort_settlement(
+    candidates: Sequence[BuiltCodeEditCandidate],
+) -> tuple[list[BuiltCodeEditCandidate], int, int]:
+    """Allocate one shared cohort charge once across its candidate nodes."""
+
+    ordered = sorted(tuple(candidates), key=lambda item: str(item.node_id))
+    if not ordered:
+        return [], 0, 0
+    reported_costs = {
+        max(0, int(item.dev_evaluation.get("settled_cost_microusd") or 0))
+        for item in ordered
     }
-    return ordered, decision
+    reported_calls = {
+        max(0, int(item.dev_evaluation.get("provider_call_count") or 0))
+        for item in ordered
+    }
+    if len(reported_costs) != 1 or len(reported_calls) != 1:
+        raise GitTreeSchedulerError(
+            "tree cohort candidates reported inconsistent shared accounting"
+        )
+    settled_cost_microusd = reported_costs.pop()
+    provider_call_count = reported_calls.pop()
+    per_node_cost, remainder = divmod(settled_cost_microusd, len(ordered))
+    allocated = [
+        replace(
+            item,
+            tree_settled_cost_microusd=(
+                max(0, int(item.tree_settled_cost_microusd))
+                + per_node_cost
+                + (1 if index < remainder else 0)
+            ),
+        )
+        for index, item in enumerate(ordered)
+    ]
+    return allocated, settled_cost_microusd, provider_call_count
 
 
 class ContainedStageFailure(str):
@@ -968,9 +835,52 @@ class CodeEditLoopResult:
     actual_openrouter_cost_usd: float
     actual_openrouter_cost_microusd: int
     openrouter_call_count: int
+    tree_result: TreeResult
     provider_usage: tuple[dict[str, Any], ...] = ()
     status: str = "completed"
     checkpoint_doc: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        status = str(self.status or "").strip().lower()
+        if status not in {"completed", "paused", "failed"}:
+            raise GitTreeContractError("code-edit loop result status is invalid")
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "selected_candidates", tuple(self.selected_candidates))
+        if self.tree_result.status != status:
+            raise GitTreeContractError("loop and tree result statuses differ")
+        if not isinstance(self.checkpoint_doc, Mapping):
+            raise GitTreeContractError("loop result requires a tree checkpoint")
+        if (
+            self.checkpoint_doc.get("git_tree_checkpoint")
+            != self.tree_result.checkpoint.to_dict()
+        ):
+            raise GitTreeContractError(
+                "loop result checkpoint differs from its tree result"
+            )
+        if status == "completed":
+            if len(self.selected_candidates) != 1:
+                raise GitTreeContractError(
+                    "completed loop requires exactly one selected candidate"
+                )
+            selected = self.selected_candidates[0]
+            selected_nodes = [
+                node
+                for node in self.tree_result.nodes
+                if node.node_id == self.tree_result.selected_node_id
+            ]
+            if (
+                selected.node_id != self.tree_result.selected_node_id
+                or selected.tree_id != self.tree_result.tree_id
+                or len(selected_nodes) != 1
+                or _candidate_tree_node(selected) != selected_nodes[0]
+            ):
+                raise GitTreeContractError(
+                    "selected candidate differs from the selected tree node"
+                )
+        elif self.selected_candidates or self.tree_result.selected_node_id:
+            raise GitTreeContractError(
+                "paused or failed loop cannot expose a selected candidate"
+            )
 
     def cost_ledger(self) -> dict[str, Any]:
         return {
@@ -988,7 +898,7 @@ class CodeEditLoopResult:
 
 @dataclass
 class CodeEditLoopEngine:
-    settings: AutoResearchLoopSettings
+    settings: AutoResearchRuntimeSettings
     call_openrouter: CodeEditOpenRouterCaller
     event_sink: Any
     builder: CodeEditCandidateBuilder
@@ -1018,6 +928,9 @@ class CodeEditLoopEngine:
     # preserves the original boto3 behavior; the measured role supplies a
     # signed host-operation adapter.
     artifact_io: Any | None = None
+    # Git is a host primitive. The measured executor receives only committed
+    # results through this adapter; it never shells out to Git inside the EIF.
+    tree_repository: Any | None = None
     # V2 supplies authenticated, receipt-bound provider inputs. None preserves
     # the existing host loaders and their exact continuity behavior.
     provider_registry_loader: Callable[[], tuple[list[Any], Any]] | None = None
@@ -1026,7 +939,26 @@ class CodeEditLoopEngine:
     # Langfuse trace (run_trace_id(run_id)) without threading run_id through
     # every stage-call signature. One engine instance serves one run at a time.
     _langfuse_run_id: str = field(default="", init=False, repr=False)
-    _inner_loop_policy: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _tree_policy_doc: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _active_tree_scheduler: GitTreeScheduler | None = field(
+        default=None, init=False, repr=False
+    )
+    _active_tree_policy: TreePolicy | None = field(default=None, init=False, repr=False)
+    _active_tree_id: str = field(default="", init=False, repr=False)
+    _active_tree_root_git_commit: str = field(default="", init=False, repr=False)
+
+    async def _tree_repository_call(self, method_name: str, **kwargs: Any) -> Any:
+        repository = self.tree_repository
+        if repository is None:
+            raise GitTreeSchedulerError("measured Git-tree repository is not wired")
+        method = getattr(repository, method_name, None)
+        if method is None or not callable(method):
+            raise GitTreeSchedulerError(
+                f"measured Git-tree repository lacks {method_name}"
+            )
+        if inspect.iscoroutinefunction(method):
+            return await method(**kwargs)
+        return await asyncio.to_thread(method, **kwargs)
 
     async def _maybe_dev_eval_candidate(
         self,
@@ -1034,6 +966,7 @@ class CodeEditLoopEngine:
         *,
         run_id: str,
         remaining_seconds: float | None = None,
+        precomputed_response: Mapping[str, Any] | None = None,
     ) -> BuiltCodeEditCandidate:
         """§6.3-1: attach a ranking-only dev score to a just-built candidate.
 
@@ -1045,12 +978,12 @@ class CodeEditLoopEngine:
         returns the candidate unscored — dev-eval must never fail a run that
         already built an image.
         """
-        policy = dict(self._inner_loop_policy or {})
+        policy = dict(self._tree_policy_doc or {})
         commitment = dict(policy.get("evaluator_commitment") or {})
 
         def _ineligible(reason: str, **details: Any) -> BuiltCodeEditCandidate:
             evidence = {
-                "schema_version": "research_lab.inner_loop_candidate_evaluation.v1",
+                "schema_version": "research_lab.git_tree_evaluation.v1",
                 "eligible": False,
                 "eligibility_reason": str(reason)[:160],
                 "evaluator_commitment": commitment,
@@ -1080,10 +1013,24 @@ class CodeEditLoopEngine:
                 )
                 return _ineligible("dev_evaluator_unwired")
 
-            reserve = max(0, int(policy.get("finalization_reserve_seconds") or 120))
-            configured_timeout = max(1, int(policy.get("evaluation_timeout_seconds") or 300))
+            measured_policy = (
+                dict(policy.get("policy") or {})
+                if isinstance(policy.get("policy"), Mapping)
+                else {}
+            )
+            reserve = max(
+                0,
+                int(
+                    measured_policy.get("finalization_reserve_seconds")
+                    or 120
+                ),
+            )
+            configured_timeout = max(
+                1,
+                int(commitment.get("evaluation_timeout_seconds") or 300),
+            )
             timeout = configured_timeout
-            if remaining_seconds is not None:
+            if remaining_seconds is not None and precomputed_response is None:
                 available = float(remaining_seconds) - reserve
                 if available <= 0:
                     return _ineligible(
@@ -1093,7 +1040,11 @@ class CodeEditLoopEngine:
                     )
                 timeout = max(1, min(configured_timeout, int(available)))
 
-            response = await asyncio.wait_for(self.dev_evaluator(candidate), timeout=timeout)
+            response = (
+                dict(precomputed_response)
+                if precomputed_response is not None
+                else await asyncio.wait_for(self.dev_evaluator(candidate), timeout=timeout)
+            )
             if not isinstance(response, Mapping):
                 raise ValueError("dev_evaluator returned a non-mapping result")
             envelope = dict(response)
@@ -1114,18 +1065,27 @@ class CodeEditLoopEngine:
             version = str(result.get("dev_score_version") or "")
             result_manifest_hash = str(result.get("snapshot_manifest_hash") or "")
             result_dev_set_hash = str(result.get("dev_set_hash") or "")
-            expected_manifest_hash = str(policy.get("snapshot_manifest_hash") or "")
-            expected_dev_set_hash = str(policy.get("dev_set_hash") or "")
-            expected_score_commitment = sha256_json(
-                {
-                    "schema_version": "research_lab.dev_score_commitment.v1",
-                    "dev_score_version": version,
-                    "dev_set_hash": result_dev_set_hash,
-                    "snapshot_manifest_hash": result_manifest_hash,
-                    "miss_policy": str(result.get("miss_policy") or ""),
-                }
+            expected_manifest_hash = str(
+                commitment.get("snapshot_manifest_hash") or ""
             )
-            dev_feedback = _build_sequential_dev_feedback(
+            expected_dev_set_hash = str(commitment.get("dev_set_hash") or "")
+            evaluation_mode = str(result.get("evaluation_mode") or "replay")
+            overlay_hash = str(result.get("overlay_hash") or "")
+            cohort_hash = str(result.get("cohort_hash") or "")
+            score_commitment_doc = {
+                "schema_version": (
+                    "research_lab.git_tree_dev_score_commitment.v1"
+                ),
+                "dev_score_version": version,
+                "dev_set_hash": result_dev_set_hash,
+                "snapshot_manifest_hash": result_manifest_hash,
+                "miss_policy": str(result.get("miss_policy") or ""),
+                "evaluation_mode": evaluation_mode,
+                "overlay_hash": overlay_hash,
+                "cohort_hash": cohort_hash,
+            }
+            expected_score_commitment = sha256_json(score_commitment_doc)
+            dev_feedback = _build_tree_dev_feedback(
                 result=result,
                 candidate=candidate,
                 score=score,
@@ -1139,6 +1099,17 @@ class CodeEditLoopEngine:
                 "no_true_misses": int(result.get("true_miss_count") or 0) == 0,
                 "no_failures": int(result.get("failure_count") or 0) == 0,
                 "strict_miss_policy": str(result.get("miss_policy") or "") == "strict",
+                "evaluation_mode_valid": evaluation_mode in {"replay", "hybrid"},
+                "overlay_commitment_valid": bool(
+                    re.fullmatch(r"sha256:[0-9a-f]{64}", overlay_hash)
+                )
+                and (
+                    evaluation_mode == "hybrid"
+                    or overlay_hash == sha256_json({})
+                ),
+                "cohort_commitment_present": bool(
+                    re.fullmatch(r"sha256:[0-9a-f]{64}", cohort_hash)
+                ),
                 "snapshot_manifest_matches": bool(expected_manifest_hash)
                 and result_manifest_hash == expected_manifest_hash,
                 "dev_set_matches": bool(expected_dev_set_hash)
@@ -1152,7 +1123,7 @@ class CodeEditLoopEngine:
                 ) == 8,
             }
             evaluation_doc = {
-                "schema_version": "research_lab.inner_loop_candidate_evaluation.v1",
+                "schema_version": "research_lab.git_tree_evaluation.v1",
                 "eligible": all(checks.values()),
                 "eligibility_reason": (
                     "eligible"
@@ -1171,6 +1142,30 @@ class CodeEditLoopEngine:
                 "dev_set_hash": result_dev_set_hash,
                 "score_commitment": str(result.get("score_commitment") or ""),
                 "receipt_root": receipt_root,
+                "evaluation_mode": evaluation_mode,
+                "overlay_hash": overlay_hash,
+                "cohort_hash": cohort_hash,
+                "evaluation_plan": dict(result.get("evaluation_plan") or {}),
+                "provider_call_count": max(
+                    0, int(result.get("provider_call_count") or 0)
+                ),
+                "settled_cost_microusd": max(
+                    0, int(result.get("settled_cost_microusd") or 0)
+                ),
+                "context_hash": sha256_json(
+                    {
+                        "schema_version": "research_lab.git_tree_eval_context.v1",
+                        "evaluator_commitment": commitment,
+                        "snapshot_manifest_hash": result_manifest_hash,
+                        "dev_set_hash": result_dev_set_hash,
+                        "score_version": version,
+                        "miss_policy": str(result.get("miss_policy") or ""),
+                        "evaluation_mode": evaluation_mode,
+                        "overlay_hash": overlay_hash,
+                        "cohort_hash": cohort_hash,
+                    }
+                ),
+                "parent_delta": dev_feedback.get("score_change_from_parent"),
                 "evaluator_commitment": commitment,
                 "checks": checks,
             }
@@ -1235,6 +1230,267 @@ class CodeEditLoopEngine:
                 error_hash=sha256_json({"error_type": type(exc).__name__, "error": str(exc)}),
             )
 
+    async def _maybe_dev_eval_cohort(
+        self,
+        candidates: Sequence[BuiltCodeEditCandidate],
+        *,
+        run_id: str,
+        remaining_seconds: float | None = None,
+        remaining_tree_budget_microusd: int | None = None,
+        post_evaluation_reserve_seconds: int | None = None,
+    ) -> list[BuiltCodeEditCandidate]:
+        """Evaluate one complete scheduler round under one frozen context."""
+
+        ordered = sorted(tuple(candidates), key=lambda item: str(item.node_id))
+        if not ordered:
+            return []
+        policy = dict(self._tree_policy_doc or {})
+        commitment = dict(policy.get("evaluator_commitment") or {})
+
+        def failed_candidate(
+            candidate: BuiltCodeEditCandidate,
+            *,
+            reason: str,
+            error: Exception | None = None,
+            details: Mapping[str, Any] | None = None,
+        ) -> BuiltCodeEditCandidate:
+            evidence = {
+                "schema_version": "research_lab.git_tree_evaluation.v1",
+                "eligible": False,
+                "eligibility_reason": str(reason)[:160],
+                "evaluator_commitment": commitment,
+                "cohort_evaluation": True,
+                **dict(details or {}),
+            }
+            if error is not None:
+                evidence.update(
+                    {
+                        "unclassified_error": type(error).__name__
+                        not in {
+                            "DevEvalRunnerError",
+                            "DevEvalError",
+                            "DevSnapshotStoreError",
+                            "TimeoutError",
+                        },
+                        "error_hash": sha256_json(
+                            {
+                                "error_type": type(error).__name__,
+                                "error": str(error),
+                            }
+                        ),
+                    }
+                )
+            return replace(
+                candidate,
+                dev_score=None,
+                dev_score_version="",
+                dev_evaluation=evidence,
+                dev_feedback={},
+                dev_feedback_hash="",
+            )
+
+        if (
+            not bool(policy.get("evaluator_enabled"))
+            or not _dev_eval_enabled()
+            or not _dev_snapshot_uri()
+            or self.dev_evaluator is None
+        ):
+            return [
+                await self._maybe_dev_eval_candidate(
+                    item,
+                    run_id=run_id,
+                    remaining_seconds=remaining_seconds,
+                )
+                for item in ordered
+            ]
+        evaluate_cohort = getattr(self.dev_evaluator, "evaluate_cohort", None)
+        if not callable(evaluate_cohort):
+            logger.warning(
+                "research_lab_tree_dev_eval_cohort_unwired run_id=%s node_count=%s",
+                run_id,
+                len(ordered),
+            )
+            return [
+                failed_candidate(item, reason="dev_evaluator_cohort_unwired")
+                for item in ordered
+            ]
+        measured_policy = (
+            dict(policy.get("policy") or {})
+            if isinstance(policy.get("policy"), Mapping)
+            else {}
+        )
+        reserve = max(
+            0,
+            int(
+                post_evaluation_reserve_seconds
+                if post_evaluation_reserve_seconds is not None
+                else measured_policy.get("finalization_reserve_seconds") or 120
+            ),
+        )
+        configured_timeout = max(
+            1, int(commitment.get("evaluation_timeout_seconds") or 300)
+        )
+        timeout = configured_timeout
+        if remaining_seconds is not None:
+            available = float(remaining_seconds) - reserve
+            if available <= 0:
+                return [
+                    failed_candidate(
+                        item,
+                        reason="insufficient_deadline_for_cohort_evaluation",
+                        details={
+                            "remaining_seconds": round(
+                                float(remaining_seconds), 3
+                            ),
+                            "post_evaluation_reserve_seconds": reserve,
+                            "configured_evaluation_timeout_seconds": (
+                                configured_timeout
+                            ),
+                        },
+                    )
+                    for item in ordered
+                ]
+            timeout = max(1, min(configured_timeout, int(available)))
+        try:
+            response = await asyncio.wait_for(
+                evaluate_cohort(
+                    ordered,
+                    remaining_tree_budget_microusd=(
+                        max(0, int(remaining_tree_budget_microusd))
+                        if remaining_tree_budget_microusd is not None
+                        else None
+                    ),
+                ),
+                timeout=timeout,
+            )
+            if not isinstance(response, Mapping):
+                raise ValueError("dev-evaluator cohort returned a non-mapping result")
+            rows = response.get("results")
+            if not isinstance(rows, Sequence) or isinstance(
+                rows, (str, bytes, bytearray)
+            ):
+                raise ValueError("dev-evaluator cohort carried no result rows")
+            rows_by_node: dict[str, Mapping[str, Any]] = {}
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    raise ValueError("dev-evaluator cohort row is invalid")
+                node_id = str(row.get("node_id") or "")
+                if not node_id or node_id in rows_by_node:
+                    raise ValueError("dev-evaluator cohort node binding is invalid")
+                rows_by_node[node_id] = row
+            if set(rows_by_node) != {str(item.node_id) for item in ordered}:
+                raise ValueError("dev-evaluator cohort omitted or added a node")
+            evaluated: list[BuiltCodeEditCandidate] = []
+            for item in ordered:
+                row = rows_by_node[str(item.node_id)]
+                raw_result = row.get("result")
+                if not isinstance(raw_result, Mapping):
+                    raise ValueError("dev-evaluator cohort candidate result is invalid")
+                metadata = row.get("evaluation_metadata")
+                merged_result = {
+                    **dict(raw_result),
+                    **(
+                        dict(metadata)
+                        if isinstance(metadata, Mapping)
+                        else {}
+                    ),
+                }
+                graph = row.get("receipt_graph")
+                precomputed = (
+                    {
+                        "result": merged_result,
+                        "receipt_graph": dict(graph),
+                    }
+                    if isinstance(graph, Mapping)
+                    else merged_result
+                )
+                evaluated.append(
+                    await self._maybe_dev_eval_candidate(
+                        item,
+                        run_id=run_id,
+                        remaining_seconds=remaining_seconds,
+                        precomputed_response=precomputed,
+                    )
+                )
+            context_hashes = {
+                str(item.dev_evaluation.get("context_hash") or "")
+                for item in evaluated
+                if item.dev_evaluation.get("eligible")
+            }
+            if len(context_hashes) > 1:
+                raise ValueError("dev-evaluator cohort contexts differ")
+            return evaluated
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "research_lab_tree_dev_eval_cohort_failed run_id=%s node_count=%s error=%s",
+                run_id,
+                len(ordered),
+                str(exc)[:200],
+            )
+            raise
+
+    async def _rehydrate_candidate_reference(
+        self,
+        *,
+        uri: str,
+        expected_hash: str,
+        run_id: str,
+    ) -> BuiltCodeEditCandidate:
+        if not str(uri).startswith("s3://"):
+            raise ValueError("rehydration_artifact_uri_invalid")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(expected_hash or "")):
+            raise ValueError("rehydration_artifact_hash_missing")
+        bucket, object_key = _parse_s3_uri(uri)
+        if self.artifact_io is not None:
+            payload = await _artifact_io_read_json(
+                self.artifact_io,
+                uri,
+                content_hash=expected_hash,
+            )
+        else:
+            def _get() -> dict[str, Any]:
+                import boto3  # type: ignore
+
+                body = boto3.client("s3").get_object(
+                    Bucket=bucket, Key=object_key
+                )["Body"].read()
+                return json.loads(body.decode("utf-8"))
+
+            payload = await asyncio.to_thread(_get)
+        stored_hash = str(payload.get("loop_candidate_artifact_hash") or "")
+        if stored_hash != expected_hash:
+            raise ValueError("rehydration_artifact_hash_mismatch")
+        candidate = replace(
+            _rehydrated_candidate_from_artifact_payload(payload),
+            rehydration_artifact_uri=uri,
+            rehydration_artifact_hash=expected_hash,
+        )
+        if candidate.tree_depth <= 0:
+            raise ValueError("rehydrated candidate is not a Git-tree node")
+        restore_source_context = getattr(
+            self.builder,
+            "restore_rehydrated_candidate_source_context",
+            None,
+        )
+        if callable(restore_source_context):
+            try:
+                await asyncio.to_thread(
+                    restore_source_context,
+                    candidate=candidate,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_tree_resume_source_restore_failed "
+                    "run_id=%s node_id=%s error=%s",
+                    run_id,
+                    candidate.node_id[:80],
+                    type(exc).__name__,
+                )
+                raise
+        return candidate
+
     async def _restore_selected_from_resume(
         self,
         *,
@@ -1248,14 +1504,26 @@ class CodeEditLoopEngine:
     ) -> list[BuiltCodeEditCandidate]:
         """Rehydrate already-built candidates from checkpoint artifacts (bug #5).
 
-        Each checkpoint summary carries a ``rehydration_artifact_uri``/``_hash``
-        pointing at the full S3 rehydration doc. Any per-candidate failure is
-        logged and skipped; the caller degrades to the legacy empty ``selected``
-        on total failure. The ``loop_resumed`` event reports the restored count.
+        Each committed build must have a content-addressed private artifact.
+        Missing or tampered state is fatal to resume; substituting another node
+        or the root would change the measured search tree.
         """
         del openrouter_calls, estimated_cost, actual_cost_microusd  # event-free restore
+        required_node_ids = {
+            node.node_id
+            for node in (
+                self._active_tree_scheduler.nodes
+                if self._active_tree_scheduler is not None
+                else ()
+            )
+            if node.status in {"evaluating", "eligible", "ineligible"}
+        }
         summaries = resume.get("selected_candidates")
         if not isinstance(summaries, Sequence):
+            if required_node_ids:
+                raise GitTreeSchedulerError(
+                    "tree checkpoint is missing candidate artifact summaries"
+                )
             return []
         restored: list[BuiltCodeEditCandidate] = []
         for summary in summaries:
@@ -1264,77 +1532,51 @@ class CodeEditLoopEngine:
             uri = str(summary.get("rehydration_artifact_uri") or "")
             expected_hash = str(summary.get("rehydration_artifact_hash") or "")
             if not uri.startswith("s3://"):
+                if str(summary.get("node_id") or "") in required_node_ids:
+                    raise GitTreeSchedulerError(
+                        "tree checkpoint candidate artifact URI is missing"
+                    )
                 continue
             try:
-                bucket, object_key = _parse_s3_uri(uri)
-
-                if self.artifact_io is not None:
-                    if not expected_hash:
-                        raise ValueError("rehydration_artifact_hash_missing")
-                    payload = await _artifact_io_read_json(
-                        self.artifact_io,
-                        uri,
-                        content_hash=expected_hash,
-                    )
-                else:
-                    def _get(bucket: str = bucket, object_key: str = object_key) -> dict[str, Any]:
-                        import boto3  # type: ignore
-
-                        body = boto3.client("s3").get_object(Bucket=bucket, Key=object_key)["Body"].read()
-                        return json.loads(body.decode("utf-8"))
-
-                    payload = await asyncio.to_thread(_get)
-                stored_hash = str(payload.get("loop_candidate_artifact_hash") or "")
-                if expected_hash and stored_hash and stored_hash != expected_hash:
-                    raise ValueError("rehydration_artifact_hash_mismatch")
-                candidate = _rehydrated_candidate_from_artifact_payload(payload)
-                candidate = replace(
-                    candidate,
-                    rehydration_artifact_uri=uri,
-                    rehydration_artifact_hash=expected_hash or stored_hash,
+                candidate = await self._rehydrate_candidate_reference(
+                    uri=uri,
+                    expected_hash=expected_hash,
+                    run_id=run_id,
                 )
-                restore_source_context = getattr(
-                    self.builder,
-                    "restore_rehydrated_candidate_source_context",
+                expected_node = next(
+                    (
+                        node
+                        for node in (
+                            self._active_tree_scheduler.nodes
+                            if self._active_tree_scheduler is not None
+                            else ()
+                        )
+                        if node.node_id == candidate.node_id
+                    ),
                     None,
                 )
-                if candidate.chain_step and callable(restore_source_context):
-                    try:
-                        await asyncio.to_thread(
-                            restore_source_context,
-                            candidate=candidate,
+                if expected_node is None:
+                    raise ValueError("rehydrated candidate tree node is missing")
+                if expected_node.status == "evaluating":
+                    if candidate.dev_evaluation or candidate.dev_score is not None:
+                        raise ValueError(
+                            "pending tree candidate contains uncommitted evaluation"
                         )
-                    except Exception as exc:
-                        # Keep the already-built finalist. If this candidate is
-                        # later needed as a parent, normal resolution emits the
-                        # typed strict-fallback event and uses the approved root.
-                        logger.warning(
-                            "research_lab_sequential_resume_source_restore_failed "
-                            "run_id=%s node_id=%s error=%s",
-                            run_id,
-                            candidate.node_id[:80],
-                            type(exc).__name__,
-                        )
-                if not _candidate_dev_evaluation_matches_policy(
-                    candidate, self._inner_loop_policy
-                ):
-                    candidate = replace(
-                        candidate,
-                        dev_score=None,
-                        dev_score_version="",
-                        dev_evaluation={},
-                        dev_feedback={},
-                        dev_feedback_hash="",
+                    restored_node = _candidate_tree_node(
+                        candidate, status="evaluating"
                     )
-                    if bool(self._inner_loop_policy.get("evaluator_enabled")):
-                        candidate = await self._maybe_dev_eval_candidate(
-                            candidate,
-                            run_id=run_id,
-                            remaining_seconds=max(
-                                0.0,
-                                float(self.settings.normalized().max_seconds) - elapsed(),
-                            ),
+                else:
+                    if not _candidate_dev_evaluation_matches_policy(
+                        candidate, self._tree_policy_doc
+                    ):
+                        raise ValueError(
+                            "rehydrated candidate evaluator commitment differs"
                         )
+                    restored_node = _candidate_tree_node(candidate)
+                if restored_node != expected_node:
+                    raise ValueError(
+                        "rehydrated candidate differs from tree checkpoint"
+                    )
                 restored.append(candidate)
             except Exception as exc:
                 logger.warning(
@@ -1343,7 +1585,14 @@ class CodeEditLoopEngine:
                     str(summary.get("node_id") or "")[:80],
                     str(exc)[:200],
                 )
-                continue
+                raise GitTreeSchedulerError(
+                    "tree checkpoint candidate could not be restored"
+                ) from exc
+        restored_ids = {candidate.node_id for candidate in restored}
+        if restored_ids != required_node_ids:
+            raise GitTreeSchedulerError(
+                "tree checkpoint candidate artifacts are incomplete"
+            )
         if restored:
             logger.info(
                 "research_lab_loop_candidates_restored run_id=%s count=%s parent=%s",
@@ -1446,6 +1695,7 @@ class CodeEditLoopEngine:
         openrouter_calls: int,
         estimated_cost: float,
         actual_cost_microusd: int,
+        build_timeout_seconds: int | None = None,
     ) -> CodeEditBuildResult:
         """Run the docker build off the event loop with liveness heartbeats.
 
@@ -1481,6 +1731,7 @@ class CodeEditLoopEngine:
                 openrouter_calls=openrouter_calls,
                 estimated_cost=estimated_cost,
                 actual_cost_microusd=actual_cost_microusd,
+                build_timeout_seconds=build_timeout_seconds,
             )
             langfuse_update_observation(
                 build_obs,
@@ -1505,15 +1756,31 @@ class CodeEditLoopEngine:
         openrouter_calls: int,
         estimated_cost: float,
         actual_cost_microusd: int,
+        build_timeout_seconds: int | None = None,
     ) -> CodeEditBuildResult:
-        if not _build_heartbeat_enabled():
-            return self.builder.build(
-                draft=draft,
-                parent_artifact=artifact,
-                run_id=run_id,
-                candidate_index=candidate_index,
-                source_context=source_context,
+        build_kwargs = {
+            "draft": draft,
+            "parent_artifact": artifact,
+            "run_id": run_id,
+            "candidate_index": candidate_index,
+            "source_context": source_context,
+        }
+        try:
+            build_parameters = inspect.signature(self.builder.build).parameters
+        except (TypeError, ValueError):
+            build_parameters = {}
+        if build_timeout_seconds is not None and (
+            "timeout_seconds" in build_parameters
+            or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in build_parameters.values()
             )
+        ):
+            build_kwargs["timeout_seconds"] = max(
+                1, int(build_timeout_seconds)
+            )
+        if not _build_heartbeat_enabled():
+            return self.builder.build(**build_kwargs)
         source_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
         await self.event_sink(
             AutoResearchLoopEvent(
@@ -1535,11 +1802,7 @@ class CodeEditLoopEngine:
         task = asyncio.create_task(
             asyncio.to_thread(
                 self.builder.build,
-                draft=draft,
-                parent_artifact=artifact,
-                run_id=run_id,
-                candidate_index=candidate_index,
-                source_context=source_context,
+                **build_kwargs,
             )
         )
         heartbeat_index = 0
@@ -1571,9 +1834,15 @@ class CodeEditLoopEngine:
                             },
                         )
                     )
-                except Exception:
+                except Exception as exc:
                     # A failed heartbeat write must never fail the build itself.
-                    pass
+                    logger.warning(
+                        "research_lab_git_tree_build_heartbeat_emit_failed "
+                        "node_id=%s heartbeat_index=%s error=%s",
+                        str(node_id or "")[:120],
+                        heartbeat_index,
+                        safe_event_error_text(exc),
+                    )
             return await task
         except asyncio.CancelledError:
             task.cancel()
@@ -1713,26 +1982,68 @@ class CodeEditLoopEngine:
         start = time.monotonic()
         settings = self.settings.normalized()
         root_artifact = artifact
-        raw_inner_loop_policy = budget_context.get("inner_loop_policy")
-        self._inner_loop_policy = (
-            dict(raw_inner_loop_policy)
-            if isinstance(raw_inner_loop_policy, Mapping)
-            else {
-                "schema_version": "research_lab.inner_loop_policy.v2",
-                "effective_phase": "off",
-                "evaluator_enabled": False,
-                "ranking_enabled": False,
-                "shadow_enabled": False,
-                "sequential_chain_enabled": False,
-                "candidate_width": 1,
-                "paid_finalist_count": 1,
-                "strict_fallback": True,
-                "fallback_reason": "inner_loop_policy_missing",
-                "evaluator_commitment": {},
-            }
+        raw_tree_policy_doc = budget_context.get("tree_policy")
+        if not isinstance(raw_tree_policy_doc, Mapping):
+            raise GitTreeSchedulerError("authoritative tree policy is missing")
+        self._tree_policy_doc = dict(raw_tree_policy_doc)
+        measured_policy = self._tree_policy_doc.get("policy")
+        if not isinstance(measured_policy, Mapping):
+            raise GitTreeSchedulerError("measured tree policy is missing")
+        tree_policy = TreePolicy.from_mapping(measured_policy)
+        if tree_policy.mode != "active":
+            raise GitTreeSchedulerError("tree engine cannot run while tree mode is off")
+        evaluator_commitment = dict(
+            self._tree_policy_doc.get("evaluator_commitment") or {}
+        )
+        evaluation_timeout_seconds = max(
+            1,
+            int(evaluator_commitment.get("evaluation_timeout_seconds") or 300),
+        )
+        final_context_reserve_seconds = (
+            tree_policy.required_final_context_seconds(
+                evaluation_timeout_seconds
+            )
+        )
+        settings = replace(
+            settings,
+            max_iterations=tree_policy.max_nodes,
+            max_candidates=tree_policy.max_nodes,
+            max_seconds=min(settings.max_seconds, tree_policy.deadline_seconds),
+        ).normalized()
+        if final_context_reserve_seconds >= settings.max_seconds:
+            raise GitTreeSchedulerError(
+                "tree runtime cannot contain final evaluation and handoff"
+            )
+        tree_id = derive_tree_id(
+            run_id=run_id,
+            root_artifact_hash=root_artifact.model_artifact_hash,
+            policy=tree_policy,
         )
         selected: list[BuiltCodeEditCandidate] = []
         resume = dict(resume_state or {})
+        raw_tree_checkpoint = resume.get("git_tree_checkpoint")
+        if isinstance(raw_tree_checkpoint, Mapping):
+            checkpoint = TreeCheckpoint.from_mapping(raw_tree_checkpoint)
+            if (
+                checkpoint.tree_id != tree_id
+                or checkpoint.root_artifact_hash
+                != root_artifact.model_artifact_hash
+                or checkpoint.policy != tree_policy
+            ):
+                raise GitTreeSchedulerError(
+                    "resume checkpoint tree authority differs from this run"
+                )
+            tree_scheduler = GitTreeScheduler.restore(
+                tree_id=tree_id,
+                policy=tree_policy,
+                nodes=checkpoint.nodes,
+                planned_slots=checkpoint.planned_slots,
+            )
+        else:
+            tree_scheduler = GitTreeScheduler(tree_id=tree_id, policy=tree_policy)
+        self._active_tree_scheduler = tree_scheduler
+        self._active_tree_policy = tree_policy
+        self._active_tree_id = tree_id
         iteration = max(0, int(resume.get("iterations_completed") or 0))
         # Langfuse continuity: every observation this run emits (stage calls,
         # builds, and later the scoring worker's private-eval span) attaches
@@ -1761,6 +2072,36 @@ class CodeEditLoopEngine:
         elapsed_offset = max(0.0, float(resume.get("elapsed_seconds") or 0.0))
         elapsed = lambda: elapsed_offset + (time.monotonic() - start)
         budget_limit_microusd = _budget_limit_microusd(budget_context)
+        budget_limit_microusd = tree_policy.effective_billable_cap(
+            budget_limit_microusd
+        )
+        if budget_limit_microusd <= 0:
+            raise GitTreeSchedulerError(
+                "Git-tree autoresearch requires a positive funded budget"
+            )
+        tree_evaluation_cost_microusd = max(
+            0,
+            int(
+                self._tree_policy_doc.get(
+                    "prior_evaluation_cost_microusd", 0
+                )
+                or 0
+            ),
+        )
+        tree_evaluation_provider_call_count = max(
+            0,
+            int(
+                self._tree_policy_doc.get(
+                    "prior_evaluation_provider_call_count", 0
+                )
+                or 0
+            ),
+        )
+        if tree_evaluation_cost_microusd > budget_limit_microusd:
+            raise GitTreeSchedulerError(
+                "settled tree evaluation cost exceeds the funded budget"
+            )
+        budget_limit_microusd -= tree_evaluation_cost_microusd
         built_candidate_total = max(0, int(resume.get("built_candidate_count") or 0))
         finalization_reserve_reached = False
         provider_capabilities = None
@@ -1850,15 +2191,17 @@ class CodeEditLoopEngine:
                 }
             except Exception as exc:
                 logger.warning("research_lab_probe_registry_load_failed error=%s", str(exc)[:200])
-        # Sequential generation cannot satisfy its contract without carrying
-        # the prior candidate's anonymized development feedback. The legacy
-        # memory flag may still disable sibling-run rejection memory, but an
-        # activated sequential phase always retains the bounded parent feedback.
-        within_run_memory_active = _within_run_memory_enabled() or _sequential_chain_enabled(
-            self._inner_loop_policy
-        )
-        rejected_diff_hashes: set[str] = set()
-        within_run_rejections: list[dict[str, Any]] = []
+        # Tree generation always carries only branch-local attempts and parent
+        # feedback. Exact diff hashes may be deduplicated globally without
+        # exposing one sibling's source or evaluator details to another.
+        within_run_memory_active = True
+        all_rejected_diff_hashes: set[str] = set()
+        branch_rejected_diff_hashes: dict[str, set[str]] = {}
+        branch_rejections: dict[str, list[dict[str, Any]]] = {}
+        branch_dev_scores: dict[str, list[dict[str, Any]]] = {}
+        branch_dev_best_scores: dict[str, float] = {}
+        current_branch_id = ""
+        current_branch_context_doc: dict[str, Any] | None = None
         # §9.5 / §9.4 cross-run context (both flag-gated OFF by default; filled
         # best-effort after the loop_started emission, injected into prompts only).
         retrieved_lessons_doc: dict[str, Any] | None = None
@@ -1878,8 +2221,12 @@ class CodeEditLoopEngine:
                 sha256_json({"unified_diff": draft.unified_diff}) if draft is not None else ""
             )
             if resolved_hash:
-                rejected_diff_hashes.add(resolved_hash)
-            within_run_rejections.append(
+                all_rejected_diff_hashes.add(resolved_hash)
+                branch_rejected_diff_hashes.setdefault(current_branch_id, set()).add(
+                    resolved_hash
+                )
+            rejections = branch_rejections.setdefault(current_branch_id, [])
+            rejections.append(
                 {
                     "iteration": int(iteration_index),
                     "stage": str(stage)[:80],
@@ -1891,29 +2238,20 @@ class CodeEditLoopEngine:
                     "status": "rejected",
                 }
             )
-            del within_run_rejections[:-25]
+            del rejections[:-25]
 
-        # §6.3-1 dev-eval state (flag default OFF): ranking-only dev scores of
-        # candidates built this run, surfaced into within-run memory, plus the
-        # §6.3-4-lite plateau tracker — the count of consecutive scored builds
-        # that failed to improve the run's best dev score by more than the
-        # configured delta.
-        dev_score_records: list[dict[str, Any]] = []
-        dev_best_score: float | None = None
-        dev_scores_since_improvement = 0
-        sequential_parent_feedback_doc: dict[str, Any] | None = None
-
+        # Ranking-only development scores are kept per branch for generation
+        # context. The scheduler, not an environment-controlled plateau rule,
+        # decides when the committed tree frontier is exhausted.
         def _record_dev_score(
             *, iteration_index: int, node_id: str, score: float, version: str
         ) -> None:
-            nonlocal dev_best_score, dev_scores_since_improvement
-            prior_best = dev_best_score
-            dev_best_score = score if prior_best is None else max(prior_best, score)
-            if prior_best is None or score > prior_best + _dev_plateau_min_delta():
-                dev_scores_since_improvement = 0
-            else:
-                dev_scores_since_improvement += 1
-            dev_score_records.append(
+            prior_best = branch_dev_best_scores.get(current_branch_id)
+            branch_dev_best_scores[current_branch_id] = (
+                score if prior_best is None else max(prior_best, score)
+            )
+            records = branch_dev_scores.setdefault(current_branch_id, [])
+            records.append(
                 {
                     "iteration": int(iteration_index),
                     "node_id": str(node_id)[:80],
@@ -1921,15 +2259,21 @@ class CodeEditLoopEngine:
                     "dev_score_version": str(version)[:120],
                 }
             )
-            del dev_score_records[:-25]
+            del records[:-25]
 
         def _within_run_memory_doc() -> dict[str, Any] | None:
             if not within_run_memory_active:
                 return None
+            within_run_rejections = branch_rejections.get(current_branch_id, [])
+            rejected_diff_hashes = branch_rejected_diff_hashes.get(
+                current_branch_id, set()
+            )
+            dev_score_records = branch_dev_scores.get(current_branch_id, [])
+            branch_best_score = branch_dev_best_scores.get(current_branch_id)
             if (
                 not within_run_rejections
                 and not dev_score_records
-                and sequential_parent_feedback_doc is None
+                and current_branch_context_doc is None
             ):
                 return None
             memory_doc = {
@@ -1952,20 +2296,14 @@ class CodeEditLoopEngine:
                         "beating best_dev_score. Never promotion evidence."
                     ),
                     "best_dev_score": (
-                        round(float(dev_best_score), 6) if dev_best_score is not None else None
+                        round(float(branch_best_score), 6)
+                        if branch_best_score is not None
+                        else None
                     ),
                     "recent_scores": [dict(item) for item in dev_score_records[-10:]],
                 }
-            if sequential_parent_feedback_doc is not None:
-                memory_doc["sequential_chain"] = {
-                    "schema_version": "research_lab.sequential_prompt_context.v1",
-                    "instruction": (
-                        "The extracted source is the exact best-so-far parent. Build one "
-                        "incremental improvement on this source using the anonymized test "
-                        "feedback; do not recreate a sibling from the run-start model."
-                    ),
-                    "parent_feedback": dict(sequential_parent_feedback_doc),
-                }
+            if current_branch_context_doc is not None:
+                memory_doc["git_tree_branch"] = dict(current_branch_context_doc)
             return memory_doc
 
         def _memory_budget_context(
@@ -2007,31 +2345,142 @@ class CodeEditLoopEngine:
             dev_evaluator_configured=self.dev_evaluator is not None,
         )
         root_source_context = source_context
-        sequential_chain_enabled = _sequential_chain_enabled(
-            self._inner_loop_policy
+        tree_authority_doc = {
+            "schema_version": "research_lab.git_tree_authority.v1",
+            "run_id": str(run_id),
+            "policy": tree_policy.to_dict(),
+            "evaluator_commitment": evaluator_commitment,
+        }
+        root_git_commit = await self._tree_repository_call(
+            "initialize",
+            source_root=root_source_context.source_root,
+            root_artifact_hash=root_artifact.model_artifact_hash,
+            policy_hash=tree_policy.policy_hash,
+            run_id=str(run_id),
+            root_manifest_hash=root_artifact.manifest_hash,
+            root_image_digest=sha256_json(
+                {"image_digest": root_artifact.image_digest}
+            ),
+            evaluator_commitment_hash=sha256_json(evaluator_commitment),
+            tree_doc=tree_authority_doc,
         )
-        sequential_source_contexts: dict[str, Any] = {
+        if not re.fullmatch(r"[0-9a-f]{64}", str(root_git_commit or "")):
+            _cleanup_source_tmp()
+            raise GitTreeSchedulerError(
+                "Git-tree repository returned an invalid SHA-256 root commit"
+            )
+        self._active_tree_root_git_commit = str(root_git_commit)
+        for checkpoint_node in tree_scheduler.nodes:
+            if checkpoint_node.git_commit:
+                await self._tree_repository_call(
+                    "verify_node_identity",
+                    node_id=checkpoint_node.node_id,
+                    git_commit=checkpoint_node.git_commit,
+                    parent_node_id=checkpoint_node.parent_node_id,
+                )
+        tree_source_contexts: dict[str, Any] = {
             root_artifact.model_artifact_hash: root_source_context
         }
-        sequential_context_failures: set[str] = set()
+        candidates_by_node_id: dict[str, BuiltCodeEditCandidate] = {}
+        tree_commits_by_node_id: dict[str, dict[str, Any]] = {}
+        generation_request_hashes: dict[str, str] = {}
+        generation_start_costs: dict[str, int] = {}
+        generation_start_calls: dict[str, int] = {}
+        generation_attempt_counts: dict[str, int] = {}
+        branch_objective_path_ids: dict[str, str] = {}
+        branch_objective_hashes: dict[str, str] = {}
 
-        async def _resolve_sequential_parent() -> tuple[
+        def _unbuilt_tree_node(
+            slot: TreeChildSlot,
+            *,
+            status: str,
+        ) -> TreeNode:
+            commit_doc = tree_commits_by_node_id.get(str(slot.node_id), {})
+            return TreeNode(
+                tree_id=tree_id,
+                node_id=str(slot.node_id),
+                parent_node_id=str(slot.parent_node_id),
+                root_branch_id=str(slot.root_branch_id),
+                depth=int(slot.depth),
+                slot_index=int(slot.slot_index),
+                status=status,
+                branch_objective_path_id=branch_objective_path_ids.get(
+                    str(slot.node_id), ""
+                ),
+                branch_objective_hash=branch_objective_hashes.get(
+                    str(slot.node_id), ""
+                ),
+                generation_attempt_count=generation_attempt_counts.get(
+                    str(slot.node_id), 0
+                ),
+                git_commit=str(commit_doc.get("git_commit") or ""),
+                source_tree_hash=str(commit_doc.get("source_tree_hash") or ""),
+                incremental_patch_hash=str(
+                    commit_doc.get("incremental_patch_hash") or ""
+                ),
+                cumulative_patch_hash=str(
+                    commit_doc.get("cumulative_patch_hash") or ""
+                ),
+                settled_cost_microusd=max(
+                    0,
+                    int(actual_cost_microusd)
+                    - generation_start_costs.get(str(slot.node_id), 0),
+                ),
+            )
+
+        async def _inspect_tree_operation(
+            operation_id: str, *, allow_missing: bool = False
+        ) -> dict[str, Any] | None:
+            inspected = await self._tree_repository_call(
+                "inspect_operation", operation_id=operation_id
+            )
+            if not isinstance(inspected, Mapping) or inspected.get(
+                "operation_id"
+            ) != operation_id:
+                raise GitTreeSchedulerError(
+                    "tree operation could not be reconciled"
+                )
+            if inspected.get("exists") is not True:
+                if allow_missing and inspected.get("exists") is False:
+                    return None
+                raise GitTreeSchedulerError(
+                    "tree operation could not be reconciled"
+                )
+            if not isinstance(inspected.get("operation"), Mapping):
+                raise GitTreeSchedulerError(
+                    "tree operation could not be reconciled"
+                )
+            operation = dict(inspected["operation"])
+            if operation.get("tree_id") != tree_id:
+                raise GitTreeSchedulerError(
+                    "tree operation belongs to another tree"
+                )
+            return operation
+
+        async def _resolve_tree_parent(slot: Any) -> tuple[
             BuiltCodeEditCandidate | None,
             PrivateModelArtifactManifest,
             Any,
         ]:
-            nonlocal sequential_parent_feedback_doc
-            if not sequential_chain_enabled:
-                sequential_parent_feedback_doc = None
-                return None, root_artifact, root_source_context
-            best = _best_eligible_chain_parent(selected, self._inner_loop_policy)
-            if best is None:
-                sequential_parent_feedback_doc = None
-                return None, root_artifact, root_source_context
-            parent_artifact = best.build.candidate_model_manifest
+            nonlocal current_branch_id, current_branch_context_doc
+            current_branch_id = str(slot.node_id)
+            parent = (
+                None
+                if slot.parent_node_id == "root"
+                else candidates_by_node_id.get(str(slot.parent_node_id))
+            )
+            if slot.parent_node_id != "root" and parent is None:
+                raise GitTreeSchedulerError("committed tree parent candidate is missing")
+            if parent is None:
+                parent_artifact = root_artifact
+                parent_context = root_source_context
+            else:
+                parent_artifact = parent.build.candidate_model_manifest
+                parent_context = tree_source_contexts.get(
+                    parent_artifact.model_artifact_hash
+                )
             parent_hash = parent_artifact.model_artifact_hash
-            parent_context = sequential_source_contexts.get(parent_hash)
-            if parent_context is None and parent_hash not in sequential_context_failures:
+            if parent_context is None:
                 try:
                     parent_context = (
                         await self._prepare_parent_source_context_with_heartbeat(
@@ -2040,7 +2489,7 @@ class CodeEditLoopEngine:
                             workspace_dir=(
                                 Path(source_tmp.name)
                                 / (
-                                    "sequential-parent-"
+                                    "tree-parent-"
                                     + re.sub(r"[^0-9a-zA-Z]", "", parent_hash)[-24:]
                                 )
                             ),
@@ -2050,16 +2499,15 @@ class CodeEditLoopEngine:
                             actual_cost_microusd=actual_cost_microusd,
                         )
                     )
-                    sequential_source_contexts[parent_hash] = parent_context
+                    tree_source_contexts[parent_hash] = parent_context
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    sequential_context_failures.add(parent_hash)
                     logger.warning(
-                        "research_lab_sequential_parent_context_failed "
+                        "research_lab_tree_parent_context_failed "
                         "run_id=%s node_id=%s error=%s",
                         run_id,
-                        best.node_id[:80],
+                        str(slot.parent_node_id)[:80],
                         type(exc).__name__,
                     )
                     await self.event_sink(
@@ -2067,15 +2515,15 @@ class CodeEditLoopEngine:
                             event_type="code_edit_validation_failed",
                             loop_status="running",
                             elapsed_seconds=elapsed(),
-                            node_id=best.node_id,
+                            node_id=str(slot.node_id),
                             cost_ledger=_running_cost_ledger(
                                 openrouter_calls,
                                 estimated_cost,
                                 actual_cost_microusd,
-                                "sequential_parent_context_failed",
+                                "tree_parent_context_failed",
                             ),
                             event_doc={
-                                "stage": "sequential_parent_context_failed",
+                                "stage": "tree_parent_context_failed",
                                 "error_class": type(exc).__name__,
                                 "error_hash": sha256_json(
                                     {
@@ -2083,35 +2531,923 @@ class CodeEditLoopEngine:
                                         "error": str(exc),
                                     }
                                 ),
-                                "chain_parent_node_id": best.node_id,
-                                "chain_parent_artifact_hash": parent_hash,
-                                "fallback": "run_start_approved_model",
+                                "tree_id": tree_id,
+                                "tree_parent_node_id": str(slot.parent_node_id),
+                                "tree_parent_artifact_hash": parent_hash,
+                                "recovery": "checkpoint_and_requeue",
                             },
                         )
                     )
-            if parent_context is None:
-                sequential_parent_feedback_doc = None
-                return None, root_artifact, root_source_context
-            sequential_parent_feedback_doc = dict(best.dev_feedback)
-            return best, parent_artifact, parent_context
+                    raise GitTreeSchedulerError(
+                        "tree parent source could not be reconstructed"
+                    ) from exc
+            current_branch_context_doc = sanitized_branch_context(
+                slot=slot,
+                parent=_candidate_tree_node(parent) if parent is not None else None,
+                ancestors=tuple(_candidate_tree_node(item) for item in selected),
+            )
+            return parent, parent_artifact, parent_context
 
-        # Bug 5: resume used to discard already-built candidates, so a paused/requeued run
-        # that had built+pushed an image resumed empty-handed and failed with "no finalists".
-        # Restoration is strictly best-effort: any failure degrades to the previous behavior.
-        restored_candidate_count = 0
-        if resume and _resume_restore_selected_enabled():
-            try:
-                selected = await self._restore_selected_from_resume(
-                    resume=resume,
+        async def _persist_generation_outcome(
+            *, slot: Any, node: TreeNode, reason: str
+        ) -> None:
+            request_hash = generation_request_hashes.get(str(slot.node_id))
+            if not request_hash:
+                raise GitTreeSchedulerError(
+                    "tree generation reservation is missing for terminal node"
+                )
+            result_doc = {
+                "schema_version": "research_lab.git_tree_generation_result.v1",
+                "tree_id": tree_id,
+                "node_id": str(slot.node_id),
+                "status": node.status,
+                "reason": str(reason)[:240],
+                "node_hash": sha256_json(node.to_dict()),
+                "node": node.to_dict(),
+            }
+            candidate = candidates_by_node_id.get(str(slot.node_id))
+            if candidate is not None:
+                result_doc.update(
+                    {
+                        "rehydration_artifact_uri": (
+                            candidate.rehydration_artifact_uri
+                        ),
+                        "rehydration_artifact_hash": (
+                            candidate.rehydration_artifact_hash
+                        ),
+                    }
+                )
+            await self._tree_repository_call(
+                "settle_operation",
+                operation_id=generation_operation_id(slot),
+                operation_status=(
+                    "succeeded"
+                    if node.status in {"evaluating", "eligible", "ineligible"}
+                    else "indeterminate"
+                    if node.status == "indeterminate"
+                    else "failed"
+                ),
+                request_hash=request_hash,
+                result_hash=sha256_json(result_doc),
+                settled_cost_microusd=max(
+                    0,
+                    int(actual_cost_microusd)
+                    - generation_start_costs.get(str(slot.node_id), 0),
+                ),
+                provider_call_count=max(
+                    0,
+                    int(openrouter_calls)
+                    - generation_start_calls.get(str(slot.node_id), 0),
+                ),
+                settlement_doc={
+                    **result_doc,
+                    "operation_kind": "generation",
+                },
+            )
+            await self._tree_repository_call(
+                "record_node", node_doc=node.to_dict()
+            )
+
+        async def _settle_build_operation(
+            *,
+            slot: TreeChildSlot,
+            request_hash: str,
+            operation_status: str,
+            node: TreeNode,
+            reason: str,
+            candidate: BuiltCodeEditCandidate | None = None,
+        ) -> None:
+            result_doc: dict[str, Any] = {
+                "schema_version": "research_lab.git_tree_build_result.v1",
+                "tree_id": tree_id,
+                "node_id": slot.node_id,
+                "operation_kind": "build",
+                "status": operation_status,
+                "reason": str(reason)[:240],
+                "build_request_hash": request_hash,
+                "generation_request_hash": generation_request_hashes.get(
+                    slot.node_id, ""
+                ),
+                "generation_settled_cost_microusd": max(
+                    0,
+                    int(actual_cost_microusd)
+                    - generation_start_costs.get(slot.node_id, 0),
+                ),
+                "generation_provider_call_count": max(
+                    0,
+                    int(openrouter_calls)
+                    - generation_start_calls.get(slot.node_id, 0),
+                ),
+                "node_hash": sha256_json(node.to_dict()),
+                "node": node.to_dict(),
+            }
+            if candidate is not None:
+                result_doc.update(
+                    {
+                        "rehydration_artifact_uri": (
+                            candidate.rehydration_artifact_uri
+                        ),
+                        "rehydration_artifact_hash": (
+                            candidate.rehydration_artifact_hash
+                        ),
+                        "candidate_artifact_hash": (
+                            candidate.build.candidate_model_manifest.model_artifact_hash
+                        ),
+                        "source_diff_hash": candidate.build.source_diff_hash,
+                    }
+                )
+            await self._tree_repository_call(
+                "settle_operation",
+                operation_id=build_operation_id(slot),
+                operation_status=operation_status,
+                request_hash=request_hash,
+                result_hash=sha256_json(result_doc),
+                settled_cost_microusd=0,
+                provider_call_count=0,
+                settlement_doc=result_doc,
+            )
+
+        async def _recover_generation_operation(
+            *, slot: TreeChildSlot, request_hash: str
+        ) -> bool:
+            operation_id = generation_operation_id(slot)
+            operation = await _inspect_tree_operation(operation_id)
+            assert operation is not None
+            if (
+                operation.get("operation_kind") != "generation"
+                or operation.get("request_hash") != request_hash
+                or str(operation.get("node_id") or "") != slot.node_id
+            ):
+                raise GitTreeSchedulerError(
+                    "tree generation operation commitment differs"
+                )
+            status = str(operation.get("status") or "")
+            settlement = dict(operation.get("settlement_doc") or {})
+            node_doc = settlement.get("node")
+            node = (
+                TreeNode.from_mapping(node_doc)
+                if isinstance(node_doc, Mapping)
+                else TreeNode(
+                    tree_id=tree_id,
+                    node_id=slot.node_id,
+                    parent_node_id=slot.parent_node_id,
+                    root_branch_id=slot.root_branch_id,
+                    depth=slot.depth,
+                    slot_index=slot.slot_index,
+                    status=(
+                        "failed" if status == "failed" else "indeterminate"
+                    ),
+                    branch_objective_path_id=branch_objective_path_ids.get(
+                        slot.node_id, ""
+                    ),
+                    branch_objective_hash=branch_objective_hashes.get(
+                        slot.node_id, ""
+                    ),
+                    generation_attempt_count=generation_attempt_counts.get(
+                        slot.node_id, 0
+                    ),
+                )
+            )
+            if (
+                node.tree_id != tree_id
+                or node.node_id != slot.node_id
+                or node.parent_node_id != slot.parent_node_id
+                or node.root_branch_id != slot.root_branch_id
+                or node.depth != slot.depth
+                or node.slot_index != slot.slot_index
+            ):
+                raise GitTreeSchedulerError(
+                    "tree generation recovery topology differs"
+                )
+
+            if status == "succeeded":
+                uri = str(settlement.get("rehydration_artifact_uri") or "")
+                artifact_hash = str(
+                    settlement.get("rehydration_artifact_hash") or ""
+                )
+                candidate = await self._rehydrate_candidate_reference(
+                    uri=uri,
+                    expected_hash=artifact_hash,
                     run_id=run_id,
-                    artifact=artifact,
-                    elapsed=elapsed,
-                    openrouter_calls=openrouter_calls,
-                    estimated_cost=estimated_cost,
-                    actual_cost_microusd=actual_cost_microusd,
+                )
+                restored_node = _candidate_tree_node(
+                    candidate,
+                    status="evaluating" if node.status == "evaluating" else None,
+                )
+                if restored_node != node:
+                    raise GitTreeSchedulerError(
+                        "tree generation recovery artifact differs"
+                    )
+                _replace_selected_candidate(candidate)
+            elif status == "reserved":
+                build_id = build_operation_id(slot)
+                build_operation = await _inspect_tree_operation(
+                    build_id, allow_missing=True
+                )
+                recovered_candidate: BuiltCodeEditCandidate | None = None
+                recovered_status = "indeterminate"
+                recovered_reason = "reserved_generation_found_after_restart"
+                generation_cost = int(
+                    operation.get("settled_cost_microusd") or 0
+                )
+                generation_calls = int(
+                    operation.get("provider_call_count") or 0
+                )
+                if build_operation is not None:
+                    if (
+                        build_operation.get("operation_kind") != "build"
+                        or str(build_operation.get("node_id") or "")
+                        != slot.node_id
+                    ):
+                        raise GitTreeSchedulerError(
+                            "tree build operation commitment differs"
+                        )
+                    build_request_hash = str(
+                        build_operation.get("request_hash") or ""
+                    )
+                    build_reservation = dict(
+                        build_operation.get("settlement_doc")
+                        or build_operation.get("reservation_doc")
+                        or {}
+                    )
+                    if (
+                        build_reservation.get("generation_request_hash")
+                        != request_hash
+                        or str(
+                            build_reservation.get("build_request_hash")
+                            or build_request_hash
+                        )
+                        != build_request_hash
+                        or build_reservation.get("tree_id") != tree_id
+                        or build_reservation.get("node_id") != slot.node_id
+                    ):
+                        raise GitTreeSchedulerError(
+                            "tree build reservation differs from generation"
+                        )
+                    generation_cost = int(
+                        build_reservation.get(
+                            "generation_settled_cost_microusd",
+                            generation_cost,
+                        )
+                        or 0
+                    )
+                    generation_calls = int(
+                        build_reservation.get(
+                            "generation_provider_call_count",
+                            generation_calls,
+                        )
+                        or 0
+                    )
+                    build_status = str(build_operation.get("status") or "")
+                    build_settlement = dict(
+                        build_operation.get("settlement_doc") or {}
+                    )
+                    build_node_doc = build_settlement.get("node")
+                    if build_status == "succeeded":
+                        if not isinstance(build_node_doc, Mapping):
+                            raise GitTreeSchedulerError(
+                                "successful tree build is missing its node"
+                            )
+                        node = TreeNode.from_mapping(build_node_doc)
+                        uri = str(
+                            build_settlement.get("rehydration_artifact_uri")
+                            or ""
+                        )
+                        artifact_hash = str(
+                            build_settlement.get("rehydration_artifact_hash")
+                            or ""
+                        )
+                        recovered_candidate = (
+                            await self._rehydrate_candidate_reference(
+                                uri=uri,
+                                expected_hash=artifact_hash,
+                                run_id=run_id,
+                            )
+                        )
+                        if (
+                            _candidate_tree_node(
+                                recovered_candidate, status="evaluating"
+                            )
+                            != node
+                        ):
+                            raise GitTreeSchedulerError(
+                                "recovered tree build artifact differs"
+                            )
+                        _replace_selected_candidate(recovered_candidate)
+                        recovered_status = "succeeded"
+                        recovered_reason = (
+                            "build_settled_before_generation_restart"
+                        )
+                    elif build_status == "failed":
+                        node = (
+                            TreeNode.from_mapping(build_node_doc)
+                            if isinstance(build_node_doc, Mapping)
+                            else _unbuilt_tree_node(slot, status="failed")
+                        )
+                        recovered_status = "failed"
+                        recovered_reason = "build_failed_before_generation_settlement"
+                    elif build_status in {"reserved", "indeterminate"}:
+                        node = (
+                            TreeNode.from_mapping(build_node_doc)
+                            if isinstance(build_node_doc, Mapping)
+                            else _unbuilt_tree_node(slot, status="indeterminate")
+                        )
+                        if build_status == "reserved":
+                            await _settle_build_operation(
+                                slot=slot,
+                                request_hash=build_request_hash,
+                                operation_status="indeterminate",
+                                node=node,
+                                reason="reserved_build_found_after_restart",
+                            )
+                        recovered_reason = "build_state_indeterminate_after_restart"
+                    else:
+                        raise GitTreeSchedulerError(
+                            "tree build operation status is invalid"
+                        )
+                else:
+                    node = _unbuilt_tree_node(slot, status="indeterminate")
+
+                result_doc = {
+                    "schema_version": "research_lab.git_tree_generation_result.v1",
+                    "tree_id": tree_id,
+                    "node_id": slot.node_id,
+                    "operation_kind": "generation",
+                    "status": node.status,
+                    "reason": recovered_reason,
+                    "node_hash": sha256_json(node.to_dict()),
+                    "node": node.to_dict(),
+                }
+                if recovered_candidate is not None:
+                    result_doc.update(
+                        {
+                            "rehydration_artifact_uri": (
+                                recovered_candidate.rehydration_artifact_uri
+                            ),
+                            "rehydration_artifact_hash": (
+                                recovered_candidate.rehydration_artifact_hash
+                            ),
+                        }
+                    )
+                await self._tree_repository_call(
+                    "settle_operation",
+                    operation_id=operation_id,
+                    operation_status=recovered_status,
+                    request_hash=request_hash,
+                    result_hash=sha256_json(result_doc),
+                    settled_cost_microusd=max(0, generation_cost),
+                    provider_call_count=max(0, generation_calls),
+                    settlement_doc=result_doc,
+                )
+            elif status not in {"failed", "indeterminate"}:
+                raise GitTreeSchedulerError(
+                    "tree generation operation status is invalid"
+                )
+
+            if (
+                node.tree_id != tree_id
+                or node.node_id != slot.node_id
+                or node.parent_node_id != slot.parent_node_id
+                or node.root_branch_id != slot.root_branch_id
+                or node.depth != slot.depth
+                or node.slot_index != slot.slot_index
+            ):
+                raise GitTreeSchedulerError(
+                    "reconciled tree generation topology differs"
+                )
+            tree_scheduler.record_node(node)
+            await self._tree_repository_call(
+                "record_node", node_doc=node.to_dict()
+            )
+            logger.warning(
+                "research_lab_tree_generation_reconciled "
+                "run_id=%s node_id=%s status=%s",
+                run_id,
+                slot.node_id,
+                status,
+            )
+            return True
+
+        async def _terminalize_unbuilt_slot(
+            slot: TreeChildSlot,
+            reason: str,
+            *,
+            status: str = "failed",
+        ) -> None:
+            if any(node.node_id == slot.node_id for node in tree_scheduler.nodes):
+                return
+            node = _unbuilt_tree_node(slot, status=status)
+            tree_scheduler.record_node(node)
+            await _persist_generation_outcome(slot=slot, node=node, reason=reason)
+            logger.warning(
+                "research_lab_tree_node_failed run_id=%s node_id=%s reason=%s",
+                run_id,
+                str(slot.node_id)[:80],
+                str(reason)[:160],
+            )
+
+        async def _persist_candidate_rehydration(
+            candidate: BuiltCodeEditCandidate,
+        ) -> BuiltCodeEditCandidate:
+            artifact_doc = await _write_private_loop_candidate_artifact(
+                artifact=root_artifact,
+                run_id=run_id,
+                node_id=candidate.node_id,
+                iteration=candidate.iteration,
+                draft=candidate.draft,
+                build=candidate.build,
+                dev_score=candidate.dev_score,
+                dev_score_version=candidate.dev_score_version,
+                dev_evaluation=candidate.dev_evaluation,
+                dev_feedback=candidate.dev_feedback,
+                dev_feedback_hash=candidate.dev_feedback_hash,
+                tree_settled_cost_microusd=(
+                    candidate.tree_settled_cost_microusd
+                ),
+                git_tree=dict(candidate.build.build_doc.get("git_tree") or {}),
+                artifact_io=self.artifact_io,
+            )
+            uri = str(artifact_doc.get("loop_candidate_artifact_uri") or "")
+            content_hash = str(
+                artifact_doc.get("loop_candidate_artifact_hash") or ""
+            )
+            if not uri.startswith("s3://") or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}", content_hash
+            ):
+                raise GitTreeSchedulerError(
+                    "tree candidate rehydration artifact was not durably verified"
+                )
+            return replace(
+                candidate,
+                rehydration_artifact_uri=uri,
+                rehydration_artifact_hash=content_hash,
+            )
+
+        def _replace_selected_candidate(candidate: BuiltCodeEditCandidate) -> None:
+            for index, existing in enumerate(selected):
+                if existing.node_id == candidate.node_id:
+                    selected[index] = candidate
+                    break
+            else:
+                selected.append(candidate)
+            candidates_by_node_id[candidate.node_id] = candidate
+
+        async def _mark_evaluation_indeterminate(
+            candidates: Sequence[BuiltCodeEditCandidate], *, reason: str
+        ) -> None:
+            for candidate in candidates:
+                previous = next(
+                    (
+                        node
+                        for node in tree_scheduler.nodes
+                        if node.node_id == candidate.node_id
+                    ),
+                    None,
+                )
+                if previous is None:
+                    raise GitTreeSchedulerError(
+                        "tree evaluation node is missing during recovery"
+                    )
+                terminal = replace(
+                    previous,
+                    status="indeterminate",
+                    evaluation=None,
+                )
+                tree_scheduler.replace_node(terminal)
+                await self._tree_repository_call(
+                    "record_node", node_doc=terminal.to_dict()
+                )
+            logger.warning(
+                "research_lab_tree_evaluation_indeterminate "
+                "run_id=%s node_count=%s reason=%s",
+                run_id,
+                len(candidates),
+                str(reason)[:160],
+            )
+
+        async def _recover_evaluation_operation(
+            *,
+            candidates: Sequence[BuiltCodeEditCandidate],
+            operation_id: str,
+            request_hash: str,
+            stage: str,
+            operation: Mapping[str, Any] | None = None,
+        ) -> list[BuiltCodeEditCandidate]:
+            state = dict(
+                operation
+                or await _inspect_tree_operation(operation_id)
+                or {}
+            )
+            if (
+                state.get("operation_kind") != "evaluation"
+                or state.get("request_hash") != request_hash
+                or str(state.get("node_id") or "")
+            ):
+                raise GitTreeSchedulerError(
+                    "tree evaluation operation commitment differs"
+                )
+            status = str(state.get("status") or "")
+            settlement = dict(state.get("settlement_doc") or {})
+            ordered = sorted(tuple(candidates), key=lambda item: item.node_id)
+            if status == "succeeded":
+                rows = settlement.get("nodes")
+                if not isinstance(rows, Sequence):
+                    raise GitTreeSchedulerError(
+                        "tree evaluation settlement artifacts are missing"
+                    )
+                rows_by_node = {
+                    str(row.get("node_id") or ""): dict(row)
+                    for row in rows
+                    if isinstance(row, Mapping)
+                }
+                if set(rows_by_node) != {item.node_id for item in ordered}:
+                    raise GitTreeSchedulerError(
+                        "tree evaluation settlement node set differs"
+                    )
+                restored: list[BuiltCodeEditCandidate] = []
+                for candidate in ordered:
+                    row = rows_by_node[candidate.node_id]
+                    restored_candidate = await self._rehydrate_candidate_reference(
+                        uri=str(row.get("artifact_uri") or ""),
+                        expected_hash=str(row.get("artifact_hash") or ""),
+                        run_id=run_id,
+                    )
+                    if (
+                        restored_candidate.node_id != candidate.node_id
+                        or not _candidate_dev_evaluation_matches_policy(
+                            restored_candidate, self._tree_policy_doc
+                        )
+                    ):
+                        raise GitTreeSchedulerError(
+                            "tree evaluation recovery artifact differs"
+                        )
+                    expected_node_doc = row.get("node")
+                    expected_node = (
+                        TreeNode.from_mapping(expected_node_doc)
+                        if isinstance(expected_node_doc, Mapping)
+                        else _candidate_tree_node(restored_candidate)
+                    )
+                    restored_node = _candidate_tree_node(restored_candidate)
+                    if restored_node != expected_node:
+                        raise GitTreeSchedulerError(
+                            "tree evaluation recovery node differs"
+                        )
+                    tree_scheduler.replace_node(restored_node)
+                    _replace_selected_candidate(restored_candidate)
+                    await self._tree_repository_call(
+                        "record_node", node_doc=restored_node.to_dict()
+                    )
+                    restored.append(restored_candidate)
+                return restored
+
+            if status == "reserved":
+                result_doc = {
+                    "schema_version": "research_lab.git_tree_evaluation_result.v1",
+                    "tree_id": tree_id,
+                    "stage": stage,
+                    "operation_kind": "evaluation",
+                    "node_id": "",
+                    "operation_id": operation_id,
+                    "request_hash": request_hash,
+                    "status": "indeterminate",
+                    "reason": "reserved_operation_found_after_restart",
+                    "nodes": [
+                        {"node_id": item.node_id} for item in ordered
+                    ],
+                }
+                await self._tree_repository_call(
+                    "settle_operation",
+                    operation_id=operation_id,
+                    operation_status="indeterminate",
+                    request_hash=request_hash,
+                    result_hash=sha256_json(result_doc),
+                    settled_cost_microusd=int(
+                        state.get("settled_cost_microusd") or 0
+                    ),
+                    provider_call_count=int(
+                        state.get("provider_call_count") or 0
+                    ),
+                    settlement_doc=result_doc,
+                )
+            elif status not in {"failed", "indeterminate"}:
+                raise GitTreeSchedulerError(
+                    "tree evaluation operation status is invalid"
+                )
+            await _mark_evaluation_indeterminate(
+                ordered,
+                reason=f"operation_{status}",
+            )
+            return []
+
+        async def _evaluate_tree_cohort(
+            candidates: Sequence[BuiltCodeEditCandidate],
+            *,
+            stage: str,
+        ) -> list[BuiltCodeEditCandidate]:
+            nonlocal current_branch_id
+            nonlocal budget_limit_microusd
+            nonlocal tree_evaluation_cost_microusd
+            nonlocal tree_evaluation_provider_call_count
+            ordered = sorted(tuple(candidates), key=lambda item: item.node_id)
+            if not ordered:
+                return []
+            operation_id = cohort_evaluation_operation_id(
+                tree_id=tree_id,
+                node_ids=[candidate.node_id for candidate in ordered],
+                stage=stage,
+            )
+            request_doc = {
+                "schema_version": "research_lab.git_tree_evaluation_request.v1",
+                "tree_id": tree_id,
+                "stage": stage,
+                "operation_id": operation_id,
+                "policy_hash": tree_policy.policy_hash,
+                "evaluator_commitment_hash": sha256_json(evaluator_commitment),
+                "candidates": [
+                    {
+                        "node_id": candidate.node_id,
+                        "artifact_hash": candidate.build.candidate_model_manifest.model_artifact_hash,
+                        "manifest_hash": candidate.build.candidate_model_manifest.manifest_hash,
+                        "source_diff_hash": candidate.build.source_diff_hash,
+                    }
+                    for candidate in ordered
+                ],
+            }
+            request_hash = sha256_json(request_doc)
+            existing_operation = await _inspect_tree_operation(
+                operation_id, allow_missing=True
+            )
+            if existing_operation is not None:
+                return await _recover_evaluation_operation(
+                    candidates=ordered,
+                    operation_id=operation_id,
+                    request_hash=request_hash,
+                    stage=stage,
+                    operation=existing_operation,
+                )
+            try:
+                reservation = await self._tree_repository_call(
+                    "reserve_operation",
+                    operation_id=operation_id,
+                    operation_kind="evaluation",
+                    request_hash=request_hash,
+                    reservation_doc=request_doc,
                 )
             except Exception:
-                selected = []
+                raced_operation = await _inspect_tree_operation(
+                    operation_id, allow_missing=True
+                )
+                if raced_operation is None:
+                    raise
+                return await _recover_evaluation_operation(
+                    candidates=ordered,
+                    operation_id=operation_id,
+                    request_hash=request_hash,
+                    stage=stage,
+                    operation=raced_operation,
+                )
+            if (
+                not isinstance(reservation, Mapping)
+                or reservation.get("operation_status") != "reserved"
+            ):
+                raise GitTreeSchedulerError(
+                    "tree evaluation reservation response is invalid"
+                )
+            if reservation.get("created") is not True:
+                return await _recover_evaluation_operation(
+                    candidates=ordered,
+                    operation_id=operation_id,
+                    request_hash=request_hash,
+                    stage=stage,
+                )
+            try:
+                evaluated = await self._maybe_dev_eval_cohort(
+                    ordered,
+                    run_id=run_id,
+                    remaining_seconds=max(
+                        0.0, settings.max_seconds - elapsed()
+                    ),
+                    remaining_tree_budget_microusd=max(
+                        0,
+                        budget_limit_microusd - actual_cost_microusd,
+                    ),
+                    post_evaluation_reserve_seconds=(
+                        tree_policy.finalization_reserve_seconds
+                        if stage == "final_shortlist"
+                        else final_context_reserve_seconds
+                    ),
+                )
+                if {item.node_id for item in evaluated} != {
+                    item.node_id for item in ordered
+                }:
+                    raise GitTreeSchedulerError(
+                        "tree cohort evaluation returned different nodes"
+                    )
+                (
+                    evaluated,
+                    settled_cost_microusd,
+                    provider_call_count,
+                ) = _apply_tree_cohort_settlement(evaluated)
+                if settled_cost_microusd > max(
+                    0, budget_limit_microusd - actual_cost_microusd
+                ):
+                    raise GitTreeSchedulerError(
+                        "tree evaluation exceeded the remaining funded budget"
+                    )
+                persisted: list[BuiltCodeEditCandidate] = []
+                for candidate in evaluated:
+                    candidate = await _persist_candidate_rehydration(candidate)
+                    persisted.append(candidate)
+                    _replace_selected_candidate(candidate)
+                    node = _candidate_tree_node(candidate)
+                    tree_scheduler.replace_node(node)
+                    await self._tree_repository_call(
+                        "record_node", node_doc=node.to_dict()
+                    )
+                    if candidate.dev_score is not None:
+                        previous_branch = current_branch_id
+                        try:
+                            current_branch_id = candidate.node_id
+                            _record_dev_score(
+                                iteration_index=candidate.iteration,
+                                node_id=candidate.node_id,
+                                score=candidate.dev_score,
+                                version=candidate.dev_score_version,
+                            )
+                        finally:
+                            current_branch_id = previous_branch
+                    await self.event_sink(
+                        AutoResearchLoopEvent(
+                            event_type=(
+                                "dev_check_passed" if node.eligible else "dev_check_failed"
+                            ),
+                            loop_status="running",
+                            elapsed_seconds=elapsed(),
+                            node_id=candidate.node_id,
+                            candidate_artifact_hash=(
+                                candidate.build.candidate_model_manifest.model_artifact_hash
+                            ),
+                            cost_ledger=_running_cost_ledger(
+                                openrouter_calls,
+                                estimated_cost,
+                                actual_cost_microusd,
+                                "tree_candidate_evaluated",
+                            ),
+                            event_doc={
+                                "tree_id": tree_id,
+                                "stage": stage,
+                                "eligible": node.eligible,
+                                "eligibility_reason": str(
+                                    candidate.dev_evaluation.get(
+                                        "eligibility_reason"
+                                    )
+                                    or ""
+                                )[:160],
+                                "evaluation_mode": str(
+                                    candidate.dev_evaluation.get(
+                                        "evaluation_mode"
+                                    )
+                                    or ""
+                                ),
+                                "context_hash": str(
+                                    candidate.dev_evaluation.get("context_hash")
+                                    or ""
+                                ),
+                                "receipt_root": str(
+                                    candidate.dev_evaluation.get("receipt_root")
+                                    or ""
+                                ),
+                            },
+                        )
+                    )
+                result_doc = {
+                    "schema_version": "research_lab.git_tree_evaluation_result.v1",
+                    "tree_id": tree_id,
+                    "stage": stage,
+                    "operation_kind": "evaluation",
+                    "node_id": "",
+                    "operation_id": operation_id,
+                    "request_hash": request_hash,
+                    "nodes": [
+                        {
+                            "node_id": item.node_id,
+                            "artifact_uri": item.rehydration_artifact_uri,
+                            "artifact_hash": item.rehydration_artifact_hash,
+                            "evaluation_hash": sha256_json(
+                                dict(item.dev_evaluation)
+                            ),
+                            "node": _candidate_tree_node(item).to_dict(),
+                        }
+                        for item in persisted
+                    ],
+                    "provider_call_count": provider_call_count,
+                    "settled_cost_microusd": settled_cost_microusd,
+                }
+                await self._tree_repository_call(
+                    "settle_operation",
+                    operation_id=operation_id,
+                    operation_status="succeeded",
+                    request_hash=request_hash,
+                    result_hash=sha256_json(result_doc),
+                    settled_cost_microusd=settled_cost_microusd,
+                    provider_call_count=provider_call_count,
+                    settlement_doc=result_doc,
+                )
+                budget_limit_microusd -= settled_cost_microusd
+                tree_evaluation_cost_microusd += settled_cost_microusd
+                tree_evaluation_provider_call_count += provider_call_count
+                return persisted
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "research_lab_tree_cohort_evaluation_unsettled "
+                    "run_id=%s stage=%s operation_id=%s error=%s",
+                    run_id,
+                    stage,
+                    operation_id,
+                    type(exc).__name__,
+                )
+                failure_doc = {
+                    "schema_version": "research_lab.git_tree_evaluation_result.v1",
+                    "tree_id": tree_id,
+                    "stage": stage,
+                    "operation_kind": "evaluation",
+                    "node_id": "",
+                    "operation_id": operation_id,
+                    "request_hash": request_hash,
+                    "status": "indeterminate",
+                    "reason": f"evaluation_interrupted:{type(exc).__name__}",
+                    "cost_treatment": "deferred_to_attested_provider_ledger",
+                    "error_hash": sha256_json(
+                        {
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        }
+                    ),
+                    "nodes": [
+                        {"node_id": item.node_id} for item in ordered
+                    ],
+                }
+                await self._tree_repository_call(
+                    "settle_operation",
+                    operation_id=operation_id,
+                    operation_status="indeterminate",
+                    request_hash=request_hash,
+                    result_hash=sha256_json(failure_doc),
+                    settled_cost_microusd=0,
+                    provider_call_count=0,
+                    settlement_doc=failure_doc,
+                )
+                await _mark_evaluation_indeterminate(
+                    ordered,
+                    reason=failure_doc["reason"],
+                )
+                raise GitTreeSchedulerError(
+                    "tree evaluation became indeterminate; automatic retry is forbidden"
+                ) from exc
+
+        async def _evaluate_pending_round() -> bool:
+            if tree_scheduler.planned_slots:
+                return False
+            pending_nodes = tuple(
+                node for node in tree_scheduler.nodes if node.status == "evaluating"
+            )
+            if not pending_nodes:
+                return False
+            # Re-score the existing eligible contenders with every new sibling
+            # cohort. The scheduler may only compare nodes sharing this frozen
+            # round context; historical scores from another overlay are never
+            # used to choose the next expandable parent.
+            comparable_nodes = tuple(
+                node
+                for node in tree_scheduler.nodes
+                if node.status == "evaluating" or node.eligible
+            )
+            pending_candidates = []
+            for node in comparable_nodes:
+                candidate = candidates_by_node_id.get(node.node_id)
+                if candidate is None:
+                    raise GitTreeSchedulerError(
+                        "tree evaluation candidate artifact is missing"
+                    )
+                pending_candidates.append(candidate)
+            await _evaluate_tree_cohort(pending_candidates, stage="round")
+            return True
+
+        # A tree resume is fail-closed: every committed node must restore with
+        # identical ancestry and evaluator commitments before expansion resumes.
+        restored_candidate_count = 0
+        if resume and _resume_restore_selected_enabled():
+            selected = await self._restore_selected_from_resume(
+                resume=resume,
+                run_id=run_id,
+                artifact=artifact,
+                elapsed=elapsed,
+                openrouter_calls=openrouter_calls,
+                estimated_cost=estimated_cost,
+                actual_cost_microusd=actual_cost_microusd,
+            )
             restored_candidate_count = len(selected)
             built_candidate_total = max(built_candidate_total, restored_candidate_count)
             # §6.3-1: re-seed dev-score memory from restored candidates so their
@@ -2120,6 +3456,12 @@ class CodeEditLoopEngine:
             # build) order, so recomputing staleness over them would be spurious
             # — resume conservatively with a fresh improvement window.
             for restored_candidate in selected:
+                if restored_candidate.tree_id != tree_id:
+                    raise GitTreeSchedulerError(
+                        "restored candidate belongs to another tree"
+                    )
+                candidates_by_node_id[restored_candidate.node_id] = restored_candidate
+                current_branch_id = restored_candidate.node_id
                 if restored_candidate.dev_score is not None:
                     _record_dev_score(
                         iteration_index=restored_candidate.iteration,
@@ -2127,8 +3469,6 @@ class CodeEditLoopEngine:
                         score=restored_candidate.dev_score,
                         version=restored_candidate.dev_score_version,
                     )
-            dev_scores_since_improvement = 0
-
         await self.event_sink(
             AutoResearchLoopEvent(
                 event_type="loop_resumed" if resume else "loop_started",
@@ -2146,7 +3486,7 @@ class CodeEditLoopEngine:
                     "requested_loop_count": int(requested_loop_count),
                     "settings": _settings_doc(settings),
                     "budget_context": _safe_budget_doc(budget_context),
-                    "inner_loop_policy": dict(self._inner_loop_policy),
+                    "git_tree_policy": dict(self._tree_policy_doc),
                     "resumed_from_checkpoint": bool(resume),
                     "restored_selected_candidate_count": restored_candidate_count,
                     "checkpoint_hash": resume.get("checkpoint_hash"),
@@ -2288,168 +3628,8 @@ class CodeEditLoopEngine:
         binding_plan_terminal_without_candidate = False
         last_checkpoint: dict[str, Any] | None = None
         stop_reason = "max_iterations"
-        ranked_path_base_doc: dict[str, Any] = dict(loop_direction_plan_doc or {})
-        ranked_path_attempted_ids: set[str] = set()
-        selected_path_id = _loop_plan_selected_path_id(loop_direction_plan_doc)
-        if selected_path_id:
-            ranked_path_attempted_ids.add(selected_path_id)
-        ranked_path_fallback_count = 0
-        # Lanes the drafter refused against the inspected source this run —
-        # the fallback prefers a different lane over re-asking a refused one.
-        refused_lane_keys: set[str] = set()
         reference_repair_attempted = bool(resume.get("planner_reference_repair_attempted"))
         reference_repair_status = str(resume.get("planner_reference_repair_status") or "")
-
-        async def _activate_ranked_path_fallback(*, trigger: str, reason: str) -> bool:
-            nonlocal loop_direction_plan_doc
-            nonlocal planner_terminal_without_candidate
-            nonlocal binding_plan_terminal_without_candidate
-            nonlocal stop_reason
-            nonlocal ranked_path_fallback_count
-
-            if not _ranked_path_fallback_enabled(self.builder.config):
-                return False
-            if not ranked_path_base_doc:
-                return False
-            max_ranked_paths = _ranked_path_fallback_max_paths(self.builder.config)
-            remaining_path_slots = max_ranked_paths - len(ranked_path_attempted_ids)
-            next_index = ranked_path_fallback_count + 1
-            previous_path_id = _loop_plan_selected_path_id(loop_direction_plan_doc)
-            next_plan = _ranked_path_fallback_plan(
-                ranked_path_base_doc,
-                attempted_path_ids=ranked_path_attempted_ids,
-                max_paths=remaining_path_slots,
-                fallback_index=next_index,
-                refused_lanes=refused_lane_keys,
-            )
-            if not next_plan:
-                if ranked_path_fallback_count > 0:
-                    await self.event_sink(
-                        AutoResearchLoopEvent(
-                            event_type="no_viable_patch",
-                            loop_status="running",
-                            elapsed_seconds=elapsed(),
-                            cost_ledger=_running_cost_ledger(
-                                openrouter_calls,
-                                estimated_cost,
-                                actual_cost_microusd,
-                                "ranked_path_fallback_exhausted",
-                            ),
-                            event_doc={
-                                "schema_version": "1.0",
-                                "stage": "ranked_path_fallback",
-                                "trigger": str(trigger or "")[:120],
-                                "reason": safe_event_error_text(reason),
-                                "failure_class": (
-                                    "binding_plan_unimplementable"
-                                    if trigger in {
-                                        "binding_plan_unimplementable",
-                                        "loop_direction_plan_feasibility",
-                                    }
-                                    or _binding_plan_unimplementable_reason(reason)
-                                    else "no_safe_patch"
-                                ),
-                                "missing_references": [],
-                                "ranked_path_fallback_attempted": False,
-                                "previous_path_id": previous_path_id,
-                                "next_path_id": "",
-                                "fallback_index": ranked_path_fallback_count,
-                                "terminal_after_ranked_paths_exhausted": True,
-                                "source_plan_hash": ranked_path_base_doc.get("plan_hash"),
-                                "focus_signature_hash": _focus_signature_hash(ticket),
-                            },
-                        )
-                    )
-                return False
-            next_path_id = _loop_plan_selected_path_id(next_plan)
-            if not next_path_id:
-                return False
-            next_plan_binding = _bind_loop_direction_plan(
-                next_plan,
-                source_context=source_context,
-                candidate_edit_constraints=candidate_edit_constraints,
-            )
-            next_plan_errors = list(next_plan_binding.errors)
-            if next_plan_errors:
-                ranked_path_attempted_ids.add(next_path_id)
-                ranked_path_fallback_count = next_index
-                await self.event_sink(
-                    AutoResearchLoopEvent(
-                        event_type="code_edit_validation_failed",
-                        loop_status="running",
-                        elapsed_seconds=elapsed(),
-                        cost_ledger=_running_cost_ledger(
-                            openrouter_calls,
-                            estimated_cost,
-                            actual_cost_microusd,
-                            "ranked_path_feasibility_failed",
-                        ),
-                        event_doc={
-                            "schema_version": "1.0",
-                            "stage": "ranked_path_feasibility",
-                            "trigger": str(trigger or "")[:120],
-                            "path_id": next_path_id,
-                            "feasibility_error_count": len(next_plan_errors),
-                            "error": "; ".join(next_plan_errors)[:700],
-                            "ranked_path_fallback_attempted": False,
-                            "fallback_index": ranked_path_fallback_count,
-                        },
-                    )
-                )
-                return await _activate_ranked_path_fallback(trigger=trigger, reason=reason)
-            next_plan = dict(next_plan_binding.plan_doc or next_plan)
-            ranked_path_attempted_ids.add(next_path_id)
-            ranked_path_fallback_count = next_index
-            loop_direction_plan_doc = next_plan
-            planner_terminal_without_candidate = False
-            binding_plan_terminal_without_candidate = False
-            stop_reason = "max_iterations"
-            event_doc = {
-                "schema_version": "1.0",
-                "stage": "ranked_path_fallback",
-                "trigger": str(trigger or "")[:120],
-                "reason": safe_event_error_text(reason),
-                "ranked_path_fallback_attempted": True,
-                "previous_path_id": previous_path_id,
-                "next_path_id": next_path_id,
-                "fallback_index": ranked_path_fallback_count,
-                "terminal_after_ranked_paths_exhausted": False,
-                "loop_direction_plan_hash": next_plan.get("plan_hash"),
-                "source_plan_hash": ranked_path_base_doc.get("plan_hash"),
-                "focus_signature_hash": _focus_signature_hash(ticket),
-            }
-            await self.event_sink(
-                AutoResearchLoopEvent(
-                    event_type="candidate_generation_fallback_requested",
-                    loop_status="running",
-                    elapsed_seconds=elapsed(),
-                    cost_ledger=_running_cost_ledger(
-                        openrouter_calls,
-                        estimated_cost,
-                        actual_cost_microusd,
-                        "ranked_path_fallback_attempted",
-                    ),
-                    event_doc=event_doc,
-                )
-            )
-            await self.event_sink(
-                AutoResearchLoopEvent(
-                    event_type="loop_direction_planned",
-                    loop_status="running",
-                    elapsed_seconds=elapsed(),
-                    cost_ledger=_running_cost_ledger(
-                        openrouter_calls,
-                        estimated_cost,
-                        actual_cost_microusd,
-                        "ranked_path_fallback_selected",
-                    ),
-                    event_doc={
-                        **event_doc,
-                        "loop_direction_plan": next_plan,
-                    },
-                )
-            )
-            return True
 
         async def _attempt_planner_reference_repair(
             *,
@@ -2460,8 +3640,6 @@ class CodeEditLoopEngine:
             feasibility_errors: Sequence[str] = (),
         ) -> dict[str, Any] | None:
             nonlocal loop_direction_plan_doc
-            nonlocal ranked_path_base_doc
-            nonlocal ranked_path_attempted_ids
             nonlocal planner_terminal_without_candidate
             nonlocal binding_plan_terminal_without_candidate
             nonlocal stop_reason
@@ -2645,11 +3823,6 @@ class CodeEditLoopEngine:
 
             repaired_feasibility_errors = list(repaired_binding.errors)
             loop_direction_plan_doc = repaired_doc
-            ranked_path_base_doc = dict(repaired_doc)
-            ranked_path_attempted_ids = set()
-            repaired_path_id = _loop_plan_selected_path_id(repaired_doc)
-            if repaired_path_id:
-                ranked_path_attempted_ids.add(repaired_path_id)
             planner_terminal_without_candidate = bool(
                 repaired_plan.no_new_safe_path or repaired_feasibility_errors
             )
@@ -2719,9 +3892,7 @@ class CodeEditLoopEngine:
         if (
             self.builder.config.loop_planner_enabled
             and loop_direction_plan_doc is None
-            # Bug 5/20: skip the planner call when restored candidates already fill the cap;
-            # the loop will finalize immediately, so a plan would be paid for and unused.
-            and not (selected and len(selected) >= settings.max_candidates and _stop_at_candidate_cap_enabled())
+            and len(tree_scheduler.nodes) < tree_policy.max_nodes
         ):
             if _would_exceed_budget(
                 actual_cost_microusd,
@@ -2779,6 +3950,7 @@ class CodeEditLoopEngine:
                             provider_outcome_digest=self.provider_outcome_digest,
                             provider_capability_summary=provider_capability_summary,
                             candidate_edit_constraints=candidate_edit_constraints,
+                            branch_factor=tree_policy.branch_factor,
                         ),
                         min(settings.draft_timeout_seconds, remaining_call_seconds),
                         self.builder.config.loop_planner_max_tokens,
@@ -2834,11 +4006,6 @@ class CodeEditLoopEngine:
                         )
                         loop_direction_plan_doc = dict(initial_binding.plan_doc or loop_plan.to_dict())
                         loop_plan = loop_direction_plan_from_mapping(loop_direction_plan_doc)
-                        ranked_path_base_doc = dict(loop_direction_plan_doc)
-                        ranked_path_attempted_ids.clear()
-                        initial_path_id = _loop_plan_selected_path_id(loop_direction_plan_doc)
-                        if initial_path_id:
-                            ranked_path_attempted_ids.add(initial_path_id)
                     except Exception as exc:
                         if planner_attempt >= planner_attempt_limit and not _planner_parse_retry_enabled():
                             stop_reason = "loop_direction_plan_parse_failed"
@@ -2935,11 +4102,6 @@ class CodeEditLoopEngine:
                                 },
                             )
                         )
-                        if await _activate_ranked_path_fallback(
-                            trigger="loop_direction_no_new_safe_path",
-                            reason=loop_plan.reason or "planner returned no_new_safe_path",
-                        ):
-                            stop_reason = "max_iterations"
                     break
         elif not self.builder.config.loop_planner_enabled:
             loop_direction_plan_doc = None
@@ -2992,46 +4154,163 @@ class CodeEditLoopEngine:
                     planner_terminal_without_candidate = True
                     binding_plan_terminal_without_candidate = True
                     stop_reason = "binding_plan_unimplementable"
-                    if await _activate_ranked_path_fallback(
-                        trigger="loop_direction_plan_feasibility",
-                        reason=feasibility_reason,
-                    ):
-                        planner_terminal_without_candidate = False
-                        binding_plan_terminal_without_candidate = False
-                        stop_reason = "max_iterations"
+        tree_base_plan_doc = dict(loop_direction_plan_doc or {})
+        valid_root_objectives = [
+            _tree_branch_direction_plan(
+                tree_base_plan_doc,
+                root_slot_index=index,
+            )
+            for index in range(tree_policy.branch_factor)
+        ]
+        if any(item is None for item in valid_root_objectives):
+            planner_terminal_without_candidate = True
+            binding_plan_terminal_without_candidate = True
+            stop_reason = "tree_branch_objectives_incomplete"
+            await self.event_sink(
+                AutoResearchLoopEvent(
+                    event_type="no_viable_patch",
+                    loop_status="running",
+                    elapsed_seconds=elapsed(),
+                    cost_ledger=_running_cost_ledger(
+                        openrouter_calls,
+                        estimated_cost,
+                        actual_cost_microusd,
+                        "tree_branch_objective_validation",
+                    ),
+                    event_doc={
+                        "stage": "tree_branch_objective_validation",
+                        "failure_class": "tree_branch_objectives_incomplete",
+                        "expected_branch_count": tree_policy.branch_factor,
+                        "valid_branch_count": sum(
+                            item is not None for item in valid_root_objectives
+                        ),
+                        "loop_direction_plan_hash": str(
+                            tree_base_plan_doc.get("plan_hash") or ""
+                        ),
+                        "recovery": "generate_a_complete_independent_path_set",
+                    },
+                )
+            )
+
+        def _root_slot_index(slot: TreeChildSlot) -> int:
+            if slot.parent_node_id == "root":
+                return int(slot.slot_index)
+            root_node = next(
+                (
+                    node
+                    for node in tree_scheduler.nodes
+                    if node.node_id == slot.root_branch_id
+                    and node.parent_node_id == "root"
+                ),
+                None,
+            )
+            if root_node is None:
+                raise GitTreeSchedulerError(
+                    "tree branch root is missing for child objective"
+                )
+            return int(root_node.slot_index)
+
+        def _direction_plan_for_slot(
+            slot: TreeChildSlot,
+        ) -> tuple[dict[str, Any] | None, str, str]:
+            plan_doc = _tree_branch_direction_plan(
+                tree_base_plan_doc,
+                root_slot_index=_root_slot_index(slot),
+            )
+            if not isinstance(plan_doc, Mapping):
+                return None, "", ""
+            path_id = _loop_plan_selected_path_id(plan_doc)
+            plan_hash = str(plan_doc.get("plan_hash") or "")
+            if not path_id or not re.fullmatch(r"sha256:[0-9a-f]{64}", plan_hash):
+                raise GitTreeSchedulerError(
+                    "tree branch objective commitment is invalid"
+                )
+            existing_root = next(
+                (
+                    node
+                    for node in tree_scheduler.nodes
+                    if node.node_id == slot.root_branch_id
+                ),
+                None,
+            )
+            if existing_root is not None and (
+                existing_root.branch_objective_path_id != path_id
+                or existing_root.branch_objective_hash != plan_hash
+            ):
+                raise GitTreeSchedulerError(
+                    "tree branch objective changed after root commitment"
+                )
+            return dict(plan_doc), path_id, plan_hash
+
         while iteration < settings.max_iterations:
             if planner_terminal_without_candidate or binding_plan_terminal_without_candidate:
                 break
+            if not tree_scheduler.planned_slots and any(
+                node.status == "evaluating" for node in tree_scheduler.nodes
+            ):
+                if should_pause and await should_pause():
+                    last_checkpoint = await self._emit_checkpoint(
+                        run_id=run_id,
+                        settings=settings,
+                        artifact=artifact,
+                        model_id=model_id,
+                        budget_context=budget_context,
+                        iterations_completed=iteration,
+                        elapsed_seconds=elapsed(),
+                        selected=selected,
+                        provider_usage=provider_usage,
+                        openrouter_calls=openrouter_calls,
+                        estimated_cost=estimated_cost,
+                        actual_cost_microusd=actual_cost_microusd,
+                        stage="pause_before_tree_round_evaluation",
+                        loop_direction_plan=loop_direction_plan_doc,
+                        built_candidate_count=built_candidate_total,
+                        probe_budget=probe_budget,
+                        planner_reference_repair_attempted=reference_repair_attempted,
+                        planner_reference_repair_status=reference_repair_status,
+                    )
+                    _cleanup_source_tmp()
+                    return self._result(
+                        selected=selected,
+                        status="paused",
+                        stop_reason="maintenance_pause_requested",
+                        iterations_completed=iteration,
+                        elapsed_seconds=elapsed(),
+                        estimated_cost=estimated_cost,
+                        actual_cost_microusd=actual_cost_microusd,
+                        openrouter_calls=openrouter_calls,
+                        provider_usage=provider_usage,
+                        checkpoint=last_checkpoint,
+                    )
+                if await _evaluate_pending_round():
+                    last_checkpoint = await self._emit_checkpoint(
+                        run_id=run_id,
+                        settings=settings,
+                        artifact=artifact,
+                        model_id=model_id,
+                        budget_context=budget_context,
+                        iterations_completed=iteration,
+                        elapsed_seconds=elapsed(),
+                        selected=selected,
+                        provider_usage=provider_usage,
+                        openrouter_calls=openrouter_calls,
+                        estimated_cost=estimated_cost,
+                        actual_cost_microusd=actual_cost_microusd,
+                        stage="tree_round_evaluated",
+                        loop_direction_plan=loop_direction_plan_doc,
+                        built_candidate_count=built_candidate_total,
+                        probe_budget=probe_budget,
+                        planner_reference_repair_attempted=reference_repair_attempted,
+                        planner_reference_repair_status=reference_repair_status,
+                    )
             if elapsed() >= settings.max_seconds:
                 stop_reason = "max_seconds"
                 break
             if (
-                str(self._inner_loop_policy.get("effective_phase") or "off") != "off"
-                and settings.max_seconds - elapsed()
-                <= max(
-                    0,
-                    int(
-                        self._inner_loop_policy.get(
-                            "finalization_reserve_seconds", 120
-                        )
-                        or 120
-                    ),
-                )
+                settings.max_seconds - elapsed()
+                <= final_context_reserve_seconds
             ):
-                stop_reason = "inner_loop_finalization_reserve"
-                break
-            # Bug 20: iterations past the candidate cap used to build docker images and then
-            # discard them (selected is truncated to max_candidates every iteration). Once the
-            # cap is filled, stop iterating; minimum runtime is enforced by the post-loop wait.
-            if len(selected) >= settings.max_candidates and _stop_at_candidate_cap_enabled():
-                stop_reason = "candidate_limit_reached"
-                break
-            if (
-                iteration >= settings.min_iterations
-                and elapsed() >= settings.min_seconds
-                and len(selected) >= settings.max_candidates
-            ):
-                stop_reason = "candidate_limit_reached_after_minimum_runtime"
+                stop_reason = "tree_finalization_reserve"
                 break
             if _would_exceed_budget(
                 actual_cost_microusd,
@@ -3075,63 +4354,207 @@ class CodeEditLoopEngine:
                     checkpoint=last_checkpoint,
                 )
 
+            if not tree_scheduler.planned_slots:
+                planned_round = tree_scheduler.plan_round()
+                if planned_round:
+                    last_checkpoint = await self._emit_checkpoint(
+                        run_id=run_id,
+                        settings=settings,
+                        artifact=artifact,
+                        model_id=model_id,
+                        budget_context=budget_context,
+                        iterations_completed=iteration,
+                        elapsed_seconds=elapsed(),
+                        selected=selected,
+                        provider_usage=provider_usage,
+                        openrouter_calls=openrouter_calls,
+                        estimated_cost=estimated_cost,
+                        actual_cost_microusd=actual_cost_microusd,
+                        stage="tree_round_planned",
+                        loop_direction_plan=loop_direction_plan_doc,
+                        built_candidate_count=built_candidate_total,
+                        probe_budget=probe_budget,
+                        planner_reference_repair_attempted=reference_repair_attempted,
+                        planner_reference_repair_status=reference_repair_status,
+                    )
+            tree_slot = tree_scheduler.next_planned()
+            if tree_slot is None:
+                stop_reason = "tree_frontier_exhausted"
+                break
+            iteration += 1
+            built_nodes_before_iteration = len(selected)
             (
-                chain_parent_candidate,
-                chain_parent_artifact,
+                tree_parent_candidate,
+                tree_parent_artifact,
                 source_context,
-            ) = await _resolve_sequential_parent()
+            ) = await _resolve_tree_parent(tree_slot)
             candidate_edit_constraints = _candidate_edit_constraints(
                 source_context,
                 config=self.builder.config,
                 dev_evaluator_configured=self.dev_evaluator is not None,
             )
-            if sequential_chain_enabled and isinstance(
-                loop_direction_plan_doc, Mapping
-            ):
-                sequential_binding = _bind_loop_direction_plan(
-                    loop_direction_plan_doc,
+            (
+                branch_direction_plan_doc,
+                branch_objective_path_id,
+                branch_objective_hash,
+            ) = _direction_plan_for_slot(tree_slot)
+            branch_binding_errors: tuple[str, ...] = ()
+            if isinstance(branch_direction_plan_doc, Mapping):
+                branch_binding = _bind_loop_direction_plan(
+                    branch_direction_plan_doc,
                     source_context=source_context,
                     candidate_edit_constraints=candidate_edit_constraints,
                 )
-                if sequential_binding.errors and chain_parent_candidate is not None:
-                    await self.event_sink(
-                        AutoResearchLoopEvent(
-                            event_type="code_edit_validation_failed",
-                            loop_status="running",
-                            elapsed_seconds=elapsed(),
-                            node_id=chain_parent_candidate.node_id,
-                            cost_ledger=_running_cost_ledger(
-                                openrouter_calls,
-                                estimated_cost,
-                                actual_cost_microusd,
-                                "sequential_parent_plan_binding_failed",
+                branch_binding_errors = tuple(branch_binding.errors)
+                branch_direction_plan_doc = dict(
+                    branch_binding.plan_doc or branch_direction_plan_doc
+                )
+                branch_objective_path_id = _loop_plan_selected_path_id(
+                    branch_direction_plan_doc
+                )
+                branch_objective_hash = str(
+                    branch_direction_plan_doc.get("plan_hash") or ""
+                )
+            branch_objective_path_ids[tree_slot.node_id] = (
+                branch_objective_path_id
+            )
+            branch_objective_hashes[tree_slot.node_id] = branch_objective_hash
+            current_branch_context_doc = {
+                **dict(current_branch_context_doc or {}),
+                "branch_objective_path_id": branch_objective_path_id,
+                "branch_objective_hash": branch_objective_hash,
+            }
+            generation_request_doc = {
+                "schema_version": "research_lab.git_tree_generation_request.v1",
+                "tree_id": tree_id,
+                "slot": tree_slot.to_dict(),
+                "policy_hash": tree_policy.policy_hash,
+                "parent_artifact_hash": (
+                    tree_parent_artifact.model_artifact_hash
+                ),
+                "parent_source_tree_hash": source_context.source_tree_hash,
+                "branch_context_hash": sha256_json(
+                    dict(current_branch_context_doc or {})
+                ),
+                "branch_objective_path_id": branch_objective_path_id,
+                "branch_objective_hash": branch_objective_hash,
+                "evaluator_commitment_hash": sha256_json(
+                    evaluator_commitment
+                ),
+            }
+            generation_request_hash = sha256_json(generation_request_doc)
+            generation_operation = generation_operation_id(tree_slot)
+            active_request_hash = generation_request_hashes.get(tree_slot.node_id)
+            if active_request_hash:
+                if active_request_hash != generation_request_hash:
+                    raise GitTreeSchedulerError(
+                        "in-process tree generation commitment changed"
+                    )
+                # A bounded parser/reference repair may retry this exact slot
+                # before the process exits. Keep its one logical reservation
+                # open; only a newly constructed engine treats a pre-existing
+                # reserved operation as indeterminate crash recovery.
+                plan_result = {
+                    "created": True,
+                    "operation_status": "reserved",
+                    "in_process_retry": True,
+                }
+            else:
+                generation_request_hashes[tree_slot.node_id] = generation_request_hash
+                generation_start_costs[tree_slot.node_id] = int(
+                    actual_cost_microusd
+                )
+                generation_start_calls[tree_slot.node_id] = int(openrouter_calls)
+                plan_result = await self._tree_repository_call(
+                    "plan_slot",
+                    slot=tree_slot,
+                    request_hash=generation_request_hash,
+                    operation_id=generation_operation,
+                    node_doc={
+                        "schema_version": "research_lab.git_tree_node_plan.v1",
+                        "tree_id": tree_id,
+                        "node_id": tree_slot.node_id,
+                        "parent_node_id": tree_slot.parent_node_id,
+                        "root_branch_id": tree_slot.root_branch_id,
+                        "depth": tree_slot.depth,
+                        "child_slot": tree_slot.slot_index,
+                        "parent_artifact_hash": (
+                            tree_parent_artifact.model_artifact_hash
+                        ),
+                        "parent_source_tree_hash": source_context.source_tree_hash,
+                        "branch_objective_path_id": branch_objective_path_id,
+                        "branch_objective_hash": branch_objective_hash,
+                        "generation_request_hash": generation_request_hash,
+                    },
+                )
+            if not isinstance(plan_result, Mapping) or plan_result.get(
+                "operation_status"
+            ) not in {"reserved", "succeeded", "failed", "indeterminate"}:
+                raise GitTreeSchedulerError(
+                    "tree generation reservation response is invalid"
+                )
+            if plan_result.get("created") is not True:
+                await _recover_generation_operation(
+                    slot=tree_slot,
+                    request_hash=generation_request_hash,
+                )
+                last_checkpoint = await self._emit_checkpoint(
+                    run_id=run_id,
+                    settings=settings,
+                    artifact=artifact,
+                    model_id=model_id,
+                    budget_context=budget_context,
+                    iterations_completed=iteration,
+                    elapsed_seconds=elapsed(),
+                    selected=selected,
+                    provider_usage=provider_usage,
+                    openrouter_calls=openrouter_calls,
+                    estimated_cost=estimated_cost,
+                    actual_cost_microusd=actual_cost_microusd,
+                    stage="tree_generation_operation_reconciled",
+                    loop_direction_plan=loop_direction_plan_doc,
+                    built_candidate_count=built_candidate_total,
+                    probe_budget=probe_budget,
+                    planner_reference_repair_attempted=reference_repair_attempted,
+                    planner_reference_repair_status=reference_repair_status,
+                )
+                continue
+            if not branch_objective_path_id or not branch_objective_hash:
+                await _terminalize_unbuilt_slot(
+                    tree_slot, "tree_branch_objective_unavailable"
+                )
+                continue
+            if branch_binding_errors:
+                await self.event_sink(
+                    AutoResearchLoopEvent(
+                        event_type="code_edit_validation_failed",
+                        loop_status="running",
+                        elapsed_seconds=elapsed(),
+                        node_id=tree_slot.node_id,
+                        cost_ledger=_running_cost_ledger(
+                            openrouter_calls,
+                            estimated_cost,
+                            actual_cost_microusd,
+                            "tree_parent_plan_binding_failed",
+                        ),
+                        event_doc={
+                            "stage": "tree_parent_plan_binding_failed",
+                            "error_count": len(branch_binding_errors),
+                            "error_hash": sha256_json(
+                                {"errors": list(branch_binding_errors)}
                             ),
-                            event_doc={
-                                "stage": "sequential_parent_plan_binding_failed",
-                                "error_count": len(sequential_binding.errors),
-                                "error_hash": sha256_json(
-                                    {"errors": list(sequential_binding.errors)}
-                                ),
-                                "chain_parent_node_id": chain_parent_candidate.node_id,
-                                "fallback": "run_start_approved_model",
-                            },
-                        )
+                            "tree_id": tree_id,
+                            "tree_parent_node_id": tree_slot.parent_node_id,
+                            "branch_objective_path_id": branch_objective_path_id,
+                            "branch_objective_hash": branch_objective_hash,
+                            "recovery": "prune_node",
+                        },
                     )
-                    chain_parent_candidate = None
-                    chain_parent_artifact = root_artifact
-                    source_context = root_source_context
-                    sequential_parent_feedback_doc = None
-                    candidate_edit_constraints = _candidate_edit_constraints(
-                        source_context,
-                        config=self.builder.config,
-                        dev_evaluator_configured=self.dev_evaluator is not None,
-                    )
-                else:
-                    loop_direction_plan_doc = dict(
-                        sequential_binding.plan_doc or loop_direction_plan_doc
-                    )
-
-            iteration += 1
+                )
+                await _terminalize_unbuilt_slot(
+                    tree_slot, "tree_parent_plan_binding_failed"
+                )
+                continue
             remaining_call_seconds = max(1, int(settings.max_seconds - elapsed()))
             source_inspection_context: dict[str, Any] = {
                 "schema_version": "1.0",
@@ -3159,8 +4582,8 @@ class CodeEditLoopEngine:
                     plan_references = tuple(
                         str(item)
                         for item in (
-                            (loop_direction_plan_doc or {}).get("must_inspect", [])
-                            if isinstance(loop_direction_plan_doc, Mapping)
+                            (branch_direction_plan_doc or {}).get("must_inspect", [])
+                            if isinstance(branch_direction_plan_doc, Mapping)
                             else []
                         )
                         if item
@@ -3259,7 +4682,6 @@ class CodeEditLoopEngine:
                         str(exc)[:200],
                     )
             budget_exhausted_after_source_inspection = False
-            retry_iteration_after_reference_repair = False
             max_inspection_rounds = max(
                 1, int(self.builder.config.code_edit_source_inspection_rounds)
             )
@@ -3301,20 +4723,20 @@ class CodeEditLoopEngine:
                                 "loop_iteration": iteration,
                                 "inspection_round": inspection_round,
                             },
-                            artifact_manifest=chain_parent_artifact.to_dict(),
+                            artifact_manifest=tree_parent_artifact.to_dict(),
                             component_registry=dict(component_registry),
                             benchmark_public_summary=benchmark_public_summary,
                             runtime_source_index=source_context.inspection_index(),
                             source_inspection_context=source_inspection_context,
-                            loop_direction_plan=loop_direction_plan_doc,
+                            loop_direction_plan=branch_direction_plan_doc,
                             budget_context=_memory_budget_context({
                                 **dict(budget_context),
                                 "loop_iteration": iteration,
                                 "inspection_round": inspection_round,
                                 "candidate_kind": "image_build",
                                 "loop_direction_plan_hash": (
-                                    (loop_direction_plan_doc or {}).get("plan_hash")
-                                    if isinstance(loop_direction_plan_doc, Mapping)
+                                    (branch_direction_plan_doc or {}).get("plan_hash")
+                                    if isinstance(branch_direction_plan_doc, Mapping)
                                     else None
                                 ),
                             }),
@@ -3617,23 +5039,12 @@ class CodeEditLoopEngine:
                 ):
                     stop_reason = "compute_budget_exhausted_before_code_edit"
                     break
-                # §6.2-8 multi-candidate drafts (flag default ON; inert at prod config
-                # because hosted_worker_max_candidates=1 bounds it to one): ask for and
-                # parse up to min(remaining candidate slots, RESEARCH_LAB_LOOP_DRAFTS_PER_CALL)
-                # candidates from ONE draft call instead of a flat settings.max_candidates,
-                # so a single call can fill several slots but never yields drafts past the
-                # bug-20 cap (never build-and-discard). The call still counts once in
-                # iteration/cost accounting; each build counts per built candidate.
-                if sequential_chain_enabled:
-                    # Each candidate must be generated only after the prior
-                    # candidate has been built and development-tested.
-                    draft_parse_limit = 1
-                elif _multi_candidate_drafts_enabled():
-                    remaining_candidate_slots = max(1, settings.max_candidates - len(selected))
-                    draft_parse_limit = min(remaining_candidate_slots, _drafts_per_call_limit())
-                else:
-                    draft_parse_limit = settings.max_candidates
-                candidate_generation_fallback_attempted = False
+                # One provider operation owns one predeclared child slot. A
+                # bounded repair/fallback attempt may replace a malformed
+                # response for that same slot, but a response can never create
+                # siblings or consume multiple node identities.
+                draft_parse_limit = 1
+                candidate_generation_attempt_count = 0
 
                 async def _attempt_candidate_generation_fallback(
                     *,
@@ -3641,8 +5052,12 @@ class CodeEditLoopEngine:
                     reason: str,
                 ) -> list[CodeEditDraft]:
                     nonlocal openrouter_calls, estimated_cost, actual_cost_microusd
-                    nonlocal candidate_generation_fallback_attempted
-                    if candidate_generation_fallback_attempted or not read_paths:
+                    nonlocal candidate_generation_attempt_count
+                    if (
+                        candidate_generation_attempt_count
+                        >= tree_policy.generation_attempts
+                        or not read_paths
+                    ):
                         return []
                     if elapsed() >= settings.max_seconds:
                         return []
@@ -3652,7 +5067,10 @@ class CodeEditLoopEngine:
                         budget_limit_microusd,
                     ):
                         return []
-                    candidate_generation_fallback_attempted = True
+                    candidate_generation_attempt_count += 1
+                    generation_attempt_counts[tree_slot.node_id] = (
+                        candidate_generation_attempt_count
+                    )
                     await self.event_sink(
                         AutoResearchLoopEvent(
                             event_type="candidate_generation_fallback_requested",
@@ -3670,6 +5088,8 @@ class CodeEditLoopEngine:
                                 "trigger": str(trigger or "")[:120],
                                 "reason": safe_event_error_text(reason),
                                 "mode": "smaller_same_lane_inspected_files",
+                                "generation_attempt": candidate_generation_attempt_count,
+                                "generation_attempt_limit": tree_policy.generation_attempts,
                                 "max_candidates": 1,
                                 "max_target_files": _fallback_max_target_files(self.builder.config),
                                 "read_file_count": len(read_paths),
@@ -3690,12 +5110,12 @@ class CodeEditLoopEngine:
                                 "requested_loop_count": requested_loop_count,
                                 "loop_iteration": iteration,
                             },
-                            artifact_manifest=chain_parent_artifact.to_dict(),
+                            artifact_manifest=tree_parent_artifact.to_dict(),
                             component_registry=dict(component_registry),
                             benchmark_public_summary=benchmark_public_summary,
                             runtime_source_context=source_context.prompt_context(),
                             source_inspection_context=source_inspection_context,
-                            loop_direction_plan=loop_direction_plan_doc,
+                            loop_direction_plan=branch_direction_plan_doc,
                             budget_context=_memory_budget_context(
                                 {
                                     **dict(budget_context),
@@ -3703,8 +5123,8 @@ class CodeEditLoopEngine:
                                     "candidate_kind": "image_build",
                                     "fallback_trigger": str(trigger or "")[:120],
                                     "loop_direction_plan_hash": (
-                                        (loop_direction_plan_doc or {}).get("plan_hash")
-                                        if isinstance(loop_direction_plan_doc, Mapping)
+                                        (branch_direction_plan_doc or {}).get("plan_hash")
+                                        if isinstance(branch_direction_plan_doc, Mapping)
                                         else None
                                     ),
                                 },
@@ -3748,7 +5168,10 @@ class CodeEditLoopEngine:
                                 },
                             )
                         )
-                        return []
+                        return await _attempt_candidate_generation_fallback(
+                            trigger=trigger,
+                            reason=reason,
+                        )
                     openrouter_calls += 1
                     estimated_cost += settings.estimated_iteration_cost_usd
                     actual_cost_microusd += max(0, int(fallback_result.cost_microusd))
@@ -3813,7 +5236,10 @@ class CodeEditLoopEngine:
                                 },
                             )
                         )
-                        return []
+                        return await _attempt_candidate_generation_fallback(
+                            trigger=trigger,
+                            reason=no_viable_reason or safe_event_error_text(exc),
+                        )
                     await self.event_sink(
                         AutoResearchLoopEvent(
                             event_type="candidate_generation_fallback_drafted",
@@ -3841,6 +5267,10 @@ class CodeEditLoopEngine:
                     )
                     return fallback_drafts
 
+                candidate_generation_attempt_count += 1
+                generation_attempt_counts[tree_slot.node_id] = (
+                    candidate_generation_attempt_count
+                )
                 draft_result, draft_call_error = await self._call_stage_contained(
                     build_code_edit_auto_research_messages(
                         ticket={
@@ -3853,20 +5283,20 @@ class CodeEditLoopEngine:
                             "requested_loop_count": requested_loop_count,
                             "loop_iteration": iteration,
                         },
-                        artifact_manifest=chain_parent_artifact.to_dict(),
+                        artifact_manifest=tree_parent_artifact.to_dict(),
                         component_registry=dict(component_registry),
                         benchmark_public_summary=benchmark_public_summary,
                         runtime_source_context=source_context.prompt_context(),
                         source_inspection_context=source_inspection_context,
-                        loop_direction_plan=loop_direction_plan_doc,
+                        loop_direction_plan=branch_direction_plan_doc,
                         budget_context=_memory_budget_context(
                             {
                                 **dict(budget_context),
                                 "loop_iteration": iteration,
                                 "candidate_kind": "image_build",
                                 "loop_direction_plan_hash": (
-                                    (loop_direction_plan_doc or {}).get("plan_hash")
-                                    if isinstance(loop_direction_plan_doc, Mapping)
+                                    (branch_direction_plan_doc or {}).get("plan_hash")
+                                    if isinstance(branch_direction_plan_doc, Mapping)
                                     else None
                                 ),
                             },
@@ -3909,10 +5339,17 @@ class CodeEditLoopEngine:
                                 "iteration": iteration,
                                 "stage": "code_edit_draft_call_failed",
                                 "error": draft_call_error or "code_edit_draft_call_failed",
+                                "generation_attempt": candidate_generation_attempt_count,
+                                "generation_attempt_limit": tree_policy.generation_attempts,
                             },
                         )
                     )
-                    drafts = []
+                    drafts = await _attempt_candidate_generation_fallback(
+                        trigger="code_edit_draft_call_failed",
+                        reason=str(
+                            draft_call_error or "code_edit_draft_call_failed"
+                        ),
+                    )
                     raw = ""
                     budget_exhausted_after_call = actual_cost_microusd >= budget_limit_microusd > 0
                 else:
@@ -3935,7 +5372,7 @@ class CodeEditLoopEngine:
                         no_viable_reason = no_viable.reason if no_viable is not None else ""
                         fallback_drafts: list[CodeEditDraft] = []
                         if no_viable_reason:
-                            terminal_binding_plan = bool(loop_direction_plan_doc) and bool(
+                            terminal_binding_plan = bool(branch_direction_plan_doc) and bool(
                                 no_viable is not None
                                 and no_viable.failure_class == "binding_plan_unimplementable"
                             )
@@ -3967,78 +5404,25 @@ class CodeEditLoopEngine:
                                         ),
                                         **(
                                             {
-                                                "terminal": True,
-                                                "stop_reason": "binding_plan_unimplementable",
+                                                "terminal_node": True,
+                                                "node_failure_reason": "binding_plan_unimplementable",
                                             }
                                             if terminal_binding_plan
                                             else {}
                                         ),
                                         "raw_response_hash": sha256_json({"raw_response": raw}),
                                         "loop_direction_plan_hash": (
-                                            (loop_direction_plan_doc or {}).get("plan_hash")
-                                            if isinstance(loop_direction_plan_doc, Mapping)
+                                            (branch_direction_plan_doc or {}).get("plan_hash")
+                                            if isinstance(branch_direction_plan_doc, Mapping)
                                             else None
                                         ),
                                     },
                                 )
                             )
-                            if terminal_binding_plan:
-                                stop_reason = "binding_plan_unimplementable"
-                                binding_plan_terminal_without_candidate = True
-                            repaired_doc = None
-                            if (
-                                terminal_binding_plan
-                                and no_viable is not None
-                                and no_viable.missing_references
-                            ):
-                                repaired_doc = await _attempt_planner_reference_repair(
-                                    trigger="binding_plan_unimplementable",
-                                    reason=no_viable_reason,
-                                    plan_doc=loop_direction_plan_doc or {},
-                                    explicit_references=(
-                                        no_viable.missing_references if no_viable is not None else ()
-                                    ),
-                                )
-                            if repaired_doc is not None and not bool(repaired_doc.get("no_new_safe_path")):
-                                retry_iteration_after_reference_repair = True
-                                binding_plan_terminal_without_candidate = False
-                                stop_reason = "max_iterations"
-                            else:
-                                fallback_drafts = await _attempt_candidate_generation_fallback(
-                                    trigger="no_viable_patch",
-                                    reason=no_viable_reason,
-                                )
-                                if fallback_drafts:
-                                    binding_plan_terminal_without_candidate = False
-                                elif terminal_binding_plan:
-                                    await _activate_ranked_path_fallback(
-                                        trigger="binding_plan_unimplementable",
-                                        reason=no_viable_reason,
-                                    )
-                                elif (
-                                    isinstance(loop_direction_plan_doc, Mapping)
-                                    and _refusal_lane_advance_enabled()
-                                ):
-                                    # Source-grounded refusal on a non-terminal
-                                    # lane: the drafter (and its bounded
-                                    # fallback) declined this lane against the
-                                    # inspected source. Re-asking the identical
-                                    # lane next iteration is pure spend —
-                                    # advance to the next ranked path
-                                    # (different lane preferred) or terminate
-                                    # cheaply with budget left.
-                                    refused_lane = str(
-                                        loop_direction_plan_doc.get("required_lane") or ""
-                                    )
-                                    if refused_lane:
-                                        refused_lane_keys.add(refused_lane)
-                                    advanced = await _activate_ranked_path_fallback(
-                                        trigger="source_grounded_refusal",
-                                        reason=no_viable_reason,
-                                    )
-                                    if not advanced:
-                                        stop_reason = "loop_direction_no_new_safe_path"
-                                        planner_terminal_without_candidate = True
+                            fallback_drafts = await _attempt_candidate_generation_fallback(
+                                trigger="no_viable_patch",
+                                reason=no_viable_reason,
+                            )
                         else:
                             await self.event_sink(
                                 AutoResearchLoopEvent(
@@ -4063,10 +5447,7 @@ class CodeEditLoopEngine:
                                 reason=safe_event_error_text(exc),
                             )
                         drafts = fallback_drafts if fallback_drafts else []
-            if retry_iteration_after_reference_repair:
-                iteration = max(0, iteration - 1)
-                drafts = []
-            for draft_index, draft in enumerate(drafts):
+            for draft in drafts[:1]:
                 if (
                     provider_capabilities is not None
                     and provider_capabilities.private_snapshot_loaded
@@ -4086,31 +5467,8 @@ class CodeEditLoopEngine:
                             "while preserving credential, cost, and output safeguards."
                         ),
                     )
-                if len(selected) >= settings.max_candidates and _stop_at_candidate_cap_enabled():
-                    # Bug 20: never start a docker build for a candidate that would be
-                    # truncated away by the max_candidates cap.
-                    await self.event_sink(
-                        AutoResearchLoopEvent(
-                            event_type="code_edit_validation_failed",
-                            loop_status="running",
-                            elapsed_seconds=elapsed(),
-                            cost_ledger=_running_cost_ledger(
-                                openrouter_calls,
-                                estimated_cost,
-                                actual_cost_microusd,
-                                "candidate_cap_reached",
-                            ),
-                            event_doc={
-                                "iteration": iteration,
-                                "stage": "candidate_cap_reached",
-                                "error": "candidate_cap_reached_draft_skipped",
-                                "selected_candidate_count": len(selected),
-                            },
-                        )
-                    )
-                    break
                 draft_diff_hash = sha256_json({"unified_diff": draft.unified_diff})
-                if within_run_memory_active and draft_diff_hash in rejected_diff_hashes:
+                if draft_diff_hash in all_rejected_diff_hashes:
                     # Within-run memory: skip a draft identical to a diff already rejected
                     # earlier in this run instead of paying to judge/build it again.
                     await self.event_sink(
@@ -4133,7 +5491,7 @@ class CodeEditLoopEngine:
                         )
                     )
                     continue
-                node_id = _node_id(run_id, iteration, draft_index, draft)
+                node_id = tree_slot.node_id
                 source_errors = self.builder.validate_draft_against_source_context(
                     draft,
                     source_context,
@@ -4183,7 +5541,7 @@ class CodeEditLoopEngine:
                         draft=draft,
                         outcome="source_context_validation",
                         detail="; ".join(source_errors),
-                        artifact=chain_parent_artifact,
+                        artifact=tree_parent_artifact,
                         component_registry=component_registry,
                         elapsed=elapsed,
                         openrouter_calls=openrouter_calls,
@@ -4204,8 +5562,8 @@ class CodeEditLoopEngine:
                             "lane": draft.lane,
                             "plan_path_id": draft.plan_path_id,
                             "loop_direction_plan_hash": (
-                                (loop_direction_plan_doc or {}).get("plan_hash")
-                                if isinstance(loop_direction_plan_doc, Mapping)
+                                (branch_direction_plan_doc or {}).get("plan_hash")
+                                if isinstance(branch_direction_plan_doc, Mapping)
                                 else None
                             ),
                             "target_files": list(draft.target_files),
@@ -4232,7 +5590,7 @@ class CodeEditLoopEngine:
                     node_id=node_id,
                     iteration=iteration,
                     settings=settings,
-                    artifact=chain_parent_artifact,
+                    artifact=tree_parent_artifact,
                     source_context=source_context,
                     source_inspection_context=source_inspection_context,
                     read_paths=tuple(sorted(read_paths)),
@@ -4263,7 +5621,7 @@ class CodeEditLoopEngine:
                         draft=draft,
                         outcome="patch_apply_repair_exhausted",
                         detail="patch did not apply after repair attempts",
-                        artifact=chain_parent_artifact,
+                        artifact=tree_parent_artifact,
                         component_registry=component_registry,
                         elapsed=elapsed,
                         openrouter_calls=openrouter_calls,
@@ -4280,7 +5638,7 @@ class CodeEditLoopEngine:
                     alignment_budget_exhausted,
                 ) = await self._judge_plan_alignment(
                     draft=candidate_draft,
-                    loop_direction_plan=loop_direction_plan_doc,
+                    loop_direction_plan=branch_direction_plan_doc,
                     prior_attempts=prior_attempts,
                     node_id=node_id,
                     iteration=iteration,
@@ -4313,7 +5671,7 @@ class CodeEditLoopEngine:
                         draft=candidate_draft,
                         outcome="plan_alignment_rejected",
                         detail=alignment_reason,
-                        artifact=chain_parent_artifact,
+                        artifact=tree_parent_artifact,
                         component_registry=component_registry,
                         elapsed=elapsed,
                         openrouter_calls=openrouter_calls,
@@ -4322,75 +5680,218 @@ class CodeEditLoopEngine:
                     )
                     continue
                 build_completed = False
+                tree_terminal_persisted = False
+                build_request_hash = ""
+                build_operation_reserved = False
                 if (
-                    str(self._inner_loop_policy.get("effective_phase") or "off") != "off"
-                    and settings.max_seconds - elapsed()
-                    <= max(
-                        0,
-                        int(
-                            self._inner_loop_policy.get(
-                                "finalization_reserve_seconds", 120
-                            )
-                            or 120
-                        ),
-                    )
+                    settings.max_seconds - elapsed()
+                    <= final_context_reserve_seconds
                 ):
                     finalization_reserve_reached = True
                     break
+                available_build_seconds = max(
+                    1,
+                    int(
+                        settings.max_seconds
+                        - elapsed()
+                        - final_context_reserve_seconds
+                    ),
+                )
+                build_timeout_seconds = min(
+                    max(
+                        1,
+                        int(
+                            getattr(
+                                self.builder.config,
+                                "code_edit_build_timeout_seconds",
+                                available_build_seconds,
+                            )
+                        ),
+                    ),
+                    available_build_seconds,
+                )
                 try:
                     incremental_draft = candidate_draft
-                    submission_draft = incremental_draft
-                    incremental_source_diff_hash = sha256_json(
+                    drafted_incremental_hash = sha256_json(
                         {"unified_diff": incremental_draft.unified_diff}
                     )
-                    composition_doc: dict[str, Any] = {
-                        "schema_version": "research_lab.sequential_composition.v1",
-                        "mode": "direct_approved_root",
-                        "root_source_tree_hash": root_source_context.source_tree_hash,
-                        "parent_source_tree_hash": source_context.source_tree_hash,
-                        "incremental_source_diff_hash": incremental_source_diff_hash,
-                        "cumulative_source_diff_hash": incremental_source_diff_hash,
-                        "cumulative_changed_files": list(
-                            incremental_draft.target_files
-                        ),
-                        "cumulative_apply_verified": True,
-                    }
-                    if sequential_chain_enabled and chain_parent_candidate is not None:
-                        submission_draft, composition_doc = await asyncio.to_thread(
-                            self.builder.compose_cumulative_draft,
-                            root_source_context=root_source_context,
-                            parent_source_context=source_context,
-                            incremental_draft=incremental_draft,
+                    tree_commit = await self._tree_repository_call(
+                        "commit_child",
+                        slot=tree_slot,
+                        draft=incremental_draft,
+                        expected_parent_source_tree_hash=source_context.source_tree_hash,
+                    )
+                    commit_doc = (
+                        tree_commit.to_dict()
+                        if callable(getattr(tree_commit, "to_dict", None))
+                        else dict(tree_commit)
+                        if isinstance(tree_commit, Mapping)
+                        else {}
+                    )
+                    tree_commits_by_node_id[node_id] = dict(commit_doc)
+                    canonical_incremental_patch = str(
+                        getattr(tree_commit, "incremental_patch", "")
+                        or commit_doc.get("incremental_patch")
+                        or ""
+                    )
+                    canonical_cumulative_patch = str(
+                        getattr(tree_commit, "cumulative_patch", "")
+                        or commit_doc.get("cumulative_patch")
+                        or ""
+                    )
+                    changed_files = tuple(
+                        str(item)
+                        for item in (
+                            getattr(tree_commit, "changed_files", ())
+                            or commit_doc.get("changed_files")
+                            or ()
                         )
+                    )
+                    if (
+                        not canonical_incremental_patch.startswith("diff --git ")
+                        or not canonical_cumulative_patch.startswith("diff --git ")
+                        or not changed_files
+                    ):
+                        raise CodeEditPatchApplyError(
+                            "Git-tree commit returned incomplete canonical patches"
+                        )
+                    if str(commit_doc.get("draft_patch_hash") or "") != drafted_incremental_hash:
+                        raise CodeEditPatchApplyError(
+                            "Git-tree draft commitment differs from generated child"
+                        )
+                    incremental_source_diff_hash = sha256_json(
+                        {"unified_diff": canonical_incremental_patch}
+                    )
+                    submission_draft = replace(
+                        incremental_draft,
+                        target_files=changed_files,
+                        unified_diff=canonical_cumulative_patch,
+                    )
                     cumulative_source_diff_hash = sha256_json(
                         {"unified_diff": submission_draft.unified_diff}
                     )
-                    if (
-                        str(
-                            composition_doc.get("cumulative_source_diff_hash")
-                            or ""
-                        )
-                        != cumulative_source_diff_hash
-                    ):
+                    if str(commit_doc.get("incremental_patch_hash") or "") != incremental_source_diff_hash:
                         raise CodeEditPatchApplyError(
-                            "sequential cumulative source diff commitment mismatch"
+                            "Git-tree incremental patch commitment mismatch"
                         )
-                    chain_step = len(selected) + 1
-                    chain_parent_node_id = (
-                        chain_parent_candidate.node_id
-                        if chain_parent_candidate is not None
-                        else ""
-                    )
-                    chain_parent_dev_score = (
-                        chain_parent_candidate.dev_score
-                        if chain_parent_candidate is not None
+                    if str(commit_doc.get("cumulative_patch_hash") or "") != cumulative_source_diff_hash:
+                        raise CodeEditPatchApplyError(
+                            "Git-tree cumulative patch commitment mismatch"
+                        )
+                    tree_git_commit = str(commit_doc.get("git_commit") or "")
+                    if not re.fullmatch(r"[0-9a-f]{64}", tree_git_commit):
+                        raise CodeEditPatchApplyError(
+                            "Git-tree child commit is not SHA-256"
+                        )
+                    tree_depth = int(tree_slot.depth)
+                    tree_parent_node_id = str(tree_slot.parent_node_id)
+                    tree_parent_dev_score = (
+                        tree_parent_candidate.dev_score
+                        if tree_parent_candidate is not None
                         else None
                     )
-                    chain_feedback_hash = (
-                        chain_parent_candidate.dev_feedback_hash
-                        if chain_parent_candidate is not None
+                    tree_parent_feedback_hash = (
+                        tree_parent_candidate.dev_feedback_hash
+                        if tree_parent_candidate is not None
                         else ""
                     )
+                    composition_doc: dict[str, Any] = {
+                        "schema_version": "research_lab.git_tree_composition.v1",
+                        "mode": "direct_parent_git_commit",
+                        "tree_id": tree_id,
+                        "node_id": node_id,
+                        "root_git_commit": str(root_git_commit),
+                        "parent_git_commit": str(
+                            commit_doc.get("parent_git_commit") or ""
+                        ),
+                        "git_commit": tree_git_commit,
+                        "branch_objective_path_id": branch_objective_path_id,
+                        "branch_objective_hash": branch_objective_hash,
+                        "generation_attempt_count": candidate_generation_attempt_count,
+                        "root_source_tree_hash": root_source_context.source_tree_hash,
+                        "parent_source_tree_hash": source_context.source_tree_hash,
+                        "child_source_tree_hash": str(
+                            commit_doc.get("source_tree_hash") or ""
+                        ),
+                        "draft_patch_hash": drafted_incremental_hash,
+                        "incremental_source_diff_hash": incremental_source_diff_hash,
+                        "cumulative_source_diff_hash": cumulative_source_diff_hash,
+                        "cumulative_changed_files": list(changed_files),
+                        "cumulative_apply_verified": True,
+                    }
+                    build_candidate_index = built_candidate_total
+                    build_request_doc = {
+                        "schema_version": "research_lab.git_tree_build_request.v1",
+                        "tree_id": tree_id,
+                        "node_id": node_id,
+                        "generation_request_hash": generation_request_hash,
+                        "policy_hash": tree_policy.policy_hash,
+                        "candidate_index": build_candidate_index,
+                        "root_artifact_hash": root_artifact.model_artifact_hash,
+                        "parent_artifact_hash": (
+                            tree_parent_artifact.model_artifact_hash
+                        ),
+                        "root_source_tree_hash": (
+                            root_source_context.source_tree_hash
+                        ),
+                        "parent_source_tree_hash": source_context.source_tree_hash,
+                        "child_source_tree_hash": str(
+                            commit_doc.get("source_tree_hash") or ""
+                        ),
+                        "git_commit": tree_git_commit,
+                        "incremental_source_diff_hash": (
+                            incremental_source_diff_hash
+                        ),
+                        "cumulative_source_diff_hash": (
+                            cumulative_source_diff_hash
+                        ),
+                        "branch_objective_path_id": branch_objective_path_id,
+                        "branch_objective_hash": branch_objective_hash,
+                        "generation_attempt_count": (
+                            candidate_generation_attempt_count
+                        ),
+                        "build_timeout_seconds": build_timeout_seconds,
+                        "generation_settled_cost_microusd": max(
+                            0,
+                            int(actual_cost_microusd)
+                            - generation_start_costs.get(node_id, 0),
+                        ),
+                        "generation_provider_call_count": max(
+                            0,
+                            int(openrouter_calls)
+                            - generation_start_calls.get(node_id, 0),
+                        ),
+                    }
+                    build_request_hash = sha256_json(build_request_doc)
+                    build_reservation = await self._tree_repository_call(
+                        "reserve_operation",
+                        operation_id=build_operation_id(tree_slot),
+                        operation_kind="build",
+                        request_hash=build_request_hash,
+                        node_id=node_id,
+                        reservation_doc=build_request_doc,
+                    )
+                    if (
+                        not isinstance(build_reservation, Mapping)
+                        or build_reservation.get("operation_status")
+                        not in {
+                            "reserved",
+                            "succeeded",
+                            "failed",
+                            "indeterminate",
+                        }
+                    ):
+                        raise GitTreeSchedulerError(
+                            "tree build reservation response is invalid"
+                        )
+                    if build_reservation.get("created") is not True:
+                        await _recover_generation_operation(
+                            slot=tree_slot,
+                            request_hash=generation_request_hash,
+                        )
+                        tree_terminal_persisted = True
+                        break
+                    build_operation_reserved = True
                     await self.event_sink(
                         AutoResearchLoopEvent(
                             event_type="candidate_build_started",
@@ -4401,25 +5902,30 @@ class CodeEditLoopEngine:
                             event_doc={
                                 "iteration": iteration,
                                 "source_diff_hash": cumulative_source_diff_hash,
-                                **(
-                                    {
-                                        "sequential_chain_step": chain_step,
-                                        "chain_root_artifact_hash": root_artifact.model_artifact_hash,
-                                        "chain_parent_artifact_hash": chain_parent_artifact.model_artifact_hash,
-                                        "chain_parent_node_id": chain_parent_node_id,
-                                        "chain_feedback_hash": chain_feedback_hash,
-                                        "incremental_source_diff_hash": incremental_source_diff_hash,
-                                        "cumulative_source_diff_hash": cumulative_source_diff_hash,
-                                    }
-                                    if sequential_chain_enabled
-                                    else {}
-                                ),
+                                "git_tree": {
+                                    "tree_id": tree_id,
+                                    "node_id": node_id,
+                                    "root_branch_id": tree_slot.root_branch_id,
+                                    "depth": tree_depth,
+                                    "child_slot": tree_slot.slot_index,
+                                    "git_commit": tree_git_commit,
+                                    "branch_objective_path_id": branch_objective_path_id,
+                                    "branch_objective_hash": branch_objective_hash,
+                                    "generation_attempt_count": candidate_generation_attempt_count,
+                                    "root_artifact_hash": root_artifact.model_artifact_hash,
+                                    "parent_artifact_hash": tree_parent_artifact.model_artifact_hash,
+                                    "parent_node_id": tree_parent_node_id,
+                                    "parent_feedback_hash": tree_parent_feedback_hash,
+                                    "incremental_source_diff_hash": incremental_source_diff_hash,
+                                    "cumulative_source_diff_hash": cumulative_source_diff_hash,
+                                },
                                 "loop_direction_plan_hash": (
-                                    (loop_direction_plan_doc or {}).get("plan_hash")
-                                    if isinstance(loop_direction_plan_doc, Mapping)
+                                    (branch_direction_plan_doc or {}).get("plan_hash")
+                                    if isinstance(branch_direction_plan_doc, Mapping)
                                     else None
                                 ),
                                 "plan_alignment": dict(candidate_draft.plan_alignment or {}),
+                                "build_timeout_seconds": build_timeout_seconds,
                             },
                         )
                     )
@@ -4430,7 +5936,7 @@ class CodeEditLoopEngine:
                         draft=submission_draft,
                         artifact=root_artifact,
                         run_id=run_id,
-                        candidate_index=built_candidate_total,
+                        candidate_index=build_candidate_index,
                         source_context=root_source_context,
                         node_id=node_id,
                         iteration=iteration,
@@ -4438,111 +5944,108 @@ class CodeEditLoopEngine:
                         openrouter_calls=openrouter_calls,
                         estimated_cost=estimated_cost,
                         actual_cost_microusd=actual_cost_microusd,
+                        build_timeout_seconds=build_timeout_seconds,
                     )
                     built_candidate_total += 1
                     build_completed = True
-                    if sequential_chain_enabled:
-                        lineage = {
-                            "schema_version": "research_lab.sequential_chain.v1",
-                            "chain_step": chain_step,
-                            "chain_root_artifact_hash": root_artifact.model_artifact_hash,
-                            "immediate_parent_artifact_hash": chain_parent_artifact.model_artifact_hash,
-                            "immediate_parent_node_id": chain_parent_node_id,
-                            "parent_dev_score": chain_parent_dev_score,
-                            "parent_dev_feedback_hash": chain_feedback_hash,
-                            "incremental_source_diff_hash": incremental_source_diff_hash,
-                            "cumulative_source_diff_hash": build.source_diff_hash,
-                            "composition": dict(composition_doc),
-                        }
-                        build = attach_sequential_lineage(
-                            build=build,
-                            draft=submission_draft,
-                            root_artifact_hash=root_artifact.model_artifact_hash,
-                            lineage=lineage,
+                    if build.source_diff_hash != cumulative_source_diff_hash:
+                        raise CodeEditPatchApplyError(
+                            "built image source diff differs from Git-tree commitment"
                         )
+                    if (
+                        build.candidate_model_manifest.model_artifact_hash
+                        != str(commit_doc.get("source_tree_hash") or "")
+                    ):
+                        raise CodeEditPatchApplyError(
+                            "built image source differs from the committed Git tree"
+                        )
+                    lineage = {
+                        "schema_version": "research_lab.git_tree_lineage.v1",
+                        "tree_id": tree_id,
+                        "node_id": node_id,
+                        "parent_node_id": tree_parent_node_id,
+                        "root_branch_id": tree_slot.root_branch_id,
+                        "depth": tree_depth,
+                        "child_slot": tree_slot.slot_index,
+                        "git_commit": tree_git_commit,
+                        "branch_objective_path_id": branch_objective_path_id,
+                        "branch_objective_hash": branch_objective_hash,
+                        "generation_attempt_count": candidate_generation_attempt_count,
+                        "root_artifact_hash": root_artifact.model_artifact_hash,
+                        "parent_artifact_hash": tree_parent_artifact.model_artifact_hash,
+                        "parent_dev_score": tree_parent_dev_score,
+                        "parent_dev_feedback_hash": tree_parent_feedback_hash,
+                        "incremental_source_diff_hash": incremental_source_diff_hash,
+                        "cumulative_source_diff_hash": cumulative_source_diff_hash,
+                        "composition": dict(composition_doc),
+                    }
+                    build = attach_git_tree_lineage(
+                        build=build,
+                        draft=submission_draft,
+                        root_artifact_hash=root_artifact.model_artifact_hash,
+                        lineage=lineage,
+                    )
                     built_candidate = BuiltCodeEditCandidate(
                         draft=submission_draft,
                         build=build,
                         node_id=node_id,
                         iteration=iteration,
-                        chain_step=chain_step if sequential_chain_enabled else 0,
-                        chain_root_artifact_hash=(
-                            root_artifact.model_artifact_hash
-                            if sequential_chain_enabled
-                            else ""
-                        ),
-                        chain_parent_artifact_hash=(
-                            chain_parent_artifact.model_artifact_hash
-                            if sequential_chain_enabled
-                            else ""
-                        ),
-                        chain_parent_node_id=(
-                            chain_parent_node_id if sequential_chain_enabled else ""
-                        ),
-                        chain_parent_dev_score=(
-                            chain_parent_dev_score
-                            if sequential_chain_enabled
-                            else None
-                        ),
-                        chain_feedback_hash=(
-                            chain_feedback_hash if sequential_chain_enabled else ""
-                        ),
-                        chain_incremental_source_diff_hash=(
-                            incremental_source_diff_hash
-                            if sequential_chain_enabled
-                            else ""
-                        ),
-                        chain_cumulative_source_diff_hash=(
-                            build.source_diff_hash
-                            if sequential_chain_enabled
-                            else ""
-                        ),
-                        chain_composition=(
-                            composition_doc if sequential_chain_enabled else {}
+                        tree_id=tree_id,
+                        tree_parent_node_id=tree_parent_node_id,
+                        tree_root_branch_id=tree_slot.root_branch_id,
+                        tree_depth=tree_depth,
+                        tree_child_slot=tree_slot.slot_index,
+                        tree_branch_objective_path_id=branch_objective_path_id,
+                        tree_branch_objective_hash=branch_objective_hash,
+                        tree_generation_attempt_count=candidate_generation_attempt_count,
+                        tree_git_commit=tree_git_commit,
+                        tree_root_artifact_hash=root_artifact.model_artifact_hash,
+                        tree_parent_artifact_hash=tree_parent_artifact.model_artifact_hash,
+                        tree_parent_dev_score=tree_parent_dev_score,
+                        tree_parent_feedback_hash=tree_parent_feedback_hash,
+                        tree_incremental_source_diff_hash=incremental_source_diff_hash,
+                        tree_cumulative_source_diff_hash=cumulative_source_diff_hash,
+                        tree_composition=composition_doc,
+                        tree_settled_cost_microusd=max(
+                            0,
+                            int(actual_cost_microusd)
+                            - generation_start_costs.get(node_id, 0),
                         ),
                     )
-                    # §6.3-1 L1 dev-eval rung (flag default OFF): attach a ranking-only
-                    # dev score through the dev_evaluator seam. Best-effort — a dev-eval
-                    # failure leaves the candidate unscored and the run untouched.
-                    built_candidate = await self._maybe_dev_eval_candidate(
-                        built_candidate,
-                        run_id=run_id,
-                        remaining_seconds=max(0.0, settings.max_seconds - elapsed()),
+                    # Siblings are built completely before the frozen cohort is
+                    # evaluated. The immutable artifact makes this intermediate
+                    # state restartable without rebuilding or regenerating.
+                    built_candidate = await _persist_candidate_rehydration(
+                        built_candidate
                     )
-                    if built_candidate.dev_score is not None:
-                        _record_dev_score(
-                            iteration_index=iteration,
-                            node_id=node_id,
-                            score=built_candidate.dev_score,
-                            version=built_candidate.dev_score_version,
-                        )
-                    # Bug 5: persist a full rehydration doc so a paused/requeued run can restore
-                    # this candidate on resume. Best-effort: failure only loses restorability.
-                    rehydration_doc = await _write_private_loop_candidate_artifact(
-                        artifact=root_artifact,
-                        run_id=run_id,
-                        node_id=node_id,
-                        iteration=iteration,
-                        draft=submission_draft,
-                        build=build,
-                        dev_score=built_candidate.dev_score,
-                        dev_score_version=built_candidate.dev_score_version,
-                        dev_evaluation=built_candidate.dev_evaluation,
-                        dev_feedback=built_candidate.dev_feedback,
-                        dev_feedback_hash=built_candidate.dev_feedback_hash,
-                        sequential_chain=(
-                            dict(build.build_doc.get("sequential_chain") or {})
-                            if sequential_chain_enabled
-                            else None
+                    _replace_selected_candidate(built_candidate)
+                    pending_node = _candidate_tree_node(
+                        built_candidate, status="evaluating"
+                    )
+                    await _settle_build_operation(
+                        slot=tree_slot,
+                        request_hash=build_request_hash,
+                        operation_status="succeeded",
+                        node=pending_node,
+                        reason="candidate_build_and_artifact_verified",
+                        candidate=built_candidate,
+                    )
+                    build_operation_reserved = False
+                    tree_scheduler.record_node(pending_node)
+                    await _persist_generation_outcome(
+                        slot=tree_slot,
+                        node=pending_node,
+                        reason="candidate_built_awaiting_cohort_evaluation",
+                    )
+                    tree_terminal_persisted = True
+                    rehydration_doc = {
+                        "loop_candidate_artifact_uri": (
+                            built_candidate.rehydration_artifact_uri
                         ),
-                        artifact_io=self.artifact_io,
-                    )
-                    built_candidate = replace(
-                        built_candidate,
-                        rehydration_artifact_uri=str(rehydration_doc.get("loop_candidate_artifact_uri") or ""),
-                        rehydration_artifact_hash=str(rehydration_doc.get("loop_candidate_artifact_hash") or ""),
-                    )
-                    selected.append(built_candidate)
+                        "loop_candidate_artifact_hash": (
+                            built_candidate.rehydration_artifact_hash
+                        ),
+                    }
                     await self.event_sink(
                         AutoResearchLoopEvent(
                             event_type="candidate_build_passed",
@@ -4559,33 +6062,13 @@ class CodeEditLoopEngine:
                                 "candidate_source_diff_hash": build.source_diff_hash,
                                 "build_doc_hash": build.build_doc.get("build_doc_hash"),
                                 "loop_direction_plan_hash": (
-                                    (loop_direction_plan_doc or {}).get("plan_hash")
-                                    if isinstance(loop_direction_plan_doc, Mapping)
+                                    (branch_direction_plan_doc or {}).get("plan_hash")
+                                    if isinstance(branch_direction_plan_doc, Mapping)
                                     else None
                                 ),
                                 "plan_alignment": dict(candidate_draft.plan_alignment or {}),
-                                **(
-                                    {
-                                        "sequential_chain": dict(
-                                            build.build_doc.get("sequential_chain") or {}
-                                        ),
-                                        "dev_feedback_hash": built_candidate.dev_feedback_hash,
-                                    }
-                                    if sequential_chain_enabled
-                                    else {}
-                                ),
-                                # §6.3-1: emitted only when a dev score was attached, so
-                                # dev-eval-off runs keep the exact pre-dev-eval doc shape.
-                                **(
-                                    {
-                                        "dev_score": built_candidate.dev_score,
-                                        "dev_score_version": built_candidate.dev_score_version,
-                                        "dev_score_ranking_only": True,
-                                        "dev_evaluation": dict(built_candidate.dev_evaluation),
-                                    }
-                                    if built_candidate.dev_evaluation
-                                    else {}
-                                ),
+                                "git_tree": dict(build.build_doc.get("git_tree") or {}),
+                                "evaluation_status": "awaiting_cohort",
                                 **{
                                     key: value
                                     for key, value in rehydration_doc.items()
@@ -4611,9 +6094,29 @@ class CodeEditLoopEngine:
                 except CodeEditInfraFailureError:
                     # Registry/auth/network failures are not candidate-quality
                     # failures. Let the hosted worker requeue the paid run.
+                    if build_operation_reserved:
+                        await _settle_build_operation(
+                            slot=tree_slot,
+                            request_hash=build_request_hash,
+                            operation_status="indeterminate",
+                            node=_unbuilt_tree_node(
+                                tree_slot, status="indeterminate"
+                            ),
+                            reason="candidate_build_infrastructure_failure",
+                        )
+                        build_operation_reserved = False
                     raise
                 except (CodeEditPrivateTestError, CodeEditImageBuildError, CodeEditPatchApplyError) as exc:
                     event_type = str(getattr(exc, "failure_stage", "") or "candidate_build_failed")
+                    if build_operation_reserved:
+                        await _settle_build_operation(
+                            slot=tree_slot,
+                            request_hash=build_request_hash,
+                            operation_status="failed",
+                            node=_unbuilt_tree_node(tree_slot, status="failed"),
+                            reason=event_type,
+                        )
+                        build_operation_reserved = False
                     _record_within_run_rejection(
                         stage=event_type,
                         reason=safe_event_error_text(exc),
@@ -4662,6 +6165,15 @@ class CodeEditLoopEngine:
                         actual_cost_microusd=actual_cost_microusd,
                     )
                 except CodeEditBuildError as exc:
+                    if build_operation_reserved:
+                        await _settle_build_operation(
+                            slot=tree_slot,
+                            request_hash=build_request_hash,
+                            operation_status="failed",
+                            node=_unbuilt_tree_node(tree_slot, status="failed"),
+                            reason="candidate_build_failed",
+                        )
+                        build_operation_reserved = False
                     _record_within_run_rejection(
                         stage="candidate_build_failed",
                         reason=safe_event_error_text(exc),
@@ -4699,12 +6211,25 @@ class CodeEditLoopEngine:
                         actual_cost_microusd=actual_cost_microusd,
                     )
                 except Exception as exc:
+                    if build_completed and not tree_terminal_persisted:
+                        raise
                     # Bug 17: an unexpected infra error during build/event emission used to
                     # abort the run. Contain it to this candidate; the run keeps whatever it
                     # has already built.
                     if not _stage_error_containment_enabled():
                         raise
                     if not build_completed:
+                        if build_operation_reserved:
+                            await _settle_build_operation(
+                                slot=tree_slot,
+                                request_hash=build_request_hash,
+                                operation_status="indeterminate",
+                                node=_unbuilt_tree_node(
+                                    tree_slot, status="indeterminate"
+                                ),
+                                reason="candidate_build_unexpected_error",
+                            )
+                            build_operation_reserved = False
                         _record_within_run_rejection(
                             stage="candidate_build_unexpected_error",
                             reason=safe_event_error_text(exc),
@@ -4738,8 +6263,14 @@ class CodeEditLoopEngine:
                                 },
                             )
                         )
-                    except Exception:
-                        pass
+                    except Exception as event_exc:
+                        logger.warning(
+                            "research_lab_git_tree_build_failure_event_emit_failed "
+                            "node_id=%s build_completed=%s error=%s",
+                            str(node_id or "")[:120],
+                            build_completed,
+                            safe_event_error_text(event_exc),
+                        )
                     if not build_completed:
                         await self._emit_reflection_recorded(
                             run_id=run_id,
@@ -4755,36 +6286,37 @@ class CodeEditLoopEngine:
                             estimated_cost=estimated_cost,
                             actual_cost_microusd=actual_cost_microusd,
                         )
-            # Candidate selection is terminal and atomic. Keeping build order
-            # here prevents one partial evaluation from evicting the ordinary
-            # first candidate before strict eligibility can be checked.
-            selected = selected[: settings.max_candidates]
-            try:
-                last_checkpoint = await self._emit_checkpoint(
-                    run_id=run_id,
-                    settings=settings,
-                    artifact=artifact,
-                    model_id=model_id,
-                    budget_context=budget_context,
-                    iterations_completed=iteration,
-                    elapsed_seconds=elapsed(),
-                    selected=selected,
-                    provider_usage=provider_usage,
-                    openrouter_calls=openrouter_calls,
-                    estimated_cost=estimated_cost,
-                    actual_cost_microusd=actual_cost_microusd,
-                    stage="code_edit_iteration_completed",
-                    loop_direction_plan=loop_direction_plan_doc,
-                    built_candidate_count=built_candidate_total,
-                    probe_budget=probe_budget,
-                    planner_reference_repair_attempted=reference_repair_attempted,
-                    planner_reference_repair_status=reference_repair_status,
+                        await _terminalize_unbuilt_slot(
+                            tree_slot,
+                            "candidate_build_unexpected_error",
+                            status="indeterminate",
+                        )
+            if (
+                len(selected) == built_nodes_before_iteration
+            ):
+                await _terminalize_unbuilt_slot(
+                    tree_slot, "tree_node_produced_no_build"
                 )
-            except Exception:
-                # Bug 17: a transient checkpoint-write failure must not fail a run that may
-                # already hold built candidates; the previous checkpoint remains usable.
-                if not _stage_error_containment_enabled():
-                    raise
+            last_checkpoint = await self._emit_checkpoint(
+                run_id=run_id,
+                settings=settings,
+                artifact=artifact,
+                model_id=model_id,
+                budget_context=budget_context,
+                iterations_completed=iteration,
+                elapsed_seconds=elapsed(),
+                selected=selected,
+                provider_usage=provider_usage,
+                openrouter_calls=openrouter_calls,
+                estimated_cost=estimated_cost,
+                actual_cost_microusd=actual_cost_microusd,
+                stage="code_edit_iteration_completed",
+                loop_direction_plan=loop_direction_plan_doc,
+                built_candidate_count=built_candidate_total,
+                probe_budget=probe_budget,
+                planner_reference_repair_attempted=reference_repair_attempted,
+                planner_reference_repair_status=reference_repair_status,
+            )
             if should_pause and await should_pause():
                 _cleanup_source_tmp()
                 return self._result(
@@ -4800,41 +6332,58 @@ class CodeEditLoopEngine:
                     checkpoint=last_checkpoint,
                 )
             if finalization_reserve_reached:
-                stop_reason = "inner_loop_finalization_reserve"
+                stop_reason = "tree_finalization_reserve"
                 break
             if budget_exhausted_after_call:
                 stop_reason = "compute_budget_exhausted_after_code_edit"
                 break
-            if (
-                _dev_eval_enabled()
-                and _dev_plateau_stop_enabled()
-                and str(self._inner_loop_policy.get("effective_phase") or "") == "rank"
-                and isinstance(self._inner_loop_policy.get("evidence"), Mapping)
-                and int(
-                    self._inner_loop_policy["evidence"].get(
-                        "rank_healthy_runs", 0
-                    )
-                ) >= 50
-                and dev_scores_since_improvement >= _dev_plateau_window()
-            ):
-                # §6.3-4 lite: the last N dev-scored builds failed to improve the
-                # run's best dev score by more than the configured delta — stop
-                # paying for further iterations on a plateaued run.
-                stop_reason = "dev_score_plateau"
-                break
-
+        if not tree_scheduler.planned_slots and any(
+            node.status == "evaluating" for node in tree_scheduler.nodes
+        ):
+            if await _evaluate_pending_round():
+                last_checkpoint = await self._emit_checkpoint(
+                    run_id=run_id,
+                    settings=settings,
+                    artifact=artifact,
+                    model_id=model_id,
+                    budget_context=budget_context,
+                    iterations_completed=iteration,
+                    elapsed_seconds=elapsed(),
+                    selected=selected,
+                    provider_usage=provider_usage,
+                    openrouter_calls=openrouter_calls,
+                    estimated_cost=estimated_cost,
+                    actual_cost_microusd=actual_cost_microusd,
+                    stage="tree_round_evaluated_before_finalization",
+                    loop_direction_plan=loop_direction_plan_doc,
+                    built_candidate_count=built_candidate_total,
+                    probe_budget=probe_budget,
+                    planner_reference_repair_attempted=reference_repair_attempted,
+                    planner_reference_repair_status=reference_repair_status,
+                )
         if selected:
             remaining_minimum = settings.min_seconds - elapsed()
-            remaining_maximum = settings.max_seconds - elapsed()
+            remaining_before_final_context = (
+                settings.max_seconds
+                - elapsed()
+                - final_context_reserve_seconds
+            )
             if _min_runtime_skip_when_selected_enabled():
                 # Candidates are already selected; parking the worker slot until min_seconds
                 # elapses is pure waste. Proceed straight to finalization.
                 remaining_minimum = 0.0
-            if remaining_minimum > 0 and remaining_maximum > 0:
-                sleep_remaining = min(remaining_minimum, remaining_maximum)
+            if remaining_minimum > 0 and remaining_before_final_context > 0:
+                sleep_remaining = min(
+                    remaining_minimum, remaining_before_final_context
+                )
                 while sleep_remaining > 0:
                     await asyncio.sleep(min(5.0, sleep_remaining))
-                    sleep_remaining = min(settings.min_seconds - elapsed(), settings.max_seconds - elapsed())
+                    sleep_remaining = min(
+                        settings.min_seconds - elapsed(),
+                        settings.max_seconds
+                        - elapsed()
+                        - final_context_reserve_seconds,
+                    )
                     if should_pause and await should_pause():
                         break
             if should_pause and await should_pause():
@@ -4871,18 +6420,106 @@ class CodeEditLoopEngine:
                     provider_usage=provider_usage,
                     checkpoint=last_checkpoint,
                 )
-        if not selected and stop_reason in {
-            "max_iterations",
-            "candidate_limit_reached",
-            "candidate_limit_reached_after_minimum_runtime",
-        }:
-            stop_reason = "no_valid_image_build_candidates"
+        shortlist_nodes = tree_scheduler.shortlist()
+        shortlist_candidates = [
+            candidates_by_node_id[node.node_id]
+            for node in shortlist_nodes
+            if node.node_id in candidates_by_node_id
+        ]
+        finalist_pool: tuple[TreeNode, ...] = ()
+        if shortlist_candidates:
+            final_evaluations = await _evaluate_tree_cohort(
+                shortlist_candidates,
+                stage="final_shortlist",
+            )
+            finalist_pool = tuple(
+                _candidate_tree_node(candidate)
+                for candidate in final_evaluations
+            )
 
-        selected, inner_loop_selection = select_inner_loop_candidates(
-            selected,
-            self._inner_loop_policy,
+        try:
+            finalist_node = select_finalist(finalist_pool)
+        except ValueError as exc:
+            logger.warning(
+                "research_lab_tree_final_context_mismatch run_id=%s error=%s",
+                run_id,
+                safe_event_error_text(exc),
+            )
+            finalist_node = None
+            stop_reason = "tree_final_evaluation_context_mismatch"
+        selected = (
+            [candidates_by_node_id[finalist_node.node_id]]
+            if finalist_node is not None
+            and finalist_node.node_id in candidates_by_node_id
+            else []
         )
-        for index, candidate in enumerate(selected):
+        if (
+            not selected
+            and tree_scheduler.nodes
+            and stop_reason in {"max_iterations", "tree_frontier_exhausted"}
+        ):
+            stop_reason = "no_eligible_tree_finalist"
+        git_bundle: dict[str, Any] = {}
+        if selected:
+            published_bundle = await self._tree_repository_call("publish_bundle")
+            if (
+                not isinstance(published_bundle, Mapping)
+                or published_bundle.get("readback_verified") is not True
+                or not str(published_bundle.get("bundle_uri") or "").startswith(
+                    "s3://"
+                )
+                or not re.fullmatch(
+                    r"sha256:[0-9a-f]{64}",
+                    str(published_bundle.get("bundle_hash") or ""),
+                )
+            ):
+                raise GitTreeSchedulerError(
+                    "Git-tree bundle was not durably verified"
+                )
+            git_bundle = dict(published_bundle)
+        evaluation_summary = summarize_tree_evaluations(tree_scheduler.nodes)
+        selected_git_tree = (
+            dict(selected[0].build.build_doc.get("git_tree") or {})
+            if selected
+            else {}
+        )
+        if selected and not selected_git_tree:
+            raise GitTreeSchedulerError(
+                "selected Git-tree candidate has no committed lineage"
+            )
+        tree_selection = {
+            "schema_version": "research_lab.git_tree_selection.v1",
+            "tree_id": tree_id,
+            "policy_hash": tree_policy.policy_hash,
+            "root_git_commit": str(root_git_commit),
+            "node_count": len(tree_scheduler.nodes),
+            "built_node_count": int(evaluation_summary["built_node_count"]),
+            "eligible_node_count": int(evaluation_summary["eligible_node_count"]),
+            "evaluation_summary": evaluation_summary,
+            "shortlist_node_ids": [node.node_id for node in shortlist_nodes],
+            "selected_node_id": selected[0].node_id if selected else "",
+            "selected_candidate_artifact_hash": (
+                selected[0].build.candidate_model_manifest.model_artifact_hash
+                if selected
+                else ""
+            ),
+            "selected_node_git_commit": (
+                selected[0].tree_git_commit if selected else ""
+            ),
+            "selected_lineage_hash": (
+                sha256_json(selected_git_tree) if selected else ""
+            ),
+            "frontier_hash": tree_scheduler.frontier_hash,
+            "paid_finalist_count": len(selected),
+            "git_bundle": git_bundle,
+        }
+        if selected:
+            await self._tree_repository_call(
+                "select_final",
+                selection_hash=sha256_json(tree_selection),
+                selection_doc=tree_selection,
+            )
+        for candidate in selected:
             await self.event_sink(
                 AutoResearchLoopEvent(
                     event_type="candidate_selected",
@@ -4893,27 +6530,34 @@ class CodeEditLoopEngine:
                     candidate_patch_hash=sha256_json(candidate.build.code_edit_manifest),
                     cost_ledger=_running_cost_ledger(openrouter_calls, estimated_cost, actual_cost_microusd, "candidate_selected"),
                     event_doc={
-                        "candidate_index": index,
+                        "candidate_index": 0,
                         "iteration": candidate.iteration,
                         "candidate_kind": "image_build",
                         "candidate_model_manifest_hash": candidate.build.candidate_model_manifest.manifest_hash,
                         "candidate_source_diff_hash": candidate.build.source_diff_hash,
                         "redacted_summary": candidate.draft.redacted_summary,
-                        "inner_loop_selection": dict(inner_loop_selection),
-                        "paid_scoring_candidate": index == 0,
-                        **(
-                            {
-                                "sequential_chain_step": candidate.chain_step,
-                                "chain_root_artifact_hash": candidate.chain_root_artifact_hash,
-                                "chain_parent_artifact_hash": candidate.chain_parent_artifact_hash,
-                                "chain_parent_node_id": candidate.chain_parent_node_id,
-                                "chain_feedback_hash": candidate.chain_feedback_hash,
-                                "incremental_source_diff_hash": candidate.chain_incremental_source_diff_hash,
-                                "cumulative_source_diff_hash": candidate.chain_cumulative_source_diff_hash,
-                            }
-                            if candidate.chain_step
-                            else {}
-                        ),
+                        "git_tree_selection": dict(tree_selection),
+                        "paid_scoring_candidate": True,
+                        "git_tree": {
+                            "tree_id": candidate.tree_id,
+                            "node_id": candidate.node_id,
+                            "parent_node_id": candidate.tree_parent_node_id,
+                            "root_branch_id": candidate.tree_root_branch_id,
+                            "depth": candidate.tree_depth,
+                            "child_slot": candidate.tree_child_slot,
+                            "branch_objective_path_id": candidate.tree_branch_objective_path_id,
+                            "branch_objective_hash": candidate.tree_branch_objective_hash,
+                            "generation_attempt_count": candidate.tree_generation_attempt_count,
+                            "git_commit": candidate.tree_git_commit,
+                            "root_artifact_hash": candidate.tree_root_artifact_hash,
+                            "parent_artifact_hash": candidate.tree_parent_artifact_hash,
+                            "parent_feedback_hash": candidate.tree_parent_feedback_hash,
+                            "incremental_source_diff_hash": candidate.tree_incremental_source_diff_hash,
+                            "cumulative_source_diff_hash": candidate.tree_cumulative_source_diff_hash,
+                            "settled_cost_microusd": (
+                                candidate.tree_settled_cost_microusd
+                            ),
+                        },
                         # P18: dev-eval ranking scores become queryable from
                         # the event stream (previously only in the S3
                         # rehydration artifact) — the dev-vs-live divergence
@@ -4926,16 +6570,8 @@ class CodeEditLoopEngine:
                             if candidate.dev_score is not None
                             else {}
                         ),
-                        "loop_direction_plan_hash": (
-                            (loop_direction_plan_doc or {}).get("plan_hash")
-                            if isinstance(loop_direction_plan_doc, Mapping)
-                            else None
-                        ),
-                        "selected_path_id": (
-                            (loop_direction_plan_doc or {}).get("selected_path_id")
-                            if isinstance(loop_direction_plan_doc, Mapping)
-                            else candidate.draft.plan_path_id
-                        ),
+                        "loop_direction_plan_hash": candidate.tree_branch_objective_hash,
+                        "selected_path_id": candidate.tree_branch_objective_path_id,
                         "plan_alignment": dict(candidate.draft.plan_alignment or {}),
                         **(
                             {
@@ -4948,6 +6584,50 @@ class CodeEditLoopEngine:
                         ),
                     },
                 )
+            )
+
+        last_checkpoint = await self._emit_checkpoint(
+            run_id=run_id,
+            settings=settings,
+            artifact=artifact,
+            model_id=model_id,
+            budget_context=budget_context,
+            iterations_completed=iteration,
+            elapsed_seconds=elapsed(),
+            selected=selected,
+            provider_usage=provider_usage,
+            openrouter_calls=openrouter_calls,
+            estimated_cost=estimated_cost,
+            actual_cost_microusd=actual_cost_microusd,
+            stage="tree_final_selection_committed",
+            loop_direction_plan=loop_direction_plan_doc,
+            built_candidate_count=built_candidate_total,
+            probe_budget=probe_budget,
+            planner_reference_repair_attempted=reference_repair_attempted,
+            planner_reference_repair_status=reference_repair_status,
+        )
+
+        if not selected:
+            checkpoint_doc = dict(
+                (last_checkpoint or {}).get("git_tree_checkpoint") or {}
+            )
+            tree_failure = {
+                "schema_version": "research_lab.git_tree_failed.v1",
+                "tree_id": tree_id,
+                "stop_reason": str(stop_reason or "no_eligible_tree_finalist"),
+                "selected_node_id": "",
+                "paid_finalist_count": 0,
+                "node_count": len(tree_scheduler.nodes),
+                "eligible_node_count": sum(
+                    1 for node in tree_scheduler.nodes if node.eligible
+                ),
+                "frontier_hash": tree_scheduler.frontier_hash,
+                "checkpoint_hash": sha256_json(checkpoint_doc),
+            }
+            await self._tree_repository_call(
+                "fail_tree",
+                failure_hash=sha256_json(tree_failure),
+                failure_doc=tree_failure,
             )
 
         result = self._result(
@@ -4974,16 +6654,21 @@ class CodeEditLoopEngine:
                     "iterations_completed": result.iterations_completed,
                     "selected_candidate_count": len(selected),
                     "stop_reason": result.stop_reason,
-                    "inner_loop_policy": dict(self._inner_loop_policy),
-                    "inner_loop_selection": dict(inner_loop_selection),
+                    "git_tree_policy": dict(self._tree_policy_doc),
+                    "git_tree_selection": dict(tree_selection),
                     "loop_direction_plan_hash": (
                         (loop_direction_plan_doc or {}).get("plan_hash")
                         if isinstance(loop_direction_plan_doc, Mapping)
                         else None
                     ),
                     "selected_path_id": (
-                        (loop_direction_plan_doc or {}).get("selected_path_id")
-                        if isinstance(loop_direction_plan_doc, Mapping)
+                        selected[0].tree_branch_objective_path_id
+                        if selected
+                        else None
+                    ),
+                    "selected_branch_objective_hash": (
+                        selected[0].tree_branch_objective_hash
+                        if selected
                         else None
                     ),
                     "gateway_scoring_queue_visible_after_this_event": bool(selected),
@@ -5011,7 +6696,7 @@ class CodeEditLoopEngine:
         self,
         *,
         run_id: str,
-        settings: AutoResearchLoopSettings,
+        settings: AutoResearchRuntimeSettings,
         artifact: PrivateModelArtifactManifest,
         model_id: str,
         budget_context: Mapping[str, Any],
@@ -5029,6 +6714,54 @@ class CodeEditLoopEngine:
         planner_reference_repair_attempted: bool = False,
         planner_reference_repair_status: str = "",
     ) -> dict[str, Any]:
+        tree_scheduler = self._active_tree_scheduler
+        tree_policy = self._active_tree_policy
+        if (
+            tree_scheduler is None
+            or tree_policy is None
+            or not self._active_tree_id
+        ):
+            raise GitTreeSchedulerError("tree checkpoint authority is unavailable")
+        operation_commitment = await self._tree_repository_call(
+            "operation_settlement_commitment"
+        )
+        if (
+            not isinstance(operation_commitment, Mapping)
+            or not re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(
+                    operation_commitment.get("operation_settlement_hash")
+                    or ""
+                ),
+            )
+        ):
+            raise GitTreeSchedulerError(
+                "tree operation settlement commitment is invalid"
+            )
+        operation_settlement_hash = str(
+            operation_commitment["operation_settlement_hash"]
+        )
+        tree_checkpoint = TreeCheckpoint(
+            tree_id=self._active_tree_id,
+            root_artifact_hash=artifact.model_artifact_hash,
+            policy=tree_policy,
+            nodes=tree_scheduler.nodes,
+            planned_slots=tree_scheduler.planned_slots,
+            frontier_hash=tree_scheduler.frontier_hash,
+            operation_settlement_hash=operation_settlement_hash,
+            selected_node_id=(
+                selected[0].node_id
+                if stage == "tree_final_selection_committed" and len(selected) == 1
+                else ""
+            ),
+            stop_reason=str(stage),
+        )
+        tree_checkpoint_doc = tree_checkpoint.to_dict()
+        await self._tree_repository_call(
+            "commit_checkpoint",
+            checkpoint_hash=sha256_json(tree_checkpoint_doc),
+            checkpoint_doc=tree_checkpoint_doc,
+        )
         payload = {
             "schema_version": "1.0",
             "run_id": run_id,
@@ -5039,15 +6772,13 @@ class CodeEditLoopEngine:
             "manifest_hash": artifact.manifest_hash,
             "settings": _settings_doc(settings),
             "budget_context": _safe_budget_doc(budget_context),
-            "inner_loop_phase": str(
-                self._inner_loop_policy.get("effective_phase") or "off"
+            "git_tree_id": self._active_tree_id,
+            "git_tree_root_commit": self._active_tree_root_git_commit,
+            "git_tree_evaluator_commitment": dict(
+                self._tree_policy_doc.get("evaluator_commitment") or {}
             ),
-            "inner_loop_evaluator_commitment": dict(
-                self._inner_loop_policy.get("evaluator_commitment") or {}
-            ),
-            "inner_loop_sequential_chain_enabled": bool(
-                self._inner_loop_policy.get("sequential_chain_enabled")
-            ),
+            "git_tree_operation_settlements": dict(operation_commitment),
+            "git_tree_checkpoint": tree_checkpoint_doc,
             "iterations_completed": int(iterations_completed),
             "next_iteration": int(iterations_completed) + 1,
             "elapsed_seconds": round(float(elapsed_seconds), 3),
@@ -5078,21 +6809,27 @@ class CodeEditLoopEngine:
                         if candidate.dev_evaluation
                         else {}
                     ),
-                    **(
-                        {
-                            "sequential_chain_step": candidate.chain_step,
-                            "chain_root_artifact_hash": candidate.chain_root_artifact_hash,
-                            "chain_parent_artifact_hash": candidate.chain_parent_artifact_hash,
-                            "chain_parent_node_id": candidate.chain_parent_node_id,
-                            "chain_parent_dev_score": candidate.chain_parent_dev_score,
-                            "chain_feedback_hash": candidate.chain_feedback_hash,
-                            "dev_feedback_hash": candidate.dev_feedback_hash,
-                            "incremental_source_diff_hash": candidate.chain_incremental_source_diff_hash,
-                            "cumulative_source_diff_hash": candidate.chain_cumulative_source_diff_hash,
-                        }
-                        if candidate.chain_step
-                        else {}
-                    ),
+                    "git_tree": {
+                        "tree_id": candidate.tree_id,
+                        "parent_node_id": candidate.tree_parent_node_id,
+                        "root_branch_id": candidate.tree_root_branch_id,
+                        "depth": candidate.tree_depth,
+                        "child_slot": candidate.tree_child_slot,
+                        "branch_objective_path_id": candidate.tree_branch_objective_path_id,
+                        "branch_objective_hash": candidate.tree_branch_objective_hash,
+                        "generation_attempt_count": candidate.tree_generation_attempt_count,
+                        "git_commit": candidate.tree_git_commit,
+                        "root_artifact_hash": candidate.tree_root_artifact_hash,
+                        "parent_artifact_hash": candidate.tree_parent_artifact_hash,
+                        "parent_dev_score": candidate.tree_parent_dev_score,
+                        "parent_feedback_hash": candidate.tree_parent_feedback_hash,
+                        "dev_feedback_hash": candidate.dev_feedback_hash,
+                        "incremental_source_diff_hash": candidate.tree_incremental_source_diff_hash,
+                        "cumulative_source_diff_hash": candidate.tree_cumulative_source_diff_hash,
+                        "settled_cost_microusd": (
+                            candidate.tree_settled_cost_microusd
+                        ),
+                    },
                 }
                 for candidate in selected
             ],
@@ -5155,6 +6892,33 @@ class CodeEditLoopEngine:
         provider_usage: Sequence[Mapping[str, Any]],
         checkpoint: dict[str, Any] | None,
     ) -> CodeEditLoopResult:
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status == "completed":
+            if len(selected) != 1:
+                raise GitTreeContractError(
+                    "completed tree loop requires exactly one finalist"
+                )
+            result_selected = tuple(selected)
+        else:
+            result_selected = ()
+        if not isinstance(checkpoint, Mapping):
+            raise GitTreeContractError("tree loop result checkpoint is missing")
+        tree_checkpoint_doc = checkpoint.get("git_tree_checkpoint")
+        if not isinstance(tree_checkpoint_doc, Mapping):
+            raise GitTreeContractError(
+                "tree loop result checkpoint has no tree commitment"
+            )
+        tree_checkpoint = TreeCheckpoint.from_mapping(tree_checkpoint_doc)
+        tree_result = TreeResult(
+            tree_id=tree_checkpoint.tree_id,
+            status=normalized_status,
+            stop_reason=str(stop_reason),
+            selected_node_id=(
+                result_selected[0].node_id if result_selected else ""
+            ),
+            nodes=tree_checkpoint.nodes,
+            checkpoint=tree_checkpoint,
+        )
         # Terminal marker on the run trace: outcome, iteration count, and
         # finalist count — the span the dashboard sorts/filters runs by.
         run_id = self._langfuse_run_id
@@ -5162,19 +6926,17 @@ class CodeEditLoopEngine:
             "research_lab.loop_run_completed",
             metadata={
                 "run_id": run_id,
-                "loop_status": status if status in {"paused", "completed", "failed"} else "completed",
+                "loop_status": normalized_status,
                 "stop_reason": str(stop_reason)[:120],
                 "iterations_completed": int(iterations_completed),
-                "candidate_count": len(selected),
+                "candidate_count": len(result_selected),
             },
             trace_id=langfuse_run_trace_id(run_id),
             sample_seed=run_id or None,
         ):
             pass
         return CodeEditLoopResult(
-            selected_candidates=tuple(
-                list(selected)[: self.settings.normalized().max_candidates]
-            ),
+            selected_candidates=result_selected,
             iterations_completed=int(iterations_completed),
             stop_reason=stop_reason,
             elapsed_seconds=round(float(elapsed_seconds), 3),
@@ -5182,9 +6944,10 @@ class CodeEditLoopEngine:
             actual_openrouter_cost_usd=round(int(actual_cost_microusd) / 1_000_000, 6),
             actual_openrouter_cost_microusd=int(actual_cost_microusd),
             openrouter_call_count=int(openrouter_calls),
+            tree_result=tree_result,
             provider_usage=tuple(dict(item) for item in provider_usage if isinstance(item, Mapping)),
-            status=status,
-            checkpoint_doc=checkpoint,
+            status=normalized_status,
+            checkpoint_doc=dict(checkpoint),
         )
 
     async def _judge_plan_alignment(
@@ -5195,7 +6958,7 @@ class CodeEditLoopEngine:
         prior_attempts: Sequence[Mapping[str, Any]],
         node_id: str,
         iteration: int,
-        settings: AutoResearchLoopSettings,
+        settings: AutoResearchRuntimeSettings,
         budget_limit_microusd: int,
         elapsed: Callable[[], float],
         openrouter_calls: int,
@@ -5536,7 +7299,7 @@ class CodeEditLoopEngine:
         run_id: str,
         node_id: str,
         iteration: int,
-        settings: AutoResearchLoopSettings,
+        settings: AutoResearchRuntimeSettings,
         artifact: PrivateModelArtifactManifest,
         source_context: Any,
         source_inspection_context: Mapping[str, Any],
@@ -6191,7 +7954,8 @@ async def _write_private_loop_candidate_artifact(
     dev_evaluation: Mapping[str, Any] | None = None,
     dev_feedback: Mapping[str, Any] | None = None,
     dev_feedback_hash: str = "",
-    sequential_chain: Mapping[str, Any] | None = None,
+    tree_settled_cost_microusd: int = 0,
+    git_tree: Mapping[str, Any] | None = None,
     artifact_io: Any | None = None,
 ) -> dict[str, Any]:
     """Persist a full rehydration doc for a built candidate (bug #5).
@@ -6211,10 +7975,9 @@ async def _write_private_loop_candidate_artifact(
         return {"loop_candidate_artifact_error": safe_event_error_text(exc)}
     base_prefix = key.rsplit("/", 1)[0] if "/" in key else "research-lab/sourcing-model"
     safe_node = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(node_id or "node"))[:80]
-    object_key = f"{base_prefix}/candidates/{run_id}/loop-candidates/{int(iteration):03d}-{safe_node}.json"
     payload = {
-        "schema_version": "1.0",
-        "artifact_type": "research_lab_loop_candidate_rehydration",
+        "schema_version": "research_lab.git_tree_candidate_rehydration.v1",
+        "artifact_type": "research_lab_git_tree_candidate_rehydration",
         "run_id": str(run_id),
         "node_id": str(node_id),
         "iteration": int(iteration),
@@ -6223,6 +7986,9 @@ async def _write_private_loop_candidate_artifact(
         "code_edit_manifest": dict(build.code_edit_manifest),
         "source_diff_hash": str(build.source_diff_hash),
         "build_doc": dict(build.build_doc),
+        "tree_settled_cost_microusd": max(
+            0, int(tree_settled_cost_microusd)
+        ),
     }
     if dev_score is not None:
         payload["dev_score"] = float(dev_score)
@@ -6232,39 +7998,60 @@ async def _write_private_loop_candidate_artifact(
     if dev_feedback:
         payload["dev_feedback"] = dict(dev_feedback)
         payload["dev_feedback_hash"] = str(dev_feedback_hash or "")
-    if sequential_chain:
-        payload["sequential_chain"] = dict(sequential_chain)
+    if not git_tree:
+        return {"loop_candidate_artifact_error": "git_tree_lineage_missing"}
+    payload["git_tree"] = dict(git_tree)
     payload_hash = sha256_json(payload)
+    object_key = (
+        f"{base_prefix}/candidates/{run_id}/loop-candidates/"
+        f"{int(iteration):03d}-{safe_node}-{payload_hash.split(':', 1)[1]}.json"
+    )
+    artifact_uri = f"s3://{bucket}/{object_key}"
 
     try:
         stored_payload = {**payload, "loop_candidate_artifact_hash": payload_hash}
         if artifact_io is not None:
             await _artifact_io_write_json(
                 artifact_io,
-                uri=f"s3://{bucket}/{object_key}",
+                uri=artifact_uri,
                 document=stored_payload,
                 content_hash=payload_hash,
                 artifact_kind="loop_candidate_rehydration",
             )
+            readback = await _artifact_io_read_json(
+                artifact_io,
+                artifact_uri,
+                content_hash=payload_hash,
+            )
         else:
-            def _put() -> None:
+            def _put_and_read() -> dict[str, Any]:
                 import boto3  # type: ignore
 
-                boto3.client("s3").put_object(
+                client = boto3.client("s3")
+                client.put_object(
                     Bucket=bucket,
                     Key=object_key,
                     Body=json.dumps(stored_payload, sort_keys=True).encode("utf-8"),
                     ContentType="application/json",
                 )
+                body = client.get_object(Bucket=bucket, Key=object_key)["Body"].read()
+                return json.loads(body.decode("utf-8"))
 
-            await asyncio.to_thread(_put)
+            readback = await asyncio.to_thread(_put_and_read)
+        if (
+            not isinstance(readback, Mapping)
+            or dict(readback) != stored_payload
+            or str(readback.get("loop_candidate_artifact_hash") or "")
+            != payload_hash
+        ):
+            raise ValueError("loop candidate artifact readback differs")
     except Exception as exc:
         return {
             "loop_candidate_artifact_hash": payload_hash,
             "loop_candidate_artifact_error": safe_event_error_text(exc),
         }
     return {
-        "loop_candidate_artifact_uri": f"s3://{bucket}/{object_key}",
+        "loop_candidate_artifact_uri": artifact_uri,
         "loop_candidate_artifact_hash": payload_hash,
     }
 
@@ -6351,19 +8138,37 @@ def _rehydrated_candidate_from_artifact_payload(
         embedded_feedback_hash = str(dev_feedback.get("feedback_hash") or "")
         if not dev_feedback_hash or embedded_feedback_hash != dev_feedback_hash:
             raise ValueError("loop_candidate_dev_feedback_hash_mismatch")
-    chain_doc = (
-        dict(stored.get("sequential_chain") or {})
-        if isinstance(stored.get("sequential_chain"), Mapping)
+    tree_doc = (
+        dict(stored.get("git_tree") or {})
+        if isinstance(stored.get("git_tree"), Mapping)
         else {}
     )
-    raw_parent_score = chain_doc.get("parent_dev_score")
-    chain_parent_dev_score = (
+    if tree_doc.get("schema_version") != "research_lab.git_tree_lineage.v1":
+        raise ValueError("loop_candidate_git_tree_lineage_missing")
+    if (
+        str(tree_doc.get("node_id") or "") != str(stored.get("node_id") or "")
+        or dict(build.build_doc.get("git_tree") or {}) != tree_doc
+        or str(tree_doc.get("cumulative_source_diff_hash") or "")
+        != build.source_diff_hash
+    ):
+        raise ValueError("loop_candidate_git_tree_lineage_mismatch")
+    raw_parent_score = tree_doc.get("parent_dev_score")
+    tree_parent_dev_score = (
         float(raw_parent_score)
         if isinstance(raw_parent_score, (int, float))
         and not isinstance(raw_parent_score, bool)
         and math.isfinite(float(raw_parent_score))
         else None
     )
+    tree_settled_cost_microusd = stored.get(
+        "tree_settled_cost_microusd", 0
+    )
+    if (
+        isinstance(tree_settled_cost_microusd, bool)
+        or not isinstance(tree_settled_cost_microusd, int)
+        or tree_settled_cost_microusd < 0
+    ):
+        raise ValueError("loop_candidate_tree_settled_cost_invalid")
     return BuiltCodeEditCandidate(
         draft=draft,
         build=build,
@@ -6378,44 +8183,40 @@ def _rehydrated_candidate_from_artifact_payload(
         ),
         dev_feedback=dev_feedback,
         dev_feedback_hash=dev_feedback_hash,
-        chain_step=max(0, int(chain_doc.get("chain_step") or 0)),
-        chain_root_artifact_hash=str(
-            chain_doc.get("chain_root_artifact_hash") or ""
+        tree_id=str(tree_doc.get("tree_id") or ""),
+        tree_parent_node_id=str(tree_doc.get("parent_node_id") or ""),
+        tree_root_branch_id=str(tree_doc.get("root_branch_id") or ""),
+        tree_depth=max(0, int(tree_doc.get("depth") or 0)),
+        tree_child_slot=max(0, int(tree_doc.get("child_slot") or 0)),
+        tree_branch_objective_path_id=str(
+            tree_doc.get("branch_objective_path_id") or ""
         ),
-        chain_parent_artifact_hash=str(
-            chain_doc.get("immediate_parent_artifact_hash") or ""
+        tree_branch_objective_hash=str(
+            tree_doc.get("branch_objective_hash") or ""
         ),
-        chain_parent_node_id=str(
-            chain_doc.get("immediate_parent_node_id") or ""
+        tree_generation_attempt_count=max(
+            0, int(tree_doc.get("generation_attempt_count") or 0)
         ),
-        chain_parent_dev_score=chain_parent_dev_score,
-        chain_feedback_hash=str(
-            chain_doc.get("parent_dev_feedback_hash") or ""
+        tree_git_commit=str(tree_doc.get("git_commit") or ""),
+        tree_root_artifact_hash=str(tree_doc.get("root_artifact_hash") or ""),
+        tree_parent_artifact_hash=str(tree_doc.get("parent_artifact_hash") or ""),
+        tree_parent_dev_score=tree_parent_dev_score,
+        tree_parent_feedback_hash=str(
+            tree_doc.get("parent_dev_feedback_hash") or ""
         ),
-        chain_incremental_source_diff_hash=str(
-            chain_doc.get("incremental_source_diff_hash") or ""
+        tree_incremental_source_diff_hash=str(
+            tree_doc.get("incremental_source_diff_hash") or ""
         ),
-        chain_cumulative_source_diff_hash=str(
-            chain_doc.get("cumulative_source_diff_hash") or ""
+        tree_cumulative_source_diff_hash=str(
+            tree_doc.get("cumulative_source_diff_hash") or ""
         ),
-        chain_composition=(
-            dict(chain_doc.get("composition") or {})
-            if isinstance(chain_doc.get("composition"), Mapping)
+        tree_composition=(
+            dict(tree_doc.get("composition") or {})
+            if isinstance(tree_doc.get("composition"), Mapping)
             else {}
         ),
+        tree_settled_cost_microusd=tree_settled_cost_microusd,
     )
-
-
-def _node_id(run_id: str, iteration: int, candidate_index: int, draft: CodeEditDraft) -> str:
-    digest = sha256_json(
-        {
-            "run_id": run_id,
-            "iteration": iteration,
-            "candidate_index": candidate_index,
-            "draft": _redacted_draft_doc(draft),
-        }
-    ).split(":", 1)[1]
-    return f"node:code-edit:{digest[:16]}"
 
 
 def _redacted_draft_doc(draft: CodeEditDraft) -> dict[str, Any]:

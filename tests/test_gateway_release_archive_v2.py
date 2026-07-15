@@ -94,7 +94,9 @@ def _release_fixture(root: Path, commit_character: str):
                         **deterministic,
                     }
                 )
-    release = build_release_manifest(rows)
+    release = build_release_manifest(
+        rows, acceptance_signer_pubkey_hash="sha256:" + "f" * 64
+    )
     release_path = eif_root / "gateway-v2-release-manifest.json"
     release_path.write_text(json.dumps(release), encoding="utf-8")
     verification = verify_release_artifacts(

@@ -13,6 +13,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from gateway.research_lab.config import DEFAULT_LOOP_START_FEE_USD
+from research_lab.canonical import sha256_json
 
 
 SECRET_MARKERS = (
@@ -405,6 +406,21 @@ class ResearchLabCandidateArtifactCreateRequest(BaseModel):
     candidate_build_doc: dict[str, Any] = Field(default_factory=dict)
     hypothesis_doc: dict[str, Any] = Field(default_factory=dict)
     redacted_public_summary: str = Field(default="", max_length=2000)
+    git_tree_id: Optional[str] = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    git_tree_node_id: Optional[str] = Field(
+        default=None, pattern=r"^tree-node:[0-9a-f]{64}$"
+    )
+    git_tree_root_commit: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    git_tree_node_commit: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    git_tree_lineage_hash: Optional[str] = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
 
     @model_validator(mode="after")
     def no_secret_material(self) -> "ResearchLabCandidateArtifactCreateRequest":
@@ -418,6 +434,31 @@ class ResearchLabCandidateArtifactCreateRequest(BaseModel):
             raise ValueError("image_build candidate requires candidate_build_doc.source_diff_artifact_uri")
         if self.candidate_build_doc.get("source_diff_artifact_error"):
             raise ValueError("image_build candidate source diff artifact persistence failed")
+        tree_values = (
+            self.git_tree_id,
+            self.git_tree_node_id,
+            self.git_tree_root_commit,
+            self.git_tree_node_commit,
+            self.git_tree_lineage_hash,
+        )
+        if any(tree_values) and not all(tree_values):
+            raise ValueError("Git-tree candidate lineage must be complete")
+        if all(tree_values):
+            lineage = self.candidate_build_doc.get("git_tree")
+            if not isinstance(lineage, dict):
+                raise ValueError("Git-tree candidate build lineage is missing")
+            composition = lineage.get("composition")
+            if not isinstance(composition, dict):
+                raise ValueError("Git-tree candidate composition is missing")
+            if (
+                lineage.get("tree_id") != self.git_tree_id
+                or lineage.get("node_id") != self.git_tree_node_id
+                or lineage.get("git_commit") != self.git_tree_node_commit
+                or composition.get("root_git_commit")
+                != self.git_tree_root_commit
+                or sha256_json(lineage) != self.git_tree_lineage_hash
+            ):
+                raise ValueError("Git-tree candidate lineage commitment differs")
         return self
 
 

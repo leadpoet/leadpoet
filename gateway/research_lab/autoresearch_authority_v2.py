@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, fields
 import json
+import os
 from pathlib import Path
+import re
+import tempfile
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from gateway.research_lab.attested_artifacts_v2 import (
@@ -40,8 +43,11 @@ from gateway.tee.autoresearch_executor_v2 import (
     HOST_BUILD_RESULT_SCHEMA_VERSION,
     HOST_CHECK_PAUSE,
     HOST_DEV_EVALUATE,
+    HOST_DEV_EVAL_COHORT_RESULT_SCHEMA_VERSION,
     HOST_DEV_EVAL_RESULT_SCHEMA_VERSION,
     HOST_EVENT_RESULT_SCHEMA_VERSION,
+    HOST_GIT_TREE,
+    HOST_GIT_TREE_RESULT_SCHEMA_VERSION,
     HOST_PAUSE_RESULT_SCHEMA_VERSION,
     HOST_READ_ARTIFACT,
     HOST_RECORD_PRIVACY,
@@ -83,15 +89,75 @@ from research_lab.eval import (
     validate_private_model_artifact_manifest,
 )
 from gateway.research_lab.code_build import CodeEditBuildResult
+from gateway.research_lab.git_tree_models import (
+    TreeCheckpoint,
+    TreeChildSlot,
+    TreeNode,
+    TreeResult,
+    derive_frontier_commitment_hash,
+    generation_operation_id,
+)
+from gateway.research_lab.git_tree_repository import (
+    GitTreeRepository,
+    operation_settlement_commitment,
+)
+from gateway.research_lab.git_tree_store import (
+    GitTreeStore,
+    tree_node_event_doc,
+)
 from gateway.research_lab.code_loop_engine import (
     BuiltCodeEditCandidate,
     CodeEditLoopResult,
 )
-from gateway.research_lab.loop_engine import AutoResearchLoopEvent, AutoResearchLoopSettings
+from gateway.research_lab.autoresearch_runtime import (
+    AutoResearchLoopEvent,
+    AutoResearchRuntimeSettings,
+)
 
 
 class AutoresearchAuthorityV2Error(RuntimeError):
     """A host operation or enclave result failed an exact V2 binding."""
+
+
+def _validated_tree_final_selection(
+    selection_doc: Mapping[str, Any],
+    *,
+    expected_tree_id: str,
+    expected_selection_hash: str,
+) -> str:
+    selected_node_id = str(selection_doc.get("selected_node_id") or "")
+    if (
+        sha256_json(dict(selection_doc)) != str(expected_selection_hash or "")
+        or selection_doc.get("schema_version")
+        != "research_lab.git_tree_selection.v1"
+        or selection_doc.get("tree_id") != expected_tree_id
+        or not re.fullmatch(r"tree-node:[0-9a-f]{64}", selected_node_id)
+        or int(selection_doc.get("paid_finalist_count") or 0) != 1
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(selection_doc.get("selected_candidate_artifact_hash") or ""),
+        )
+        or not re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(selection_doc.get("selected_node_git_commit") or ""),
+        )
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(selection_doc.get("selected_lineage_hash") or ""),
+        )
+    ):
+        raise AutoresearchAuthorityV2Error(
+            "Git-tree selection authority is incomplete"
+        )
+    return selected_node_id
+
+
+TREE_RECOVERY_DESCRIPTOR_SCHEMA_VERSION = (
+    "research_lab.git_tree_recovery_descriptor.v1"
+)
+TREE_ARTIFACT_KMS_KEY_ENV = "RESEARCH_LAB_TREE_ARTIFACT_KMS_KEY_ID"
+TREE_ARTIFACT_KMS_FALLBACK_ENV = "RESEARCH_LAB_SCORE_BUNDLE_KMS_KEY_ID"
+TREE_ARTIFACT_KMS_DEFAULT = "alias/leadpoet-research-lab-artifact-signing"
 
 
 @dataclass(frozen=True)
@@ -281,6 +347,252 @@ def _parse_s3_uri(uri: str) -> tuple[str, str]:
     if not separator or not bucket or not key or ".." in key.split("/"):
         raise AutoresearchAuthorityV2Error("artifact S3 URI is invalid")
     return bucket, key
+
+
+def _git_tree_workspace(tree_id: str) -> Path:
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(tree_id or "")):
+        raise AutoresearchAuthorityV2Error("Git-tree id is invalid")
+    configured = str(os.getenv("RESEARCH_LAB_TREE_WORK_ROOT") or "").strip()
+    root = (
+        Path(configured).expanduser()
+        if configured
+        else Path.home() / ".cache" / "leadpoet" / "research-lab" / "git-trees"
+    )
+    return root.resolve() / str(tree_id).split(":", 1)[-1]
+
+
+def _tree_artifact_kms_key_id() -> str:
+    return str(
+        os.getenv(TREE_ARTIFACT_KMS_KEY_ENV)
+        or os.getenv(TREE_ARTIFACT_KMS_FALLBACK_ENV)
+        or TREE_ARTIFACT_KMS_DEFAULT
+    ).strip()
+
+
+def _put_tree_object_and_readback(
+    *,
+    bucket: str,
+    key: str,
+    body: bytes,
+    content_type: str,
+) -> bytes:
+    import boto3
+
+    kms_key_id = _tree_artifact_kms_key_id()
+    if not kms_key_id:
+        raise AutoresearchAuthorityV2Error(
+            "Git-tree private artifact KMS key is unavailable"
+        )
+    client = boto3.client("s3")
+    client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body,
+        ContentType=content_type,
+        ServerSideEncryption="aws:kms",
+        SSEKMSKeyId=kms_key_id,
+        Metadata={"content-sha256": sha256_bytes(body).split(":", 1)[1]},
+    )
+    response = client.get_object(Bucket=bucket, Key=key)
+    if response.get("ServerSideEncryption") != "aws:kms":
+        raise AutoresearchAuthorityV2Error(
+            "Git-tree private artifact is not SSE-KMS encrypted"
+        )
+    readback = response["Body"].read()
+    if readback != body:
+        raise AutoresearchAuthorityV2Error(
+            "Git-tree private artifact readback differs"
+        )
+    return bytes(readback)
+
+
+def _read_tree_object(
+    *, uri: str, content_hash: str, size_bytes: int
+) -> bytes:
+    import boto3
+
+    bucket, key = _parse_s3_uri(uri)
+    response = boto3.client("s3").get_object(Bucket=bucket, Key=key)
+    if response.get("ServerSideEncryption") != "aws:kms":
+        raise AutoresearchAuthorityV2Error(
+            "Git-tree recovery artifact is not SSE-KMS encrypted"
+        )
+    body = bytes(response["Body"].read())
+    if (
+        sha256_bytes(body) != str(content_hash)
+        or len(body) != int(size_bytes)
+    ):
+        raise AutoresearchAuthorityV2Error(
+            "Git-tree recovery artifact commitment differs"
+        )
+    return body
+
+
+def _validate_tree_recovery_descriptor(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise AutoresearchAuthorityV2Error(
+            "Git-tree recovery descriptor is missing"
+        )
+    descriptor = dict(value)
+    required = {
+        "schema_version",
+        "tree_id",
+        "checkpoint_hash",
+        "recovery_uri",
+        "recovery_hash",
+        "recovery_size_bytes",
+        "bundle_uri",
+        "bundle_hash",
+        "bundle_size_bytes",
+        "kms_encrypted",
+    }
+    if (
+        set(descriptor) != required
+        or descriptor.get("schema_version")
+        != TREE_RECOVERY_DESCRIPTOR_SCHEMA_VERSION
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", str(descriptor.get("tree_id") or "")
+        )
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(descriptor.get("checkpoint_hash") or ""),
+        )
+        or not str(descriptor.get("recovery_uri") or "").startswith("s3://")
+        or not str(descriptor.get("bundle_uri") or "").startswith("s3://")
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(descriptor.get("recovery_hash") or ""),
+        )
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(descriptor.get("bundle_hash") or ""),
+        )
+        or int(descriptor.get("recovery_size_bytes") or 0) <= 0
+        or int(descriptor.get("bundle_size_bytes") or 0) <= 0
+        or descriptor.get("kms_encrypted") is not True
+    ):
+        raise AutoresearchAuthorityV2Error(
+            "Git-tree recovery descriptor is invalid"
+        )
+    return descriptor
+
+
+async def _publish_tree_recovery(
+    *,
+    repository: GitTreeRepository,
+    tree_id: str,
+    checkpoint_hash: str,
+    manifest_uri: str,
+) -> dict[str, Any]:
+    bucket, _manifest_key = _parse_s3_uri(manifest_uri)
+    with tempfile.TemporaryDirectory(
+        prefix="leadpoet-git-tree-recovery-"
+    ) as temporary:
+        bundle_path = Path(temporary) / "tree.bundle"
+        bundle = await asyncio.to_thread(repository.create_bundle, bundle_path)
+        bundle_bytes = bundle_path.read_bytes()
+    bundle_hash = str(bundle["bundle_hash"])
+    bundle_key = (
+        "research-lab/autoresearch/git-trees/"
+        + tree_id.split(":", 1)[1]
+        + "/bundles/"
+        + bundle_hash.split(":", 1)[1]
+        + ".bundle"
+    )
+    verified_bundle = await asyncio.to_thread(
+        _put_tree_object_and_readback,
+        bucket=bucket,
+        key=bundle_key,
+        body=bundle_bytes,
+        content_type="application/octet-stream",
+    )
+    bundle_uri = f"s3://{bucket}/{bundle_key}"
+    recovery_state = await asyncio.to_thread(
+        repository.export_recovery_state,
+        checkpoint_hash=checkpoint_hash,
+        bundle_uri=bundle_uri,
+        bundle_hash=bundle_hash,
+        bundle_size_bytes=len(verified_bundle),
+    )
+    recovery_bytes = canonical_json(recovery_state).encode("utf-8")
+    recovery_hash = sha256_bytes(recovery_bytes)
+    recovery_key = (
+        "research-lab/autoresearch/git-trees/"
+        + tree_id.split(":", 1)[1]
+        + "/checkpoints/"
+        + checkpoint_hash.split(":", 1)[1]
+        + "/"
+        + recovery_hash.split(":", 1)[1]
+        + ".json"
+    )
+    verified_recovery = await asyncio.to_thread(
+        _put_tree_object_and_readback,
+        bucket=bucket,
+        key=recovery_key,
+        body=recovery_bytes,
+        content_type="application/json",
+    )
+    return {
+        "schema_version": TREE_RECOVERY_DESCRIPTOR_SCHEMA_VERSION,
+        "tree_id": tree_id,
+        "checkpoint_hash": checkpoint_hash,
+        "recovery_uri": f"s3://{bucket}/{recovery_key}",
+        "recovery_hash": recovery_hash,
+        "recovery_size_bytes": len(verified_recovery),
+        "bundle_uri": bundle_uri,
+        "bundle_hash": bundle_hash,
+        "bundle_size_bytes": len(verified_bundle),
+        "kms_encrypted": True,
+    }
+
+
+async def _load_tree_recovery(
+    *, descriptor: Mapping[str, Any], expected_tree_id: str
+) -> tuple[dict[str, Any], bytes]:
+    normalized = _validate_tree_recovery_descriptor(descriptor)
+    if normalized["tree_id"] != expected_tree_id:
+        raise AutoresearchAuthorityV2Error(
+            "Git-tree recovery belongs to another tree"
+        )
+    recovery_bytes = await asyncio.to_thread(
+        _read_tree_object,
+        uri=str(normalized["recovery_uri"]),
+        content_hash=str(normalized["recovery_hash"]),
+        size_bytes=int(normalized["recovery_size_bytes"]),
+    )
+    try:
+        recovery_state = json.loads(recovery_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AutoresearchAuthorityV2Error(
+            "Git-tree recovery state is not canonical JSON"
+        ) from exc
+    if (
+        not isinstance(recovery_state, Mapping)
+        or canonical_json(dict(recovery_state)).encode("utf-8")
+        != recovery_bytes
+        or recovery_state.get("tree_id") != expected_tree_id
+        or recovery_state.get("checkpoint_hash")
+        != normalized["checkpoint_hash"]
+    ):
+        raise AutoresearchAuthorityV2Error(
+            "Git-tree recovery state binding differs"
+        )
+    bundle_doc = recovery_state.get("git_bundle")
+    if not isinstance(bundle_doc, Mapping) or dict(bundle_doc) != {
+        "uri": normalized["bundle_uri"],
+        "content_hash": normalized["bundle_hash"],
+        "size_bytes": normalized["bundle_size_bytes"],
+    }:
+        raise AutoresearchAuthorityV2Error(
+            "Git-tree recovery bundle binding differs"
+        )
+    bundle_bytes = await asyncio.to_thread(
+        _read_tree_object,
+        uri=str(normalized["bundle_uri"]),
+        content_hash=str(normalized["bundle_hash"]),
+        size_bytes=int(normalized["bundle_size_bytes"]),
+    )
+    return dict(recovery_state), bundle_bytes
 
 
 def _mapping(value: Any, field: str) -> dict[str, Any]:
@@ -520,18 +832,35 @@ def _candidate(value: Mapping[str, Any]) -> BuiltCodeEditCandidate:
         "dev_evaluation",
         "dev_feedback",
         "dev_feedback_hash",
-        "chain_step",
-        "chain_root_artifact_hash",
-        "chain_parent_artifact_hash",
-        "chain_parent_node_id",
-        "chain_parent_dev_score",
-        "chain_feedback_hash",
-        "chain_incremental_source_diff_hash",
-        "chain_cumulative_source_diff_hash",
-        "chain_composition",
+        "tree_id",
+        "tree_parent_node_id",
+        "tree_root_branch_id",
+        "tree_depth",
+        "tree_child_slot",
+        "tree_branch_objective_path_id",
+        "tree_branch_objective_hash",
+        "tree_generation_attempt_count",
+        "tree_git_commit",
+        "tree_root_artifact_hash",
+        "tree_parent_artifact_hash",
+        "tree_parent_dev_score",
+        "tree_parent_feedback_hash",
+        "tree_incremental_source_diff_hash",
+        "tree_cumulative_source_diff_hash",
+        "tree_composition",
+        "tree_settled_cost_microusd",
     }
     if set(value) != required:
         raise AutoresearchAuthorityV2Error("V2 selected candidate fields are invalid")
+    settled_cost_microusd = value["tree_settled_cost_microusd"]
+    if (
+        isinstance(settled_cost_microusd, bool)
+        or not isinstance(settled_cost_microusd, int)
+        or settled_cost_microusd < 0
+    ):
+        raise AutoresearchAuthorityV2Error(
+            "V2 selected candidate settled cost is invalid"
+        )
     return BuiltCodeEditCandidate(
         draft=_draft(value["draft"]),
         build=_build_result(value["build"]),
@@ -546,27 +875,41 @@ def _candidate(value: Mapping[str, Any]) -> BuiltCodeEditCandidate:
         dev_evaluation=_mapping(value["dev_evaluation"], "dev_evaluation"),
         dev_feedback=_mapping(value["dev_feedback"], "dev_feedback"),
         dev_feedback_hash=str(value["dev_feedback_hash"] or ""),
-        chain_step=max(0, int(value["chain_step"] or 0)),
-        chain_root_artifact_hash=str(value["chain_root_artifact_hash"] or ""),
-        chain_parent_artifact_hash=str(
-            value["chain_parent_artifact_hash"] or ""
+        tree_id=str(value["tree_id"] or ""),
+        tree_parent_node_id=str(value["tree_parent_node_id"] or "root"),
+        tree_root_branch_id=str(value["tree_root_branch_id"] or ""),
+        tree_depth=max(0, int(value["tree_depth"] or 0)),
+        tree_child_slot=max(0, int(value["tree_child_slot"] or 0)),
+        tree_branch_objective_path_id=str(
+            value["tree_branch_objective_path_id"] or ""
         ),
-        chain_parent_node_id=str(value["chain_parent_node_id"] or ""),
-        chain_parent_dev_score=(
-            float(value["chain_parent_dev_score"])
-            if value["chain_parent_dev_score"] is not None
+        tree_branch_objective_hash=str(
+            value["tree_branch_objective_hash"] or ""
+        ),
+        tree_generation_attempt_count=max(
+            0, int(value["tree_generation_attempt_count"] or 0)
+        ),
+        tree_git_commit=str(value["tree_git_commit"] or ""),
+        tree_root_artifact_hash=str(value["tree_root_artifact_hash"] or ""),
+        tree_parent_artifact_hash=str(
+            value["tree_parent_artifact_hash"] or ""
+        ),
+        tree_parent_dev_score=(
+            float(value["tree_parent_dev_score"])
+            if value["tree_parent_dev_score"] is not None
             else None
         ),
-        chain_feedback_hash=str(value["chain_feedback_hash"] or ""),
-        chain_incremental_source_diff_hash=str(
-            value["chain_incremental_source_diff_hash"] or ""
+        tree_parent_feedback_hash=str(value["tree_parent_feedback_hash"] or ""),
+        tree_incremental_source_diff_hash=str(
+            value["tree_incremental_source_diff_hash"] or ""
         ),
-        chain_cumulative_source_diff_hash=str(
-            value["chain_cumulative_source_diff_hash"] or ""
+        tree_cumulative_source_diff_hash=str(
+            value["tree_cumulative_source_diff_hash"] or ""
         ),
-        chain_composition=_mapping(
-            value["chain_composition"], "chain_composition"
+        tree_composition=_mapping(
+            value["tree_composition"], "tree_composition"
         ),
+        tree_settled_cost_microusd=settled_cost_microusd,
     )
 
 
@@ -581,6 +924,7 @@ def _loop_result(value: Mapping[str, Any]) -> CodeEditLoopResult:
         "actual_openrouter_cost_usd",
         "actual_openrouter_cost_microusd",
         "openrouter_call_count",
+        "tree_result",
         "provider_usage",
         "status",
         "checkpoint_doc",
@@ -594,6 +938,13 @@ def _loop_result(value: Mapping[str, Any]) -> CodeEditLoopResult:
     checkpoint = value.get("checkpoint_doc")
     if checkpoint is not None and not isinstance(checkpoint, Mapping):
         raise AutoresearchAuthorityV2Error("V2 checkpoint is invalid")
+    tree_result_doc = value.get("tree_result")
+    if not isinstance(tree_result_doc, Mapping):
+        raise AutoresearchAuthorityV2Error("V2 tree result is invalid")
+    try:
+        tree_result = TreeResult.from_mapping(tree_result_doc)
+    except (TypeError, ValueError) as exc:
+        raise AutoresearchAuthorityV2Error("V2 tree result is invalid") from exc
     return CodeEditLoopResult(
         selected_candidates=tuple(_candidate(item) for item in selected),
         iterations_completed=int(value["iterations_completed"]),
@@ -603,6 +954,7 @@ def _loop_result(value: Mapping[str, Any]) -> CodeEditLoopResult:
         actual_openrouter_cost_usd=float(value["actual_openrouter_cost_usd"]),
         actual_openrouter_cost_microusd=int(value["actual_openrouter_cost_microusd"]),
         openrouter_call_count=int(value["openrouter_call_count"]),
+        tree_result=tree_result,
         provider_usage=tuple(dict(item) for item in usage),
         status=str(value["status"]),
         checkpoint_doc=(dict(checkpoint) if checkpoint is not None else None),
@@ -627,12 +979,13 @@ async def run_authoritative_autoresearch_v2(
     budget_context: Mapping[str, Any],
     requested_loop_count: int,
     resume_state: Mapping[str, Any] | None,
-    loop_settings: AutoResearchLoopSettings,
+    loop_settings: AutoResearchRuntimeSettings,
     probe_private_window_term_hashes: Sequence[str],
     openrouter_key_ref: str,
     miner_hotkey: str,
     openrouter_guard: OpenRouterGuardAuthorityV2,
     component_registry_authority: Mapping[str, Any],
+    active_model_authority: Mapping[str, Any],
     expected_event_state_hash: str,
     record_loop_event: Callable[[AutoResearchLoopEvent], Any],
     code_builder: Any,
@@ -647,6 +1000,7 @@ async def run_authoritative_autoresearch_v2(
     coordinator_client: Any = coordinator_tee_client,
     load_catalog_snapshot: Any = load_source_add_catalog_snapshot_v2,
     load_provider_outcome_snapshot: Any = load_provider_outcome_snapshot_v2,
+    tree_store: Any | None = None,
 ) -> AuthoritativeAutoresearchV2Result:
     guard_graph = openrouter_guard.authority.get("receipt_graph")
     guard_receipt = openrouter_guard.authority.get("receipt")
@@ -674,6 +1028,27 @@ async def run_authoritative_autoresearch_v2(
             "component registry measured lineage is unavailable"
         )
     component_receipt_hash = str(component_receipt["receipt_hash"])
+    active_model_graph = active_model_authority.get("receipt_graph")
+    active_model_receipt = active_model_authority.get("receipt") or (
+        active_model_authority.get("execution_receipt")
+    )
+    active_model_result = active_model_authority.get("result")
+    if (
+        not isinstance(active_model_graph, Mapping)
+        or not isinstance(active_model_receipt, Mapping)
+        or not isinstance(active_model_result, Mapping)
+        or active_model_graph.get("root_receipt_hash")
+        != active_model_receipt.get("receipt_hash")
+        or active_model_receipt.get("purpose")
+        != "research_lab.active_private_model.v2"
+        or active_model_receipt.get("output_root")
+        != sha256_json(dict(active_model_result))
+        or active_model_result.get("artifact") != artifact.to_dict()
+    ):
+        raise AutoresearchAuthorityV2Error(
+            "active private model measured lineage is unavailable"
+        )
+    active_model_receipt_hash = str(active_model_receipt["receipt_hash"])
     catalog_outcome = await load_catalog_snapshot(epoch_id=int(epoch_id))
     catalog_result = catalog_outcome.get("result")
     catalog_graph = catalog_outcome.get("receipt_graph")
@@ -764,6 +1139,11 @@ async def run_authoritative_autoresearch_v2(
             "receipt_graph": dict(component_graph),
             "root_receipt_hash": component_receipt_hash,
         },
+        "active_model_evidence": {
+            "result": dict(active_model_result),
+            "receipt_graph": dict(active_model_graph),
+            "root_receipt_hash": active_model_receipt_hash,
+        },
         "provider_catalog_evidence": {
             "result": dict(catalog_result),
             "receipt_graph": dict(catalog_graph),
@@ -782,7 +1162,7 @@ async def run_authoritative_autoresearch_v2(
         "resume_state": dict(resume_state or {}),
         "loop_settings": {
             item.name: getattr(loop_settings, item.name)
-            for item in fields(AutoResearchLoopSettings)
+            for item in fields(AutoResearchRuntimeSettings)
         },
         "source_bundle": source_bundle,
         "probe_private_window_term_hashes": sorted(
@@ -838,6 +1218,7 @@ async def run_authoritative_autoresearch_v2(
             str(source_bundle["archive_sha256"]),
             privacy_receipt_hash,
             component_receipt_hash,
+            active_model_receipt_hash,
             catalog_receipt_hash,
             provider_outcome_receipt_hash,
             str(provider_outcome_result["provider_outcome_digest_hash"]),
@@ -858,6 +1239,7 @@ async def run_authoritative_autoresearch_v2(
         parent_receipt_hashes=(
             privacy_receipt_hash,
             component_receipt_hash,
+            active_model_receipt_hash,
             catalog_receipt_hash,
             provider_outcome_receipt_hash,
         ),
@@ -947,6 +1329,892 @@ async def run_authoritative_autoresearch_v2(
             },
         }
 
+    authoritative_tree_store = tree_store or GitTreeStore()
+
+    async def git_tree_handler(
+        command: Mapping[str, Any], request: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        action = str(command.get("action") or "")
+        state_hash = sha256_json(dict(command))
+        if request.get("expected_state_hash") != state_hash:
+            raise AutoresearchAuthorityV2Error("Git-tree host state differs")
+        tree_id = str(command.get("tree_id") or "")
+        repository = GitTreeRepository(
+            workspace=_git_tree_workspace(tree_id),
+            tree_id=tree_id,
+        )
+
+        if action == "initialize":
+            if set(command) != {
+                "action",
+                "tree_id",
+                "root_artifact_hash",
+                "policy_hash",
+                "root_source_tree_hash",
+                "run_id",
+                "root_manifest_hash",
+                "root_image_digest",
+                "evaluator_commitment_hash",
+                "tree_doc",
+            }:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree initialize fields are invalid"
+                )
+            if command.get("root_artifact_hash") != artifact.model_artifact_hash:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree root differs from the active model"
+                )
+            tree_doc = _mapping(command.get("tree_doc"), "Git-tree document")
+            if (
+                str(command.get("run_id") or "") != str(run_id)
+                or command.get("root_manifest_hash") != artifact.manifest_hash
+                or command.get("root_image_digest")
+                != sha256_json({"image_digest": artifact.image_digest})
+                or command.get("evaluator_commitment_hash")
+                != sha256_json(
+                    _mapping(
+                        tree_doc.get("evaluator_commitment"),
+                        "Git-tree evaluator commitment",
+                    )
+                )
+            ):
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree root authority differs from the measured run"
+                )
+            persisted_current = await authoritative_tree_store.get_tree_current(
+                tree_id=tree_id
+            )
+            local_state = await asyncio.to_thread(repository.state_status)
+            if local_state == "missing" and persisted_current is not None:
+                recovery_event = (
+                    await authoritative_tree_store.get_latest_recovery_event(
+                        tree_id=tree_id
+                    )
+                )
+                if recovery_event is not None:
+                    event_doc = _mapping(
+                        recovery_event.get("event_doc"),
+                        "Git-tree recovery event",
+                    )
+                    descriptor = _validate_tree_recovery_descriptor(
+                        event_doc.get("recovery")
+                    )
+                    recovery_state, bundle_bytes = await _load_tree_recovery(
+                        descriptor=descriptor,
+                        expected_tree_id=tree_id,
+                    )
+                    with tempfile.TemporaryDirectory(
+                        prefix="leadpoet-git-tree-restore-"
+                    ) as recovery_tmp:
+                        bundle_path = Path(recovery_tmp) / "tree.bundle"
+                        bundle_path.write_bytes(bundle_bytes)
+                        await asyncio.to_thread(
+                            repository.restore_recovery_state,
+                            recovery_state=recovery_state,
+                            bundle_path=bundle_path,
+                        )
+                elif persisted_current.get("current_round_index") is not None:
+                    raise AutoresearchAuthorityV2Error(
+                        "Git-tree durable frontier has no recovery artifact"
+                    )
+            with tempfile.TemporaryDirectory(
+                prefix="leadpoet-git-tree-root-"
+            ) as temporary:
+                source_context = await asyncio.to_thread(
+                    code_builder.prepare_parent_source_context,
+                    parent_artifact=artifact,
+                    workspace_dir=Path(temporary),
+                )
+                if (
+                    source_context.source_tree_hash
+                    != command.get("root_source_tree_hash")
+                    or source_context.source_tree_hash
+                    != artifact.model_artifact_hash
+                ):
+                    raise AutoresearchAuthorityV2Error(
+                        "Git-tree extracted root source commitment differs"
+                    )
+                root_git_commit = await asyncio.to_thread(
+                    repository.initialize,
+                    source_root=source_context.source_root,
+                    root_artifact_hash=artifact.model_artifact_hash,
+                    policy_hash=str(command["policy_hash"]),
+                    run_id=str(run_id),
+                    root_manifest_hash=artifact.manifest_hash,
+                    root_image_digest=str(command["root_image_digest"]),
+                    evaluator_commitment_hash=str(
+                        command["evaluator_commitment_hash"]
+                    ),
+                    tree_doc=tree_doc,
+                )
+            persisted_tree = await authoritative_tree_store.create_tree(
+                tree_id=tree_id,
+                run_id=str(run_id),
+                root_artifact_hash=artifact.model_artifact_hash,
+                root_manifest_hash=artifact.manifest_hash,
+                root_source_tree_hash=str(command["root_source_tree_hash"]),
+                root_git_commit=root_git_commit,
+                root_image_digest=str(command["root_image_digest"]),
+                policy_hash=str(command["policy_hash"]),
+                evaluator_commitment_hash=str(
+                    command["evaluator_commitment_hash"]
+                ),
+                tree_doc=tree_doc,
+            )
+            if persisted_tree.get("created") is True:
+                await authoritative_tree_store.append_event_next(
+                    tree_id=tree_id,
+                    event_type="tree_created",
+                    event_doc={
+                        "schema_version": "research_lab.git_tree_created.v1",
+                        "tree_id": tree_id,
+                        "run_id": str(run_id),
+                        "root_artifact_hash": artifact.model_artifact_hash,
+                        "root_git_commit": root_git_commit,
+                        "policy_hash": str(command["policy_hash"]),
+                    },
+                )
+            persisted_operations = await authoritative_tree_store.list_operations(
+                tree_id=tree_id
+            )
+            if persisted_operations:
+                await asyncio.to_thread(
+                    repository.reconcile_operations,
+                    persisted_operations,
+                )
+            result: Mapping[str, Any] = {
+                "tree_id": tree_id,
+                "root_git_commit": root_git_commit,
+                "root_source_tree_hash": str(command["root_source_tree_hash"]),
+            }
+        elif action == "plan_slot":
+            if set(command) != {
+                "action",
+                "tree_id",
+                "slot",
+                "request_hash",
+                "operation_id",
+                "node_doc",
+            }:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree plan fields are invalid"
+                )
+            slot = TreeChildSlot.from_mapping(
+                _mapping(command.get("slot"), "Git-tree planned slot")
+            )
+            if (
+                slot.tree_id != tree_id
+                or command.get("operation_id") != generation_operation_id(slot)
+            ):
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree plan identity differs"
+                )
+            planned = await authoritative_tree_store.plan_node(
+                slot=slot,
+                request_hash=str(command["request_hash"]),
+                node_doc=_mapping(command.get("node_doc"), "Git-tree node plan"),
+            )
+            await asyncio.to_thread(
+                repository.plan_slot,
+                slot=slot,
+                request_hash=str(command["request_hash"]),
+                operation_id=str(command["operation_id"]),
+                node_doc=_mapping(command.get("node_doc"), "Git-tree node plan"),
+            )
+            if planned.get("created") is True:
+                await authoritative_tree_store.append_event_next(
+                    tree_id=tree_id,
+                    event_type="node_planned",
+                    node_id=slot.node_id,
+                    event_doc={
+                        "schema_version": "research_lab.git_tree_node_planned.v1",
+                        **slot.to_dict(),
+                        "operation_id": str(command["operation_id"]),
+                        "request_hash": str(command["request_hash"]),
+                    },
+                )
+            operation = _mapping(
+                planned.get("operation"), "Git-tree generation reservation"
+            )
+            result = {
+                "tree_id": tree_id,
+                "action": action,
+                "created": bool(planned.get("created")),
+                "node_id": slot.node_id,
+                "operation_id": str(command["operation_id"]),
+                "operation_status": str(operation.get("operation_status") or ""),
+            }
+        elif action == "reserve_operation":
+            if set(command) != {
+                "action",
+                "tree_id",
+                "operation_id",
+                "operation_kind",
+                "request_hash",
+                "node_id",
+                "reservation_doc",
+            }:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree operation reservation fields are invalid"
+                )
+            operation_kind = str(command.get("operation_kind") or "")
+            if operation_kind not in {
+                "build",
+                "provider",
+                "evaluation",
+                "artifact",
+                "checkpoint",
+            }:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree operation reservation kind is invalid"
+                )
+            node_id = str(command.get("node_id") or "")
+            if node_id and not re.fullmatch(r"tree-node:[0-9a-f]{64}", node_id):
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree operation reservation node is invalid"
+                )
+            reservation_doc = _mapping(
+                command.get("reservation_doc"),
+                "Git-tree operation reservation",
+            )
+            operation = await authoritative_tree_store.transition_operation(
+                logical_operation_id=str(command["operation_id"]),
+                tree_id=tree_id,
+                node_id=node_id,
+                operation_kind=operation_kind,
+                operation_status="reserved",
+                request_hash=str(command["request_hash"]),
+                settlement_doc=reservation_doc,
+            )
+            local = await asyncio.to_thread(
+                repository.reserve_operation,
+                operation_id=str(command["operation_id"]),
+                operation_kind=operation_kind,
+                request_hash=str(command["request_hash"]),
+                node_id=node_id,
+                reservation_doc=reservation_doc,
+            )
+            operation_row = _mapping(
+                operation.get("operation"),
+                "Git-tree operation reservation row",
+            )
+            result = {
+                "tree_id": tree_id,
+                "action": action,
+                "created": bool(operation.get("created")),
+                "operation_id": str(command["operation_id"]),
+                "operation_status": str(
+                    operation_row.get("operation_status") or ""
+                ),
+                "local_created": bool(local.get("created")),
+            }
+            if operation_kind == "build" and operation.get("created") is True:
+                event = await authoritative_tree_store.append_event_next(
+                    tree_id=tree_id,
+                    event_type="node_build_started",
+                    node_id=node_id,
+                    event_doc={
+                        "schema_version": (
+                            "research_lab.git_tree_build_started.v1"
+                        ),
+                        "tree_id": tree_id,
+                        "node_id": node_id,
+                        "operation_id": str(command["operation_id"]),
+                        "request_hash": str(command["request_hash"]),
+                    },
+                )
+                result["event_hash"] = str(event.get("event_hash") or "")
+        elif action == "inspect_operation":
+            if set(command) != {"action", "tree_id", "operation_id"}:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree operation inspection fields are invalid"
+                )
+            operation_id = str(command["operation_id"])
+            persisted = await authoritative_tree_store.get_operation(
+                logical_operation_id=operation_id
+            )
+            local = await asyncio.to_thread(
+                repository.inspect_operation,
+                operation_id=operation_id,
+            )
+            if persisted.get("exists"):
+                persisted_row = _mapping(
+                    persisted.get("operation"),
+                    "Git-tree persisted operation",
+                )
+                await asyncio.to_thread(
+                    repository.reconcile_operations,
+                    [persisted_row],
+                )
+                local = await asyncio.to_thread(
+                    repository.inspect_operation,
+                    operation_id=operation_id,
+                )
+            if bool(persisted.get("exists")) != bool(local.get("exists")):
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree operation persistence layers diverged"
+                )
+            if not persisted.get("exists"):
+                result = {
+                    "tree_id": tree_id,
+                    "action": action,
+                    "operation_id": operation_id,
+                    "exists": False,
+                    "operation": {},
+                }
+            else:
+                persisted_row = _mapping(
+                    persisted.get("operation"),
+                    "Git-tree persisted operation",
+                )
+                local_row = _mapping(
+                    local.get("operation"),
+                    "Git-tree local operation",
+                )
+                comparison = {
+                    "tree_id": str(persisted_row.get("tree_id") or ""),
+                    "node_id": str(persisted_row.get("node_id") or ""),
+                    "operation_kind": str(
+                        persisted_row.get("operation_kind") or ""
+                    ),
+                    "request_hash": str(
+                        persisted_row.get("request_hash") or ""
+                    ),
+                    "status": str(
+                        persisted_row.get("operation_status") or ""
+                    ),
+                    "result_hash": str(
+                        persisted_row.get("result_hash") or ""
+                    ),
+                    "settled_cost_microusd": int(
+                        persisted_row.get("settled_cost_microusd") or 0
+                    ),
+                    "provider_call_count": int(
+                        persisted_row.get("provider_call_count") or 0
+                    ),
+                    "settlement_doc": dict(
+                        persisted_row.get("settlement_doc") or {}
+                    ),
+                }
+                if comparison["tree_id"] != tree_id:
+                    raise AutoresearchAuthorityV2Error(
+                        "Git-tree operation belongs to another tree"
+                    )
+                local_comparison = {
+                    key: local_row.get(key)
+                    for key in (
+                        "tree_id",
+                        "node_id",
+                        "operation_kind",
+                        "request_hash",
+                        "status",
+                        "result_hash",
+                        "settled_cost_microusd",
+                        "provider_call_count",
+                        "settlement_doc",
+                    )
+                }
+                local_comparison["node_id"] = str(
+                    local_comparison.get("node_id") or ""
+                )
+                local_comparison["result_hash"] = str(
+                    local_comparison.get("result_hash") or ""
+                )
+                local_comparison["settled_cost_microusd"] = int(
+                    local_comparison.get("settled_cost_microusd") or 0
+                )
+                local_comparison["provider_call_count"] = int(
+                    local_comparison.get("provider_call_count") or 0
+                )
+                local_comparison["settlement_doc"] = dict(
+                    local_comparison.get("settlement_doc")
+                    or (
+                        local_row.get("reservation_doc")
+                        if local_comparison.get("status") == "reserved"
+                        else {}
+                    )
+                    or {}
+                )
+                if comparison != local_comparison:
+                    raise AutoresearchAuthorityV2Error(
+                        "Git-tree operation state differs between database and host"
+                    )
+                result = {
+                    "tree_id": tree_id,
+                    "action": action,
+                    "operation_id": operation_id,
+                    "exists": True,
+                    "operation": comparison,
+                }
+        elif action == "operation_settlement_commitment":
+            if set(command) != {"action", "tree_id"}:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree operation commitment fields are invalid"
+                )
+            persisted_operations = await authoritative_tree_store.list_operations(
+                tree_id=tree_id
+            )
+            await asyncio.to_thread(
+                repository.reconcile_operations,
+                persisted_operations,
+            )
+            persisted_commitment = operation_settlement_commitment(
+                tree_id=tree_id,
+                operations=persisted_operations,
+            )
+            local_commitment = await asyncio.to_thread(
+                repository.operation_settlement_commitment
+            )
+            if dict(local_commitment) != persisted_commitment:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree operation commitments differ between database and host"
+                )
+            result = {
+                "tree_id": tree_id,
+                "action": action,
+                **persisted_commitment,
+            }
+        elif action == "settle_operation":
+            if set(command) != {
+                "action",
+                "tree_id",
+                "operation_id",
+                "operation_status",
+                "request_hash",
+                "result_hash",
+                "settled_cost_microusd",
+                "provider_call_count",
+                "settlement_doc",
+            }:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree settlement fields are invalid"
+                )
+            settlement_doc = _mapping(
+                command.get("settlement_doc"), "Git-tree operation settlement"
+            )
+            node_id = str(settlement_doc.get("node_id") or "")
+            operation = await authoritative_tree_store.transition_operation(
+                logical_operation_id=str(command["operation_id"]),
+                tree_id=tree_id,
+                node_id=node_id,
+                operation_kind=str(settlement_doc.get("operation_kind") or "generation"),
+                operation_status=str(command["operation_status"]),
+                request_hash=str(command["request_hash"]),
+                result_hash=str(command["result_hash"]),
+                settled_cost_microusd=int(command["settled_cost_microusd"]),
+                provider_call_count=int(command["provider_call_count"]),
+                settlement_doc=settlement_doc,
+                expected_current_status="reserved",
+            )
+            local = await asyncio.to_thread(
+                repository.settle_operation,
+                operation_id=str(command["operation_id"]),
+                operation_status=str(command["operation_status"]),
+                request_hash=str(command["request_hash"]),
+                result_hash=str(command["result_hash"]),
+                settled_cost_microusd=int(command["settled_cost_microusd"]),
+                provider_call_count=int(command["provider_call_count"]),
+                settlement_doc=settlement_doc,
+            )
+            result = {
+                "tree_id": tree_id,
+                "action": action,
+                "created": bool(operation.get("created")),
+                "operation_id": str(command["operation_id"]),
+                "operation_status": str(command["operation_status"]),
+                "local_created": bool(local.get("created")),
+            }
+        elif action == "record_node":
+            if set(command) != {"action", "tree_id", "node"}:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree node record fields are invalid"
+                )
+            node = TreeNode.from_mapping(
+                _mapping(command.get("node"), "Git-tree terminal node")
+            )
+            if node.tree_id != tree_id or node.status not in {
+                "evaluating",
+                "eligible",
+                "ineligible",
+                "failed",
+                "cancelled",
+                "indeterminate",
+            }:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree terminal node is invalid"
+                )
+            local = await asyncio.to_thread(
+                repository.record_node, node_doc=node.to_dict()
+            )
+            event = await authoritative_tree_store.append_event_next(
+                tree_id=tree_id,
+                event_type=(
+                    "node_built"
+                    if node.status == "evaluating"
+                    else "node_evaluated"
+                    if node.status in {"eligible", "ineligible"}
+                    else "node_failed"
+                ),
+                node_id=node.node_id,
+                event_doc=tree_node_event_doc(node),
+            )
+            result = {
+                "tree_id": tree_id,
+                "action": action,
+                "created": bool(local.get("created")),
+                "node_id": node.node_id,
+                "node_status": node.status,
+                "event_hash": str(event.get("event_hash") or ""),
+            }
+        elif action == "commit_checkpoint":
+            if set(command) != {
+                "action",
+                "tree_id",
+                "checkpoint_hash",
+                "checkpoint",
+            }:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree checkpoint fields are invalid"
+                )
+            checkpoint_doc = _mapping(
+                command.get("checkpoint"), "Git-tree checkpoint"
+            )
+            checkpoint = TreeCheckpoint.from_mapping(checkpoint_doc)
+            if checkpoint.tree_id != tree_id:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree checkpoint belongs to another tree"
+                )
+            local = await asyncio.to_thread(
+                repository.commit_checkpoint,
+                checkpoint_hash=str(command["checkpoint_hash"]),
+                checkpoint_doc=checkpoint_doc,
+            )
+            checkpoint_hash = str(command["checkpoint_hash"])
+            current_tree = await authoritative_tree_store.get_tree_current(
+                tree_id=tree_id
+            )
+            current_frontier_doc = (
+                current_tree.get("current_frontier_doc")
+                if isinstance(current_tree, Mapping)
+                else None
+            )
+            if (
+                isinstance(current_frontier_doc, Mapping)
+                and current_frontier_doc.get("checkpoint_hash")
+                == checkpoint_hash
+            ):
+                recovery = _validate_tree_recovery_descriptor(
+                    current_frontier_doc.get("recovery")
+                )
+                await _load_tree_recovery(
+                    descriptor=recovery,
+                    expected_tree_id=tree_id,
+                )
+            else:
+                recovery = await _publish_tree_recovery(
+                    repository=repository,
+                    tree_id=tree_id,
+                    checkpoint_hash=checkpoint_hash,
+                    manifest_uri=artifact.manifest_uri,
+                )
+            committed_frontier_hash = derive_frontier_commitment_hash(
+                tree_id=tree_id,
+                scheduler_frontier_hash=checkpoint.frontier_hash,
+                checkpoint_hash=checkpoint_hash,
+            )
+            durable_frontier_doc = {
+                "schema_version": "research_lab.git_tree_frontier_state.v1",
+                "tree_id": tree_id,
+                "scheduler_frontier_hash": checkpoint.frontier_hash,
+                "node_ids": [node.node_id for node in checkpoint.nodes],
+                "planned_slots": [
+                    slot.to_dict() for slot in checkpoint.planned_slots
+                ],
+                "checkpoint_hash": checkpoint_hash,
+                "recovery": recovery,
+            }
+            frontier = await authoritative_tree_store.commit_frontier_next(
+                tree_id=tree_id,
+                frontier_hash=committed_frontier_hash,
+                frontier_doc=durable_frontier_doc,
+            )
+            event = await authoritative_tree_store.append_event_next(
+                tree_id=tree_id,
+                event_type="checkpoint_committed",
+                event_doc={
+                    "schema_version": "research_lab.git_tree_checkpoint_commit.v1",
+                    "tree_id": tree_id,
+                    "checkpoint_hash": checkpoint_hash,
+                    "scheduler_frontier_hash": checkpoint.frontier_hash,
+                    "frontier_commitment_hash": committed_frontier_hash,
+                    "operation_settlement_hash": checkpoint.operation_settlement_hash,
+                    "recovery_hash": recovery["recovery_hash"],
+                    "bundle_hash": recovery["bundle_hash"],
+                    "recovery": recovery,
+                },
+            )
+            result = {
+                "tree_id": tree_id,
+                "action": action,
+                "created": bool(local.get("created")),
+                "checkpoint_hash": checkpoint_hash,
+                "recovery_hash": recovery["recovery_hash"],
+                "bundle_hash": recovery["bundle_hash"],
+                "frontier_commitment_hash": str(
+                    frontier.get("commitment_hash") or ""
+                ),
+                "event_hash": str(event.get("event_hash") or ""),
+            }
+        elif action == "select_final":
+            if set(command) != {
+                "action",
+                "tree_id",
+                "selection_hash",
+                "selection",
+            }:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree selection fields are invalid"
+                )
+            selection_doc = _mapping(
+                command.get("selection"), "Git-tree final selection"
+            )
+            selected_node_id = _validated_tree_final_selection(
+                selection_doc,
+                expected_tree_id=tree_id,
+                expected_selection_hash=str(command["selection_hash"]),
+            )
+            persisted = await authoritative_tree_store.select_final(
+                tree_id=tree_id,
+                node_id=selected_node_id,
+                selection_hash=str(command["selection_hash"]),
+                selection_doc=selection_doc,
+            )
+            local = await asyncio.to_thread(
+                repository.select_final,
+                selection_hash=str(command["selection_hash"]),
+                selection_doc=selection_doc,
+            )
+            event = _mapping(persisted.get("event"), "Git-tree selection event")
+            result = {
+                "tree_id": tree_id,
+                "action": action,
+                "created": bool(persisted.get("created")),
+                "local_created": bool(local.get("created")),
+                "selected_node_id": selected_node_id,
+                "selection_hash": str(command["selection_hash"]),
+                "event_hash": str(event.get("event_hash") or ""),
+            }
+        elif action == "fail_tree":
+            if set(command) != {
+                "action",
+                "tree_id",
+                "failure_hash",
+                "failure",
+            }:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree failure fields are invalid"
+                )
+            failure_doc = _mapping(
+                command.get("failure"), "Git-tree terminal failure"
+            )
+            failure_hash = str(command.get("failure_hash") or "")
+            if (
+                sha256_json(failure_doc) != failure_hash
+                or failure_doc.get("schema_version")
+                != "research_lab.git_tree_failed.v1"
+                or failure_doc.get("tree_id") != tree_id
+                or not str(failure_doc.get("stop_reason") or "")
+                or str(failure_doc.get("selected_node_id") or "")
+                or int(failure_doc.get("paid_finalist_count") or 0) != 0
+            ):
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree terminal failure binding is invalid"
+                )
+            local = await asyncio.to_thread(
+                repository.fail_tree,
+                failure_hash=failure_hash,
+                failure_doc=failure_doc,
+            )
+            event = await authoritative_tree_store.append_event_next(
+                tree_id=tree_id,
+                event_type="tree_failed",
+                event_doc=failure_doc,
+            )
+            result = {
+                "tree_id": tree_id,
+                "action": action,
+                "created": bool(local.get("created")),
+                "failure_hash": failure_hash,
+                "event_hash": str(event.get("event_hash") or ""),
+            }
+        elif action == "publish_bundle":
+            if set(command) != {"action", "tree_id"}:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree bundle fields are invalid"
+                )
+            with tempfile.TemporaryDirectory(
+                prefix="leadpoet-git-tree-bundle-"
+            ) as temporary:
+                bundle_path = Path(temporary) / "tree.bundle"
+                bundle = await asyncio.to_thread(
+                    repository.create_bundle, bundle_path
+                )
+                bundle_bytes = bundle_path.read_bytes()
+            bucket, _manifest_key = _parse_s3_uri(artifact.manifest_uri)
+            bundle_hash = str(bundle["bundle_hash"])
+            bundle_key = (
+                "research-lab/autoresearch/git-trees/"
+                + tree_id.split(":", 1)[1]
+                + "/bundles/"
+                + bundle_hash.split(":", 1)[1]
+                + ".bundle"
+            )
+            verified_bytes = await asyncio.to_thread(
+                _put_tree_object_and_readback,
+                bucket=bucket,
+                key=bundle_key,
+                body=bundle_bytes,
+                content_type="application/octet-stream",
+            )
+            if sha256_bytes(verified_bytes) != bundle_hash:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree bundle readback commitment differs"
+                )
+            result = {
+                "tree_id": tree_id,
+                "action": action,
+                "bundle_uri": f"s3://{bucket}/{bundle_key}",
+                "bundle_hash": bundle_hash,
+                "bundle_size_bytes": len(verified_bytes),
+                "readback_verified": True,
+            }
+        elif action == "commit_child":
+            if set(command) != {
+                "action",
+                "tree_id",
+                "slot",
+                "draft",
+                "expected_parent_source_tree_hash",
+            }:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree child fields are invalid"
+                )
+            slot = TreeChildSlot.from_mapping(
+                _mapping(command.get("slot"), "Git-tree child slot")
+            )
+            if slot.tree_id != tree_id:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree child belongs to another tree"
+                )
+            commit = await asyncio.to_thread(
+                repository.commit_child,
+                slot=slot,
+                draft=_draft(_mapping(command.get("draft"), "Git-tree draft")),
+                expected_parent_source_tree_hash=str(
+                    command["expected_parent_source_tree_hash"]
+                ),
+            )
+            await asyncio.to_thread(repository.verify_node, commit=commit)
+            node_recovery_doc = {
+                **commit.to_dict(),
+                "schema_version": "research_lab.git_tree_node_recovery.v1",
+            }
+            node_recovery_hash = sha256_json(node_recovery_doc)
+            await asyncio.to_thread(
+                repository.commit_checkpoint,
+                checkpoint_hash=node_recovery_hash,
+                checkpoint_doc=node_recovery_doc,
+            )
+            existing_generated = await authoritative_tree_store.get_node_event(
+                tree_id=tree_id,
+                node_id=slot.node_id,
+                event_type="node_generated",
+            )
+            if existing_generated is not None:
+                generated_doc = _mapping(
+                    existing_generated.get("event_doc"),
+                    "Git-tree node-generated event",
+                )
+                if (
+                    generated_doc.get("git_commit") != commit.git_commit
+                    or generated_doc.get("node_recovery_hash")
+                    != node_recovery_hash
+                ):
+                    raise AutoresearchAuthorityV2Error(
+                        "Git-tree node recovery event differs"
+                    )
+                node_recovery = _validate_tree_recovery_descriptor(
+                    generated_doc.get("recovery")
+                )
+                await _load_tree_recovery(
+                    descriptor=node_recovery,
+                    expected_tree_id=tree_id,
+                )
+            else:
+                node_recovery = await _publish_tree_recovery(
+                    repository=repository,
+                    tree_id=tree_id,
+                    checkpoint_hash=node_recovery_hash,
+                    manifest_uri=artifact.manifest_uri,
+                )
+                await authoritative_tree_store.append_event_next(
+                    tree_id=tree_id,
+                    event_type="node_generated",
+                    node_id=slot.node_id,
+                    event_doc={
+                        "schema_version": (
+                            "research_lab.git_tree_node_generated.v1"
+                        ),
+                        "tree_id": tree_id,
+                        "node_id": slot.node_id,
+                        "parent_node_id": slot.parent_node_id,
+                        "git_commit": commit.git_commit,
+                        "source_tree_hash": commit.source_tree_hash,
+                        "node_recovery_hash": node_recovery_hash,
+                        "recovery": node_recovery,
+                    },
+                )
+            result = {
+                **commit.to_dict(),
+                "incremental_patch": commit.incremental_patch,
+                "cumulative_patch": commit.cumulative_patch,
+            }
+        elif action == "verify_node_identity":
+            if set(command) != {
+                "action",
+                "tree_id",
+                "node_id",
+                "git_commit",
+                "parent_node_id",
+            }:
+                raise AutoresearchAuthorityV2Error(
+                    "Git-tree verification fields are invalid"
+                )
+            await asyncio.to_thread(
+                repository.verify_node_identity,
+                node_id=str(command["node_id"]),
+                git_commit=str(command["git_commit"]),
+                parent_node_id=str(command["parent_node_id"]),
+            )
+            result = {
+                "tree_id": tree_id,
+                "node_id": str(command["node_id"]),
+                "git_commit": str(command["git_commit"]),
+                "parent_node_id": str(command["parent_node_id"]),
+                "verified": True,
+            }
+        else:
+            raise AutoresearchAuthorityV2Error(
+                "Git-tree host action is unsupported"
+            )
+
+        return {
+            "schema_version": HOST_GIT_TREE_RESULT_SCHEMA_VERSION,
+            "action": action,
+            "state_hash": state_hash,
+            "result": dict(result),
+        }
+
     async def read_artifact_handler(command: Mapping[str, Any], request: Mapping[str, Any]):
         content_hash = str(command["content_hash"])
         if request.get("expected_state_hash") != content_hash:
@@ -1024,9 +2292,131 @@ async def run_authoritative_autoresearch_v2(
         HOST_WRITE_ARTIFACT: write_artifact_handler,
         HOST_CHECK_PAUSE: pause_handler,
         HOST_RECORD_PRIVACY: privacy_handler,
+        HOST_GIT_TREE: git_tree_handler,
     }
     if dev_evaluator is not None:
         async def dev_handler(command: Mapping[str, Any], request: Mapping[str, Any]):
+            if "candidates" in command:
+                candidate_docs = command.get("candidates")
+                candidate_hashes = command.get("candidate_hashes")
+                request_hash = str(command.get("cohort_request_hash") or "")
+                remaining_tree_budget_microusd = command.get(
+                    "remaining_tree_budget_microusd"
+                )
+                if (
+                    not isinstance(candidate_docs, list)
+                    or not candidate_docs
+                    or len(candidate_docs) > 128
+                    or not isinstance(candidate_hashes, list)
+                    or len(candidate_hashes) != len(candidate_docs)
+                    or any(
+                        not isinstance(item, Mapping) for item in candidate_docs
+                    )
+                    or any(
+                        str(candidate_hashes[index]) != sha256_json(dict(item))
+                        for index, item in enumerate(candidate_docs)
+                    )
+                    or isinstance(remaining_tree_budget_microusd, bool)
+                    or not isinstance(remaining_tree_budget_microusd, int)
+                    or remaining_tree_budget_microusd < 0
+                    or request_hash
+                    != sha256_json(
+                        {
+                            "schema_version": "leadpoet.autoresearch_dev_eval_cohort_request.v4",
+                            "candidate_hashes": [str(item) for item in candidate_hashes],
+                            "remaining_tree_budget_microusd": (
+                                remaining_tree_budget_microusd
+                            ),
+                        }
+                    )
+                    or request.get("expected_state_hash") != request_hash
+                ):
+                    raise AutoresearchAuthorityV2Error(
+                        "dev-eval cohort state differs"
+                    )
+                reconstructed = [_candidate(dict(item)) for item in candidate_docs]
+                node_ids = [str(item.node_id) for item in reconstructed]
+                if len(set(node_ids)) != len(node_ids):
+                    raise AutoresearchAuthorityV2Error(
+                        "dev-eval cohort has duplicate nodes"
+                    )
+                evaluate_cohort = getattr(
+                    dev_evaluator, "evaluate_cohort", None
+                )
+                if not callable(evaluate_cohort):
+                    raise AutoresearchAuthorityV2Error(
+                        "dev-evaluator lacks the tree cohort contract"
+                    )
+                response = await _maybe_await(
+                    evaluate_cohort(
+                        reconstructed,
+                        remaining_tree_budget_microusd=(
+                            remaining_tree_budget_microusd
+                        ),
+                    )
+                )
+                if not isinstance(response, Mapping):
+                    raise AutoresearchAuthorityV2Error(
+                        "attested dev-eval cohort result is invalid"
+                    )
+                rows = response.get("results")
+                if (
+                    response.get("schema_version")
+                    != "research_lab.git_tree_eval_cohort_result.v1"
+                    or not isinstance(rows, list)
+                    or len(rows) != len(reconstructed)
+                ):
+                    raise AutoresearchAuthorityV2Error(
+                        "attested dev-eval cohort fields are invalid"
+                    )
+                rows_by_node = {
+                    str(row.get("node_id") or ""): row
+                    for row in rows
+                    if isinstance(row, Mapping)
+                }
+                if set(rows_by_node) != set(node_ids):
+                    raise AutoresearchAuthorityV2Error(
+                        "attested dev-eval cohort nodes differ"
+                    )
+                output_rows = []
+                for index, node_id in enumerate(node_ids):
+                    row = rows_by_node[node_id]
+                    result = row.get("result")
+                    graph = row.get("receipt_graph")
+                    metadata = row.get("evaluation_metadata")
+                    if (
+                        not isinstance(result, Mapping)
+                        or not isinstance(graph, Mapping)
+                        or not isinstance(metadata, Mapping)
+                    ):
+                        raise AutoresearchAuthorityV2Error(
+                            "dev-eval cohort lacks measured scoring ancestry"
+                        )
+                    output_rows.append(
+                        {
+                            "node_id": node_id,
+                            "candidate_hash": str(candidate_hashes[index]),
+                            "result": dict(result),
+                            "receipt_graph": dict(graph),
+                            "evaluation_metadata": dict(metadata),
+                        }
+                    )
+                return {
+                    "schema_version": HOST_DEV_EVAL_COHORT_RESULT_SCHEMA_VERSION,
+                    "cohort_request_hash": request_hash,
+                    "cohort_hash": str(response.get("cohort_hash") or ""),
+                    "evaluation_mode": str(
+                        response.get("evaluation_mode") or ""
+                    ),
+                    "overlay_hash": str(response.get("overlay_hash") or ""),
+                    "provider_call_count": int(
+                        response.get("provider_call_count") or 0
+                    ),
+                    "settled_cost_microusd": int(
+                        response.get("settled_cost_microusd") or 0
+                    ),
+                    "results": output_rows,
+                }
             candidate_hash = str(command["candidate_hash"])
             if request.get("expected_state_hash") != candidate_hash:
                 raise AutoresearchAuthorityV2Error("dev-eval state differs")
@@ -1085,6 +2475,7 @@ async def run_authoritative_autoresearch_v2(
             parent_graphs=(
                 guard_graph,
                 component_graph,
+                active_model_graph,
                 catalog_graph,
                 provider_outcome_graph,
             ),

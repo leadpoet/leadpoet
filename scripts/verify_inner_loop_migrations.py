@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Live read-only check that the inner-loop activation migrations applied.
+"""Live read-only check that the Git-tree inner-loop migration applied.
 
 Confirms scripts/70 (allocator records), scripts/71 (score calibration), and
-scripts/93 (automatic activation events/current state) exist and are readable
-by service_role. Function existence is checked through PostgREST's schema
-metadata without invoking the mutating transition RPC.
+scripts/95 (tree state and atomic transitions) exist and are readable by
+service_role. Function existence is checked through PostgREST's schema metadata
+without invoking a mutating RPC.
 
 Read-only by design: both tables are append-only with a delete/update-blocking
 trigger, so this never inserts a probe row. A `select <pk-column> limit 1`
@@ -38,17 +38,30 @@ CHECKS = (
     ("research_lab_allocator_selection_records", "selection_doc"),
     ("research_lab_score_calibration", "calibration_id"),
     ("research_lab_score_calibration", "realized_mean_delta"),
-    ("research_lab_inner_loop_activation_events", "event_hash"),
-    ("research_lab_inner_loop_activation_events", "evidence_doc"),
-    ("research_lab_inner_loop_activation_current", "phase"),
+    ("research_lab_autoresearch_trees", "tree_id"),
+    ("research_lab_autoresearch_tree_nodes", "parent_node_id"),
+    ("research_lab_autoresearch_tree_events", "event_hash"),
+    ("research_lab_autoresearch_operation_current", "logical_operation_id"),
+    ("research_lab_autoresearch_frontier_commitments", "frontier_hash"),
+    ("research_lab_autoresearch_tree_current", "current_frontier_doc"),
+    ("research_lab_autoresearch_tree_handoffs", "candidate_id"),
 )
-ACTIVATION_RPC_PATH = "/rpc/append_research_lab_inner_loop_activation_event"
+REQUIRED_RPC_PATHS = {
+    "/rpc/create_research_lab_autoresearch_tree",
+    "/rpc/plan_research_lab_autoresearch_tree_node",
+    "/rpc/transition_research_lab_autoresearch_operation",
+    "/rpc/append_research_lab_autoresearch_tree_event",
+    "/rpc/commit_research_lab_autoresearch_frontier",
+    "/rpc/select_research_lab_autoresearch_tree_final",
+    "/rpc/fail_research_lab_autoresearch_tree",
+    "/rpc/record_research_lab_autoresearch_tree_handoff",
+}
 
 
-def _activation_rpc_is_exposed() -> bool:
-    """Inspect PostgREST OpenAPI metadata without invoking the write RPC."""
+def _missing_rpc_paths() -> set[str]:
+    """Inspect PostgREST metadata without invoking any write RPC."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        return False
+        return set(REQUIRED_RPC_PATHS)
     response = httpx.get(
         f"{SUPABASE_URL.rstrip('/')}/rest/v1/",
         headers={
@@ -61,7 +74,9 @@ def _activation_rpc_is_exposed() -> bool:
     response.raise_for_status()
     document = response.json()
     paths = document.get("paths") if isinstance(document, dict) else None
-    return isinstance(paths, dict) and ACTIVATION_RPC_PATH in paths
+    if not isinstance(paths, dict):
+        return set(REQUIRED_RPC_PATHS)
+    return set(REQUIRED_RPC_PATHS).difference(paths)
 
 
 def main() -> int:
@@ -79,22 +94,21 @@ def main() -> int:
     for table in sorted(checked_tables):
         print(f"OK   {table}")
     try:
-        if _activation_rpc_is_exposed():
-            print("OK   append_research_lab_inner_loop_activation_event RPC")
-        else:
-            failures.append(
-                "append_research_lab_inner_loop_activation_event: not exposed by PostgREST"
-            )
-    except Exception as exc:  # noqa: BLE001 - report metadata failure
-        failures.append(
-            "append_research_lab_inner_loop_activation_event: " + str(exc)[:200]
+        missing_rpcs = _missing_rpc_paths()
+        for path in sorted(REQUIRED_RPC_PATHS.difference(missing_rpcs)):
+            print(f"OK   {path.removeprefix('/rpc/')} RPC")
+        failures.extend(
+            f"{path.removeprefix('/rpc/')}: not exposed by PostgREST"
+            for path in sorted(missing_rpcs)
         )
+    except Exception as exc:  # noqa: BLE001 - report metadata failure
+        failures.append("Git-tree RPC metadata: " + str(exc)[:200])
     if failures:
         for failure in failures:
             print(f"FAIL {failure}")
         print(
             "\nOne or more objects are missing. Re-run the migration for the "
-            "failing object (scripts/70, scripts/71, or scripts/93) and check "
+            "failing object (scripts/70, scripts/71, or scripts/95) and check "
             "for SQL errors."
         )
         return 1

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
 from validator_tee.host.release_v2 import (
+    DETERMINISTIC_RELEASE_FIELDS,
     ValidatorReleaseV2Error,
     build_validator_build_evidence,
     build_validator_release_manifest,
@@ -89,10 +90,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "manifest verification requires --local-release"
         )
     local = validate_validator_release(_load(args.local_release))
-    if local != manifest["release"]:
-        raise ValidatorReleaseV2Error(
-            "local validator build differs from approved six-build release"
-        )
+    for field in DETERMINISTIC_RELEASE_FIELDS:
+        if local[field] != manifest["release"][field]:
+            raise ValidatorReleaseV2Error(
+                "local validator build differs from approved six-build release at %s"
+                % field
+            )
     print("validator_v2_release_gate=verified")
     print("validator_v2_release_manifest_hash=%s" % manifest["release_manifest_hash"])
     return 0

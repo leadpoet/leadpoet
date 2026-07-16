@@ -39,6 +39,22 @@ def test_validator_release_binds_every_deterministic_build_output():
     assert value["release_hash"].startswith("sha256:")
 
 
+def test_validator_release_identity_excludes_non_measured_eif_bytes():
+    first = _release()
+    second = build_validator_release(
+        commit_sha=first["commit_sha"],
+        pcr0=first["pcr0"],
+        app_manifest_hash=first["app_manifest_hash"],
+        dependency_lock_hash=first["dependency_lock_hash"],
+        normalized_image_hash=first["normalized_image_hash"],
+        eif_hash=_hash("9"),
+        dockerfile_hash=first["dockerfile_hash"],
+        base_dockerfile_hash=first["base_dockerfile_hash"],
+    )
+
+    assert first["release_hash"] == second["release_hash"]
+
+
 def test_validator_release_rejects_tampering_and_debug_pcr():
     value = copy.deepcopy(_release())
     value["app_manifest_hash"] = _hash("9")
@@ -112,3 +128,38 @@ def test_validator_release_manifest_rejects_one_divergent_gateway_build():
     evidence[-1] = divergent
     with pytest.raises(ValidatorReleaseV2Error, match="diverged"):
         build_validator_release_manifest(evidence)
+
+
+def test_validator_release_manifest_commits_divergent_raw_eif_hashes():
+    release = _release()
+    evidence = [
+        build_validator_build_evidence(
+            release,
+            builder_domain=domain,
+            builder_id=domain + "-parent",
+            build_ordinal=ordinal,
+        )
+        for domain in ("gateway", "validator")
+        for ordinal in (1, 2, 3)
+    ]
+    alternate = build_validator_release(
+        commit_sha=release["commit_sha"],
+        pcr0=release["pcr0"],
+        app_manifest_hash=release["app_manifest_hash"],
+        dependency_lock_hash=release["dependency_lock_hash"],
+        normalized_image_hash=release["normalized_image_hash"],
+        eif_hash=_hash("9"),
+        dockerfile_hash=release["dockerfile_hash"],
+        base_dockerfile_hash=release["base_dockerfile_hash"],
+    )
+    evidence[-1] = build_validator_build_evidence(
+        alternate,
+        builder_domain="validator",
+        builder_id="validator-parent",
+        build_ordinal=3,
+    )
+
+    manifest = build_validator_release_manifest(evidence)
+
+    assert manifest["eif_hashes"] == sorted({_hash("6"), _hash("9")})
+    assert manifest["release"]["release_hash"] == release["release_hash"]

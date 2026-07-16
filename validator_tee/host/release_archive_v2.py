@@ -16,6 +16,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 
 from leadpoet_canonical.attested_v2 import sha256_json
 from validator_tee.host.release_v2 import (
+    DETERMINISTIC_RELEASE_FIELDS,
+    describe_eif_pcr0,
     parse_pcr0,
     validate_validator_release,
     validate_validator_release_manifest,
@@ -135,17 +137,27 @@ def verify_archive_directory(path: Path) -> Dict[str, Any]:
             "archived local validator release",
         )
     )
-    if local_release != release:
+    if any(
+        local_release[field] != release[field]
+        for field in DETERMINISTIC_RELEASE_FIELDS
+    ):
         raise ValidatorReleaseArchiveV2Error("archived local validator release differs")
     if (
         release["release_hash"] != document["release_hash"]
         or release["commit_sha"] != document["commit_sha"]
     ):
         raise ValidatorReleaseArchiveV2Error("validator archived release identity mismatch")
-    if files["validator-enclave.eif"]["sha256"] != release["eif_hash"]:
+    if files["validator-enclave.eif"]["sha256"] != local_release["eif_hash"]:
         raise ValidatorReleaseArchiveV2Error("archived validator EIF differs from release")
-    if parse_pcr0((root / "enclave_build_output.txt").read_text(encoding="utf-8")) != release["pcr0"]:
+    build_pcr0 = parse_pcr0(
+        (root / "enclave_build_output.txt").read_text(encoding="utf-8")
+    )
+    if build_pcr0 != release["pcr0"]:
         raise ValidatorReleaseArchiveV2Error("archived validator PCR0 differs from release")
+    if describe_eif_pcr0(root / "validator-enclave.eif") != build_pcr0:
+        raise ValidatorReleaseArchiveV2Error(
+            "archived validator EIF PCR0 differs from its build output"
+        )
     if files["Dockerfile.enclave"]["sha256"] != release["dockerfile_hash"]:
         raise ValidatorReleaseArchiveV2Error("archived validator Dockerfile differs")
     if files["Dockerfile.base"]["sha256"] != release["base_dockerfile_hash"]:
@@ -173,7 +185,10 @@ def archive_verified_release(
     local_release = validate_validator_release(
         _load_json(tee_root / "validator-v2-release.json", "local validator release")
     )
-    if local_release != release:
+    if any(
+        local_release[field] != release[field]
+        for field in DETERMINISTIC_RELEASE_FIELDS
+    ):
         raise ValidatorReleaseArchiveV2Error(
             "local validator build differs from approved six-build release"
         )

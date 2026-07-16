@@ -49,6 +49,8 @@ import json
 import sys
 from pathlib import Path
 
+from validator_tee.host.release_v2 import DETERMINISTIC_RELEASE_FIELDS
+
 root = Path(sys.argv[1])
 domain = sys.argv[2]
 records = [
@@ -56,8 +58,9 @@ records = [
     for ordinal in (1, 2, 3)
 ]
 releases = [record["release"] for record in records]
-if any(release != releases[0] for release in releases[1:]):
-    raise SystemExit("three clean validator builds diverged")
+for field in DETERMINISTIC_RELEASE_FIELDS:
+    if len({release[field] for release in releases}) != 1:
+        raise SystemExit(f"three clean validator builds diverged at {field}")
 print("validator_v2_three_build_release_hash=" + releases[0]["release_hash"])
 PY
 

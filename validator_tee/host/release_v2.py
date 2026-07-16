@@ -31,6 +31,7 @@ _FIELDS = {
     "base_dockerfile_hash",
     "release_hash",
 }
+DETERMINISTIC_RELEASE_FIELDS = frozenset(_FIELDS - {"eif_hash"})
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
 
@@ -85,6 +86,22 @@ def parse_pcr0(output: str) -> str:
     raise ValidatorReleaseV2Error("validator build output lacks a valid PCR0")
 
 
+def describe_eif_pcr0(path: Path) -> str:
+    try:
+        completed = subprocess.run(
+            ["nitro-cli", "describe-eif", "--eif-path", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValidatorReleaseV2Error(
+            "validator EIF description is unavailable"
+        ) from exc
+    return parse_pcr0(completed.stdout)
+
+
 def build_validator_release(
     *,
     commit_sha: str,
@@ -119,7 +136,13 @@ def build_validator_release(
             base_dockerfile_hash, "base_dockerfile_hash"
         ),
     }
-    return {**body, "release_hash": _canonical_hash(body)}
+    # Nitro CLI may embed non-measured build metadata in the EIF. PCR0 and the
+    # normalized image define runtime identity; the raw EIF hash remains a
+    # local/audit observation and is committed by the six-build evidence root.
+    release_identity = {
+        key: value for key, value in body.items() if key != "eif_hash"
+    }
+    return {**body, "release_hash": _canonical_hash(release_identity)}
 
 
 def validate_validator_release(value: Mapping[str, Any]) -> Dict[str, Any]:
@@ -220,7 +243,7 @@ def build_validator_release_manifest(
                 "validator %s build ordinals are incomplete" % domain
             )
     releases = [item["release"] for item in normalized]
-    for field in sorted(_FIELDS):
+    for field in sorted(DETERMINISTIC_RELEASE_FIELDS):
         if len({item[field] for item in releases}) != 1:
             raise ValidatorReleaseV2Error(
                 "independent validator builds diverged at %s" % field
@@ -235,7 +258,8 @@ def build_validator_release_manifest(
     )
     body = {
         "schema_version": VALIDATOR_RELEASE_MANIFEST_SCHEMA_VERSION,
-        "release": releases[0],
+        "release": sorted_evidence[0]["release"],
+        "eif_hashes": sorted({item["eif_hash"] for item in releases}),
         "build_evidence_root": _sha256_bytes(
             json.dumps(
                 sorted_evidence,
@@ -254,6 +278,7 @@ def validate_validator_release_manifest(value: Mapping[str, Any]) -> Dict[str, A
     if not isinstance(value, Mapping) or set(value) != {
         "schema_version",
         "release",
+        "eif_hashes",
         "build_evidence_root",
         "verified_build_count",
         "builder_domains",
@@ -263,6 +288,17 @@ def validate_validator_release_manifest(value: Mapping[str, Any]) -> Dict[str, A
     if value.get("schema_version") != VALIDATOR_RELEASE_MANIFEST_SCHEMA_VERSION:
         raise ValidatorReleaseV2Error("validator release manifest schema is invalid")
     release = validate_validator_release(value.get("release"))
+    eif_hashes = value.get("eif_hashes")
+    if (
+        not isinstance(eif_hashes, list)
+        or not eif_hashes
+        or len(eif_hashes) > 6
+        or eif_hashes != sorted(set(eif_hashes))
+    ):
+        raise ValidatorReleaseV2Error("validator release EIF hashes are invalid")
+    normalized_eif_hashes = [_hash(item, "eif_hash") for item in eif_hashes]
+    if release["eif_hash"] not in normalized_eif_hashes:
+        raise ValidatorReleaseV2Error("validator representative EIF hash is absent")
     build_evidence_root = _hash(
         value.get("build_evidence_root"),
         "build_evidence_root",
@@ -274,6 +310,7 @@ def validate_validator_release_manifest(value: Mapping[str, Any]) -> Dict[str, A
     body = {
         "schema_version": VALIDATOR_RELEASE_MANIFEST_SCHEMA_VERSION,
         "release": release,
+        "eif_hashes": normalized_eif_hashes,
         "build_evidence_root": build_evidence_root,
         "verified_build_count": 6,
         "builder_domains": sorted(VALIDATOR_BUILDER_DOMAINS),
@@ -319,9 +356,14 @@ def release_from_build_outputs(
         base_dockerfile = (repo_root / "validator_tee" / "Dockerfile.base").read_bytes()
     except OSError as exc:
         raise ValidatorReleaseV2Error("validator build output is unavailable") from exc
+    measured_pcr0 = parse_pcr0(measurements)
+    if describe_eif_pcr0(eif_path) != measured_pcr0:
+        raise ValidatorReleaseV2Error(
+            "validator EIF PCR0 differs from its build output"
+        )
     return build_validator_release(
         commit_sha=_git_commit(repo_root),
-        pcr0=parse_pcr0(measurements),
+        pcr0=measured_pcr0,
         app_manifest_hash=app_manifest_hash,
         dependency_lock_hash=dependency_lock_hash,
         normalized_image_hash=normalized_image_hash,

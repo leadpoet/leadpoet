@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+import validator_tee.host.release_archive_v2 as release_archive
+
 from validator_tee.host.release_archive_v2 import (
     ValidatorReleaseArchiveV2Error,
     archive_verified_release,
@@ -21,6 +23,19 @@ from validator_tee.host.release_v2 import (
 
 def _sha(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+@pytest.fixture(autouse=True)
+def _describe_fixture_eif(monkeypatch):
+    monkeypatch.setattr(
+        release_archive,
+        "describe_eif_pcr0",
+        lambda path: release_archive.parse_pcr0(
+            (Path(path).parent / "enclave_build_output.txt").read_text(
+                encoding="utf-8"
+            )
+        ),
+    )
 
 
 def _fixture(root: Path, character: str):
@@ -97,6 +112,24 @@ def test_validator_archive_rejects_tampered_eif(tmp_path):
         match="size mismatch|hash mismatch",
     ):
         verify_archive_directory(archive)
+
+
+def test_validator_archive_rejects_eif_with_different_measured_pcr0(
+    tmp_path, monkeypatch
+):
+    tee_root, manifest_path, _manifest = _fixture(tmp_path / "build", "b")
+    result = archive_verified_release(
+        release_manifest_path=manifest_path,
+        validator_tee_root=tee_root,
+        archive_root=tmp_path / "archive",
+    )
+    monkeypatch.setattr(release_archive, "describe_eif_pcr0", lambda _path: "f" * 96)
+
+    with pytest.raises(
+        ValidatorReleaseArchiveV2Error,
+        match="EIF PCR0 differs",
+    ):
+        verify_archive_directory(Path(result["archive_path"]))
 
 
 def test_validator_archive_retains_current_and_two_predecessors(tmp_path):

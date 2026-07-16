@@ -245,8 +245,78 @@ def test_auditor_source_has_no_verification_burn_or_trust_banner():
     assert "submit_burn_weights_to_uid0" not in source
     assert "AUDITOR VERIFICATION MODE" not in source
     assert "Trust level:" not in source
-    # The verified V1 fallback is intentionally present again (env-gated via
-    # AUDITOR_ALLOW_VERIFIED_V1_FALLBACK) so auditors keep submitting while
-    # the gateway serves the legacy weight path; it must stay fully verified.
-    assert "AUDITOR_ALLOW_VERIFIED_V1_FALLBACK" in source
+    # The verified V1 path is intentionally present (selected via
+    # AUDITOR_WEIGHT_PROTOCOL) so auditors keep submitting while the gateway
+    # serves the legacy weight path; it must stay fully verified.
+    assert "AUDITOR_WEIGHT_PROTOCOL" in source
     assert "verify_attested_weights_v1" in source
+
+
+def _protocol_probe_auditor(monkeypatch, protocol):
+    if protocol is None:
+        monkeypatch.delenv("AUDITOR_WEIGHT_PROTOCOL", raising=False)
+    else:
+        monkeypatch.setenv("AUDITOR_WEIGHT_PROTOCOL", protocol)
+    auditor = auditor_module.AuditorValidator.__new__(
+        auditor_module.AuditorValidator
+    )
+    auditor.calls = []
+
+    async def v2_absent(_epoch):
+        auditor.calls.append("v2")
+        auditor._last_v2_authority_was_absent = True
+        return None
+
+    async def v1_bundle(_epoch):
+        auditor.calls.append("v1")
+        return {"bundle": "v1"}
+
+    auditor.fetch_attested_weights_v2 = v2_absent
+    auditor.fetch_attested_weights_v1 = v1_bundle
+    auditor.verify_attested_weights_v1 = (
+        lambda bundle, *, expected_epoch_id: dict(bundle)
+    )
+    return auditor
+
+
+def test_forced_v1_mode_never_requests_the_v2_endpoint(monkeypatch):
+    auditor = _protocol_probe_auditor(monkeypatch, "legacy_v1_compat")
+
+    result, status = asyncio.run(auditor.fetch_verified_weight_authority(23973))
+
+    assert auditor.calls == ["v1"]
+    assert status == "v1_verified"
+    assert result == {"bundle": "v1"}
+
+
+def test_forced_v2_mode_never_falls_back_to_v1(monkeypatch):
+    auditor = _protocol_probe_auditor(monkeypatch, "authoritative_v2")
+
+    result, status = asyncio.run(auditor.fetch_verified_weight_authority(23973))
+
+    assert auditor.calls == ["v2"]
+    assert result is None
+    assert status == "v2_unavailable"
+
+
+def test_auto_mode_uses_verified_v1_only_when_v2_authority_absent(monkeypatch):
+    auditor = _protocol_probe_auditor(monkeypatch, None)
+
+    result, status = asyncio.run(auditor.fetch_verified_weight_authority(23973))
+
+    assert auditor.calls == ["v2", "v1"]
+    assert status == "v1_verified"
+    assert result == {"bundle": "v1"}
+
+
+def test_unknown_protocol_value_warns_and_runs_auto(monkeypatch, caplog):
+    auditor = _protocol_probe_auditor(monkeypatch, "banana")
+
+    with caplog.at_level("WARNING"):
+        result, status = asyncio.run(
+            auditor.fetch_verified_weight_authority(23973)
+        )
+
+    assert "auditor_weight_protocol_invalid" in caplog.text
+    assert auditor.calls == ["v2", "v1"]
+    assert status == "v1_verified"

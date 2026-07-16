@@ -274,11 +274,14 @@ class AuditorValidator:
         self.validator_code_hash = None
         self.validator_hotkey = None
         
+        weight_protocol = self.auditor_weight_protocol()
         logger.info("✅ Auditor Validator initialized")
+        logger.info("auditor_weight_protocol=%s", weight_protocol)
         print(f"✅ Auditor Validator initialized")
         print(f"   Hotkey: {self.wallet.hotkey.ss58_address}")
         print(f"   UID: {self.uid}")
         print(f"   Gateway: {self.gateway_url}")
+        print(f"   Weight protocol: {weight_protocol}")
     
     def _get_uid(self) -> Optional[int]:
         """Get our UID from the metagraph."""
@@ -869,35 +872,35 @@ class AuditorValidator:
             return None
 
     @staticmethod
-    def _verified_v1_fallback_enabled() -> bool:
-        """Allow the fully verified V1 bundle when V2 authority is absent.
+    def auditor_weight_protocol() -> str:
+        """Auditor-only weight-source selector (AUDITOR_WEIGHT_PROTOCOL).
 
-        Default ON so auditors keep submitting while the gateway runs the
-        legacy weight path; set AUDITOR_ALLOW_VERIFIED_V1_FALLBACK=false to
-        enforce strict V2-only auditing once the V2 release is live. The
-        fallback never fires on an invalid V2 authority — only when the
-        gateway reports that no V2 authority exists for the epoch.
+        Supported modes:
+          auto              - V2-first; verified V1 only when the gateway
+                              reports that no V2 authority exists (default)
+          legacy_v1_compat  - force V1; never request the V2 endpoint
+          authoritative_v2  - force V2; never fall back to V1
+
+        Deliberately separate from VALIDATOR_WEIGHT_PROTOCOL: that variable
+        controls the primary validator and is ignored here. Every mode keeps
+        the strict verification chain (weights hash, signature, PCR0+commit
+        allowlist pair, Nitro attestation); an unrecognized value warns and
+        runs as auto rather than taking an auditor offline over a typo.
         """
         raw = str(
-            os.environ.get("AUDITOR_ALLOW_VERIFIED_V1_FALLBACK", "true") or ""
+            os.environ.get("AUDITOR_WEIGHT_PROTOCOL", "auto") or "auto"
         ).strip().lower()
-        return raw in {"1", "true", "yes", "on"}
+        if raw in {"auto", "legacy_v1_compat", "authoritative_v2"}:
+            return raw
+        logger.warning(
+            "auditor_weight_protocol_invalid value=%s using=auto", raw[:40]
+        )
+        return "auto"
 
-    async def fetch_verified_weight_authority(
+    async def _fetch_verified_v1(
         self,
         epoch_id: int,
     ) -> Tuple[Optional[Dict], str]:
-        """Prefer V2 and permit verified V1 only when V2 authority is absent."""
-
-        v2_bundle = await self.fetch_attested_weights_v2(epoch_id)
-        if isinstance(v2_bundle, dict):
-            verified = self.verify_attested_weights_v2(v2_bundle)
-            return verified, "v2_verified" if verified else "v2_invalid"
-        if not getattr(self, "_last_v2_authority_was_absent", False):
-            return None, "v2_unavailable"
-        if not self._verified_v1_fallback_enabled():
-            return None, "v2_unavailable"
-
         v1_bundle = await self.fetch_attested_weights_v1(epoch_id)
         if not isinstance(v1_bundle, dict):
             return None, "v1_unavailable"
@@ -906,6 +909,28 @@ class AuditorValidator:
             expected_epoch_id=epoch_id,
         )
         return verified, "v1_verified" if verified else "v1_invalid"
+
+    async def fetch_verified_weight_authority(
+        self,
+        epoch_id: int,
+    ) -> Tuple[Optional[Dict], str]:
+        """Fetch the weight authority for the selected auditor protocol."""
+
+        protocol = self.auditor_weight_protocol()
+        if protocol == "legacy_v1_compat":
+            # Forced V1: the V2 endpoint is never requested in this mode.
+            return await self._fetch_verified_v1(epoch_id)
+
+        v2_bundle = await self.fetch_attested_weights_v2(epoch_id)
+        if isinstance(v2_bundle, dict):
+            verified = self.verify_attested_weights_v2(v2_bundle)
+            return verified, "v2_verified" if verified else "v2_invalid"
+        if protocol == "authoritative_v2":
+            return None, "v2_unavailable"
+        if not getattr(self, "_last_v2_authority_was_absent", False):
+            return None, "v2_unavailable"
+
+        return await self._fetch_verified_v1(epoch_id)
 
     def verify_attested_weights_v2(self, authority: Dict) -> Optional[Dict]:
         """Verify finalized V2 authority against independent PCR0 builds."""

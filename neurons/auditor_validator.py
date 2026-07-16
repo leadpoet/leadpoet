@@ -172,6 +172,7 @@ from typing import Dict, List, Optional, Tuple
 import bittensor as bt
 import aiohttp
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from Leadpoet.utils.bittensor_sdk import ExtrinsicOutcome
 
 # Import canonical functions from shared module
 from leadpoet_canonical.weights import (
@@ -246,8 +247,8 @@ class AuditorValidator:
         """
         self.config = config
         self.gateway_url = _normalize_gateway_url(gateway_url)
-        self.wallet = bt.wallet(config=config)
-        self.subtensor = bt.subtensor(config=config)
+        self.wallet = bt.Wallet(config=config)
+        self.subtensor = bt.Subtensor(config=config)
         self.metagraph = self.subtensor.metagraph(config.netuid)
         
         # Verify we're registered as a validator
@@ -302,7 +303,7 @@ class AuditorValidator:
         
         try:
             # Create new subtensor instance
-            self.subtensor = bt.subtensor(config=self.config)
+            self.subtensor = bt.Subtensor(config=self.config)
             self.metagraph = self.subtensor.metagraph(self.config.netuid)
             
             # Verify we're still registered
@@ -1308,19 +1309,22 @@ class AuditorValidator:
         attempt = 0
         while True:
             attempt += 1
-            success, message = self.subtensor.set_weights(
-                netuid=self.config.netuid,
-                wallet=self.wallet,
-                uids=uids,
-                weights=weights,
-                wait_for_finalization=True,
+            outcome = ExtrinsicOutcome.from_sdk(
+                self.subtensor.set_weights(
+                    netuid=self.config.netuid,
+                    wallet=self.wallet,
+                    uids=uids,
+                    weights=weights,
+                    wait_for_finalization=True,
+                    mechid=0,
+                )
             )
-            if success:
+            if outcome.success:
                 return True
 
             print(
                 f"❌ Bittensor rejected weight submission attempt {attempt}: "
-                f"{message}"
+                f"{outcome.message}"
             )
             time.sleep(12)
             current_block = self.subtensor.get_current_block()
@@ -1569,8 +1573,8 @@ EXAMPLES:
     )
     
     # Bittensor arguments
-    bt.wallet.add_args(parser)
-    bt.subtensor.add_args(parser)
+    bt.Wallet.add_args(parser)
+    bt.Subtensor.add_args(parser)
     
     # Custom arguments
     parser.add_argument(
@@ -1594,7 +1598,7 @@ EXAMPLES:
     )
     
     args = parser.parse_args()
-    config = bt.config(parser)
+    config = bt.Config(parser)
     
     # Configure logging level
     logging.getLogger().setLevel(getattr(logging, args.log_level))

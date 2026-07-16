@@ -2,12 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import bittensor as bt
 import pytest
-from bittensor_wallet import Wallet
-
-if not hasattr(bt, "wallet"):
-    bt.wallet = Wallet
 
 import neurons.validator as validator_module
 

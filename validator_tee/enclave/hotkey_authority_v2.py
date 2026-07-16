@@ -56,7 +56,6 @@ MAX_RECIPIENT_CIPHERTEXT_BYTES = 64 * 1024
 MAX_PENDING_WEIGHT_AUTHORIZATIONS = 8
 MAX_SERVE_AXON_SIGNATURES_PER_BOOT = 8
 SDK_SET_WEIGHTS_RETRIES_PER_CALL = 5
-GLOBAL_MAX_SUBNET_COUNT = 4096
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _RAW_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -765,9 +764,12 @@ class ValidatorHotkeyAuthorityV2:
         uids: Sequence[int],
         weights_u16: Sequence[int],
         version_key: int,
+        last_epoch_block: int,
+        pending_epoch_at: int,
+        subnet_epoch_index: int,
         tempo: int,
+        blocks_since_last_step: int,
         current_block: int,
-        storage_netuid: int,
         subnet_reveal_period_epochs: int,
         block_time: float,
         hotkey_public_key_hex: str,
@@ -803,14 +805,17 @@ class ValidatorHotkeyAuthorityV2:
             raise ValidatorHotkeyAuthorityV2Error(
                 "SDK weight vector differs from enclave computation"
             )
-        expected_storage_netuid = (
-            int(profile["mechid"]) * GLOBAL_MAX_SUBNET_COUNT
-            + int(result["netuid"])
-        )
+        schedule = {
+            "last_epoch_block": int(last_epoch_block),
+            "pending_epoch_at": int(pending_epoch_at),
+            "subnet_epoch_index": int(subnet_epoch_index),
+            "tempo": int(tempo),
+            "blocks_since_last_step": int(blocks_since_last_step),
+            "current_block": int(current_block),
+        }
         if (
             int(version_key) != int(profile["version_key"])
-            or int(tempo) != int(profile["tempo"])
-            or int(storage_netuid) != expected_storage_netuid
+            or schedule["tempo"] != int(profile["tempo"])
             or int(subnet_reveal_period_epochs)
             != int(profile["subnet_reveal_period_epochs"])
             or round(float(block_time) * 1000)
@@ -821,7 +826,16 @@ class ValidatorHotkeyAuthorityV2:
             raise ValidatorHotkeyAuthorityV2Error(
                 "SDK chain parameters differ from measured profile"
             )
-        block = int(current_block)
+        if (
+            any(value < 0 or value > 2**64 - 1 for value in schedule.values())
+            or schedule["tempo"] <= 0
+            or schedule["tempo"] > 65535
+            or schedule["last_epoch_block"] > schedule["current_block"]
+        ):
+            raise ValidatorHotkeyAuthorityV2Error(
+                "SDK epoch schedule state is invalid"
+            )
+        block = schedule["current_block"]
         snapshot_block = int(result["block"])
         if not (
             snapshot_block
@@ -835,9 +849,12 @@ class ValidatorHotkeyAuthorityV2:
             uids=normalized_uids,
             weights_u16=normalized_weights,
             version_key=int(version_key),
-            tempo=int(tempo),
-            current_block=block,
-            storage_netuid=int(storage_netuid),
+            last_epoch_block=schedule["last_epoch_block"],
+            pending_epoch_at=schedule["pending_epoch_at"],
+            subnet_epoch_index=schedule["subnet_epoch_index"],
+            tempo=schedule["tempo"],
+            blocks_since_last_step=schedule["blocks_since_last_step"],
+            current_block=schedule["current_block"],
             subnet_reveal_period_epochs=int(subnet_reveal_period_epochs),
             block_time=float(block_time),
             hotkey_public_key=self.hotkey_public_key,
@@ -848,6 +865,7 @@ class ValidatorHotkeyAuthorityV2:
                 "weight_submission_event_hash": event_hash,
                 "commitment_hash": sha256_bytes(commitment),
                 "reveal_round": int(reveal_round),
+                "epoch_schedule": schedule,
                 "attempt": attempt_number,
             }
         )
@@ -863,6 +881,7 @@ class ValidatorHotkeyAuthorityV2:
                 "weight_submission_event_hash": event_hash,
                 "commitment": bytes(commitment),
                 "reveal_round": int(reveal_round),
+                "epoch_schedule": dict(schedule),
                 "consumed": False,
             }
         return {

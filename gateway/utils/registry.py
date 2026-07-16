@@ -83,7 +83,7 @@ def inject_async_subtensor(async_subtensor):
     print(f"✅ AsyncSubtensor injected into registry utils (network: {_async_subtensor.network})")
 
 
-async def get_metagraph_async() -> bt.metagraph:
+async def get_metagraph_async() -> bt.Metagraph:
     """
     Get Bittensor metagraph using injected async subtensor (ASYNC VERSION).
     
@@ -294,7 +294,7 @@ async def get_metagraph_async() -> bt.metagraph:
         raise
 
 
-def get_metagraph() -> bt.metagraph:
+def get_metagraph() -> bt.Metagraph:
     """
     Get Bittensor metagraph (SYNC WRAPPER - prefer async version).
     
@@ -620,7 +620,7 @@ def warm_metagraph_cache(target_epoch: int) -> bool:
                 
                 def _fetch_metagraph():
                     """Helper function to fetch metagraph (runs in timeout-enforced thread)"""
-                    subtensor = bt.subtensor(network=BITTENSOR_NETWORK)
+                    subtensor = bt.Subtensor(network=BITTENSOR_NETWORK)
                     return subtensor.metagraph(netuid=BITTENSOR_NETUID)
                 
                 # Execute with 60-second timeout

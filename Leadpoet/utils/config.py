@@ -201,9 +201,9 @@ def add_validator_args(cls, parser):
 
 def config(cls):
     parser = argparse.ArgumentParser()
-    bt.wallet.add_args(parser)
-    bt.subtensor.add_args(parser)
+    bt.Wallet.add_args(parser)
+    bt.Subtensor.add_args(parser)
     bt.logging.add_args(parser)
-    bt.axon.add_args(parser)
+    bt.Axon.add_args(parser)
     cls.add_args(parser)
-    return bt.config(parser)
+    return bt.Config(parser)

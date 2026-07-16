@@ -111,7 +111,7 @@ def get_subtensor():
     global _subtensor
     if _subtensor is None:
         import bittensor as bt
-        _subtensor = bt.subtensor()
+        _subtensor = bt.Subtensor()
     return _subtensor
 
 

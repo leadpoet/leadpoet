@@ -210,7 +210,7 @@ def _background_epoch_monitor():
                 # across event loops, so we use the OLD sync method here.
                 if subtensor is None:
                     import bittensor as bt
-                    subtensor = bt.subtensor(network=_epoch_network)
+                    subtensor = bt.Subtensor(network=_epoch_network)
                 
                 current_block = subtensor.get_current_block()
                 

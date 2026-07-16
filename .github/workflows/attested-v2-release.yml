@@ -39,7 +39,7 @@ jobs:
           while true; do
             read -r block position < <(python3 - <<'PY'
           import bittensor as bt
-          chain = bt.subtensor(network="finney")
+          chain = bt.Subtensor(network="finney")
           block = int(chain.get_current_block())
           tempo = int(chain.tempo(71))
           print(block, (block + 72) % (tempo + 1))
@@ -116,7 +116,7 @@ jobs:
           while true; do
             read -r block position < <(python3 - <<'PY'
           import bittensor as bt
-          chain = bt.subtensor(network="finney")
+          chain = bt.Subtensor(network="finney")
           block = int(chain.get_current_block())
           tempo = int(chain.tempo(71))
           print(block, (block + 72) % (tempo + 1))

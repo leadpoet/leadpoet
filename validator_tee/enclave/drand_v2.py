@@ -1,6 +1,7 @@
 """Exact C-ABI bridge for enclave-generated Bittensor drand commitments.
 
-The official ``bittensor-drand`` 1.0.0 source exposes ``cr_generate_commit``.
+The official ``bittensor-drand`` 2.0.0 source exposes
+``cr_generate_commit_v2`` for the stateful epoch model.
 Its published Python wheel targets CPython 3.9 and must not be imported into
 the validator's pinned CPython 3.7 enclave.  Production therefore supplies a
 separately rebuilt C-ABI-only shared object whose hash is part of the measured
@@ -44,7 +45,7 @@ def file_sha256(path: Path) -> str:
 
 
 class CtypesDrandCommitBackendV2:
-    """Call only the pinned ``cr_generate_commit`` C ABI."""
+    """Call only the pinned stateful ``cr_generate_commit_v2`` C ABI."""
 
     def __init__(
         self,
@@ -61,7 +62,7 @@ class CtypesDrandCommitBackendV2:
             raise DrandCommitV2Error("drand helper hash mismatch")
         try:
             library = library_loader(str(path))
-            generate = library.cr_generate_commit
+            generate = library.cr_generate_commit_v2
             free_buffer = library.cr_free
             free_string = library.cr_free_str
         except Exception as exc:
@@ -74,7 +75,10 @@ class CtypesDrandCommitBackendV2:
             ctypes.c_uint64,
             ctypes.c_uint64,
             ctypes.c_uint64,
+            ctypes.c_uint64,
             ctypes.c_uint16,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
             ctypes.c_uint64,
             ctypes.c_double,
             ctypes.POINTER(ctypes.c_uint8),
@@ -99,9 +103,12 @@ class CtypesDrandCommitBackendV2:
         uids: Sequence[int],
         weights_u16: Sequence[int],
         version_key: int,
+        last_epoch_block: int,
+        pending_epoch_at: int,
+        subnet_epoch_index: int,
         tempo: int,
+        blocks_since_last_step: int,
         current_block: int,
-        storage_netuid: int,
         subnet_reveal_period_epochs: int,
         block_time: float,
         hotkey_public_key: bytes,
@@ -119,15 +126,22 @@ class CtypesDrandCommitBackendV2:
             raise DrandCommitV2Error("drand sparse weights are invalid")
         numeric = (
             int(version_key),
+            int(last_epoch_block),
+            int(pending_epoch_at),
+            int(subnet_epoch_index),
             int(tempo),
+            int(blocks_since_last_step),
             int(current_block),
-            int(storage_netuid),
             int(subnet_reveal_period_epochs),
         )
         if any(value < 0 for value in numeric):
             raise DrandCommitV2Error("drand chain parameter is negative")
-        if numeric[3] > 65535:
-            raise DrandCommitV2Error("drand storage netuid is invalid")
+        if numeric[4] <= 0 or numeric[4] > 65535:
+            raise DrandCommitV2Error("drand tempo is invalid")
+        if numeric[1] > numeric[6]:
+            raise DrandCommitV2Error("drand epoch state is invalid")
+        if any(value > 2**64 - 1 for value in numeric):
+            raise DrandCommitV2Error("drand chain parameter is too large")
         if not isinstance(block_time, (int, float)) or not 0 < float(block_time) <= 120:
             raise DrandCommitV2Error("drand block time is invalid")
         hotkey = bytes(hotkey_public_key)
@@ -151,6 +165,9 @@ class CtypesDrandCommitBackendV2:
             numeric[2],
             numeric[3],
             numeric[4],
+            numeric[5],
+            numeric[6],
+            numeric[7],
             float(block_time),
             hotkey_array,
             len(hotkey),

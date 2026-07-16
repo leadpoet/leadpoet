@@ -12,6 +12,7 @@ from Leadpoet.base.utils.weight_utils import (
     convert_weights_and_uids_for_emit,
 )
 from Leadpoet.utils.config import add_validator_args
+from Leadpoet.utils.bittensor_sdk import ExtrinsicOutcome
 from Leadpoet.validator.reward import calculate_emissions
 
 class BaseValidatorNeuron(BaseNeuron):
@@ -29,7 +30,7 @@ class BaseValidatorNeuron(BaseNeuron):
         self.config_neuron("./validator_state")
         self.config_axon(8093)
 
-        self.dendrite = bt.dendrite(wallet=self.wallet)
+        self.dendrite = bt.Dendrite(wallet=self.wallet)
         bt.logging.info(f"Dendrite: {self.dendrite}")
         bt.logging.info("Building validation weights.")
         self.scores = np.zeros(self.metagraph.n, dtype=np.float32)
@@ -47,7 +48,7 @@ class BaseValidatorNeuron(BaseNeuron):
         bt.logging.info("Serving validator axon...")
         enclave_backed = hasattr(self.wallet.hotkey, "enclave_client_v2")
         try:
-            self.axon = bt.axon(wallet=self.wallet, config=self.config)
+            self.axon = bt.Axon(wallet=self.wallet, config=self.config)
             self.axon.attach(self.forward)
             if enclave_backed:
                 from validator_tee import AuthoritativeServeAxonContextV2
@@ -56,16 +57,21 @@ class BaseValidatorNeuron(BaseNeuron):
                     substrate=self.subtensor.substrate,
                     wallet=self.wallet,
                 ) as signing_context:
-                    served = self.subtensor.serve_axon(
-                        netuid=self.config.netuid,
-                        axon=self.axon,
-                        period=signing_context.period,
+                    outcome = ExtrinsicOutcome.from_sdk(
+                        self.subtensor.serve_axon(
+                            netuid=self.config.netuid,
+                            axon=self.axon,
+                            period=signing_context.period,
+                        )
                     )
                 self._last_serve_axon_receipts_v2 = list(
                     signing_context.extrinsic_signature_results
                 )
-                if served is not True:
-                    raise RuntimeError("authoritative V2 axon registration failed")
+                if not outcome.success:
+                    detail = f": {outcome.message}" if outcome.message else ""
+                    raise RuntimeError(
+                        f"authoritative V2 axon registration failed{detail}"
+                    )
             else:
                 self.subtensor.serve_axon(
                     netuid=self.config.netuid,
@@ -172,19 +178,22 @@ class BaseValidatorNeuron(BaseNeuron):
         bt.logging.debug("uint_weights", uint_weights)
         bt.logging.debug("uint_uids", uint_uids)
 
-        result, msg = self.subtensor.set_weights(
-            wallet=self.wallet,
-            netuid=self.config.netuid,
-            uids=uint_uids,
-            weights=uint_weights,
-            wait_for_finalization=False,
-            wait_for_inclusion=False,
-            version_key=self.spec_version,
+        outcome = ExtrinsicOutcome.from_sdk(
+            self.subtensor.set_weights(
+                wallet=self.wallet,
+                netuid=self.config.netuid,
+                uids=uint_uids,
+                weights=uint_weights,
+                wait_for_finalization=False,
+                wait_for_inclusion=False,
+                version_key=self.spec_version,
+                mechid=0,
+            )
         )
-        if result:
+        if outcome.success:
             bt.logging.info("set_weights on chain successfully!")
         else:
-            bt.logging.error("set_weights failed", msg)
+            bt.logging.error("set_weights failed", outcome.message)
 
     def resync_metagraph(self):
         bt.logging.info("resync_metagraph()")

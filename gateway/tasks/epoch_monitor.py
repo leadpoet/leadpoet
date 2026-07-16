@@ -85,7 +85,7 @@ class EpochMonitor:
         
         # Initialize subtensor (sync version - for polling)
         try:
-            self.subtensor = bt.subtensor(network=self.network)
+            self.subtensor = bt.Subtensor(network=self.network)
             print(f"✅ Connected to {self.network} chain")
         except Exception as e:
             print(f"❌ Failed to connect to chain: {e}")

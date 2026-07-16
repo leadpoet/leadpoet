@@ -1,12 +1,12 @@
 #!/bin/bash
-# Rebuild the pinned bittensor-drand 1.0.0 C ABI without Python bindings.
+# Rebuild the pinned bittensor-drand 2.0.0 C ABI without Python bindings.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VALIDATOR_TEE_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_ROOT="$(dirname "$VALIDATOR_TEE_DIR")"
-SOURCE_ARCHIVE="${1:-$REPO_ROOT/.validator-tee-artifacts/bittensor_drand-1.0.0.tar.gz}"
+SOURCE_ARCHIVE="${1:-$REPO_ROOT/.validator-tee-artifacts/bittensor_drand-2.0.0.tar.gz}"
 OUTPUT="${2:-$REPO_ROOT/.validator-tee-artifacts/libbittensor_drand_v2.so}"
 EXPECTED_HASH_FILE="${3:-$VALIDATOR_TEE_DIR/enclave/libbittensor_drand_v2.sha256}"
 BUILDER_IMAGE="rust@sha256:d9c3c6f1264a547d84560e06ffd79ed7a799ce0bff0980b26cf10d29af888377"
@@ -39,7 +39,9 @@ set -euo pipefail
 mkdir -p /work/source /work/output /work/cargo
 tar -xzf /work/source.tar.gz -C /work/source --strip-components=1
 cat > /work/source/src/lib.rs <<'RS'
+mod constants;
 mod drand;
+mod epoch_schedule;
 mod ffi;
 RS
 python3 - <<'PY'

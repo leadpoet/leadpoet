@@ -2,9 +2,9 @@
 
 The normal application-signature path is purpose constrained by the enclave.
 The chain path is narrower: while the existing ``Subtensor.set_weights`` call
-runs, this module replaces only timelocked-commit generation and extrinsic
-assembly. The enclave independently reconstructs the exact SCALE payload before
-releasing one sr25519 signature.
+runs, this module replaces only the SDK's stateful timelocked-commit generation
+and extrinsic assembly. The enclave independently reconstructs the exact SCALE
+payload before releasing one sr25519 signature.
 """
 
 from __future__ import annotations
@@ -29,22 +29,23 @@ _ACTIVE_CHAIN_SIGNING_CONTEXT = None
 
 
 def _weight_extrinsic_module() -> Any:
-    """Resolve the module whose global drand helper the installed SDK calls."""
+    """Resolve the module whose stateful drand helper Bittensor 10 calls."""
 
     errors = []
     for module_name in (
-        "bittensor.core.extrinsics.mechanism",  # production Bittensor 9.12
-        "bittensor.core.extrinsics.weights",  # newer SDK layout used in CI
+        "bittensor.core.extrinsics.weights",
+        "bittensor.core.extrinsics.mechanism",
     ):
         try:
             module = importlib.import_module(module_name)
         except ImportError as exc:
             errors.append(exc)
             continue
-        if hasattr(module, "get_encrypted_commit"):
+        if hasattr(module, "get_encrypted_commit_v2"):
             return module
     raise EnclaveHotkeyV2Error(
-        "installed Bittensor SDK has no measured timelocked-weight helper"
+        "installed Bittensor SDK has no stateful timelocked-weight helper; "
+        "Bittensor 10.5.0 or newer is required"
     ) from (errors[-1] if errors else None)
 
 
@@ -391,7 +392,8 @@ class AuthoritativeSetWeightsContextV2(AbstractContextManager):
         self.weight_submission_event_hash = str(weight_submission_event_hash)
         self._on_signed_extrinsic = on_signed_extrinsic
         self.client = wallet.hotkey.enclave_client_v2
-        self._original_get_encrypted_commit = None
+        self._weight_module = None
+        self._original_get_encrypted_commit_v2 = None
         self._original_create_signed_extrinsic = None
         self._commit_queue = []  # type: List[Dict[str, Any]]
         self.extrinsic_signature_results = []  # type: List[Dict[str, Any]]
@@ -404,12 +406,16 @@ class AuthoritativeSetWeightsContextV2(AbstractContextManager):
                 raise EnclaveHotkeyV2Error(
                     "another authoritative chain-signing context is active"
                 )
-            mechanism = _weight_extrinsic_module()
-            self._original_get_encrypted_commit = mechanism.get_encrypted_commit
+            self._weight_module = _weight_extrinsic_module()
+            self._original_get_encrypted_commit_v2 = (
+                self._weight_module.get_encrypted_commit_v2
+            )
             self._original_create_signed_extrinsic = (
                 self.substrate.create_signed_extrinsic
             )
-            mechanism.get_encrypted_commit = self._get_encrypted_commit
+            self._weight_module.get_encrypted_commit_v2 = (
+                self._get_encrypted_commit_v2
+            )
             self.substrate.create_signed_extrinsic = self._create_signed_extrinsic
             _ACTIVE_CHAIN_SIGNING_CONTEXT = self
             return self
@@ -420,9 +426,13 @@ class AuthoritativeSetWeightsContextV2(AbstractContextManager):
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         global _ACTIVE_CHAIN_SIGNING_CONTEXT
         try:
-            mechanism = _weight_extrinsic_module()
-            if self._original_get_encrypted_commit is not None:
-                mechanism.get_encrypted_commit = self._original_get_encrypted_commit
+            if (
+                self._weight_module is not None
+                and self._original_get_encrypted_commit_v2 is not None
+            ):
+                self._weight_module.get_encrypted_commit_v2 = (
+                    self._original_get_encrypted_commit_v2
+                )
             if self._original_create_signed_extrinsic is not None:
                 self.substrate.create_signed_extrinsic = (
                     self._original_create_signed_extrinsic
@@ -431,15 +441,18 @@ class AuthoritativeSetWeightsContextV2(AbstractContextManager):
         finally:
             _CHAIN_SIGNING_PATCH_LOCK.release()
 
-    def _get_encrypted_commit(
+    def _get_encrypted_commit_v2(
         self,
         *,
         uids: List[int],
         weights: List[int],
         version_key: int,
+        last_epoch_block: int,
+        pending_epoch_at: int,
+        subnet_epoch_index: int,
         tempo: int,
+        blocks_since_last_step: int,
         current_block: int,
-        netuid: int,
         subnet_reveal_period_epochs: int,
         block_time: float,
         hotkey: bytes,
@@ -451,9 +464,12 @@ class AuthoritativeSetWeightsContextV2(AbstractContextManager):
                 "uids": [int(item) for item in uids],
                 "weights_u16": [int(item) for item in weights],
                 "version_key": int(version_key),
+                "last_epoch_block": int(last_epoch_block),
+                "pending_epoch_at": int(pending_epoch_at),
+                "subnet_epoch_index": int(subnet_epoch_index),
                 "tempo": int(tempo),
+                "blocks_since_last_step": int(blocks_since_last_step),
                 "current_block": int(current_block),
-                "storage_netuid": int(netuid),
                 "subnet_reveal_period_epochs": int(
                     subnet_reveal_period_epochs
                 ),

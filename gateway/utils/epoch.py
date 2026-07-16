@@ -59,7 +59,7 @@ def inject_async_subtensor(async_subtensor):
     _async_subtensor = async_subtensor
     
     # Create sync subtensor for quick block queries (avoids WebSocket subscription conflicts)
-    _sync_subtensor = bt.subtensor(network=_async_subtensor.network)
+    _sync_subtensor = bt.Subtensor(network=_async_subtensor.network)
     
     print(f"✅ AsyncSubtensor injected into epoch utils (network: {_async_subtensor.network})")
     print(f"✅ Sync subtensor created for block queries (avoids subscription conflicts)")

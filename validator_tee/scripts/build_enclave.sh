@@ -96,7 +96,7 @@ echo "   ✓ Validator V2 runtime artifacts staged and verified"
 
 echo "🔐 Step 0b.1: Building pinned bittensor-drand C ABI helper..."
 bash "$VALIDATOR_TEE_DIR/scripts/build_drand_cabi_v2.sh" \
-    "$RUNTIME_ARTIFACT_DIR/bittensor_drand-1.0.0.tar.gz" \
+    "$RUNTIME_ARTIFACT_DIR/bittensor_drand-2.0.0.tar.gz" \
     "$RUNTIME_ARTIFACT_DIR/libbittensor_drand_v2.so" \
     "$VALIDATOR_TEE_DIR/enclave/libbittensor_drand_v2.sha256"
 echo "   ✓ Bittensor drand C ABI helper rebuilt and hash verified"

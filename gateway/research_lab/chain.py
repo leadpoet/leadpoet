@@ -160,7 +160,7 @@ import os
 import bittensor as bt
 
 network = os.getenv("BITTENSOR_NETWORK", "finney")
-subtensor = bt.subtensor(network=network)
+subtensor = bt.Subtensor(network=network)
 try:
     block = int(subtensor.block)
 finally:
@@ -216,7 +216,7 @@ def _fetch_metagraph_direct() -> Any:
     proxy_keys = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
     saved_proxy_env = {key: os.environ.pop(key) for key in proxy_keys if key in os.environ}
     try:
-        subtensor = bt.subtensor(network=network)
+        subtensor = bt.Subtensor(network=network)
         try:
             return subtensor.metagraph(netuid=netuid)
         finally:

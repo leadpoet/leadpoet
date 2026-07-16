@@ -9,9 +9,9 @@ class BaseNeuron:
 
     def __init__(self, config=None, wallet=None):
         if config is None:
-            config = bt.config()
+            config = bt.Config()
         self.config = config
-        self.wallet = wallet if wallet is not None else bt.wallet(config=self.config)
+        self.wallet = wallet if wallet is not None else bt.Wallet(config=self.config)
         bt.logging.debug("Initializing subtensor for real network")
         
         # ════════════════════════════════════════════════════════════
@@ -33,17 +33,17 @@ class BaseNeuron:
                 self.config.subtensor = bt.Config()
                 self.config.subtensor.network = "test"
                 self.config.subtensor.chain_endpoint = "wss://test.finney.opentensor.ai:443"
-            self.subtensor = bt.subtensor(config=self.config)
+            self.subtensor = bt.Subtensor(config=self.config)
             bt.logging.info(f"Subtensor initialized, endpoint: {self.subtensor.chain_endpoint}, network: {self.config.subtensor.network}")
         except Exception as e:
-            bt.logging.error(f"Failed to initialize bt.subtensor: {e}")
+            bt.logging.error(f"Failed to initialize bt.Subtensor: {e}")
             raise RuntimeError(f"Subtensor initialization failed: {e}")
         finally:
             # Restore proxy environment variables for API calls
             for var, value in saved_proxies.items():
                 os.environ[var] = value
         
-        self.metagraph = bt.metagraph(netuid=self.config.netuid, subtensor=self.subtensor)
+        self.metagraph = bt.Metagraph(netuid=self.config.netuid, subtensor=self.subtensor)
         self.step = 0
         self.block = self.subtensor.get_current_block()
         self.should_exit = False

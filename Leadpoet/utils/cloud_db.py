@@ -363,7 +363,7 @@ class _Verifier:
         """
         net = network or self._network
         nid = netuid or self._netuid
-        subtensor = bt.subtensor(network=net)
+        subtensor = bt.Subtensor(network=net)
         return subtensor.metagraph(netuid=nid)
     
     async def is_miner_async(self, ss58: str, network=None, netuid=None) -> bool:
@@ -463,7 +463,7 @@ def _has_firestore_credentials() -> bool:
     return os.path.exists("service_account_key.json") or bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
 
 # ─────────────────────────────── READ ────────────────────────────────
-def get_cloud_leads(wallet: bt.wallet, limit: int = 100) -> List[Dict]:
+def get_cloud_leads(wallet: bt.Wallet, limit: int = 100) -> List[Dict]:
     if not _VERIFY.is_miner(wallet.hotkey.ss58_address):
         raise PermissionError("Hotkey not registered as miner on subnet")
 
@@ -472,7 +472,7 @@ def get_cloud_leads(wallet: bt.wallet, limit: int = 100) -> List[Dict]:
     return r.json()
 
 # ─────────────────────────────── WRITE ───────────────────────────────
-def save_leads_to_cloud(wallet: bt.wallet, leads: List[Dict]) -> bool:
+def save_leads_to_cloud(wallet: bt.Wallet, leads: List[Dict]) -> bool:
     if not leads:
         return True
 
@@ -502,7 +502,7 @@ def save_leads_to_cloud(wallet: bt.wallet, leads: List[Dict]) -> bool:
 
 # ───────────────────────────── Queued prospects ─────────────────────────────
 def push_prospects_to_cloud(
-    wallet: bt.wallet, 
+    wallet: bt.Wallet,
     prospects: List[Dict],
     network: str = None,
     netuid: int = None
@@ -810,7 +810,7 @@ def push_prospects_to_cloud(
 
 
 def fetch_prospects_from_cloud(
-    wallet: bt.wallet, 
+    wallet: bt.Wallet,
     limit: int = 100,
     network: str = None,
     netuid: int = None
@@ -874,7 +874,7 @@ def fetch_prospects_from_cloud(
 
 # ---- Consensus Validation Functions ---------------------------------
 def submit_validation_assessment(
-    wallet: bt.wallet,
+    wallet: bt.Wallet,
     prospect_id: str,
     lead_id: str,
     lead_data: Dict,
@@ -1012,7 +1012,7 @@ def submit_validation_assessment(
 
 
 def get_rejection_feedback(
-    wallet: bt.wallet,
+    wallet: bt.Wallet,
     limit: int = 50,
     network: str = None,
     netuid: int = None
@@ -1160,37 +1160,37 @@ def fetch_curation_result(request_id: str) -> dict:
         return None        # let the caller loop again
     return r.json()
 
-def _signed_body(wallet: bt.wallet, extra: dict) -> dict:
+def _signed_body(wallet: bt.Wallet, extra: dict) -> dict:
     payload  = generate_timestamp(json.dumps(extra, sort_keys=True, default=str))  # Handle datetime objects
     sig_b64  = base64.b64encode(wallet.hotkey.sign(payload)).decode()
     return {"wallet": wallet.hotkey.ss58_address,
             "signature": sig_b64, **extra}
 
 # ───────── validator → miner ------------------------------------------------
-def push_miner_curation_request(wallet: bt.wallet, payload: dict) -> str:
+def push_miner_curation_request(wallet: bt.Wallet, payload: dict) -> str:
     body = _signed_body(wallet, payload)
     r    = requests.post(f"{API_URL}/curate/miner_request", json=body, timeout=10)
     r.raise_for_status()
     return r.json()["miner_request_id"]
 
-def fetch_miner_curation_request(wallet: bt.wallet) -> dict:
+def fetch_miner_curation_request(wallet: bt.Wallet) -> dict:
     body = _signed_body(wallet, {})
     r    = requests.post(f"{API_URL}/curate/miner_request/fetch", json=body, timeout=10)
     r.raise_for_status()
     return r.json()
 
 # ───────── miner → validator -----------------------------------------------
-def push_miner_curation_result(wallet: bt.wallet, result: dict):
+def push_miner_curation_result(wallet: bt.Wallet, result: dict):
     body = _signed_body(wallet, result)
     requests.post(f"{API_URL}/curate/miner_result", json=body, timeout=30).raise_for_status()
 
-def fetch_miner_curation_result(wallet: bt.wallet) -> dict:
+def fetch_miner_curation_result(wallet: bt.Wallet) -> dict:
     body = _signed_body(wallet, {})
     r    = requests.post(f"{API_URL}/curate/miner_result/fetch", json=body, timeout=10)
     r.raise_for_status()
     return r.json()
 
-def push_validator_weights(wallet: bt.wallet, uid: int, weights: dict):
+def push_validator_weights(wallet: bt.Wallet, uid: int, weights: dict):
     body   = _signed_body(wallet, {"uid": uid, "weights": weights})
     r      = requests.post(f"{API_URL}/validator_weights", json=body, timeout=10)
     r.raise_for_status()
@@ -1198,7 +1198,7 @@ def push_validator_weights(wallet: bt.wallet, uid: int, weights: dict):
 
 # ──────────────────── BROADCAST API REQUESTS ─────────────────────────────
 
-def broadcast_api_request(wallet: bt.wallet, num_leads: int, business_desc: str, client_id: str = None) -> str:
+def broadcast_api_request(wallet: bt.Wallet, num_leads: int, business_desc: str, client_id: str = None) -> str:
     """
     Broadcast an API request to Supabase for ALL validators and miners to process.
 
@@ -1245,7 +1245,7 @@ def broadcast_api_request(wallet: bt.wallet, num_leads: int, business_desc: str,
         return None
 
 
-def fetch_broadcast_requests(wallet: bt.wallet, role: str = "validator") -> List[Dict]:
+def fetch_broadcast_requests(wallet: bt.Wallet, role: str = "validator") -> List[Dict]:
     """
     Fetch pending broadcast API requests from Supabase.
     Returns list of pending requests that need processing.
@@ -1289,7 +1289,7 @@ def fetch_broadcast_requests(wallet: bt.wallet, role: str = "validator") -> List
     #     return []
 
 
-def mark_broadcast_processing(wallet: bt.wallet, request_id: str) -> bool:
+def mark_broadcast_processing(wallet: bt.Wallet, request_id: str) -> bool:
     """
     Mark a broadcast request as being processed to prevent duplicates.
     Uses conditional UPDATE for atomic operation.
@@ -1351,7 +1351,7 @@ def get_broadcast_status(request_id: str) -> Dict:
         bt.logging.error(f"Failed to get status for request {request_id[:8]}...: {e}")
         return {"status": "error", "leads": [], "error": str(e)}
 
-def push_validator_ranking(wallet: bt.wallet, request_id: str, ranked_leads: List[Dict], validator_trust: float) -> bool:
+def push_validator_ranking(wallet: bt.Wallet, request_id: str, ranked_leads: List[Dict], validator_trust: float) -> bool:
     """
     Submit validator's ranking for a broadcast API request to Supabase.
 
@@ -1521,7 +1521,7 @@ def log_consensus_metrics(
         bt.logging.warning(f"Failed to log consensus metrics (non-critical): {e}")
         return False
 
-def push_miner_curated_leads(wallet: bt.wallet, request_id: str, leads: List[Dict]) -> bool:
+def push_miner_curated_leads(wallet: bt.Wallet, request_id: str, leads: List[Dict]) -> bool:
     """
     Push miner's curated leads to Supabase for validators to pick up.
 
@@ -1907,7 +1907,7 @@ def check_linkedin_combo_duplicate(linkedin_url: str, company_linkedin_url: str)
         return False
 
 
-def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
+def gateway_get_presigned_url(wallet: bt.Wallet, lead_data: Dict) -> Dict:
     """
     Get presigned URL from gateway for S3/MinIO upload.
     
@@ -2060,7 +2060,7 @@ def gateway_upload_lead(presigned_url: str, lead_data: Dict) -> bool:
         return False
 
 
-def gateway_verify_submission(wallet: bt.wallet, lead_id: str) -> Dict:
+def gateway_verify_submission(wallet: bt.Wallet, lead_id: str) -> Dict:
     """
     Trigger gateway verification of uploaded lead (BRD Section 4.1, Step 5-6).
     
@@ -2210,7 +2210,7 @@ def gateway_verify_submission(wallet: bt.wallet, lead_id: str) -> Dict:
         return None
 
 
-def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> tuple:
+def gateway_get_epoch_leads(wallet: bt.Wallet, epoch_id: int) -> tuple:
     """
     Get assigned leads for current epoch (validator only).
     
@@ -2297,7 +2297,7 @@ def gateway_get_epoch_leads(wallet: bt.wallet, epoch_id: int) -> tuple:
         return ([], 50)  # Return empty list (not None) to indicate "retry later", default max
 
 
-def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_results: List[Dict]) -> bool:
+def gateway_submit_validation(wallet: bt.Wallet, epoch_id: int, validation_results: List[Dict]) -> bool:
     """
     Submit validation results for all leads in an epoch (IMMEDIATE REVEAL MODE).
     
@@ -2448,7 +2448,7 @@ def gateway_submit_validation(wallet: bt.wallet, epoch_id: int, validation_resul
 # Lead Fulfillment System — Miner Functions
 # ═══════════════════════════════════════════════════════════════════
 
-def gateway_poll_fulfillment_requests(wallet: bt.wallet) -> List[Dict]:
+def gateway_poll_fulfillment_requests(wallet: bt.Wallet) -> List[Dict]:
     """Poll the gateway for active fulfillment ICP requests."""
     try:
         response = requests.get(
@@ -2464,7 +2464,7 @@ def gateway_poll_fulfillment_requests(wallet: bt.wallet) -> List[Dict]:
 
 
 def gateway_submit_fulfillment_commit(
-    wallet: bt.wallet,
+    wallet: bt.Wallet,
     request_id: str,
     lead_hashes: List[Dict],
     schema_version: int = 1,
@@ -2506,7 +2506,7 @@ def gateway_submit_fulfillment_commit(
 
 
 def gateway_reveal_fulfillment(
-    wallet: bt.wallet,
+    wallet: bt.Wallet,
     request_id: str,
     submission_id: str,
     leads: List[Dict],
@@ -2547,12 +2547,12 @@ def gateway_reveal_fulfillment(
 # Lead Fulfillment System — Validator Functions
 # ═══════════════════════════════════════════════════════════════════
 
-def _sign_fulfillment_message(wallet: bt.wallet, msg: str) -> str:
+def _sign_fulfillment_message(wallet: bt.Wallet, msg: str) -> str:
     """Ed25519-sign a fulfillment message, returning base64 string."""
     return base64.b64encode(wallet.hotkey.sign(msg)).decode()
 
 
-def gateway_get_fulfillment_reveals(wallet: bt.wallet, request_id: str = None) -> dict:
+def gateway_get_fulfillment_reveals(wallet: bt.Wallet, request_id: str = None) -> dict:
     """Fetch revealed leads in scoring status, ready for scoring.
 
     Passes the validator's hotkey so the gateway excludes requests
@@ -2627,7 +2627,7 @@ def gateway_get_fulfillment_reveals(wallet: bt.wallet, request_id: str = None) -
 
 
 def gateway_submit_fulfillment_scores(
-    wallet: bt.wallet,
+    wallet: bt.Wallet,
     request_id: str,
     scores: List[Dict],
     validator_hotkey: str = "",
@@ -2669,7 +2669,7 @@ def gateway_submit_fulfillment_scores(
 
 
 def gateway_get_fulfillment_leaderboard_snapshot(
-    wallet: bt.wallet, limit: int = 3
+    wallet: bt.Wallet, limit: int = 3
 ) -> Dict[str, Any]:
     """Fetch the unchanged leaderboard response including its exact time window."""
 
@@ -2706,7 +2706,7 @@ def gateway_get_fulfillment_leaderboard_snapshot(
     )
 
 
-def gateway_get_fulfillment_leaderboard(wallet: bt.wallet, limit: int = 3) -> List[Dict]:
+def gateway_get_fulfillment_leaderboard(wallet: bt.Wallet, limit: int = 3) -> List[Dict]:
     """Fetch the top-N fulfillment miners ranked by wins in the last 140 epochs.
 
     Window: rolling 140-epoch window (~7.0 days) anchored to current wall-clock
@@ -2740,7 +2740,7 @@ def gateway_get_fulfillment_leaderboard(wallet: bt.wallet, limit: int = 3) -> Li
     ]
 
 
-def gateway_get_all_fulfillment_rewards(wallet: bt.wallet, current_epoch: int) -> Dict[str, float]:
+def gateway_get_all_fulfillment_rewards(wallet: bt.Wallet, current_epoch: int) -> Dict[str, float]:
     """Fetch active fulfillment rewards grouped by miner hotkey.
 
     Returns {miner_hotkey: sum_of_reward_pct} for all rewards where

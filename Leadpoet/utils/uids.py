@@ -4,7 +4,7 @@ import bittensor as bt
 from typing import List
 
 def check_uid_availability(
-    metagraph: "bt.metagraph", uid: int, vpermit_tao_limit: int
+    metagraph: "bt.Metagraph", uid: int, vpermit_tao_limit: int
 ) -> bool:
     if uid >= len(metagraph.hotkeys):
         bt.logging.debug(f"UID {uid} rejected: Out of range (max {len(metagraph.hotkeys) - 1})")

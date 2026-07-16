@@ -57,9 +57,9 @@ def _profile():
         "network": "finney",
         "chain_endpoint": "wss://entrypoint-finney.opentensor.ai:443",
         "genesis_hash": "0" * 64,
-        "spec_version": 424,
+        "spec_version": 432,
         "transaction_version": 1,
-        "version_key": 9012000,
+        "version_key": 10005000,
         "commit_call_index": "0776",
         "serve_axon_call_index": "0704",
         "commit_reveal_version": 4,
@@ -276,10 +276,13 @@ def _prepare(monkeypatch):
         weight_submission_event_hash="sha256:" + "a" * 64,
         uids=response["weight_result"]["sparse_uids"],
         weights_u16=response["weight_result"]["sparse_weights_u16"],
-        version_key=9012000,
+        version_key=10005000,
+        last_epoch_block=response["weight_result"]["block"] - 126,
+        pending_epoch_at=0,
+        subnet_epoch_index=23860,
         tempo=360,
+        blocks_since_last_step=127,
         current_block=response["weight_result"]["block"] + 1,
-        storage_netuid=71,
         subnet_reveal_period_epochs=1,
         block_time=12.0,
         hotkey_public_key_hex=HOTKEY_PUBLIC.hex(),
@@ -293,6 +296,10 @@ def test_commit_and_extrinsic_signature_bind_exact_enclave_vector(monkeypatch):
     assert drand.calls[0]["weights_u16"] == response["weight_result"][
         "sparse_weights_u16"
     ]
+    assert drand.calls[0]["last_epoch_block"] == 8596679
+    assert drand.calls[0]["pending_epoch_at"] == 0
+    assert drand.calls[0]["subnet_epoch_index"] == 23860
+    assert drand.calls[0]["blocks_since_last_step"] == 127
     # Build once with a placeholder payload to obtain the canonical bytes the
     # SDK must present. The authority independently rebuilds this document.
     from leadpoet_canonical.hotkey_authority_v2 import build_weight_extrinsic_authorization_v2
@@ -463,7 +470,7 @@ def test_serve_axon_signer_rebuilds_and_limits_the_exact_call(monkeypatch):
 
     request = {
         "netuid": 71,
-        "version": 9012000,
+        "version": 10005000,
         "ip": 2130706433,
         "port": 8093,
         "ip_type": 4,
@@ -503,10 +510,13 @@ def test_commit_preparation_rejects_changed_weights_or_chain_profile(monkeypatch
         "weight_submission_event_hash": "sha256:" + "a" * 64,
         "uids": response["weight_result"]["sparse_uids"],
         "weights_u16": response["weight_result"]["sparse_weights_u16"],
-        "version_key": 9012000,
+        "version_key": 10005000,
+        "last_epoch_block": response["weight_result"]["block"] - 126,
+        "pending_epoch_at": 0,
+        "subnet_epoch_index": 23860,
         "tempo": 360,
+        "blocks_since_last_step": 127,
         "current_block": response["weight_result"]["block"] + 1,
-        "storage_netuid": 71,
         "subnet_reveal_period_epochs": 1,
         "block_time": 12.0,
         "hotkey_public_key_hex": HOTKEY_PUBLIC.hex(),
@@ -531,10 +541,13 @@ def test_commit_retry_budget_covers_the_full_measured_block_window(monkeypatch):
         "weight_submission_event_hash": "sha256:" + "a" * 64,
         "uids": response["weight_result"]["sparse_uids"],
         "weights_u16": response["weight_result"]["sparse_weights_u16"],
-        "version_key": 9012000,
+        "version_key": 10005000,
+        "last_epoch_block": response["weight_result"]["block"] - 126,
+        "pending_epoch_at": 0,
+        "subnet_epoch_index": 23860,
         "tempo": 360,
+        "blocks_since_last_step": 127,
         "current_block": response["weight_result"]["block"] + 1,
-        "storage_netuid": 71,
         "subnet_reveal_period_epochs": 1,
         "block_time": 12.0,
         "hotkey_public_key_hex": HOTKEY_PUBLIC.hex(),

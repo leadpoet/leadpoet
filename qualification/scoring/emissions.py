@@ -203,7 +203,7 @@ async def is_hotkey_registered(
         loop = asyncio.get_event_loop()
         
         def _check_registration():
-            subtensor = bt.subtensor(network="finney")
+            subtensor = bt.Subtensor(network="finney")
             metagraph = subtensor.metagraph(netuid)
             return hotkey in metagraph.hotkeys
         

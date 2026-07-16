@@ -47,7 +47,7 @@ Requirements:
 - Bittensor CLI
 
 ```bash
-pip install "bittensor>=9.10,<10.0.0" "bittensor-cli>=1.0.0"
+pip install "bittensor==10.5.0" "bittensor-cli>=1.0.0"
 btcli wallet create
 ```
 

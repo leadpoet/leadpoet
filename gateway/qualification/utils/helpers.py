@@ -783,7 +783,7 @@ async def get_current_bittensor_epoch() -> int:
         loop = asyncio.get_event_loop()
         
         def _get_block():
-            subtensor = bt.subtensor(network="finney")
+            subtensor = bt.Subtensor(network="finney")
             return subtensor.block
         
         return await loop.run_in_executor(None, _get_block)
@@ -834,7 +834,7 @@ async def is_hotkey_registered(hotkey: str, netuid: int = SUBNET_NETUID) -> bool
         loop = asyncio.get_event_loop()
         
         def _check_registration():
-            subtensor = bt.subtensor(network="finney")
+            subtensor = bt.Subtensor(network="finney")
             metagraph = subtensor.metagraph(netuid)
             return hotkey in metagraph.hotkeys
         

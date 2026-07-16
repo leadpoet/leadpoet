@@ -21,9 +21,9 @@
     "CheckMortalityAdditionalSigned",
     "CheckMetadataHashAdditionalSigned"
   ],
-  "spec_version": 424,
+  "spec_version": 432,
   "subnet_reveal_period_epochs": 1,
   "tempo": 360,
   "transaction_version": 1,
-  "version_key": 9012000
+  "version_key": 10005000
 }

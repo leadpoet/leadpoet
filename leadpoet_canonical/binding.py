@@ -149,7 +149,7 @@ def verify_binding_message(
             return False
         
         # Verify SR25519 signature
-        from substrateinterface import Keypair
+        from bittensor_wallet import Keypair
         keypair = Keypair(ss58_address=hotkey)
         return keypair.verify(binding_msg.encode(), bytes.fromhex(signature_hex))
 
@@ -355,4 +355,3 @@ if __name__ == "__main__":
     
     print("\n" + "=" * 50)
     print("All tests completed!")
-

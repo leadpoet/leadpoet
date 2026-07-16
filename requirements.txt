@@ -1,26 +1,11 @@
-# Core Bittensor dependencies
-bittensor>=9.10,<10.0.0
-# Pin async-substrate-interface below 1.7 to work around a bittensor SDK
-# bug in 1.7+ (per Yuma 2026-04-29).  Without this cap, the validator's
-# chain client raises an error on cold start.
-#
-# Range pin (rather than an exact ==1.6.4 the way Yuma quoted) because
-# the validator's Dockerfile currently uses python:3.9-slim, and async-
-# substrate-interface 1.6.2-1.6.4 require Python >=3.10 (1.6.1 is the
-# highest 3.9-compatible release).  pip resolves dynamically:
-#   - Python 3.9   → 1.6.1
-#   - Python 3.10+ → 1.6.4
-# So we get Yuma's recommended version automatically once we bump the
-# Docker base image; no requirements.txt change needed at that point.
-#
-# Remove the cap once upstream bittensor releases a substrate-interface
-# bump that's compatible with whatever they shipped in 1.7+.
-async-substrate-interface>=1.6.1,<1.7
-# The legacy (sync) substrate-interface package provides the Keypair used
-# by leadpoet_canonical.binding.verify_binding_message via a lazy,
-# fail-closed import. It was only ever present on the gateway host as an
-# ad-hoc install, so a fresh environment silently rejected every weight
-# submission with "invalid hotkey binding" (epoch 23929).
+# Bittensor 10 understands the stateful epoch metadata introduced by Finney
+# runtime spec 432. The gateway's measured Python 3.9 runtime remains on the
+# final v9-compatible dependency line until that runtime is rebuilt.
+bittensor>=9.10,<10.0.0; python_version < "3.10"
+bittensor==10.5.0; python_version >= "3.10"
+async-substrate-interface>=1.6.1,<1.7; python_version < "3.10"
+async-substrate-interface==2.2.1; python_version >= "3.10"
+# Gateway qualification performs synchronous historical-block inspection.
 substrate-interface==1.7.11
 
 # HTTP and networking

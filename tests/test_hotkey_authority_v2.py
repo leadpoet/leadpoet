@@ -38,9 +38,9 @@ def _profile():
         "network": "finney",
         "chain_endpoint": "wss://entrypoint-finney.opentensor.ai:443",
         "genesis_hash": "0" * 64,
-        "spec_version": 424,
+        "spec_version": 432,
         "transaction_version": 1,
-        "version_key": 9012000,
+        "version_key": 10005000,
         "commit_call_index": "0776",
         "serve_axon_call_index": "0704",
         "commit_reveal_version": 4,
@@ -80,7 +80,7 @@ def test_serve_axon_encoding_matches_finalized_finney_metadata():
     call = encode_serve_axon_call(
         profile=_profile(),
         netuid=71,
-        version=9012000,
+        version=10005000,
         ip=2130706433,
         port=8093,
         ip_type=4,
@@ -89,7 +89,7 @@ def test_serve_axon_encoding_matches_finalized_finney_metadata():
         placeholder2=0,
     )
     assert call.hex() == (
-        "07044700208389000100007f0000000000000000000000009d1f04040000"
+        "0704470008aa98000100007f0000000000000000000000009d1f04040000"
     )
 
 
@@ -114,7 +114,7 @@ def test_checked_in_finney_profile_matches_observed_runtime_payload_fixture():
         block_hash="a23c4fd9e3650f154d48200853e6c44271dd325d9363b7c5aefa582c7a708b23",
     )
     assert preimage.hex() == (
-        "07764700000c6162637b0000000000000004004200140000a801000001000000"
+        "07764700000c6162637b0000000000000004004200140000b001000001000000"
         "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
         "a23c4fd9e3650f154d48200853e6c44271dd325d9363b7c5aefa582c7a708b2300"
     )
@@ -216,7 +216,7 @@ def test_serve_axon_authorization_binds_only_the_measured_call():
         validator_hotkey=HOTKEY,
         hotkey_public_key_hex="2" * 64,
         netuid=71,
-        version=9012000,
+        version=10005000,
         ip=2130706433,
         port=8093,
         ip_type=4,

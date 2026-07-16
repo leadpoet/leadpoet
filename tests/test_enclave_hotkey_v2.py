@@ -127,7 +127,7 @@ class FakeServeCall:
             "call_module": "SubtensorModule",
             "call_function": "serve_axon",
             "call_args": {
-                "version": 9012000,
+                "version": 10005000,
                 "ip": 2130706433,
                 "port": 8093,
                 "ip_type": 4,
@@ -148,6 +148,13 @@ def _wallet(client):
         path="/nonexistent-public-wallet",
         client=client,
     )
+
+
+def _require_weight_extrinsic_module():
+    try:
+        return _weight_extrinsic_module()
+    except EnclaveHotkeyV2Error as exc:
+        pytest.skip(str(exc))
 
 
 def test_public_only_keypair_routes_only_application_domains_to_enclave():
@@ -192,12 +199,12 @@ def test_wallet_creation_rejects_unprovisioned_or_mismatched_state():
 
 
 def test_set_weights_context_uses_enclave_commit_and_exact_sdk_payload(monkeypatch):
-    mechanism = _weight_extrinsic_module()
+    mechanism = _require_weight_extrinsic_module()
 
     client = FakeClient()
     wallet = _wallet(client)
     substrate = FakeSubstrate()
-    original_drand = mechanism.get_encrypted_commit
+    original_drand = mechanism.get_encrypted_commit_v2
     original_signer = substrate.create_signed_extrinsic
     with AuthoritativeSetWeightsContextV2(
         substrate=substrate,
@@ -205,13 +212,16 @@ def test_set_weights_context_uses_enclave_commit_and_exact_sdk_payload(monkeypat
         weight_authorization_id="sha256:" + "6" * 64,
         weight_submission_event_hash="sha256:" + "7" * 64,
     ) as context:
-        commitment, reveal_round = mechanism.get_encrypted_commit(
+        commitment, reveal_round = mechanism.get_encrypted_commit_v2(
             uids=[0, 14],
             weights=[65535, 123],
-            version_key=9012000,
+            version_key=10005000,
+            last_epoch_block=100,
+            pending_epoch_at=0,
+            subnet_epoch_index=23859,
             tempo=360,
+            blocks_since_last_step=22,
             current_block=122,
-            netuid=71,
             subnet_reveal_period_epochs=1,
             block_time=12.0,
             hotkey=wallet.hotkey.public_key,
@@ -228,8 +238,25 @@ def test_set_weights_context_uses_enclave_commit_and_exact_sdk_payload(monkeypat
         assert context.extrinsic_signature_results[0]["receipt"][
             "receipt_hash"
         ].startswith("sha256:")
-    assert mechanism.get_encrypted_commit is original_drand
+    assert mechanism.get_encrypted_commit_v2 is original_drand
     assert substrate.create_signed_extrinsic == original_signer
+    commit_request = [item for item in client.requests if item[0] == "commit"][0][1]
+    assert commit_request == {
+        "weight_authorization_id": "sha256:" + "6" * 64,
+        "weight_submission_event_hash": "sha256:" + "7" * 64,
+        "uids": [0, 14],
+        "weights_u16": [65535, 123],
+        "version_key": 10005000,
+        "last_epoch_block": 100,
+        "pending_epoch_at": 0,
+        "subnet_epoch_index": 23859,
+        "tempo": 360,
+        "blocks_since_last_step": 22,
+        "current_block": 122,
+        "subnet_reveal_period_epochs": 1,
+        "block_time": 12.0,
+        "hotkey_public_key_hex": PUBLIC_KEY,
+    }
     extrinsic_request = [item for item in client.requests if item[0] == "extrinsic"][0][1]
     assert extrinsic_request == {
         "commit_authorization_id": "sha256:" + "2" * 64,
@@ -242,12 +269,12 @@ def test_set_weights_context_uses_enclave_commit_and_exact_sdk_payload(monkeypat
 
 
 def test_set_weights_context_restores_sdk_functions_after_failure():
-    mechanism = _weight_extrinsic_module()
+    mechanism = _require_weight_extrinsic_module()
 
     client = FakeClient()
     wallet = _wallet(client)
     substrate = FakeSubstrate()
-    original_drand = mechanism.get_encrypted_commit
+    original_drand = mechanism.get_encrypted_commit_v2
     original_signer = substrate.create_signed_extrinsic
     with pytest.raises(RuntimeError, match="fixture failure"):
         with AuthoritativeSetWeightsContextV2(
@@ -257,12 +284,12 @@ def test_set_weights_context_restores_sdk_functions_after_failure():
             weight_submission_event_hash="sha256:" + "7" * 64,
         ):
             raise RuntimeError("fixture failure")
-    assert mechanism.get_encrypted_commit is original_drand
+    assert mechanism.get_encrypted_commit_v2 is original_drand
     assert substrate.create_signed_extrinsic == original_signer
 
 
 def test_set_weights_context_fsync_callback_runs_before_sdk_can_broadcast():
-    mechanism = _weight_extrinsic_module()
+    mechanism = _require_weight_extrinsic_module()
     client = FakeClient()
     wallet = _wallet(client)
     substrate = FakeSubstrate()
@@ -279,13 +306,16 @@ def test_set_weights_context_fsync_callback_runs_before_sdk_can_broadcast():
         weight_submission_event_hash="sha256:" + "7" * 64,
         on_signed_extrinsic=fail_journal,
     ) as context:
-        mechanism.get_encrypted_commit(
+        mechanism.get_encrypted_commit_v2(
             uids=[0, 14],
             weights=[65535, 123],
-            version_key=9012000,
+            version_key=10005000,
+            last_epoch_block=100,
+            pending_epoch_at=0,
+            subnet_epoch_index=23859,
             tempo=360,
+            blocks_since_last_step=22,
             current_block=122,
-            netuid=71,
             subnet_reveal_period_epochs=1,
             block_time=12.0,
             hotkey=wallet.hotkey.public_key,
@@ -302,6 +332,7 @@ def test_set_weights_context_fsync_callback_runs_before_sdk_can_broadcast():
 
 
 def test_set_weights_context_rejects_generic_chain_signing():
+    _require_weight_extrinsic_module()
     client = FakeClient()
     wallet = _wallet(client)
     substrate = FakeSubstrate()

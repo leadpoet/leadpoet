@@ -193,7 +193,7 @@ async def lifespan(app: FastAPI):
     # window (epoch 23929). Fail startup loudly instead.
     # ════════════════════════════════════════════════════════════════
     try:
-        from substrateinterface import Keypair as _PreflightKeypair
+        from bittensor_wallet import Keypair as _PreflightKeypair
         _probe_kp = _PreflightKeypair.create_from_uri("//gateway-startup-preflight")
         if not _probe_kp.verify(b"preflight", _probe_kp.sign(b"preflight")):
             raise RuntimeError("sr25519 sign/verify round-trip returned False")

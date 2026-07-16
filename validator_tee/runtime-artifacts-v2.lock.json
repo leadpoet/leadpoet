@@ -1,9 +1,9 @@
 {
   "artifacts": {
     "bittensor_drand_source": {
-      "filename": "bittensor_drand-1.0.0.tar.gz",
-      "sha256": "d309a19981d69e2bfc0ac27770c63531173fc4bb2a41483c9c60b6677c44a501",
-      "url": "https://files.pythonhosted.org/packages/59/2e/7994f0d84945837fd9cd027ad93aba00e1936021d79a862133f0e1c25555/bittensor_drand-1.0.0.tar.gz"
+      "filename": "bittensor_drand-2.0.0.tar.gz",
+      "sha256": "517cd8cabb4634a980e26aaf85ac0a8481f62fefadc0499ddbadb6467ae030c7",
+      "url": "https://files.pythonhosted.org/packages/70/c8/f1fdee0f0f5088585d6804a0099554f66834fd6d7347b921a0fedfc18e73/bittensor_drand-2.0.0.tar.gz"
     },
     "sr25519_cp37": {
       "filename": "py_sr25519_bindings-0.2.2-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",

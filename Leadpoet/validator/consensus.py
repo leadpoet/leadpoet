@@ -161,7 +161,7 @@ def get_active_validators() -> List[Dict]:
         from Leadpoet.utils.cloud_db import NETWORK, SUBNET_ID
         from datetime import datetime
 
-        subtensor = bt.subtensor(network=NETWORK)
+        subtensor = bt.Subtensor(network=NETWORK)
         mg = subtensor.metagraph(netuid=SUBNET_ID)
         current_block = subtensor.get_current_block()
 

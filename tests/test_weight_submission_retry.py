@@ -3,12 +3,6 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-import bittensor as bt
-from bittensor_wallet import Wallet
-
-if not hasattr(bt, "wallet"):
-    bt.wallet = Wallet
-
 import neurons.auditor_validator as auditor_module
 import neurons.validator as validator_module
 
@@ -26,6 +20,12 @@ class _FakeSubtensor:
 
     def get_current_block(self):
         return self._blocks.pop(0)
+
+
+class _SdkResponse:
+    def __init__(self, success: bool, message: str):
+        self.success = success
+        self.message = message
 
 
 def _primary(results, *, blocks=()):
@@ -98,6 +98,8 @@ def test_primary_retries_false_tuples_until_true(monkeypatch, capsys):
     assert len(validator.subtensor.calls) == 3
     assert all(call["uids"] == [1, 2] for call in validator.subtensor.calls)
     assert all(call["weights"] == [0.25, 0.75] for call in validator.subtensor.calls)
+    assert all(call["netuid"] == 71 for call in validator.subtensor.calls)
+    assert all(call["mechid"] == 0 for call in validator.subtensor.calls)
     assert validator._last_weight_submission_epoch is None
     assert validator._last_weight_extrinsic_receipts_v2 == [
         {"receipt": "signed"}
@@ -131,8 +133,8 @@ def test_primary_stops_before_retry_after_epoch_rollover(monkeypatch):
     assert validator._last_weight_submission_epoch is None
 
 
-def test_primary_returns_immediately_on_true(monkeypatch):
-    validator = _primary([(True, "accepted")])
+def test_primary_accepts_v10_extrinsic_response(monkeypatch):
+    validator = _primary([_SdkResponse(True, "accepted")])
 
     async def unexpected_sleep(_seconds):
         raise AssertionError("successful submission must not sleep")
@@ -173,10 +175,39 @@ def test_auditor_retries_false_tuples_until_true(monkeypatch, capsys):
     assert len(auditor.subtensor.calls) == 3
     assert all(call["uids"] == [3, 4] for call in auditor.subtensor.calls)
     assert all(call["weights"] == [0.4, 0.6] for call in auditor.subtensor.calls)
+    assert all(call["netuid"] == 71 for call in auditor.subtensor.calls)
+    assert all(call["mechid"] == 0 for call in auditor.subtensor.calls)
     assert auditor.last_submitted_epoch is None
     output = capsys.readouterr().out
     assert "rejected-one" in output
     assert "rejected-two" in output
+
+
+def test_auditor_accepts_v10_extrinsic_response(monkeypatch):
+    auditor = _auditor([_SdkResponse(True, "accepted")])
+
+    def unexpected_sleep(_seconds):
+        raise AssertionError("successful submission must not sleep")
+
+    monkeypatch.setattr(auditor_module.time, "sleep", unexpected_sleep)
+
+    result = auditor._set_weights_until_epoch_end(
+        epoch_id=2,
+        uids=[3],
+        weights=[1.0],
+    )
+
+    assert result is True
+    assert auditor.subtensor.calls == [
+        {
+            "netuid": 71,
+            "wallet": auditor.wallet,
+            "uids": [3],
+            "weights": [1.0],
+            "wait_for_finalization": True,
+            "mechid": 0,
+        }
+    ]
 
 
 def test_auditor_stops_before_retry_after_epoch_rollover(monkeypatch):

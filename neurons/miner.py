@@ -1991,7 +1991,7 @@ def run_qualification_submission_flow(wallet, config, netuid: int):
             
             try:
                 print(f"   🔄 Connection attempt {attempt}/3...")
-                subtensor = bt.subtensor(config=config)
+                subtensor = bt.Subtensor(config=config)
                 print(f"   ✅ Connected to: {subtensor.chain_endpoint}")
                 break  # Success - exit retry loop
             except Exception as e:
@@ -2770,7 +2770,7 @@ def _execute_research_lab_payment(
             time.sleep(delay)
         try:
             print(f"   Connection attempt {attempt}/3...")
-            subtensor = bt.subtensor(config=config)
+            subtensor = bt.Subtensor(config=config)
             print(f"   Connected to: {subtensor.chain_endpoint}")
             break
         except Exception as exc:
@@ -3312,7 +3312,7 @@ def main():
         # Record attestation LOCALLY (gateway verifies via lead metadata)
         # Load wallet to get SS58 address
         try:
-            temp_wallet = bt.wallet(config=config)
+            temp_wallet = bt.Wallet(config=config)
             wallet_address = temp_wallet.hotkey.ss58_address
         except Exception as e:
             bt.logging.error(f"❌ Could not load wallet for attestation: {e}")
@@ -3350,7 +3350,7 @@ def main():
             # Update attestation
             # Load wallet to get SS58 address
             try:
-                temp_wallet = bt.wallet(config=config)
+                temp_wallet = bt.Wallet(config=config)
                 wallet_address = temp_wallet.hotkey.ss58_address
             except Exception as e:
                 bt.logging.error(f"❌ Could not load wallet for attestation: {e}")
@@ -3396,7 +3396,7 @@ def main():
 
     if miner_mode == "research_lab":
         try:
-            temp_wallet = bt.wallet(config=config)
+            temp_wallet = bt.Wallet(config=config)
             print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
             run_research_lab_auto_research_flow(temp_wallet, config, config.netuid)
         except Exception as e:
@@ -3408,7 +3408,7 @@ def main():
 
     if miner_mode == "research_lab_resume_credit":
         try:
-            temp_wallet = bt.wallet(config=config)
+            temp_wallet = bt.Wallet(config=config)
             print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
             run_research_lab_resume_credit_blocked_flow(temp_wallet, config, config.netuid)
         except Exception as e:
@@ -3420,7 +3420,7 @@ def main():
 
     if miner_mode == "research_lab_source_add":
         try:
-            temp_wallet = bt.wallet(config=config)
+            temp_wallet = bt.Wallet(config=config)
             print(f"\n✅ Wallet loaded: {temp_wallet.hotkey.ss58_address}")
             run_research_lab_source_add_flow(temp_wallet, config, config.netuid)
         except Exception as e:

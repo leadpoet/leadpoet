@@ -101,7 +101,7 @@ class BaseMinerNeuron(BaseNeuron):
         os.environ.setdefault("GRPC_TRACE", "")
 
         # NOW build the axon with the correct port
-        self.axon = bt.axon(
+        self.axon = bt.Axon(
             wallet=self.wallet,
             ip      = "0.0.0.0",
             port    = self.config.axon.port,

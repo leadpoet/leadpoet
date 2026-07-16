@@ -40,6 +40,7 @@ from Leadpoet.base.utils.pool import (
 # Import modules that have inject_async_subtensor methods
 from Leadpoet.validator import reward as reward_module
 from Leadpoet.utils import cloud_db as cloud_db_module
+from Leadpoet.utils.bittensor_sdk import ExtrinsicOutcome
 from Leadpoet.validator.reward import start_epoch_monitor, stop_epoch_monitor
 import asyncio
 from typing import List, Dict, Mapping, Optional, Any
@@ -1685,7 +1686,7 @@ class Validator(BaseValidatorNeuron):
         print(f"🔍 Validator hotkey: {self.wallet.hotkey.ss58_address}")
 
         # Build the axon with the correct port
-        self.axon = bt.axon(
+        self.axon = bt.Axon(
             wallet=self.wallet,
             ip      = "0.0.0.0",
             port    = self.config.axon.port,
@@ -1887,7 +1888,7 @@ class Validator(BaseValidatorNeuron):
             # pattern as run_broadcast_polling elsewhere in this file.
             #
             # The thread:
-            #   * creates its own ``bt.subtensor`` (so we don't share
+            #   * creates its own ``bt.Subtensor`` (so we don't share
             #     the main loop's async_subtensor, which is loop-bound)
             #   * queries current_block synchronously each tick and
             #     passes it to process_fulfillment_workflow via
@@ -1905,7 +1906,7 @@ class Validator(BaseValidatorNeuron):
                     asyncio.set_event_loop(thread_loop)
 
                     try:
-                        thread_subtensor = bt.subtensor(
+                        thread_subtensor = bt.Subtensor(
                             network=self.config.subtensor.network
                         )
                     except Exception as e:
@@ -3671,14 +3672,17 @@ class Validator(BaseValidatorNeuron):
         ) as signing_context:
             while True:
                 attempt += 1
-                success, message = self.subtensor.set_weights(
-                    netuid=self.config.netuid,
-                    wallet=self.wallet,
-                    uids=uids,
-                    weights=weights,
-                    wait_for_finalization=True,
+                outcome = ExtrinsicOutcome.from_sdk(
+                    self.subtensor.set_weights(
+                        netuid=self.config.netuid,
+                        wallet=self.wallet,
+                        uids=uids,
+                        weights=weights,
+                        wait_for_finalization=True,
+                        mechid=0,
+                    )
                 )
-                if success:
+                if outcome.success:
                     self._last_weight_extrinsic_receipts_v2 = list(
                         signing_context.extrinsic_signature_results
                     )
@@ -3686,7 +3690,7 @@ class Validator(BaseValidatorNeuron):
 
                 print(
                     f"   ❌ Bittensor rejected weight submission attempt {attempt}: "
-                    f"{message}"
+                    f"{outcome.message}"
                 )
                 await asyncio.sleep(12)
                 current_block = await self.get_current_block_async()
@@ -9158,7 +9162,7 @@ async def run_validator(validator_hotkey, queue_maxsize):
     print("Validator event loop started.")
 
     # Create validator instance
-    config = bt.config()
+    config = bt.Config()
     validator = Validator(config=config)
 
     # Start HTTP server

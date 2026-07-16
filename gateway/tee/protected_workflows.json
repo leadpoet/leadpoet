@@ -222,7 +222,7 @@
       "symbol": "confirmation_min_delta"
     },
     {
-      "ast_sha256": "sha256:481c8843d4969fed133d3bc5f29504a29c4f33119784673b0c2f23995e31822f",
+      "ast_sha256": "sha256:ab84b385ebf2bcddd8ebf68a44e96456a23cd3dcf6d68728c7c57f9f4ad5546f",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "maybe_refresh_dev_snapshot"
     },
@@ -627,7 +627,7 @@
       "symbol": "evaluate_dev"
     },
     {
-      "ast_sha256": "sha256:093bcc1944fe4a804c2232c6c162728212b2f6aeb8ad330cbe3af540829748de",
+      "ast_sha256": "sha256:6da728043d6b34b1868bbc2307eb17d9f3d1cfeea65a4d11d10033e29596e876",
       "path": "research_lab/eval/evaluator.py",
       "symbol": "_benchmark_icp_score"
     },
@@ -637,7 +637,7 @@
       "symbol": "_run_candidate_with_retries"
     },
     {
-      "ast_sha256": "sha256:cc171dcfb0efddfeb1088bf41e5864365b0fa9318885eeb315f2e71726e6b041",
+      "ast_sha256": "sha256:3bea9ecb5ce4a6b8161ec1b487f9ac76cbb7ba07dafd1869b24fa07afa2a215b",
       "path": "research_lab/eval/evaluator.py",
       "symbol": "_score_single_icp"
     },
@@ -647,7 +647,7 @@
       "symbol": "_score_with_private_holdout_gate"
     },
     {
-      "ast_sha256": "sha256:614c07ad7d35131654229a820a4139e206b67402e77ecb8998ae2a89be0cb349",
+      "ast_sha256": "sha256:3d63abbc8576f51429cad1a0a3a616f0b30470c4355086d3b4391f7f78d637ac",
       "path": "research_lab/eval/evaluator.py",
       "symbol": "benchmark_icp_score_from_company_scores"
     },
@@ -772,7 +772,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:b2ddfd13570dd04e80dfd37ff9089a4c172b8af272becea130f556d3fecdf096",
-  "protected_source_commit": "58ddb8d7130856a8d111ca50a6a5bd65a78f7426",
+  "manifest_hash": "sha256:4439cfc3e52c9d2634376ce1c30f28a867a441c7d95ea99d04005b9fa6acb892",
+  "protected_source_commit": "88e197d488300aed6df91640b3b77638a53e9b23",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

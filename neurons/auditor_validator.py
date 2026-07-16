@@ -1461,6 +1461,7 @@ class AuditorValidator:
                             await self.fetch_verified_weight_authority(target_epoch)
                         )
                         if weights_data is None:
+                            # Verification is fail-closed: no fallback vector will be submitted.
                             if authority_status in {
                                 "v2_unavailable",
                                 "v1_unavailable",

@@ -49,6 +49,9 @@ TRACE_ENV_NAMES = (
 PRE_CAPTURE_ROW_KEYS = {
     "icp_ref",
     "icp_hash",
+    # Requested company count for the ICP; per-ICP scores normalize against
+    # it, so the evaluator stamps it on every row (capture on or off).
+    "icp_company_goal",
     "status",
     "hard_failure",
     "base_company_scores",

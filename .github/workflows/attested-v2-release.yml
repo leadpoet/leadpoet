@@ -24,6 +24,11 @@ jobs:
     runs-on: [self-hosted, linux, x64, leadpoet-gateway-v2-builder]
     timeout-minutes: 720
     steps:
+      - name: Remove stale root-owned V2 builder temp directories
+        run: |
+          sudo find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -type d \
+            -name '.drand-cabi-v2.*' -exec rm -rf -- {} +
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
@@ -96,6 +101,11 @@ jobs:
     runs-on: [self-hosted, linux, x64, leadpoet-validator-v2-builder]
     timeout-minutes: 720
     steps:
+      - name: Remove stale root-owned V2 builder temp directories
+        run: |
+          sudo find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -type d \
+            -name '.drand-cabi-v2.*' -exec rm -rf -- {} +
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}

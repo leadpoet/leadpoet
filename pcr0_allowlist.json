@@ -1,6 +1,6 @@
 {
   "_comment": "PCR0 allowlist for LeadPoet TEE verification. Updated by CI/CD on each enclave build.",
-  "_updated": "2026-07-13",
+  "_updated": "2026-07-16",
   "_repo": "https://github.com/leadpoet/leadpoet",
   "gateway_pcr0": [
     {
@@ -79,6 +79,13 @@
       "deployed": "2026-07-12",
       "commit_hash": "4bfbb40b31f5c129350a8db67da0f7f44764dd8a",
       "notes": "gateway enclave: champion schedule-cap cutoff deploy"
+    },
+    {
+      "pcr0": "4d7b70b81faf7bd1cd17d36ae42767011beff704145898a191651ffd5c3bf4f590cf5299ec9108a8ff210ac1f16e20bf",
+      "version": "2026-07-16",
+      "deployed": "2026-07-16",
+      "commit_hash": "c2d33853d6325fa666041134e8b027526adf3716",
+      "notes": "gateway enclave: 2026-07-16 pinned rollback deploy to c2d33853 on legacy_v1 protocol, restoring weight publication"
     },
     {
       "pcr0": "499bbe2f2417eadc224478f6c65a02e105a4b099f9051959bf4b988b3c23d03cbf4357ea21cd8ae7e9ec5c243342a73c",

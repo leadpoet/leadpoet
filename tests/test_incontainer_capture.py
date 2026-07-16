@@ -775,6 +775,7 @@ async def test_capture_disabled_rows_byte_identical_to_legacy_shape(monkeypatch)
     assert rows[0] == {
         "icp_ref": "icp-0",
         "icp_hash": "hash-0",
+        "icp_company_goal": 5,
         "status": "completed",
         "hard_failure": False,
         "base_company_scores": [],

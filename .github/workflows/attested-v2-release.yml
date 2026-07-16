@@ -105,6 +105,12 @@ jobs:
             sleep 60
           done
 
+      - name: Reclaim unreferenced validator build space
+        run: |
+          docker image prune --force
+          docker builder prune --force
+          df -h /
+
       - name: Prepare immutable build inputs
         run: |
           export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"

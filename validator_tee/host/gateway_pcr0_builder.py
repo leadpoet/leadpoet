@@ -47,15 +47,32 @@ def _run(
     timeout: int = 3600,
     check: bool = True,
 ) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        list(command),
-        cwd=str(cwd) if cwd else None,
-        env=dict(env) if env else None,
-        check=check,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        return subprocess.run(
+            list(command),
+            cwd=str(cwd) if cwd else None,
+            env=dict(env) if env else None,
+            check=check,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.CalledProcessError as exc:
+        output = "\n".join(
+            value.strip()
+            for value in (exc.stdout or "", exc.stderr or "")
+            if value.strip()
+        )
+        if len(output) > 12000:
+            output = output[-12000:]
+        raise GatewayPCR0BuildError(
+            "%s failed with exit code %s%s"
+            % (
+                Path(str(command[0])).name,
+                exc.returncode,
+                ":\n" + output if output else "",
+            )
+        ) from exc
 
 
 def resolve_commit(repo_root: Path, revision: str) -> str:
@@ -308,7 +325,11 @@ def build_reproducible_gateway_pcr0(
     ):
         values = {result[field] for result in results}
         if len(values) != 1:
-            raise GatewayPCR0BuildError("gateway builds diverged at %s" % field)
+            observed = [result[field] for result in results]
+            raise GatewayPCR0BuildError(
+                "gateway builds diverged at %s: %s"
+                % (field, json.dumps(observed, separators=(",", ":")))
+            )
     evidence = [
         {
             "schema_version": BUILD_EVIDENCE_SCHEMA_VERSION,

@@ -69,7 +69,10 @@ def test_repeated_build_divergence_fails_closed(tmp_path, monkeypatch):
         return _result(commit, pcr0=("a" if kwargs["index"] == 1 else "b") * 96)
 
     monkeypatch.setattr(gateway_pcr0_builder, "_build_once", _build)
-    with pytest.raises(gateway_pcr0_builder.GatewayPCR0BuildError, match="pcr0"):
+    with pytest.raises(
+        gateway_pcr0_builder.GatewayPCR0BuildError,
+        match=r'pcr0: \["a{96}","b{96}","b{96}"\]',
+    ):
         gateway_pcr0_builder.build_reproducible_gateway_pcr0(
             repo_root=tmp_path,
             revision="HEAD",

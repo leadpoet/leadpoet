@@ -32,6 +32,9 @@ GATEWAY_V2_RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$GATEWAY_TEE_EIF_ROO
 GATEWAY_V2_ARTIFACT_POLICY="${GATEWAY_V2_ARTIFACT_POLICY:-$GATEWAY_V2_CONFIG_DIR/encrypted-artifact-policy.json}"
 GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST="${GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST:-$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2.json}"
 GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT="${GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT:-$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2}"
+GATEWAY_V2_RELEASE_BUCKET="${GATEWAY_V2_RELEASE_BUCKET:-leadpoet-attested-v2-artifacts-493765492819}"
+GATEWAY_V2_RELEASE_PREFIX="${GATEWAY_V2_RELEASE_PREFIX:-attested-v2/releases}"
+GATEWAY_V2_KMS_KEY_ID="${GATEWAY_V2_KMS_KEY_ID:-arn:aws:kms:us-east-1:493765492819:key/c5412928-093e-4bf5-aafc-7b27c02f1445}"
 export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
 export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:-$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT/validator-runtime}"
 GATEWAY_DEPLOY_STAGE="${GATEWAY_DEPLOY_STAGE:-bootstrap}"
@@ -549,6 +552,102 @@ PREPARED_GATEWAY_SHA="$(
     --last-good-file "$GATEWAY_LAST_GOOD_MANIFEST"
 )"
 echo "Prepared gateway commit: $PREPARED_GATEWAY_SHA"
+
+echo "Acquiring the independently built V2 release channel"
+if ! PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.tee.release_channel_v2 \
+    --ensure \
+    --expected-commit "$PREPARED_GATEWAY_SHA" \
+    --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
+    --prefix "$GATEWAY_V2_RELEASE_PREFIX" \
+    --gateway-output "$GATEWAY_V2_RELEASE_MANIFEST"; then
+  echo "ERROR: independently approved V2 release is not published for $PREPARED_GATEWAY_SHA" >&2
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 75
+fi
+
+echo "Preparing commit-bound KMS credential envelopes"
+if ! PYTHONPATH="$LEADPOET_REPO_ROOT" python3 -m gateway.tee.prepare_gateway_envelopes_v2 \
+    --install \
+    --env-file "$ENV_CLONE" \
+    --kms-key-id "$GATEWAY_V2_KMS_KEY_ID" \
+    --deploy-commit "$PREPARED_GATEWAY_SHA" \
+    --output-dir "$GATEWAY_V2_CONFIG_DIR"; then
+  echo "ERROR: gateway V2 credential envelope preparation failed before shutdown" >&2
+  exit 75
+fi
+
+python3 - "$ENV_CLONE" "$GATEWAY_V2_CONFIG_DIR/gateway-v2-env-transition.json" <<'PY'
+import json
+import os
+from pathlib import Path
+import shlex
+import sys
+import tempfile
+
+environment_path = Path(sys.argv[1])
+report = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+remove = set(report.get("plaintext_environment_names_to_remove") or [])
+kept = []
+for raw in environment_path.read_text(encoding="utf-8").splitlines():
+    line = raw.strip()
+    candidate = line[7:].strip() if line.startswith("export ") else line
+    try:
+        parts = shlex.split(candidate, posix=True)
+    except ValueError:
+        parts = []
+    name = parts[0].split("=", 1)[0] if len(parts) == 1 and "=" in parts[0] else ""
+    if name not in remove:
+        kept.append(raw)
+descriptor, temporary_name = tempfile.mkstemp(
+    prefix=".gateway-env-scrub.", dir=str(environment_path.parent)
+)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(kept).rstrip() + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary_name, 0o600)
+    os.replace(temporary_name, environment_path)
+finally:
+    Path(temporary_name).unlink(missing_ok=True)
+print("Scrubbed commit-bound provider plaintext from prepared parent environment")
+PY
+
+if [ ! -e "$GATEWAY_V2_ARTIFACT_POLICY" ]; then
+  echo "Installing the public production V2 artifact policy"
+  python3 - "$GATEWAY_V2_ARTIFACT_POLICY" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+destination = Path(sys.argv[1])
+destination.parent.mkdir(parents=True, exist_ok=True)
+value = {
+    "schema_version": "leadpoet.encrypted_artifact_policy.v2",
+    "bucket_host": (
+        "leadpoet-attested-v2-artifacts-493765492819."
+        "s3.us-east-1.amazonaws.com"
+    ),
+    "key_prefix": "/encrypted-artifacts/",
+    "minimum_retention_days": 365,
+}
+descriptor, temporary_name = tempfile.mkstemp(
+    prefix=".artifact-policy.", dir=str(destination.parent)
+)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, sort_keys=True, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary_name, 0o600)
+    os.replace(temporary_name, destination)
+finally:
+    Path(temporary_name).unlink(missing_ok=True)
+PY
+fi
 
 if report_gateway_v2_bootstrap_pending; then
   exit 75

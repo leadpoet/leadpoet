@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import secrets
 import shlex
+import shutil
 import tempfile
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -30,10 +31,17 @@ from gateway.utils.tee_kms_provision_v2 import build_provider_envelope_v2
 
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _BOOT_SOURCES = {
-    "openrouter": ("RESEARCH_LAB_V2_OPENROUTER_API_KEY",),
-    "exa": ("RESEARCH_LAB_V2_EXA_API_KEY",),
-    "scrapingdog": ("RESEARCH_LAB_V2_SCRAPINGDOG_API_KEY",),
-    "deepline": ("RESEARCH_LAB_V2_DEEPLINE_API_KEY",),
+    "openrouter": (
+        "RESEARCH_LAB_V2_OPENROUTER_API_KEY",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_KEY",
+    ),
+    "exa": ("RESEARCH_LAB_V2_EXA_API_KEY", "EXA_API_KEY"),
+    "scrapingdog": (
+        "RESEARCH_LAB_V2_SCRAPINGDOG_API_KEY",
+        "SCRAPINGDOG_API_KEY",
+    ),
+    "deepline": ("RESEARCH_LAB_V2_DEEPLINE_API_KEY", "DEEPLINE_API_KEY"),
     "supabase_service_role": ("SUPABASE_SERVICE_ROLE_KEY",),
     "truelist": ("TRUELIST_API_KEY",),
 }
@@ -317,18 +325,125 @@ def prepare_gateway_envelopes_v2(
         raise
 
 
+def install_gateway_envelopes_v2(
+    *,
+    environment: Mapping[str, str],
+    kms_key_id: str,
+    deploy_commit: str,
+    install_dir: Path,
+    kms_client: Any = None,
+) -> Dict[str, Any]:
+    """Reuse exact-commit envelopes or atomically install a complete new set."""
+
+    destination = Path(install_dir)
+    report_path = destination / "gateway-v2-env-transition.json"
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        report = None
+    if isinstance(report, Mapping) and report.get("deploy_commit") == deploy_commit:
+        hosted_count = int(report.get("hosted_worker_count") or 0)
+        scoring_count = int(report.get("scoring_worker_count") or 0)
+        expected_names = {
+            "artifact_master_key.json",
+            "openrouter.json",
+            "exa.json",
+            "scrapingdog.json",
+            "deepline.json",
+            "supabase_service_role.json",
+            "truelist.json",
+            *set(_SPECIAL_PROFILES),
+            *{
+                "autoresearch_proxy_%02d.json" % index
+                for index in range(hosted_count)
+            },
+            *{
+                "scoring_proxy_%02d.json" % index
+                for index in range(scoring_count)
+            },
+            "gateway-v2-env-transition.json",
+        }
+        if expected_names and all(
+            (destination / name).is_file() and not (destination / name).is_symlink()
+            for name in expected_names
+        ):
+            return {**dict(report), "status": "reused"}
+
+    destination.mkdir(parents=True, exist_ok=True)
+    os.chmod(destination, 0o700)
+    staging = destination.parent / (
+        ".gateway-v2-envelope-install.%s" % secrets.token_hex(8)
+    )
+    backup = destination.parent / (
+        ".gateway-v2-envelope-backup.%s" % secrets.token_hex(8)
+    )
+    generated = prepare_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id=kms_key_id,
+        deploy_commit=deploy_commit,
+        output_dir=staging,
+        kms_client=kms_client,
+    )
+    managed_names = {
+        path.name for path in staging.iterdir() if path.is_file()
+    }
+    old_managed = {
+        path.name
+        for pattern in (
+            "artifact_master_key.json",
+            "openrouter.json",
+            "exa.json",
+            "scrapingdog.json",
+            "deepline.json",
+            "supabase_service_role.json",
+            "truelist.json",
+            "benchmark_*.json",
+            "stale_parent_*.json",
+            "source_add_judge_*.json",
+            "autoresearch_proxy_*.json",
+            "scoring_proxy_*.json",
+            "gateway-v2-env-transition.json",
+        )
+        for path in destination.glob(pattern)
+        if path.is_file() and not path.is_symlink()
+    }
+    backup.mkdir(mode=0o700)
+    try:
+        for name in sorted(old_managed):
+            os.replace(destination / name, backup / name)
+        for name in sorted(managed_names):
+            os.replace(staging / name, destination / name)
+        staging.rmdir()
+        shutil.rmtree(backup)
+    except Exception:
+        for name in sorted(managed_names):
+            installed = destination / name
+            if installed.exists():
+                installed.unlink()
+        for path in backup.iterdir():
+            os.replace(path, destination / path.name)
+        shutil.rmtree(backup, ignore_errors=True)
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return {**generated, "status": "installed"}
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", required=True, type=Path)
     parser.add_argument("--kms-key-id", required=True)
     parser.add_argument("--deploy-commit", required=True)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--install", action="store_true")
     args = parser.parse_args(argv)
-    result = prepare_gateway_envelopes_v2(
+    function = install_gateway_envelopes_v2 if args.install else prepare_gateway_envelopes_v2
+    keyword = "install_dir" if args.install else "output_dir"
+    result = function(
         environment=load_environment_file(args.env_file),
         kms_key_id=args.kms_key_id,
         deploy_commit=args.deploy_commit,
-        output_dir=args.output_dir,
+        kms_client=None,
+        **{keyword: args.output_dir},
     )
     print(json.dumps(result, sort_keys=True, indent=2))
     return 0

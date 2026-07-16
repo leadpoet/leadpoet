@@ -1,0 +1,190 @@
+name: Attested V2 Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: attested-v2-release-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_BUCKET: leadpoet-attested-v2-artifacts-493765492819
+  RELEASE_PREFIX: attested-v2/releases
+  ACCEPTANCE_SIGNER_PUBKEY_HASH: sha256:cdc20e17d9ecee5da04b30604ac72bc015326640ab98501646551f075d60ef36
+
+jobs:
+  gateway-parent:
+    name: Independent gateway-parent builds
+    runs-on: [self-hosted, linux, x64, leadpoet-gateway-v2-builder]
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Wait for safe subnet build window
+        run: |
+          while true; do
+            read -r block position < <(python3 - <<'PY'
+          import bittensor as bt
+          chain = bt.subtensor(network="finney")
+          block = int(chain.get_current_block())
+          tempo = int(chain.tempo(71))
+          print(block, (block + 72) % (tempo + 1))
+          PY
+            )
+            echo "Finney block=$block subnet71_position=$position"
+            [ "$position" -le 180 ] && break
+            sleep 60
+          done
+
+      - name: Prepare immutable build inputs
+        run: |
+          export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"
+          nice -n 10 ionice -c2 -n7 bash gateway/tee/prepare_offline_artifacts_v2.sh
+
+      - name: Build gateway and validator evidence
+        run: |
+          export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"
+          export GATEWAY_V2_BUILDER_DOMAIN=gateway
+          export GATEWAY_V2_BUILDER_ID="gateway-parent-${RUNNER_NAME}"
+          export GATEWAY_V2_BUILD_REVISION="$GITHUB_SHA"
+          export GATEWAY_V2_BUILD_EVIDENCE_DIR="$RUNNER_TEMP/gateway-evidence"
+          export GATEWAY_V2_BUILD_WORK_ROOT="$RUNNER_TEMP/gateway-build-work"
+          export GATEWAY_V2_PCR0_CACHE_FILE="$RUNNER_TEMP/gateway-pcr0-cache.json"
+          nice -n 10 ionice -c2 -n7 bash gateway/tee/build_release_evidence_v2.sh
+
+          export VALIDATOR_V2_BUILDER_DOMAIN=gateway
+          export VALIDATOR_V2_BUILDER_ID="gateway-parent-${RUNNER_NAME}"
+          export VALIDATOR_V2_BUILD_EVIDENCE_DIR="$RUNNER_TEMP/validator-evidence"
+          nice -n 10 ionice -c2 -n7 bash validator_tee/scripts/build_release_evidence_v2.sh
+
+          mkdir -p "$RUNNER_TEMP/release-evidence"
+          cp "$RUNNER_TEMP/gateway-evidence/gateway-gateway-evidence.json" \
+            "$RUNNER_TEMP/release-evidence/"
+          cp "$RUNNER_TEMP/validator-evidence"/validator-gateway-*.json \
+            "$RUNNER_TEMP/release-evidence/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v2-evidence-gateway-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          path: ${{ runner.temp }}/release-evidence/*.json
+
+  validator-parent:
+    name: Independent validator-parent builds
+    runs-on: [self-hosted, linux, x64, leadpoet-validator-v2-builder]
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Wait for safe subnet build window
+        run: |
+          while true; do
+            read -r block position < <(python3 - <<'PY'
+          import bittensor as bt
+          chain = bt.subtensor(network="finney")
+          block = int(chain.get_current_block())
+          tempo = int(chain.tempo(71))
+          print(block, (block + 72) % (tempo + 1))
+          PY
+            )
+            echo "Finney block=$block subnet71_position=$position"
+            [ "$position" -le 180 ] && break
+            sleep 60
+          done
+
+      - name: Prepare immutable build inputs
+        run: |
+          export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"
+          nice -n 10 ionice -c2 -n7 bash gateway/tee/prepare_offline_artifacts_v2.sh
+
+      - name: Build gateway and validator evidence
+        run: |
+          export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"
+          export GATEWAY_V2_BUILDER_DOMAIN=validator
+          export GATEWAY_V2_BUILDER_ID="validator-parent-${RUNNER_NAME}"
+          export GATEWAY_V2_BUILD_REVISION="$GITHUB_SHA"
+          export GATEWAY_V2_BUILD_EVIDENCE_DIR="$RUNNER_TEMP/gateway-evidence"
+          export GATEWAY_V2_BUILD_WORK_ROOT="$RUNNER_TEMP/gateway-build-work"
+          export GATEWAY_V2_PCR0_CACHE_FILE="$RUNNER_TEMP/gateway-pcr0-cache.json"
+          nice -n 10 ionice -c2 -n7 bash gateway/tee/build_release_evidence_v2.sh
+
+          export VALIDATOR_V2_BUILDER_DOMAIN=validator
+          export VALIDATOR_V2_BUILDER_ID="validator-parent-${RUNNER_NAME}"
+          export VALIDATOR_V2_BUILD_EVIDENCE_DIR="$RUNNER_TEMP/validator-evidence"
+          nice -n 10 ionice -c2 -n7 bash validator_tee/scripts/build_release_evidence_v2.sh
+
+          mkdir -p "$RUNNER_TEMP/release-evidence"
+          cp "$RUNNER_TEMP/gateway-evidence/gateway-validator-evidence.json" \
+            "$RUNNER_TEMP/release-evidence/"
+          cp "$RUNNER_TEMP/validator-evidence"/validator-validator-*.json \
+            "$RUNNER_TEMP/release-evidence/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v2-evidence-validator-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          path: ${{ runner.temp }}/release-evidence/*.json
+
+  publish:
+    name: Assemble and immutably publish exact-commit channel
+    needs: [gateway-parent, validator-parent]
+    runs-on: [self-hosted, linux, x64, leadpoet-gateway-v2-builder]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v2-evidence-*-${{ github.sha }}
+          path: ${{ runner.temp }}/evidence
+          merge-multiple: true
+
+      - name: Assemble both six-build manifests
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          GATEWAY_V2_ACCEPTANCE_SIGNER_PUBKEY_HASH="$ACCEPTANCE_SIGNER_PUBKEY_HASH" \
+            bash gateway/tee/assemble_release_manifest_v2.sh \
+              "$RUNNER_TEMP/evidence/gateway-gateway-evidence.json" \
+              "$RUNNER_TEMP/evidence/gateway-validator-evidence.json" \
+              "$RUNNER_TEMP/release/gateway-v2-release-manifest.json"
+
+          python3 -m validator_tee.host.verify_release_gate_v2 \
+            --build-manifest \
+            --evidence "$RUNNER_TEMP/evidence/validator-gateway-1.json" \
+            --evidence "$RUNNER_TEMP/evidence/validator-gateway-2.json" \
+            --evidence "$RUNNER_TEMP/evidence/validator-gateway-3.json" \
+            --evidence "$RUNNER_TEMP/evidence/validator-validator-1.json" \
+            --evidence "$RUNNER_TEMP/evidence/validator-validator-2.json" \
+            --evidence "$RUNNER_TEMP/evidence/validator-validator-3.json" \
+            --output "$RUNNER_TEMP/release/validator-v2-release-manifest.json"
+
+          python3 -m gateway.tee.release_channel_v2 \
+            --build \
+            --gateway-manifest "$RUNNER_TEMP/release/gateway-v2-release-manifest.json" \
+            --validator-manifest "$RUNNER_TEMP/release/validator-v2-release-manifest.json" \
+            --output "$RUNNER_TEMP/release/release-channel-v2.json"
+
+      - name: Publish with COMPLIANCE Object Lock
+        run: |
+          python3 -m gateway.tee.release_channel_v2 \
+            --publish "$RUNNER_TEMP/release/release-channel-v2.json" \
+            --bucket "$RELEASE_BUCKET" \
+            --prefix "$RELEASE_PREFIX" \
+            --retention-days 365

@@ -14,6 +14,8 @@ VALIDATOR_V2_RELEASE_MANIFEST="${VALIDATOR_V2_RELEASE_MANIFEST:-/home/ec2-user/.
 VALIDATOR_V2_RELEASE_ARCHIVE_ROOT="${VALIDATOR_V2_RELEASE_ARCHIVE_ROOT:-/home/ec2-user/.config/leadpoet/validator-releases-v2}"
 VALIDATOR_V2_HOTKEY_CONFIG="${VALIDATOR_V2_HOTKEY_CONFIG:-/home/ec2-user/.config/leadpoet/validator-hotkey-config-v2.json}"
 VALIDATOR_V2_HOTKEY_ENVELOPE="${VALIDATOR_V2_HOTKEY_ENVELOPE:-/home/ec2-user/.config/leadpoet/validator-hotkey-envelope-v2.json}"
+VALIDATOR_V2_RELEASE_BUCKET="${VALIDATOR_V2_RELEASE_BUCKET:-leadpoet-attested-v2-artifacts-493765492819}"
+VALIDATOR_V2_RELEASE_PREFIX="${VALIDATOR_V2_RELEASE_PREFIX:-attested-v2/releases}"
 export VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT="${VALIDATOR_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts/validator-runtime}"
 VALIDATOR_WALLET_ROOT="${VALIDATOR_WALLET_ROOT:-$HOME/.bittensor/wallets}"
 VALIDATOR_WALLET_NAME="${VALIDATOR_WALLET_NAME:-validator_72}"
@@ -215,6 +217,18 @@ export VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_DEPLOY_SHA"
 export GITHUB_SHA="$VALIDATOR_DEPLOY_SHA"
 export GIT_COMMIT="$VALIDATOR_DEPLOY_SHA"
 export LEADPOET_WRAPPER_ACTIVE=1
+echo "Acquiring the independently built V2 release channel"
+if ! python3 -m gateway.tee.release_channel_v2 \
+    --ensure \
+    --expected-commit "$VALIDATOR_DEPLOY_SHA" \
+    --bucket "$VALIDATOR_V2_RELEASE_BUCKET" \
+    --prefix "$VALIDATOR_V2_RELEASE_PREFIX" \
+    --gateway-output "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
+    --validator-output "$VALIDATOR_V2_RELEASE_MANIFEST"; then
+  echo "ERROR: independently approved V2 release is not published for $VALIDATOR_DEPLOY_SHA" >&2
+  echo "Validator remains running; production shutdown has not started." >&2
+  exit 75
+fi
 VALIDATOR_V2_MISSING_INPUTS=()
 for required_file in \
   "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \

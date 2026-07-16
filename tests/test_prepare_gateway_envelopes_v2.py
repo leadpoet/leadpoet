@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from gateway.tee.prepare_gateway_envelopes_v2 import (
+    install_gateway_envelopes_v2,
     prepare_gateway_envelopes_v2,
 )
 from gateway.utils.tee_kms_provision_v2 import validate_provider_envelope
@@ -75,3 +76,42 @@ def test_prepares_complete_dynamic_gateway_envelope_set(tmp_path):
             "https://hosted-1",
         )
     )
+
+
+def test_install_uses_canonical_secret_names_and_reuses_exact_commit(tmp_path):
+    environment = _environment()
+    environment["OPENROUTER_API_KEY"] = environment.pop(
+        "RESEARCH_LAB_V2_OPENROUTER_API_KEY"
+    )
+    environment["EXA_API_KEY"] = environment.pop("RESEARCH_LAB_V2_EXA_API_KEY")
+    environment["SCRAPINGDOG_API_KEY"] = environment.pop(
+        "RESEARCH_LAB_V2_SCRAPINGDOG_API_KEY"
+    )
+    environment["DEEPLINE_API_KEY"] = environment.pop(
+        "RESEARCH_LAB_V2_DEEPLINE_API_KEY"
+    )
+    destination = tmp_path / "v2"
+    destination.mkdir()
+    (destination / "acceptance-corpus-v2.json").write_text("{}")
+    kms = KMS()
+    installed = install_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        install_dir=destination,
+        kms_client=kms,
+    )
+    request_count = len(kms.requests)
+    assert installed["status"] == "installed"
+    assert "OPENROUTER_API_KEY" in installed["plaintext_environment_names_to_remove"]
+    assert (destination / "acceptance-corpus-v2.json").read_text() == "{}"
+
+    reused = install_gateway_envelopes_v2(
+        environment=environment,
+        kms_key_id="alias/gateway-v2",
+        deploy_commit="1" * 40,
+        install_dir=destination,
+        kms_client=kms,
+    )
+    assert reused["status"] == "reused"
+    assert len(kms.requests) == request_count

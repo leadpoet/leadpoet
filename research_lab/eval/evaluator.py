@@ -246,14 +246,20 @@ def _fp_penalty_points() -> float:
 def _fp_unverified_primary_penalty_points() -> float:
     """Per-company penalty when the ICP's PRIMARY intent failed verification.
 
-    Separate knob from the deterministic-gate penalty because intent
-    verification involves providers; keep 0 until the verifier's behavior
-    under transient provider failures is proven not to blame the model.
+    Falsified intent is a false positive like any other, so this INHERITS
+    the main FP penalty by default — one knob activates both. Set
+    RESEARCH_LAB_EVAL_FP_UNVERIFIED_PRIMARY_PENALTY explicitly to weight
+    deception differently (e.g., harsher than ordinary non-fit).
+    Verifier-infrastructure errors are excluded from this count
+    (fail-open), so provider outages never penalize the model.
     """
-    return max(
-        0.0,
-        _env_float("RESEARCH_LAB_EVAL_FP_UNVERIFIED_PRIMARY_PENALTY", 0.0),
-    )
+    raw = os.environ.get("RESEARCH_LAB_EVAL_FP_UNVERIFIED_PRIMARY_PENALTY")
+    if raw is None or not str(raw).strip():
+        return _fp_penalty_points()
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return _fp_penalty_points()
 
 
 # Failure reasons that count as model-controllable false positives. Matched

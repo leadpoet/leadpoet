@@ -175,6 +175,8 @@ from research_lab.eval.evaluator import (
     _benchmark_style_score as _queue_benchmark_style_score,
     _critical_measurement_failures,
     _upload_incontainer_trace as _upload_incontainer_trace_doc,
+    _fp_penalty_points,
+    _fp_unverified_primary_penalty_points,
     benchmark_icp_score_from_company_scores,
     fp_penalty_total_from_breakdowns,
     build_holdout_gate_result,
@@ -11977,14 +11979,12 @@ class ResearchLabGatewayScoringWorker:
             "observed_cost_usd": 0.0,
             # FP penalty knobs ride in the bundle policy so the public
             # verifier recomputes per-ICP scores with the exact values the
-            # builder used (defaults 0 = off keep historical scores).
-            "fp_penalty_points": float(
-                os.environ.get("RESEARCH_LAB_EVAL_FP_PENALTY_POINTS", "0")
-            ),
-            "fp_unverified_primary_penalty_points": float(
-                os.environ.get(
-                    "RESEARCH_LAB_EVAL_FP_UNVERIFIED_PRIMARY_PENALTY", "0"
-                )
+            # builder used (defaults 0 = off keep historical scores). The
+            # evaluator helpers are the single source of truth: falsified
+            # intent inherits the main FP penalty unless overridden.
+            "fp_penalty_points": _fp_penalty_points(),
+            "fp_unverified_primary_penalty_points": (
+                _fp_unverified_primary_penalty_points()
             ),
         }
 

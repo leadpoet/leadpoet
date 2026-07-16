@@ -202,6 +202,26 @@ def test_fp_penalty_total_helper(monkeypatch):
     assert total == pytest.approx(25.0 + 10.0)
 
 
+def test_fake_intent_inherits_main_penalty_by_default(monkeypatch):
+    # Falsified intent is a false positive like any other: the ONE main knob
+    # penalizes it at the same rate unless explicitly overridden.
+    monkeypatch.setenv("RESEARCH_LAB_EVAL_FP_PENALTY_POINTS", "25")
+    monkeypatch.delenv(
+        "RESEARCH_LAB_EVAL_FP_UNVERIFIED_PRIMARY_PENALTY", raising=False
+    )
+    breakdowns = [
+        _bd(details=[{"matched_icp_signal": 1, "after_decay": 5.0}]),  # bonus only
+    ]
+    icp = {"intent_signals": ["hiring engineers"]}
+    total = evaluator.fp_penalty_total_from_breakdowns(breakdowns, icp)
+    assert total == pytest.approx(25.0)
+    # Explicit override can weight deception harder than ordinary non-fit.
+    monkeypatch.setenv("RESEARCH_LAB_EVAL_FP_UNVERIFIED_PRIMARY_PENALTY", "50")
+    assert evaluator.fp_penalty_total_from_breakdowns(
+        breakdowns, icp
+    ) == pytest.approx(50.0)
+
+
 # ---------------------------------------------------------------------------
 # Verifier parity
 # ---------------------------------------------------------------------------

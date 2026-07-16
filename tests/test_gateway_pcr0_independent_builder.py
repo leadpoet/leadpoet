@@ -140,6 +140,13 @@ def test_gateway_builder_normalizes_image_before_eif():
     assert "normalized_image=image" in source
 
 
+def test_gateway_builder_discards_large_intermediate_artifacts():
+    source = Path(gateway_pcr0_builder.__file__).read_text(encoding="utf-8")
+
+    assert "eif_path.unlink()" in source
+    assert '["docker", "builder", "prune", "-af"]' in source
+
+
 def test_cache_keeps_latest_twenty_verified_commits(tmp_path):
     cache = tmp_path / "cache.json"
     for index in range(25):

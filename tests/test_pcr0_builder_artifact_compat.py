@@ -88,3 +88,13 @@ def test_pcr0_build_uses_module_shutil_without_shadowing_it_locally():
         and any(alias.name == "shutil" for alias in node.names)
         for node in ast.walk(function)
     )
+
+
+def test_drand_builder_restores_runner_ownership_before_cleanup():
+    source = (
+        ROOT / "validator_tee" / "scripts" / "build_drand_cabi_v2.sh"
+    ).read_text(encoding="utf-8")
+
+    assert '-e "HOST_UID=$(id -u)"' in source
+    assert '-e "HOST_GID=$(id -g)"' in source
+    assert 'chown -R "$HOST_UID:$HOST_GID" /work' in source

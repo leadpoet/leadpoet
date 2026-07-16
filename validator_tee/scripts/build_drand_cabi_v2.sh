@@ -75,10 +75,12 @@ chmod 700 "$WORK_DIR/build.sh"
 
 docker run --rm --platform linux/amd64 \
   --network bridge \
+  -e "HOST_UID=$(id -u)" \
+  -e "HOST_GID=$(id -g)" \
   -v "$WORK_DIR:/work" \
   -v "$CACHE_DIR:/cargo-cache" \
   "$BUILDER_IMAGE" \
-  bash /work/build.sh
+  bash -c 'trap '\''chown -R "$HOST_UID:$HOST_GID" /work'\'' EXIT; bash /work/build.sh'
 
 ACTUAL_HASH="$(sha256sum "$WORK_DIR/output/libbittensor_drand_v2.so" | awk '{print $1}')"
 if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then

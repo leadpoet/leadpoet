@@ -259,10 +259,12 @@ def _build_once(
     )
     pcr0 = _parse_measurement(result.stdout)
     eif_hash = "sha256:" + hashlib.sha256(eif_path.read_bytes()).hexdigest()
+    eif_path.unlink()
     dockerfile_hash = "sha256:" + hashlib.sha256(
         (gateway_root / "tee" / "Dockerfile.enclave").read_bytes()
     ).hexdigest()
     _run(["docker", "rmi", "-f", image, raw_image], check=False, timeout=120)
+    _run(["docker", "builder", "prune", "-af"], check=False, timeout=600)
     return {
         "commit_sha": commit,
         "role": role,

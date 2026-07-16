@@ -67,6 +67,11 @@ jobs:
           export GATEWAY_V2_PCR0_CACHE_FILE="$RUNNER_TEMP/gateway-pcr0-cache.json"
           nice -n 10 ionice -c2 -n7 bash gateway/tee/build_release_evidence_v2.sh
 
+          rm -rf "$RUNNER_TEMP/gateway-build-work"
+          docker image prune --force
+          docker builder prune --force
+          df -h /
+
           export VALIDATOR_V2_BUILDER_DOMAIN=gateway
           export VALIDATOR_V2_BUILDER_ID="gateway-parent-${RUNNER_NAME}"
           export VALIDATOR_V2_BUILD_EVIDENCE_DIR="$RUNNER_TEMP/validator-evidence"
@@ -133,6 +138,11 @@ jobs:
           export GATEWAY_V2_BUILD_WORK_ROOT="$RUNNER_TEMP/gateway-build-work"
           export GATEWAY_V2_PCR0_CACHE_FILE="$RUNNER_TEMP/gateway-pcr0-cache.json"
           nice -n 10 ionice -c2 -n7 bash gateway/tee/build_release_evidence_v2.sh
+
+          rm -rf "$RUNNER_TEMP/gateway-build-work"
+          docker image prune --force
+          docker builder prune --force
+          df -h /
 
           export VALIDATOR_V2_BUILDER_DOMAIN=validator
           export VALIDATOR_V2_BUILDER_ID="validator-parent-${RUNNER_NAME}"

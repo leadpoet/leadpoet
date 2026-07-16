@@ -762,7 +762,7 @@
       "symbol": "select_snapshot_dev_icps"
     },
     {
-      "ast_sha256": "sha256:6da728043d6b34b1868bbc2307eb17d9f3d1cfeea65a4d11d10033e29596e876",
+      "ast_sha256": "sha256:f1ff7d3dd9cefdc30e26ca869fbcb246e2e53db1d6ac2353c992512a1ef46e8f",
       "path": "research_lab/eval/evaluator.py",
       "symbol": "_benchmark_icp_score"
     },
@@ -772,7 +772,7 @@
       "symbol": "_run_candidate_with_retries"
     },
     {
-      "ast_sha256": "sha256:3bea9ecb5ce4a6b8161ec1b487f9ac76cbb7ba07dafd1869b24fa07afa2a215b",
+      "ast_sha256": "sha256:b67cc4186045493a843152d695770f039c1d44e0e5698b2a9adfcd04d0d84953",
       "path": "research_lab/eval/evaluator.py",
       "symbol": "_score_single_icp"
     },
@@ -782,7 +782,7 @@
       "symbol": "_score_with_private_holdout_gate"
     },
     {
-      "ast_sha256": "sha256:3d63abbc8576f51429cad1a0a3a616f0b30470c4355086d3b4391f7f78d637ac",
+      "ast_sha256": "sha256:4ed8d17ad336da16aa2d157cc87fb476d73bda70bd0350bc162d8024ff92f7fb",
       "path": "research_lab/eval/evaluator.py",
       "symbol": "benchmark_icp_score_from_company_scores"
     },
@@ -907,7 +907,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:aaf1e7a5cbed4a71ab3b2202f2b6a6cc7be57c9df854cce332cbbdf8ebf31d5f",
-  "protected_source_commit": "a203bcc6567114b95d1b51855016f364268193bc",
+  "manifest_hash": "sha256:b94233877631e95da6f86deac3d9cb58015c88eb8ac2700fae8a975aedfedf46",
+  "protected_source_commit": "c62caef72b68c14c62386117e6143255dd89f636",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

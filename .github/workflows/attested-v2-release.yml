@@ -52,8 +52,8 @@ jobs:
 
       - name: Reclaim unreferenced gateway build space
         run: |
-          docker image prune --force
-          docker builder prune --force
+          docker image prune --all --force
+          docker builder prune --all --force
           df -h /
 
       - name: Prepare immutable build inputs
@@ -73,8 +73,8 @@ jobs:
           nice -n 10 ionice -c2 -n7 bash gateway/tee/build_release_evidence_v2.sh
 
           rm -rf "$RUNNER_TEMP/gateway-build-work"
-          docker image prune --force
-          docker builder prune --force
+          docker image prune --all --force
+          docker builder prune --all --force
           df -h /
 
           export VALIDATOR_V2_BUILDER_DOMAIN=gateway
@@ -129,8 +129,8 @@ jobs:
 
       - name: Reclaim unreferenced validator build space
         run: |
-          docker image prune --force
-          docker builder prune --force
+          docker image prune --all --force
+          docker builder prune --all --force
           df -h /
 
       - name: Prepare immutable build inputs
@@ -150,8 +150,8 @@ jobs:
           nice -n 10 ionice -c2 -n7 bash gateway/tee/build_release_evidence_v2.sh
 
           rm -rf "$RUNNER_TEMP/gateway-build-work"
-          docker image prune --force
-          docker builder prune --force
+          docker image prune --all --force
+          docker builder prune --all --force
           df -h /
 
           export VALIDATOR_V2_BUILDER_DOMAIN=validator

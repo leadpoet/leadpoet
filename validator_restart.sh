@@ -215,16 +215,34 @@ export VALIDATOR_V2_DEPLOY_COMMIT="$VALIDATOR_DEPLOY_SHA"
 export GITHUB_SHA="$VALIDATOR_DEPLOY_SHA"
 export GIT_COMMIT="$VALIDATOR_DEPLOY_SHA"
 export LEADPOET_WRAPPER_ACTIVE=1
+VALIDATOR_V2_MISSING_INPUTS=()
 for required_file in \
   "$VALIDATOR_V2_GATEWAY_RELEASE_MANIFEST" \
   "$VALIDATOR_V2_RELEASE_MANIFEST" \
   "$VALIDATOR_V2_HOTKEY_CONFIG" \
   "$VALIDATOR_V2_HOTKEY_ENVELOPE"; do
   if [ ! -r "$required_file" ]; then
-    echo "ERROR: authoritative V2 input is unavailable: $required_file" >&2
-    exit 1
+    VALIDATOR_V2_MISSING_INPUTS+=("$required_file")
   fi
 done
+if [ "${#VALIDATOR_V2_MISSING_INPUTS[@]}" -gt 0 ]; then
+  python3 - "${VALIDATOR_V2_MISSING_INPUTS[@]}" <<'PY'
+import json
+import sys
+print(json.dumps({
+    "schema_version": "leadpoet.validator_v2_first_activation.v1",
+    "status": "bootstrap_pending",
+    "production_shutdown_started": False,
+    "missing_paths": sys.argv[1:],
+    "required_external_approvals": [
+        "independent_gateway_and_validator_parent_build_evidence",
+        "verified_validator_hotkey_envelope_and_offline_custody",
+    ],
+}, sort_keys=True, indent=2))
+PY
+  echo "Validator remains untouched. Complete the V2 bootstrap ceremony, then rerun this restart." >&2
+  exit 75
+fi
 
 HOST_HOTKEY_ENTRY=""
 if [ -d "$HOST_HOTKEY_DIR" ]; then

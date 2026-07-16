@@ -69,6 +69,10 @@ DEPRECATED_RESEARCH_LAB_GIT_TREE_ENV_NAMES = frozenset(
     }
 )
 MAX_RESEARCH_LAB_GIT_TREE_ICP_COUNT = 8
+DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI = (
+    "s3://leadpoet-attested-v2-artifacts-493765492819/"
+    "research-lab/dev-snapshots/current.json"
+)
 
 
 class ResearchLabGitTreeConfigError(ValueError):
@@ -79,7 +83,10 @@ class ResearchLabGitTreeConfigError(ValueError):
 class ResearchLabGitTreeConfig:
     """Single source for Git-tree defaults and environment resolution."""
 
-    mode: str = "off"
+    # Production V2 is the Git-tree workflow. Operators can still set `off`
+    # explicitly for an emergency kill switch, but an omitted environment no
+    # longer silently disables the production mechanism.
+    mode: str = "active"
     branch_factor: int = 2
     beam_width: int = 2
     max_depth: int = 2

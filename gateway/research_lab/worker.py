@@ -41,7 +41,11 @@ from gateway.research_lab.active_model_authority_v2 import (
     attest_active_private_model_v2,
 )
 from gateway.research_lab.provider_probe import build_probe_guard_term_hashes
-from gateway.research_lab.config import DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS, ResearchLabGatewayConfig
+from gateway.research_lab.config import (
+    DEFAULT_ACTIVE_LOOP_STALE_AFTER_SECONDS,
+    DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI,
+    ResearchLabGatewayConfig,
+)
 from gateway.research_lab.dev_eval_runner import (
     build_attested_code_edit_dev_evaluator_v2,
     dev_eval_runner_enabled,
@@ -2262,7 +2266,10 @@ class ResearchLabHostedWorker:
             )
         readiness = await asyncio.to_thread(
             snapshot_readiness,
-            str(os.getenv("RESEARCH_LAB_DEV_SNAPSHOT_URI") or ""),
+            str(
+                os.getenv("RESEARCH_LAB_DEV_SNAPSHOT_URI")
+                or DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI
+            ),
             expected_dev_icp_count=self.tree_policy.live_max_icps_per_node,
         )
         tree_preflight_reason = ""

@@ -46,6 +46,37 @@ V2_CREDENTIAL_ENVELOPES=(
   "$GATEWAY_V2_CONFIG_DIR/truelist.json"
 )
 
+report_gateway_v2_bootstrap_pending() {
+  local missing=() path
+  for path in \
+    "$GATEWAY_V2_RELEASE_MANIFEST" \
+    "$GATEWAY_V2_ARTIFACT_POLICY" \
+    "$GATEWAY_V2_ACCEPTANCE_CORPUS_MANIFEST" \
+    "$GATEWAY_V2_ACCEPTANCE_CORPUS_ROOT" \
+    "${V2_CREDENTIAL_ENVELOPES[@]}"; do
+    [ -e "$path" ] || missing+=("$path")
+  done
+  if [ "${#missing[@]}" -eq 0 ]; then
+    return 1
+  fi
+  python3 - "${missing[@]}" <<'PY'
+import json
+import sys
+print(json.dumps({
+    "schema_version": "leadpoet.gateway_v2_first_activation.v1",
+    "status": "bootstrap_pending",
+    "production_shutdown_started": False,
+    "missing_paths": sys.argv[1:],
+    "required_external_approvals": [
+        "offline_acceptance_corpus_signature",
+        "independent_gateway_and_validator_parent_build_evidence",
+    ],
+}, sort_keys=True, indent=2))
+PY
+  echo "Gateway remains untouched. Complete the V2 bootstrap ceremony, then rerun this restart." >&2
+  return 0
+}
+
 deployment_field() {
   python3 "$GATEWAY_GIT_HELPER" field \
     --plan-file "$GATEWAY_DEPLOY_PLAN_FILE" \
@@ -518,6 +549,10 @@ PREPARED_GATEWAY_SHA="$(
     --last-good-file "$GATEWAY_LAST_GOOD_MANIFEST"
 )"
 echo "Prepared gateway commit: $PREPARED_GATEWAY_SHA"
+
+if report_gateway_v2_bootstrap_pending; then
+  exit 75
+fi
 
 echo "Validating the prepared V2 release before production shutdown"
   GATEWAY_DEPLOY_STAGE="v2_pre_shutdown_preflight"

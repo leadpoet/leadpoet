@@ -486,7 +486,14 @@ def _dev_snapshot_uri() -> str:
     """The frozen provider-snapshot set URI dev-eval replays against
     (``research_lab.eval.snapshot_store.SNAPSHOT_URI_ENV``). Empty = no set."""
 
-    return os.environ.get("RESEARCH_LAB_DEV_SNAPSHOT_URI", "").strip()
+    from gateway.research_lab.config import DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI
+
+    return (
+        os.environ.get(
+            "RESEARCH_LAB_DEV_SNAPSHOT_URI",
+            DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI,
+        ).strip()
+    )
 
 
 @dataclass(frozen=True)

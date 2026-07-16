@@ -17,7 +17,10 @@ import tempfile
 import time
 from typing import Any, Awaitable, Callable, Iterator, Mapping, Sequence
 
-from gateway.research_lab.config import RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD
+from gateway.research_lab.config import (
+    DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI,
+    RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD,
+)
 from gateway.research_lab.dev_eval_runner import snapshot_readiness
 from gateway.research_lab.git_tree_models import TreePolicy
 from gateway.research_lab.promotion import load_active_private_model
@@ -246,7 +249,9 @@ async def maybe_refresh_dev_snapshot(
         if last_check and timestamp - last_check < retry_after:
             return {"status": "skipped", "reason": "check_not_due_after_lock"}
 
-        pointer_uri = str(os.getenv(SNAPSHOT_URI_ENV) or "").strip()
+        pointer_uri = str(
+            os.getenv(SNAPSHOT_URI_ENV) or DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI
+        ).strip()
         try:
             active_before = await active_loader(config, register_bootstrap=False)
             identity_before = _artifact_identity(active_before)

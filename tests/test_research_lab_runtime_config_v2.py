@@ -3,9 +3,11 @@ from dataclasses import replace
 import pytest
 
 from gateway.research_lab.config import (
+    DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI,
     DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG,
     ResearchLabGatewayConfig,
 )
+from gateway.research_lab.dev_eval_runner import dev_eval_runner_enabled
 from gateway.tee.research_lab_runtime_config_v2 import (
     BEHAVIOR_ENV_NAMES,
     HOST_ONLY_SECRET_FIELDS,
@@ -65,6 +67,25 @@ def test_execution_config_rejects_tampering_and_secret_material():
     secret["fields"]["private_repo_url"] = "https://user:pass@example.invalid/repo"
     with pytest.raises(ResearchLabRuntimeConfigV2Error, match="URI credentials"):
         validate_research_lab_execution_config(secret)
+
+
+def test_execution_config_commits_production_defaults_when_env_omits_them():
+    document = build_research_lab_execution_config(
+        environment={}, network="finney", netuid=71
+    )
+
+    behavior = document["behavior_environment"]
+    assert behavior["RESEARCH_LAB_TREE_MODE"] == "active"
+    assert behavior["RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED"] == "true"
+    assert (
+        behavior["RESEARCH_LAB_DEV_SNAPSHOT_URI"]
+        == DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI
+    )
+
+
+def test_dev_eval_runner_is_enabled_when_override_is_absent(monkeypatch):
+    monkeypatch.delenv("RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED", raising=False)
+    assert dev_eval_runner_enabled() is True
 
 
 def test_behavior_environment_is_exact_and_applied(monkeypatch):

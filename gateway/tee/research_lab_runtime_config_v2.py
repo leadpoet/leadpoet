@@ -17,6 +17,8 @@ import re
 from typing import Any, Dict, Mapping, Optional
 
 from gateway.research_lab.config import (
+    DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI,
+    DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG,
     RESEARCH_LAB_GIT_TREE_ENV_NAMES,
     ResearchLabGatewayConfig,
     ResearchLabGitTreeConfig,
@@ -82,6 +84,12 @@ AUTORESEARCH_BEHAVIOR_ENV_NAMES = (
     "RESEARCH_LAB_PROBE_SNAPSHOT_OVERLAY_URI",
     "RESEARCH_LAB_REFLECTION_EMISSION_ENABLED",
 )
+
+AUTORESEARCH_BEHAVIOR_DEFAULTS = {
+    "RESEARCH_LAB_DEV_SNAPSHOT_URI": DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI,
+    "RESEARCH_LAB_LOOP_DEV_EVAL_ENABLED": "true",
+    **DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.to_environment(),
+}
 
 PROVIDER_PREFLIGHT_BEHAVIOR_ENV_NAMES = (
     "RESEARCH_LAB_PROVIDER_PREFLIGHT_ENABLED",
@@ -289,7 +297,12 @@ def build_research_lab_execution_config(
             name for name in MODEL_CREDENTIAL_ENV_NAMES if name in source_environment
         ),
         "behavior_environment": _normalized_environment(
-            {name: source_environment.get(name) for name in BEHAVIOR_ENV_NAMES}
+            {
+                name: source_environment.get(
+                    name, AUTORESEARCH_BEHAVIOR_DEFAULTS.get(name)
+                )
+                for name in BEHAVIOR_ENV_NAMES
+            }
         ),
     }
     return validate_research_lab_execution_config(document)

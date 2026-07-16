@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from gateway.research_lab.config import (
+    DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI,
     DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG,
     MAX_RESEARCH_LAB_GIT_TREE_ICP_COUNT,
 )
@@ -96,8 +97,8 @@ class DevEvalRunnerError(RuntimeError):
 
 
 def dev_eval_runner_enabled() -> bool:
-    """Mirror of the engine's ``_dev_eval_enabled`` gate (env-driven)."""
-    raw = str(os.getenv(DEV_EVAL_ENABLED_ENV) or "").strip().lower()
+    """Mirror the engine's enabled-by-default development evaluation gate."""
+    raw = str(os.getenv(DEV_EVAL_ENABLED_ENV) or "true").strip().lower()
     return raw in _TRUTHY
 
 
@@ -1403,7 +1404,9 @@ def build_code_edit_dev_evaluator(
     if not dev_eval_runner_enabled():
         return None
     uri = str(
-        snapshot_uri if snapshot_uri is not None else os.getenv(SNAPSHOT_URI_ENV) or ""
+        snapshot_uri
+        if snapshot_uri is not None
+        else os.getenv(SNAPSHOT_URI_ENV) or DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI
     ).strip()
     if not uri:
         logger.info(

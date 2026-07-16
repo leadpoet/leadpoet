@@ -22,6 +22,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 from gateway.tee.release_manifest_v2 import BUILD_EVIDENCE_SCHEMA_VERSION
 from gateway.tee.topology import ROLE_SPECS
+from validator_tee.host.docker_image_normalizer_v2 import normalize_docker_image
 
 
 CACHE_SCHEMA_VERSION = "leadpoet.gateway_pcr0_cache.v2"
@@ -220,23 +221,24 @@ def _build_once(
         raise GatewayPCR0BuildError("gateway role build identity mismatch")
 
     image = "leadpoet-gateway-verify:%s-%s-%s" % (role, commit[:12], index)
-    _run(["docker", "rmi", "-f", image], check=False, timeout=120)
+    raw_image = image + "-raw"
+    _run(["docker", "rmi", "-f", image, raw_image], check=False, timeout=120)
     build_env = dict(os.environ)
     build_env["DOCKER_BUILDKIT"] = "1"
     build_env["BUILDX_NO_DEFAULT_ATTESTATIONS"] = "1"
     _run(
         _deterministic_docker_build_command(
             gateway_root=gateway_root,
-            image=image,
+            image=raw_image,
             role=role,
         ),
         env=build_env,
         timeout=3600,
     )
-    image_id = _run(
-        ["docker", "image", "inspect", "-f", "{{.Id}}", image],
-        timeout=120,
-    ).stdout.strip()
+    image_id = normalize_docker_image(
+        source_image=raw_image,
+        normalized_image=image,
+    )
     if not image_id.startswith("sha256:"):
         raise GatewayPCR0BuildError("gateway image ID is invalid")
 
@@ -260,7 +262,7 @@ def _build_once(
     dockerfile_hash = "sha256:" + hashlib.sha256(
         (gateway_root / "tee" / "Dockerfile.enclave").read_bytes()
     ).hexdigest()
-    _run(["docker", "rmi", "-f", image], check=False, timeout=120)
+    _run(["docker", "rmi", "-f", image, raw_image], check=False, timeout=120)
     return {
         "commit_sha": commit,
         "role": role,

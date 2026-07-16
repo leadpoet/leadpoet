@@ -52,6 +52,12 @@ PRE_CAPTURE_ROW_KEYS = {
     # Requested company count for the ICP; per-ICP scores normalize against
     # it, so the evaluator stamps it on every row (capture on or off).
     "icp_company_goal",
+    # Per-side false-positive counts for the FP penalty knobs; stamped on
+    # every row so the verifier can recompute penalized scores.
+    "base_fp_gate_count",
+    "base_fp_unverified_primary_count",
+    "candidate_fp_gate_count",
+    "candidate_fp_unverified_primary_count",
     "status",
     "hard_failure",
     "base_company_scores",
@@ -776,6 +782,10 @@ async def test_capture_disabled_rows_byte_identical_to_legacy_shape(monkeypatch)
         "icp_ref": "icp-0",
         "icp_hash": "hash-0",
         "icp_company_goal": 5,
+        "base_fp_gate_count": 0,
+        "base_fp_unverified_primary_count": 0,
+        "candidate_fp_gate_count": 0,
+        "candidate_fp_unverified_primary_count": 0,
         "status": "completed",
         "hard_failure": False,
         "base_company_scores": [],

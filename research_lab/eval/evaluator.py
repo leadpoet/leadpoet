@@ -222,6 +222,135 @@ def _capped_top5_score_enabled() -> bool:
     return _env_flag("RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE", False)
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _fp_penalty_points() -> float:
+    """Per-company penalty for deterministic false positives.
+
+    A company zeroed by a model-controllable gate (exclusion list, required
+    attribute, missing hard fields, country/duplicate/data-quality
+    pre-checks, company re-verification) subtracts this many points from
+    the ICP's score sum before normalization, so shipping junk scores
+    WORSE than honestly returning fewer companies. Default 0 = off; like
+    the capped flag, enable only together with a fresh baseline (never
+    compare scores across the boundary).
+    """
+    return max(0.0, _env_float("RESEARCH_LAB_EVAL_FP_PENALTY_POINTS", 0.0))
+
+
+def _fp_unverified_primary_penalty_points() -> float:
+    """Per-company penalty when the ICP's PRIMARY intent failed verification.
+
+    Separate knob from the deterministic-gate penalty because intent
+    verification involves providers; keep 0 until the verifier's behavior
+    under transient provider failures is proven not to blame the model.
+    """
+    return max(
+        0.0,
+        _env_float("RESEARCH_LAB_EVAL_FP_UNVERIFIED_PRIMARY_PENALTY", 0.0),
+    )
+
+
+# Failure reasons that count as model-controllable false positives. Matched
+# as case-insensitive substrings of LeadScoreBreakdown.failure_reason. Keep
+# this list conservative: provider/infra failures must NEVER appear here.
+PENALIZABLE_FAILURE_MARKERS: tuple = (
+    "exclusion list",             # ICP excluded_companies hit
+    "required_attribute",         # attribute claim absent / failed / unbacked
+    "missing employee_count",     # hard-field gaps in the model's own output
+    "missing company_stage",
+    "country mismatch",           # deterministic zero-check gates
+    "missing country",
+    "duplicate company",
+    "data quality issue",
+    "missing industry",
+    "company verification failed",  # scorer re-verification rejected
+)
+
+_NEVER_PENALIZE_MARKERS: tuple = ("error", "timeout", "provider", "429")
+
+
+def _failure_reason_is_penalizable(reason: Any) -> bool:
+    text = str(reason or "").strip().lower()
+    if not text:
+        return False
+    if any(marker in text for marker in _NEVER_PENALIZE_MARKERS):
+        return False
+    return any(marker in text for marker in PENALIZABLE_FAILURE_MARKERS)
+
+
+def count_penalizable_false_positives(
+    breakdowns: Sequence[Mapping[str, Any]],
+    *,
+    icp_has_intent_signals: bool,
+) -> tuple[int, int]:
+    """(gate_fp_count, unverified_primary_count) for one ICP's breakdowns.
+
+    Gate FPs are zero-score rows whose failure_reason is a deterministic,
+    model-controllable rejection. Unverified-primary rows are companies the
+    scorer kept (fit points only) after zeroing intent because no verified
+    signal matched the ICP's primary intent; they are counted separately
+    and penalized by their own knob. Derived from breakdowns only, so the
+    cache-hit and cache-miss scoring paths count identically.
+    """
+    gate_fps = 0
+    unverified_primary = 0
+    for row in breakdowns:
+        if not isinstance(row, Mapping):
+            continue
+        reason = row.get("failure_reason")
+        if reason:
+            if _failure_reason_is_penalizable(reason):
+                gate_fps += 1
+            continue
+        if not icp_has_intent_signals:
+            continue
+        details = row.get("intent_signals_detail")
+        if not isinstance(details, Sequence) or isinstance(details, (str, bytes)):
+            continue
+        primary_verified = False
+        for detail in details:
+            if not isinstance(detail, Mapping):
+                continue
+            try:
+                idx = int(detail.get("matched_icp_signal", -1))
+            except (TypeError, ValueError):
+                continue
+            if idx == 0 and float(detail.get("after_decay") or 0.0) > 0.0:
+                primary_verified = True
+                break
+        if details and not primary_verified:
+            unverified_primary += 1
+    return gate_fps, unverified_primary
+
+
+def fp_penalty_total_from_breakdowns(
+    breakdowns: Sequence[Mapping[str, Any]],
+    icp: Any,
+) -> float:
+    """Pre-multiplied FP penalty points for one ICP under the current knobs.
+
+    Shared by the daily-baseline path (scoring_worker) and any caller that
+    holds raw breakdowns, so baseline and candidate scoring penalize
+    identically.
+    """
+    icp_has_intents = bool(
+        (icp.get("intent_signals") if isinstance(icp, Mapping) else None)
+        or (icp.get("intent_signal") if isinstance(icp, Mapping) else None)
+        or getattr(icp, "intent_signals", None)
+        or getattr(icp, "intent_signal", None)
+    )
+    gate, primary = count_penalizable_false_positives(
+        breakdowns, icp_has_intent_signals=icp_has_intents
+    )
+    return gate * _fp_penalty_points() + primary * _fp_unverified_primary_penalty_points()
+
+
 def _icp_company_goal(icp: Any) -> int:
     """The ICP's requested company count (max_companies), clamped to 1..50.
 
@@ -856,11 +985,43 @@ async def _score_single_icp(
                     "model_role": "candidate",
                 },
             )
-        base_scores = await _maybe_await(scorer(base_outputs, icp, True)) if base_runner is not None else []
-        candidate_scores = await _maybe_await(scorer(candidate_outputs, icp, False))
+        # Score via breakdowns when the scorer exposes them so the per-ICP
+        # false-positive counts can be derived (the day-scoped scoring cache
+        # stores breakdowns, so cache hits count identically). Falls back to
+        # the score-list contract for scorers without breakdown support.
+        base_breakdowns: list[Mapping[str, Any]] = []
+        candidate_breakdowns: list[Mapping[str, Any]] = []
+        if hasattr(scorer, "score_with_breakdowns"):
+            if base_runner is not None:
+                base_breakdowns = await _maybe_await(
+                    scorer.score_with_breakdowns(base_outputs, icp, True)
+                )
+            candidate_breakdowns = await _maybe_await(
+                scorer.score_with_breakdowns(candidate_outputs, icp, False)
+            )
+            base_scores = [
+                float(item.get("final_score", 0.0) or 0.0) for item in base_breakdowns
+            ]
+            candidate_scores = [
+                float(item.get("final_score", 0.0) or 0.0)
+                for item in candidate_breakdowns
+            ]
+        else:
+            base_scores = await _maybe_await(scorer(base_outputs, icp, True)) if base_runner is not None else []
+            candidate_scores = await _maybe_await(scorer(candidate_outputs, icp, False))
     finally:
         if trace_token is not None:
             end_incontainer_trace_collection(trace_token)
+    icp_has_intents = bool(
+        (icp.get("intent_signals") if isinstance(icp, Mapping) else None)
+        or (icp.get("intent_signal") if isinstance(icp, Mapping) else None)
+    )
+    base_fp_gate, base_fp_primary = count_penalizable_false_positives(
+        base_breakdowns, icp_has_intent_signals=icp_has_intents
+    )
+    cand_fp_gate, cand_fp_primary = count_penalizable_false_positives(
+        candidate_breakdowns, icp_has_intent_signals=icp_has_intents
+    )
     if base_runner is not None and not base_outputs:
         failure_reasons.append("reference_model_zero_companies")
     elif base_runner is not None and not base_scores:
@@ -877,6 +1038,14 @@ async def _score_single_icp(
         # Requested company count for this ICP; the capped per-ICP score
         # normalizes against it (verifier recomputes with the same value).
         "icp_company_goal": _icp_company_goal(icp),
+        # Per-side false-positive counts (deterministic-gate rejections and
+        # unverified-primary-intent companies); the FP penalty knobs multiply
+        # these at aggregation time and the verifier recomputes with the
+        # penalty points recorded in the bundle policy.
+        "base_fp_gate_count": base_fp_gate,
+        "base_fp_unverified_primary_count": base_fp_primary,
+        "candidate_fp_gate_count": cand_fp_gate,
+        "candidate_fp_unverified_primary_count": cand_fp_primary,
         "base_company_scores": base_scores,
         "candidate_company_scores": candidate_scores,
         "failure_reason": ";".join(failure_reasons),
@@ -2114,28 +2283,53 @@ def _benchmark_style_score(
                 values,
                 capped_top5=capped_top5,
                 requested_count=row.get("icp_company_goal"),
+                fp_penalty_total=_row_fp_penalty_total(row, score_field),
             )
         )
     return float(sum(per_icp_scores) / len(per_icp_scores)) if per_icp_scores else 0.0
 
 
+def _row_fp_penalty_total(row: Mapping[str, Any], score_field: str) -> float:
+    """Penalty points for one per-ICP row under the current env knobs.
+
+    Rows stamp per-side FP counts (``fp_gate_count``/``candidate_fp_gate_count``
+    etc. depending on which score_field is being aggregated); missing keys
+    mean zero so legacy rows are untouched.
+    """
+    side = "base" if score_field.startswith("base") else "candidate"
+    gate = _coerce_count(row.get(f"{side}_fp_gate_count"))
+    primary = _coerce_count(row.get(f"{side}_fp_unverified_primary_count"))
+    return gate * _fp_penalty_points() + primary * _fp_unverified_primary_penalty_points()
+
+
+def _coerce_count(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 def benchmark_icp_score_from_company_scores(
     scores: Sequence[float],
     requested_count: int | None = None,
+    fp_penalty_total: float = 0.0,
 ) -> float:
     """Per-ICP score on the live-gate scale for one ICP's company scores.
 
     ``requested_count`` is the ICP's requested company count (max_companies);
     omitted/None keeps the fixed 5-lead budget so legacy callers and ICP sets
-    are unchanged. Shared entry point so the daily-baseline path and the
-    candidate path flip together when RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE
-    changes; never mix scores computed under different settings of that flag.
+    are unchanged. ``fp_penalty_total`` is the pre-multiplied penalty-point
+    sum for the ICP's false positives (0 keeps historical scores exactly).
+    Shared entry point so the daily-baseline path and the candidate path flip
+    together when RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE changes; never mix
+    scores computed under different settings of these knobs.
     """
     values = [float(item or 0.0) for item in scores]
     return _benchmark_icp_score(
         values,
         capped_top5=_capped_top5_score_enabled(),
         requested_count=requested_count,
+        fp_penalty_total=fp_penalty_total,
     )
 
 
@@ -2147,20 +2341,31 @@ def _requested_count_or_default(requested_count: Any) -> int:
     return max(1, min(count, _MAX_ICP_COMPANY_GOAL))
 
 
+# A single catastrophic ICP must hurt, but not dominate the whole benchmark
+# mean by itself: per-ICP scores never go below this floor.
+_FP_PENALTY_ICP_FLOOR = -100.0
+
+
 def _benchmark_icp_score(
     values: list[float],
     *,
     capped_top5: bool,
     requested_count: Any = None,
+    fp_penalty_total: float = 0.0,
 ) -> float:
     if capped_top5:
         # Match the verifier's advisory arithmetic exactly
         # (leadpoet_verifier.aggregation.per_icp_normalized_score): each company
         # score is clamped to [0, MAX_COMPANY_TOTAL_SCORE], summed over the top
         # N companies, and divided by the N-lead budget the ICP requested.
+        # False-positive penalty points subtract from the sum BEFORE the
+        # normalization, so junk companies drag the ICP score — negative is
+        # allowed (floored) and pulls the whole benchmark mean down.
         count = _requested_count_or_default(requested_count)
         top_values = sorted(values, reverse=True)[:count]
-        return float(per_icp_normalized_score(top_values, max_leads=count))
+        normalized = float(per_icp_normalized_score(top_values, max_leads=count))
+        penalty = max(0.0, float(fp_penalty_total)) / count
+        return max(_FP_PENALTY_ICP_FLOOR, normalized - penalty)
     return float(sum(values) / len(values)) if values else 0.0
 
 

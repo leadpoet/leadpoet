@@ -176,6 +176,7 @@ from research_lab.eval.evaluator import (
     _critical_measurement_failures,
     _upload_incontainer_trace as _upload_incontainer_trace_doc,
     benchmark_icp_score_from_company_scores,
+    fp_penalty_total_from_breakdowns,
     build_holdout_gate_result,
     build_score_bundle_from_scored_icps,
     score_private_model_pair_items,
@@ -10054,7 +10055,11 @@ class ResearchLabGatewayScoringWorker:
                 # is sum(top-N)/N for the ICP's requested company count, so the
                 # baseline pays for unfilled slots exactly like candidates do.
                 icp_score = benchmark_icp_score_from_company_scores(
-                    scores, requested_count=_icp_company_goal(item["icp"])
+                    scores,
+                    requested_count=_icp_company_goal(item["icp"]),
+                    fp_penalty_total=fp_penalty_total_from_breakdowns(
+                        score_breakdowns, item["icp"]
+                    ),
                 )
                 logger.info(
                     format_worker_block(
@@ -10956,7 +10961,11 @@ class ResearchLabGatewayScoringWorker:
         # Shared flag-aware per-ICP score (see the isolation-path comment):
         # capped mode divides by the ICP's requested company count.
         icp_score = benchmark_icp_score_from_company_scores(
-            scores, requested_count=_icp_company_goal(item["icp"])
+            scores,
+            requested_count=_icp_company_goal(item["icp"]),
+            fp_penalty_total=fp_penalty_total_from_breakdowns(
+                score_breakdowns, item["icp"]
+            ),
         )
         logger.info(
             format_worker_block(
@@ -11966,6 +11975,17 @@ class ResearchLabGatewayScoringWorker:
             "max_hard_failures": int(os.environ.get("RESEARCH_LAB_MAX_HARD_FAILURES", "0")),
             "min_candidate_score": float(os.environ.get("RESEARCH_LAB_MIN_CANDIDATE_SCORE", "0")),
             "observed_cost_usd": 0.0,
+            # FP penalty knobs ride in the bundle policy so the public
+            # verifier recomputes per-ICP scores with the exact values the
+            # builder used (defaults 0 = off keep historical scores).
+            "fp_penalty_points": float(
+                os.environ.get("RESEARCH_LAB_EVAL_FP_PENALTY_POINTS", "0")
+            ),
+            "fp_unverified_primary_penalty_points": float(
+                os.environ.get(
+                    "RESEARCH_LAB_EVAL_FP_UNVERIFIED_PRIMARY_PENALTY", "0"
+                )
+            ),
         }
 
     def _preliminary_evaluation_policy(self) -> dict[str, Any]:

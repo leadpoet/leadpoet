@@ -115,6 +115,12 @@ PER_ICP_CAPTURE_PASSTHROUGH_KEYS = (
     # Requested company count for the ICP; the per-ICP normalization divides
     # by it, so it must survive into the bundle for exact recomputation.
     "icp_company_goal",
+    # Per-side false-positive counts; the FP penalty points recorded in the
+    # bundle policy multiply these during recomputation.
+    "base_fp_gate_count",
+    "base_fp_unverified_primary_count",
+    "candidate_fp_gate_count",
+    "candidate_fp_unverified_primary_count",
     # Immutable per-ICP context stamps used by trajectory/corpus joins and
     # later analysis. These carry only refs/hashes, never private ICP text.
     "evaluation_context",
@@ -138,15 +144,46 @@ def _row_leads_normalizer(row: Mapping[str, Any], default: int) -> int:
     return max(1, min(goal, 50))
 
 
+# Per-ICP floor when false-positive penalties push a score negative: one
+# catastrophic ICP hurts the mean but cannot dominate it alone.
+FP_PENALTY_ICP_FLOOR = -100.0
+
+
+def _row_fp_penalty(
+    row: Mapping[str, Any],
+    side: str,
+    *,
+    fp_penalty_points: float,
+    fp_unverified_primary_penalty_points: float,
+) -> float:
+    def _count(key: str) -> int:
+        try:
+            return max(0, int(row.get(key)))
+        except (TypeError, ValueError):
+            return 0
+
+    return (
+        _count(f"{side}_fp_gate_count") * fp_penalty_points
+        + _count(f"{side}_fp_unverified_primary_count")
+        * fp_unverified_primary_penalty_points
+    )
+
+
 def compute_evaluation_aggregates(
     per_icp_results: Sequence[Mapping[str, Any]],
     *,
     leads_per_icp_normalizer: int = DEFAULT_LEADS_PER_ICP_NORMALIZER,
     lcb_z: float = DEFAULT_LCB_Z,
+    fp_penalty_points: float = 0.0,
+    fp_unverified_primary_penalty_points: float = 0.0,
 ) -> dict[str, Any]:
     """Recompute paired base/candidate metrics from per-company scores."""
     if leads_per_icp_normalizer <= 0:
         raise ValueError("leads_per_icp_normalizer must be positive")
+    fp_penalty_points = max(0.0, float(fp_penalty_points))
+    fp_unverified_primary_penalty_points = max(
+        0.0, float(fp_unverified_primary_penalty_points)
+    )
     if not per_icp_results:
         raise ValueError("evaluation requires at least one ICP result")
 
@@ -161,8 +198,28 @@ def compute_evaluation_aggregates(
         base_company_scores = _coerce_scores(item.get("base_company_scores", ()))
         candidate_company_scores = _coerce_scores(item.get("candidate_company_scores", ()))
         row_leads = _row_leads_normalizer(item, leads_per_icp_normalizer)
-        base_score = per_icp_normalized_score(base_company_scores, max_leads=row_leads)
-        candidate_score = per_icp_normalized_score(candidate_company_scores, max_leads=row_leads)
+        base_score = max(
+            FP_PENALTY_ICP_FLOOR,
+            per_icp_normalized_score(base_company_scores, max_leads=row_leads)
+            - _row_fp_penalty(
+                item,
+                "base",
+                fp_penalty_points=fp_penalty_points,
+                fp_unverified_primary_penalty_points=fp_unverified_primary_penalty_points,
+            )
+            / row_leads,
+        )
+        candidate_score = max(
+            FP_PENALTY_ICP_FLOOR,
+            per_icp_normalized_score(candidate_company_scores, max_leads=row_leads)
+            - _row_fp_penalty(
+                item,
+                "candidate",
+                fp_penalty_points=fp_penalty_points,
+                fp_unverified_primary_penalty_points=fp_unverified_primary_penalty_points,
+            )
+            / row_leads,
+        )
         delta = candidate_score - base_score
         hard_failure = bool(item.get("hard_failure", False))
         if hard_failure:
@@ -204,6 +261,10 @@ def compute_evaluation_aggregates(
         "se_delta": round(se_delta, 6),
         "delta_lcb": round(delta_lcb, 6),
         "leads_per_icp_normalizer": int(leads_per_icp_normalizer),
+        "fp_penalty_points": round(fp_penalty_points, 6),
+        "fp_unverified_primary_penalty_points": round(
+            fp_unverified_primary_penalty_points, 6
+        ),
         "lcb_z": round(float(lcb_z), 6),
         "per_icp_results": normalized_rows,
     }
@@ -468,9 +529,25 @@ def evaluate_daily_baseline_improvement_gate(
         try:
             candidate_score = float(row["candidate_per_icp_score"])
         except (KeyError, TypeError, ValueError):
-            candidate_score = per_icp_normalized_score(
-                _coerce_scores(row.get("candidate_company_scores", ())),
-                max_leads=_row_leads_normalizer(row, normalizer),
+            fallback_leads = _row_leads_normalizer(row, normalizer)
+            candidate_score = max(
+                FP_PENALTY_ICP_FLOOR,
+                per_icp_normalized_score(
+                    _coerce_scores(row.get("candidate_company_scores", ())),
+                    max_leads=fallback_leads,
+                )
+                - _row_fp_penalty(
+                    row,
+                    "candidate",
+                    fp_penalty_points=float(
+                        aggregates.get("fp_penalty_points", 0.0) or 0.0
+                    ),
+                    fp_unverified_primary_penalty_points=float(
+                        aggregates.get("fp_unverified_primary_penalty_points", 0.0)
+                        or 0.0
+                    ),
+                )
+                / fallback_leads,
             )
         deltas.append(candidate_score - baseline_score)
         candidate_scores.append(candidate_score)
@@ -563,6 +640,10 @@ def build_research_evaluation_score_bundle(
         per_icp_results,
         leads_per_icp_normalizer=int((policy or {}).get("leads_per_icp_normalizer", DEFAULT_LEADS_PER_ICP_NORMALIZER)),
         lcb_z=float((policy or {}).get("lcb_z", DEFAULT_LCB_Z)),
+        fp_penalty_points=float((policy or {}).get("fp_penalty_points", 0.0)),
+        fp_unverified_primary_penalty_points=float(
+            (policy or {}).get("fp_unverified_primary_penalty_points", 0.0)
+        ),
     )
     total_cost_usd = float((policy or {}).get("observed_cost_usd", 0.0))
     aggregates = {**aggregates, "total_cost_usd": round(total_cost_usd, 6)}

@@ -317,7 +317,6 @@ def build_reproducible_gateway_pcr0(
     for field in (
         "pcr0",
         "image_id",
-        "eif_sha256",
         "source_manifest_hash",
         "build_identity_hash",
         "execution_manifest_hash",

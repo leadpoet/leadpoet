@@ -1,9 +1,10 @@
 """Canonical release gate for independently reproduced gateway role EIFs.
 
 The gateway and validator each build every physical role three times from the
-same clean Git commit.  A release manifest is accepted only when all six builds
-agree on every deterministic identity field.  The manifest is deployment
-metadata; it contains no credentials and is not itself measured into the EIF.
+same clean Git commit. A release is accepted only when all six builds agree on
+the measured and deterministic runtime identity. Raw EIF hashes remain bound
+into audit evidence but can differ because Nitro CLI embeds build-time metadata
+outside PCR0. The manifest contains no credentials and is not itself measured.
 """
 
 from __future__ import annotations
@@ -33,7 +34,6 @@ DETERMINISTIC_FIELDS = (
     "commit_sha",
     "pcr0",
     "normalized_image_hash",
-    "eif_hash",
     "source_manifest_hash",
     "build_identity_hash",
     "execution_manifest_hash",
@@ -41,6 +41,7 @@ DETERMINISTIC_FIELDS = (
     "dockerfile_hash",
     "topology_hash",
 )
+OBSERVATION_FIELDS = ("eif_hash",)
 
 
 class ReleaseManifestV2Error(ValueError):
@@ -87,6 +88,7 @@ def normalize_build_evidence(value: Mapping[str, Any]) -> Dict[str, Any]:
         "physical_role",
         "service_role",
         *DETERMINISTIC_FIELDS,
+        *OBSERVATION_FIELDS,
     }
     if not isinstance(value, Mapping) or set(value) != fields:
         raise ReleaseManifestV2Error("build evidence fields do not match schema")
@@ -123,6 +125,8 @@ def normalize_build_evidence(value: Mapping[str, Any]) -> Dict[str, Any]:
     for field in DETERMINISTIC_FIELDS:
         if field in {"commit_sha", "pcr0"}:
             continue
+        normalized[field] = _hash(value.get(field), field)
+    for field in OBSERVATION_FIELDS:
         normalized[field] = _hash(value.get(field), field)
     return normalized
 
@@ -182,6 +186,7 @@ def build_release_manifest(
             "physical_role": role,
             "service_role": ROLE_SPECS[role]["service_role"],
             **{field: role_evidence[0][field] for field in DETERMINISTIC_FIELDS},
+            "eif_hashes": sorted({item["eif_hash"] for item in role_evidence}),
             "verified_build_count": len(role_evidence),
             "builder_domains": sorted(BUILDER_DOMAINS),
         }
@@ -255,6 +260,7 @@ def validate_release_manifest(value: Mapping[str, Any]) -> Dict[str, Any]:
             "physical_role",
             "service_role",
             *DETERMINISTIC_FIELDS,
+            "eif_hashes",
             "verified_build_count",
             "builder_domains",
         }
@@ -279,6 +285,16 @@ def validate_release_manifest(value: Mapping[str, Any]) -> Dict[str, Any]:
             if field in {"commit_sha", "pcr0"}:
                 continue
             _hash(summary[field], field)
+        eif_hashes = summary.get("eif_hashes")
+        if (
+            not isinstance(eif_hashes, list)
+            or not eif_hashes
+            or len(eif_hashes) > 6
+            or eif_hashes != sorted(set(eif_hashes))
+        ):
+            raise ReleaseManifestV2Error("release role EIF evidence is invalid")
+        for eif_hash in eif_hashes:
+            _hash(eif_hash, "eif_hash")
     body = {field: value[field] for field in fields if field != "release_hash"}
     if value.get("release_hash") != _sha256_json(body):
         raise ReleaseManifestV2Error("release manifest hash mismatch")

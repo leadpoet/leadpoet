@@ -84,6 +84,19 @@ def test_release_rejects_cross_host_pcr_or_image_divergence():
         _release(rows)
 
 
+def test_release_commits_non_measured_eif_hashes_without_requiring_equality():
+    rows = _evidence()
+    role = rows[0]["physical_role"]
+    original = rows[0]["eif_hash"]
+    rows[0]["eif_hash"] = _hash("f")
+
+    release = _release(rows)
+
+    assert release["roles"][role]["eif_hashes"] == sorted(
+        {original, _hash("f")}
+    )
+
+
 def test_release_rejects_missing_or_duplicate_build_evidence():
     rows = _evidence()
     with pytest.raises(ReleaseManifestV2Error, match="exactly 18"):

@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import stat
+import subprocess
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from gateway.tee.release_manifest_v2 import validate_release_manifest
@@ -78,6 +79,32 @@ def _pcr0_from_build_output(path: Path) -> str:
     )
 
 
+def _pcr0_from_eif(path: Path) -> str:
+    try:
+        completed = subprocess.run(
+            ["nitro-cli", "describe-eif", "--eif-path", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        value = json.loads(completed.stdout)
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        raise ReleaseArtifactVerificationError(
+            "Nitro EIF description is unavailable or invalid"
+        ) from exc
+    measurements = value.get("Measurements") if isinstance(value, Mapping) else None
+    pcr0 = (
+        str(measurements.get("PCR0") or "").lower()
+        if isinstance(measurements, Mapping)
+        else ""
+    )
+    if len(pcr0) != 96 or any(character not in "0123456789abcdef" for character in pcr0):
+        raise ReleaseArtifactVerificationError(
+            "Nitro EIF description has no valid PCR0"
+        )
+    return pcr0
+
+
 def verify_release_artifacts(
     *,
     release_manifest: Mapping[str, Any],
@@ -113,9 +140,15 @@ def verify_release_artifacts(
             raise ReleaseArtifactVerificationError(
                 "%s image identity is unavailable" % role
             ) from exc
+        build_pcr0 = _pcr0_from_build_output(measurement_path)
+        eif_pcr0 = _pcr0_from_eif(eif_path)
+        if build_pcr0 != eif_pcr0:
+            raise ReleaseArtifactVerificationError(
+                "%s EIF PCR0 differs from its build output" % role
+            )
         observed = {
             "commit_sha": str(identity.get("commit_sha") or "").lower(),
-            "pcr0": _pcr0_from_build_output(measurement_path),
+            "pcr0": eif_pcr0,
             "normalized_image_hash": image_id,
             "eif_hash": _sha256_file(eif_path),
             "source_manifest_hash": context_hash,
@@ -130,6 +163,8 @@ def verify_release_artifacts(
             "topology_hash": str(identity.get("topology_hash") or "").lower(),
         }
         for field, actual in observed.items():
+            if field == "eif_hash":
+                continue
             if actual != str(expected[field]).lower():
                 raise ReleaseArtifactVerificationError(
                     "%s local artifact differs from release at %s" % (role, field)

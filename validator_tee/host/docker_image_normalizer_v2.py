@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
 import hashlib
 import json
@@ -11,7 +12,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
-from typing import Any
+from typing import Any, Optional, Sequence
 
 
 class DockerImageNormalizationError(RuntimeError):
@@ -233,3 +234,20 @@ def normalize_docker_image(*, source_image: str, normalized_image: str) -> str:
         if not canonical_config_id.startswith("sha256:"):
             raise DockerImageNormalizationError("canonical Docker config ID is invalid")
         return observed_id
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source-image", required=True)
+    parser.add_argument("--normalized-image", required=True)
+    args = parser.parse_args(argv)
+    image_id = normalize_docker_image(
+        source_image=args.source_image,
+        normalized_image=args.normalized_image,
+    )
+    print(image_id)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

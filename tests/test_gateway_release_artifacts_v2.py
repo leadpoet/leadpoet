@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from gateway.tee import verify_release_artifacts_v2 as artifact_verifier
 from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
     build_release_manifest,
@@ -19,6 +20,19 @@ from gateway.tee.verify_release_artifacts_v2 import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _describe_fixture_eif(monkeypatch):
+    def _read(path: Path) -> str:
+        measurement = path.with_name(
+            path.name.replace("tee-enclave-", "enclave-build-").replace(
+                ".eif", ".json"
+            )
+        )
+        return artifact_verifier._pcr0_from_build_output(measurement)
+
+    monkeypatch.setattr(artifact_verifier, "_pcr0_from_eif", _read)
 
 
 def _sha256(value: bytes) -> str:
@@ -116,12 +130,26 @@ def test_local_role_artifacts_must_match_approved_six_build_release(tmp_path):
     ]["eif_hash"]
 
 
-def test_local_role_artifact_tampering_fails_closed(tmp_path):
+def test_local_eif_hash_is_recorded_even_when_build_metadata_differs(tmp_path):
     gateway_root, eif_root, release, _observed = _fixture(tmp_path)
     (eif_root / "tee-enclave-gateway_scoring.eif").write_bytes(b"tampered")
+    result = verify_release_artifacts(
+        release_manifest=release,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+    )
+    role = next(
+        item for item in result["roles"] if item["physical_role"] == "gateway_scoring"
+    )
+    assert role["eif_hash"] == _sha256(b"tampered")
+
+
+def test_local_eif_pcr0_must_match_its_build_output(tmp_path, monkeypatch):
+    gateway_root, eif_root, release, _observed = _fixture(tmp_path)
+    monkeypatch.setattr(artifact_verifier, "_pcr0_from_eif", lambda _path: "f" * 96)
     with pytest.raises(
         ReleaseArtifactVerificationError,
-        match="gateway_scoring.*eif_hash",
+        match="EIF PCR0 differs from its build output",
     ):
         verify_release_artifacts(
             release_manifest=release,
@@ -138,4 +166,5 @@ def test_role_build_archives_only_after_local_release_verification():
     archive_offset = script.index("gateway.tee.release_archive_v2")
     assert verify_offset < archive_offset
     assert '--retain 3' in script
+    assert "docker_image_normalizer_v2" in script
     assert 'RELEASE_ARCHIVE_ROOT="${GATEWAY_V2_RELEASE_ARCHIVE_ROOT:-$EIF_ROOT/releases-v2}"' in script

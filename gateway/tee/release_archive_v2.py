@@ -206,8 +206,6 @@ def verify_archive_directory(path: Path) -> Dict[str, Any]:
     ):
         raise ReleaseArchiveV2Error("gateway archived release identity mismatch")
     for role, expectation in release["roles"].items():
-        if files["tee-enclave-%s.eif" % role]["sha256"] != expectation["eif_hash"]:
-            raise ReleaseArchiveV2Error("archived gateway EIF differs from release")
         image_id = (root / ("enclave-image-%s.txt" % role)).read_text(
             encoding="utf-8"
         ).strip()
@@ -232,6 +230,22 @@ def verify_archive_directory(path: Path) -> Dict[str, Any]:
     )
     if verification.get("release_hash") != release["release_hash"]:
         raise ReleaseArchiveV2Error("archived local verification is for another release")
+    verification_roles = {
+        item.get("physical_role"): item
+        for item in verification.get("roles", [])
+        if isinstance(item, Mapping)
+    }
+    if set(verification_roles) != set(ROLE_SPECS):
+        raise ReleaseArchiveV2Error("archived local verification roles are incomplete")
+    for role, item in verification_roles.items():
+        if item.get("eif_hash") != files["tee-enclave-%s.eif" % role]["sha256"]:
+            raise ReleaseArchiveV2Error(
+                "archived gateway EIF differs from local verification"
+            )
+        if item.get("pcr0") != release["roles"][role]["pcr0"]:
+            raise ReleaseArchiveV2Error(
+                "archived local PCR0 differs from release"
+            )
     return document
 
 

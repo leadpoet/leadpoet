@@ -31,6 +31,7 @@ fi
 mkdir -p "$EIF_ROOT"
 for role in "${ROLES[@]}"; do
   image="tee-enclave:${role}"
+  raw_image="${image}-raw"
   output="$EIF_ROOT/tee-enclave-${role}.eif"
   measurements="$EIF_ROOT/enclave-build-${role}.json"
   rm -f "$output" "$measurements"
@@ -38,14 +39,19 @@ for role in "${ROLES[@]}"; do
     --no-cache \
     --build-arg "LEADPOET_ENCLAVE_ROLE=${role}" \
     -f "$GATEWAY_ROOT/tee/Dockerfile.enclave" \
-    -t "$image" \
+    -t "$raw_image" \
     "$GATEWAY_ROOT/"
+  sudo env PYTHONPATH="${GATEWAY_ROOT%/gateway}" python3 -m \
+    validator_tee.host.docker_image_normalizer_v2 \
+    --source-image "$raw_image" \
+    --normalized-image "$image"
   sudo docker image inspect -f '{{.Id}}' "$image" \
     > "$EIF_ROOT/enclave-image-${role}.txt"
   sudo nitro-cli build-enclave \
     --docker-uri "$image" \
     --output-file "$output" \
     | tee "$measurements"
+  sudo docker rmi -f "$raw_image" >/dev/null 2>&1 || true
 done
 
 if [ "$TOPOLOGY_MODE" = "full" ]; then

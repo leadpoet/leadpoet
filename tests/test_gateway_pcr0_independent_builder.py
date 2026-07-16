@@ -81,6 +81,30 @@ def test_repeated_build_divergence_fails_closed(tmp_path, monkeypatch):
         )
 
 
+def test_repeated_build_eif_metadata_may_differ_when_identity_matches(
+    tmp_path, monkeypatch
+):
+    commit = "3" * 40
+    monkeypatch.setattr(gateway_pcr0_builder, "resolve_commit", lambda *_args: commit)
+    monkeypatch.setattr(gateway_pcr0_builder, "extract_clean_commit", lambda **kwargs: kwargs["destination"].mkdir())
+
+    def _build(**kwargs):
+        result = _result(commit)
+        result["eif_sha256"] = "sha256:" + str(kwargs["index"]) * 64
+        return result
+
+    monkeypatch.setattr(gateway_pcr0_builder, "_build_once", _build)
+    result = gateway_pcr0_builder.build_reproducible_gateway_pcr0(
+        repo_root=tmp_path,
+        revision="HEAD",
+        work_root=tmp_path / "work",
+    )
+
+    assert [row["eif_hash"] for row in result["build_evidence"]] == [
+        "sha256:" + str(index) * 64 for index in (1, 2, 3)
+    ]
+
+
 def test_repeated_builds_require_three_runs(tmp_path):
     with pytest.raises(gateway_pcr0_builder.GatewayPCR0BuildError, match="three"):
         gateway_pcr0_builder.build_reproducible_gateway_pcr0(

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from gateway.tee import verify_release_artifacts_v2 as artifact_verifier
 from gateway.tee.release_archive_v2 import (
     ReleaseArchiveV2Error,
     archive_verified_release,
@@ -21,10 +22,24 @@ from gateway.tee.verify_release_artifacts_v2 import (
     source_manifest_hash,
     verify_release_artifacts,
 )
+from leadpoet_canonical.attested_v2 import sha256_json
 
 
 def _sha(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+@pytest.fixture(autouse=True)
+def _describe_fixture_eif(monkeypatch):
+    def _read(path: Path) -> str:
+        measurement = path.with_name(
+            path.name.replace("tee-enclave-", "enclave-build-").replace(
+                ".eif", ".json"
+            )
+        )
+        return artifact_verifier._pcr0_from_build_output(measurement)
+
+    monkeypatch.setattr(artifact_verifier, "_pcr0_from_eif", _read)
 
 
 def _release_fixture(root: Path, commit_character: str):
@@ -141,6 +156,38 @@ def test_gateway_archive_rejects_artifact_tampering(tmp_path):
     archive = Path(result["archive_path"])
     (archive / "tee-enclave-gateway_scoring.eif").write_bytes(b"tampered")
     with pytest.raises(ReleaseArchiveV2Error, match="size mismatch|hash mismatch"):
+        verify_archive_directory(archive)
+
+
+def test_gateway_archive_rejects_eif_rehashed_after_tampering(tmp_path):
+    gateway_root, eif_root, release_path, _release = _release_fixture(
+        tmp_path / "build", "f"
+    )
+    result = archive_verified_release(
+        release_manifest_path=release_path,
+        gateway_root=gateway_root,
+        eif_root=eif_root,
+        archive_root=tmp_path / "archive",
+    )
+    archive = Path(result["archive_path"])
+    relative_path = "tee-enclave-gateway_scoring.eif"
+    eif_path = archive / relative_path
+    eif_path.write_bytes(b"tampered-and-rehashed")
+
+    archive_doc_path = archive / "archive.json"
+    archive_doc = json.loads(archive_doc_path.read_text(encoding="utf-8"))
+    archive_doc["files"][relative_path] = {
+        "sha256": _sha(eif_path.read_bytes()),
+        "size_bytes": eif_path.stat().st_size,
+    }
+    body = {key: value for key, value in archive_doc.items() if key != "archive_hash"}
+    archive_doc["archive_hash"] = sha256_json(body)
+    archive_doc_path.write_text(json.dumps(archive_doc), encoding="utf-8")
+
+    with pytest.raises(
+        ReleaseArchiveV2Error,
+        match="gateway EIF differs from local verification",
+    ):
         verify_archive_directory(archive)
 
 

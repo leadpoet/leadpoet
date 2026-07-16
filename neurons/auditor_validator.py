@@ -3,7 +3,9 @@
 LeadPoet Auditor Validator
 
 A lightweight validator that copies authoritative V2 weights after independently
-verifying their complete attested receipt graph.
+verifying their complete attested receipt graph. During the V2 rollout, it can
+copy a fully verified V1 bundle only when the gateway reports that no V2
+authority exists for the requested epoch.
 
 Verification failure is fail-closed: the auditor never substitutes a locally
 computed or burn vector, and an invalid or pending V2 authority never downgrades.
@@ -16,6 +18,7 @@ import os
 import sys
 import argparse
 import json
+import re
 import time
 from urllib.parse import urlparse
 
@@ -230,7 +233,7 @@ PENDING_EQUIVOCATION_FILE = os.path.join(_SCRIPT_DIR, ".pending_equivocation_che
 
 class AuditorValidator:
     """
-    Validator that accepts only independently verified V2 authority.
+    Validator that prefers V2 and narrowly supports verified rollout-era V1.
     """
     
     def __init__(self, config, gateway_url: str):
@@ -648,6 +651,7 @@ class AuditorValidator:
     async def fetch_attested_weights_v2(self, epoch_id: int) -> Optional[Dict]:
         """Fetch the sole authoritative V2 bundle."""
 
+        self._last_v2_authority_was_absent = False
         try:
             async with aiohttp.ClientSession(trust_env=False) as session:
                 url = f"{self.gateway_url}/weights/v2/latest/{self.config.netuid}/{int(epoch_id)}"
@@ -662,16 +666,11 @@ class AuditorValidator:
                             if isinstance(not_found, dict)
                             else ""
                         )
-                        if detail not in {
+                        self._last_v2_authority_was_absent = detail in {
                             "Not Found",
                             "v2 weight bundle not found",
                             "finalized v2 weight authority not found",
-                        }:
-                            logger.warning(
-                                "auditor_v2_fetch_failed epoch=%s status=404 detail=%s",
-                                epoch_id,
-                                detail[:160],
-                            )
+                        }
                         return None
                     if response.status != 200:
                         logger.warning(
@@ -691,17 +690,216 @@ class AuditorValidator:
             )
             return None
 
+    async def fetch_attested_weights_v1(self, epoch_id: int) -> Optional[Dict]:
+        """Fetch the temporary V1 compatibility bundle."""
+
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as session:
+                url = (
+                    f"{self.gateway_url}/weights/latest/"
+                    f"{self.config.netuid}/{int(epoch_id)}"
+                )
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 404:
+                        return None
+                    if response.status != 200:
+                        logger.warning(
+                            "auditor_v1_fallback_fetch_failed epoch=%s status=%s",
+                            epoch_id,
+                            response.status,
+                        )
+                        return None
+                    value = await response.json()
+                    return value if isinstance(value, dict) else None
+        except Exception as exc:
+            logger.warning(
+                "auditor_v1_fallback_fetch_failed epoch=%s error_type=%s error=%s",
+                epoch_id,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            return None
+
+    @staticmethod
+    def _v1_pcr0_commit_is_allowed(pcr0: str, commit_hash: str) -> bool:
+        try:
+            allowlist = json.loads(
+                (Path(_REPO_ROOT) / "pcr0_allowlist.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        except Exception:
+            return False
+        return any(
+            isinstance(item, dict)
+            and str(item.get("pcr0") or "").lower() == pcr0
+            and str(item.get("commit_hash") or "").lower() == commit_hash
+            for item in allowlist.get("validator_pcr0", [])
+        )
+
+    @staticmethod
+    def _verify_v1_nitro_attestation(
+        bundle: Dict,
+        *,
+        pcr0: str,
+        pubkey: str,
+        epoch_id: int,
+    ) -> bool:
+        from leadpoet_canonical.nitro import verify_nitro_attestation_full
+
+        valid, _details = verify_nitro_attestation_full(
+            bundle["validator_attestation_b64"],
+            expected_pcr0=pcr0,
+            expected_pubkey=pubkey,
+            expected_purpose="validator_weights",
+            expected_epoch_id=epoch_id,
+            role="validator",
+            skip_pcr0_verification=False,
+        )
+        return bool(valid)
+
+    def verify_attested_weights_v1(
+        self,
+        bundle: Dict,
+        *,
+        expected_epoch_id: int,
+    ) -> Optional[Dict]:
+        """Verify V1 without allowing invalid V2 authority to downgrade."""
+
+        try:
+            if not isinstance(bundle, dict):
+                raise ValueError("bundle is not an object")
+            netuid = bundle.get("netuid")
+            epoch_id = bundle.get("epoch_id")
+            block = bundle.get("block")
+            if (
+                isinstance(netuid, bool)
+                or not isinstance(netuid, int)
+                or netuid != int(self.config.netuid)
+                or isinstance(epoch_id, bool)
+                or not isinstance(epoch_id, int)
+                or epoch_id != int(expected_epoch_id)
+                or isinstance(block, bool)
+                or not isinstance(block, int)
+                or block < 0
+                or block // EPOCH_LENGTH != epoch_id
+            ):
+                raise ValueError("bundle chain identity is invalid")
+
+            uids = bundle.get("uids")
+            weights_u16 = bundle.get("weights_u16")
+            if (
+                not isinstance(uids, list)
+                or not isinstance(weights_u16, list)
+                or not uids
+                or len(uids) != len(weights_u16)
+                or len(set(uids)) != len(uids)
+                or any(
+                    isinstance(uid, bool)
+                    or not isinstance(uid, int)
+                    or uid < 0
+                    or uid > 65535
+                    for uid in uids
+                )
+                or any(
+                    isinstance(weight, bool)
+                    or not isinstance(weight, int)
+                    or weight < 0
+                    or weight > 65535
+                    for weight in weights_u16
+                )
+            ):
+                raise ValueError("bundle weight vector is invalid")
+
+            claimed_hash = str(bundle.get("weights_hash") or "").lower()
+            signature = str(bundle.get("validator_signature") or "").lower()
+            pubkey = str(bundle.get("validator_enclave_pubkey") or "").lower()
+            pcr0 = str(bundle.get("validator_pcr0") or "").lower()
+            commit_hash = str(bundle.get("pcr0_commit_hash") or "").lower()
+            attestation = str(bundle.get("validator_attestation_b64") or "")
+            if (
+                not re.fullmatch(r"[0-9a-f]{64}", claimed_hash)
+                or not re.fullmatch(r"[0-9a-f]{128}", signature)
+                or not re.fullmatch(r"[0-9a-f]{64}", pubkey)
+                or not re.fullmatch(r"[0-9a-f]{96}", pcr0)
+                or not re.fullmatch(r"[0-9a-f]{40}", commit_hash)
+                or not attestation
+            ):
+                raise ValueError("bundle attestation fields are invalid")
+
+            recomputed_hash = bundle_weights_hash(
+                netuid,
+                epoch_id,
+                block,
+                list(zip(uids, weights_u16)),
+            )
+            if recomputed_hash != claimed_hash:
+                raise ValueError("bundle weights hash mismatch")
+            Ed25519PublicKey.from_public_bytes(bytes.fromhex(pubkey)).verify(
+                bytes.fromhex(signature),
+                bytes.fromhex(claimed_hash),
+            )
+            if not self._v1_pcr0_commit_is_allowed(pcr0, commit_hash):
+                raise ValueError("bundle PCR0 and commit are not an allowed pair")
+            if not self._verify_v1_nitro_attestation(
+                bundle,
+                pcr0=pcr0,
+                pubkey=pubkey,
+                epoch_id=epoch_id,
+            ):
+                raise ValueError("bundle Nitro attestation verification failed")
+            return dict(bundle)
+        except Exception as exc:
+            logger.warning(
+                "auditor_v1_fallback_verification_failed epoch=%s "
+                "error_type=%s error=%s",
+                expected_epoch_id,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            return None
+
+    @staticmethod
+    def _verified_v1_fallback_enabled() -> bool:
+        """Allow the fully verified V1 bundle when V2 authority is absent.
+
+        Default ON so auditors keep submitting while the gateway runs the
+        legacy weight path; set AUDITOR_ALLOW_VERIFIED_V1_FALLBACK=false to
+        enforce strict V2-only auditing once the V2 release is live. The
+        fallback never fires on an invalid V2 authority — only when the
+        gateway reports that no V2 authority exists for the epoch.
+        """
+        raw = str(
+            os.environ.get("AUDITOR_ALLOW_VERIFIED_V1_FALLBACK", "true") or ""
+        ).strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
     async def fetch_verified_weight_authority(
         self,
         epoch_id: int,
     ) -> Tuple[Optional[Dict], str]:
-        """Fetch and independently verify the sole V2 authority."""
+        """Prefer V2 and permit verified V1 only when V2 authority is absent."""
 
         v2_bundle = await self.fetch_attested_weights_v2(epoch_id)
-        if not isinstance(v2_bundle, dict):
+        if isinstance(v2_bundle, dict):
+            verified = self.verify_attested_weights_v2(v2_bundle)
+            return verified, "v2_verified" if verified else "v2_invalid"
+        if not getattr(self, "_last_v2_authority_was_absent", False):
             return None, "v2_unavailable"
-        verified = self.verify_attested_weights_v2(v2_bundle)
-        return verified, "v2_verified" if verified else "v2_invalid"
+        if not self._verified_v1_fallback_enabled():
+            return None, "v2_unavailable"
+
+        v1_bundle = await self.fetch_attested_weights_v1(epoch_id)
+        if not isinstance(v1_bundle, dict):
+            return None, "v1_unavailable"
+        verified = self.verify_attested_weights_v1(
+            v1_bundle,
+            expected_epoch_id=epoch_id,
+        )
+        return verified, "v1_verified" if verified else "v1_invalid"
 
     def verify_attested_weights_v2(self, authority: Dict) -> Optional[Dict]:
         """Verify finalized V2 authority against independent PCR0 builds."""
@@ -1232,8 +1430,10 @@ class AuditorValidator:
                             await self.fetch_verified_weight_authority(target_epoch)
                         )
                         if weights_data is None:
-                            # Verification is fail-closed: no fallback vector will be submitted.
-                            if authority_status == "v2_unavailable":
+                            if authority_status in {
+                                "v2_unavailable",
+                                "v1_unavailable",
+                            }:
                                 print("   ⏳ Weights not yet published. Waiting 30s...")
                             else:
                                 print("❌ Auditor verification failed")

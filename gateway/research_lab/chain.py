@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import subprocess
+import sys
 import time
 from typing import Any, Iterable
 
@@ -18,6 +21,7 @@ _EPOCH_HINT_MAX_AGE_SECONDS_ENV = "RESEARCH_LAB_GATEWAY_EPOCH_HINT_MAX_AGE_SECON
 _DIRECT_EPOCH_TIMEOUT_SECONDS_ENV = "RESEARCH_LAB_DIRECT_EPOCH_TIMEOUT_SECONDS"
 _DEFAULT_EPOCH_HINT_MAX_AGE_SECONDS = 2 * 60 * 60
 _DEFAULT_DIRECT_EPOCH_TIMEOUT_SECONDS = 20.0
+_DIRECT_EPOCH_RESULT_PREFIX = "LEADPOET_EPOCH_RESULT="
 
 
 async def resolve_research_lab_evaluation_epoch(configured_epoch: int | str | None = None) -> tuple[int, int | None, str]:
@@ -147,21 +151,60 @@ async def _get_metagraph() -> Any:
 
 
 def _fetch_current_chain_epoch_direct() -> tuple[int, int, str]:
-    import bittensor as bt
-
     network = os.getenv("BITTENSOR_NETWORK", "finney")
     proxy_keys = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
-    saved_proxy_env = {key: os.environ.pop(key) for key in proxy_keys if key in os.environ}
+    child_env = {key: value for key, value in os.environ.items() if key not in proxy_keys}
+    probe = """
+import json
+import os
+import bittensor as bt
+
+network = os.getenv("BITTENSOR_NETWORK", "finney")
+subtensor = bt.subtensor(network=network)
+try:
+    block = int(subtensor.block)
+finally:
+    close = getattr(subtensor, "close", None)
+    if callable(close):
+        close()
+print(%r + json.dumps({"block": block, "network": network}, separators=(",", ":")))
+""" % _DIRECT_EPOCH_RESULT_PREFIX
+    timeout_seconds = max(1.0, _direct_epoch_timeout_seconds() - 1.0)
     try:
-        subtensor = bt.subtensor(network=network)
-        try:
-            block = int(subtensor.block)
-        finally:
-            close = getattr(subtensor, "close", None)
-            if callable(close):
-                close()
-    finally:
-        os.environ.update(saved_proxy_env)
+        completed = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            check=False,
+            env=child_env,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"direct subtensor epoch probe timed out after {timeout_seconds:.1f}s"
+        ) from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+        raise RuntimeError(
+            "direct subtensor epoch probe failed: "
+            + (detail[-1][:200] if detail else f"exit {completed.returncode}")
+        )
+    result_line = next(
+        (
+            line[len(_DIRECT_EPOCH_RESULT_PREFIX) :]
+            for line in reversed(completed.stdout.splitlines())
+            if line.startswith(_DIRECT_EPOCH_RESULT_PREFIX)
+        ),
+        "",
+    )
+    try:
+        result = json.loads(result_line)
+        block = int(result["block"])
+        result_network = str(result["network"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("direct subtensor epoch probe returned invalid output") from exc
+    if block <= 0 or result_network != network:
+        raise RuntimeError("direct subtensor epoch probe returned inconsistent output")
     return block // 360, block, network
 
 

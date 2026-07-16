@@ -31,7 +31,9 @@ from gateway.fulfillment.models import (
 from gateway.qualification.models import LeadOutput, ICPPrompt
 from gateway.fulfillment.icp_checks import (
     tier1_check,
+    semantic_industry_match,
     semantic_sub_industry_match,
+    sub_industry_deterministic_status,
     validate_lead_geography,
 )
 from validator_models.fulfillment_person_verification import fulfillment_person_verification
@@ -311,7 +313,7 @@ async def score_fulfillment_lead(
 
     # --- Tier 1: ICP Fit (deterministic, free) ---
     t1_failure = tier1_check(lead, lead_output, icp, seen_companies, role_decisions=role_decisions)
-    if t1_failure and t1_failure != "sub_industry_needs_llm":
+    if t1_failure and t1_failure not in ("industry_needs_llm", "sub_industry_needs_llm"):
         return FulfillmentScoreResult(
             tier1_passed=False,
             failure_reason=t1_failure,
@@ -364,7 +366,27 @@ async def score_fulfillment_lead(
                 ),
             )
 
-    # --- Tier 1.5: LLM-based checks (sub-industry semantic + location) ---
+    # --- Tier 1.5: LLM-based checks (industry/sub-industry semantic + location) ---
+    # Call 0: Industry semantic match (only if the deterministic ladder —
+    # exact, equivalence class, containment — failed). Multi-clause provider
+    # industry descriptions can never string-equal a taxonomy label, so this
+    # gate judges them instead of hard-rejecting viable candidates.
+    if t1_failure == "industry_needs_llm":
+        icp_inds = icp.industry if isinstance(icp.industry, list) else [icp.industry]
+        ind_matched, matched_ind = await semantic_industry_match(
+            lead.industry, icp_inds,
+        )
+        if not ind_matched:
+            return FulfillmentScoreResult(
+                tier1_passed=False,
+                failure_reason="industry_mismatch",
+                failure_detail=_build_failure_detail("industry_mismatch", lead=lead, lead_output=lead_output, icp=icp),
+            )
+        print(f"   ✅ Tier 1.5: Industry semantic match: '{lead.industry}' → '{matched_ind}'")
+        # tier1_check returns at the industry rung, so the sub-industry rung
+        # was never evaluated — run it now that industry has passed.
+        t1_failure = sub_industry_deterministic_status(lead, icp)
+
     # Call 1: Sub-industry semantic match (only if Tier 1 exact+containment failed)
     if t1_failure == "sub_industry_needs_llm":
         icp_subs = icp.sub_industry if isinstance(icp.sub_industry, list) else [icp.sub_industry]

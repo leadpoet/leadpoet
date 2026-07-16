@@ -131,6 +131,20 @@ _SUB_INDUSTRY_SEMANTIC_PROMPT = (
     'Return JSON only: {{"match": true/false, "matched_sub_industry": "the matched target or empty"}}'
 )
 
+_INDUSTRY_SEMANTIC_PROMPT = (
+    'Lead industry description: "{lead_industry}"\n\n'
+    'ICP target industries: {icp_industries}\n\n'
+    'Does the lead\'s industry belong to any target industry?\n'
+    'The lead value is often a long multi-clause provider description while '
+    'targets are single taxonomy labels — match when the described business '
+    'clearly falls inside a target industry.\n'
+    'Match on: spelling variations, abbreviations, singular/plural, '
+    'hyphenation differences, or terms that refer to the same business category.\n'
+    'Do NOT match unrelated categories even if they sound similar; when in '
+    'doubt, do not match.\n\n'
+    'Return JSON only: {{"match": true/false, "matched_industry": "the matched target or empty"}}'
+)
+
 _LOCATION_CHECK_PROMPT = (
     'ICP target geography: "{icp_geography}"\n\n'
     'Lead HQ: city="{hq_city}", state="{hq_state}", country="{hq_country}"\n\n'
@@ -340,6 +354,61 @@ def _role_decision_key(role: str) -> str:
 # Tier 1: ICP Fit Gate (free, deterministic)
 # ---------------------------------------------------------------------------
 
+def _containment_match(lead_value: str, allowed_values: List[str]) -> bool:
+    """Case-insensitive bidirectional containment against any allowed label."""
+    lead_lower = (lead_value or "").lower().strip()
+    if not lead_lower:
+        return False
+    for allowed in allowed_values:
+        allowed_lower = allowed.lower().strip()
+        if allowed_lower and (allowed_lower in lead_lower or lead_lower in allowed_lower):
+            return True
+    return False
+
+
+@lru_cache(maxsize=1)
+def _known_parent_industries() -> frozenset:
+    """Lowercased parent-industry labels from the taxonomy authority."""
+    from gateway.utils.industry_taxonomy import INDUSTRY_TAXONOMY
+
+    parents = set()
+    for entry in INDUSTRY_TAXONOMY.values():
+        for industry in entry.get("industries", []) if isinstance(entry, dict) else []:
+            parents.add(str(industry).lower().strip())
+    return frozenset(parents)
+
+
+def _industry_components(value: str) -> List[str]:
+    """Split a provider industry field into its listed values.
+
+    Providers separate multiple industries with ";" or "," ("Robotics;
+    Industrial Automation and Autonomous Systems"). No taxonomy label name
+    contains either character (verified against
+    gateway/utils/industry_taxonomy.py), so splitting can never break a
+    legitimate single label.
+    """
+    parts = [p.strip() for p in re.split(r"[;,]", value or "") if p.strip()]
+    return parts if parts else ([value.strip()] if value and value.strip() else [])
+
+
+def sub_industry_deterministic_status(
+    lead: FulfillmentLead, icp: FulfillmentICP
+) -> Optional[str]:
+    """The sub-industry rung of Tier 1: None = pass, else needs the LLM.
+
+    Shared by ``tier1_check`` and the Tier 1.5 bridge in scoring so an
+    industry deferral cannot skip the sub-industry check.
+    """
+    allowed_subs = _coerce_industry_list(icp.sub_industry)
+    if not allowed_subs:
+        return None
+    if lead.sub_industry in allowed_subs:
+        return None
+    if _containment_match(lead.sub_industry, allowed_subs):
+        return None
+    return "sub_industry_needs_llm"
+
+
 def tier1_check(
     lead: FulfillmentLead,
     lead_output: LeadOutput,
@@ -349,7 +418,8 @@ def tier1_check(
 ) -> Optional[str]:
     """
     Return failure_reason string if the lead fails any ICP check, else None.
-    Returns "sub_industry_needs_llm" if sub-industry needs Tier 1.5 LLM check.
+    Returns "industry_needs_llm" / "sub_industry_needs_llm" when the
+    corresponding label needs the Tier 1.5 LLM check.
 
     ``role_decisions`` is an optional ``{normalized_role: bool}`` cache
     pre-populated by ``score_fulfillment_batch``'s LLM pre-pass.  When
@@ -359,27 +429,38 @@ def tier1_check(
     allowed_inds = _coerce_industry_list(icp.industry)
     if allowed_inds:
         if lead.industry not in allowed_inds:
-            # Fallback: industry equivalence map (e.g., Software ≈ IT, Real
-            # Estate ≈ Physical Infrastructure).  See
-            # gateway/utils/industry_equivalence.json.  Purely additive — if
-            # JSON missing or no class matches, behaves exactly as the
-            # original hard check.
-            if not _industry_in_equivalence_class(lead.industry, allowed_inds):
-                return "industry_mismatch"
+            # Providers separate multiple industries with ";"/"," ("Robotics;
+            # Industrial Automation and Autonomous Systems"), which can never
+            # string-equal a single taxonomy label — that hard-rejected
+            # viable candidates. Each listed component gets the full ladder:
+            # exact membership, the equivalence map (e.g., Software ≈ IT —
+            # see gateway/utils/industry_equivalence.json, purely additive),
+            # then case-insensitive containment. Anything still unmatched
+            # defers to the Tier 1.5 semantic gate instead of hard-zeroing —
+            # the same ladder the sub-industry check below has always used.
+            components = _industry_components(lead.industry)
+            matched = any(
+                component in allowed_inds
+                or _industry_in_equivalence_class(component, allowed_inds)
+                or _containment_match(component, allowed_inds)
+                for component in components
+            )
+            if not matched:
+                # Clean taxonomy labels that simply name different
+                # industries are a true mismatch — reject instantly, as
+                # always. Only messy provider values (anything that is not
+                # a recognized parent-industry label) earn the Tier 1.5
+                # semantic judgment.
+                known = _known_parent_industries()
+                if components and all(
+                    component.lower().strip() in known for component in components
+                ):
+                    return "industry_mismatch"
+                return "industry_needs_llm"
 
-    allowed_subs = _coerce_industry_list(icp.sub_industry)
-    if allowed_subs:
-        if lead.sub_industry not in allowed_subs:
-            # Try containment match before flagging for LLM
-            lead_sub_lower = lead.sub_industry.lower().strip()
-            containment_match = False
-            for allowed in allowed_subs:
-                allowed_lower = allowed.lower().strip()
-                if allowed_lower in lead_sub_lower or lead_sub_lower in allowed_lower:
-                    containment_match = True
-                    break
-            if not containment_match:
-                return "sub_industry_needs_llm"
+    sub_status = sub_industry_deterministic_status(lead, icp)
+    if sub_status:
+        return sub_status
 
     if icp.excluded_companies and lead.business:
         from gateway.fulfillment.normalize import normalize_company
@@ -535,6 +616,37 @@ async def _llm_call(prompt: str, or_key: str) -> Optional[dict]:
                 continue
             return None
     return None
+
+
+async def semantic_industry_match(
+    lead_industry: str,
+    icp_industries: list,
+) -> Tuple[bool, str]:
+    """Semantic industry match via LLM. Returns (matched, matched_industry).
+
+    Conservative gate for lead industries that failed the deterministic
+    ladder (exact, equivalence class, containment) — typically multi-clause
+    provider descriptions that cannot string-equal a taxonomy label. No key
+    or no LLM result fails closed, matching the sub-industry behavior.
+    """
+    or_key = _get_openrouter_key()
+    if not or_key:
+        return False, ""
+
+    safe_ind = lead_industry.replace("{", "{{").replace("}", "}}")
+    inds_str = ", ".join(f'"{s}"' for s in icp_industries)
+
+    prompt = _INDUSTRY_SEMANTIC_PROMPT.format(
+        lead_industry=safe_ind,
+        icp_industries=inds_str,
+    )
+
+    result = await _llm_call(prompt, or_key)
+    if result:
+        matched = bool(result.get("match", False))
+        matched_industry = str(result.get("matched_industry", ""))
+        return matched, matched_industry
+    return False, ""
 
 
 async def semantic_sub_industry_match(

@@ -112,3 +112,7 @@ def test_gateway_eif_uses_pinned_python39_offline_lock_and_unchanged_outer_conte
     assert "--no-deps" in prepare
     assert "--require-hashes" in prepare
     assert "verify-wheelhouse" in stage
+    assert prepare.count(
+        'PYTHONPATH="$REPO_ROOT" python3 '
+        '"$SCRIPT_DIR/sandbox_runtime_artifact.py" verify'
+    ) == 3

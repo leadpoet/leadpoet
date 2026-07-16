@@ -19,6 +19,7 @@ COPY . .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir -e .
+RUN python3 -c "import bittensor as bt; assert str(bt.__version__) == '10.5.0', bt.__version__"
 
 # Create validator_weights directory for state persistence
 RUN mkdir -p validator_weights

@@ -687,3 +687,47 @@ class TestHealthScript:
         assert any(line == "alert_reward_pending_uid_events=1" for line in lines)
         assert any(line == "alert_promotion_passed_without_active_version_created=1" for line in lines)
         assert any("promotion_passed_no_activation candidate=cand-1" in line for line in lines)
+
+
+class TestPerIcpGoalNormalization:
+    """Dynamic per-ICP lead budget: rows carrying icp_company_goal normalize
+    against the requested company count instead of the fixed 5-lead budget."""
+
+    def test_row_goal_overrides_set_normalizer(self):
+        rows = [
+            {
+                "icp_ref": "icp:a",
+                "icp_hash": _sha("1"),
+                "icp_company_goal": 3,
+                "base_company_scores": [],
+                "candidate_company_scores": [80, 80, 80],
+            },
+            {
+                "icp_ref": "icp:b",
+                "icp_hash": _sha("2"),
+                "base_company_scores": [],
+                "candidate_company_scores": [80],
+            },
+        ]
+        aggregates = compute_evaluation_aggregates(rows)
+        by_ref = {row["icp_ref"]: row for row in aggregates["per_icp_results"]}
+        # Goal-carrying row: sum(80*3)/3 = 80; the goal survives into the bundle.
+        assert by_ref["icp:a"]["candidate_per_icp_score"] == pytest.approx(80.0)
+        assert by_ref["icp:a"]["icp_company_goal"] == 3
+        # Legacy row without a goal keeps the fixed 5-lead budget: 80/5.
+        assert by_ref["icp:b"]["candidate_per_icp_score"] == pytest.approx(16.0)
+        assert "icp_company_goal" not in by_ref["icp:b"]
+
+    def test_invalid_goal_falls_back_to_set_normalizer(self):
+        rows = [
+            {
+                "icp_ref": "icp:a",
+                "icp_hash": _sha("1"),
+                "icp_company_goal": "junk",
+                "base_company_scores": [],
+                "candidate_company_scores": [50],
+            },
+        ]
+        aggregates = compute_evaluation_aggregates(rows)
+        row = aggregates["per_icp_results"][0]
+        assert row["candidate_per_icp_score"] == pytest.approx(10.0)

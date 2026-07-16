@@ -146,10 +146,14 @@ async def _emit_holdout_transition(
 INCONTAINER_TRACE_S3_PREFIX_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX"
 INCONTAINER_TRACE_KMS_KEY_ENV = "RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID"
 
-# Company scores are normalized against a fixed lead budget per ICP when the
-# capped top-5 scoring flag is on; must match the verifier's advisory recompute
+# Company scores are normalized against the ICP's requested lead budget when
+# the capped scoring flag is on; must match the verifier's advisory recompute
 # (leadpoet_verifier.research_evaluation.DEFAULT_LEADS_PER_ICP_NORMALIZER).
+# This is the fallback budget for ICPs that carry no max_companies goal.
 _TOP5_LEADS_PER_ICP = 5
+# Same clamp as the goal-seeking sourcing/scoring paths
+# (gateway.research_lab.scoring_worker._icp_company_goal).
+_MAX_ICP_COMPANY_GOAL = 50
 _EVAL_ENV_TRUTHY = {"1", "true", "yes", "on"}
 _PROVIDER_429_RETRY_BACKOFF_SECONDS = 15.0
 _PROVIDER_COST_CAP_ERROR_MARKERS = (
@@ -203,13 +207,35 @@ def _provider_flake_retry_enabled() -> bool:
 
 def _capped_top5_score_enabled() -> bool:
     """Bug #8 score-scale switch: per-ICP score becomes the verifier's capped
-    sum(top-5 company scores)/5 instead of the unweighted company mean.
+    sum(top-N company scores)/N instead of the unweighted company mean, where
+    N is the ICP's requested company count (max_companies, fallback 5).
+
+    Under the mean, one 80-score company earns the same ICP score as three
+    80-score companies, so the model is never rewarded for filling the
+    requested quantity. The capped form divides by the requested count, so
+    every unfilled slot costs score.
 
     Default OFF — enabling changes the score scale, so the daily baseline and
     all candidates must flip in the same deploy followed by a fresh baseline
     run (never compare scores across the boundary).
     """
     return _env_flag("RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE", False)
+
+
+def _icp_company_goal(icp: Any) -> int:
+    """The ICP's requested company count (max_companies), clamped to 1..50.
+
+    Falls back to the fixed 5-lead budget when the ICP carries no goal, so
+    legacy ICP sets keep the historical normalization exactly.
+    """
+    raw = icp.get("max_companies") if isinstance(icp, Mapping) else None
+    if raw is None:
+        return _TOP5_LEADS_PER_ICP
+    try:
+        goal = int(raw)
+    except (TypeError, ValueError):
+        return _TOP5_LEADS_PER_ICP
+    return max(1, min(goal, _MAX_ICP_COMPANY_GOAL))
 
 
 def _max_scored_companies_per_icp() -> int:
@@ -848,6 +874,9 @@ async def _score_single_icp(
         "icp_hash": str(item.get("icp_hash") or ""),
         "status": "completed",
         "hard_failure": False,
+        # Requested company count for this ICP; the capped per-ICP score
+        # normalizes against it (verifier recomputes with the same value).
+        "icp_company_goal": _icp_company_goal(icp),
         "base_company_scores": base_scores,
         "candidate_company_scores": candidate_scores,
         "failure_reason": ";".join(failure_reasons),
@@ -2069,8 +2098,9 @@ def _benchmark_style_score(
     #
     # One deliberate deviation:
     # - With RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE on (bug #8), the per-ICP score
-    #   is the verifier's capped sum(top-5 company scores)/5 instead of the
-    #   unweighted mean, closing the truncate-to-best-company exploit.
+    #   is the verifier's capped sum(top-N company scores)/N — N being the
+    #   ICP's requested company count — instead of the unweighted mean,
+    #   closing the truncate-to-best-company exploit and paying for quantity.
     capped_top5 = _capped_top5_score_enabled()
     per_icp_scores: list[float] = []
     for row in per_icp_results:
@@ -2079,29 +2109,58 @@ def _benchmark_style_score(
             per_icp_scores.append(0.0)
             continue
         values = [float(item or 0.0) for item in scores]
-        per_icp_scores.append(_benchmark_icp_score(values, capped_top5=capped_top5))
+        per_icp_scores.append(
+            _benchmark_icp_score(
+                values,
+                capped_top5=capped_top5,
+                requested_count=row.get("icp_company_goal"),
+            )
+        )
     return float(sum(per_icp_scores) / len(per_icp_scores)) if per_icp_scores else 0.0
 
 
-def benchmark_icp_score_from_company_scores(scores: Sequence[float]) -> float:
+def benchmark_icp_score_from_company_scores(
+    scores: Sequence[float],
+    requested_count: int | None = None,
+) -> float:
     """Per-ICP score on the live-gate scale for one ICP's company scores.
 
-    Shared entry point so the daily-baseline path and the candidate path flip
-    together when RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE changes; never mix scores
-    computed under different settings of that flag.
+    ``requested_count`` is the ICP's requested company count (max_companies);
+    omitted/None keeps the fixed 5-lead budget so legacy callers and ICP sets
+    are unchanged. Shared entry point so the daily-baseline path and the
+    candidate path flip together when RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE
+    changes; never mix scores computed under different settings of that flag.
     """
     values = [float(item or 0.0) for item in scores]
-    return _benchmark_icp_score(values, capped_top5=_capped_top5_score_enabled())
+    return _benchmark_icp_score(
+        values,
+        capped_top5=_capped_top5_score_enabled(),
+        requested_count=requested_count,
+    )
 
 
-def _benchmark_icp_score(values: list[float], *, capped_top5: bool) -> float:
+def _requested_count_or_default(requested_count: Any) -> int:
+    try:
+        count = int(requested_count)
+    except (TypeError, ValueError):
+        return _TOP5_LEADS_PER_ICP
+    return max(1, min(count, _MAX_ICP_COMPANY_GOAL))
+
+
+def _benchmark_icp_score(
+    values: list[float],
+    *,
+    capped_top5: bool,
+    requested_count: Any = None,
+) -> float:
     if capped_top5:
         # Match the verifier's advisory arithmetic exactly
         # (leadpoet_verifier.aggregation.per_icp_normalized_score): each company
         # score is clamped to [0, MAX_COMPANY_TOTAL_SCORE], summed over the top
-        # five companies, and divided by the fixed 5-lead budget.
-        top_values = sorted(values, reverse=True)[:_TOP5_LEADS_PER_ICP]
-        return float(per_icp_normalized_score(top_values, max_leads=_TOP5_LEADS_PER_ICP))
+        # N companies, and divided by the N-lead budget the ICP requested.
+        count = _requested_count_or_default(requested_count)
+        top_values = sorted(values, reverse=True)[:count]
+        return float(per_icp_normalized_score(top_values, max_leads=count))
     return float(sum(values) / len(values)) if values else 0.0
 
 

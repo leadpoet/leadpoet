@@ -112,10 +112,30 @@ PER_ICP_CAPTURE_PASSTHROUGH_KEYS = (
     # why loop lead-funnel / intent-pass-rate panels had no data.
     "funnel",
     "evidence_types",
+    # Requested company count for the ICP; the per-ICP normalization divides
+    # by it, so it must survive into the bundle for exact recomputation.
+    "icp_company_goal",
     # Immutable per-ICP context stamps used by trajectory/corpus joins and
     # later analysis. These carry only refs/hashes, never private ICP text.
     "evaluation_context",
 )
+
+
+def _row_leads_normalizer(row: Mapping[str, Any], default: int) -> int:
+    """Per-ICP lead budget: the row's requested company count when present.
+
+    Rows produced after the dynamic-goal change carry ``icp_company_goal``
+    (the ICP's max_companies, clamped 1..50); older bundles have no such key
+    and keep the set-level normalizer so historical scores replay unchanged.
+    """
+    raw = row.get("icp_company_goal")
+    if raw is None:
+        return default
+    try:
+        goal = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(goal, 50))
 
 
 def compute_evaluation_aggregates(
@@ -140,8 +160,9 @@ def compute_evaluation_aggregates(
     for item in sorted(per_icp_results, key=lambda row: str(row.get("icp_ref") or row.get("icp_hash") or "")):
         base_company_scores = _coerce_scores(item.get("base_company_scores", ()))
         candidate_company_scores = _coerce_scores(item.get("candidate_company_scores", ()))
-        base_score = per_icp_normalized_score(base_company_scores, max_leads=leads_per_icp_normalizer)
-        candidate_score = per_icp_normalized_score(candidate_company_scores, max_leads=leads_per_icp_normalizer)
+        row_leads = _row_leads_normalizer(item, leads_per_icp_normalizer)
+        base_score = per_icp_normalized_score(base_company_scores, max_leads=row_leads)
+        candidate_score = per_icp_normalized_score(candidate_company_scores, max_leads=row_leads)
         delta = candidate_score - base_score
         hard_failure = bool(item.get("hard_failure", False))
         if hard_failure:
@@ -449,7 +470,7 @@ def evaluate_daily_baseline_improvement_gate(
         except (KeyError, TypeError, ValueError):
             candidate_score = per_icp_normalized_score(
                 _coerce_scores(row.get("candidate_company_scores", ())),
-                max_leads=normalizer,
+                max_leads=_row_leads_normalizer(row, normalizer),
             )
         deltas.append(candidate_score - baseline_score)
         candidate_scores.append(candidate_score)

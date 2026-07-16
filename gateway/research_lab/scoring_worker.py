@@ -175,6 +175,7 @@ from research_lab.eval.evaluator import (
     _benchmark_style_score as _queue_benchmark_style_score,
     _critical_measurement_failures,
     _upload_incontainer_trace as _upload_incontainer_trace_doc,
+    benchmark_icp_score_from_company_scores,
     build_holdout_gate_result,
     build_score_bundle_from_scored_icps,
     score_private_model_pair_items,
@@ -10049,7 +10050,12 @@ class ResearchLabGatewayScoringWorker:
                             )
                         )
                 scores = [float(row.get("final_score", 0.0) or 0.0) for row in score_breakdowns]
-                icp_score = _average(scores)
+                # Shared flag-aware per-ICP score: with the capped flag on this
+                # is sum(top-N)/N for the ICP's requested company count, so the
+                # baseline pays for unfilled slots exactly like candidates do.
+                icp_score = benchmark_icp_score_from_company_scores(
+                    scores, requested_count=_icp_company_goal(item["icp"])
+                )
                 logger.info(
                     format_worker_block(
                         "RESEARCH LAB PRIVATE BASELINE ICP SCORED",
@@ -10947,7 +10953,11 @@ class ResearchLabGatewayScoringWorker:
                     )
                 )
         scores = [float(row.get("final_score", 0.0) or 0.0) for row in score_breakdowns]
-        icp_score = _average(scores)
+        # Shared flag-aware per-ICP score (see the isolation-path comment):
+        # capped mode divides by the ICP's requested company count.
+        icp_score = benchmark_icp_score_from_company_scores(
+            scores, requested_count=_icp_company_goal(item["icp"])
+        )
         logger.info(
             format_worker_block(
                 "RESEARCH LAB PRIVATE BASELINE ICP SCORED",

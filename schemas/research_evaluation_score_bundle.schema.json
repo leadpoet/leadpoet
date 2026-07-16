@@ -161,6 +161,12 @@
       "properties": {
         "icp_ref": { "type": "string" },
         "icp_hash": { "$ref": "#/$defs/sha256" },
+        "icp_company_goal": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Requested company count for this ICP (max_companies); per-ICP scores normalize against it. Absent on bundles built before dynamic goals."
+        },
         "status": { "type": "string" },
         "hard_failure": { "type": "boolean" },
         "base_company_scores": {

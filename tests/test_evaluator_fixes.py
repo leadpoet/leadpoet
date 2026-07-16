@@ -716,6 +716,44 @@ def test_capped_top5_flag_defaults_to_legacy_mean():
     )
 
 
+def test_capped_score_normalizes_against_requested_company_count(monkeypatch):
+    monkeypatch.setenv("RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE", "true")
+    # One 80-score company against a 3-company goal earns a third of the goal
+    # being fully met — quantity is paid, not just quality.
+    assert evaluator.benchmark_icp_score_from_company_scores(
+        [80.0], requested_count=3
+    ) == pytest.approx(80.0 / 3)
+    assert evaluator.benchmark_icp_score_from_company_scores(
+        [80.0, 80.0, 80.0], requested_count=3
+    ) == pytest.approx(80.0)
+    # Overshoot beyond the goal is capped at the top-N companies.
+    assert evaluator.benchmark_icp_score_from_company_scores(
+        [80.0, 70.0, 60.0, 90.0], requested_count=3
+    ) == pytest.approx((90.0 + 80.0 + 70.0) / 3)
+    # None/invalid falls back to the fixed 5-lead budget (legacy ICP sets).
+    assert evaluator.benchmark_icp_score_from_company_scores(
+        [80.0], requested_count=None
+    ) == pytest.approx(80.0 / 5)
+    # Rows built by the evaluator carry the goal; the batch scorer honors it.
+    rows = [
+        {"candidate_company_scores": [80.0], "icp_company_goal": 1},
+        {"candidate_company_scores": [80.0], "icp_company_goal": 4},
+    ]
+    assert evaluator._benchmark_style_score(rows, "candidate_company_scores") == pytest.approx(
+        (80.0 + 80.0 / 4) / 2
+    )
+
+
+def test_icp_company_goal_reads_max_companies():
+    assert evaluator._icp_company_goal({"max_companies": 3}) == 3
+    assert evaluator._icp_company_goal({"max_companies": "7"}) == 7
+    assert evaluator._icp_company_goal({"max_companies": 500}) == 50
+    assert evaluator._icp_company_goal({"max_companies": 0}) == 1
+    assert evaluator._icp_company_goal({}) == 5
+    assert evaluator._icp_company_goal({"max_companies": "junk"}) == 5
+    assert evaluator._icp_company_goal(None) == 5
+
+
 async def test_max_scored_companies_caps_llm_scoring(monkeypatch):
     monkeypatch.delenv("QUALIFICATION_OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)

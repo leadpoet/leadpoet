@@ -250,7 +250,14 @@ async def execute_scoring_operation(operation: str, payload: Mapping[str, Any]) 
         scores = payload.get("scores")
         if not isinstance(scores, list):
             raise ScoringExecutorError("scores must be a list")
-        return {"score": benchmark_icp_score_from_company_scores(scores)}
+        requested_count = payload.get("requested_count")
+        if requested_count is not None and not isinstance(requested_count, int):
+            raise ScoringExecutorError("requested_count must be an integer when provided")
+        return {
+            "score": benchmark_icp_score_from_company_scores(
+                scores, requested_count=requested_count
+            )
+        }
     if operation == OP_BUILD_SCORE_BUNDLE:
         from leadpoet_verifier.research_evaluation import score_bundle_hash
         from research_lab.eval.evaluator import build_score_bundle_from_scored_icps

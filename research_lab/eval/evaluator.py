@@ -314,9 +314,18 @@ def count_penalizable_false_positives(
         if not isinstance(details, Sequence) or isinstance(details, (str, bytes)):
             continue
         primary_verified = False
+        verifier_errored = False
         for detail in details:
             if not isinstance(detail, Mapping):
                 continue
+            verdict = detail.get("judge_verdict")
+            if isinstance(verdict, Mapping):
+                decision = str(verdict.get("decision") or "")
+                # A signal the verifier could not judge (provider outage,
+                # transport crash) is an infrastructure failure, not proof
+                # of falsified intent: fail open for the whole company.
+                if decision == "rejected_verifier_error" or verdict.get("error_class"):
+                    verifier_errored = True
             try:
                 idx = int(detail.get("matched_icp_signal", -1))
             except (TypeError, ValueError):
@@ -324,7 +333,7 @@ def count_penalizable_false_positives(
             if idx == 0 and float(detail.get("after_decay") or 0.0) > 0.0:
                 primary_verified = True
                 break
-        if details and not primary_verified:
+        if details and not primary_verified and not verifier_errored:
             unverified_primary += 1
     return gate_fps, unverified_primary
 

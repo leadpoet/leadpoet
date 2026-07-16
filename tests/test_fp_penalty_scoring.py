@@ -158,6 +158,38 @@ def test_unverified_primary_intent_counted_separately():
     assert primary2 == 0
 
 
+def test_verifier_infrastructure_error_fails_open():
+    # A primary rejected because the three-stage verifier CRASHED (provider
+    # outage) must not count as falsified intent — fail open per company.
+    errored = [
+        {
+            "matched_icp_signal": -1,
+            "after_decay": 0.0,
+            "judge_verdict": {
+                "decision": "rejected_verifier_error",
+                "rejection_reason": "three_stage_exception",
+                "error_class": "ReadTimeout",
+            },
+        }
+    ]
+    content_rejected = [
+        {
+            "matched_icp_signal": -1,
+            "after_decay": 0.0,
+            "judge_verdict": {
+                "decision": "rejected_three_stage",
+                "rejection_reason": "claim_not_supported_by_source",
+            },
+        }
+    ]
+    gate, primary = evaluator.count_penalizable_false_positives(
+        [_bd(details=errored), _bd(details=content_rejected)],
+        icp_has_intent_signals=True,
+    )
+    assert gate == 0
+    assert primary == 1  # only the content rejection counts
+
+
 def test_fp_penalty_total_helper(monkeypatch):
     monkeypatch.setenv("RESEARCH_LAB_EVAL_FP_PENALTY_POINTS", "25")
     monkeypatch.setenv("RESEARCH_LAB_EVAL_FP_UNVERIFIED_PRIMARY_PENALTY", "10")

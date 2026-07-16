@@ -802,10 +802,19 @@ async def test_max_scored_companies_caps_llm_scoring(monkeypatch):
 
     scored_calls.clear()
     monkeypatch.delenv("RESEARCH_LAB_EVAL_MAX_SCORED_COMPANIES")
-    uncapped = await scorer(companies, icp, False)
-    # Default 0 = unlimited (legacy behavior).
-    assert len(uncapped) == 6
-    assert len(scored_calls) == 6
+    goal_capped = await scorer(companies, icp, False)
+    # Over-returning is never scored: with no explicit max_companies the
+    # benchmark contract's 5-lead budget caps scoring (was unlimited).
+    assert len(goal_capped) == 5
+    assert len(scored_calls) == 5
+
+    scored_calls.clear()
+    icp_goal_3 = dict(icp, max_companies=3)
+    goal3 = await scorer(companies, icp_goal_3, False)
+    # The ICP's requested count is the cap: extras earn no points, no FP
+    # penalty, and cost nothing to score.
+    assert len(goal3) == 3
+    assert len(scored_calls) == 3
 
 
 def test_explicit_candidate_intent_signals_are_schema_normalized():

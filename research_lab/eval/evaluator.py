@@ -2964,13 +2964,14 @@ class QualificationStyleCompanyScorer:
         seen_companies: set[str] = set()
         breakdowns: list[dict[str, Any]] = []
         max_scored = _max_scored_companies_per_icp()
+        # Over-returning is never scored: companies beyond the ICP's requested
+        # count (max_companies, fallback 5) earn no points, no FP penalty, and
+        # no LLM cost — matching the baseline path's outputs[:goal] truncation.
+        # The env cost cap (bug #8) can only tighten this further.
+        goal = _icp_company_goal(icp)
+        scoring_cap = goal if not max_scored else min(goal, max_scored)
         for company in companies:
-            if max_scored and len(breakdowns) >= max_scored:
-                # Cost cap (bug #8): stop LLM-scoring once the per-ICP budget
-                # is reached. Shared by the baseline and candidate paths since
-                # both score through this adapter. With
-                # RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE on, keep this cap >= 5 so
-                # the top-5 normalization still sees a full lead budget.
+            if len(breakdowns) >= scoring_cap:
                 break
             scoring_icp = dict(icp)
             company_bucket = normalize_employee_count_bucket(

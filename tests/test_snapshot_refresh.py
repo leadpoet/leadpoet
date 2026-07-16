@@ -16,18 +16,21 @@ from research_lab.eval.snapshot_store import SNAPSHOT_URI_ENV
 IMAGE = "123456789.dkr.ecr.test/model@sha256:" + "a" * 64
 COMMIT = "b" * 40
 CONFIG_HASH = "sha256:" + "c" * 64
+MODEL_MANIFEST_HASH = "sha256:" + "f" * 64
 
 
 def _active(
     image: str = IMAGE,
     commit: str = COMMIT,
     config_hash: str = CONFIG_HASH,
+    manifest_hash: str = MODEL_MANIFEST_HASH,
 ):
     return SimpleNamespace(
         artifact=SimpleNamespace(
             image_digest=image,
             git_commit_sha=commit,
             config_hash=config_hash,
+            manifest_hash=manifest_hash,
         )
     )
 
@@ -41,6 +44,7 @@ def _ready(**overrides: Any) -> dict[str, Any]:
         "champion_image_digest": IMAGE,
         "source_commit": COMMIT,
         "model_config_hash": CONFIG_HASH,
+        "private_model_manifest_hash": MODEL_MANIFEST_HASH,
         **overrides,
     }
 

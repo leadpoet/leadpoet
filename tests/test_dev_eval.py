@@ -32,10 +32,12 @@ from research_lab.eval.dev_eval import (
     DEV_LEADS_PER_ICP,
     DevEvalError,
     MechanicalDevScorer,
+    build_current_day_dev_bank,
     build_dev_icp_set,
     compute_dev_set_hash,
     evaluate_dev,
     mechanical_company_score,
+    select_current_day_dev_icps,
 )
 from research_lab.eval.snapshot_store import (
     MODE_RECORD,
@@ -722,6 +724,163 @@ async def test_evaluate_dev_manifest_verification(tmp_path):
 # ---------------------------------------------------------------------------
 # Dev-set discipline (leak-cluster guard)
 # ---------------------------------------------------------------------------
+
+
+def _current_day_bank_items(count: int = 20) -> list[dict]:
+    industries = [
+        "Legal Services",
+        "Biotechnology Research",
+        "Financial Services",
+        "Manufacturing",
+        "Hospitals and Health Care",
+        "Education",
+        "Advertising Services",
+        "Cybersecurity",
+        "Retail",
+        "Telecommunications",
+    ]
+    items: list[dict] = []
+    for index in range(count):
+        industry = industries[index % len(industries)]
+        icp = {
+            **_dev_icp(index),
+            "industry": industry,
+            "sub_industry": f"{industry} segment {index}",
+            "product_service": f"{industry} intent platform {index}",
+            "intent_signals": [f"{industry} buying intent signal {index}"],
+            "intent_signal": f"{industry} buying intent signal {index}",
+        }
+        items.append(
+            {
+                "icp": icp,
+                "icp_ref": f"current-day:{index}",
+                "icp_hash": sha256_json({"icp": icp}),
+                "baseline_score": float(index),
+                "benchmark_category": (
+                    "public" if index < count // 2 else "private"
+                ),
+                "set_id": 100,
+                "day_index": 1,
+                "day_rank": index + 1,
+            }
+        )
+    return items
+
+
+def _current_day_bank(items: list[dict]):
+    return build_current_day_dev_bank(
+        items,
+        benchmark_date="2026-07-16",
+        benchmark_bundle_id="private_benchmark:" + "1" * 64,
+        benchmark_bundle_hash="sha256:" + "2" * 64,
+        rolling_window_hash="sha256:" + "3" * 64,
+        private_model_manifest_hash="sha256:" + "4" * 64,
+        evaluation_epoch=24000,
+    )
+
+
+def test_current_day_selector_uses_three_weak_and_two_strong_across_visibility():
+    bank = _current_day_bank(_current_day_bank_items())
+    selected = select_current_day_dev_icps(
+        bank.items,
+        size=5,
+        seed="tree-run-1",
+        miner_direction="improve legal industry intent finding",
+        bank_manifest=bank.manifest,
+    )
+
+    assert selected.manifest["weak_count"] == 3
+    assert selected.manifest["strong_count"] == 2
+    assert "current-day:0" in {row["icp_ref"] for row in selected.items}
+    assert sum(float(row["baseline_score"]) < 10 for row in selected.items) == 3
+    assert sum(float(row["baseline_score"]) >= 10 for row in selected.items) == 2
+    assert {row["benchmark_category"] for row in selected.items} == {
+        "public",
+        "private",
+    }
+
+    repeated = select_current_day_dev_icps(
+        bank.items,
+        size=5,
+        seed="tree-run-1",
+        miner_direction="improve legal industry intent finding",
+        bank_manifest=bank.manifest,
+    )
+    assert repeated == selected
+
+
+def test_current_day_selector_prioritizes_direction_relevant_weak_case():
+    bank = _current_day_bank(_current_day_bank_items())
+    legal = select_current_day_dev_icps(
+        bank.items,
+        size=1,
+        seed="same-tree",
+        miner_direction="legal services intent",
+        bank_manifest=bank.manifest,
+    )
+    biotech = select_current_day_dev_icps(
+        bank.items,
+        size=1,
+        seed="same-tree",
+        miner_direction="biotechnology research intent",
+        bank_manifest=bank.manifest,
+    )
+    assert legal.items[0]["icp"]["industry"] == "Legal Services"
+    assert biotech.items[0]["icp"]["industry"] == "Biotechnology Research"
+    assert legal.dev_set_hash != biotech.dev_set_hash
+
+
+def test_current_day_selector_keeps_strong_regression_guards_diverse():
+    items = _current_day_bank_items()
+    for index in range(10, 20):
+        items[index]["icp"]["industry"] = "Legal Services"
+        items[index]["icp"]["sub_industry"] = "Legal software"
+        items[index]["icp"]["country"] = "United States"
+        items[index]["icp"]["employee_count"] = "51-200"
+        items[index]["icp_hash"] = sha256_json({"icp": items[index]["icp"]})
+    items[10]["icp"]["industry"] = "Financial Services"
+    items[10]["icp"]["sub_industry"] = "Payments"
+    items[10]["icp"]["country"] = "Canada"
+    items[10]["icp"]["employee_count"] = "201-500"
+    items[10]["icp_hash"] = sha256_json({"icp": items[10]["icp"]})
+    bank = _current_day_bank(items)
+
+    selected = select_current_day_dev_icps(
+        bank.items,
+        size=5,
+        seed="tree-run-diversity",
+        miner_direction="improve legal industry intent finding",
+        bank_manifest=bank.manifest,
+    )
+
+    strong = [
+        row for row in selected.items if float(row["baseline_score"]) >= 10
+    ]
+    assert len(strong) == 2
+    assert {row["icp"]["industry"] for row in strong} == {
+        "Financial Services",
+        "Legal Services",
+    }
+
+
+@pytest.mark.parametrize("failure", ["duplicate_ref", "duplicate_hash", "duplicate_intent", "nan_score"])
+def test_current_day_bank_rejects_ambiguous_or_invalid_inputs(failure):
+    items = _current_day_bank_items(6)
+    if failure == "duplicate_ref":
+        items[1]["icp_ref"] = items[0]["icp_ref"]
+    elif failure == "duplicate_hash":
+        items[1]["icp_hash"] = items[0]["icp_hash"]
+    elif failure == "duplicate_intent":
+        items[1]["intent_signal_signature"] = dev_eval.intent_signal_signature(
+            items[0]["icp"]
+        )
+        items[0]["intent_signal_signature"] = items[1][
+            "intent_signal_signature"
+        ]
+    else:
+        items[1]["baseline_score"] = float("nan")
+    with pytest.raises(DevEvalError):
+        _current_day_bank(items)
 
 
 def test_build_dev_icp_set_hard_excludes_holdout_matches():

@@ -71,6 +71,7 @@ from gateway.research_lab.maintenance import (
     expire_unpaid_tickets,
     get_autoresearch_maintenance_state,
     is_autoresearch_maintenance_paused,
+    reconcile_champion_reward_statuses,
     reconcile_terminal_ticket_statuses,
     set_autoresearch_maintenance_paused,
 )
@@ -1764,6 +1765,39 @@ class ResearchLabHostedWorker:
                 self.worker_ref,
                 str(exc)[:200],
             )
+        if int(self.config.hosted_worker_index or 0) == 0:
+            try:
+                status_interval = max(
+                    60,
+                    int(
+                        os.getenv(
+                            "RESEARCH_LAB_CHAMPION_STATUS_RECONCILE_INTERVAL_SECONDS",
+                            "600",
+                        )
+                    ),
+                )
+            except ValueError:
+                status_interval = 600
+            now_monotonic = time.monotonic()
+            last_status_reconcile = float(
+                getattr(self, "_champion_status_reconcile_monotonic", 0.0)
+                or 0.0
+            )
+            if now_monotonic - last_status_reconcile >= status_interval:
+                self._champion_status_reconcile_monotonic = now_monotonic
+                try:
+                    await reconcile_champion_reward_statuses(
+                        netuid=int(self.config.netuid),
+                        actor_ref=self.worker_ref,
+                        dry_run=False,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "research_lab_periodic_champion_status_reconcile_failed "
+                        "worker_ref=%s error=%s",
+                        self.worker_ref,
+                        str(exc)[:200],
+                    )
         try:
             from gateway.research_lab.trajectory_projector import (
                 GatewayProjectorStore,
@@ -2264,6 +2298,17 @@ class ResearchLabHostedWorker:
                 checkpoint_doc=resume_state,
                 reason="tree_evaluation_operation_indeterminate",
             )
+        ticket_doc = (
+            context.ticket.get("ticket_doc")
+            if isinstance(context.ticket.get("ticket_doc"), Mapping)
+            else {}
+        )
+        miner_direction = str(
+            ticket_doc.get("brief_public_summary")
+            or context.ticket.get("brief_public_summary")
+            or ""
+        )
+        dev_selection_seed = str(context.run_id)
         readiness = await asyncio.to_thread(
             snapshot_readiness,
             str(
@@ -2271,6 +2316,9 @@ class ResearchLabHostedWorker:
                 or DEFAULT_RESEARCH_LAB_DEV_SNAPSHOT_URI
             ),
             expected_dev_icp_count=self.tree_policy.live_max_icps_per_node,
+            selection_seed=dev_selection_seed,
+            miner_direction=miner_direction,
+            require_current_day=True,
         )
         tree_preflight_reason = ""
         if not dev_eval_runner_enabled():
@@ -2287,6 +2335,12 @@ class ResearchLabHostedWorker:
             tree_preflight_reason = (
                 "tree_snapshot_champion_image_differs_from_active_model"
             )
+        elif str(readiness.get("private_model_manifest_hash") or "") != str(
+            artifact.manifest_hash or ""
+        ):
+            tree_preflight_reason = (
+                "tree_snapshot_benchmark_model_differs_from_active_model"
+            )
         if tree_preflight_reason:
             logger.warning(
                 "research_lab_git_tree_preflight_deferred run_id=%s reason=%s",
@@ -2301,11 +2355,40 @@ class ResearchLabHostedWorker:
             )
 
         evaluator_commitment = {
-            "schema_version": "research_lab.git_tree_evaluator_commitment.v1",
+            "schema_version": "research_lab.git_tree_evaluator_commitment.v2",
             "snapshot_manifest_hash": str(readiness.get("manifest_hash") or ""),
             "snapshot_ready_hash": str(readiness.get("ready_hash") or ""),
             "dev_set_hash": str(readiness.get("dev_set_hash") or ""),
             "dev_set_size": int(readiness.get("dev_set_size") or 0),
+            "snapshot_bank_hash": str(
+                readiness.get("snapshot_bank_hash") or ""
+            ),
+            "snapshot_bank_size": int(
+                readiness.get("snapshot_bank_size") or 0
+            ),
+            "daily_bank_hash": str(readiness.get("daily_bank_hash") or ""),
+            "selection_manifest_hash": str(
+                readiness.get("selection_manifest_hash") or ""
+            ),
+            "selection_seed_hash": str(
+                readiness.get("selection_seed_hash") or ""
+            ),
+            "miner_direction_hash": str(
+                readiness.get("miner_direction_hash") or ""
+            ),
+            "benchmark_date": str(readiness.get("benchmark_date") or ""),
+            "benchmark_bundle_id": str(
+                readiness.get("benchmark_bundle_id") or ""
+            ),
+            "benchmark_bundle_hash": str(
+                readiness.get("benchmark_bundle_hash") or ""
+            ),
+            "rolling_window_hash": str(
+                readiness.get("rolling_window_hash") or ""
+            ),
+            "private_model_manifest_hash": str(
+                readiness.get("private_model_manifest_hash") or ""
+            ),
             "champion_image_digest": str(
                 readiness.get("champion_image_digest") or ""
             ),
@@ -2581,6 +2664,8 @@ class ResearchLabHostedWorker:
                 prior_settled_cost_microusd=int(
                     tree_evaluation_usage["settled_cost_microusd"]
                 ),
+                selection_seed=dev_selection_seed,
+                miner_direction=miner_direction,
             )
             openrouter_guard = await verify_openrouter_guard_v2(
                 key_ref=context.openrouter_key_ref,

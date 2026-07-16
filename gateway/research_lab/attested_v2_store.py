@@ -38,6 +38,7 @@ ARTIFACT_TABLE = "research_lab_attested_artifact_links_v2"
 BUSINESS_ARTIFACT_TABLE = "research_lab_attested_business_artifact_links_v2"
 TRANSITION_TABLE = "research_lab_signed_transition_commands_v2"
 SOURCING_EPOCH_TABLE = "validator_sourcing_epoch_inputs_v2"
+LEGACY_SETTLEMENT_TABLE = "research_lab_legacy_finalized_allocation_migrations_v2"
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GRAPH_QUERY_CHUNK = 200
 _MAX_GRAPH_ROWS = 10000
@@ -844,6 +845,73 @@ async def persist_execution_sidecars_v2(
     )
     transition_result = await persist_transition_commands_v2(transitions)
     return {**artifact_result, **transition_result}
+
+
+async def persist_legacy_finalized_allocation_migration_v2(
+    *,
+    settlement: Mapping[str, Any],
+    receipt_hash: str,
+) -> dict[str, Any]:
+    """Persist one measured pre-V2 settlement with exact duplicate recovery."""
+
+    from leadpoet_canonical.legacy_settlement_v2 import (
+        validate_legacy_settlement_document_v2,
+    )
+
+    document = validate_legacy_settlement_document_v2(settlement)
+    normalized_receipt_hash = str(receipt_hash or "").lower()
+    if not _HASH_RE.fullmatch(normalized_receipt_hash):
+        raise AttestedV2StoreError("legacy settlement receipt hash is invalid")
+    stored_receipt = await select_one(
+        RECEIPT_TABLE,
+        filters=(("receipt_hash", normalized_receipt_hash),),
+    )
+    receipt_doc = (
+        stored_receipt.get("receipt_doc")
+        if isinstance(stored_receipt, Mapping)
+        else None
+    )
+    if not isinstance(receipt_doc, Mapping):
+        raise AttestedV2StoreError("legacy settlement receipt is not durable")
+    validate_signed_execution_receipt(receipt_doc)
+    if (
+        receipt_doc.get("receipt_hash") != normalized_receipt_hash
+        or receipt_doc.get("role") != "gateway_coordinator"
+        or receipt_doc.get("purpose")
+        != "research_lab.legacy_finalized_allocation.v2"
+        or receipt_doc.get("status") != "succeeded"
+        or receipt_doc.get("output_root") != sha256_json(document)
+    ):
+        raise AttestedV2StoreError("legacy settlement receipt differs")
+    row = {
+        "netuid": int(document["netuid"]),
+        "epoch_id": int(document["epoch_id"]),
+        "schema_version": str(document["schema_version"]),
+        "allocation_hash": str(document["allocation_hash"]),
+        "settlement_hash": str(document["settlement_hash"]),
+        "settlement_receipt_hash": normalized_receipt_hash,
+        "allocation_doc": dict(document["allocation_doc"]),
+        "settlement_doc": dict(document),
+    }
+    stored = await _insert_exact(
+        LEGACY_SETTLEMENT_TABLE,
+        row,
+        key_filters=(
+            ("netuid", row["netuid"]),
+            ("epoch_id", row["epoch_id"]),
+        ),
+    )
+    return {
+        "schema_version": document["schema_version"],
+        "netuid": row["netuid"],
+        "epoch_id": row["epoch_id"],
+        "allocation_hash": row["allocation_hash"],
+        "settlement_hash": row["settlement_hash"],
+        "settlement_receipt_hash": normalized_receipt_hash,
+        "durable_readback_hash": sha256_json(
+            {key: stored[key] for key in row}
+        ),
+    }
 
 
 async def persist_weight_bundle_v2(bundle: Mapping[str, Any]) -> dict[str, Any]:

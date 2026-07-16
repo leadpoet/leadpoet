@@ -1843,14 +1843,14 @@ async def reconcile_champion_reward_statuses(
 ) -> dict[str, Any]:
     """Mark champion rewards whose scheduled obligation is fully retired as paid.
 
-    Uses the surplus-aware paid-to-date accounting (per-epoch credit capped at
-    the scheduled rate), so a reward stays active while its 20-epoch schedule
-    still has balance even when single-champion surplus paid far above it.
+    Paid-to-date is reconstructed only from allocation inputs whose exact
+    validator weight extrinsic has finalized on chain.  Allocation snapshots
+    that were merely produced or published cannot close an obligation.
     """
     from gateway.config import BITTENSOR_NETUID
     from gateway.research_lab.allocations import (
         ACTIVE_CHAMPION_STATUSES,
-        _champion_paid_alpha_to_date,
+        _champion_finalized_paid_alpha_to_date,
         _decimal,
         _rate_float,
     )
@@ -1869,7 +1869,7 @@ async def reconcile_champion_reward_statuses(
                 max_rows=max(1, int(limit or 50) * 5),
             )
         )
-    paid_by_reward = await _champion_paid_alpha_to_date(
+    paid_by_reward = await _champion_finalized_paid_alpha_to_date(
         epoch=effective_epoch,
         netuid=effective_netuid,
         champion_rows=reward_rows,
@@ -1882,7 +1882,7 @@ async def reconcile_champion_reward_statuses(
         desired = _decimal(row.get("desired_alpha_percent") or 0)
         epoch_count = int(row.get("epoch_count") or 0)
         total_due = desired * epoch_count
-        paid = _decimal(paid_by_reward.get(reward_id, 0))
+        paid = min(total_due, _decimal(paid_by_reward.get(reward_id, 0)))
         remaining = total_due - paid
         if desired <= 0 or epoch_count <= 0 or remaining > 0:
             continue
@@ -1908,29 +1908,326 @@ async def reconcile_champion_reward_statuses(
         }
 
     repaired: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
     for plan in planned:
-        event = await create_champion_reward_event(
-            champion_reward_id=str(plan["champion_reward_id"]),
-            event_type="paid",
-            reward_status="paid",
-            reason=reason,
-            event_doc={
-                "schema_version": "1.0",
-                "source": "champion_reward_status_reconciler",
-                "actor_ref": actor_ref or default_actor_ref(),
-                "epoch": effective_epoch,
-                "previous_reward_status": plan["current_reward_status"],
-                "total_due_alpha_percent": plan["total_due_alpha_percent"],
-                "paid_alpha_percent_to_date": plan["paid_alpha_percent_to_date"],
-            },
-        )
+        try:
+            event = await create_champion_reward_event(
+                champion_reward_id=str(plan["champion_reward_id"]),
+                event_type="paid",
+                reward_status="paid",
+                reason=reason,
+                event_doc={
+                    "schema_version": "1.0",
+                    "source": "finalized_chain_champion_status_reconciler",
+                    "settlement_authority": "finalized_v2_weight_extrinsics",
+                    "actor_ref": actor_ref or default_actor_ref(),
+                    "epoch": effective_epoch,
+                    "previous_reward_status": plan["current_reward_status"],
+                    "total_due_alpha_percent": plan["total_due_alpha_percent"],
+                    "paid_alpha_percent_to_date": plan["paid_alpha_percent_to_date"],
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - continue the idempotent sweep
+            logger.warning(
+                "research_lab_champion_status_reconcile_write_failed "
+                "reward_id=%s error=%s",
+                plan["champion_reward_id"],
+                str(exc)[:240],
+            )
+            failed.append(
+                {
+                    "champion_reward_id": plan["champion_reward_id"],
+                    "error": str(exc)[:240],
+                }
+            )
+            continue
         repaired.append({**plan, "event_seq": event.get("seq"), "event_hash": event.get("anchored_hash")})
     return {
-        "ok": True,
+        "ok": not failed,
         "dry_run": False,
         "action": "reconcile-champion-reward-statuses",
         "epoch": effective_epoch,
         "planned_count": len(planned),
         "repaired_count": len(repaired),
         "repaired": repaired,
+        "failed": failed,
     }
+
+
+async def backfill_champion_reward_v2_authority(
+    *,
+    epoch: int | None = None,
+    limit: int = 1000,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Idempotently attest immutable pre-V2 champion obligations."""
+
+    from gateway.research_lab.allocations import (
+        SETTLEMENT_TRACKED_CHAMPION_STATUSES,
+    )
+    from gateway.research_lab.attested_v2_store import (
+        load_business_artifact_graph_by_ref_v2,
+    )
+    from gateway.research_lab.v2_authority import (
+        attest_historical_champion_reward_v2,
+    )
+    from gateway.tee.reward_executor_v2 import champion_reward_row_projection_v2
+    from gateway.utils.epoch import get_current_epoch_id_async
+    from leadpoet_canonical.attested_v2 import sha256_json
+
+    effective_epoch = (
+        int(epoch) if epoch is not None else await get_current_epoch_id_async()
+    )
+    rows: list[dict[str, Any]] = []
+    for status in sorted(SETTLEMENT_TRACKED_CHAMPION_STATUSES):
+        rows.extend(
+            await select_all(
+                "research_lab_champion_reward_current",
+                filters=(("current_reward_status", status),),
+                order_by=(("created_at", False),),
+                max_rows=max(1, int(limit)),
+                allow_partial=False,
+            )
+        )
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            int(row.get("start_epoch") or 0),
+            str(row.get("champion_reward_id") or ""),
+        ),
+    )[: max(1, int(limit))]
+    covered: list[str] = []
+    planned: list[str] = []
+    for row in rows:
+        reward_id = str(row.get("champion_reward_id") or "")
+        expected_output = sha256_json(champion_reward_row_projection_v2(row))
+        try:
+            graph = await load_business_artifact_graph_by_ref_v2(
+                artifact_kind="champion_reward_decision",
+                artifact_ref=reward_id,
+            )
+            root_hash = str(graph.get("root_receipt_hash") or "")
+            root = next(
+                (
+                    receipt
+                    for receipt in graph.get("receipts") or ()
+                    if isinstance(receipt, Mapping)
+                    and receipt.get("receipt_hash") == root_hash
+                ),
+                None,
+            )
+            if (
+                not isinstance(root, Mapping)
+                or root.get("purpose") != "research_lab.reward_decision.v2"
+                or root.get("output_root") != expected_output
+            ):
+                raise RuntimeError("stored champion V2 receipt differs")
+            covered.append(reward_id)
+        except Exception as exc:
+            logger.info(
+                "research_lab_champion_v2_backfill_required reward_id=%s reason=%s",
+                reward_id,
+                str(exc)[:200],
+            )
+            planned.append(reward_id)
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "action": "backfill-champion-v2-authority",
+            "epoch": effective_epoch,
+            "inspected_count": len(rows),
+            "already_covered_count": len(covered),
+            "planned_count": len(planned),
+            "planned_champion_reward_ids": planned,
+        }
+
+    migrated: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for reward_id in planned:
+        try:
+            outcome = await attest_historical_champion_reward_v2(
+                epoch_id=effective_epoch,
+                champion_reward_id=reward_id,
+            )
+            receipt = outcome.get("execution_receipt") or outcome.get("receipt") or {}
+            migrated.append(
+                {
+                    "champion_reward_id": reward_id,
+                    "receipt_hash": str(receipt.get("receipt_hash") or ""),
+                }
+            )
+        except Exception as exc:
+            logger.exception(
+                "research_lab_champion_v2_backfill_failed reward_id=%s",
+                reward_id,
+            )
+            failed.append(
+                {
+                    "champion_reward_id": reward_id,
+                    "error": str(exc)[:300],
+                }
+            )
+    return {
+        "ok": not failed,
+        "dry_run": False,
+        "action": "backfill-champion-v2-authority",
+        "epoch": effective_epoch,
+        "inspected_count": len(rows),
+        "already_covered_count": len(covered),
+        "migrated_count": len(migrated),
+        "migrated": migrated,
+        "failed": failed,
+    }
+
+
+async def backfill_champion_settlement_v2_authority(
+    *,
+    epoch: int | None = None,
+    netuid: int | None = None,
+    limit: int = 1000,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Attest missing pre-V2 finalized champion allocation epochs.
+
+    The cutover readiness report is the source of work. Invalid historical
+    rows and allocation-hash conflicts remain blocking findings; they are
+    never converted into settlement authority by this command.
+    """
+
+    from gateway.config import BITTENSOR_NETUID
+    from gateway.research_lab.v2_authority import (
+        attest_historical_champion_settlement_v2,
+    )
+    from gateway.utils.epoch import get_current_epoch_id_async
+
+    effective_epoch = (
+        int(epoch) if epoch is not None else await get_current_epoch_id_async()
+    )
+    effective_netuid = (
+        int(netuid) if netuid is not None else int(BITTENSOR_NETUID)
+    )
+    normalized_limit = max(1, int(limit or 1000))
+    before = await champion_v2_cutover_readiness_report(
+        epoch=effective_epoch,
+        netuid=effective_netuid,
+    )
+    missing = list(before.get("missing_historical_settlements") or ())
+    planned = [
+        {
+            "epoch": int(item["epoch"]),
+            "allocation_hash": str(item["allocation_hash"]),
+        }
+        for item in missing
+        if isinstance(item, Mapping)
+        and item.get("reason")
+        == "missing_finalized_chain_settlement_authority"
+        and item.get("epoch") is not None
+        and item.get("allocation_hash")
+    ]
+    planned = sorted(planned, key=lambda item: item["epoch"])[
+        :normalized_limit
+    ]
+    blocked = [
+        dict(item)
+        for item in missing
+        if not (
+            isinstance(item, Mapping)
+            and item.get("reason")
+            == "missing_finalized_chain_settlement_authority"
+        )
+    ]
+    if dry_run:
+        return {
+            "ok": not blocked,
+            "dry_run": True,
+            "action": "backfill-champion-v2-settlements",
+            "epoch": effective_epoch,
+            "netuid": effective_netuid,
+            "planned_count": len(planned),
+            "planned": planned,
+            "blocked": blocked,
+            "readiness_before": before,
+        }
+
+    migrated: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for item in planned:
+        settlement_epoch = int(item["epoch"])
+        try:
+            outcome = await attest_historical_champion_settlement_v2(
+                epoch_id=effective_epoch,
+                netuid=effective_netuid,
+                settlement_epoch_id=settlement_epoch,
+            )
+            receipt = (
+                outcome.get("execution_receipt")
+                or outcome.get("receipt")
+                or {}
+            )
+            migrated.append(
+                {
+                    **item,
+                    "settlement_hash": str(
+                        (outcome.get("result") or {}).get("settlement_hash")
+                        or ""
+                    ),
+                    "receipt_hash": str(receipt.get("receipt_hash") or ""),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - continue the idempotent sweep
+            logger.exception(
+                "research_lab_champion_v2_settlement_backfill_failed "
+                "netuid=%s settlement_epoch=%s",
+                effective_netuid,
+                settlement_epoch,
+            )
+            failed.append(
+                {
+                    **item,
+                    "error": str(exc)[:300],
+                }
+            )
+    after = await champion_v2_cutover_readiness_report(
+        epoch=effective_epoch,
+        netuid=effective_netuid,
+    )
+    return {
+        "ok": not blocked and not failed,
+        "dry_run": False,
+        "action": "backfill-champion-v2-settlements",
+        "epoch": effective_epoch,
+        "netuid": effective_netuid,
+        "planned_count": len(planned),
+        "migrated_count": len(migrated),
+        "migrated": migrated,
+        "blocked": blocked,
+        "failed": failed,
+        "readiness_before": before,
+        "readiness_after": after,
+    }
+
+
+async def champion_v2_cutover_readiness_report(
+    *,
+    epoch: int | None = None,
+    netuid: int | None = None,
+) -> dict[str, Any]:
+    """Return the operator-visible 100% positive-balance receipt gate."""
+
+    from gateway.config import BITTENSOR_NETUID
+    from gateway.research_lab.champion_settlement_v2 import (
+        champion_v2_cutover_readiness,
+    )
+    from gateway.utils.epoch import get_current_epoch_id_async
+
+    effective_epoch = (
+        int(epoch) if epoch is not None else await get_current_epoch_id_async()
+    )
+    effective_netuid = (
+        int(netuid) if netuid is not None else int(BITTENSOR_NETUID)
+    )
+    return await champion_v2_cutover_readiness(
+        epoch=effective_epoch,
+        netuid=effective_netuid,
+    )

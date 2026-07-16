@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 
 import pytest
@@ -795,3 +796,72 @@ async def test_business_artifact_lookup_rejects_ambiguous_rows(monkeypatch):
             artifact_ref="score_bundle:" + "a" * 64,
             artifact_hash=HASH,
         )
+
+
+@pytest.mark.asyncio
+async def test_legacy_settlement_concurrent_retries_persist_one_exact_row(
+    monkeypatch,
+):
+    from leadpoet_canonical import legacy_settlement_v2
+
+    document = {
+        "schema_version": "leadpoet.legacy_finalized_allocation.v2",
+        "netuid": 71,
+        "epoch_id": 100,
+        "allocation_hash": HASH_B,
+        "settlement_hash": HASH_C,
+        "allocation_doc": {"allocation_hash": HASH_B},
+    }
+    receipt_doc = {
+        "receipt_hash": HASH,
+        "role": "gateway_coordinator",
+        "purpose": "research_lab.legacy_finalized_allocation.v2",
+        "status": "succeeded",
+        "output_root": attested_v2_store.sha256_json(document),
+    }
+    stored_row = None
+    lock = asyncio.Lock()
+
+    async def insert(table, row):
+        nonlocal stored_row
+        assert table == attested_v2_store.LEGACY_SETTLEMENT_TABLE
+        async with lock:
+            if stored_row is not None:
+                raise RuntimeError("duplicate key 23505")
+            stored_row = dict(row)
+            return dict(stored_row)
+
+    async def select(table, *, filters):
+        if table == attested_v2_store.RECEIPT_TABLE:
+            return {"receipt_doc": receipt_doc}
+        assert table == attested_v2_store.LEGACY_SETTLEMENT_TABLE
+        assert filters == (("netuid", 71), ("epoch_id", 100))
+        return dict(stored_row) if stored_row is not None else None
+
+    monkeypatch.setattr(
+        legacy_settlement_v2,
+        "validate_legacy_settlement_document_v2",
+        lambda value: dict(value),
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "validate_signed_execution_receipt",
+        lambda _value: None,
+    )
+    monkeypatch.setattr(attested_v2_store, "insert_row", insert)
+    monkeypatch.setattr(attested_v2_store, "select_one", select)
+
+    results = await asyncio.gather(
+        *(
+            attested_v2_store.persist_legacy_finalized_allocation_migration_v2(
+                settlement=document,
+                receipt_hash=HASH,
+            )
+            for _index in range(10)
+        )
+    )
+    assert stored_row is not None
+    assert len(results) == 10
+    assert {result["durable_readback_hash"] for result in results} == {
+        results[0]["durable_readback_hash"]
+    }

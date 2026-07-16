@@ -234,6 +234,65 @@ def test_qualification_sources_use_fixed_tables_and_typed_uuid_chunks():
     assert provider.requests == []
 
 
+def test_historical_settlement_queries_are_fixed_and_epoch_bound():
+    provider = FakeProvider([{"rows": []}])
+    _read(
+        provider,
+        policy_id="legacy_finalized_allocation_migrations",
+        parameters={"netuid": 71, "start_epoch": 90, "end_epoch": 100},
+    )
+    url = provider.requests[0]["url"]
+    assert (
+        "/rest/v1/research_lab_legacy_finalized_allocation_migrations_v2?"
+        in url
+    )
+    assert "netuid=eq.71" in url
+    assert "epoch_id=gte.90" in url
+    assert "epoch_id=lte.100" in url
+    assert "order=epoch_id.asc" in url
+
+    provider = FakeProvider([{"rows": []}])
+    _read(
+        provider,
+        policy_id="legacy_weight_bundles_by_epoch",
+        parameters={"netuid": 71, "epoch_id": 100},
+    )
+    url = provider.requests[0]["url"]
+    assert "/rest/v1/published_weight_bundles?" in url
+    assert "netuid=eq.71" in url
+    assert "epoch_id=eq.100" in url
+    assert "limit=100" in url
+
+    provider = FakeProvider([{"rows": []}])
+    _read(
+        provider,
+        policy_id="legacy_audit_anchor_by_epoch",
+        parameters={"netuid": 71, "epoch_id": 100},
+    )
+    url = provider.requests[0]["url"]
+    assert "/rest/v1/research_lab_arweave_epoch_audit_anchor_current?" in url
+    assert "epoch=eq.100" in url
+    assert "audit_kind=eq.active" in url
+    assert "current_anchor_status=eq.checkpointed" in url
+
+    provider = FakeProvider([{"rows": []}])
+    _read(
+        provider,
+        policy_id="legacy_transparency_event_by_hash",
+        parameters={"event_hash": "sha256:" + "a" * 64},
+    )
+    assert "event_hash=eq." + "a" * 64 in provider.requests[0]["url"]
+
+    provider = FakeProvider([{"rows": []}])
+    with pytest.raises(SupabaseSourceV2Error, match="event_hash"):
+        _read(
+            provider,
+            policy_id="legacy_transparency_event_by_hash",
+            parameters={"event_hash": "a" * 64 + "&select=secret"},
+        )
+    assert provider.requests == []
+
+
 @pytest.mark.parametrize(
     ("policy_id", "parameter_name"),
     (

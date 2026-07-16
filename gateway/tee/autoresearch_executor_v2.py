@@ -2546,6 +2546,17 @@ class AutoresearchExecutorV2:
             "snapshot_ready_hash",
             "dev_set_hash",
             "dev_set_size",
+            "snapshot_bank_hash",
+            "snapshot_bank_size",
+            "daily_bank_hash",
+            "selection_manifest_hash",
+            "selection_seed_hash",
+            "miner_direction_hash",
+            "benchmark_date",
+            "benchmark_bundle_id",
+            "benchmark_bundle_hash",
+            "rolling_window_hash",
+            "private_model_manifest_hash",
             "champion_image_digest",
             "source_commit",
             "model_config_hash",
@@ -2565,16 +2576,34 @@ class AutoresearchExecutorV2:
             "snapshot_manifest_hash",
             "snapshot_ready_hash",
             "dev_set_hash",
+            "snapshot_bank_hash",
+            "daily_bank_hash",
+            "selection_manifest_hash",
+            "selection_seed_hash",
+            "miner_direction_hash",
+            "benchmark_bundle_hash",
+            "rolling_window_hash",
+            "private_model_manifest_hash",
             "model_config_hash",
         ):
             _hash(evaluator_commitment.get(field), field)
         provider_model_ids = evaluator_commitment.get("provider_model_ids")
         if (
             evaluator_commitment.get("schema_version")
-            != "research_lab.git_tree_evaluator_commitment.v1"
+            != "research_lab.git_tree_evaluator_commitment.v2"
             or evaluator_commitment.get("miss_policy") != "strict"
             or int(evaluator_commitment.get("dev_set_size") or 0)
             != tree_policy.live_max_icps_per_node
+            or int(evaluator_commitment.get("snapshot_bank_size") or 0)
+            < tree_policy.live_max_icps_per_node
+            or not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}",
+                str(evaluator_commitment.get("benchmark_date") or ""),
+            )
+            or not re.fullmatch(
+                r"private_benchmark:[0-9a-f]{64}",
+                str(evaluator_commitment.get("benchmark_bundle_id") or ""),
+            )
             or not str(evaluator_commitment.get("champion_image_digest") or "")
             or not str(evaluator_commitment.get("source_commit") or "")
             or not str(evaluator_commitment.get("score_version") or "")

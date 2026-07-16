@@ -162,6 +162,19 @@ QUERY_POLICIES = {
         max_pages=50,
         order="champion_reward_id.asc",
     ),
+    "champion_reward_by_id": SupabaseQueryV2(
+        policy_id="champion_reward_by_id",
+        table="research_lab_champion_reward_current",
+        select=(
+            "champion_reward_id,score_bundle_id,candidate_id,run_id,miner_hotkey,"
+            "miner_uid,island,policy_id,evaluation_epoch,start_epoch,epoch_count,"
+            "improvement_points,threshold_points,desired_alpha_percent,"
+            "source_score_bundle_hash,input_hash,anchored_hash,current_reward_status"
+        ),
+        parameter_names=("champion_reward_id",),
+        max_pages=1,
+        limit=2,
+    ),
     "allocation_source_add_rewards": SupabaseQueryV2(
         policy_id="allocation_source_add_rewards",
         table="research_lab_source_add_reward_current",
@@ -335,6 +348,72 @@ QUERY_POLICIES = {
         parameter_names=("netuid", "start_epoch", "end_epoch"),
         max_pages=100,
         order="epoch.desc",
+    ),
+    "finalized_allocation_authorities": SupabaseQueryV2(
+        policy_id="finalized_allocation_authorities",
+        table="research_lab_finalized_allocation_epochs_v2",
+        select=(
+            "bundle_hash,schema_version,netuid,epoch_id,block,validator_hotkey,"
+            "root_receipt_hash,weights_hash,snapshot_hash,bundle_doc,"
+            "weight_submission_event_hash,publication_receipt_hash,"
+            "transparency_event_hash,durable_readback_hash,publication_doc,"
+            "weight_finalization_event_hash,finalization_receipt_hash,"
+            "extrinsic_authorization_hash,extrinsic_hash,finalized_block,"
+            "finalized_block_hash,state_transition_hash,finalization_doc"
+        ),
+        parameter_names=("netuid", "start_epoch", "end_epoch"),
+        max_pages=100,
+        order="epoch_id.asc,validator_hotkey.asc",
+    ),
+    "legacy_finalized_allocation_migrations": SupabaseQueryV2(
+        policy_id="legacy_finalized_allocation_migrations",
+        table="research_lab_legacy_finalized_allocation_migrations_v2",
+        select=(
+            "netuid,epoch_id,schema_version,allocation_hash,settlement_hash,"
+            "settlement_receipt_hash,allocation_doc,settlement_doc"
+        ),
+        parameter_names=("netuid", "start_epoch", "end_epoch"),
+        max_pages=100,
+        order="epoch_id.asc",
+    ),
+    "legacy_weight_bundles_by_epoch": SupabaseQueryV2(
+        policy_id="legacy_weight_bundles_by_epoch",
+        table="published_weight_bundles",
+        select=(
+            "netuid,epoch_id,block,uids,weights_u16,weights_hash,validator_hotkey,"
+            "validator_enclave_pubkey,validator_signature,validator_pcr0,"
+            "pcr0_commit_hash,weight_submission_event_hash,created_at"
+        ),
+        parameter_names=("netuid", "epoch_id"),
+        max_pages=1,
+        order="validator_hotkey.asc,created_at.asc",
+        limit=100,
+    ),
+    "legacy_audit_anchor_by_epoch": SupabaseQueryV2(
+        policy_id="legacy_audit_anchor_by_epoch",
+        table="research_lab_arweave_epoch_audit_anchor_current",
+        select=(
+            "anchor_id,epoch,netuid,audit_kind,allocation_hash,weights_hash,"
+            "payload_hash,transparency_event_hash,current_anchor_status,"
+            "current_transparency_event_hash,current_tee_sequence,"
+            "current_checkpoint_number,current_checkpoint_merkle_root,"
+            "current_arweave_tx_id,current_status_at"
+        ),
+        parameter_names=("netuid", "epoch_id"),
+        max_pages=1,
+        order="current_status_at.desc",
+        limit=2,
+    ),
+    "legacy_transparency_event_by_hash": SupabaseQueryV2(
+        policy_id="legacy_transparency_event_by_hash",
+        table="transparency_log",
+        select=(
+            "event_type,event_hash,payload_hash,enclave_pubkey,signed_log_entry,"
+            "tee_sequence,created_at"
+        ),
+        parameter_names=("event_hash",),
+        max_pages=1,
+        limit=2,
     ),
     "attested_business_artifact_by_ref": SupabaseQueryV2(
         policy_id="attested_business_artifact_by_ref",
@@ -518,6 +597,13 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
             ("current_reward_status", "in.(active,queued,partially_paid)"),
             ("start_epoch", "lte.%d" % epoch_id),
         )
+    if policy.policy_id == "champion_reward_by_id":
+        reward_id = _identifier(
+            parameters["champion_reward_id"], "champion_reward_id"
+        )
+        if not re.fullmatch(r"champion_reward:sha256:[0-9a-f]{64}", reward_id):
+            raise SupabaseSourceV2Error("champion_reward_id is invalid")
+        return (("champion_reward_id", "eq.%s" % reward_id),)
     if policy.policy_id == "allocation_source_add_rewards":
         epoch_id = _non_negative_int(parameters["epoch_id"], "epoch_id")
         return (
@@ -609,6 +695,46 @@ def _filters(policy: SupabaseQueryV2, parameters: Mapping[str, Any]) -> Sequence
             ("epoch", "gte.%d" % start_epoch),
             ("epoch", "lte.%d" % end_epoch),
         )
+    if policy.policy_id in {
+        "finalized_allocation_authorities",
+        "legacy_finalized_allocation_migrations",
+    }:
+        start_epoch = _non_negative_int(parameters["start_epoch"], "start_epoch")
+        end_epoch = _non_negative_int(parameters["end_epoch"], "end_epoch")
+        if end_epoch < start_epoch:
+            raise SupabaseSourceV2Error(
+                "finalized allocation authority range is inverted"
+            )
+        return (
+            ("netuid", "eq.%d" % _non_negative_int(parameters["netuid"], "netuid")),
+            ("epoch_id", "gte.%d" % start_epoch),
+            ("epoch_id", "lte.%d" % end_epoch),
+        )
+    if policy.policy_id in {
+        "legacy_weight_bundles_by_epoch",
+        "legacy_audit_anchor_by_epoch",
+    }:
+        epoch_id = _non_negative_int(parameters["epoch_id"], "epoch_id")
+        netuid = _non_negative_int(parameters["netuid"], "netuid")
+        filters = [
+            ("netuid", "eq.%d" % netuid),
+            (("epoch_id" if policy.policy_id == "legacy_weight_bundles_by_epoch" else "epoch"), "eq.%d" % epoch_id),
+        ]
+        if policy.policy_id == "legacy_audit_anchor_by_epoch":
+            filters.extend(
+                (
+                    ("audit_kind", "eq.active"),
+                    ("current_anchor_status", "eq.checkpointed"),
+                )
+            )
+        return tuple(filters)
+    if policy.policy_id == "legacy_transparency_event_by_hash":
+        event_hash = str(parameters["event_hash"] or "").strip().lower()
+        if event_hash.startswith("sha256:"):
+            event_hash = event_hash.split(":", 1)[1]
+        if not re.fullmatch(r"[0-9a-f]{64}", event_hash):
+            raise SupabaseSourceV2Error("event_hash is invalid")
+        return (("event_hash", "eq.%s" % event_hash),)
     if policy.policy_id == "attested_business_artifact_by_ref":
         return (
             (

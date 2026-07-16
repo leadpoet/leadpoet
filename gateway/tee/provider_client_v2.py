@@ -203,6 +203,8 @@ _PROVIDER_BY_HOST = {
     "cloudflare-dns.com": "dns",
     "rdap.org": "rdap",
     "entrypoint-finney.opentensor.ai": "bittensor_chain",
+    "archive.chain.opentensor.ai": "bittensor_archive",
+    "arweave.net": "arweave",
 }
 _CREDENTIAL_HEADERS = {
     "authorization",

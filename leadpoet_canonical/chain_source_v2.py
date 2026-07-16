@@ -9,6 +9,8 @@ same bytes without importing Bittensor, substrate-interface, or a SCALE codec.
 from __future__ import annotations
 
 import hashlib
+import base64
+import gzip
 import json
 import re
 from typing import Any, Dict, Mapping, Sequence, Tuple
@@ -18,6 +20,7 @@ from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_
 
 CHAIN_SOURCE_SCHEMA_VERSION = "leadpoet.bittensor_chain_source.v2"
 CHAIN_ENDPOINT_HOST = "entrypoint-finney.opentensor.ai"
+CHAIN_ARCHIVE_ENDPOINT_HOST = "archive.chain.opentensor.ai"
 CHAIN_ENDPOINT_PORT = 443
 CHAIN_ENDPOINT_PATH = "/"
 CHAIN_RPC_METHOD = "SubnetInfoRuntimeApi_get_selective_mechagraph"
@@ -30,6 +33,9 @@ CHAIN_RPC_TIMEOUT_MS = 30_000
 CHAIN_RPC_RETRY_BACKOFF_SECONDS = (1.0, 3.0)
 CHAIN_MAX_FINALIZATION_SCAN_BLOCKS = 96
 CHAIN_MAX_BLOCK_EXTRINSICS = 8192
+CHAIN_MAX_CHECKPOINT_EVENTS = 15_000
+CHAIN_MAX_CHECKPOINT_COMPRESSED_BYTES = 64 * 1024 * 1024
+CHAIN_MAX_CHECKPOINT_DECOMPRESSED_BYTES = 128 * 1024 * 1024
 
 _RAW_HASH_RE = re.compile(r"^(?:0x)?[0-9a-f]{64}$")
 _BASE58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -43,6 +49,7 @@ def chain_source_policy_document() -> Dict[str, Any]:
     return {
         "schema_version": CHAIN_SOURCE_SCHEMA_VERSION,
         "host": CHAIN_ENDPOINT_HOST,
+        "archive_host": CHAIN_ARCHIVE_ENDPOINT_HOST,
         "port": CHAIN_ENDPOINT_PORT,
         "path": CHAIN_ENDPOINT_PATH,
         "tls_terminates_in_enclave": True,
@@ -205,6 +212,158 @@ def timelocked_weight_commits_storage_key(*, netuid: int, mechid: int = 0) -> st
         )
     )
     return "0x" + key.hex()
+
+
+def weights_storage_key(*, netuid: int, validator_uid: int) -> str:
+    """Build the exact ``SubtensorModule.Weights`` double-map key.
+
+    Live Finney metadata defines both map hashers as ``Identity`` and both keys
+    as ``u16``.  Keeping this codec dependency-free lets the measured
+    coordinator verify historical weight state without importing Bittensor.
+    """
+
+    normalized_netuid = int(netuid)
+    normalized_uid = int(validator_uid)
+    if not 0 <= normalized_netuid <= 0xFFFF or not 0 <= normalized_uid <= 0xFFFF:
+        raise ChainSourceV2Error("weight storage key input is invalid")
+    key = b"".join(
+        (
+            _twox128(b"SubtensorModule"),
+            _twox128(b"Weights"),
+            normalized_netuid.to_bytes(2, "little"),
+            normalized_uid.to_bytes(2, "little"),
+        )
+    )
+    return "0x" + key.hex()
+
+
+def decode_weights_storage(value: Any) -> Sequence[Tuple[int, int]]:
+    """Decode a SCALE ``Vec<(u16, u16)>`` from historical chain state."""
+
+    text = str(value or "")
+    if not text.startswith("0x"):
+        raise ChainSourceV2Error("weight storage value is invalid")
+    try:
+        data = bytes.fromhex(text[2:])
+    except ValueError as exc:
+        raise ChainSourceV2Error("weight storage value is invalid hex") from exc
+    if not data:
+        raise ChainSourceV2Error("weight storage value is empty")
+    count, offset = _compact_decode(data, 0)
+    if count > CHAIN_MAX_HOTKEYS:
+        raise ChainSourceV2Error("weight storage count exceeds policy")
+    expected_end = offset + count * 4
+    if expected_end != len(data):
+        message = "truncated" if expected_end > len(data) else "trailing bytes"
+        raise ChainSourceV2Error("weight storage has %s" % message)
+    result = []
+    seen = set()
+    for _index in range(count):
+        uid = int.from_bytes(data[offset : offset + 2], "little")
+        weight = int.from_bytes(data[offset + 2 : offset + 4], "little")
+        offset += 4
+        if uid in seen:
+            raise ChainSourceV2Error("weight storage contains duplicate UIDs")
+        seen.add(uid)
+        if weight > 0:
+            result.append((uid, weight))
+    return tuple(sorted(result))
+
+
+def _checkpoint_merkle(events: Sequence[Mapping[str, Any]]) -> Tuple[str, list[list[str]]]:
+    if not events or len(events) > CHAIN_MAX_CHECKPOINT_EVENTS:
+        raise ChainSourceV2Error("Arweave checkpoint event count is invalid")
+    level = [
+        hashlib.sha256(
+            json.dumps(event, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).digest()
+        for event in events
+    ]
+    levels = [[item.hex() for item in level]]
+    while len(level) > 1:
+        next_level = []
+        for index in range(0, len(level), 2):
+            left = level[index]
+            right = level[index + 1] if index + 1 < len(level) else left
+            next_level.append(hashlib.sha256(left + right).digest())
+        level = next_level
+        levels.append([item.hex() for item in level])
+    return level[0].hex(), levels
+
+
+def validate_arweave_checkpoint_event(
+    checkpoint: Mapping[str, Any],
+    *,
+    expected_event_hash: str,
+    expected_signed_log_entry: Mapping[str, Any],
+    expected_sequence: int,
+    expected_merkle_root: str,
+) -> Dict[str, Any]:
+    """Verify one exact signed event is immutable in an Arweave checkpoint."""
+
+    if not isinstance(checkpoint, Mapping) or set(checkpoint) != {
+        "header",
+        "signature",
+        "events_compressed",
+        "tree_levels",
+    }:
+        raise ChainSourceV2Error("Arweave checkpoint fields are invalid")
+    header = checkpoint.get("header")
+    if not isinstance(header, Mapping):
+        raise ChainSourceV2Error("Arweave checkpoint header is invalid")
+    root = normalize_raw_hash(header.get("merkle_root"), "checkpoint merkle root")
+    expected_root = normalize_raw_hash(expected_merkle_root, "expected merkle root")
+    if root != expected_root:
+        raise ChainSourceV2Error("Arweave checkpoint root differs from durable anchor")
+    encoded = str(checkpoint.get("events_compressed") or "")
+    try:
+        compressed = base64.b64decode(encoded, validate=True)
+    except Exception as exc:
+        raise ChainSourceV2Error("Arweave checkpoint events are invalid base64") from exc
+    if not compressed or len(compressed) > CHAIN_MAX_CHECKPOINT_COMPRESSED_BYTES:
+        raise ChainSourceV2Error("Arweave checkpoint compressed size exceeds policy")
+    try:
+        decompressed = gzip.decompress(compressed)
+    except (OSError, EOFError) as exc:
+        raise ChainSourceV2Error("Arweave checkpoint events are invalid gzip") from exc
+    if len(decompressed) > CHAIN_MAX_CHECKPOINT_DECOMPRESSED_BYTES:
+        raise ChainSourceV2Error("Arweave checkpoint expanded size exceeds policy")
+    try:
+        events = json.loads(decompressed.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ChainSourceV2Error("Arweave checkpoint events are invalid JSON") from exc
+    if not isinstance(events, list) or any(not isinstance(item, Mapping) for item in events):
+        raise ChainSourceV2Error("Arweave checkpoint event collection is invalid")
+    if int(header.get("event_count", -1)) != len(events):
+        raise ChainSourceV2Error("Arweave checkpoint event count differs")
+    sequence_range = header.get("sequence_range")
+    sequences = [int(item.get("sequence", -1)) for item in events]
+    if (
+        not isinstance(sequence_range, Mapping)
+        or not sequences
+        or sequence_range.get("first") != sequences[0]
+        or sequence_range.get("last") != sequences[-1]
+        or sequences != sorted(sequences)
+        or len(sequences) != len(set(sequences))
+    ):
+        raise ChainSourceV2Error("Arweave checkpoint sequence commitment differs")
+    computed_root, computed_levels = _checkpoint_merkle(events)
+    if computed_root != root or checkpoint.get("tree_levels") != computed_levels:
+        raise ChainSourceV2Error("Arweave checkpoint Merkle tree differs")
+    matches = [
+        item
+        for item in events
+        if item.get("event_hash") == expected_event_hash
+        and item.get("signed_log_entry") == dict(expected_signed_log_entry)
+    ]
+    if len(matches) != 1 or int(matches[0].get("sequence", -1)) != int(expected_sequence):
+        raise ChainSourceV2Error("signed audit event is absent or duplicated in checkpoint")
+    return {
+        "checkpoint_number": int(header.get("checkpoint_number", -1)),
+        "event_count": len(events),
+        "merkle_root": root,
+        "event_sequence": int(expected_sequence),
+    }
 
 
 def decode_timelocked_weight_commits(value: Any) -> Sequence[Dict[str, Any]]:

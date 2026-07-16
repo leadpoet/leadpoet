@@ -6,8 +6,10 @@ import json
 from types import SimpleNamespace
 
 from gateway.research_lab.config import DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG
-from research_lab.canonical import sha256_json
-from research_lab.eval.dev_eval import intent_signal_signature
+from gateway.research_lab.icp_window import (
+    WINDOW_MODE_LEGACY_ROLLING,
+    select_rolling_icp_window_from_sets,
+)
 from scripts import export_research_lab_dev_icp_inputs as exporter
 
 
@@ -69,33 +71,66 @@ def test_rows_paginates_past_postgrest_default_cap():
     assert loaded[-1]["set_id"] == 1004
 
 
-def test_exporter_is_deterministic_and_excludes_full_current_horizon(
+def test_exporter_is_deterministic_and_uses_completed_current_day_bank(
     monkeypatch,
     tmp_path,
 ):
-    horizon_a = _icp(100, signal="private-current-signal")
-    horizon_b = _icp(101)
-    retired = [_icp(index) for index in range(20)]
-    retired.append(_icp(999, signal="private-current-signal"))
+    benchmark_date = "2026-07-13"
+    model_manifest_hash = "sha256:" + "f" * 64
+    source_set = {
+        "set_id": 4,
+        "icps": [_icp(index) for index in range(8)],
+        "icp_set_hash": "sha256:" + "4" * 64,
+        "is_active": True,
+    }
+    window = select_rolling_icp_window_from_sets(
+        [source_set],
+        days=1,
+        icps_per_day=8,
+        window_mode=WINDOW_MODE_LEGACY_ROLLING,
+    )
+    categories = ("public", "private", "conditional")
+    per_icp_summaries = [
+        {
+            "icp_ref": item["icp_ref"],
+            "icp_hash": item["icp_hash"],
+            "score": float(index * 10),
+        }
+        for index, item in enumerate(window.benchmark_items, start=1)
+    ]
+    category_items = [
+        {
+            "icp_ref": item["icp_ref"],
+            "category": categories[index % len(categories)],
+        }
+        for index, item in enumerate(window.benchmark_items)
+    ]
     rows_by_table = {
-        "research_lab_rolling_icp_windows": [
+        "research_lab_private_model_benchmark_current": [
             {
-                "rolling_window_hash": "sha256:" + "a" * 64,
-                "required_days": 2,
-                "window_doc": {
-                    "fresh_set_id": 4,
-                    "required_days": 2,
-                    "sets": [{"set_id": 4}, {"set_id": 3}],
+                "benchmark_bundle_id": "benchmark-bundle-current",
+                "benchmark_bundle_hash": "sha256:" + "b" * 64,
+                "benchmark_date": benchmark_date,
+                "private_model_manifest_hash": model_manifest_hash,
+                "rolling_window_hash": window.window_hash,
+                "evaluation_epoch": 24000,
+                "benchmark_quality": "passed",
+                "current_benchmark_status": "completed",
+                "score_summary_doc": {
+                    "per_icp_summaries": per_icp_summaries,
+                    "category_assignment": {"items": category_items},
                 },
-                "created_at": "2026-07-13T00:00:00Z",
+                "created_at": "2026-07-13T23:00:00Z",
             }
         ],
-        "qualification_private_icp_sets": [
-            {"set_id": 4, "icps": [horizon_a], "is_active": True},
-            {"set_id": 3, "icps": [horizon_b], "is_active": True},
-            {"set_id": 2, "icps": retired[:11], "is_active": False},
-            {"set_id": 1, "icps": retired[11:], "is_active": False},
+        "research_lab_rolling_icp_windows": [
+            {
+                "rolling_window_hash": window.window_hash,
+                "window_doc": window.public_doc,
+                "created_at": "2026-07-13T22:00:00Z",
+            }
         ],
+        "qualification_private_icp_sets": [source_set],
     }
     client = _Client(rows_by_table)
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
@@ -112,7 +147,15 @@ def test_exporter_is_deterministic_and_excludes_full_current_horizon(
         monkeypatch.setattr(
             __import__("sys"),
             "argv",
-            ["export", "--out-dir", str(out), "--seed", "fixed-seed"],
+            [
+                "export",
+                "--out-dir",
+                str(out),
+                "--benchmark-date",
+                benchmark_date,
+                "--expected-private-model-manifest-hash",
+                model_manifest_hash,
+            ],
         )
         assert exporter.main() == 0
         outputs.append(
@@ -120,22 +163,20 @@ def test_exporter_is_deterministic_and_excludes_full_current_horizon(
         )
 
     assert outputs[0] == outputs[1]
-    assert len(outputs[0]["items"]) == (
+    assert outputs[0]["schema_version"] == "research_lab.dev_icp_export.v2"
+    assert outputs[0]["configured_dev_icp_count"] == (
         DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
     )
-    selected_signatures = {
-        intent_signal_signature(row["icp"]) for row in outputs[0]["items"]
-    }
-    assert intent_signal_signature(horizon_a) not in selected_signatures
-    selected_hashes = {row["icp_hash"] for row in outputs[0]["items"]}
-    assert sha256_json({"icp": horizon_a}) not in selected_hashes
-    exclusions = json.loads(
-        (tmp_path / "first" / "holdout_window_hashes.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert intent_signal_signature(horizon_a) in exclusions["hashes"]
-    assert "qualification_private_icp_sets:4:icp-100" in exclusions["hashes"]
+    assert len(outputs[0]["items"]) == len(window.benchmark_items)
+    assert {
+        row["benchmark_category"] for row in outputs[0]["items"]
+    } == {"public", "private", "conditional"}
+    manifest = outputs[0]["daily_bank_manifest"]
+    assert manifest["benchmark_date"] == benchmark_date
+    assert manifest["rolling_window_hash"] == window.window_hash
+    assert manifest["private_model_manifest_hash"] == model_manifest_hash
+    assert manifest["bank_size"] == len(window.benchmark_items)
+    assert not (tmp_path / "first" / "holdout_window_hashes.json").exists()
 
 
 def test_exporter_fails_without_service_credentials(monkeypatch, tmp_path):

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Mapping
 
+from leadpoet_canonical.attested_v2 import sha256_json
 from leadpoet_verifier.economics import build_champion_reward_obligation
 from research_lab.reimbursements import (
     ReimbursementCapUsage,
@@ -17,6 +19,7 @@ OP_RESEARCH_LAB_REWARD_DECISION = "research_lab_reward_decision"
 REWARD_DECISION_KINDS = frozenset(
     {
         "champion",
+        "champion_migration",
         "reimbursement",
         "source_add_leg1",
         "source_add_leg2",
@@ -162,6 +165,8 @@ def execute_reward_decision_v2(payload: Mapping[str, Any]) -> Dict[str, Any]:
         raise RewardExecutorV2Error("reward decision input is invalid")
     if kind == "champion":
         return _champion(value)
+    if kind == "champion_migration":
+        return _champion_migration(value)
     if kind == "reimbursement":
         return _reimbursement(value)
     return _source_add(kind, value)
@@ -184,6 +189,114 @@ def _champion(value: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "decision_kind": "champion",
         "reward": build_champion_reward_obligation(obligation_input, policy),
+    }
+
+
+def _champion_migration(value: Mapping[str, Any]) -> Dict[str, Any]:
+    """Attest an immutable pre-V2 obligation without replaying a new policy.
+
+    Historical reward policies changed over time. Recomputing an old row with
+    today's policy would rewrite history. Instead, reconstruct the exact
+    anchored payload from the stored obligation and its immutable score bundle,
+    then require its original hashes to match byte-for-byte.
+    """
+
+    if not isinstance(value, Mapping) or set(value) != {
+        "reward_row",
+        "score_bundle",
+    }:
+        raise RewardExecutorV2Error(
+            "champion migration fields are invalid"
+        )
+    reward_row = _mapping(value.get("reward_row"), "champion migration reward")
+    score_bundle = _mapping(
+        value.get("score_bundle"), "champion migration score bundle"
+    )
+    bundle_id = str(score_bundle.get("score_bundle_id") or "")
+    bundle_hash = str(score_bundle.get("score_bundle_hash") or "")
+    bundle_doc = _mapping(
+        score_bundle.get("score_bundle_doc"), "champion migration score document"
+    )
+    if (
+        bundle_id != str(reward_row.get("score_bundle_id") or "")
+        or bundle_hash != str(bundle_doc.get("score_bundle_hash") or "")
+    ):
+        raise RewardExecutorV2Error(
+            "champion migration score bundle differs from reward"
+        )
+    stored_source_hash = str(reward_row.get("source_score_bundle_hash") or "")
+    if stored_source_hash and stored_source_hash != bundle_hash:
+        raise RewardExecutorV2Error(
+            "champion migration source score bundle hash differs"
+        )
+    daily_counts: Dict[str, int] = {}
+    aggregates = bundle_doc.get("aggregates")
+    per_icp = (
+        aggregates.get("per_icp_results")
+        if isinstance(aggregates, Mapping)
+        else None
+    )
+    if not isinstance(per_icp, list):
+        raise RewardExecutorV2Error(
+            "champion migration score bundle has no per-ICP results"
+        )
+    for item in per_icp:
+        if not isinstance(item, Mapping):
+            raise RewardExecutorV2Error(
+                "champion migration per-ICP result is invalid"
+            )
+        ref = str(item.get("icp_ref") or "")
+        match = re.search(r"qualification_private_icp_sets:(\d+):", ref)
+        day = match.group(1) if match else ref.split(":")[0]
+        if not day:
+            raise RewardExecutorV2Error(
+                "champion migration per-ICP day is missing"
+            )
+        daily_counts[day] = daily_counts.get(day, 0) + 1
+
+    candidate_id = str(reward_row.get("candidate_id") or "")
+    run_id = str(reward_row.get("run_id") or "")
+    reconstructed = {
+        "champion_reward_id": "",
+        "status": "active",
+        "reasons": [],
+        "uid": int(reward_row.get("miner_uid", -1)),
+        "miner_hotkey": str(reward_row.get("miner_hotkey") or ""),
+        "island": str(reward_row.get("island") or "generalist"),
+        "source_id": candidate_id or bundle_id or run_id or "unknown",
+        "score_bundle_id": bundle_id,
+        "candidate_id": candidate_id,
+        "run_id": run_id,
+        "evaluation_epoch": int(reward_row.get("evaluation_epoch") or 0),
+        "start_epoch": int(reward_row.get("start_epoch") or 0),
+        "epoch_count": int(reward_row.get("epoch_count") or 0),
+        "improvement_points": float(
+            reward_row.get("improvement_points") or 0.0
+        ),
+        "threshold_points": float(reward_row.get("threshold_points") or 0.0),
+        "desired_alpha_percent": float(
+            reward_row.get("desired_alpha_percent") or 0.0
+        ),
+        "daily_icp_counts": dict(sorted(daily_counts.items())),
+        "required_icp_count": sum(daily_counts.values()),
+        "input_hash": str(reward_row.get("input_hash") or ""),
+    }
+    anchored_hash = sha256_json(reconstructed)
+    reward_id = "champion_reward:" + anchored_hash
+    if (
+        reward_id != str(reward_row.get("champion_reward_id") or "")
+        or anchored_hash != str(reward_row.get("anchored_hash") or "")
+    ):
+        raise RewardExecutorV2Error(
+            "champion migration anchored payload differs from stored obligation"
+        )
+    return {
+        "decision_kind": "champion",
+        "reward": {
+            **reconstructed,
+            "champion_reward_id": reward_id,
+            "anchored_hash": anchored_hash,
+        },
     }
 
 

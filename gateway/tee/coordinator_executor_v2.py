@@ -45,6 +45,9 @@ OP_SOURCE_ADD_CATALOG_SNAPSHOT_V2 = "source_add_catalog_snapshot_v2"
 OP_PROVIDER_OUTCOME_SNAPSHOT_V2 = "provider_outcome_snapshot_v2"
 OP_REGISTER_OPENROUTER_CREDENTIAL_V2 = "register_openrouter_credential_v2"
 OP_PREFLIGHT_OPENROUTER_CREDENTIAL_V2 = "preflight_openrouter_credential_v2"
+OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2 = (
+    "attest_legacy_finalized_allocation_v2"
+)
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 _COORDINATOR_WEIGHT_INPUT_PURPOSES = {
@@ -62,6 +65,9 @@ COORDINATOR_OPERATIONS_V2 = {
     OP_RESEARCH_LAB_ALLOCATION: frozenset({"research_lab.allocation.v2"}),
     OP_RESEARCH_LAB_REWARD_DECISION: frozenset(
         {"research_lab.reward_decision.v2"}
+    ),
+    OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2: frozenset(
+        {"research_lab.legacy_finalized_allocation.v2"}
     ),
     OP_SOURCE_ADD_PROVENANCE_V2: frozenset(
         {"research_lab.source_add_provenance.v2"}
@@ -182,6 +188,9 @@ class CoordinatorExecutorV2:
         reward_source_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
+        legacy_settlement_source_resolver: Optional[
+            Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
+        ] = None,
         source_add_catalog_resolver: Optional[
             Callable[[Mapping[str, Any], ExecutionContextV2], Mapping[str, Any]]
         ] = None,
@@ -214,6 +223,9 @@ class CoordinatorExecutorV2:
             source_add_functional_probe_resolver
         )
         self._reward_source_resolver = reward_source_resolver
+        self._legacy_settlement_source_resolver = (
+            legacy_settlement_source_resolver
+        )
         self._source_add_catalog_resolver = source_add_catalog_resolver
         self._provider_outcome_supplier = provider_outcome_supplier
         self._openrouter_registration_resolver = openrouter_registration_resolver
@@ -247,6 +259,22 @@ class CoordinatorExecutorV2:
                     str(document["artifact"]["model_artifact_hash"]),
                     str(document["artifact"]["manifest_hash"]),
                     str(document["source_state_hash"]),
+                ),
+            )
+        if operation == OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2:
+            if self._legacy_settlement_source_resolver is None:
+                raise ValueError("measured legacy settlement source is unavailable")
+            document = dict(
+                self._legacy_settlement_source_resolver(payload, context)
+            )
+            return ExecutionResultV2(
+                output=document,
+                artifact_hashes=(
+                    str(document["settlement_hash"]),
+                    str(document["allocation_hash"]),
+                    str(document["chain_compare_hash"]),
+                    str(document["audit_event_hash"]),
+                    str(document["checkpoint_merkle_root"]),
                 ),
             )
         if operation == OP_RESEARCH_LAB_ALLOCATION:
@@ -337,6 +365,7 @@ class CoordinatorExecutorV2:
             decision_kind = str(payload.get("decision_kind") or "")
             measured_payload = payload
             if decision_kind in {
+                "champion_migration",
                 "source_add_leg1",
                 "source_add_leg2",
                 "reimbursement",
@@ -382,6 +411,12 @@ class CoordinatorExecutorV2:
         context: ExecutionContextV2,
     ) -> None:
         kind = str(payload.get("decision_kind") or "")
+        if kind == "champion_migration":
+            if context.external_receipt_graphs or context.parent_receipt_hashes:
+                raise ValueError(
+                    "champion migration cannot inherit host-selected ancestry"
+                )
+            return
         expected_purpose = {
             "champion": "research_lab.promotion_decision.v2",
             "source_add_leg1": "research_lab.source_add_functional_probe.v2",

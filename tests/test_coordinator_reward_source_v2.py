@@ -210,6 +210,68 @@ def test_leg1_replaces_host_reward_rows_with_authenticated_rows():
     ]
 
 
+def test_champion_migration_reconstructs_exact_measured_reward_and_bundle():
+    reward_id = "champion_reward:sha256:" + "1" * 64
+    bundle_id = "score_bundle:" + "2" * 64
+    reward = {
+        "champion_reward_id": reward_id,
+        "score_bundle_id": bundle_id,
+        "desired_alpha_percent": 7.45,
+        "current_reward_status": "active",
+    }
+    score_bundle = {
+        "score_bundle_id": bundle_id,
+        "score_bundle_hash": "sha256:" + "3" * 64,
+        "score_bundle_doc": {"schema_version": "1.0"},
+    }
+    reader = FakeReader(
+        {
+            "champion_reward_by_id": [reward],
+            "score_bundle_by_id": [score_bundle],
+        }
+    )
+    resolver = CoordinatorRewardSourceV2(
+        reader=reader,
+        chain_source=FakeChain(),
+        config_supplier=_config,
+    )
+
+    resolved = resolver.resolve(
+        payload={
+            "decision_kind": "champion_migration",
+            "decision_payload": {"champion_reward_id": reward_id},
+        },
+        context=_context(),
+    )
+
+    assert resolved == {
+        "decision_kind": "champion_migration",
+        "decision_payload": {
+            "reward_row": reward,
+            "score_bundle": score_bundle,
+        },
+    }
+    assert reader.calls == [
+        ("champion_reward_by_id", {"champion_reward_id": reward_id}),
+        ("score_bundle_by_id", {"score_bundle_id": bundle_id}),
+    ]
+
+    with pytest.raises(
+        CoordinatorRewardSourceV2Error,
+        match="champion migration request fields are invalid",
+    ):
+        resolver.resolve(
+            payload={
+                "decision_kind": "champion_migration",
+                "decision_payload": {
+                    "champion_reward_id": reward_id,
+                    "desired_alpha_percent": 99.0,
+                },
+            },
+            context=_context(),
+        )
+
+
 def test_leg1_daily_cap_is_not_rechecked_outside_atomic_slot_transaction():
     reader = FakeReader(
         {

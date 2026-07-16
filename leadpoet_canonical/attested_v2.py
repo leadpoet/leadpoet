@@ -41,6 +41,7 @@ ROLE_PURPOSES = {
             "research_lab.ranking.v2",
             "research_lab.promotion_decision.v2",
             "research_lab.reward_decision.v2",
+            "research_lab.legacy_finalized_allocation.v2",
             "research_lab.source_add_provenance.v2",
             "research_lab.source_add_functional_probe.v2",
             "research_lab.source_add_catalog_snapshot.v2",

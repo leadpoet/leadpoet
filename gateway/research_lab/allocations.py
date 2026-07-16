@@ -7,7 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import hmac
 import logging
 import os
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from gateway.research_lab.alpha_pricing import (
     inject_alpha_price_valuation,
@@ -25,6 +25,7 @@ from leadpoet_verifier.economics import allocate_research_lab_epoch
 ACTIVE_REIMBURSEMENT_STATUSES = {"awarded"}
 ACTIVE_SCHEDULE_STATUSES = {"scheduled"}
 ACTIVE_CHAMPION_STATUSES = {"active", "queued", "partially_paid"}
+SETTLEMENT_TRACKED_CHAMPION_STATUSES = ACTIVE_CHAMPION_STATUSES | {"paid"}
 RATE_QUANT = Decimal("0.000001")
 logger = logging.getLogger(__name__)
 
@@ -430,7 +431,43 @@ async def _champion_paid_alpha_to_date(
         max_rows=max(10000, int(epoch) - int(start_floor) + 100),
         allow_partial=True,
     )
-    return _champion_paid_alpha_to_date_from_snapshots(snapshot_rows)
+    return _champion_paid_alpha_to_date_from_snapshots(
+        snapshot_rows,
+        obligation_caps=_champion_obligation_caps(champion_rows),
+    )
+
+
+async def _champion_finalized_paid_alpha_to_date(
+    *,
+    epoch: int,
+    netuid: int,
+    champion_rows: list[dict[str, Any]],
+) -> dict[str, float]:
+    """Return champion credit proven by finalized V2 chain evidence only."""
+
+    if not champion_rows:
+        return {}
+    start_epochs = [
+        int(row.get("start_epoch") or 0)
+        for row in champion_rows
+        if int(row.get("start_epoch") or 0) <= int(epoch)
+    ]
+    if not start_epochs:
+        return {}
+    start_floor = min(start_epochs)
+    from gateway.research_lab.champion_settlement_v2 import (
+        load_finalized_allocation_history_v2,
+    )
+
+    finalized_rows = await load_finalized_allocation_history_v2(
+        netuid=int(netuid),
+        start_epoch=int(start_floor),
+        end_epoch=int(epoch) - 1,
+    )
+    return _champion_paid_alpha_to_date_from_snapshots(
+        finalized_rows,
+        obligation_caps=_champion_obligation_caps(champion_rows),
+    )
 
 
 async def _source_add_paid_alpha_to_date(
@@ -509,8 +546,34 @@ def _champion_schedule_cap_start_epoch() -> int:
         return 23878
 
 
-def _champion_paid_alpha_to_date_from_snapshots(snapshot_rows: list[Mapping[str, Any]]) -> dict[str, float]:
-    """Sum per-epoch obligation credit per champion reward.
+def _champion_obligation_caps(
+    champion_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Decimal]:
+    caps: dict[str, Decimal] = {}
+    for row in champion_rows:
+        reward_id = str(
+            row.get("champion_reward_id")
+            or row.get("source_add_reward_id")
+            or row.get("source_id")
+            or ""
+        )
+        if not reward_id:
+            continue
+        desired = max(Decimal("0"), _decimal(row.get("desired_alpha_percent") or 0))
+        try:
+            epoch_count = max(0, int(row.get("epoch_count") or 0))
+        except (TypeError, ValueError):
+            epoch_count = 0
+        caps[reward_id] = desired * Decimal(epoch_count)
+    return caps
+
+
+def _champion_paid_alpha_to_date_from_snapshots(
+    snapshot_rows: list[Mapping[str, Any]],
+    *,
+    obligation_caps: Mapping[str, Any] | None = None,
+) -> dict[str, float]:
+    """Sum per-epoch obligation credit from pre-validated settlement rows.
 
     Champions earn the scheduled rate for the full reward window; a
     single-champion epoch can pay far above schedule from the remaining Lab
@@ -523,7 +586,11 @@ def _champion_paid_alpha_to_date_from_snapshots(snapshot_rows: list[Mapping[str,
     """
     cap_start_epoch = _champion_schedule_cap_start_epoch()
     paid_by_reward: dict[str, Decimal] = {}
-    for row in snapshot_rows:
+    normalized_caps = {
+        str(reward_id): max(Decimal("0"), _decimal(value))
+        for reward_id, value in (obligation_caps or {}).items()
+    }
+    for row in sorted(snapshot_rows, key=lambda item: int(item.get("epoch") or 0)):
         allocation_doc = row.get("allocation_doc") or {}
         if not isinstance(allocation_doc, Mapping):
             continue
@@ -554,7 +621,11 @@ def _champion_paid_alpha_to_date_from_snapshots(snapshot_rows: list[Mapping[str,
                         scheduled = _decimal(scheduled_raw)
                         if scheduled > 0:
                             credit = min(paid, scheduled)
-                paid_by_reward[source_id] = paid_by_reward.get(source_id, Decimal("0")) + credit
+                already_credited = paid_by_reward.get(source_id, Decimal("0"))
+                total_cap = normalized_caps.get(source_id)
+                if total_cap is not None:
+                    credit = min(credit, max(Decimal("0"), total_cap - already_credited))
+                paid_by_reward[source_id] = already_credited + credit
     return {reward_id: _rate_float(paid) for reward_id, paid in paid_by_reward.items()}
 
 
@@ -571,7 +642,7 @@ def _champion_replay_obligation(
     champion_reward_id = str(row.get("champion_reward_id") or "")
     desired = _decimal(row.get("desired_alpha_percent") or 0)
     total_due = desired * Decimal(epoch_count)
-    paid_to_date = _decimal(paid_by_reward.get(champion_reward_id, 0))
+    paid_to_date = min(total_due, _decimal(paid_by_reward.get(champion_reward_id, 0)))
     remaining = max(Decimal("0"), total_due - paid_to_date)
     if desired <= 0 or remaining <= 0:
         return None

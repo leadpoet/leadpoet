@@ -1,0 +1,55 @@
+from pathlib import Path
+import re
+
+from leadpoet_canonical.attested_v2 import ROLE_PURPOSES
+
+
+SQL = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "99-research-lab-v2-champion-settlement.sql"
+).read_text(encoding="utf-8")
+
+
+def test_finalized_allocation_view_requires_bundle_publication_and_finalization():
+    assert "research_lab_attested_weight_bundles_v2 b" in SQL
+    assert "research_lab_attested_publication_events_v2 p" in SQL
+    assert "research_lab_attested_weight_finalizations_v2 f" in SQL
+    assert "f.weight_submission_event_hash = p.weight_submission_event_hash" in SQL
+
+
+def test_finalized_allocation_view_is_service_role_only():
+    assert "WITH (security_invoker = true)" in SQL
+    assert "FROM PUBLIC, anon, authenticated" in SQL
+    assert "TO service_role" in SQL
+
+
+def test_legacy_settlement_migration_is_append_only_and_receipt_backed():
+    assert "research_lab_legacy_finalized_allocation_migrations_v2" in SQL
+    assert "PRIMARY KEY (netuid, epoch_id)" in SQL
+    assert "REFERENCES public.research_lab_attested_execution_receipts_v2" in SQL
+    assert "prevent_research_lab_attested_v2_mutation" in SQL
+    assert "ENABLE ROW LEVEL SECURITY" in SQL
+    assert "GRANT SELECT, INSERT" in SQL
+
+
+def test_deployed_receipt_allowlist_accepts_measured_legacy_settlement():
+    assert "DROP CONSTRAINT %I" in SQL
+    assert "research_lab_attested_execution_receipts_v2_role_purpose_check" in SQL
+    assert "research_lab.legacy_finalized_allocation.v2" in SQL
+    assert (
+        "VALIDATE CONSTRAINT "
+        "research_lab_attested_execution_receipts_v2_role_purpose_check"
+    ) in SQL
+
+
+def test_deployed_receipt_allowlist_exactly_matches_canonical_role_contract():
+    for role, expected_purposes in ROLE_PURPOSES.items():
+        match = re.search(
+            rf"role = '{re.escape(role)}' AND purpose IN \((.*?)\n\s*\)\)",
+            SQL,
+            re.DOTALL,
+        )
+        assert match is not None, role
+        migrated_purposes = set(re.findall(r"'([^']+)'", match.group(1)))
+        assert migrated_purposes == set(expected_purposes), role

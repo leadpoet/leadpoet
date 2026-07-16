@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Dry-run-first recorder for Research Lab L1 dev-eval provider snapshots.
+"""Dry-run-first recorder for current-day Research Lab dev snapshots.
 
-Runs the CURRENT champion once over a chosen dev ICP set with LIVE providers,
+Runs the CURRENT champion once over the complete scored daily benchmark bank,
 capturing every provider response (Exa, Scrapingdog, OpenRouter, ...) into a
 frozen snapshot set that `research_lab.eval.dev_eval.evaluate_dev` replays
 deterministically (§6.3-1). Recording spends real provider budget, so it is
@@ -14,9 +14,9 @@ and the environment gate
 
   RESEARCH_LAB_DEV_SNAPSHOT_RECORD_ENABLED=true
 
-The dev ICP set is built with `build_dev_icp_set`, which hard-excludes any
-ICP whose ref/hash/intent-signal signature appears in the supplied holdout
-window hashes (leak-cluster guard) and prints the exclusion proof.
+The per-tree weak/strong cohort is selected later from this immutable bank.
+This recorder never chooses ICPs from retired sets and never prints hidden ICP
+refs or payloads.
 
 Champion runners:
   --adapter-path   private champion checkout, run in a subprocess (mirrors
@@ -34,10 +34,8 @@ Example (gateway box):
   RESEARCH_LAB_DEV_SNAPSHOT_RECORD_ENABLED=true \
   python3 scripts/record_research_lab_dev_snapshots.py \
       --source-icps /tmp/source_icps.json \
-      --exclude-hashes /tmp/holdout_window_hashes.json \
-      --seed dev-v1 \
       --snapshot-dir /var/lib/research_lab/dev_snapshots/dev-v1 \
-      --adapter-path /opt/champion \
+      --champion-image <immutable-ecr-digest> \
       --record
 """
 
@@ -91,16 +89,23 @@ def _load_source_items(path: str) -> list[dict[str, Any]]:
     return [dict(item) for item in decoded if isinstance(item, Mapping)]
 
 
-def _load_exclusions(args: argparse.Namespace) -> list[str]:
-    exclusions: list[str] = list(args.exclude_hash or [])
-    if args.exclude_hashes:
-        decoded = _load_json_file(args.exclude_hashes)
-        if isinstance(decoded, Mapping):
-            decoded = decoded.get("hashes") or decoded.get("item_refs") or []
-        if not isinstance(decoded, list):
-            raise ValueError("exclude-hashes file must be a JSON list (or hold one)")
-        exclusions.extend(str(item) for item in decoded)
-    return exclusions
+def _load_source_export(path: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    decoded = _load_json_file(path)
+    if (
+        not isinstance(decoded, Mapping)
+        or decoded.get("schema_version") != "research_lab.dev_icp_export.v2"
+        or not isinstance(decoded.get("items"), list)
+        or not isinstance(decoded.get("daily_bank_manifest"), Mapping)
+    ):
+        raise ValueError(
+            "source ICP file must be a current-day dev ICP export v2 document"
+        )
+    items = [
+        dict(item) for item in decoded["items"] if isinstance(item, Mapping)
+    ]
+    if len(items) != len(decoded["items"]):
+        raise ValueError("source ICP export contains an invalid item")
+    return items, dict(decoded["daily_bank_manifest"])
 
 
 def _provider_key_presence() -> dict[str, bool]:
@@ -330,20 +335,15 @@ def _print_plan(
     runner_label: str,
     recording: bool,
 ) -> None:
-    proof = dev_set.manifest["exclusion_proof"]
     print("Research Lab dev-snapshot recorder")
     print(f"  mode:                {'RECORD (live providers)' if recording else 'DRY RUN'}")
-    print(f"  dev_set_hash:        {dev_set.dev_set_hash}")
-    print(f"  selected_icps:       {len(dev_set.items)}")
-    print(f"  source_icps:         {dev_set.manifest['source_icp_count']}")
-    print(f"  excluded_icps:       {proof['excluded_item_count']} (leak-cluster guard)")
-    print(f"  exclusion_set_hash:  {proof['exclusion_set_hash']}")
+    print(f"  daily_bank_hash:     {dev_set.manifest['daily_bank_hash']}")
+    print(f"  benchmark_date:      {dev_set.manifest['benchmark_date']}")
+    print(f"  bank_icps:           {len(dev_set.items)}")
     print(f"  snapshot_dir:        {snapshot_dir}")
     print(f"  champion_runner:     {runner_label}")
     for group, present in _provider_key_presence().items():
         print(f"  provider_key[{group}]: {'present' if present else 'MISSING'}")
-    for item in dev_set.items:
-        print(f"    dev icp: {item['icp_ref']} {item['icp_hash']}")
 
 
 def _recording_failure_summary(
@@ -391,9 +391,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Record a frozen provider snapshot set for the L1 dev-eval rung"
     )
-    parser.add_argument("--source-icps", required=True, help="JSON file of candidate dev ICPs (benchmark-item or raw ICP shapes)")
-    parser.add_argument("--exclude-hashes", default="", help="JSON file listing holdout-window icp_refs/icp_hashes/signatures to exclude")
-    parser.add_argument("--exclude-hash", action="append", default=[], help="Additional exclusion entry (repeatable)")
+    parser.add_argument("--source-icps", required=True, help="Current-day dev ICP export v2 JSON")
     parser.add_argument(
         "--size",
         type=int,
@@ -403,12 +401,12 @@ def main() -> int:
             + RESEARCH_LAB_GIT_TREE_ENV_BY_FIELD["live_max_icps_per_node"]
         ),
     )
-    parser.add_argument("--seed", default="dev-v1", help="Deterministic selection seed (default dev-v1)")
     parser.add_argument("--snapshot-dir", default="", help="Local snapshot directory (default: RESEARCH_LAB_DEV_SNAPSHOT_URI when it is a local path)")
     parser.add_argument("--adapter-path", default="", help="Private champion checkout for subprocess execution")
     parser.add_argument("--champion-image", default="", help="Immutable champion ECR digest for docker execution")
     parser.add_argument("--source-commit", default=os.getenv("RESEARCH_LAB_PRIVATE_COMMIT_SHA", ""))
     parser.add_argument("--model-config-hash", default=os.getenv("RESEARCH_LAB_PRIVATE_MODEL_CONFIG_HASH", ""))
+    parser.add_argument("--private-model-manifest-hash", required=True)
     parser.add_argument("--provider-model-id", action="append", default=[])
     parser.add_argument("--module-name", default="research_lab_adapter")
     parser.add_argument("--callable-name", default="run_icp")
@@ -434,7 +432,7 @@ def main() -> int:
         return 1
 
     from research_lab.canonical import utc_now_iso
-    from research_lab.eval.dev_eval import build_dev_icp_set
+    from research_lab.eval.dev_eval import build_current_day_dev_bank
     from research_lab.eval.snapshot_store import (
         MODE_RECORD,
         SNAPSHOT_URI_ENV,
@@ -442,21 +440,40 @@ def main() -> int:
     )
 
     try:
-        source_items = _load_source_items(args.source_icps)
-        exclusions = _load_exclusions(args)
+        source_items, source_bank_manifest = _load_source_export(
+            args.source_icps
+        )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"ERROR: {exc}")
         return 1
 
     try:
-        dev_set = build_dev_icp_set(
+        dev_set = build_current_day_dev_bank(
             source_items,
-            exclude_window_hashes=exclusions,
-            size=configured_icp_count,
-            seed=args.seed,
+            benchmark_date=str(source_bank_manifest.get("benchmark_date") or ""),
+            benchmark_bundle_id=str(
+                source_bank_manifest.get("benchmark_bundle_id") or ""
+            ),
+            benchmark_bundle_hash=str(
+                source_bank_manifest.get("benchmark_bundle_hash") or ""
+            ),
+            rolling_window_hash=str(
+                source_bank_manifest.get("rolling_window_hash") or ""
+            ),
+            private_model_manifest_hash=str(
+                source_bank_manifest.get("private_model_manifest_hash") or ""
+            ),
+            evaluation_epoch=int(
+                source_bank_manifest.get("evaluation_epoch") or 0
+            ),
         )
+        if dev_set.manifest != source_bank_manifest:
+            raise ValueError("daily bank manifest differs from exported ICPs")
     except Exception as exc:  # noqa: BLE001 - CLI boundary
-        print(f"ERROR: could not build dev ICP set: {exc}")
+        print(f"ERROR: could not validate current-day dev ICP bank: {exc}")
+        return 1
+    if len(dev_set.items) < configured_icp_count:
+        print("ERROR: daily bank is smaller than the configured per-node ICP count")
         return 1
 
     snapshot_dir = str(args.snapshot_dir or os.getenv(SNAPSHOT_URI_ENV) or "").strip()
@@ -506,6 +523,11 @@ def main() -> int:
     if not str(args.model_config_hash).startswith("sha256:"):
         print("ERROR: --model-config-hash must be an exact sha256 commitment")
         return 1
+    if str(args.private_model_manifest_hash) != str(
+        dev_set.manifest.get("private_model_manifest_hash") or ""
+    ):
+        print("ERROR: daily baseline model manifest differs from the active champion")
+        return 1
     provider_model_ids = sorted({str(item).strip() for item in args.provider_model_id if str(item).strip()})
     if not provider_model_ids:
         print("ERROR: pass at least one --provider-model-id used by the champion")
@@ -525,7 +547,7 @@ def main() -> int:
     runner_failure_refs: list[str] = []
     replay_output_hashes: list[dict[str, str]] = []
     try:
-        for item in dev_set.items:
+        for item_index, item in enumerate(dev_set.items, start=1):
             ref = item["icp_ref"]
             try:
                 companies = _record_icp_with_docker(
@@ -537,10 +559,16 @@ def main() -> int:
                     snapshot_dir=str(staging),
                     timeout_seconds=args.timeout_seconds,
                 )
-                print(f"recorded {ref}: {len(companies)} companies, snapshots={store.snapshot_count()}")
+                print(
+                    f"recorded daily ICP {item_index}/{len(dev_set.items)}: "
+                    f"{len(companies)} companies, snapshots={store.snapshot_count()}"
+                )
             except Exception as exc:  # noqa: BLE001 - collect every failed ICP
                 runner_failure_refs.append(str(ref))
-                print(f"WARNING: recording failed for {ref}: {exc}")
+                print(
+                    f"WARNING: recording failed for daily ICP {item_index}: "
+                    f"{type(exc).__name__}"
+                )
 
         failure_file = staging / "record_failures.jsonl"
         failure_summary = _recording_failure_summary(
@@ -581,6 +609,9 @@ def main() -> int:
                 "champion_image_digest": args.champion_image,
                 "source_commit": str(args.source_commit),
                 "model_config_hash": str(args.model_config_hash),
+                "private_model_manifest_hash": str(
+                    args.private_model_manifest_hash
+                ),
                 "provider_model_ids": provider_model_ids,
                 "replay_output_hashes": replay_output_hashes,
             },

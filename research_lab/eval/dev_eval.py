@@ -23,11 +23,12 @@ Engine integration contract:
   ordinary build order.
 * Iteration continuation / plateau-stop (§6.3-4) keys off dev-score deltas.
 
-Dev-score discipline (leak-cluster guard, plan §8.2):
+Dev-score discipline:
 
-* The dev ICP set is built once with :func:`build_dev_icp_set`, which
-  hard-excludes any ICP whose ref/hash/intent-signal signature appears in the
-  private holdout window, and records the exclusion proof in its manifest.
+* Production snapshots contain the completed current-day rebenchmark bank.
+  Each tree binds one deterministic cohort with direction-relevant weak ICPs
+  and strong regression guards via :func:`select_current_day_dev_icps`.
+  The older retired-set builder remains only for historical artifact reads.
 * Dev scores are RANKING-ONLY — they order candidates within a run and are
   never promotion evidence. Expect and tolerate dev-vs-live divergence; the
   L2 live benchmark exists to catch it.
@@ -51,6 +52,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import inspect
+import math
 import re
 from typing import Any, Awaitable, Callable, Mapping, Sequence, Union
 
@@ -72,6 +74,10 @@ from .snapshot_store import (
 
 DEV_SCORE_VERSION = "research-lab-dev-eval-mechanical-v1"
 DEV_LEADS_PER_ICP = 5  # mirror evaluator._TOP5_LEADS_PER_ICP / the verifier lead budget
+CURRENT_DAY_DEV_BANK_SCHEMA_VERSION = "research_lab.current_day_dev_bank.v1"
+CURRENT_DAY_DEV_SELECTION_SCHEMA_VERSION = (
+    "research_lab.current_day_dev_selection.v1"
+)
 
 ModelRunner = Callable[
     [Mapping[str, Any], Mapping[str, Any]],
@@ -129,6 +135,366 @@ class DevIcpSet:
     items: tuple[dict[str, Any], ...]
     manifest: dict[str, Any]
     dev_set_hash: str
+
+
+def build_current_day_dev_bank(
+    source_icps: Sequence[Mapping[str, Any]],
+    *,
+    benchmark_date: str,
+    benchmark_bundle_id: str,
+    benchmark_bundle_hash: str,
+    rolling_window_hash: str,
+    private_model_manifest_hash: str,
+    evaluation_epoch: int,
+) -> DevIcpSet:
+    """Validate and bind the fully scored current-day benchmark bank.
+
+    The bank remains private.  It contains the exact ICP payloads needed for
+    replay plus baseline score/category metadata used to select one per-tree
+    weak/strong cohort.  Duplicate refs, content hashes, or intent signatures
+    fail closed so a single ICP cannot occupy multiple selection slots.
+    """
+
+    normalized: list[dict[str, Any]] = []
+    seen_refs: set[str] = set()
+    seen_hashes: set[str] = set()
+    seen_signatures: set[str] = set()
+    for entry in source_icps:
+        if not isinstance(entry, Mapping):
+            raise DevEvalError("current-day dev bank item is invalid")
+        item = _normalize_current_day_bank_item(entry)
+        duplicate_field = next(
+            (
+                name
+                for name, value, seen in (
+                    ("icp_ref", item["icp_ref"], seen_refs),
+                    ("icp_hash", item["icp_hash"], seen_hashes),
+                    (
+                        "intent_signal_signature",
+                        item["intent_signal_signature"],
+                        seen_signatures,
+                    ),
+                )
+                if value in seen
+            ),
+            "",
+        )
+        if duplicate_field:
+            raise DevEvalError(
+                f"current-day dev bank contains duplicate {duplicate_field}"
+            )
+        seen_refs.add(item["icp_ref"])
+        seen_hashes.add(item["icp_hash"])
+        seen_signatures.add(item["intent_signal_signature"])
+        normalized.append(item)
+    if not normalized:
+        raise DevEvalError("current-day dev bank is empty")
+    normalized.sort(key=lambda row: (row["icp_ref"], row["icp_hash"]))
+    dev_set_hash = compute_dev_set_hash(normalized)
+    payload = {
+        "schema_version": CURRENT_DAY_DEV_BANK_SCHEMA_VERSION,
+        "benchmark_date": str(benchmark_date),
+        "benchmark_bundle_id": str(benchmark_bundle_id),
+        "benchmark_bundle_hash": str(benchmark_bundle_hash),
+        "rolling_window_hash": str(rolling_window_hash),
+        "private_model_manifest_hash": str(private_model_manifest_hash),
+        "evaluation_epoch": max(0, int(evaluation_epoch)),
+        "bank_size": len(normalized),
+        "dev_set_hash": dev_set_hash,
+        "items": [
+            {
+                "icp_ref": item["icp_ref"],
+                "icp_hash": item["icp_hash"],
+                "intent_signal_signature": item["intent_signal_signature"],
+                "baseline_score": item["baseline_score"],
+                "benchmark_category": item["benchmark_category"],
+            }
+            for item in normalized
+        ],
+    }
+    manifest = {**payload, "daily_bank_hash": sha256_json(payload)}
+    return DevIcpSet(
+        items=tuple(normalized),
+        manifest=manifest,
+        dev_set_hash=dev_set_hash,
+    )
+
+
+def select_current_day_dev_icps(
+    source_icps: Sequence[Mapping[str, Any]],
+    *,
+    size: int,
+    seed: str,
+    miner_direction: str,
+    bank_manifest: Mapping[str, Any] | None = None,
+) -> DevIcpSet:
+    """Select direction-relevant weak cases plus strong regression guards.
+
+    For the default five-ICP policy this selects three ICPs from the lower
+    half of today's baseline scores and two from the upper half.  Direction
+    relevance is the first weak-case preference; diversity and deterministic
+    hash order resolve ties.  Strong cases prefer diversity within the upper
+    score half, then the higher baseline score.  No
+    randomness, completion timing, candidate output, or public/private label
+    affects selection.
+    """
+
+    if size <= 0:
+        raise DevEvalError("current-day dev selection size must be positive")
+    items = [_normalize_current_day_bank_item(item) for item in source_icps]
+    if len(items) < size:
+        raise DevEvalError(
+            f"current_day_dev_selection_requires_{size}_icps_found_{len(items)}"
+        )
+    if bank_manifest is not None:
+        _validate_current_day_bank_manifest(items, bank_manifest)
+    ranked = sorted(
+        items,
+        key=lambda item: (
+            item["baseline_score"],
+            sha256_json(
+                {
+                    "selection_seed": str(seed),
+                    "icp_hash": item["icp_hash"],
+                }
+            ),
+        ),
+    )
+    lower_count = (len(ranked) + 1) // 2
+    weak_pool = ranked[:lower_count]
+    strong_pool = ranked[lower_count:]
+    if not strong_pool:
+        strong_pool = list(reversed(ranked))
+    weak_count = min((size + 1) // 2, len(weak_pool))
+    strong_count = size - weak_count
+    if len(strong_pool) < strong_count:
+        weak_count += strong_count - len(strong_pool)
+        strong_count = len(strong_pool)
+
+    direction_tokens = _tokens(miner_direction)
+    selected: list[dict[str, Any]] = []
+    selected.extend(
+        _select_ranked_daily_items(
+            weak_pool,
+            count=weak_count,
+            selected=selected,
+            seed=str(seed),
+            direction_tokens=direction_tokens,
+            prefer_weak=True,
+        )
+    )
+    selected.extend(
+        _select_ranked_daily_items(
+            [item for item in strong_pool if item["icp_hash"] not in {
+                row["icp_hash"] for row in selected
+            }],
+            count=strong_count,
+            selected=selected,
+            seed=str(seed),
+            direction_tokens=direction_tokens,
+            prefer_weak=False,
+        )
+    )
+    if len(selected) != size:
+        raise DevEvalError("current-day dev selection could not fill every slot")
+    selected = sorted(selected, key=lambda row: row["icp_hash"])
+    selected_hash = compute_dev_set_hash(selected)
+    bank_hash = str((bank_manifest or {}).get("daily_bank_hash") or "")
+    direction_hash = sha256_json({"miner_direction": str(miner_direction or "")})
+    seed_hash = sha256_json({"selection_seed": str(seed)})
+    payload = {
+        "schema_version": CURRENT_DAY_DEV_SELECTION_SCHEMA_VERSION,
+        "selection_policy": "current_day_directional_weak_strong_v1",
+        "selection_seed_hash": seed_hash,
+        "miner_direction_hash": direction_hash,
+        "daily_bank_hash": bank_hash,
+        "requested_size": int(size),
+        "weak_count": int(weak_count),
+        "strong_count": int(strong_count),
+        "dev_set_hash": selected_hash,
+        "selected_items": [
+            {
+                "icp_ref": item["icp_ref"],
+                "icp_hash": item["icp_hash"],
+                "selection_band": (
+                    "weak" if item in weak_pool else "strong"
+                ),
+            }
+            for item in selected
+        ],
+    }
+    manifest = {**payload, "selection_manifest_hash": sha256_json(payload)}
+    return DevIcpSet(
+        items=tuple(selected),
+        manifest=manifest,
+        dev_set_hash=selected_hash,
+    )
+
+
+def select_snapshot_dev_icps(
+    source_icps: Sequence[Mapping[str, Any]],
+    *,
+    snapshot_manifest: Mapping[str, Any],
+    size: int,
+    seed: str,
+    miner_direction: str,
+) -> DevIcpSet:
+    """Shared host/measured resolver for an immutable snapshot cohort."""
+
+    bank_manifest = (
+        dict(snapshot_manifest.get("dev_set_manifest") or {})
+        if isinstance(snapshot_manifest.get("dev_set_manifest"), Mapping)
+        else {}
+    )
+    if bank_manifest.get("schema_version") == CURRENT_DAY_DEV_BANK_SCHEMA_VERSION:
+        return select_current_day_dev_icps(
+            source_icps,
+            size=size,
+            seed=seed,
+            miner_direction=miner_direction,
+            bank_manifest=bank_manifest,
+        )
+    if len(source_icps) != int(size):
+        raise DevEvalError(
+            "non-current snapshot cannot supply a larger selectable bank"
+        )
+    selected = [dict(item) for item in source_icps]
+    dev_set_hash = compute_dev_set_hash(selected)
+    payload = {
+        "schema_version": "research_lab.exact_snapshot_selection.v1",
+        "selection_policy": "exact_snapshot_compat_v1",
+        "requested_size": int(size),
+        "dev_set_hash": dev_set_hash,
+        "selection_seed_hash": sha256_json({"selection_seed": str(seed)}),
+        "miner_direction_hash": sha256_json(
+            {"miner_direction": str(miner_direction)}
+        ),
+        "selected_items": [
+            {
+                "icp_ref": str(item.get("icp_ref") or ""),
+                "icp_hash": str(item.get("icp_hash") or ""),
+            }
+            for item in sorted(
+                selected, key=lambda row: str(row.get("icp_hash") or "")
+            )
+        ],
+    }
+    return DevIcpSet(
+        items=tuple(selected),
+        manifest={**payload, "selection_manifest_hash": sha256_json(payload)},
+        dev_set_hash=dev_set_hash,
+    )
+
+
+def _normalize_current_day_bank_item(entry: Mapping[str, Any]) -> dict[str, Any]:
+    item = _normalize_dev_item(entry)
+    raw_score = entry.get("baseline_score")
+    if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+        raise DevEvalError("current-day dev bank item has no numeric baseline score")
+    score = float(raw_score)
+    if not math.isfinite(score):
+        raise DevEvalError("current-day dev bank item baseline score is not finite")
+    return {
+        **item,
+        "baseline_score": score,
+        "benchmark_category": str(
+            entry.get("benchmark_category") or "unclassified"
+        ),
+        "set_id": int(entry.get("set_id") or 0),
+        "day_index": int(entry.get("day_index") or 0),
+        "day_rank": int(entry.get("day_rank") or 0),
+    }
+
+
+def _validate_current_day_bank_manifest(
+    items: Sequence[Mapping[str, Any]], manifest: Mapping[str, Any]
+) -> None:
+    document = dict(manifest)
+    if document.get("schema_version") != CURRENT_DAY_DEV_BANK_SCHEMA_VERSION:
+        raise DevEvalError("current-day dev bank manifest schema is invalid")
+    payload = {key: value for key, value in document.items() if key != "daily_bank_hash"}
+    if str(document.get("daily_bank_hash") or "") != sha256_json(payload):
+        raise DevEvalError("current-day dev bank manifest hash differs")
+    if int(document.get("bank_size") or 0) != len(items):
+        raise DevEvalError("current-day dev bank manifest size differs")
+    if str(document.get("dev_set_hash") or "") != compute_dev_set_hash(items):
+        raise DevEvalError("current-day dev bank ICP commitment differs")
+    expected = [
+        {
+            "icp_ref": item["icp_ref"],
+            "icp_hash": item["icp_hash"],
+            "intent_signal_signature": item["intent_signal_signature"],
+            "baseline_score": item["baseline_score"],
+            "benchmark_category": item["benchmark_category"],
+        }
+        for item in sorted(items, key=lambda row: (row["icp_ref"], row["icp_hash"]))
+    ]
+    if document.get("items") != expected:
+        raise DevEvalError("current-day dev bank manifest items differ")
+
+
+def _daily_direction_relevance(
+    item: Mapping[str, Any], direction_tokens: frozenset[str]
+) -> int:
+    if not direction_tokens:
+        return 0
+    icp = item.get("icp") if isinstance(item.get("icp"), Mapping) else {}
+    weighted_text = " ".join(
+        [
+            str(icp.get("industry") or ""),
+            str(icp.get("industry") or ""),
+            str(icp.get("sub_industry") or ""),
+            str(icp.get("sub_industry") or ""),
+            str(icp.get("product_service") or ""),
+            str(icp.get("required_attribute") or ""),
+            str(icp.get("intent_signals") or ""),
+            str(icp.get("intent_signal") or ""),
+        ]
+    )
+    return len(direction_tokens & _tokens(weighted_text))
+
+
+def _select_ranked_daily_items(
+    pool: Sequence[Mapping[str, Any]],
+    *,
+    count: int,
+    selected: Sequence[Mapping[str, Any]],
+    seed: str,
+    direction_tokens: frozenset[str],
+    prefer_weak: bool,
+) -> list[dict[str, Any]]:
+    remaining = [dict(item) for item in pool]
+    chosen: list[dict[str, Any]] = []
+    covered = [set() for _field in _DEV_DIVERSITY_FIELDS]
+    for item in selected:
+        for index, value in enumerate(_dev_diversity_values(item)):
+            if value:
+                covered[index].add(value)
+    while remaining and len(chosen) < count:
+        def _key(item: Mapping[str, Any]) -> tuple[Any, ...]:
+            novelty = sum(
+                bool(value) and value not in covered[index]
+                for index, value in enumerate(_dev_diversity_values(item))
+            )
+            seeded = sha256_json(
+                {"selection_seed": seed, "icp_hash": item["icp_hash"]}
+            )
+            if prefer_weak:
+                return (
+                    _daily_direction_relevance(item, direction_tokens),
+                    novelty,
+                    -float(item["baseline_score"]),
+                    seeded,
+                )
+            return (novelty, float(item["baseline_score"]), seeded)
+
+        best = max(remaining, key=_key)
+        remaining.remove(best)
+        chosen.append(best)
+        for index, value in enumerate(_dev_diversity_values(best)):
+            if value:
+                covered[index].add(value)
+    return chosen
 
 
 def build_dev_icp_set(

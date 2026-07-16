@@ -9,9 +9,15 @@ from gateway.research_lab.allocations import (
     ACTIVE_REIMBURSEMENT_STATUSES,
     ACTIVE_SCHEDULE_STATUSES,
     _champion_paid_alpha_to_date_from_snapshots,
+    _champion_obligation_caps,
     _champion_replay_obligation,
     _epoch_active,
     _source_add_paid_alpha_to_date_from_snapshots,
+)
+from gateway.research_lab.champion_settlement_v2 import (
+    merge_finalized_allocation_histories_v2,
+    validate_finalized_allocation_authorities_v2,
+    validate_legacy_settlement_migrations_v2,
 )
 from gateway.research_lab.alpha_pricing import (
     compute_alpha_price_valuation,
@@ -101,10 +107,17 @@ class CoordinatorAllocationSourceV2:
         source_add_rows = self._read(
             "allocation_source_add_rewards", {"epoch_id": epoch}, context
         )
-        history = self._allocation_history(
+        champion_history = self._finalized_champion_history(
             epoch=epoch,
             netuid=netuid,
             champion_rows=champion_source_rows,
+            context=context,
+            required_parents=required_parent_hashes,
+        )
+        source_add_history = self._allocation_history(
+            epoch=epoch,
+            netuid=netuid,
+            champion_rows=(),
             source_add_rows=source_add_rows,
             context=context,
             required_parents=required_parent_hashes,
@@ -112,7 +125,7 @@ class CoordinatorAllocationSourceV2:
         champion_rows, champion_skipped = self._champions(
             epoch=epoch,
             rows=champion_source_rows,
-            history=history,
+            history=champion_history,
             hotkey_uids=hotkey_uids,
             context=context,
             required_parents=required_parent_hashes,
@@ -120,7 +133,7 @@ class CoordinatorAllocationSourceV2:
         source_add_obligations, source_add_skipped = self._source_add(
             epoch=epoch,
             rows=source_add_rows,
-            history=history,
+            history=source_add_history,
             hotkey_uids=hotkey_uids,
             context=context,
             required_parents=required_parent_hashes,
@@ -353,7 +366,10 @@ class CoordinatorAllocationSourceV2:
         context: ExecutionContextV2,
         required_parents: Set[str],
     ) -> Tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
-        paid = _champion_paid_alpha_to_date_from_snapshots(list(history))
+        paid = _champion_paid_alpha_to_date_from_snapshots(
+            list(history),
+            obligation_caps=_champion_obligation_caps(rows),
+        )
         obligations = []
         skipped = []
         for row in rows:
@@ -361,6 +377,9 @@ class CoordinatorAllocationSourceV2:
             if status not in ACTIVE_CHAMPION_STATUSES:
                 continue
             reward_id = str(row.get("champion_reward_id") or "")
+            replay = _champion_replay_obligation(row, paid_by_reward=paid, epoch=epoch)
+            if replay is None:
+                continue
             self._require_reward_receipt(
                 artifact_kind="champion_reward_decision",
                 artifact_ref=reward_id,
@@ -380,9 +399,6 @@ class CoordinatorAllocationSourceV2:
                     }
                 )
                 continue
-            replay = _champion_replay_obligation(row, paid_by_reward=paid, epoch=epoch)
-            if replay is None:
-                continue
             obligations.append(
                 {
                     "uid": uid,
@@ -400,6 +416,93 @@ class CoordinatorAllocationSourceV2:
                 }
             )
         return obligations, skipped
+
+    def _finalized_champion_history(
+        self,
+        *,
+        epoch: int,
+        netuid: int,
+        champion_rows: Sequence[Mapping[str, Any]],
+        context: ExecutionContextV2,
+        required_parents: Set[str],
+    ) -> list[Dict[str, Any]]:
+        starts = [
+            int(row.get("start_epoch") or 0)
+            for row in champion_rows
+            if int(row.get("start_epoch") or 0) <= epoch
+        ]
+        if not starts or epoch <= 0:
+            return []
+        native_rows = self._read(
+            "finalized_allocation_authorities",
+            {
+                "netuid": netuid,
+                "start_epoch": min(starts),
+                "end_epoch": epoch - 1,
+            },
+            context,
+        )
+        legacy_rows = self._read(
+            "legacy_finalized_allocation_migrations",
+            {
+                "netuid": netuid,
+                "start_epoch": min(starts),
+                "end_epoch": epoch - 1,
+            },
+            context,
+        )
+        graph_by_root = {
+            str(graph.get("root_receipt_hash") or ""): graph
+            for graph in context.external_receipt_graphs
+            if isinstance(graph, Mapping)
+        }
+        native = validate_finalized_allocation_authorities_v2(
+            native_rows,
+            finalization_graphs=graph_by_root,
+        )
+        migrated = validate_legacy_settlement_migrations_v2(
+            legacy_rows,
+            receipt_graphs=graph_by_root,
+        )
+        finalized = merge_finalized_allocation_histories_v2(native, migrated)
+        for row in finalized:
+            authority_types = set(row.get("authority_types") or ())
+            if "native_v2_finalization" in authority_types:
+                receipt_hash = self._require_allocation_receipt(
+                    epoch=int(row["epoch"]),
+                    allocation=dict(row["allocation_doc"]),
+                    allocation_hash=str(row["allocation_hash"]),
+                    context=context,
+                    required_parents=required_parents,
+                )
+                if receipt_hash != str(row.get("allocation_receipt_hash") or ""):
+                    raise CoordinatorAllocationSourceV2Error(
+                        "finalized weight bundle used another allocation receipt"
+                    )
+            if "legacy_finalized_chain_migration_v2" in authority_types:
+                receipt_hash = str(
+                    row.get("legacy_settlement_receipt_hash") or ""
+                )
+                if (
+                    not receipt_hash
+                    or receipt_hash not in graph_by_root
+                    or receipt_hash not in context.parent_receipt_hashes
+                ):
+                    raise CoordinatorAllocationSourceV2Error(
+                        "legacy finalized allocation receipt is not a declared source"
+                    )
+                required_parents.add(receipt_hash)
+        used_finalization_roots = {
+            str(row.get("finalization_receipt_hash") or "")
+            for row in native_rows
+        }
+        for root in used_finalization_roots:
+            if not root or root not in graph_by_root:
+                raise CoordinatorAllocationSourceV2Error(
+                    "finalized allocation graph is not a declared source"
+                )
+            required_parents.add(root)
+        return finalized
 
     def _source_add(
         self,
@@ -564,7 +667,7 @@ class CoordinatorAllocationSourceV2:
         allocation_hash: str,
         context: ExecutionContextV2,
         required_parents: Set[str],
-    ) -> None:
+    ) -> str:
         link, receipt = self._business_receipt(
             artifact_kind="allocation",
             artifact_ref="epoch:%d" % epoch,
@@ -582,6 +685,7 @@ class CoordinatorAllocationSourceV2:
                 "historical allocation receipt does not bind its row"
             )
         required_parents.add(str(receipt["receipt_hash"]))
+        return str(receipt["receipt_hash"])
 
     def _business_receipt(
         self,

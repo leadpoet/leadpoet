@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import gzip
 import json
 
 import pytest
@@ -9,6 +11,7 @@ from leadpoet_canonical.chain_source_v2 import (
     CHAIN_RPC_METHOD,
     ChainSourceV2Error,
     chain_source_policy_hash,
+    decode_weights_storage,
     decode_timelocked_weight_commits,
     decode_selective_metagraph_result,
     encode_selective_metagraph_params,
@@ -17,6 +20,8 @@ from leadpoet_canonical.chain_source_v2 import (
     parse_json_rpc_response,
     ss58_encode_account_id,
     timelocked_weight_commits_storage_key,
+    validate_arweave_checkpoint_event,
+    weights_storage_key,
 )
 
 
@@ -146,3 +151,78 @@ def test_timelocked_commit_storage_decoder_is_exact():
     ]
     with pytest.raises(ChainSourceV2Error, match="trailing"):
         decode_timelocked_weight_commits("0x" + (encoded + b"\x00").hex())
+
+
+def test_weight_storage_key_and_decoder_match_live_finney_metadata_shape():
+    assert weights_storage_key(netuid=71, validator_uid=12) == (
+        "0x658faa385070e074c85bf6b568cf0555"
+        "a1e7036061f484bc3048a64b64e35ec4"
+        "47000c00"
+    )
+    encoded = b"".join(
+        (
+            b"\x08",  # Vec length 2
+            (3).to_bytes(2, "little"),
+            (123).to_bytes(2, "little"),
+            (9).to_bytes(2, "little"),
+            (456).to_bytes(2, "little"),
+        )
+    )
+    assert decode_weights_storage("0x" + encoded.hex()) == (
+        (3, 123),
+        (9, 456),
+    )
+    with pytest.raises(ChainSourceV2Error, match="duplicate"):
+        decode_weights_storage(
+            "0x"
+            + (
+                b"\x08"
+                + (3).to_bytes(2, "little")
+                + (1).to_bytes(2, "little")
+                + (3).to_bytes(2, "little")
+                + (2).to_bytes(2, "little")
+            ).hex()
+        )
+
+
+def test_arweave_checkpoint_requires_exact_event_and_merkle_commitment():
+    signed = {"signed_event": {"payload": {"ok": True}}}
+    event = {
+        "sequence": 7,
+        "event_hash": "1" * 64,
+        "signed_log_entry": signed,
+    }
+    leaf = __import__("hashlib").sha256(
+        json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    checkpoint = {
+        "header": {
+            "checkpoint_number": 4,
+            "event_count": 1,
+            "merkle_root": leaf,
+            "sequence_range": {"first": 7, "last": 7},
+        },
+        "signature": "ignored-by-historical-inclusion-check",
+        "events_compressed": base64.b64encode(
+            gzip.compress(json.dumps([event]).encode())
+        ).decode(),
+        "tree_levels": [[leaf]],
+    }
+    result = validate_arweave_checkpoint_event(
+        checkpoint,
+        expected_event_hash="1" * 64,
+        expected_signed_log_entry=signed,
+        expected_sequence=7,
+        expected_merkle_root=leaf,
+    )
+    assert result["checkpoint_number"] == 4
+    tampered = json.loads(json.dumps(checkpoint))
+    tampered["tree_levels"] = [["2" * 64]]
+    with pytest.raises(ChainSourceV2Error, match="Merkle tree differs"):
+        validate_arweave_checkpoint_event(
+            tampered,
+            expected_event_hash="1" * 64,
+            expected_signed_log_entry=signed,
+            expected_sequence=7,
+            expected_merkle_root=leaf,
+        )

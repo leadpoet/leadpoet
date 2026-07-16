@@ -160,28 +160,31 @@ def _run_command(command: Sequence[str], env: Mapping[str, str], timeout_seconds
     return str(completed.stdout or "")
 
 
-def _artifact_identity(active: Any) -> tuple[str, str, str]:
+def _artifact_identity(active: Any) -> tuple[str, str, str, str]:
     artifact = active.artifact
     return (
         str(artifact.image_digest or ""),
         str(artifact.git_commit_sha or ""),
         str(artifact.config_hash or ""),
+        str(artifact.manifest_hash or ""),
     )
 
 
 def _readiness_matches_artifact(
-    readiness: Mapping[str, Any], identity: tuple[str, str, str]
+    readiness: Mapping[str, Any], identity: tuple[str, str, str, str]
 ) -> bool:
     return bool(
         readiness.get("ready")
         and str(readiness.get("champion_image_digest") or "") == identity[0]
         and str(readiness.get("source_commit") or "") == identity[1]
         and str(readiness.get("model_config_hash") or "") == identity[2]
+        and str(readiness.get("private_model_manifest_hash") or "")
+        == identity[3]
     )
 
 
 def _refresh_reason(
-    readiness: Mapping[str, Any], identity: tuple[str, str, str]
+    readiness: Mapping[str, Any], identity: tuple[str, str, str, str]
 ) -> str:
     if not readiness.get("ready"):
         return str(readiness.get("reason") or "snapshot_not_ready")
@@ -259,6 +262,7 @@ async def maybe_refresh_dev_snapshot(
                 readiness_loader,
                 pointer_uri,
                 expected_dev_icp_count=tree_policy.live_max_icps_per_node,
+                require_current_day=True,
             )
             reason = _refresh_reason(readiness, identity_before)
             base_state = {
@@ -319,6 +323,8 @@ async def maybe_refresh_dev_snapshot(
                         str(inputs_dir),
                         "--seed",
                         seed,
+                        "--expected-private-model-manifest-hash",
+                        identity_before[3],
                     ),
                     env,
                     timeout_seconds,
@@ -328,10 +334,6 @@ async def maybe_refresh_dev_snapshot(
                     _runtime_script(source_root, "record_research_lab_dev_snapshots.py"),
                     "--source-icps",
                     str(inputs_dir / "source_icps.json"),
-                    "--exclude-hashes",
-                    str(inputs_dir / "holdout_window_hashes.json"),
-                    "--seed",
-                    seed,
                     "--snapshot-dir",
                     str(snapshot_dir),
                     "--champion-image",
@@ -340,6 +342,8 @@ async def maybe_refresh_dev_snapshot(
                     identity_before[1],
                     "--model-config-hash",
                     identity_before[2],
+                    "--private-model-manifest-hash",
+                    identity_before[3],
                     "--record",
                 ]
                 for model_id in provider_model_ids:
@@ -382,6 +386,7 @@ async def maybe_refresh_dev_snapshot(
                 readiness_loader,
                 pointer_uri,
                 expected_dev_icp_count=tree_policy.live_max_icps_per_node,
+                require_current_day=True,
             )
             if not _readiness_matches_artifact(final_readiness, identity_before):
                 raise RuntimeError("published snapshot does not match the active private model")

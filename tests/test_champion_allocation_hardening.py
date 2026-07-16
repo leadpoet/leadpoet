@@ -131,6 +131,30 @@ class TestChampionPaidToDate:
         )
         assert obligation is None
 
+    def test_final_credit_is_capped_at_remaining_obligation_balance(self):
+        rows = [
+            _snapshot_row(
+                [_entry("champion_reward:r1", 6.0)],
+                epoch=100 + index,
+            )
+            for index in range(3)
+        ]
+        paid = _champion_paid_alpha_to_date_from_snapshots(
+            rows,
+            obligation_caps={"champion_reward:r1": 10.0},
+        )
+        assert paid["champion_reward:r1"] == pytest.approx(10.0)
+        assert _champion_replay_obligation(
+            {
+                "champion_reward_id": "champion_reward:r1",
+                "start_epoch": 100,
+                "epoch_count": 2,
+                "desired_alpha_percent": 5.0,
+            },
+            paid_by_reward={"champion_reward:r1": 99.0},
+            epoch=103,
+        ) is None
+
 
 class TestAllocationSnapshotPersistenceDecision:
     @staticmethod

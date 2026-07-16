@@ -264,3 +264,213 @@ async def test_allocation_binds_every_reward_parent(monkeypatch):
         load_allocation_parent_graphs=load_parent_graphs,
     )
     assert outcome["lineage_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_historical_settlement_authority_is_scope_bound_and_durable(
+    monkeypatch,
+):
+    from leadpoet_canonical import legacy_settlement_v2
+
+    document = {
+        "netuid": 71,
+        "epoch_id": 100,
+        "settlement_hash": HASH_B,
+    }
+    captured = {}
+    links = []
+    migrations = []
+
+    async def execute(**kwargs):
+        captured.update(kwargs)
+        receipt = {"receipt_hash": HASH_A, "output_root": v2_authority.sha256_json(document)}
+        return {
+            "status": "succeeded",
+            "result": document,
+            "execution_receipt": receipt,
+            "receipt_graph": {
+                "root_receipt_hash": HASH_A,
+                "receipts": [receipt],
+            },
+        }
+
+    async def persist_links(**kwargs):
+        links.append(kwargs)
+        return {"business_artifact_link_count": 1}
+
+    async def persist_migration(**kwargs):
+        migrations.append(kwargs)
+        return {"settlement_hash": HASH_B}
+
+    monkeypatch.setattr(v2_authority, "legacy_v1_enabled", lambda: True)
+    monkeypatch.setattr(
+        legacy_settlement_v2,
+        "validate_legacy_settlement_document_v2",
+        lambda value: dict(value),
+    )
+    result = await v2_authority.attest_historical_champion_settlement_v2(
+        epoch_id=101,
+        netuid=71,
+        settlement_epoch_id=100,
+        execute=execute,
+        persist_links=persist_links,
+        persist_migration=persist_migration,
+    )
+    assert result["status"] == "matched"
+    assert captured["sequence"] == 100
+    assert captured["payload"] == {
+        "schema_version": "leadpoet.legacy_finalized_allocation_request.v2",
+        "netuid": 71,
+        "epoch_id": 100,
+    }
+    assert links[0]["artifacts"][0] == {
+        "artifact_kind": "legacy_finalized_allocation",
+        "artifact_ref": "71:100",
+        "artifact_hash": HASH_B,
+    }
+    assert migrations == [{"settlement": document, "receipt_hash": HASH_A}]
+
+
+@pytest.mark.asyncio
+async def test_historical_champion_reward_migration_runs_before_v2_cutover(
+    monkeypatch,
+):
+    reward_id = "champion_reward:sha256:" + "c" * 64
+    result = {"decision_kind": "champion", "reward": {"id": reward_id}}
+    captured = {}
+
+    async def execute(**kwargs):
+        captured.update(kwargs)
+        projection = {"champion_reward_id": reward_id}
+        receipt = {
+            "receipt_hash": HASH_A,
+            "output_root": v2_authority.sha256_json(projection),
+        }
+        return {
+            "status": "succeeded",
+            "result": result,
+            "execution_receipt": receipt,
+            "receipt_graph": {
+                "root_receipt_hash": HASH_A,
+                "receipts": [receipt],
+            },
+        }
+
+    async def persist_links(**_kwargs):
+        return {"business_artifact_link_count": 1}
+
+    monkeypatch.setattr(v2_authority, "legacy_v1_enabled", lambda: True)
+    monkeypatch.setattr(
+        v2_authority,
+        "reward_receipt_projection_v2",
+        lambda _result: {"champion_reward_id": reward_id},
+    )
+    outcome = await v2_authority.attest_historical_champion_reward_v2(
+        epoch_id=101,
+        champion_reward_id=reward_id,
+        execute=execute,
+        persist_links=persist_links,
+    )
+
+    assert outcome["status"] == "matched"
+    assert captured["payload"] == {
+        "decision_kind": "champion_migration",
+        "decision_payload": {"champion_reward_id": reward_id},
+    }
+
+
+@pytest.mark.asyncio
+async def test_allocation_parent_loader_uses_legacy_settlement_receipt(
+    monkeypatch,
+):
+    from gateway.research_lab import attested_v2_store, champion_settlement_v2, store
+
+    reward_id = "champion_reward:sha256:" + "c" * 64
+    reward_receipt = "sha256:" + "d" * 64
+    settlement_receipt = "sha256:" + "e" * 64
+    champion_row = {
+        "champion_reward_id": reward_id,
+        "current_reward_status": "active",
+        "start_epoch": 99,
+        "epoch_count": 20,
+        "desired_alpha_percent": 1.0,
+    }
+    business_refs = []
+    receipt_roots = []
+
+    async def select_all(table, **kwargs):
+        if table == "research_lab_champion_reward_current":
+            filters = dict(
+                (item[0], item[1])
+                for item in kwargs.get("filters") or ()
+                if len(item) == 2
+            )
+            return [champion_row] if filters.get("current_reward_status") == "active" else []
+        return []
+
+    async def select_one(*_args, **_kwargs):
+        return None
+
+    async def load_history(**_kwargs):
+        return [
+            {
+                "epoch": 99,
+                "netuid": 71,
+                "allocation_hash": HASH_A,
+                "allocation_doc": {
+                    "allocation_hash": HASH_A,
+                    "champion_allocations": [],
+                    "queued_champion_allocations": [],
+                },
+                "allocation_receipt_hash": settlement_receipt,
+                "legacy_settlement_receipt_hash": settlement_receipt,
+                "authority_types": ["legacy_finalized_chain_migration_v2"],
+                "finalized_bundle_hashes": [],
+                "finalization_receipt_hashes": [],
+            }
+        ]
+
+    async def load_business(*, artifact_kind, artifact_ref):
+        business_refs.append((artifact_kind, artifact_ref))
+        return {
+            "root_receipt_hash": reward_receipt,
+            "receipts": [{"receipt_hash": reward_receipt}],
+        }
+
+    async def load_receipt(receipt_hash):
+        receipt_roots.append(receipt_hash)
+        return {
+            "root_receipt_hash": receipt_hash,
+            "receipts": [{"receipt_hash": receipt_hash}],
+        }
+
+    monkeypatch.setattr(store, "select_all", select_all)
+    monkeypatch.setattr(store, "select_one", select_one)
+    monkeypatch.setattr(
+        champion_settlement_v2,
+        "load_finalized_allocation_history_v2",
+        load_history,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_business_artifact_graph_by_ref_v2",
+        load_business,
+    )
+    monkeypatch.setattr(
+        attested_v2_store,
+        "load_receipt_graph_v2",
+        load_receipt,
+    )
+
+    graphs = await v2_authority._load_allocation_parent_graphs_v2(
+        epoch_id=100,
+        netuid=71,
+        policy={},
+    )
+
+    assert business_refs == [("champion_reward_decision", reward_id)]
+    assert receipt_roots == [settlement_receipt]
+    assert {graph["root_receipt_hash"] for graph in graphs} == {
+        reward_receipt,
+        settlement_receipt,
+    }

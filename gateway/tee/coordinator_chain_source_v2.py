@@ -11,20 +11,26 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 from gateway.tee.provider_broker_v2 import PROVIDER_BROKER_SCHEMA_VERSION
 from leadpoet_canonical.attested_v2 import sha256_bytes, sha256_json
 from leadpoet_canonical.chain_source_v2 import (
+    CHAIN_ARCHIVE_ENDPOINT_HOST,
+    CHAIN_FINALIZATION_EPOCH_BLOCKS,
     CHAIN_ENDPOINT_HOST,
     CHAIN_RPC_METHOD,
+    CHAIN_RPC_RETRY_BACKOFF_SECONDS,
     CHAIN_RPC_TIMEOUT_MS,
     ChainSourceV2Error,
+    decode_weights_storage,
     decode_selective_metagraph_result,
     encode_selective_metagraph_params,
     json_rpc_request,
     normalize_raw_hash,
     parse_finalized_header,
     parse_json_rpc_response,
+    weights_storage_key,
 )
 
 
 CHAIN_ENDPOINT_URL = "https://%s/" % CHAIN_ENDPOINT_HOST
+CHAIN_ARCHIVE_ENDPOINT_URL = "https://%s/" % CHAIN_ARCHIVE_ENDPOINT_HOST
 COINGECKO_TAO_USD_URL = (
     "https://api.coingecko.com/api/v3/simple/price"
     "?ids=bittensor&vs_currencies=usd"
@@ -213,6 +219,146 @@ class CoordinatorChainSourceV2:
             "live allocation price exhausted measured retries"
         ) from last_error
 
+    def read_historical_finalized_weights(
+        self,
+        *,
+        netuid: int,
+        epoch_id: int,
+        validator_hotkey: str,
+        context: Any,
+    ) -> Dict[str, Any]:
+        """Read one epoch-end weight vector from the canonical archive node."""
+
+        if not self._retry_policy_hashes.get("bittensor_archive"):
+            raise CoordinatorChainSourceV2Error(
+                "bittensor_archive retry policy is unavailable"
+            )
+        normalized_epoch = int(epoch_id)
+        if normalized_epoch < 0 or int(netuid) <= 0 or not str(validator_hotkey):
+            raise CoordinatorChainSourceV2Error("historical weight request is invalid")
+        target_block = (
+            (normalized_epoch + 1) * CHAIN_FINALIZATION_EPOCH_BLOCKS - 1
+        )
+        finalized_hash = normalize_raw_hash(
+            self._archive_call(
+                method="chain_getFinalizedHead",
+                params=(),
+                request_id=101,
+                logical_operation_id=(
+                    "%s:legacy-settlement:%d:finalized-head"
+                    % (context.job_id, normalized_epoch)
+                ),
+                context=context,
+            ),
+            "archive finalized head",
+        )
+        finalized_header = parse_finalized_header(
+            self._archive_call(
+                method="chain_getHeader",
+                params=("0x" + finalized_hash,),
+                request_id=102,
+                logical_operation_id=(
+                    "%s:legacy-settlement:%d:finalized-header"
+                    % (context.job_id, normalized_epoch)
+                ),
+                context=context,
+            )
+        )
+        if int(finalized_header["block"]) < target_block:
+            raise CoordinatorChainSourceV2Error(
+                "historical settlement block is not finalized"
+            )
+        target_hash = normalize_raw_hash(
+            self._archive_call(
+                method="chain_getBlockHash",
+                params=(target_block,),
+                request_id=103,
+                logical_operation_id=(
+                    "%s:legacy-settlement:%d:block-hash"
+                    % (context.job_id, normalized_epoch)
+                ),
+                context=context,
+            ),
+            "historical settlement block hash",
+        )
+        target_header = parse_finalized_header(
+            self._archive_call(
+                method="chain_getHeader",
+                params=("0x" + target_hash,),
+                request_id=104,
+                logical_operation_id=(
+                    "%s:legacy-settlement:%d:block-header"
+                    % (context.job_id, normalized_epoch)
+                ),
+                context=context,
+            )
+        )
+        if int(target_header["block"]) != target_block:
+            raise CoordinatorChainSourceV2Error(
+                "historical settlement header differs from target"
+            )
+        metagraph = decode_selective_metagraph_result(
+            self._archive_call(
+                method="state_call",
+                params=(
+                    CHAIN_RPC_METHOD,
+                    encode_selective_metagraph_params(netuid=int(netuid)),
+                    "0x" + target_hash,
+                ),
+                request_id=105,
+                logical_operation_id=(
+                    "%s:legacy-settlement:%d:metagraph"
+                    % (context.job_id, normalized_epoch)
+                ),
+                context=context,
+            )
+        )
+        if (
+            int(metagraph["netuid"]) != int(netuid)
+            or int(metagraph["block"]) != target_block
+        ):
+            raise CoordinatorChainSourceV2Error(
+                "historical settlement metagraph differs from target"
+            )
+        matching_uids = [
+            uid
+            for uid, hotkey in enumerate(metagraph["hotkeys"])
+            if hotkey == str(validator_hotkey)
+        ]
+        if len(matching_uids) != 1:
+            raise CoordinatorChainSourceV2Error(
+                "historical validator UID is absent or ambiguous"
+            )
+        validator_uid = matching_uids[0]
+        storage_key = weights_storage_key(
+            netuid=int(netuid), validator_uid=validator_uid
+        )
+        weights = decode_weights_storage(
+            self._archive_call(
+                method="state_getStorage",
+                params=(storage_key, "0x" + target_hash),
+                request_id=106,
+                logical_operation_id=(
+                    "%s:legacy-settlement:%d:weights"
+                    % (context.job_id, normalized_epoch)
+                ),
+                context=context,
+            )
+        )
+        return {
+            "epoch_id": normalized_epoch,
+            "netuid": int(netuid),
+            "target_block": target_block,
+            "target_block_hash": target_hash,
+            "target_header": target_header,
+            "finalized_head_block": int(finalized_header["block"]),
+            "finalized_head_hash": finalized_hash,
+            "validator_hotkey": str(validator_hotkey),
+            "validator_uid": validator_uid,
+            "weights_storage_key": storage_key,
+            "weights": [[int(uid), int(weight)] for uid, weight in weights],
+        }
+
     def _chain_call(
         self,
         *,
@@ -241,6 +387,42 @@ class CoordinatorChainSourceV2:
             raise CoordinatorChainSourceV2Error(
                 "authenticated chain response is invalid"
             ) from exc
+
+    def _archive_call(
+        self,
+        *,
+        method: str,
+        params: Sequence[Any],
+        request_id: int,
+        logical_operation_id: str,
+        context: Any,
+    ) -> Any:
+        body = json_rpc_request(method, params, request_id)
+        last_error: Optional[BaseException] = None
+        for attempt_number in range(len(CHAIN_RPC_RETRY_BACKOFF_SECONDS) + 1):
+            try:
+                result = self._provider_call(
+                    provider_id="bittensor_archive",
+                    logical_operation_id=logical_operation_id,
+                    attempt_number=attempt_number,
+                    method="POST",
+                    url=CHAIN_ARCHIVE_ENDPOINT_URL,
+                    headers={
+                        "accept": "application/json",
+                        "content-type": "application/json",
+                    },
+                    body=body,
+                    timeout_ms=CHAIN_RPC_TIMEOUT_MS,
+                    context=context,
+                )
+                return parse_json_rpc_response(result["body"], request_id)
+            except (CoordinatorChainSourceV2Error, ChainSourceV2Error) as exc:
+                last_error = exc
+                if attempt_number < len(CHAIN_RPC_RETRY_BACKOFF_SECONDS):
+                    self._sleep(CHAIN_RPC_RETRY_BACKOFF_SECONDS[attempt_number])
+        raise CoordinatorChainSourceV2Error(
+            "authenticated archive request exhausted measured retries"
+        ) from last_error
 
     def _provider_call(
         self,

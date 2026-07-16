@@ -42,6 +42,26 @@ def test_provider_registry_hash_binds_measured_https_routes():
     assert document["routes"]["bittensor_chain"]["hosts"] == [
         "entrypoint-finney.opentensor.ai"
     ]
+    assert document["routes"]["bittensor_archive"] == {
+        "hosts": ["archive.chain.opentensor.ai"],
+        "path_prefixes": ["/"],
+        "credential_slot": "",
+        "credential_location": "none",
+        "credential_name": "",
+        "credential_prefix": "",
+        "credential_header_aliases": [],
+        "allowed_methods": ["POST"],
+    }
+    assert document["routes"]["arweave"] == {
+        "hosts": ["arweave.net"],
+        "path_prefixes": ["/"],
+        "credential_slot": "",
+        "credential_location": "none",
+        "credential_name": "",
+        "credential_prefix": "",
+        "credential_header_aliases": [],
+        "allowed_methods": ["GET"],
+    }
     assert document["routes"]["supabase"] == {
         "hosts": ["qplwoislplkcegvdmbim.supabase.co"],
         "path_prefixes": ["/rest/v1/"],
@@ -207,6 +227,45 @@ def test_plaintext_unmeasured_destination_and_runner_credentials_fail_closed():
         broker.execute(_request(url="https://example.com/api/v1/chat/completions"))
     with pytest.raises(ProviderBrokerV2Error, match="credential header"):
         broker.execute(_request(headers={"Authorization": "Bearer host-value"}))
+
+
+def test_historical_settlement_routes_are_host_and_method_bound():
+    broker = _broker(FakeTransport())
+    broker.execute(
+        _request(
+            provider_id="bittensor_archive",
+            method="POST",
+            url="https://archive.chain.opentensor.ai/",
+        )
+    )
+    broker.execute(
+        _request(
+            logical_operation_id="operation-arweave",
+            provider_id="arweave",
+            method="GET",
+            url="https://arweave.net/" + "A" * 43,
+            body_b64=base64.b64encode(b"").decode("ascii"),
+        )
+    )
+    with pytest.raises(ProviderBrokerV2Error, match="method"):
+        broker.execute(
+            _request(
+                logical_operation_id="operation-archive-get",
+                provider_id="bittensor_archive",
+                method="GET",
+                url="https://archive.chain.opentensor.ai/",
+            )
+        )
+    with pytest.raises(ProviderBrokerV2Error, match="destination"):
+        broker.execute(
+            _request(
+                logical_operation_id="operation-arweave-host",
+                provider_id="arweave",
+                method="GET",
+                url="https://example.com/" + "A" * 43,
+                body_b64=base64.b64encode(b"").decode("ascii"),
+            )
+        )
 
 
 def test_scrapingdog_key_is_injected_only_inside_coordinator_query():

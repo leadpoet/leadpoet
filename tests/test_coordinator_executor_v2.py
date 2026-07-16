@@ -2,6 +2,7 @@ import pytest
 
 from gateway.tee.coordinator_executor_v2 import (
     OP_ATTEST_ARTIFACT_PERSISTENCE,
+    OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2,
     OP_ATTEST_WEIGHT_INPUT,
     OP_ATTEST_WEIGHT_PUBLICATION,
     OP_PROVIDER_OUTCOME_SNAPSHOT_V2,
@@ -93,6 +94,56 @@ async def test_coordinator_rejects_operation_outside_measured_authority():
                 job_id="score:test",
                 purpose="research_lab.ranking.v2",
                 epoch_id=1,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_coordinator_attests_legacy_settlement_only_from_measured_source():
+    document = {
+        "settlement_hash": "sha256:" + "1" * 64,
+        "allocation_hash": "sha256:" + "2" * 64,
+        "chain_compare_hash": "sha256:" + "3" * 64,
+        "audit_event_hash": "sha256:" + "4" * 64,
+        "checkpoint_merkle_root": "sha256:" + "5" * 64,
+    }
+    calls = []
+
+    def resolver(payload, context):
+        calls.append((dict(payload), context.job_id))
+        return document
+
+    result = await CoordinatorExecutorV2(
+        legacy_settlement_source_resolver=resolver
+    )(
+        OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2,
+        {
+            "schema_version": "leadpoet.legacy_finalized_allocation_request.v2",
+            "netuid": 71,
+            "epoch_id": 100,
+        },
+        ExecutionContextV2(
+            job_id="legacy-settlement:100",
+            purpose="research_lab.legacy_finalized_allocation.v2",
+            epoch_id=101,
+        ),
+    )
+    assert result.output == document
+    assert set(result.artifact_hashes) == set(document.values())
+    assert calls[0][1] == "legacy-settlement:100"
+
+    with pytest.raises(ValueError, match="source is unavailable"):
+        await CoordinatorExecutorV2()(
+            OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2,
+            {
+                "schema_version": "leadpoet.legacy_finalized_allocation_request.v2",
+                "netuid": 71,
+                "epoch_id": 100,
+            },
+            ExecutionContextV2(
+                job_id="legacy-settlement:missing",
+                purpose="research_lab.legacy_finalized_allocation.v2",
+                epoch_id=101,
             ),
         )
 

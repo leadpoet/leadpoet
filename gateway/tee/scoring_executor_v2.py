@@ -40,7 +40,11 @@ from gateway.tee.scoring_executor import (
 )
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_bytes, sha256_json
 from research_lab.eval import PrivateModelArtifactManifest
-from research_lab.eval.dev_eval import compute_dev_set_hash, evaluate_dev
+from research_lab.eval.dev_eval import (
+    compute_dev_set_hash,
+    evaluate_dev,
+    select_snapshot_dev_icps,
+)
 from research_lab.eval.provider_evidence_cache import (
     EVIDENCE_CACHE_SCHEMA_VERSION,
     icp_evidence_cache_key,
@@ -81,8 +85,8 @@ OP_DEV_REPLAY_V2 = "run_dev_replay_v2"
 OP_DEV_HYBRID_V2 = "run_dev_hybrid_v2"
 OP_PROVIDER_PREFLIGHT_V2 = "provider_preflight_v2"
 OP_SOURCE_ADD_LEG2_JUDGE_V2 = "source_add_leg2_judge_v2"
-DEV_REPLAY_REQUEST_SCHEMA_VERSION = "leadpoet.dev_replay_request.v3"
-DEV_HYBRID_REQUEST_SCHEMA_VERSION = "leadpoet.dev_hybrid_request.v3"
+DEV_REPLAY_REQUEST_SCHEMA_VERSION = "leadpoet.dev_replay_request.v4"
+DEV_HYBRID_REQUEST_SCHEMA_VERSION = "leadpoet.dev_hybrid_request.v4"
 PROVIDER_PREFLIGHT_REQUEST_SCHEMA_VERSION = "leadpoet.provider_preflight_request.v2"
 SOURCE_ADD_JUDGE_REQUEST_SCHEMA_VERSION = "leadpoet.source_add_judge_request.v2"
 SOURCE_ADD_JUDGE_RESULT_SCHEMA_VERSION = "leadpoet.source_add_judge_result.v2"
@@ -812,6 +816,7 @@ class ScoringExecutorV2:
             "snapshot_bundle",
             "snapshot_tree_hash",
             "snapshot_manifest_hash",
+            "dev_selection_request",
             "module_name",
             "callable_name",
             "environment",
@@ -831,6 +836,13 @@ class ScoringExecutorV2:
         snapshot_bundle = dict(payload["snapshot_bundle"])
         snapshot_tree_hash = str(payload.get("snapshot_tree_hash") or "")
         snapshot_manifest_hash = str(payload.get("snapshot_manifest_hash") or "")
+        selection_request = payload.get("dev_selection_request")
+        if not isinstance(selection_request, Mapping) or set(selection_request) != {
+            "selection_seed",
+            "miner_direction",
+            "selection_manifest_hash",
+        }:
+            raise ValueError("dev replay selection request is invalid")
         if snapshot_bundle.get("source_tree_hash") != snapshot_tree_hash:
             raise ValueError("dev replay snapshot bundle commitment differs")
         environment = payload.get("environment")
@@ -887,13 +899,13 @@ class ScoringExecutorV2:
                 != snapshot_manifest_hash
             ):
                 raise ValueError("dev replay snapshot manifest verification failed")
-            dev_items = snapshot_store.load_dev_icp_items()
+            bank_items = snapshot_store.load_dev_icp_items() or []
             expected_dev_icp_count = measured_git_tree_config(
                 self._execution_config
             ).live_max_icps_per_node
-            if len(dev_items) != expected_dev_icp_count:
+            if not expected_dev_icp_count <= len(bank_items) <= 100:
                 raise ValueError(
-                    "dev replay set size differs from measured Git-tree policy"
+                    "dev replay bank size cannot satisfy measured Git-tree policy"
                 )
             if total_timeout != measured_dev_eval_total_timeout_seconds(
                 self._execution_config
@@ -901,7 +913,7 @@ class ScoringExecutorV2:
                 raise ValueError("dev replay total timeout differs from measured policy")
             if per_icp_timeout != measured_dev_eval_icp_timeout_seconds(
                 self._execution_config,
-                item_count=len(dev_items),
+                item_count=expected_dev_icp_count,
             ):
                 raise ValueError("dev replay ICP timeout differs from measured policy")
             if str(payload["miss_policy"]) != measured_dev_snapshot_miss_policy(
@@ -909,8 +921,22 @@ class ScoringExecutorV2:
             ):
                 raise ValueError("dev replay miss policy differs from measured policy")
             expected_dev_set_hash = str(manifest.get("icp_set_hash") or "")
-            if compute_dev_set_hash(dev_items) != expected_dev_set_hash:
-                raise ValueError("dev replay ICP set commitment differs")
+            if compute_dev_set_hash(bank_items) != expected_dev_set_hash:
+                raise ValueError("dev replay ICP bank commitment differs")
+            selection = select_snapshot_dev_icps(
+                bank_items,
+                snapshot_manifest=manifest,
+                size=expected_dev_icp_count,
+                seed=str(selection_request.get("selection_seed") or ""),
+                miner_direction=str(
+                    selection_request.get("miner_direction") or ""
+                ),
+            )
+            if str(selection_request.get("selection_manifest_hash") or "") != str(
+                selection.manifest.get("selection_manifest_hash") or ""
+            ):
+                raise ValueError("dev replay selection commitment differs")
+            dev_items = list(selection.items)
 
             async def candidate_runner(
                 icp: Mapping[str, Any],
@@ -980,6 +1006,7 @@ class ScoringExecutorV2:
                 str(snapshot_evidence["archive_sha256"]),
                 snapshot_tree_hash,
                 snapshot_manifest_hash,
+                str(selection.manifest["selection_manifest_hash"]),
                 cohort_hash,
                 sha256_json(result_doc),
             ),
@@ -1001,6 +1028,7 @@ class ScoringExecutorV2:
             "snapshot_bundle",
             "snapshot_tree_hash",
             "snapshot_manifest_hash",
+            "dev_selection_request",
             "module_name",
             "callable_name",
             "environment",
@@ -1022,6 +1050,13 @@ class ScoringExecutorV2:
         snapshot_bundle = dict(payload["snapshot_bundle"])
         snapshot_tree_hash = str(payload.get("snapshot_tree_hash") or "")
         snapshot_manifest_hash = str(payload.get("snapshot_manifest_hash") or "")
+        selection_request = payload.get("dev_selection_request")
+        if not isinstance(selection_request, Mapping) or set(selection_request) != {
+            "selection_seed",
+            "miner_direction",
+            "selection_manifest_hash",
+        }:
+            raise ValueError("dev hybrid selection request is invalid")
         if snapshot_bundle.get("source_tree_hash") != snapshot_tree_hash:
             raise ValueError("dev hybrid snapshot bundle commitment differs")
         environment = payload.get("environment")
@@ -1082,13 +1117,13 @@ class ScoringExecutorV2:
                 != snapshot_manifest_hash
             ):
                 raise ValueError("dev hybrid snapshot manifest verification failed")
-            dev_items = snapshot_store.load_dev_icp_items()
+            bank_items = snapshot_store.load_dev_icp_items() or []
             expected_dev_icp_count = measured_git_tree_config(
                 self._execution_config
             ).live_max_icps_per_node
-            if len(dev_items) != expected_dev_icp_count:
+            if not expected_dev_icp_count <= len(bank_items) <= 100:
                 raise ValueError(
-                    "dev hybrid set size differs from measured Git-tree policy"
+                    "dev hybrid bank size cannot satisfy measured Git-tree policy"
                 )
             if total_timeout != measured_dev_eval_total_timeout_seconds(
                 self._execution_config
@@ -1096,7 +1131,7 @@ class ScoringExecutorV2:
                 raise ValueError("dev hybrid total timeout differs from measured policy")
             if per_icp_timeout != measured_dev_eval_icp_timeout_seconds(
                 self._execution_config,
-                item_count=len(dev_items),
+                item_count=expected_dev_icp_count,
             ):
                 raise ValueError("dev hybrid ICP timeout differs from measured policy")
             if str(payload["miss_policy"]) != measured_dev_snapshot_miss_policy(
@@ -1104,8 +1139,22 @@ class ScoringExecutorV2:
             ):
                 raise ValueError("dev hybrid miss policy differs from measured policy")
             expected_dev_set_hash = str(manifest.get("icp_set_hash") or "")
-            if compute_dev_set_hash(dev_items) != expected_dev_set_hash:
-                raise ValueError("dev hybrid ICP set commitment differs")
+            if compute_dev_set_hash(bank_items) != expected_dev_set_hash:
+                raise ValueError("dev hybrid ICP bank commitment differs")
+            selection = select_snapshot_dev_icps(
+                bank_items,
+                snapshot_manifest=manifest,
+                size=expected_dev_icp_count,
+                seed=str(selection_request.get("selection_seed") or ""),
+                miner_direction=str(
+                    selection_request.get("miner_direction") or ""
+                ),
+            )
+            if str(selection_request.get("selection_manifest_hash") or "") != str(
+                selection.manifest.get("selection_manifest_hash") or ""
+            ):
+                raise ValueError("dev hybrid selection commitment differs")
+            dev_items = list(selection.items)
             expected_refs = {
                 icp_evidence_cache_key(
                     canonicalize_private_model_icp(dict(item.get("icp") or item))
@@ -1217,6 +1266,7 @@ class ScoringExecutorV2:
                 str(snapshot_evidence["archive_sha256"]),
                 snapshot_tree_hash,
                 snapshot_manifest_hash,
+                str(selection.manifest["selection_manifest_hash"]),
                 overlay_hash,
                 cohort_hash,
                 *tuple(cache_hashes),

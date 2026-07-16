@@ -27,7 +27,10 @@ from gateway.deploy_readiness import (
 from .config import ResearchLabGatewayConfig
 from .maintenance import (
     autoresearch_queue_status_counts,
+    backfill_champion_reward_v2_authority,
+    backfill_champion_settlement_v2_authority,
     candidate_scoring_status_counts,
+    champion_v2_cutover_readiness_report,
     default_actor_ref,
     dumps_status,
     expire_unpaid_tickets,
@@ -305,6 +308,49 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_champion.add_argument("--actor-ref", default=default_actor_ref())
     reconcile_champion.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
     reconcile_champion.add_argument("--write", dest="dry_run", action="store_false")
+
+    champion_v2_backfill = sub.add_parser(
+        "backfill-champion-v2-authority",
+        help="Attest immutable pre-V2 champion obligations into V2 receipt authority",
+    )
+    champion_v2_backfill.add_argument("--epoch", type=int, default=None)
+    champion_v2_backfill.add_argument("--limit", type=int, default=1000)
+    champion_v2_backfill.add_argument(
+        "--dry-run", dest="dry_run", action="store_true", default=True
+    )
+    champion_v2_backfill.add_argument(
+        "--write", dest="dry_run", action="store_false"
+    )
+
+    champion_v2_settlement_backfill = sub.add_parser(
+        "backfill-champion-v2-settlements",
+        help=(
+            "Attest finalized pre-V2 champion allocation epochs into V2 "
+            "settlement authority"
+        ),
+    )
+    champion_v2_settlement_backfill.add_argument(
+        "--epoch", type=int, default=None
+    )
+    champion_v2_settlement_backfill.add_argument(
+        "--netuid", type=int, default=None
+    )
+    champion_v2_settlement_backfill.add_argument(
+        "--limit", type=int, default=1000
+    )
+    champion_v2_settlement_backfill.add_argument(
+        "--dry-run", dest="dry_run", action="store_true", default=True
+    )
+    champion_v2_settlement_backfill.add_argument(
+        "--write", dest="dry_run", action="store_false"
+    )
+
+    champion_v2_readiness = sub.add_parser(
+        "champion-v2-cutover-readiness",
+        help="Require 100% V2 receipt coverage for positive champion balances",
+    )
+    champion_v2_readiness.add_argument("--epoch", type=int, default=None)
+    champion_v2_readiness.add_argument("--netuid", type=int, default=None)
 
     reconcile_tickets = sub.add_parser(
         "reconcile-terminal-tickets",
@@ -1726,6 +1772,24 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             reason=args.reason,
             actor_ref=args.actor_ref,
             dry_run=args.dry_run,
+        )
+    if args.command == "backfill-champion-v2-authority":
+        return await backfill_champion_reward_v2_authority(
+            epoch=args.epoch,
+            limit=args.limit,
+            dry_run=args.dry_run,
+        )
+    if args.command == "backfill-champion-v2-settlements":
+        return await backfill_champion_settlement_v2_authority(
+            epoch=args.epoch,
+            netuid=args.netuid,
+            limit=args.limit,
+            dry_run=args.dry_run,
+        )
+    if args.command == "champion-v2-cutover-readiness":
+        return await champion_v2_cutover_readiness_report(
+            epoch=args.epoch,
+            netuid=args.netuid,
         )
     if args.command == "reconcile-terminal-tickets":
         return await reconcile_terminal_ticket_statuses(

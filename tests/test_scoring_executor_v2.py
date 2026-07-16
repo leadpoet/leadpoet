@@ -694,6 +694,34 @@ async def test_v2_dev_replay_preserves_score_and_adds_tree_commitments(tmp_path)
         "snapshot_bundle": snapshot_bundle,
         "snapshot_tree_hash": snapshot_bundle["source_tree_hash"],
         "snapshot_manifest_hash": manifest["manifest_hash"],
+        "dev_selection_request": {
+            "selection_seed": "candidate-tree-1",
+            "miner_direction": "improve DevOps hiring intent",
+            "selection_manifest_hash": sha256_json(
+                {
+                    "schema_version": "research_lab.exact_snapshot_selection.v1",
+                    "selection_policy": "exact_snapshot_compat_v1",
+                    "requested_size": len(dev_items),
+                    "dev_set_hash": compute_dev_set_hash(dev_items),
+                    "selection_seed_hash": sha256_json(
+                        {"selection_seed": "candidate-tree-1"}
+                    ),
+                    "miner_direction_hash": sha256_json(
+                        {"miner_direction": "improve DevOps hiring intent"}
+                    ),
+                    "selected_items": [
+                        {
+                            "icp_ref": str(item["icp_ref"]),
+                            "icp_hash": str(item["icp_hash"]),
+                        }
+                        for item in sorted(
+                            dev_items,
+                            key=lambda row: str(row["icp_hash"]),
+                        )
+                    ],
+                }
+            ),
+        },
         "module_name": "research_lab_adapter",
         "callable_name": "run_icp",
         "environment": {},

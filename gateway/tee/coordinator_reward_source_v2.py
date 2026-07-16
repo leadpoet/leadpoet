@@ -52,6 +52,11 @@ class CoordinatorRewardSourceV2:
         kind = str(payload.get("decision_kind") or "")
         if kind == "reimbursement":
             return self._resolve_reimbursement(payload=payload, context=context)
+        if kind == "champion_migration":
+            return self._resolve_champion_migration(
+                payload=payload,
+                context=context,
+            )
         if kind not in {"source_add_leg1", "source_add_leg2"}:
             raise CoordinatorRewardSourceV2Error(
                 "reward source kind is unsupported"
@@ -268,6 +273,57 @@ class CoordinatorRewardSourceV2:
         return {
             "decision_kind": kind,
             "decision_payload": decision,
+        }
+
+    def _resolve_champion_migration(
+        self,
+        *,
+        payload: Mapping[str, Any],
+        context: ExecutionContextV2,
+    ) -> Dict[str, Any]:
+        proposed = payload.get("decision_payload")
+        if not isinstance(proposed, Mapping) or set(proposed) != {
+            "champion_reward_id"
+        }:
+            raise CoordinatorRewardSourceV2Error(
+                "champion migration request fields are invalid"
+            )
+        reward_id = str(proposed.get("champion_reward_id") or "")
+        reward = self._one(
+            "champion_reward_by_id",
+            {"champion_reward_id": reward_id},
+            context,
+        )
+        if str(reward.get("champion_reward_id") or "") != reward_id:
+            raise CoordinatorRewardSourceV2Error(
+                "champion migration reward differs from measured state"
+            )
+        bundle_id = str(reward.get("score_bundle_id") or "")
+        score_bundle = self._one(
+            "score_bundle_by_id",
+            {"score_bundle_id": bundle_id},
+            context,
+        )
+        bundle_doc = score_bundle.get("score_bundle_doc")
+        if (
+            str(score_bundle.get("score_bundle_id") or "") != bundle_id
+            or not isinstance(bundle_doc, Mapping)
+        ):
+            raise CoordinatorRewardSourceV2Error(
+                "champion migration score bundle differs from measured state"
+            )
+        return {
+            "decision_kind": "champion_migration",
+            "decision_payload": {
+                "reward_row": dict(reward),
+                "score_bundle": {
+                    "score_bundle_id": bundle_id,
+                    "score_bundle_hash": str(
+                        score_bundle.get("score_bundle_hash") or ""
+                    ),
+                    "score_bundle_doc": dict(bundle_doc),
+                },
+            },
         }
 
     def _resolve_reimbursement(

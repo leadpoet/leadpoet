@@ -51,7 +51,14 @@ from gateway.research_lab.config import (
     DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG,
     MAX_RESEARCH_LAB_GIT_TREE_ICP_COUNT,
 )
-from research_lab.eval.dev_eval import compute_dev_set_hash, evaluate_dev
+from leadpoet_canonical.attested_v2 import sha256_json
+from research_lab.eval.dev_eval import (
+    CURRENT_DAY_DEV_BANK_SCHEMA_VERSION,
+    DevIcpSet,
+    compute_dev_set_hash,
+    evaluate_dev,
+    select_snapshot_dev_icps,
+)
 from research_lab.eval.snapshot_store import (
     DEV_ICPS_NAME,
     MANIFEST_NAME,
@@ -76,6 +83,7 @@ DEV_EVAL_TOTAL_TIMEOUT_ENV = "RESEARCH_LAB_LOOP_DEV_EVAL_TIMEOUT_SECONDS"
 DEV_EVAL_ICP_TIMEOUT_ENV = "RESEARCH_LAB_LOOP_DEV_EVAL_ICP_TIMEOUT_SECONDS"
 DEV_EVAL_CACHE_DIR_ENV = "RESEARCH_LAB_DEV_SNAPSHOT_CACHE_DIR"
 DEFAULT_TOTAL_TIMEOUT_SECONDS = 300
+MAX_DEV_SNAPSHOT_BANK_ICP_COUNT = 100
 CONTAINER_SNAPSHOT_DIR = "/research_lab_dev_snapshots"
 _TRUTHY = ("1", "true", "yes", "on")
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -278,6 +286,9 @@ def snapshot_readiness(
     expected_dev_icp_count: int = (
         DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
     ),
+    selection_seed: str = "snapshot-readiness",
+    miner_direction: str = "",
+    require_current_day: bool = False,
 ) -> dict[str, Any]:
     """Return fail-closed snapshot preflight evidence for activation policy."""
     if default_miss_policy() != MISS_POLICY_STRICT:
@@ -310,6 +321,35 @@ def snapshot_readiness(
             store,
             expected_dev_icp_count=expected_dev_icp_count,
         )
+        selection = select_verified_dev_items(
+            items,
+            manifest=manifest,
+            expected_dev_icp_count=expected_dev_icp_count,
+            selection_seed=selection_seed,
+            miner_direction=miner_direction,
+        )
+        bank_manifest = (
+            dict(manifest.get("dev_set_manifest") or {})
+            if isinstance(manifest.get("dev_set_manifest"), Mapping)
+            else {}
+        )
+        current_day_bank = (
+            bank_manifest.get("schema_version")
+            == CURRENT_DAY_DEV_BANK_SCHEMA_VERSION
+        )
+        benchmark_date = str(bank_manifest.get("benchmark_date") or "")
+        current_utc_date = (now or datetime.now(timezone.utc)).astimezone(
+            timezone.utc
+        ).date().isoformat()
+        if require_current_day and (
+            not current_day_bank or benchmark_date != current_utc_date
+        ):
+            return {
+                "ready": False,
+                "reason": "snapshot_is_not_current_day_rebenchmark_bank",
+                "benchmark_date": benchmark_date,
+                "required_benchmark_date": current_utc_date,
+            }
         recorded_at = str(manifest.get("recorded_at") or "")
         recorded = datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
         if recorded.tzinfo is None:
@@ -325,18 +365,43 @@ def snapshot_readiness(
             else []
         )
         return {
-            "ready": len(items) == expected_dev_icp_count,
+            "ready": len(selection.items) == expected_dev_icp_count,
             "reason": (
                 "ready"
-                if len(items) == expected_dev_icp_count
-                else "dev_set_size_does_not_match_config"
+                if len(selection.items) == expected_dev_icp_count
+                else "dev_selection_size_does_not_match_config"
             ),
             "manifest_hash": str(manifest.get("manifest_hash") or ""),
-            "dev_set_hash": str(manifest.get("icp_set_hash") or ""),
+            "dev_set_hash": selection.dev_set_hash,
             "recorded_at": recorded_at,
             "snapshot_age_seconds": age,
-            "dev_set_size": len(items),
+            "dev_set_size": len(selection.items),
             "expected_dev_set_size": expected_dev_icp_count,
+            "snapshot_bank_hash": str(manifest.get("icp_set_hash") or ""),
+            "snapshot_bank_size": len(items),
+            "daily_bank_hash": str(bank_manifest.get("daily_bank_hash") or ""),
+            "selection_manifest_hash": str(
+                selection.manifest.get("selection_manifest_hash") or ""
+            ),
+            "selection_seed_hash": str(
+                selection.manifest.get("selection_seed_hash") or ""
+            ),
+            "miner_direction_hash": str(
+                selection.manifest.get("miner_direction_hash") or ""
+            ),
+            "benchmark_date": benchmark_date,
+            "benchmark_bundle_id": str(
+                bank_manifest.get("benchmark_bundle_id") or ""
+            ),
+            "benchmark_bundle_hash": str(
+                bank_manifest.get("benchmark_bundle_hash") or ""
+            ),
+            "rolling_window_hash": str(
+                bank_manifest.get("rolling_window_hash") or ""
+            ),
+            "private_model_manifest_hash": str(
+                bank_manifest.get("private_model_manifest_hash") or ""
+            ),
             "ready_hash": str(verification.get("ready_hash") or ""),
             "configured_snapshot_uri": str(root_uri or ""),
             "resolved_snapshot_uri": str(resolution.get("snapshot_uri") or ""),
@@ -369,11 +434,13 @@ def load_verified_dev_items(
     items = store.load_dev_icp_items()
     if not items:
         raise DevEvalRunnerError("snapshot set carries no dev ICP payloads")
-    if len(items) != expected_dev_icp_count:
+    if len(items) < expected_dev_icp_count:
         raise DevEvalRunnerError(
-            "development snapshot size differs from configured ICP count: "
-            f"expected={expected_dev_icp_count} actual={len(items)}"
+            "development snapshot bank is smaller than configured ICP count: "
+            f"minimum={expected_dev_icp_count} actual={len(items)}"
         )
+    if len(items) > MAX_DEV_SNAPSHOT_BANK_ICP_COUNT:
+        raise DevEvalRunnerError("development snapshot bank exceeds the safety cap")
     manifest = store.load_manifest()
     expected = str((manifest or {}).get("icp_set_hash") or "")
     if expected and compute_dev_set_hash(items) != expected:
@@ -382,6 +449,28 @@ def load_verified_dev_items(
             "(tampered or mixed snapshot vintages)"
         )
     return items
+
+
+def select_verified_dev_items(
+    items: Sequence[Mapping[str, Any]],
+    *,
+    manifest: Mapping[str, Any],
+    expected_dev_icp_count: int,
+    selection_seed: str,
+    miner_direction: str,
+) -> DevIcpSet:
+    """Resolve one exact run cohort from a verified immutable snapshot bank."""
+
+    try:
+        return select_snapshot_dev_icps(
+            items,
+            snapshot_manifest=manifest,
+            size=int(expected_dev_icp_count),
+            seed=str(selection_seed),
+            miner_direction=str(miner_direction),
+        )
+    except Exception as exc:
+        raise DevEvalRunnerError(str(exc)) from exc
 
 
 class DockerReplayDevEvaluator:
@@ -397,6 +486,8 @@ class DockerReplayDevEvaluator:
         expected_dev_icp_count: int = (
             DEFAULT_RESEARCH_LAB_GIT_TREE_CONFIG.live_max_icps_per_node
         ),
+        selection_seed: str = "",
+        miner_direction: str = "",
     ) -> None:
         self._snapshot_uri = str(
             snapshot_uri if snapshot_uri is not None else os.getenv(SNAPSHOT_URI_ENV) or ""
@@ -406,6 +497,8 @@ class DockerReplayDevEvaluator:
         # Test seam: replaces the docker invocation, everything else is real.
         self._run_icp_in_docker = run_icp_in_docker or self._run_icp_in_docker_default
         self._expected_dev_icp_count = int(expected_dev_icp_count)
+        self._selection_seed = str(selection_seed)
+        self._miner_direction = str(miner_direction)
         if not 1 <= self._expected_dev_icp_count <= MAX_RESEARCH_LAB_GIT_TREE_ICP_COUNT:
             raise DevEvalRunnerError("configured development ICP count is invalid")
         self._prepare_lock: asyncio.Lock | None = None
@@ -432,9 +525,20 @@ class DockerReplayDevEvaluator:
                     replay_store,
                     expected_dev_icp_count=self._expected_dev_icp_count,
                 )
+                manifest = replay_store.load_manifest()
+                if not isinstance(manifest, Mapping):
+                    raise DevEvalRunnerError("snapshot-set manifest is required")
+                selected = await asyncio.to_thread(
+                    select_verified_dev_items,
+                    dev_items,
+                    manifest=manifest,
+                    expected_dev_icp_count=self._expected_dev_icp_count,
+                    selection_seed=self._selection_seed,
+                    miner_direction=self._miner_direction,
+                )
                 self._local_dir = local_dir
                 self._replay_store = replay_store
-                self._dev_items = dev_items
+                self._dev_items = list(selected.items)
             return self._local_dir, self._replay_store, self._dev_items
 
     async def __call__(self, candidate: Any) -> Mapping[str, Any]:
@@ -603,6 +707,8 @@ class AttestedReplayDevEvaluatorV2:
         prior_provider_call_count: int = 0,
         prior_settled_cost_microusd: int = 0,
         model_runner_factory: Any = None,
+        selection_seed: str = "",
+        miner_direction: str = "",
     ) -> None:
         self._epoch_id = max(0, int(epoch_id))
         self._worker_index = int(worker_index)
@@ -626,6 +732,8 @@ class AttestedReplayDevEvaluatorV2:
         self._live_max_icps_per_node = int(live_max_icps_per_node)
         self._live_timeout_seconds = int(live_timeout_seconds)
         self._evaluation_concurrency = int(evaluation_concurrency)
+        self._selection_seed = str(selection_seed)
+        self._miner_direction = str(miner_direction)
         if not 1 <= self._live_provider_call_cap <= 32:
             raise DevEvalRunnerError("tree live provider-call cap is invalid")
         if not 1 <= self._live_cost_cap_microusd <= 500_000:
@@ -643,6 +751,7 @@ class AttestedReplayDevEvaluatorV2:
         self._replay_store: ProviderSnapshotStore | None = None
         self._snapshot_bundle: dict[str, Any] | None = None
         self._dev_items: list[dict[str, Any]] | None = None
+        self._selection_manifest: dict[str, Any] | None = None
         self._tree_paid_call_count = max(0, int(prior_provider_call_count))
         self._tree_cost_microusd = max(
             0, int(prior_settled_cost_microusd)
@@ -692,6 +801,17 @@ class AttestedReplayDevEvaluatorV2:
                         "snapshot-set manifest failed verification: "
                         + "; ".join(verification.get("errors") or ())
                     )
+                manifest = replay_store.load_manifest()
+                if not isinstance(manifest, Mapping):
+                    raise DevEvalRunnerError("snapshot-set manifest is required")
+                selection = await asyncio.to_thread(
+                    select_verified_dev_items,
+                    dev_items,
+                    manifest=manifest,
+                    expected_dev_icp_count=self._live_max_icps_per_node,
+                    selection_seed=self._selection_seed,
+                    miner_direction=self._miner_direction,
+                )
                 snapshot_bundle = await asyncio.to_thread(
                     build_source_bundle_v2,
                     local_dir,
@@ -699,7 +819,8 @@ class AttestedReplayDevEvaluatorV2:
                 self._local_dir = local_dir
                 self._replay_store = replay_store
                 self._snapshot_bundle = snapshot_bundle
-                self._dev_items = dev_items
+                self._dev_items = list(selection.items)
+                self._selection_manifest = dict(selection.manifest)
             return (
                 self._local_dir,
                 self._replay_store,
@@ -753,6 +874,7 @@ class AttestedReplayDevEvaluatorV2:
         evaluation_mode: str,
         overlay_hash: str,
         cohort_hash: str,
+        expected_dev_set_hash: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         from leadpoet_canonical.attested_v2 import sha256_json
 
@@ -761,7 +883,7 @@ class AttestedReplayDevEvaluatorV2:
         if not isinstance(result, Mapping) or not isinstance(graph, Mapping):
             raise DevEvalRunnerError("measured dev evaluation result is incomplete")
         if str(result.get("dev_set_hash") or "") != str(
-            manifest.get("icp_set_hash") or ""
+            expected_dev_set_hash
         ):
             raise DevEvalRunnerError("measured dev evaluation ICP commitment differs")
         if str(result.get("snapshot_manifest_hash") or "") != str(
@@ -837,6 +959,9 @@ class AttestedReplayDevEvaluatorV2:
         )
         environment, credential_env_names = self._measured_environment()
         dev_items = list(self._dev_items or ())
+        selection_manifest = dict(self._selection_manifest or {})
+        if not selection_manifest:
+            raise DevEvalRunnerError("candidate evaluation selection is missing")
         per_icp_timeout = _per_icp_timeout_seconds(len(dev_items))
         execute = self._execute or execute_scoring_v2
         if evaluation_mode == "hybrid":
@@ -860,6 +985,13 @@ class AttestedReplayDevEvaluatorV2:
             "snapshot_bundle": snapshot_bundle,
             "snapshot_tree_hash": snapshot_bundle["source_tree_hash"],
             "snapshot_manifest_hash": str(manifest.get("manifest_hash") or ""),
+            "dev_selection_request": {
+                "selection_seed": self._selection_seed,
+                "miner_direction": self._miner_direction,
+                "selection_manifest_hash": str(
+                    selection_manifest.get("selection_manifest_hash") or ""
+                ),
+            },
             "module_name": "research_lab_adapter",
             "callable_name": "run_icp",
             "environment": environment,
@@ -910,6 +1042,9 @@ class AttestedReplayDevEvaluatorV2:
             evaluation_mode=evaluation_mode,
             overlay_hash=(overlay_hash if evaluation_mode == "hybrid" else sha256_json({})),
             cohort_hash=cohort_hash,
+            expected_dev_set_hash=str(
+                selection_manifest.get("dev_set_hash") or ""
+            ),
         )
         logger.info(
             "research_lab_loop_dev_eval_result node_id=%s lane=%s aggregate_dev_score=%s "
@@ -1446,6 +1581,8 @@ def build_attested_code_edit_dev_evaluator_v2(
     prior_provider_call_count: int = 0,
     prior_settled_cost_microusd: int = 0,
     model_runner_factory: Any = None,
+    selection_seed: str = "",
+    miner_direction: str = "",
 ) -> AttestedReplayDevEvaluatorV2 | None:
     """V2 worker factory preserving the existing optional dev-eval gate."""
     if not dev_eval_runner_enabled():
@@ -1477,4 +1614,6 @@ def build_attested_code_edit_dev_evaluator_v2(
         prior_provider_call_count=prior_provider_call_count,
         prior_settled_cost_microusd=prior_settled_cost_microusd,
         model_runner_factory=model_runner_factory,
+        selection_seed=selection_seed,
+        miner_direction=miner_direction,
     )

@@ -92,6 +92,13 @@ PROTECTED_SYMBOLS = {
         "DockerReplayDevEvaluator",
         "AttestedReplayDevEvaluatorV2",
     ),
+    "gateway/research_lab/champion_settlement_v2.py": (
+        "validate_finalized_allocation_authorities_v2",
+        "validate_legacy_settlement_migrations_v2",
+        "merge_finalized_allocation_histories_v2",
+        "load_finalized_allocation_history_v2",
+        "champion_v2_cutover_readiness",
+    ),
     "gateway/research_lab/autoresearch_authority_v2.py": (
         "run_authoritative_autoresearch_v2",
     ),
@@ -115,6 +122,9 @@ PROTECTED_SYMBOLS = {
         "prepare_autoresearch_scoring_payload",
     ),
     "research_lab/eval/dev_eval.py": (
+        "build_current_day_dev_bank",
+        "select_current_day_dev_icps",
+        "select_snapshot_dev_icps",
         "build_dev_icp_set",
         "DevEvalResult",
         "evaluate_dev",
@@ -173,9 +183,23 @@ PROTECTED_SYMBOLS = {
     ),
     "gateway/research_lab/allocations.py": (
         "build_research_lab_allocation_bundle",
+        "_champion_finalized_paid_alpha_to_date",
+        "_champion_obligation_caps",
         "_champion_paid_alpha_to_date_from_snapshots",
         "_champion_replay_obligation",
         "_epoch_active",
+    ),
+    "gateway/research_lab/maintenance.py": (
+        "reconcile_champion_reward_statuses",
+        "backfill_champion_reward_v2_authority",
+        "backfill_champion_settlement_v2_authority",
+        "champion_v2_cutover_readiness_report",
+    ),
+    "gateway/research_lab/v2_authority.py": (
+        "attest_historical_champion_reward_v2",
+        "attest_historical_champion_settlement_v2",
+        "build_allocation_v2",
+        "_load_allocation_parent_graphs_v2",
     ),
     "gateway/research_lab/promotion.py": (
         "confirmation_min_delta",
@@ -198,6 +222,17 @@ PROTECTED_SYMBOLS = {
         "validate_published_weight_bundle_v2",
         "validate_weight_finalization_submission_v2",
     ),
+    "leadpoet_canonical/chain_source_v2.py": (
+        "weights_storage_key",
+        "decode_weights_storage",
+        "validate_arweave_checkpoint_event",
+    ),
+    "leadpoet_canonical/legacy_settlement_v2.py": (
+        "validate_legacy_weight_bundle_v2",
+        "validate_legacy_audit_event_v2",
+        "validate_legacy_finalized_settlement_v2",
+        "validate_legacy_settlement_document_v2",
+    ),
     "leadpoet_verifier/economics.py": (
         "compute_reimbursement_award",
         "build_reimbursement_schedule",
@@ -217,6 +252,12 @@ PROTECTED_SYMBOLS = {
     ),
     "gateway/tee/coordinator_allocation_source_v2.py": (
         "CoordinatorAllocationSourceV2",
+    ),
+    "gateway/tee/coordinator_legacy_settlement_v2.py": (
+        "CoordinatorLegacySettlementSourceV2",
+    ),
+    "gateway/tee/coordinator_executor_v2.py": (
+        "CoordinatorExecutorV2",
     ),
     "gateway/tee/coordinator_active_model_source_v2.py": (
         "CoordinatorActiveModelSourceV2",

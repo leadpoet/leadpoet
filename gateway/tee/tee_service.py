@@ -1897,6 +1897,9 @@ def get_v2_coordinator_job_manager():
         from gateway.tee.coordinator_chain_source_v2 import (
             CoordinatorChainSourceV2,
         )
+        from gateway.tee.coordinator_legacy_settlement_v2 import (
+            CoordinatorLegacySettlementSourceV2,
+        )
         from gateway.tee.coordinator_source_add_v2 import (
             CoordinatorSourceAddFunctionalProbeV2,
             CoordinatorSourceAddProvenanceV2,
@@ -1919,6 +1922,12 @@ def get_v2_coordinator_job_manager():
         chain_source = CoordinatorChainSourceV2(
             execute_provider=get_v2_provider_broker().execute,
             retry_policy_hashes=retry_hashes,
+        )
+        legacy_settlement_source = CoordinatorLegacySettlementSourceV2(
+            reader=source_reader,
+            chain_source=chain_source,
+            execute_provider=get_v2_provider_broker().execute,
+            retry_policy_hash=retry_hashes["arweave"],
         )
         allocation_source = CoordinatorAllocationSourceV2(
             reader=source_reader,
@@ -1995,6 +2004,12 @@ def get_v2_coordinator_job_manager():
                 ),
                 reward_source_resolver=lambda payload, context: (
                     reward_source.resolve(payload=payload, context=context)
+                ),
+                legacy_settlement_source_resolver=lambda payload, context: (
+                    legacy_settlement_source.resolve(
+                        payload=payload,
+                        context=context,
+                    )
                 ),
                 source_add_catalog_resolver=lambda payload, context: (
                     reward_source.catalog_snapshot(payload=payload, context=context)

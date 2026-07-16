@@ -173,6 +173,18 @@ BUILTIN_PROVIDER_ROUTES = {
         hosts=("entrypoint-finney.opentensor.ai",),
         path_prefixes=("/",),
     ),
+    "bittensor_archive": ProviderRouteV2(
+        provider_id="bittensor_archive",
+        hosts=("archive.chain.opentensor.ai",),
+        path_prefixes=("/",),
+        allowed_methods=("POST",),
+    ),
+    "arweave": ProviderRouteV2(
+        provider_id="arweave",
+        hosts=("arweave.net",),
+        path_prefixes=("/",),
+        allowed_methods=("GET",),
+    ),
     "coingecko": ProviderRouteV2(
         provider_id="coingecko",
         hosts=("api.coingecko.com",),

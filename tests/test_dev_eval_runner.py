@@ -13,6 +13,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,11 +29,16 @@ from gateway.research_lab.dev_eval_runner import (
     build_code_edit_dev_evaluator,
     ensure_local_snapshot_set,
     load_verified_dev_items,
+    snapshot_readiness,
 )
 from gateway.tee.source_bundle_v2 import build_source_bundle_v2
 from research_lab.canonical import sha256_json
 from research_lab.eval import PrivateModelArtifactManifest, build_local_private_artifact_manifest
-from research_lab.eval.dev_eval import DEV_SCORE_VERSION, compute_dev_set_hash
+from research_lab.eval.dev_eval import (
+    DEV_SCORE_VERSION,
+    build_current_day_dev_bank,
+    compute_dev_set_hash,
+)
 from research_lab.eval.snapshot_store import (
     MODE_RECORD,
     MODE_REPLAY,
@@ -177,13 +183,14 @@ def _fake_docker_runner(companies_by_icp_id: dict[str, list[dict]]):
 
 
 def test_factory_returns_none_when_flag_off(monkeypatch, tmp_path):
+    monkeypatch.setenv(DEV_EVAL_ENABLED_ENV, "false")
     monkeypatch.setenv(SNAPSHOT_URI_ENV, str(tmp_path))
     assert build_code_edit_dev_evaluator() is None
 
 
-def test_factory_returns_none_without_snapshot_uri(monkeypatch):
+def test_factory_returns_none_with_explicit_empty_snapshot_uri(monkeypatch):
     monkeypatch.setenv(DEV_EVAL_ENABLED_ENV, "true")
-    assert build_code_edit_dev_evaluator() is None
+    assert build_code_edit_dev_evaluator(snapshot_uri="") is None
 
 
 def test_factory_returns_evaluator_when_configured(monkeypatch, tmp_path):
@@ -312,6 +319,98 @@ def test_load_verified_dev_items_requires_payloads(tmp_path):
     replay = ProviderSnapshotStore(root, mode=MODE_REPLAY)
     with pytest.raises(DevEvalRunnerError, match="dev ICP payloads"):
         load_verified_dev_items(replay)
+
+
+def test_current_day_snapshot_is_eligible_only_for_its_utc_benchmark_date(
+    tmp_path,
+):
+    raw_items = []
+    for index in range(10):
+        icp = {
+            **_dev_icp(index),
+            "industry": f"Industry {index}",
+            "sub_industry": f"Segment {index}",
+            "country": "United States" if index % 2 else "Canada",
+            "employee_count": "51-200" if index % 2 else "201-500",
+        }
+        raw_items.append(
+            {
+                "icp": icp,
+                "icp_ref": f"current-day:{index}",
+                "icp_hash": sha256_json({"icp": icp}),
+                "baseline_score": float(index),
+                "benchmark_category": "public" if index % 2 else "private",
+            }
+        )
+    bank = build_current_day_dev_bank(
+        raw_items,
+        benchmark_date="2026-07-16",
+        benchmark_bundle_id="private_benchmark:" + "1" * 64,
+        benchmark_bundle_hash="sha256:" + "2" * 64,
+        rolling_window_hash="sha256:" + "3" * 64,
+        private_model_manifest_hash="sha256:" + "4" * 64,
+        evaluation_epoch=24000,
+    )
+    root = str(tmp_path / "current-day-snapshot")
+    store = ProviderSnapshotStore(root, mode=MODE_RECORD)
+    for item in bank.items:
+        request = build_snapshot_request(
+            "GET",
+            SCRAPINGDOG_URL.format(
+                link_id=item["icp"]["icp_id"], key="RECORDKEY"
+            ),
+        )
+        store.record_response(request, status=200, body_text='{"companies":[]}')
+    store.write_dev_icp_items(bank.items)
+    manifest = store.build_manifest(
+        icp_set_hash=bank.dev_set_hash,
+        dev_set_manifest=bank.manifest,
+        recorded_at="2026-07-16T01:00:00Z",
+        provenance={
+            "champion_image_digest": IMAGE_DIGEST,
+            "source_commit": "a" * 40,
+            "model_config_hash": "sha256:" + "b" * 64,
+            "private_model_manifest_hash": "sha256:" + "4" * 64,
+            "provider_model_ids": ["test/provider-model"],
+            "replay_output_hashes": [
+                {
+                    "icp_hash": item["icp_hash"],
+                    "output_hash": "sha256:" + "c" * 64,
+                }
+                for item in bank.items
+            ],
+        },
+    )
+    store.write_manifest(manifest)
+    store.write_ready_document(store.build_ready_document(manifest))
+
+    current = snapshot_readiness(
+        root,
+        now=datetime(2026, 7, 16, 12, tzinfo=timezone.utc),
+        expected_dev_icp_count=5,
+        selection_seed="run-1",
+        miner_direction="improve legal intent",
+        require_current_day=True,
+    )
+    expired = snapshot_readiness(
+        root,
+        now=datetime(2026, 7, 17, 0, 0, 1, tzinfo=timezone.utc),
+        expected_dev_icp_count=5,
+        selection_seed="run-1",
+        miner_direction="improve legal intent",
+        require_current_day=True,
+    )
+
+    assert current["ready"] is True
+    assert current["dev_set_size"] == 5
+    assert current["snapshot_bank_size"] == 10
+    assert current["benchmark_date"] == "2026-07-16"
+    assert expired == {
+        "ready": False,
+        "reason": "snapshot_is_not_current_day_rebenchmark_bank",
+        "benchmark_date": "2026-07-16",
+        "required_benchmark_date": "2026-07-17",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +603,7 @@ def test_attested_evaluator_rejects_tampered_cohort_commitment():
             evaluation_mode="replay",
             overlay_hash=sha256_json({}),
             cohort_hash="sha256:" + "5" * 64,
+            expected_dev_set_hash=result["dev_set_hash"],
         )
 
 
@@ -540,6 +640,11 @@ async def test_snapshot_preparation_is_lazy_and_single_flight(
 
     monkeypatch.setattr(runner_module, "ensure_local_snapshot_set", prepare_snapshot)
     monkeypatch.setattr(runner_module, "load_verified_dev_items", load_items)
+    monkeypatch.setattr(
+        ProviderSnapshotStore,
+        "load_manifest",
+        lambda _store: {"icp_set_hash": compute_dev_set_hash(items)},
+    )
     evaluator = DockerReplayDevEvaluator(
         snapshot_uri="s3://private/snapshot",
         cache_root=tmp_path / "cache",

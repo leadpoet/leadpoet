@@ -2024,6 +2024,7 @@ ALTER TABLE public.research_lab_attested_execution_receipts_v2
             'research_lab.ranking.v2',
             'research_lab.promotion_decision.v2',
             'research_lab.reward_decision.v2',
+            'research_lab.legacy_finalized_allocation.v2',
             'research_lab.allocation.v2',
             'research_lab.champion_input.v2',
             'research_lab.reimbursement_input.v2',

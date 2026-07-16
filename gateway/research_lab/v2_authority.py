@@ -18,6 +18,7 @@ from gateway.tee.source_add_runtime_v2 import (
     validate_source_add_runtime_catalog_v2,
 )
 from gateway.tee.coordinator_executor_v2 import (
+    OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2,
     OP_PROMOTION_GATE_DECISION,
     OP_PROMOTION_IMPROVEMENT,
     OP_RESEARCH_LAB_ALLOCATION,
@@ -372,7 +373,7 @@ async def authorize_reward_decision_v2(
 ) -> dict[str, Any]:
     """Require the existing reward kernel to produce one exact signed decision."""
 
-    if legacy_v1_enabled():
+    if legacy_v1_enabled() and decision_kind != "champion_migration":
         if not isinstance(expected_result, Mapping):
             raise ResearchLabV2AuthorityError(
                 "legacy reward decisions without a host result must use the legacy kernel"
@@ -471,6 +472,119 @@ async def authorize_reward_decision_v2(
         persist_links=persist_links,
     )
     return {**dict(outcome), "status": "matched", "artifact_link_status": link}
+
+
+async def attest_historical_champion_reward_v2(
+    *,
+    epoch_id: int,
+    champion_reward_id: str,
+    execute: Any = execute_coordinator_v2,
+    persist_links: Any = None,
+) -> dict[str, Any]:
+    """Migrate one immutable pre-V2 champion row into V2 receipt authority."""
+
+    reward_id = str(champion_reward_id or "")
+    if not re.fullmatch(r"champion_reward:sha256:[0-9a-f]{64}", reward_id):
+        raise ResearchLabV2AuthorityError("champion reward id is invalid")
+    return await authorize_reward_decision_v2(
+        epoch_id=int(epoch_id),
+        decision_kind="champion_migration",
+        decision_payload={"champion_reward_id": reward_id},
+        expected_result=None,
+        artifact_kind="champion_reward_decision",
+        artifact_ref=reward_id,
+        parent_graphs=(),
+        execute=execute,
+        persist_links=persist_links,
+    )
+
+
+async def attest_historical_champion_settlement_v2(
+    *,
+    epoch_id: int,
+    netuid: int,
+    settlement_epoch_id: int,
+    execute: Any = execute_coordinator_v2,
+    persist_links: Any = None,
+    persist_migration: Any = None,
+) -> dict[str, Any]:
+    """Migrate one proven pre-V2 finalized allocation into V2 authority."""
+
+    from leadpoet_canonical.legacy_settlement_v2 import (
+        LEGACY_SETTLEMENT_REQUEST_SCHEMA_VERSION,
+        validate_legacy_settlement_document_v2,
+    )
+
+    normalized_netuid = int(netuid)
+    normalized_settlement_epoch = int(settlement_epoch_id)
+    if normalized_netuid <= 0 or normalized_settlement_epoch < 0:
+        raise ResearchLabV2AuthorityError(
+            "champion settlement migration scope is invalid"
+        )
+    outcome = await execute(
+        operation=OP_ATTEST_LEGACY_FINALIZED_ALLOCATION_V2,
+        purpose="research_lab.legacy_finalized_allocation.v2",
+        epoch_id=int(epoch_id),
+        sequence=normalized_settlement_epoch,
+        payload={
+            "schema_version": LEGACY_SETTLEMENT_REQUEST_SCHEMA_VERSION,
+            "netuid": normalized_netuid,
+            "epoch_id": normalized_settlement_epoch,
+        },
+        parent_graphs=(),
+        input_artifact_hashes=(),
+    )
+    result = outcome.get("result")
+    if not isinstance(result, Mapping):
+        raise ResearchLabV2AuthorityError(
+            "champion settlement migration result is missing"
+        )
+    document = validate_legacy_settlement_document_v2(result)
+    if (
+        int(document["netuid"]) != normalized_netuid
+        or int(document["epoch_id"]) != normalized_settlement_epoch
+    ):
+        raise ResearchLabV2AuthorityError(
+            "champion settlement migration result scope differs"
+        )
+    receipt = outcome.get("execution_receipt") or outcome.get("receipt")
+    if not isinstance(receipt, Mapping):
+        raise ResearchLabV2AuthorityError(
+            "champion settlement migration receipt is missing"
+        )
+    receipt_hash = str(receipt.get("receipt_hash") or "")
+    if receipt.get("output_root") != sha256_json(document):
+        raise ResearchLabV2AuthorityError(
+            "champion settlement migration output root differs"
+        )
+    link = await _persist_business_links(
+        outcome,
+        (
+            {
+                "artifact_kind": "legacy_finalized_allocation",
+                "artifact_ref": "%d:%d"
+                % (normalized_netuid, normalized_settlement_epoch),
+                "artifact_hash": str(document["settlement_hash"]),
+            },
+        ),
+        persist_links=persist_links,
+    )
+    if persist_migration is None:
+        from gateway.research_lab.attested_v2_store import (
+            persist_legacy_finalized_allocation_migration_v2,
+        )
+
+        persist_migration = persist_legacy_finalized_allocation_migration_v2
+    durable = await persist_migration(
+        settlement=document,
+        receipt_hash=receipt_hash,
+    )
+    return {
+        **dict(outcome),
+        "status": "matched",
+        "artifact_link_status": link,
+        "migration_status": durable,
+    }
 
 
 async def judge_source_add_implementation_v2(
@@ -1084,8 +1198,37 @@ async def build_allocation_v2(
     persist_links: Any = None,
     load_allocation_parent_graphs: Any = None,
 ) -> dict[str, Any]:
+    using_default_parent_loader = load_allocation_parent_graphs is None
     if load_allocation_parent_graphs is None:
         load_allocation_parent_graphs = _load_allocation_parent_graphs_v2
+    if using_default_parent_loader:
+        from gateway.research_lab.champion_settlement_v2 import (
+            champion_v2_cutover_readiness,
+        )
+
+        readiness = await champion_v2_cutover_readiness(
+            epoch=int(epoch_id),
+            netuid=int(netuid),
+        )
+        if (
+            readiness.get("ready") is not True
+            or float(readiness.get("receipt_coverage") or 0.0) != 1.0
+            or float(
+                readiness.get("historical_settlement_coverage") or 0.0
+            )
+            != 1.0
+        ):
+            raise ResearchLabV2AuthorityError(
+                "champion V2 cutover blocked: %d obligations and %d "
+                "historical settlements lack authoritative receipts"
+                % (
+                    len(readiness.get("missing") or ()),
+                    len(
+                        readiness.get("missing_historical_settlements")
+                        or ()
+                    ),
+                )
+            )
     graphs = list(
         await load_allocation_parent_graphs(
             epoch_id=int(epoch_id),
@@ -1219,6 +1362,15 @@ async def _load_allocation_parent_graphs_v2(
 
     from gateway.research_lab.attested_v2_store import (
         load_business_artifact_graph_by_ref_v2,
+        load_receipt_graph_v2,
+    )
+    from gateway.research_lab.allocations import (
+        _champion_obligation_caps,
+        _champion_paid_alpha_to_date_from_snapshots,
+        _champion_replay_obligation,
+    )
+    from gateway.research_lab.champion_settlement_v2 import (
+        load_finalized_allocation_history_v2,
     )
     from gateway.research_lab.store import select_all, select_one
 
@@ -1230,6 +1382,14 @@ async def _load_allocation_parent_graphs_v2(
             artifact_ref=ref,
         )
         graphs[str(graph["root_receipt_hash"])] = graph
+
+    async def add_receipt_root(receipt_hash: str) -> None:
+        graph = await load_receipt_graph_v2(str(receipt_hash))
+        if str(graph.get("root_receipt_hash") or "") != str(receipt_hash):
+            raise ResearchLabV2AuthorityError(
+                "allocation finalized-chain graph root differs"
+            )
+        graphs[str(receipt_hash)] = graph
 
     try:
         epoch_span = max(1, int(policy.get("reimbursement_epochs") or 20))
@@ -1277,11 +1437,43 @@ async def _load_allocation_parent_graphs_v2(
                 ),
             )
         )
+    champion_starts = [
+        int(row.get("start_epoch") or 0)
+        for row in champion_rows
+        if int(row.get("start_epoch") or 0) <= int(epoch_id)
+    ]
+    finalized_champion_history = []
+    if champion_starts and int(epoch_id) > 0:
+        finalized_champion_history = await load_finalized_allocation_history_v2(
+            netuid=int(netuid),
+            start_epoch=min(champion_starts),
+            end_epoch=int(epoch_id) - 1,
+        )
+    paid_by_reward = _champion_paid_alpha_to_date_from_snapshots(
+        finalized_champion_history,
+        obligation_caps=_champion_obligation_caps(champion_rows),
+    )
     for row in champion_rows:
+        if _champion_replay_obligation(
+            row,
+            paid_by_reward=paid_by_reward,
+            epoch=int(epoch_id),
+        ) is None:
+            continue
         await add(
             "champion_reward_decision",
             str(row.get("champion_reward_id") or ""),
         )
+    for row in finalized_champion_history:
+        authority_types = set(row.get("authority_types") or ())
+        if "native_v2_finalization" in authority_types:
+            await add("allocation", "epoch:%d" % int(row.get("epoch") or 0))
+            for receipt_hash in row.get("finalization_receipt_hashes") or ():
+                await add_receipt_root(str(receipt_hash))
+        if "legacy_finalized_chain_migration_v2" in authority_types:
+            await add_receipt_root(
+                str(row.get("legacy_settlement_receipt_hash") or "")
+            )
     for row in source_rows:
         await add(
             "source_add_reward_decision",
@@ -1290,7 +1482,7 @@ async def _load_allocation_parent_graphs_v2(
 
     starts = [
         int(row.get("start_epoch") or 0)
-        for row in tuple(champion_rows) + tuple(source_rows)
+        for row in source_rows
         if int(row.get("start_epoch") or 0) <= int(epoch_id)
     ]
     if starts and int(epoch_id) > 0:

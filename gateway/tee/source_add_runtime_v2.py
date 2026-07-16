@@ -45,6 +45,8 @@ _VALID_METHODS = frozenset({"GET", "POST"})
 _RESERVED_PROVIDER_IDS = frozenset(
     {
         "bittensor_chain",
+        "bittensor_archive",
+        "arweave",
         "coingecko",
         "deepline",
         "dns",

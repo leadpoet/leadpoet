@@ -828,8 +828,12 @@ class ProviderSnapshotStore:
                 if str(doc.get(key) or "") != str(manifest.get(key) or ""):
                     errors.append(f"ready_{key}_mismatch")
         items = self.load_dev_icp_items() or []
-        if len(items) != expected_dev_icp_count:
-            errors.append("dev_set_size_does_not_match_config")
+        # A current-day snapshot stores the full scored rebenchmark bank.  A
+        # run deterministically selects exactly expected_dev_icp_count items
+        # from that immutable bank, so readiness requires a sufficient bank,
+        # not equality with the per-node evaluation width.
+        if len(items) < expected_dev_icp_count:
+            errors.append("dev_bank_smaller_than_configured_selection")
         if int(doc.get("dev_set_size") or 0) != len(items):
             errors.append("ready_dev_set_size_mismatch")
         provenance = manifest.get("provenance") if isinstance(manifest, Mapping) else {}
@@ -844,6 +848,20 @@ class ProviderSnapshotStore:
             value = provenance.get(key)
             if value in (None, "", [], {}):
                 errors.append(f"snapshot_provenance_missing:{key}")
+        dev_manifest = (
+            manifest.get("dev_set_manifest")
+            if isinstance(manifest, Mapping)
+            and isinstance(manifest.get("dev_set_manifest"), Mapping)
+            else {}
+        )
+        if (
+            dev_manifest.get("schema_version")
+            == "research_lab.current_day_dev_bank.v1"
+            and not provenance.get("private_model_manifest_hash")
+        ):
+            errors.append(
+                "snapshot_provenance_missing:private_model_manifest_hash"
+            )
         require_sig = self._is_s3 if require_signature is None else bool(require_signature)
         signature = str(doc.get("signature_b64") or "")
         key_id = str(doc.get("kms_key_id") or "")

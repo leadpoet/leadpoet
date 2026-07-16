@@ -671,6 +671,12 @@ class AuditorValidator:
                             "v2 weight bundle not found",
                             "finalized v2 weight authority not found",
                         }
+                        if not self._last_v2_authority_was_absent:
+                            logger.warning(
+                                "auditor_v2_fetch_failed epoch=%s status=404 detail=%s",
+                                epoch_id,
+                                detail[:160],
+                            )
                         return None
                     if response.status != 200:
                         logger.warning(

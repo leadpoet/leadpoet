@@ -245,5 +245,8 @@ def test_auditor_source_has_no_verification_burn_or_trust_banner():
     assert "submit_burn_weights_to_uid0" not in source
     assert "AUDITOR VERIFICATION MODE" not in source
     assert "Trust level:" not in source
-    assert "fetch_attested_weights_v1" not in source
-    assert "verify_attested_weights_v1" not in source
+    # The verified V1 fallback is intentionally present again (env-gated via
+    # AUDITOR_ALLOW_VERIFIED_V1_FALLBACK) so auditors keep submitting while
+    # the gateway serves the legacy weight path; it must stay fully verified.
+    assert "AUDITOR_ALLOW_VERIFIED_V1_FALLBACK" in source
+    assert "verify_attested_weights_v1" in source

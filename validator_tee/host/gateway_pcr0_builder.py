@@ -235,6 +235,10 @@ def _build_once(
         env=build_env,
         timeout=3600,
     )
+    # The tagged image retains every layer needed for normalization. Drop the
+    # duplicate BuildKit cache before docker save so constrained independent
+    # builders do not need space for the image, cache, and export at once.
+    _run(["docker", "builder", "prune", "-af"], check=False, timeout=600)
     image_id = normalize_docker_image(
         source_image=raw_image,
         normalized_image=image,

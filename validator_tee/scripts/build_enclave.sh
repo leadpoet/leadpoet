@@ -398,7 +398,8 @@ DEPENDENCY_LOCK_HASH="$(
         -c 'from validator_tee.enclave.runtime_v2 import dependency_lock_hash; print(dependency_lock_hash())'
 )"
 NORMALIZED_IMAGE_HASH="$(docker image inspect -f '{{.Id}}' validator-tee-enclave:latest)"
-python3 -m validator_tee.host.release_v2 \
+PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m validator_tee.host.release_v2 \
     --repo-root "$REPO_ROOT" \
     --measurements "$VALIDATOR_TEE_DIR/enclave_build_output.txt" \
     --eif "$VALIDATOR_TEE_DIR/validator-enclave.eif" \

@@ -69,3 +69,14 @@ def test_validator_build_runs_protected_workflow_gate():
     )
     assert "validator_tee.host.protected_workflows_v2" in script
     assert "protected_workflows_v2.json" in script
+
+
+def test_validator_build_binds_release_tool_to_repo_root():
+    script = (ROOT / "validator_tee" / "scripts" / "build_enclave.sh").read_text(
+        encoding="utf-8"
+    )
+    release = script.index("python3 -m validator_tee.host.release_v2")
+    binding = script.rfind(
+        'PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"', 0, release
+    )
+    assert binding != -1

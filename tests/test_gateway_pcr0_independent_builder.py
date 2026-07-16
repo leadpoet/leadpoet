@@ -145,6 +145,12 @@ def test_gateway_builder_discards_large_intermediate_artifacts():
 
     assert "eif_path.unlink()" in source
     assert '["docker", "builder", "prune", "-af"]' in source
+    build = source.index("_deterministic_docker_build_command(")
+    pre_normalization_prune = source.index(
+        '["docker", "builder", "prune", "-af"]', build
+    )
+    normalization = source.index("image_id = normalize_docker_image(", build)
+    assert build < pre_normalization_prune < normalization
 
 
 def test_cache_keeps_latest_twenty_verified_commits(tmp_path):

@@ -119,11 +119,12 @@ def test_penalizable_gate_reasons_counted():
         _bd("Duplicate company: 'Acme' already scored this evaluation"),
         _bd("Data quality issue: company_website is example/placeholder"),
         _bd("Company verification failed: stage differs"),
+        _bd("Intent fabrication detected (hardcoded date or generic claim)"),
     ]
     gate, primary = evaluator.count_penalizable_false_positives(
         breakdowns, icp_has_intent_signals=True
     )
-    assert gate == 6
+    assert gate == 7
     assert primary == 0
 
 

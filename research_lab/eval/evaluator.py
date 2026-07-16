@@ -276,6 +276,9 @@ PENALIZABLE_FAILURE_MARKERS: tuple = (
     "data quality issue",
     "missing industry",
     "company verification failed",  # scorer re-verification rejected
+    "intent fabrication detected",  # every signal fabricated (hardcoded
+                                    # dates / generic claims) — the most
+                                    # blatant fake-intent shape
 )
 
 _NEVER_PENALIZE_MARKERS: tuple = ("error", "timeout", "provider", "429")

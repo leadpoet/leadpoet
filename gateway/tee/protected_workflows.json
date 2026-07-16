@@ -27,12 +27,22 @@
       "symbol": "submit_weights_v2"
     },
     {
-      "ast_sha256": "sha256:6a7f7642dadf86e472560f4f9731727eaf7d8da8864f6e26901edd159c8d5775",
+      "ast_sha256": "sha256:362f25337d34ee9e56a8dc5c2b387cde0d31b50fa03ad1c8fffe6c30f7a2ef6e",
+      "path": "gateway/research_lab/allocations.py",
+      "symbol": "_champion_finalized_paid_alpha_to_date"
+    },
+    {
+      "ast_sha256": "sha256:c1c387a55f18d997c55462ed3e2777cd728f3135025b9b907841acfb4ef19628",
+      "path": "gateway/research_lab/allocations.py",
+      "symbol": "_champion_obligation_caps"
+    },
+    {
+      "ast_sha256": "sha256:63221ee4c3b078e9ecb45714d96b552bf2d4278b46806cb7163fdc680c08b21c",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "_champion_paid_alpha_to_date_from_snapshots"
     },
     {
-      "ast_sha256": "sha256:78fdcc389d8e8b69b38ff6ea371942981a70a1ce144accc6b108f3ef812301f9",
+      "ast_sha256": "sha256:050076893acacd5929ac0591c6a9e74a4e8800f8272af0c4517e4690fa02becf",
       "path": "gateway/research_lab/allocations.py",
       "symbol": "_champion_replay_obligation"
     },
@@ -67,6 +77,31 @@
       "symbol": "would_exceed_budget"
     },
     {
+      "ast_sha256": "sha256:9f9cab97dbe077a4d7f1ff50f7bbec0edf241e6654bf6b964db49bc8fd3a1ada",
+      "path": "gateway/research_lab/champion_settlement_v2.py",
+      "symbol": "champion_v2_cutover_readiness"
+    },
+    {
+      "ast_sha256": "sha256:46c83586b20a30d638edec40c18e392a7ca5279717a44ce06afe8f356cf1646c",
+      "path": "gateway/research_lab/champion_settlement_v2.py",
+      "symbol": "load_finalized_allocation_history_v2"
+    },
+    {
+      "ast_sha256": "sha256:0a596655f76a56083bd168a8a58183c967dcc60bbf2da06ed202afe3b51e0f73",
+      "path": "gateway/research_lab/champion_settlement_v2.py",
+      "symbol": "merge_finalized_allocation_histories_v2"
+    },
+    {
+      "ast_sha256": "sha256:b943a6520b1c9b4b796554f3664dbb86c8e7ad4e61cd9f6df2432deac5aad962",
+      "path": "gateway/research_lab/champion_settlement_v2.py",
+      "symbol": "validate_finalized_allocation_authorities_v2"
+    },
+    {
+      "ast_sha256": "sha256:9f9d701f78dd7b882579330bfa835d2f48f384c8378ba6ffe387dfd09b863484",
+      "path": "gateway/research_lab/champion_settlement_v2.py",
+      "symbol": "validate_legacy_settlement_migrations_v2"
+    },
+    {
       "ast_sha256": "sha256:61d28682599010ff2d3f2da4a090d62f76968122760fc696454dad2249999481",
       "path": "gateway/research_lab/code_loop_engine.py",
       "symbol": "CodeEditLoopEngine"
@@ -77,17 +112,17 @@
       "symbol": "_bind_loop_direction_plan"
     },
     {
-      "ast_sha256": "sha256:1504ff3c5243c36415a5705fdba551d279a34667b83ff8782273ebd4c3b1935d",
+      "ast_sha256": "sha256:d8e1da92de5964ccc3303651e163ea46ff83982043cd1dde023067db01b1ab8d",
       "path": "gateway/research_lab/dev_eval_runner.py",
       "symbol": "AttestedReplayDevEvaluatorV2"
     },
     {
-      "ast_sha256": "sha256:e00b3287490252e29362fad68731e5426115250594d9ab6ee9517a4964bf97ec",
+      "ast_sha256": "sha256:5387e61320f6010b56f49642785acfb10d32f95b14fd8cc9a5d5f8b4855e68cd",
       "path": "gateway/research_lab/dev_eval_runner.py",
       "symbol": "DockerReplayDevEvaluator"
     },
     {
-      "ast_sha256": "sha256:12b773043291289aee71f0f27c3f692748ce1f602e8cb9c27422a6cae702a79a",
+      "ast_sha256": "sha256:cd1f89b404a6edc912062d730cde4b35e9ca5be3913fe49dc26a1ae2b636d00f",
       "path": "gateway/research_lab/dev_eval_runner.py",
       "symbol": "snapshot_readiness"
     },
@@ -197,6 +232,26 @@
       "symbol": "GitTreeStore"
     },
     {
+      "ast_sha256": "sha256:4f2300cc0086d7631423e66043272e0448215f9747a922fea04f522ff281c596",
+      "path": "gateway/research_lab/maintenance.py",
+      "symbol": "backfill_champion_reward_v2_authority"
+    },
+    {
+      "ast_sha256": "sha256:c9713e89effa65852b23674331b06421f0723c5cea130023d9cea13c7935312e",
+      "path": "gateway/research_lab/maintenance.py",
+      "symbol": "backfill_champion_settlement_v2_authority"
+    },
+    {
+      "ast_sha256": "sha256:8934402857de3afe0e803314a5e72d16a3b6ba46510427a5e1dbe47d1385b9ed",
+      "path": "gateway/research_lab/maintenance.py",
+      "symbol": "champion_v2_cutover_readiness_report"
+    },
+    {
+      "ast_sha256": "sha256:b86cd33b148d25fab15968be07fa291b55ef438704f9901d976571478a4589e1",
+      "path": "gateway/research_lab/maintenance.py",
+      "symbol": "reconcile_champion_reward_statuses"
+    },
+    {
       "ast_sha256": "sha256:9e9873735281d7ae52e6726f1b90dde5b1447dac4cd11c3b0b3388350fbfd2fd",
       "path": "gateway/research_lab/promotion.py",
       "symbol": "ResearchLabPromotionController.process_scored_candidate"
@@ -222,7 +277,7 @@
       "symbol": "confirmation_min_delta"
     },
     {
-      "ast_sha256": "sha256:ab84b385ebf2bcddd8ebf68a44e96456a23cd3dcf6d68728c7c57f9f4ad5546f",
+      "ast_sha256": "sha256:3294cc6af696a786a40633268aca4c7758a896e5ab3b82fe77cdae3c32f7544a",
       "path": "gateway/research_lab/snapshot_refresh.py",
       "symbol": "maybe_refresh_dev_snapshot"
     },
@@ -292,7 +347,27 @@
       "symbol": "normalize_tee_protocol"
     },
     {
-      "ast_sha256": "sha256:383551da6a613dbf32054f7999efe284a3712b782d26f0954b071dfdda5558e7",
+      "ast_sha256": "sha256:76b68eed9b8554647c59b13a59c2a63acf9a42943a24ccc21c7a3dacf9c1e939",
+      "path": "gateway/research_lab/v2_authority.py",
+      "symbol": "_load_allocation_parent_graphs_v2"
+    },
+    {
+      "ast_sha256": "sha256:a3f1be07e8f9fb53a4b8cef49d53051597b810408c02b522f741627b8690d798",
+      "path": "gateway/research_lab/v2_authority.py",
+      "symbol": "attest_historical_champion_reward_v2"
+    },
+    {
+      "ast_sha256": "sha256:1fd6f29c6b88f170226f0dd8d2fc8343baac4c3ab0011c83e71c943be86c01bf",
+      "path": "gateway/research_lab/v2_authority.py",
+      "symbol": "attest_historical_champion_settlement_v2"
+    },
+    {
+      "ast_sha256": "sha256:38a24245ed7938dd4dc74c082c6b8efd950abe234c9eb7237efa415c4e7b1662",
+      "path": "gateway/research_lab/v2_authority.py",
+      "symbol": "build_allocation_v2"
+    },
+    {
+      "ast_sha256": "sha256:35b5b2b8435f2341f261bcf4026031ab9af0f40da4696dd33316e988462606a5",
       "path": "gateway/tee/autoresearch_executor_v2.py",
       "symbol": "AutoresearchExecutorV2"
     },
@@ -302,17 +377,27 @@
       "symbol": "CoordinatorActiveModelSourceV2"
     },
     {
-      "ast_sha256": "sha256:c0b490b38a4269bc6e6468dd180cfeccf50f56bb0eb7ea72474b98a9da9f9e19",
+      "ast_sha256": "sha256:64a6864a27afc489bbe2f0ee4fca90d8fff574029ed2e0275c6fc3be4a158129",
       "path": "gateway/tee/coordinator_allocation_source_v2.py",
       "symbol": "CoordinatorAllocationSourceV2"
     },
     {
-      "ast_sha256": "sha256:6584e644d68b7925834d21270aed7d4b5abcbc97b62925a83854001320e83382",
+      "ast_sha256": "sha256:cdeb652ef9c73a3c6b1a5c184599f38a7dca353601a21f9b3073b63dc3438d3d",
       "path": "gateway/tee/coordinator_chain_source_v2.py",
       "symbol": "CoordinatorChainSourceV2"
     },
     {
-      "ast_sha256": "sha256:55911701fc6e5c3b2a893345efbba2a23b93a8f2823cdde8b62e96fd2cddeecc",
+      "ast_sha256": "sha256:29c74afa2d61c9476a3cc4f4e40f07c8788003e9b75ce2340187c0c125e8a4ef",
+      "path": "gateway/tee/coordinator_executor_v2.py",
+      "symbol": "CoordinatorExecutorV2"
+    },
+    {
+      "ast_sha256": "sha256:127d61c619e95b83bdbe410a557e8a95817c06e7447120e5fc4648b9e660af16",
+      "path": "gateway/tee/coordinator_legacy_settlement_v2.py",
+      "symbol": "CoordinatorLegacySettlementSourceV2"
+    },
+    {
+      "ast_sha256": "sha256:43e23098d3ca6318fbdbe9659872714c808ed04aed4154724fab0316b4d166a4",
       "path": "gateway/tee/coordinator_reward_source_v2.py",
       "symbol": "CoordinatorRewardSourceV2"
     },
@@ -362,7 +447,7 @@
       "symbol": "champion_reward_row_projection_v2"
     },
     {
-      "ast_sha256": "sha256:ae1dcff332d846311ee2b1463ae585e85f60516c2d880c5db41a8fc03e094984",
+      "ast_sha256": "sha256:6056b4435ffa282cc8b82ea12163ac517b1717c2a57e2cc5376a652ca8bf394d",
       "path": "gateway/tee/reward_executor_v2.py",
       "symbol": "execute_reward_decision_v2"
     },
@@ -382,7 +467,7 @@
       "symbol": "source_add_reward_row_projection_v2"
     },
     {
-      "ast_sha256": "sha256:f504006f68618764842ad2de1eaedb04ebf73b3cbb6a0898af0ac23c3e7724b9",
+      "ast_sha256": "sha256:e92935292ee1a1d6fc376bc436c63b0e4005978f19d51cd6987496f473cc785b",
       "path": "gateway/tee/scoring_executor_v2.py",
       "symbol": "ScoringExecutorV2"
     },
@@ -410,6 +495,41 @@
       "ast_sha256": "sha256:3e4ffeb620cc8fbcca887df296dd37208f54e7d383fecf2ec78718718f5a328d",
       "path": "gateway/tee/source_add_runtime_v2.py",
       "symbol": "validate_source_add_sealed_job_envelope_v2"
+    },
+    {
+      "ast_sha256": "sha256:c4f0dfacfd68b4b9b4e9ea3b788b7a6c284a4c61e141bedfa3bd0e6d9f00e214",
+      "path": "leadpoet_canonical/chain_source_v2.py",
+      "symbol": "decode_weights_storage"
+    },
+    {
+      "ast_sha256": "sha256:12b3c5738dd43e7469e5d9011fceda25e26b27816858ea60ac5c7fcc5179610f",
+      "path": "leadpoet_canonical/chain_source_v2.py",
+      "symbol": "validate_arweave_checkpoint_event"
+    },
+    {
+      "ast_sha256": "sha256:1e666b972a3e5f1e5df1c2f014f2ea97fade3b8f719b60c3de80f4a484ae49a3",
+      "path": "leadpoet_canonical/chain_source_v2.py",
+      "symbol": "weights_storage_key"
+    },
+    {
+      "ast_sha256": "sha256:906fa61561b0b7358a0e2868a077394b993bcff5cc85278a8c62818047b71f95",
+      "path": "leadpoet_canonical/legacy_settlement_v2.py",
+      "symbol": "validate_legacy_audit_event_v2"
+    },
+    {
+      "ast_sha256": "sha256:feebdd9e209f0a7e77d0a87bd8ec78c01b2649481b441326ceab9d9f57a7f266",
+      "path": "leadpoet_canonical/legacy_settlement_v2.py",
+      "symbol": "validate_legacy_finalized_settlement_v2"
+    },
+    {
+      "ast_sha256": "sha256:66479e31db22d68b2bef27ba014dab869386dd92ed64ff7324261ced5827cc7d",
+      "path": "leadpoet_canonical/legacy_settlement_v2.py",
+      "symbol": "validate_legacy_settlement_document_v2"
+    },
+    {
+      "ast_sha256": "sha256:53ea8ee882c257d9cf18c3669a5c2a7bd93f0faee7148c45452de9c9f1a464a3",
+      "path": "leadpoet_canonical/legacy_settlement_v2.py",
+      "symbol": "validate_legacy_weight_bundle_v2"
     },
     {
       "ast_sha256": "sha256:9da83659412c65a826b0c1e9c6aa9d7b9cce7bf255ae164fc120ea09f0641378",
@@ -617,6 +737,11 @@
       "symbol": "_score_dev_items"
     },
     {
+      "ast_sha256": "sha256:17f4d301d8c8283d288fe32ad1c0f7d86ac63811600b330d365fcb87f13e9408",
+      "path": "research_lab/eval/dev_eval.py",
+      "symbol": "build_current_day_dev_bank"
+    },
+    {
       "ast_sha256": "sha256:5b731639426830d06b33219f737fc27cff5ab6915101e8cb773e08e17665aff4",
       "path": "research_lab/eval/dev_eval.py",
       "symbol": "build_dev_icp_set"
@@ -625,6 +750,16 @@
       "ast_sha256": "sha256:ed6f60b2c4fa976d795b8ba645d24a95f57589489269d1c0c3dd7c29223701c5",
       "path": "research_lab/eval/dev_eval.py",
       "symbol": "evaluate_dev"
+    },
+    {
+      "ast_sha256": "sha256:24521ded458b86c28d168977e790a0d2a33eebde08fc930b02f52dc64b511df5",
+      "path": "research_lab/eval/dev_eval.py",
+      "symbol": "select_current_day_dev_icps"
+    },
+    {
+      "ast_sha256": "sha256:32e98bc3ae633dd55f91c2ac71d060e5f0b07e4c5eee39a166f0c801c4574c1a",
+      "path": "research_lab/eval/dev_eval.py",
+      "symbol": "select_snapshot_dev_icps"
     },
     {
       "ast_sha256": "sha256:6da728043d6b34b1868bbc2307eb17d9f3d1cfeea65a4d11d10033e29596e876",
@@ -732,7 +867,7 @@
       "symbol": "merge_evidence_caches"
     },
     {
-      "ast_sha256": "sha256:e7081aa77b91ee1840fd32e2c91901144f6ba0ccb656b90a0547726de953174b",
+      "ast_sha256": "sha256:c66a67fbd1c7c5700cedd4d845af683aaf7beb17ed17a09e4ca84637da94be96",
       "path": "research_lab/eval/snapshot_store.py",
       "symbol": "ProviderSnapshotStore"
     },
@@ -772,7 +907,7 @@
       "symbol": "validate_source_add_reward_record"
     }
   ],
-  "manifest_hash": "sha256:4439cfc3e52c9d2634376ce1c30f28a867a441c7d95ea99d04005b9fa6acb892",
-  "protected_source_commit": "88e197d488300aed6df91640b3b77638a53e9b23",
+  "manifest_hash": "sha256:aaf1e7a5cbed4a71ab3b2202f2b6a6cc7be57c9df854cce332cbbdf8ebf31d5f",
+  "protected_source_commit": "a203bcc6567114b95d1b51855016f364268193bc",
   "schema_version": "leadpoet.protected_workflows.v2"
 }
